@@ -1,11 +1,5 @@
 {
   "mcpServers": {
-    "interledger.org-v4 Docs": {
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "https://gitmcp.io/interledger/interledger.org-v4"
-      ]
-    }
+    
   }
 }
