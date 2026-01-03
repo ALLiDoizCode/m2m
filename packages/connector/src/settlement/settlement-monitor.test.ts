@@ -58,8 +58,16 @@ describe('SettlementMonitor Threshold Detection', () => {
 
     // Create mock TelemetryEmitter
     mockTelemetryEmitter = {
+      connect: jest.fn().mockResolvedValue(undefined),
+      disconnect: jest.fn().mockResolvedValue(undefined),
+      isConnected: jest.fn().mockReturnValue(true),
+      emitNodeStatus: jest.fn(),
+      emitPacketReceived: jest.fn(),
+      emitPacketSent: jest.fn(),
+      emitRouteLookup: jest.fn(),
+      emitLog: jest.fn(),
       emit: jest.fn(),
-    };
+    } as unknown as jest.Mocked<TelemetryEmitter>;
 
     // Reset all mocks
     jest.clearAllMocks();
@@ -550,6 +558,7 @@ describe('SettlementMonitor Threshold Detection', () => {
         peers: ['peer-a'],
         tokenIds: ['ILP'],
         telemetryEmitter: mockTelemetryEmitter,
+        nodeId: 'test-node',
       };
 
       settlementMonitor = new SettlementMonitor(config, mockAccountManager, mockLogger);
@@ -562,16 +571,20 @@ describe('SettlementMonitor Threshold Detection', () => {
 
       await checkBalances(settlementMonitor);
 
-      expect(mockTelemetryEmitter.emit).toHaveBeenCalledWith('SETTLEMENT_TRIGGERED', {
+      expect(mockTelemetryEmitter.emit).toHaveBeenCalledWith({
+        type: 'SETTLEMENT_TRIGGERED',
+        nodeId: 'test-node',
         peerId: 'peer-a',
         tokenId: 'ILP',
         currentBalance: '1200',
         threshold: '1000',
         exceedsBy: '200',
+        triggerReason: 'THRESHOLD_EXCEEDED',
         timestamp: expect.any(String),
       });
 
       expect(mockLogger.debug).toHaveBeenCalledWith(
+        { peerId: 'peer-a', tokenId: 'ILP' },
         'Settlement trigger telemetry sent to dashboard'
       );
     });
@@ -627,7 +640,7 @@ describe('SettlementMonitor Threshold Detection', () => {
       expect(eventListener).toHaveBeenCalledTimes(1);
 
       expect(mockLogger.error).toHaveBeenCalledWith(
-        { error: 'Telemetry server unreachable' },
+        { error: 'Telemetry server unreachable', peerId: 'peer-a', tokenId: 'ILP' },
         'Failed to emit settlement telemetry'
       );
     });
