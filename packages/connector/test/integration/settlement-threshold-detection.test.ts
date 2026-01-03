@@ -30,6 +30,9 @@ const execAsync = promisify(exec);
 // Integration test timeout - 3 minutes for Docker + polling cycles
 jest.setTimeout(180000);
 
+// Skip tests unless E2E_TESTS is enabled (requires TigerBeetle container)
+const e2eEnabled = process.env.E2E_TESTS === 'true';
+
 /**
  * Check if Docker is available
  */
@@ -71,7 +74,9 @@ async function isTigerBeetleAccessible(): Promise<boolean> {
   }
 }
 
-describe('Settlement Threshold Detection Integration Test', () => {
+const describeIfE2E = e2eEnabled ? describe : describe.skip;
+
+describeIfE2E('Settlement Threshold Detection Integration Test', () => {
   let accountManager: AccountManager;
   let settlementMonitor: SettlementMonitor;
   let tigerBeetleClient: TigerBeetleClient;
@@ -187,7 +192,7 @@ describe('Settlement Threshold Detection Integration Test', () => {
 
     // Step 5: Simulate packet forwarding by recording transfers
     // Transfer 1: 50 units (below threshold)
-    await accountManager.recordPacketForward({
+    await accountManager.recordPacketTransfers({
       incomingPeerId: peerId,
       outgoingPeerId: 'peer-test-b',
       tokenId,
@@ -207,7 +212,7 @@ describe('Settlement Threshold Detection Integration Test', () => {
     expect(settlementMonitor.getSettlementState(peerId, tokenId)).toBe(SettlementState.IDLE);
 
     // Transfer 2: 40 units (total 90, still below threshold)
-    await accountManager.recordPacketForward({
+    await accountManager.recordPacketTransfers({
       incomingPeerId: peerId,
       outgoingPeerId: 'peer-test-b',
       tokenId,
@@ -225,7 +230,7 @@ describe('Settlement Threshold Detection Integration Test', () => {
     expect(settlementEvents.length).toBe(0);
 
     // Transfer 3: 30 units (total 120, EXCEEDS threshold of 100)
-    await accountManager.recordPacketForward({
+    await accountManager.recordPacketTransfers({
       incomingPeerId: peerId,
       outgoingPeerId: 'peer-test-b',
       tokenId,
@@ -261,7 +266,7 @@ describe('Settlement Threshold Detection Integration Test', () => {
 
     // Step 9: Verify no duplicate triggers
     // Send another packet while state is SETTLEMENT_PENDING
-    await accountManager.recordPacketForward({
+    await accountManager.recordPacketTransfers({
       incomingPeerId: peerId,
       outgoingPeerId: 'peer-test-b',
       tokenId,
@@ -314,7 +319,7 @@ describe('Settlement Threshold Detection Integration Test', () => {
     await settlementMonitor.start();
 
     // Record transfer exceeding threshold
-    await accountManager.recordPacketForward({
+    await accountManager.recordPacketTransfers({
       incomingPeerId: peerId,
       outgoingPeerId: 'peer-test-b',
       tokenId,
@@ -335,7 +340,7 @@ describe('Settlement Threshold Detection Integration Test', () => {
 
     // Simulate settlement by recording reverse transfer
     // (This would normally be done by SettlementAPI in Story 6.7)
-    await accountManager.recordPacketForward({
+    await accountManager.recordPacketTransfers({
       incomingPeerId: 'peer-test-b',
       outgoingPeerId: peerId,
       tokenId,

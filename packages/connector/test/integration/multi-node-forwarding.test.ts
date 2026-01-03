@@ -51,7 +51,11 @@ const waitForConnections = async (
   throw new Error('Timeout waiting for connector connections');
 };
 
-describe('Multi-Node Packet Forwarding', () => {
+// Skip tests unless E2E_TESTS is enabled (requires multi-node connector setup)
+const e2eEnabled = process.env.E2E_TESTS === 'true';
+const describeIfE2E = e2eEnabled ? describe : describe.skip;
+
+describeIfE2E('Multi-Node Packet Forwarding', () => {
   let connectorA: ConnectorNode;
   let connectorB: ConnectorNode;
   let connectorC: ConnectorNode;

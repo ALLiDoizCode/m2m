@@ -326,10 +326,12 @@ function measureVisualizationLatency(
   return eventTime - packetSentTime;
 }
 
-// Skip all tests if Docker or Docker Compose are not available
+// Skip all tests if Docker or Docker Compose are not available or E2E_TESTS not enabled
 const dockerAvailable = isDockerAvailable();
 const composeAvailable = isDockerComposeAvailable();
-const describeIfDockerCompose = dockerAvailable && composeAvailable ? describe : describe.skip;
+const e2eEnabled = process.env.E2E_TESTS === 'true';
+const describeIfDockerCompose =
+  dockerAvailable && composeAvailable && e2eEnabled ? describe : describe.skip;
 
 describeIfDockerCompose('Performance Tests (NFR1-NFR4)', () => {
   beforeAll(async () => {

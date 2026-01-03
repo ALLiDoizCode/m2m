@@ -24,7 +24,11 @@ const execAsync = promisify(exec);
 // Integration test timeout - 2 minutes for TigerBeetle operations
 jest.setTimeout(120000);
 
-describe('AccountManager Integration Tests', () => {
+// Skip tests unless E2E_TESTS is enabled (requires TigerBeetle container)
+const e2eEnabled = process.env.E2E_TESTS === 'true';
+const describeIfE2E = e2eEnabled ? describe : describe.skip;
+
+describeIfE2E('AccountManager Integration Tests', () => {
   let accountManager: AccountManager;
   let tigerBeetleClient: TigerBeetleClient;
   let logger: pino.Logger;

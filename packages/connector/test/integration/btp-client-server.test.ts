@@ -54,7 +54,11 @@ const createValidRejectPacket = (): ILPRejectPacket => ({
   data: Buffer.alloc(0),
 });
 
-describe('BTPClient and BTPServer Integration', () => {
+// Skip tests unless E2E_TESTS is enabled (requires real BTP server/client setup)
+const e2eEnabled = process.env.E2E_TESTS === 'true';
+const describeIfE2E = e2eEnabled ? describe : describe.skip;
+
+describeIfE2E('BTPClient and BTPServer Integration', () => {
   let server: BTPServer;
   let client: BTPClient;
   let serverPort: number;

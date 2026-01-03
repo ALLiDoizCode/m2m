@@ -35,6 +35,9 @@ const execAsync = promisify(exec);
 // Integration test timeout - 3 minutes for Docker + settlement flow
 jest.setTimeout(180000);
 
+// Skip tests unless E2E_TESTS is enabled (requires TigerBeetle container)
+const e2eEnabled = process.env.E2E_TESTS === 'true';
+
 /**
  * Check if Docker is available
  */
@@ -76,7 +79,9 @@ async function isTigerBeetleAccessible(): Promise<boolean> {
   }
 }
 
-describe('Settlement API Execution Integration Test', () => {
+const describeIfE2E = e2eEnabled ? describe : describe.skip;
+
+describeIfE2E('Settlement API Execution Integration Test', () => {
   let accountManager: AccountManager;
   let settlementMonitor: SettlementMonitor;
   let tigerBeetleClient: TigerBeetleClient;
@@ -142,10 +147,10 @@ describe('Settlement API Execution Integration Test', () => {
       {
         thresholds: {
           defaultThreshold: 100n, // Low threshold for testing
+          pollingInterval: 2000, // 2 seconds for fast detection
         },
         peers: ['peer-b'],
         tokenIds: ['ILP'],
-        pollingInterval: 2000, // 2 seconds for fast detection
       },
       accountManager,
       logger
