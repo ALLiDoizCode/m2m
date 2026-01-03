@@ -313,6 +313,7 @@ describeIfDockerCompose('Docker Compose Multi-Node Deployment', () => {
       await waitForHealthy();
 
       // Act: Ping connector-a from connector-b
+      // @ts-ignore - Used in E2E tests (skipped in CI)
       const pingResult = executeCommand(
         'docker-compose exec -T connector-b ping -c 3 connector-a',
         { ignoreError: true }

@@ -191,6 +191,7 @@ interface LogEntry {
 
 // Commented out for now - will be used when implementing detailed log analysis
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
+// @ts-ignore - Will be used in future E2E test implementation
 function parseLogsForPacket(logs: string, packetId: string): LogEntry[] {
   const entries: LogEntry[] = [];
   const lines = logs.split('\n');

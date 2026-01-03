@@ -12,6 +12,7 @@
 import { execSync, exec } from 'child_process';
 import { promisify } from 'util';
 
+// @ts-ignore - Used in E2E tests (skipped in CI)
 const execAsync = promisify(exec);
 
 const IMAGE_NAME = 'ilp-connector-integration-test';
@@ -139,7 +140,7 @@ describeIfDocker('Docker Container Integration Tests', () => {
       expect(match).not.toBeNull();
 
       const [, sizeValue, unit] = match!;
-      const size = parseFloat(sizeValue);
+      const size = parseFloat(sizeValue!);
 
       // Convert to MB if needed
       let sizeMB: number;
