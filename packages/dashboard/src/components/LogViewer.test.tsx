@@ -421,14 +421,14 @@ describe('LogViewer Component', () => {
       // Act
       render(<LogViewer {...mockProps} levelFilter={levelFilter} />);
 
-      // Assert
-      const errorCheckbox = screen.getByLabelText(/error/i) as HTMLInputElement;
-      const warnCheckbox = screen.getByLabelText(/warn/i) as HTMLInputElement;
-      const infoCheckbox = screen.getByLabelText(/info/i) as HTMLInputElement;
+      // Assert - Radix UI Checkbox uses data-state attribute
+      const errorCheckbox = screen.getByLabelText(/error/i);
+      const warnCheckbox = screen.getByLabelText(/warn/i);
+      const infoCheckbox = screen.getByLabelText(/info/i);
 
-      expect(errorCheckbox.checked).toBe(true);
-      expect(warnCheckbox.checked).toBe(true);
-      expect(infoCheckbox.checked).toBe(false);
+      expect(errorCheckbox).toHaveAttribute('data-state', 'checked');
+      expect(warnCheckbox).toHaveAttribute('data-state', 'checked');
+      expect(infoCheckbox).toHaveAttribute('data-state', 'unchecked');
     });
 
     it('should check node filter checkbox when node is in nodeFilter', () => {
@@ -442,12 +442,12 @@ describe('LogViewer Component', () => {
       // Act
       render(<LogViewer {...mockProps} nodeFilter={nodeFilter} allLogEntries={allLogEntries} />);
 
-      // Assert
-      const connectorACheckbox = screen.getByLabelText('connector-a') as HTMLInputElement;
-      const connectorBCheckbox = screen.getByLabelText('connector-b') as HTMLInputElement;
+      // Assert - Radix UI Checkbox uses data-state attribute
+      const connectorACheckbox = screen.getByLabelText('connector-a');
+      const connectorBCheckbox = screen.getByLabelText('connector-b');
 
-      expect(connectorACheckbox.checked).toBe(true);
-      expect(connectorBCheckbox.checked).toBe(false);
+      expect(connectorACheckbox).toHaveAttribute('data-state', 'checked');
+      expect(connectorBCheckbox).toHaveAttribute('data-state', 'unchecked');
     });
   });
 

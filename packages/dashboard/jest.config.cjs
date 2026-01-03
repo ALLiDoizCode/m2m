@@ -21,13 +21,19 @@ module.exports = {
         '^.+\\.(ts|tsx)$': [
           'ts-jest',
           {
-            tsconfig: '<rootDir>/tsconfig.json',
+            tsconfig: {
+              jsx: 'react-jsx',
+              esModuleInterop: true,
+              module: 'esnext',
+              moduleResolution: 'bundler',
+            },
           },
         ],
       },
       moduleNameMapper: {
         '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
         '^react-cytoscapejs$': '<rootDir>/src/__mocks__/react-cytoscapejs.tsx',
+        '^react-virtuoso$': '<rootDir>/src/__mocks__/react-virtuoso.tsx',
         '^@/(.*)$': '<rootDir>/src/$1',
       },
       setupFilesAfterEnv: ['<rootDir>/src/setupTests.ts'],
