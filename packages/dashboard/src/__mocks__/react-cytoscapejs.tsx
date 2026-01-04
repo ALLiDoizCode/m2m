@@ -61,6 +61,7 @@ const CytoscapeComponent: React.FC<CytoscapeComponentProps> = (props) => {
       cyInstanceRef.current?.destroy();
       cyInstanceRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cyCallback]);
 
   // Update elements when they change

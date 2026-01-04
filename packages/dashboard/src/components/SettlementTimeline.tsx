@@ -88,14 +88,14 @@ function formatTimestamp(timestamp: string): string {
  *
  * Events are fetched from REST API on mount and updated in real-time via WebSocket.
  */
-export function SettlementTimeline({ events, connected }: SettlementTimelineProps) {
+export function SettlementTimeline({ events, connected }: SettlementTimelineProps): JSX.Element {
   const [settlementEvents, setSettlementEvents] = useState<SettlementEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // Fetch initial settlement events from REST API
   useEffect(() => {
-    const fetchEvents = async () => {
+    const fetchEvents = async (): Promise<void> => {
       try {
         setLoading(true);
         setError(null);

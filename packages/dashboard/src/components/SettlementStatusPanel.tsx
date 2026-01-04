@@ -106,14 +106,14 @@ function getStateDisplay(state: BalanceState['settlementState']): {
  * - Settlement state (IDLE, PENDING, IN_PROGRESS)
  * - Last update timestamp
  */
-export function SettlementStatusPanel({ events, connected }: SettlementStatusPanelProps) {
+export function SettlementStatusPanel({ events, connected }: SettlementStatusPanelProps): JSX.Element {
   const [balances, setBalances] = useState<Map<string, BalanceState>>(new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // Fetch initial balance state from REST API
   useEffect(() => {
-    const fetchBalances = async () => {
+    const fetchBalances = async (): Promise<void> => {
       try {
         setLoading(true);
         setError(null);

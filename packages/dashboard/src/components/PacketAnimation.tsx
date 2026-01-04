@@ -77,7 +77,7 @@ export const PacketAnimation = React.memo(
       });
 
       // Animation loop function
-      const animate = () => {
+      const animate = (): void => {
         if (!cyInstance) {
           return;
         }
@@ -259,7 +259,7 @@ export const PacketAnimation = React.memo(
           animationFrameRef.current = null;
         }
       };
-    }, [activePackets, cyInstance, packetsByEdge, prefersReducedMotion]);
+    }, [activePackets, cyInstance, packetsByEdge, prefersReducedMotion, onPacketClick]);
 
     // Cleanup all packet nodes on unmount
     useEffect(() => {

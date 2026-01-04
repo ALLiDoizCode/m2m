@@ -111,7 +111,7 @@ export function LogViewer({
   setSearchText,
   clearFilters,
   allLogEntries,
-}: LogViewerProps) {
+}: LogViewerProps): JSX.Element {
   const virtuosoRef = useRef<TableVirtuosoHandle>(null);
   const isAtBottomRef = useRef<boolean>(true);
 
@@ -137,7 +137,7 @@ export function LogViewer({
   }, [logEntries.length, autoScroll]);
 
   // Track if user is at bottom
-  const handleAtBottomStateChange = (atBottom: boolean) => {
+  const handleAtBottomStateChange = (atBottom: boolean): void => {
     isAtBottomRef.current = atBottom;
 
     // Auto-enable scroll when user scrolls to bottom

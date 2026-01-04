@@ -30,7 +30,7 @@ export function PacketDetailPanel({
   packet,
   recentPacketIds = [],
   onSelectPacket,
-}: PacketDetailPanelProps) {
+}: PacketDetailPanelProps): JSX.Element {
   const { toast } = useToast();
   const [expandedFields, setExpandedFields] = useState<Set<string>>(new Set());
 
