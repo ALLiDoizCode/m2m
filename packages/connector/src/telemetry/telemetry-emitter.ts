@@ -36,6 +36,7 @@ export class TelemetryEmitter {
   private readonly _logger: Logger;
   private _reconnectDelay: number = 1000; // Start at 1 second
   private _reconnectTimeout: NodeJS.Timeout | null = null;
+  private _intentionalDisconnect: boolean = false; // Track if disconnect was intentional
 
   /**
    * Create a TelemetryEmitter instance
@@ -59,6 +60,7 @@ export class TelemetryEmitter {
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
+        this._intentionalDisconnect = false; // Reset flag when connecting
         this._ws = new WebSocket(this._dashboardUrl);
         let settled = false; // Track if promise has been settled
 
@@ -111,6 +113,9 @@ export class TelemetryEmitter {
    * Call during connector shutdown.
    */
   async disconnect(): Promise<void> {
+    // Set flag to prevent auto-reconnect
+    this._intentionalDisconnect = true;
+
     // Cancel any pending reconnection attempts
     if (this._reconnectTimeout) {
       clearTimeout(this._reconnectTimeout);
@@ -361,6 +366,11 @@ export class TelemetryEmitter {
    * Reconnection attempts continue indefinitely (dashboard may restart)
    */
   private _scheduleReconnect(): void {
+    // Don't reconnect if disconnect was intentional
+    if (this._intentionalDisconnect) {
+      return;
+    }
+
     // Cancel any existing reconnection timeout
     if (this._reconnectTimeout) {
       clearTimeout(this._reconnectTimeout);

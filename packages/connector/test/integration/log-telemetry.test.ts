@@ -127,8 +127,12 @@ describe('Test 12: LOG Telemetry Integration Test', () => {
   });
 
   afterEach(async () => {
+    // Wait a bit for any pending log writes to complete
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await telemetryEmitter.disconnect();
     await mockTelemetryServer.stop();
+    // Wait for port to be fully released
+    await new Promise((resolve) => setTimeout(resolve, 200));
   });
 
   it('should emit LOG telemetry event when connector logs a message', async () => {
@@ -315,6 +319,10 @@ describe('Test 12: LOG Telemetry Integration Test', () => {
     expect((mockTelemetryServer.receivedMessages[0]?.data as LogTelemetryData).message).toBe(
       'After server restart'
     );
+
+    // Cleanup: disconnect and wait before next test
+    await telemetryEmitter.disconnect();
+    await new Promise((resolve) => setTimeout(resolve, 300));
   });
 
   it('should not crash when telemetry server is unavailable', async () => {
