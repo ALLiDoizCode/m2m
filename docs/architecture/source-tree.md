@@ -34,6 +34,30 @@ m2m/                                  # Monorepo root
 │   │   ├── package.json
 │   │   └── tsconfig.json
 │   │
+│   ├── contracts/                    # Smart contracts (Foundry - Epic 8)
+│   │   ├── src/                            # Solidity contract source
+│   │   │   ├── MockERC20.sol               # Test ERC20 token (Story 8.1)
+│   │   │   ├── TokenNetworkRegistry.sol    # Factory for TokenNetwork contracts (Story 8.2)
+│   │   │   └── TokenNetwork.sol            # Payment channel contract (Story 8.3)
+│   │   ├── script/                         # Deployment scripts (.s.sol)
+│   │   │   └── Deploy.s.sol                # Multi-environment deployment (local/testnet/mainnet)
+│   │   ├── test/                           # Foundry tests (.t.sol)
+│   │   │   ├── Deploy.t.sol                # Deployment verification tests
+│   │   │   ├── Integration.t.sol           # Integration tests
+│   │   │   ├── TokenNetworkRegistry.t.sol  # Registry unit tests (Story 8.2)
+│   │   │   └── TokenNetwork.t.sol          # TokenNetwork unit tests (Story 8.3)
+│   │   ├── lib/                            # Foundry dependencies
+│   │   │   ├── forge-std/                  # Foundry standard library
+│   │   │   └── openzeppelin-contracts/     # OpenZeppelin v5.5.0 library
+│   │   ├── out/                            # Compiled contract artifacts (gitignored)
+│   │   ├── cache/                          # Foundry build cache (gitignored)
+│   │   ├── broadcast/                      # Deployment transaction logs
+│   │   ├── foundry.toml                    # Foundry configuration (Solidity 0.8.20)
+│   │   ├── remappings.txt                  # Import path remappings
+│   │   ├── .gitignore                      # Ignore out/, cache/, broadcast/
+│   │   ├── package.json                    # npm scripts (build, test, deploy)
+│   │   └── README.md                       # Smart contract development guide
+│   │
 │   ├── dashboard/                    # Visualization dashboard
 │   │   ├── server/
 │   │   │   ├── telemetry-server.ts        # WebSocket telemetry aggregator

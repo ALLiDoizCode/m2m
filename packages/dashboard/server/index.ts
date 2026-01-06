@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TelemetryServer } from './telemetry-server.js';
@@ -18,7 +19,7 @@ const HTTP_PORT = parseInt(process.env.HTTP_PORT || '8080', 10);
 
 // Create and start telemetry server
 let telemetryServer: TelemetryServer | null = null;
-let httpServer: any = null;
+let httpServer: http.Server | null = null;
 
 export async function main(): Promise<void> {
   try {
@@ -43,6 +44,9 @@ export async function main(): Promise<void> {
     // Settlement telemetry API endpoints (Story 6.8)
     app.get('/api/balances', (_req, res) => {
       try {
+        if (!telemetryServer) {
+          throw new Error('Telemetry server not initialized');
+        }
         const balances = telemetryServer.getAccountBalances();
         res.status(200).json(balances);
       } catch (error) {
@@ -55,6 +59,9 @@ export async function main(): Promise<void> {
 
     app.get('/api/settlements/recent', (_req, res) => {
       try {
+        if (!telemetryServer) {
+          throw new Error('Telemetry server not initialized');
+        }
         const events = telemetryServer.getSettlementEvents();
         res.status(200).json(events);
       } catch (error) {
@@ -62,6 +69,22 @@ export async function main(): Promise<void> {
           error: error instanceof Error ? error.message : 'Unknown error',
         });
         res.status(500).json({ error: 'Failed to fetch settlement events' });
+      }
+    });
+
+    // Payment channel API endpoints (Story 8.10)
+    app.get('/api/channels', (_req, res) => {
+      try {
+        if (!telemetryServer) {
+          throw new Error('Telemetry server not initialized');
+        }
+        const channels = telemetryServer.getChannels();
+        res.status(200).json(channels);
+      } catch (error) {
+        logger.error('Failed to fetch channels', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+        res.status(500).json({ error: 'Failed to fetch channels' });
       }
     });
 

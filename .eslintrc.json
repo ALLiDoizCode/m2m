@@ -32,5 +32,14 @@
     "node": true,
     "es2022": true
   },
-  "ignorePatterns": ["dist", "node_modules", "*.js", "*.config.js"]
+  "ignorePatterns": ["dist", "node_modules", "*.js", "*.config.js"],
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.integration.test.ts"],
+      "rules": {
+        "@typescript-eslint/no-explicit-any": "off",
+        "no-console": "off"
+      }
+    }
+  ]
 }

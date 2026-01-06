@@ -65,6 +65,28 @@ module.exports = {
         '^(\\.{1,2}/.*)\\.js$': '$1',
       },
     },
+    // Integration tests (Story 6.8, Story 8.10)
+    {
+      displayName: 'dashboard-integration',
+      preset: 'ts-jest',
+      testEnvironment: 'node',
+      roots: ['<rootDir>/test'],
+      testMatch: ['<rootDir>/test/**/*.test.ts'],
+      moduleFileExtensions: ['ts', 'js', 'json'],
+      transform: {
+        '^.+\\.ts$': [
+          'ts-jest',
+          {
+            tsconfig: '<rootDir>/tsconfig.server.json',
+            useESM: true,
+          },
+        ],
+      },
+      extensionsToTreatAsEsm: ['.ts'],
+      moduleNameMapper: {
+        '^(\\.{1,2}/.*)\\.js$': '$1',
+      },
+    },
   ],
   coverageThreshold: {
     global: {

@@ -1,0 +1,15 @@
+{
+  "name": "@m2m/contracts",
+  "version": "1.0.0",
+  "description": "Smart contracts for M2M payment channels",
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "test:verbose": "forge test -vvvv",
+    "coverage": "forge coverage --report lcov",
+    "coverage:summary": "forge coverage --report summary",
+    "deploy:local": "forge script script/Deploy.s.sol --rpc-url local --broadcast",
+    "deploy:sepolia": "forge script script/Deploy.s.sol --rpc-url base_sepolia --broadcast --verify",
+    "deploy:mainnet": "forge script script/Deploy.s.sol --rpc-url base_mainnet --broadcast --verify"
+  }
+}

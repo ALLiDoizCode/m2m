@@ -16,6 +16,8 @@ Educational implementation of an Interledger Protocol (ILP) connector with Bilat
 - [Monorepo Structure](#monorepo-structure)
 - [Prerequisites](#prerequisites)
 - [Setup Instructions](#setup-instructions)
+- [Development Environment](#development-environment)
+- [Smart Contract Development](#smart-contract-development)
 - [Quick Start](#quick-start)
 - [Testing Packet Routing with send-packet Tool](#testing-packet-routing-with-send-packet-tool)
 - [Docker Compose Deployment](#docker-compose-deployment)
@@ -439,6 +441,64 @@ Choose the right development command for your workflow:
 
 - **Local Blockchain Development Guide**: [docs/guides/local-blockchain-development.md](docs/guides/local-blockchain-development.md) - Detailed setup and usage instructions
 - **Epic 7 Documentation**: [docs/stories/7.\*.story.md](docs/stories/) - Architecture and implementation details for local blockchain infrastructure
+
+## Smart Contract Development
+
+M2M uses **Foundry** for smart contract development, testing, and deployment. Smart contracts are deployed to **Base L2** (an Ethereum Layer 2 scaling solution) for low-cost payment channel operations.
+
+### Quick Start
+
+1. **Initialize Foundry project** (already done in packages/contracts/):
+
+   ```bash
+   cd packages/contracts
+   forge build
+   ```
+
+2. **Run tests**:
+
+   ```bash
+   forge test
+   ```
+
+3. **Deploy to local Anvil** (requires Anvil running via docker-compose-dev.yml):
+   ```bash
+   npm run deploy:local
+   ```
+
+### Deployment Progression: Local → Testnet → Mainnet
+
+**1. Local Development (Anvil)**
+
+- Deploy to local Anvil fork of Base Sepolia
+- Instant feedback, free gas, offline development
+- Command: `npm run deploy:local`
+
+**2. Testnet Deployment (Base Sepolia)**
+
+- Deploy to public Base Sepolia testnet
+- Test with real blockchain but $0 gas costs
+- Requires `BASE_SEPOLIA_RPC_URL` and `ETHERSCAN_API_KEY` in .env.dev
+- Command: `npm run deploy:sepolia`
+
+**3. Mainnet Deployment (Base L2 Production)**
+
+- **CRITICAL: Security audit required before mainnet deployment**
+- Deploy to Base L2 mainnet with real cryptocurrency
+- Requires secure `PRIVATE_KEY` from hardware wallet or KMS
+- Command: `npm run deploy:mainnet`
+
+### Documentation
+
+- **Smart Contract Development Guide**: [docs/guides/smart-contract-development.md](docs/guides/smart-contract-development.md)
+- **Local Blockchain Development**: [docs/guides/local-blockchain-development.md](docs/guides/local-blockchain-development.md)
+- **Environment Configuration**: [docs/guides/local-vs-production-config.md](docs/guides/local-vs-production-config.md)
+
+### Security Warning
+
+⚠️ **NEVER use development private keys for testnet or mainnet deployment**
+
+The default `PRIVATE_KEY` in `.env.dev` is Anvil Account #0 - a publicly known development key. This key should ONLY be used for local Anvil deployment. For testnet and mainnet, use a secure private key from a hardware wallet or key management service.
 
 ## Quick Start
 

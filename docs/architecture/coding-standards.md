@@ -40,3 +40,76 @@
 - **Use `Buffer` for binary data:** Not `Uint8Array` or `ArrayBuffer` (Node.js convention)
 - **Async/await over callbacks:** All asynchronous code uses `async/await` pattern
 - **Optional chaining for safety:** Use `peer?.connected` instead of `peer && peer.connected`
+
+## Solidity Standards (Epic 8 Smart Contracts)
+
+### Core Standards
+
+- **Solidity Version:** 0.8.20 (configured in foundry.toml)
+- **License Identifier:** MIT (`SPDX-License-Identifier: MIT` at top of all files)
+- **OpenZeppelin:** Version 5.5.0 for audited contract implementations
+- **Gas Optimization:** Use custom errors instead of require strings (~50% gas savings)
+
+### Naming Conventions
+
+| Element           | Convention                | Example                                 |
+| ----------------- | ------------------------- | --------------------------------------- |
+| Contracts         | PascalCase                | `TokenNetwork`, `TokenNetworkRegistry`  |
+| Functions/Methods | camelCase                 | `openChannel`, `setTotalDeposit`        |
+| Structs           | PascalCase                | `Channel`, `ParticipantState`           |
+| Enums             | PascalCase                | `ChannelState`                          |
+| Custom Errors     | PascalCase                | `InvalidParticipant`, `ChannelNotFound` |
+| Events            | PascalCase                | `ChannelOpened`, `ChannelDeposit`       |
+| State Variables   | camelCase                 | `channelCounter`, `settlementTimeout`   |
+| Constants         | UPPER_SNAKE_CASE          | `MIN_SETTLEMENT_TIMEOUT`                |
+| Private/Internal  | camelCase with `_` prefix | `_validateParticipants`                 |
+
+### Critical Rules
+
+- **ALWAYS use SafeERC20:** Use `safeTransferFrom` and `safeTransfer` for all ERC20 operations (handles non-standard tokens)
+- **ALWAYS use ReentrancyGuard:** Apply `nonReentrant` modifier to all state-changing functions with external calls
+- **Custom errors over require:** `if (invalid) revert InvalidParticipant();` instead of `require(valid, "Invalid")`
+- **NatSpec documentation required:** All contracts, structs, functions, events must have `@notice`, `@dev`, `@param`, `@return` comments
+- **Checks-Effects-Interactions pattern:** Always update state BEFORE external calls
+- **Indexed event parameters:** Use `indexed` for up to 3 parameters per event for efficient filtering
+- **Immutable where possible:** Use `immutable` for constructor-set values (gas optimization)
+- **Balance verification for tokens:** Measure actual balance changes for fee-on-transfer token support
+
+### Security Patterns
+
+```solidity
+// Custom errors (gas efficient)
+error InvalidParticipant();
+error ChannelNotFound();
+
+// SafeERC20 usage
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+using SafeERC20 for IERC20;
+
+IERC20(token).safeTransferFrom(participant, address(this), amount);
+
+// Reentrancy protection
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+function deposit() external nonReentrant {
+    // State changes BEFORE external calls
+    balance += amount;
+    IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+}
+
+// Balance verification (fee-on-transfer tokens)
+uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+IERC20(token).safeTransferFrom(participant, address(this), amount);
+uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+uint256 actualReceived = balanceAfter - balanceBefore;
+```
+
+### Testing Standards (Foundry)
+
+- **Test file naming:** `ContractName.t.sol`
+- **Test contract naming:** `ContractNameTest is Test`
+- **Test function naming:** `test` prefix (e.g., `testOpenChannel`, `testRevertInvalidParticipant`)
+- **AAA pattern:** Arrange (setup), Act (execute), Assert (verify)
+- **Descriptive names:** `testRejectInvalidParticipants` not `testFail1`
+- **Fuzz testing:** Use `testFuzz_` prefix for fuzz tests with random inputs
+- **Coverage target:** >95% line coverage for all production contracts

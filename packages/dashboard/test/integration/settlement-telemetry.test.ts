@@ -453,7 +453,7 @@ describe('Settlement Telemetry Integration Test (Story 6.8)', () => {
       const initialBalances = initialResponse.data;
 
       // Connect to WebSocket and wait for balance update
-      const { events, close } = await connectToTelemetry('ws://localhost:3001/telemetry');
+      const { close } = await connectToTelemetry('ws://localhost:3001/telemetry');
 
       await new Promise((resolve) => setTimeout(resolve, 5000));
 

@@ -5,13 +5,16 @@ import { usePacketAnimation } from '../hooks/usePacketAnimation';
 import { usePacketDetail } from '../hooks/usePacketDetail';
 import { useNodeStatus } from '../hooks/useNodeStatus';
 import { useLogViewer } from '../hooks/useLogViewer';
+import { useChannelState } from '../hooks/useChannelState';
 import { NetworkGraph } from '../components/NetworkGraph';
 import { PacketAnimation } from '../components/PacketAnimation';
+import { ChannelIndicators } from '../components/ChannelIndicators';
 import { PacketDetailPanel } from '../components/PacketDetailPanel';
 import { NodeStatusPanel } from '../components/NodeStatusPanel';
 import { LogViewer } from '../components/LogViewer';
 import { SettlementStatusPanel } from '../components/SettlementStatusPanel';
 import { SettlementTimeline } from '../components/SettlementTimeline';
+import { PaymentChannelsPanel } from '../components/PaymentChannelsPanel';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import Cytoscape from 'cytoscape';
@@ -20,6 +23,7 @@ function DashboardHome(): JSX.Element {
   const { events, connected, error } = useTelemetry();
   const { graphData } = useNetworkGraph(events);
   const { activePackets } = usePacketAnimation(events);
+  const { channels, getChannelsByParticipants, getAllChannels } = useChannelState(events);
   const { selectedPacketId, selectPacket, clearSelection, getSelectedPacket, recentPackets } =
     usePacketDetail(events);
   const {
@@ -103,7 +107,7 @@ function DashboardHome(): JSX.Element {
                   </div>
                 </div>
               ) : (
-                <>
+                <div style={{ position: 'relative', width: '100%', height: '100%' }}>
                   <NetworkGraph
                     graphData={graphData}
                     onCyReady={setCyInstance}
@@ -114,7 +118,12 @@ function DashboardHome(): JSX.Element {
                     cyInstance={cyInstance}
                     onPacketClick={selectPacket}
                   />
-                </>
+                  <ChannelIndicators
+                    channels={channels}
+                    cyInstance={cyInstance}
+                    getChannelsByParticipants={getChannelsByParticipants}
+                  />
+                </div>
               )}
             </div>
 
@@ -149,6 +158,11 @@ function DashboardHome(): JSX.Element {
         {/* Settlement Tab Content */}
         <TabsContent value="settlement" className="mt-0">
           <div className="flex flex-col gap-6" style={{ height: 'calc(100vh - 300px)' }}>
+            {/* Payment Channels Panel */}
+            <div>
+              <PaymentChannelsPanel channels={getAllChannels()} connected={connected} />
+            </div>
+
             {/* Settlement Status Panel */}
             <div>
               <SettlementStatusPanel events={events} connected={connected} />

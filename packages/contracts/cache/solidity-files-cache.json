@@ -1,0 +1,1260 @@
+{
+  "_format": "",
+  "paths": {
+    "artifacts": "out",
+    "build_infos": "out/build-info",
+    "sources": "src",
+    "tests": "test",
+    "scripts": "script",
+    "libraries": ["lib"]
+  },
+  "files": {
+    "lib/forge-std/src/Base.sol": {
+      "lastModificationDate": 1767550805575,
+      "contentHash": "9880db309ccc37a4",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/Base.sol",
+      "imports": ["lib/forge-std/src/StdStorage.sol", "lib/forge-std/src/Vm.sol"],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "CommonBase": {
+          "0.8.20": {
+            "default": { "path": "Base.sol/CommonBase.json", "build_id": "f492cff77d7636b0" }
+          }
+        },
+        "ScriptBase": {
+          "0.8.20": {
+            "default": { "path": "Base.sol/ScriptBase.json", "build_id": "f492cff77d7636b0" }
+          }
+        },
+        "TestBase": {
+          "0.8.20": {
+            "default": { "path": "Base.sol/TestBase.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/Script.sol": {
+      "lastModificationDate": 1767550805575,
+      "contentHash": "f18ee875ff6da793",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/Script.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol"
+      ],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "Script": {
+          "0.8.20": {
+            "default": { "path": "Script.sol/Script.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdAssertions.sol": {
+      "lastModificationDate": 1767550805576,
+      "contentHash": "0ac1d552ee53d774",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdAssertions.sol",
+      "imports": ["lib/forge-std/src/Vm.sol"],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "StdAssertions": {
+          "0.8.20": {
+            "default": {
+              "path": "StdAssertions.sol/StdAssertions.json",
+              "build_id": "0168033f071d456f"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdChains.sol": {
+      "lastModificationDate": 1767550805576,
+      "contentHash": "15a1a266c5880512",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdChains.sol",
+      "imports": ["lib/forge-std/src/Vm.sol"],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "StdChains": {
+          "0.8.20": {
+            "default": { "path": "StdChains.sol/StdChains.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdCheats.sol": {
+      "lastModificationDate": 1767550805576,
+      "contentHash": "40be0caebf4fdf03",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdCheats.sol",
+      "imports": [
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol"
+      ],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "StdCheats": {
+          "0.8.20": {
+            "default": { "path": "StdCheats.sol/StdCheats.json", "build_id": "f492cff77d7636b0" }
+          }
+        },
+        "StdCheatsSafe": {
+          "0.8.20": {
+            "default": {
+              "path": "StdCheats.sol/StdCheatsSafe.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdConstants.sol": {
+      "lastModificationDate": 1767550805577,
+      "contentHash": "83211db7732fa9bc",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdConstants.sol",
+      "imports": ["lib/forge-std/src/Vm.sol", "lib/forge-std/src/interfaces/IMulticall3.sol"],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "StdConstants": {
+          "0.8.20": {
+            "default": {
+              "path": "StdConstants.sol/StdConstants.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdError.sol": {
+      "lastModificationDate": 1767550805577,
+      "contentHash": "8f8dd214d8988c1b",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdError.sol",
+      "imports": [],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "stdError": {
+          "0.8.20": {
+            "default": { "path": "StdError.sol/stdError.json", "build_id": "0168033f071d456f" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdInvariant.sol": {
+      "lastModificationDate": 1767550805577,
+      "contentHash": "d75ce961c0062eda",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdInvariant.sol",
+      "imports": [],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "StdInvariant": {
+          "0.8.20": {
+            "default": {
+              "path": "StdInvariant.sol/StdInvariant.json",
+              "build_id": "0168033f071d456f"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdJson.sol": {
+      "lastModificationDate": 1767550805577,
+      "contentHash": "fa627b76988efab7",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdJson.sol",
+      "imports": ["lib/forge-std/src/Vm.sol"],
+      "versionRequirement": ">=0.6.0, <0.9.0",
+      "artifacts": {
+        "stdJson": {
+          "0.8.20": {
+            "default": { "path": "StdJson.sol/stdJson.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdMath.sol": {
+      "lastModificationDate": 1767550805577,
+      "contentHash": "35a42e2ea32e8a19",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdMath.sol",
+      "imports": [],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "stdMath": {
+          "0.8.20": {
+            "default": { "path": "StdMath.sol/stdMath.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdStorage.sol": {
+      "lastModificationDate": 1767550805577,
+      "contentHash": "4947050788dc42ee",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdStorage.sol",
+      "imports": ["lib/forge-std/src/Vm.sol"],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "stdStorage": {
+          "0.8.20": {
+            "default": { "path": "StdStorage.sol/stdStorage.json", "build_id": "f492cff77d7636b0" }
+          }
+        },
+        "stdStorageSafe": {
+          "0.8.20": {
+            "default": {
+              "path": "StdStorage.sol/stdStorageSafe.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdStyle.sol": {
+      "lastModificationDate": 1767550805578,
+      "contentHash": "c36f8b31348e8572",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdStyle.sol",
+      "imports": ["lib/forge-std/src/Vm.sol"],
+      "versionRequirement": ">=0.4.22, <0.9.0",
+      "artifacts": {
+        "StdStyle": {
+          "0.8.20": {
+            "default": { "path": "StdStyle.sol/StdStyle.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdToml.sol": {
+      "lastModificationDate": 1767550805578,
+      "contentHash": "0da56b7cec33d9a5",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdToml.sol",
+      "imports": ["lib/forge-std/src/Vm.sol"],
+      "versionRequirement": ">=0.6.0, <0.9.0",
+      "artifacts": {
+        "stdToml": {
+          "0.8.20": {
+            "default": { "path": "StdToml.sol/stdToml.json", "build_id": "0168033f071d456f" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/StdUtils.sol": {
+      "lastModificationDate": 1767550805578,
+      "contentHash": "f7e7b5af3135d41c",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/StdUtils.sol",
+      "imports": [
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol"
+      ],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "StdUtils": {
+          "0.8.20": {
+            "default": { "path": "StdUtils.sol/StdUtils.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/Test.sol": {
+      "lastModificationDate": 1767550805578,
+      "contentHash": "3194f2e1ef947ea8",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/Test.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol"
+      ],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "Test": {
+          "0.8.20": { "default": { "path": "Test.sol/Test.json", "build_id": "0168033f071d456f" } }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/Vm.sol": {
+      "lastModificationDate": 1767550805579,
+      "contentHash": "00c7599a02739501",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/Vm.sol",
+      "imports": [],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "Vm": {
+          "0.8.20": { "default": { "path": "Vm.sol/Vm.json", "build_id": "f492cff77d7636b0" } }
+        },
+        "VmSafe": {
+          "0.8.20": { "default": { "path": "Vm.sol/VmSafe.json", "build_id": "f492cff77d7636b0" } }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/console.sol": {
+      "lastModificationDate": 1767550805580,
+      "contentHash": "d066adc60d3a1a8f",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/console.sol",
+      "imports": [],
+      "versionRequirement": ">=0.4.22, <0.9.0",
+      "artifacts": {
+        "console": {
+          "0.8.20": {
+            "default": { "path": "console.sol/console.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/console2.sol": {
+      "lastModificationDate": 1767550805580,
+      "contentHash": "339df1727370a5a3",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/console2.sol",
+      "imports": ["lib/forge-std/src/console.sol"],
+      "versionRequirement": ">=0.4.22, <0.9.0",
+      "artifacts": {},
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/interfaces/IMulticall3.sol": {
+      "lastModificationDate": 1767550805582,
+      "contentHash": "1d7fd847a2861d72",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/interfaces/IMulticall3.sol",
+      "imports": [],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "IMulticall3": {
+          "0.8.20": {
+            "default": {
+              "path": "IMulticall3.sol/IMulticall3.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/forge-std/src/safeconsole.sol": {
+      "lastModificationDate": 1767550805585,
+      "contentHash": "a253b907b4c1dc54",
+      "interfaceReprHash": null,
+      "sourceName": "lib/forge-std/src/safeconsole.sol",
+      "imports": [],
+      "versionRequirement": ">=0.6.2, <0.9.0",
+      "artifacts": {
+        "safeconsole": {
+          "0.8.20": {
+            "default": {
+              "path": "safeconsole.sol/safeconsole.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/access/Ownable.sol": {
+      "lastModificationDate": 1767550842286,
+      "contentHash": "aeede215495e3727",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+      "imports": ["lib/openzeppelin-contracts/contracts/utils/Context.sol"],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "Ownable": {
+          "0.8.20": {
+            "default": { "path": "Ownable.sol/Ownable.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol": {
+      "lastModificationDate": 1767550842297,
+      "contentHash": "1822a75bab6fed91",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+      "imports": [
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol"
+      ],
+      "versionRequirement": ">=0.6.2",
+      "artifacts": {
+        "IERC1363": {
+          "0.8.20": {
+            "default": { "path": "IERC1363.sol/IERC1363.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol": {
+      "lastModificationDate": 1767550842297,
+      "contentHash": "1a826f6d4b769022",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+      "imports": ["lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol"],
+      "versionRequirement": ">=0.4.16",
+      "artifacts": {},
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol": {
+      "lastModificationDate": 1767550842298,
+      "contentHash": "e318fc72a6d9cc43",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+      "imports": ["lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol"],
+      "versionRequirement": ">=0.4.16",
+      "artifacts": {},
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol": {
+      "lastModificationDate": 1767550842302,
+      "contentHash": "3902bd8df0571165",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+      "imports": [],
+      "versionRequirement": ">=0.8.4",
+      "artifacts": {
+        "IERC1155Errors": {
+          "0.8.20": {
+            "default": {
+              "path": "draft-IERC6093.sol/IERC1155Errors.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        },
+        "IERC20Errors": {
+          "0.8.20": {
+            "default": {
+              "path": "draft-IERC6093.sol/IERC20Errors.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        },
+        "IERC721Errors": {
+          "0.8.20": {
+            "default": {
+              "path": "draft-IERC6093.sol/IERC721Errors.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol": {
+      "lastModificationDate": 1767550842324,
+      "contentHash": "bdb8cc1da86cf7dd",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+      "imports": [
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "ERC20": {
+          "0.8.20": {
+            "default": { "path": "ERC20.sol/ERC20.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol": {
+      "lastModificationDate": 1767550842325,
+      "contentHash": "1dcd768972ff31b3",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+      "imports": [],
+      "versionRequirement": ">=0.4.16",
+      "artifacts": {
+        "IERC20": {
+          "0.8.20": {
+            "default": { "path": "IERC20.sol/IERC20.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol": {
+      "lastModificationDate": 1767550842326,
+      "contentHash": "c0fde354a75fbdc6",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+      "imports": ["lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol"],
+      "versionRequirement": ">=0.6.2",
+      "artifacts": {
+        "IERC20Metadata": {
+          "0.8.20": {
+            "default": {
+              "path": "IERC20Metadata.sol/IERC20Metadata.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol": {
+      "lastModificationDate": 1767550842327,
+      "contentHash": "f9342855928500dd",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+      "imports": [
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "SafeERC20": {
+          "0.8.20": {
+            "default": { "path": "SafeERC20.sol/SafeERC20.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/utils/Context.sol": {
+      "lastModificationDate": 1767550842333,
+      "contentHash": "16db1f8b2f7183f5",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+      "imports": [],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "Context": {
+          "0.8.20": {
+            "default": { "path": "Context.sol/Context.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/utils/Pausable.sol": {
+      "lastModificationDate": 1767550842336,
+      "contentHash": "5972d615b5a74f4d",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+      "imports": ["lib/openzeppelin-contracts/contracts/utils/Context.sol"],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "Pausable": {
+          "0.8.20": {
+            "default": { "path": "Pausable.sol/Pausable.json", "build_id": "2783d554366b0224" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol": {
+      "lastModificationDate": 1767550842336,
+      "contentHash": "a70644ba3ffaf8d5",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+      "imports": ["lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol"],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "ReentrancyGuard": {
+          "0.8.20": {
+            "default": {
+              "path": "ReentrancyGuard.sol/ReentrancyGuard.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol": {
+      "lastModificationDate": 1767550842337,
+      "contentHash": "261e9fcb6515866e",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+      "imports": [],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "StorageSlot": {
+          "0.8.20": {
+            "default": {
+              "path": "StorageSlot.sol/StorageSlot.json",
+              "build_id": "f492cff77d7636b0"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol": {
+      "lastModificationDate": 1767550842676,
+      "contentHash": "dd405905c438d549",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+      "imports": [],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "ECDSA": {
+          "0.8.20": {
+            "default": { "path": "ECDSA.sol/ECDSA.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol": {
+      "lastModificationDate": 1767550842344,
+      "contentHash": "021ac46c8076d0ee",
+      "interfaceReprHash": null,
+      "sourceName": "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+      "imports": [],
+      "versionRequirement": ">=0.4.16",
+      "artifacts": {
+        "IERC165": {
+          "0.8.20": {
+            "default": { "path": "IERC165.sol/IERC165.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "script/Deploy.s.sol": {
+      "lastModificationDate": 1767621101942,
+      "contentHash": "8c01bc9576e8469a",
+      "interfaceReprHash": null,
+      "sourceName": "script/Deploy.s.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/Script.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+        "src/MockERC20.sol",
+        "src/TokenNetwork.sol",
+        "src/TokenNetworkRegistry.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "DeployScript": {
+          "0.8.20": {
+            "default": { "path": "Deploy.s.sol/DeployScript.json", "build_id": "81b4e3fa7868ea59" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "src/MockERC20.sol": {
+      "lastModificationDate": 1767561183954,
+      "contentHash": "ae4e32a1c2f70358",
+      "interfaceReprHash": null,
+      "sourceName": "src/MockERC20.sol",
+      "imports": [
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "MockERC20": {
+          "0.8.20": {
+            "default": { "path": "MockERC20.sol/MockERC20.json", "build_id": "f492cff77d7636b0" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "src/MockFeeOnTransferERC20.sol": {
+      "lastModificationDate": 1767567023332,
+      "contentHash": "75decebf3bcadcba",
+      "interfaceReprHash": null,
+      "sourceName": "src/MockFeeOnTransferERC20.sol",
+      "imports": [
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "src/MockERC20.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "MockFeeOnTransferERC20": {
+          "0.8.20": {
+            "default": {
+              "path": "MockFeeOnTransferERC20.sol/MockFeeOnTransferERC20.json",
+              "build_id": "a665592f6d8fab94"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "src/TokenNetwork.sol": {
+      "lastModificationDate": 1767572728804,
+      "contentHash": "95638c4722fb4e19",
+      "interfaceReprHash": null,
+      "sourceName": "src/TokenNetwork.sol",
+      "imports": [
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "TokenNetwork": {
+          "0.8.20": {
+            "default": {
+              "path": "TokenNetwork.sol/TokenNetwork.json",
+              "build_id": "ae1181ad6c842397"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "src/TokenNetworkRegistry.sol": {
+      "lastModificationDate": 1767566705799,
+      "contentHash": "31780864ecd09570",
+      "interfaceReprHash": null,
+      "sourceName": "src/TokenNetworkRegistry.sol",
+      "imports": [
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+        "src/TokenNetwork.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "TokenNetworkRegistry": {
+          "0.8.20": {
+            "default": {
+              "path": "TokenNetworkRegistry.sol/TokenNetworkRegistry.json",
+              "build_id": "ae1181ad6c842397"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "test/Deploy.t.sol": {
+      "lastModificationDate": 1767551049110,
+      "contentHash": "20f1fda11980125f",
+      "interfaceReprHash": null,
+      "sourceName": "test/Deploy.t.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Test.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "src/MockERC20.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "DeployTest": {
+          "0.8.20": {
+            "default": { "path": "Deploy.t.sol/DeployTest.json", "build_id": "2783d554366b0224" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "test/Fuzz.t.sol": {
+      "lastModificationDate": 1767618153996,
+      "contentHash": "670817f56c5d2dec",
+      "interfaceReprHash": null,
+      "sourceName": "test/Fuzz.t.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Test.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+        "src/MockERC20.sol",
+        "src/TokenNetwork.sol",
+        "src/TokenNetworkRegistry.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "FuzzTest": {
+          "0.8.20": {
+            "default": { "path": "Fuzz.t.sol/FuzzTest.json", "build_id": "072bd3bdec4eb8e6" }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "test/GasBenchmark.t.sol": {
+      "lastModificationDate": 1767616444954,
+      "contentHash": "ccb0f7860af1f5c4",
+      "interfaceReprHash": null,
+      "sourceName": "test/GasBenchmark.t.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Test.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+        "src/MockERC20.sol",
+        "src/TokenNetwork.sol",
+        "src/TokenNetworkRegistry.sol"
+      ],
+      "versionRequirement": "=0.8.20",
+      "artifacts": {
+        "GasBenchmarkTest": {
+          "0.8.20": {
+            "default": {
+              "path": "GasBenchmark.t.sol/GasBenchmarkTest.json",
+              "build_id": "3a4cc5f0b24d3575"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "test/Integration.t.sol": {
+      "lastModificationDate": 1767551373791,
+      "contentHash": "2df3c9dffeee84f2",
+      "interfaceReprHash": null,
+      "sourceName": "test/Integration.t.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Test.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "src/MockERC20.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "IntegrationTest": {
+          "0.8.20": {
+            "default": {
+              "path": "Integration.t.sol/IntegrationTest.json",
+              "build_id": "2783d554366b0224"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "test/IntegrationMultiChannel.t.sol": {
+      "lastModificationDate": 1767616935163,
+      "contentHash": "e9c305fc305132fa",
+      "interfaceReprHash": null,
+      "sourceName": "test/IntegrationMultiChannel.t.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Test.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+        "src/MockERC20.sol",
+        "src/TokenNetwork.sol",
+        "src/TokenNetworkRegistry.sol"
+      ],
+      "versionRequirement": "=0.8.20",
+      "artifacts": {
+        "IntegrationMultiChannelTest": {
+          "0.8.20": {
+            "default": {
+              "path": "IntegrationMultiChannel.t.sol/IntegrationMultiChannelTest.json",
+              "build_id": "8a19d39ff159a9f3"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "test/TokenNetwork.t.sol": {
+      "lastModificationDate": 1767572767922,
+      "contentHash": "70b473b3fdcd079c",
+      "interfaceReprHash": null,
+      "sourceName": "test/TokenNetwork.t.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Test.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+        "src/MockERC20.sol",
+        "src/MockFeeOnTransferERC20.sol",
+        "src/TokenNetwork.sol",
+        "src/TokenNetworkRegistry.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "TokenNetworkTest": {
+          "0.8.20": {
+            "default": {
+              "path": "TokenNetwork.t.sol/TokenNetworkTest.json",
+              "build_id": "ae1181ad6c842397"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    },
+    "test/TokenNetworkRegistry.t.sol": {
+      "lastModificationDate": 1767566868982,
+      "contentHash": "94fe5c342b885f4a",
+      "interfaceReprHash": null,
+      "sourceName": "test/TokenNetworkRegistry.t.sol",
+      "imports": [
+        "lib/forge-std/src/Base.sol",
+        "lib/forge-std/src/StdAssertions.sol",
+        "lib/forge-std/src/StdChains.sol",
+        "lib/forge-std/src/StdCheats.sol",
+        "lib/forge-std/src/StdConstants.sol",
+        "lib/forge-std/src/StdError.sol",
+        "lib/forge-std/src/StdInvariant.sol",
+        "lib/forge-std/src/StdJson.sol",
+        "lib/forge-std/src/StdMath.sol",
+        "lib/forge-std/src/StdStorage.sol",
+        "lib/forge-std/src/StdStyle.sol",
+        "lib/forge-std/src/StdToml.sol",
+        "lib/forge-std/src/StdUtils.sol",
+        "lib/forge-std/src/Test.sol",
+        "lib/forge-std/src/Vm.sol",
+        "lib/forge-std/src/console.sol",
+        "lib/forge-std/src/console2.sol",
+        "lib/forge-std/src/interfaces/IMulticall3.sol",
+        "lib/forge-std/src/safeconsole.sol",
+        "lib/openzeppelin-contracts/contracts/access/Ownable.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Context.sol",
+        "lib/openzeppelin-contracts/contracts/utils/Pausable.sol",
+        "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+        "lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol",
+        "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol",
+        "lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol",
+        "src/MockERC20.sol",
+        "src/TokenNetwork.sol",
+        "src/TokenNetworkRegistry.sol"
+      ],
+      "versionRequirement": "^0.8.20",
+      "artifacts": {
+        "TokenNetworkRegistryTest": {
+          "0.8.20": {
+            "default": {
+              "path": "TokenNetworkRegistry.t.sol/TokenNetworkRegistryTest.json",
+              "build_id": "5f860363184da0c7"
+            }
+          }
+        }
+      },
+      "seenByCompiler": true
+    }
+  },
+  "builds": [
+    "0168033f071d456f",
+    "072bd3bdec4eb8e6",
+    "2783d554366b0224",
+    "3a4cc5f0b24d3575",
+    "5f860363184da0c7",
+    "81b4e3fa7868ea59",
+    "8a19d39ff159a9f3",
+    "a665592f6d8fab94",
+    "ae1181ad6c842397",
+    "f492cff77d7636b0"
+  ],
+  "profiles": {
+    "default": {
+      "solc": {
+        "optimizer": { "enabled": true, "runs": 200 },
+        "metadata": { "useLiteralContent": false, "bytecodeHash": "ipfs", "appendCBOR": true },
+        "outputSelection": {
+          "*": {
+            "*": [
+              "abi",
+              "evm.bytecode.object",
+              "evm.bytecode.sourceMap",
+              "evm.bytecode.linkReferences",
+              "evm.deployedBytecode.object",
+              "evm.deployedBytecode.sourceMap",
+              "evm.deployedBytecode.linkReferences",
+              "evm.deployedBytecode.immutableReferences",
+              "evm.methodIdentifiers",
+              "metadata"
+            ]
+          }
+        },
+        "evmVersion": "shanghai",
+        "viaIR": true,
+        "libraries": {}
+      },
+      "vyper": {
+        "evmVersion": "shanghai",
+        "outputSelection": { "*": { "*": ["abi", "evm.bytecode", "evm.deployedBytecode"] } }
+      }
+    }
+  },
+  "preprocessed": false,
+  "mocks": []
+}

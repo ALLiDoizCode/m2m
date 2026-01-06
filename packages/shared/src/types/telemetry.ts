@@ -29,6 +29,12 @@ export enum TelemetryEventType {
   SETTLEMENT_TRIGGERED = 'SETTLEMENT_TRIGGERED',
   /** Settlement completed event - emitted when settlement execution completes (Story 6.7) */
   SETTLEMENT_COMPLETED = 'SETTLEMENT_COMPLETED',
+  /** Payment channel opened event - emitted when channel successfully opened (Story 8.10) */
+  PAYMENT_CHANNEL_OPENED = 'PAYMENT_CHANNEL_OPENED',
+  /** Payment channel balance update event - emitted when balance proof signed (Story 8.10) */
+  PAYMENT_CHANNEL_BALANCE_UPDATE = 'PAYMENT_CHANNEL_BALANCE_UPDATE',
+  /** Payment channel settled event - emitted when channel settlement completes (Story 8.10) */
+  PAYMENT_CHANNEL_SETTLED = 'PAYMENT_CHANNEL_SETTLED',
 }
 
 /**
@@ -234,6 +240,158 @@ export interface SettlementCompletedEvent {
 }
 
 /**
+ * Payment Channel Opened Telemetry Event
+ *
+ * Emitted by ChannelManager (Story 8.9) when a payment channel is successfully opened
+ * on-chain. Contains full channel configuration and initial deposit information.
+ *
+ * **Emission Point:** ChannelManager.trackChannel() after channel opening confirmed
+ *
+ * **BigInt Serialization:** initialDeposits values are strings (bigint serialized for JSON).
+ *
+ * **Dashboard Usage:**
+ * - NetworkGraph displays channel indicator on peer edge
+ * - PaymentChannelsPanel lists new channel in table
+ * - Timeline shows channel opened event
+ *
+ * @example
+ * ```typescript
+ * const event: PaymentChannelOpenedEvent = {
+ *   type: 'PAYMENT_CHANNEL_OPENED',
+ *   timestamp: 1735992000000,
+ *   nodeId: 'connector-a',
+ *   channelId: '0x1234...5678',
+ *   participants: ['0xabc...def', '0x123...456'],
+ *   tokenAddress: '0x7f5c764cbc14f9669b88837ca1490cca17c31607',
+ *   tokenSymbol: 'USDC',
+ *   settlementTimeout: 86400,
+ *   initialDeposits: {
+ *     '0xabc...def': '1000000000',
+ *     '0x123...456': '1000000000'
+ *   }
+ * };
+ * ```
+ */
+export interface PaymentChannelOpenedEvent {
+  /** Event type discriminator */
+  type: 'PAYMENT_CHANNEL_OPENED';
+  /** Event timestamp (Unix timestamp in milliseconds) */
+  timestamp: number;
+  /** Connector node ID emitting this event */
+  nodeId: string;
+  /** Channel identifier (bytes32 hex string from contract) */
+  channelId: string;
+  /** Ethereum addresses of both channel participants [participant1, participant2] */
+  participants: [string, string];
+  /** ERC20 token contract address */
+  tokenAddress: string;
+  /** Human-readable token symbol (e.g., "USDC") */
+  tokenSymbol: string;
+  /** Challenge period duration in seconds */
+  settlementTimeout: number;
+  /** Initial deposits keyed by participant address, bigint as string */
+  initialDeposits: { [participant: string]: string };
+}
+
+/**
+ * Payment Channel Balance Update Telemetry Event
+ *
+ * Emitted by SettlementExecutor (Story 8.8) after signing a balance proof.
+ * Tracks cumulative transferred amounts and nonces for off-chain payment state.
+ *
+ * **Emission Point:** SettlementExecutor.signBalanceProof() after state update
+ *
+ * **BigInt Serialization:** myTransferred and theirTransferred are strings (bigint serialized).
+ *
+ * **Dashboard Usage:**
+ * - PaymentChannelsPanel shows real-time transferred amounts and nonces
+ * - Timeline displays balance update events
+ * - NetworkGraph tooltip shows current balances
+ *
+ * @example
+ * ```typescript
+ * const event: PaymentChannelBalanceUpdateEvent = {
+ *   type: 'PAYMENT_CHANNEL_BALANCE_UPDATE',
+ *   timestamp: 1735992100000,
+ *   nodeId: 'connector-a',
+ *   channelId: '0x1234...5678',
+ *   myNonce: 42,
+ *   theirNonce: 38,
+ *   myTransferred: '250000000',
+ *   theirTransferred: '180000000'
+ * };
+ * ```
+ */
+export interface PaymentChannelBalanceUpdateEvent {
+  /** Event type discriminator */
+  type: 'PAYMENT_CHANNEL_BALANCE_UPDATE';
+  /** Event timestamp (Unix timestamp in milliseconds) */
+  timestamp: number;
+  /** Connector node ID emitting this event */
+  nodeId: string;
+  /** Channel identifier */
+  channelId: string;
+  /** Our latest nonce (number of balance updates we've signed) */
+  myNonce: number;
+  /** Counterparty latest nonce (number of balance updates they've signed) */
+  theirNonce: number;
+  /** Cumulative amount we transferred (bigint as string) */
+  myTransferred: string;
+  /** Cumulative amount counterparty transferred (bigint as string) */
+  theirTransferred: string;
+}
+
+/**
+ * Payment Channel Settled Telemetry Event
+ *
+ * Emitted by ChannelManager (Story 8.9) when a payment channel settlement completes
+ * on-chain. Reports final balances and settlement method used.
+ *
+ * **Emission Point:** ChannelManager after handleDisputedClosure() or closeIdleChannel()
+ *
+ * **Settlement Types:**
+ * - 'cooperative': Both parties agreed to close channel
+ * - 'unilateral': One party closed channel with latest balance proof
+ * - 'disputed': Settlement challenged, resolved through dispute period
+ *
+ * **BigInt Serialization:** finalBalances values are strings (bigint serialized for JSON).
+ *
+ * **Dashboard Usage:**
+ * - NetworkGraph removes channel indicator or shows as settled
+ * - PaymentChannelsPanel updates channel status to 'settled'
+ * - Timeline shows channel settlement event with settlement type
+ *
+ * @example
+ * ```typescript
+ * const event: PaymentChannelSettledEvent = {
+ *   type: 'PAYMENT_CHANNEL_SETTLED',
+ *   timestamp: 1735996000000,
+ *   nodeId: 'connector-a',
+ *   channelId: '0x1234...5678',
+ *   finalBalances: {
+ *     '0xabc...def': '750000000',
+ *     '0x123...456': '1250000000'
+ *   },
+ *   settlementType: 'cooperative'
+ * };
+ * ```
+ */
+export interface PaymentChannelSettledEvent {
+  /** Event type discriminator */
+  type: 'PAYMENT_CHANNEL_SETTLED';
+  /** Event timestamp (Unix timestamp in milliseconds) */
+  timestamp: number;
+  /** Connector node ID emitting this event */
+  nodeId: string;
+  /** Channel identifier */
+  channelId: string;
+  /** Final settlement balances keyed by participant address, bigint as string */
+  finalBalances: { [participant: string]: string };
+  /** Settlement method: cooperative, unilateral, or disputed */
+  settlementType: 'cooperative' | 'unilateral' | 'disputed';
+}
+
+/**
  * Telemetry Event Union Type
  *
  * Discriminated union of all telemetry event types.
@@ -252,8 +410,17 @@ export interface SettlementCompletedEvent {
  *     case 'SETTLEMENT_COMPLETED':
  *       console.log(`Settlement ${event.success ? 'succeeded' : 'failed'}: ${event.peerId}`);
  *       break;
+ *     case 'PAYMENT_CHANNEL_OPENED':
+ *       console.log(`Channel opened: ${event.channelId}, token: ${event.tokenSymbol}`);
+ *       break;
+ *     case 'PAYMENT_CHANNEL_BALANCE_UPDATE':
+ *       console.log(`Channel balance updated: ${event.channelId}, nonce: ${event.myNonce}`);
+ *       break;
+ *     case 'PAYMENT_CHANNEL_SETTLED':
+ *       console.log(`Channel settled: ${event.channelId}, type: ${event.settlementType}`);
+ *       break;
  *     default:
- *       console.log(`Unknown event type: ${event.type}`);
+ *       console.log(`Unknown event type`);
  *   }
  * }
  * ```
@@ -261,4 +428,7 @@ export interface SettlementCompletedEvent {
 export type TelemetryEvent =
   | AccountBalanceEvent
   | SettlementTriggeredEvent
-  | SettlementCompletedEvent;
+  | SettlementCompletedEvent
+  | PaymentChannelOpenedEvent
+  | PaymentChannelBalanceUpdateEvent
+  | PaymentChannelSettledEvent;

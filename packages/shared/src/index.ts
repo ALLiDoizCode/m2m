@@ -53,12 +53,15 @@ export {
 // Routing Types
 export { RoutingTableEntry } from './types/routing';
 
-// Telemetry Types (Story 6.8)
+// Telemetry Types (Story 6.8, Story 8.10)
 export {
   TelemetryEventType,
   SettlementState,
   AccountBalanceEvent,
   SettlementTriggeredEvent,
   SettlementCompletedEvent,
+  PaymentChannelOpenedEvent,
+  PaymentChannelBalanceUpdateEvent,
+  PaymentChannelSettledEvent,
   TelemetryEvent,
 } from './types/telemetry';
