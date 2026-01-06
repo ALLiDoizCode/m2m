@@ -105,10 +105,9 @@ describeIntegration('SettlementExecutor Integration Tests', () => {
       const event: SettlementTriggerEvent = {
         peerId: 'test-peer',
         tokenId: 'ILP',
-        creditBalance: 1000n,
-        debitBalance: 0n,
+        currentBalance: 1000n,
         threshold: 500n,
-        timestamp: Date.now(),
+        timestamp: new Date(),
       };
 
       // Trigger settlement
@@ -148,10 +147,9 @@ describeIntegration('SettlementExecutor Integration Tests', () => {
       const event1: SettlementTriggerEvent = {
         peerId: 'test-peer',
         tokenId: 'ILP',
-        creditBalance: 500n,
-        debitBalance: 0n,
+        currentBalance: 500n,
         threshold: 500n,
-        timestamp: Date.now(),
+        timestamp: new Date(),
       };
 
       mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event1);
@@ -166,10 +164,9 @@ describeIntegration('SettlementExecutor Integration Tests', () => {
       const event2: SettlementTriggerEvent = {
         peerId: 'test-peer',
         tokenId: 'ILP',
-        creditBalance: 300n,
-        debitBalance: 0n,
+        currentBalance: 300n,
         threshold: 500n,
-        timestamp: Date.now(),
+        timestamp: new Date(),
       };
 
       mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event2);
@@ -204,10 +201,9 @@ describeIntegration('SettlementExecutor Integration Tests', () => {
       const event1: SettlementTriggerEvent = {
         peerId: 'test-peer',
         tokenId: 'ILP',
-        creditBalance: 500n,
-        debitBalance: 0n,
+        currentBalance: 500n,
         threshold: 500n,
-        timestamp: Date.now(),
+        timestamp: new Date(),
       };
 
       mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event1);
@@ -216,10 +212,9 @@ describeIntegration('SettlementExecutor Integration Tests', () => {
       const event2: SettlementTriggerEvent = {
         peerId: 'test-peer-2',
         tokenId: 'ILP',
-        creditBalance: 600n,
-        debitBalance: 0n,
+        currentBalance: 600n,
         threshold: 500n,
-        timestamp: Date.now(),
+        timestamp: new Date(),
       };
 
       mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event2);
@@ -253,10 +248,9 @@ describeIntegration('SettlementExecutor Integration Tests', () => {
       const event: SettlementTriggerEvent = {
         peerId: 'test-peer',
         tokenId: 'ILP',
-        creditBalance: 1000n,
-        debitBalance: 0n,
+        currentBalance: 1000n,
         threshold: 500n,
-        timestamp: Date.now(),
+        timestamp: new Date(),
       };
 
       mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event);
@@ -281,10 +275,9 @@ describeIntegration('SettlementExecutor Integration Tests', () => {
       const event: SettlementTriggerEvent = {
         peerId: 'test-peer',
         tokenId: 'ILP',
-        creditBalance: 1000n,
-        debitBalance: 0n,
+        currentBalance: 1000n,
         threshold: 500n,
-        timestamp: Date.now(),
+        timestamp: new Date(),
       };
 
       mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event);
