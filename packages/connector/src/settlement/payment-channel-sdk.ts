@@ -193,7 +193,11 @@ export class PaymentChannelSDK {
     const tokenNetwork = new ethers.Contract(tokenNetworkAddress, TOKEN_NETWORK_ABI, this.signer);
 
     // Step 3: Open channel on TokenNetwork
-    const tx = await tokenNetwork.openChannel(participant2, settlementTimeout);
+    const openChannelFn = tokenNetwork.openChannel;
+    if (!openChannelFn) {
+      throw new Error('TokenNetwork contract missing openChannel method');
+    }
+    const tx = await openChannelFn(participant2, settlementTimeout);
     const receipt = await tx.wait(this.config.confirmations);
 
     // Extract ChannelOpened event from transaction receipt
@@ -404,7 +408,11 @@ export class PaymentChannelSDK {
     ];
 
     // Step 3: Submit close transaction
-    const tx = await tokenNetwork.closeChannel(channelId, balanceProofTuple, signature);
+    const closeChannelFn = tokenNetwork.closeChannel;
+    if (!closeChannelFn) {
+      throw new Error('TokenNetwork contract missing closeChannel method');
+    }
+    const tx = await closeChannelFn(channelId, balanceProofTuple, signature);
     const receipt = await tx.wait(this.config.confirmations);
 
     // Extract ChannelClosed event from receipt
@@ -470,7 +478,11 @@ export class PaymentChannelSDK {
     );
 
     // Step 4: Submit settlement transaction
-    const tx = await tokenNetwork.settleChannel(channelId);
+    const settleChannelFn = tokenNetwork.settleChannel;
+    if (!settleChannelFn) {
+      throw new Error('TokenNetwork contract missing settleChannel method');
+    }
+    const tx = await settleChannelFn(channelId);
     const receipt = await tx.wait(this.config.confirmations);
 
     // Extract ChannelSettled event from receipt
@@ -533,7 +545,11 @@ export class PaymentChannelSDK {
     );
 
     // Step 3: Call getChannel view function
-    const channelData = await tokenNetwork.getChannel(channelId);
+    const getChannelFn = tokenNetwork.getChannel;
+    if (!getChannelFn) {
+      throw new Error('TokenNetwork contract missing getChannel method');
+    }
+    const channelData = await getChannelFn(channelId);
 
     // Step 4: Parse on-chain channel data
     const [
@@ -689,7 +705,11 @@ export class PaymentChannelSDK {
     }
 
     // Query registry for existing TokenNetwork
-    const existingTokenNetwork = (await this.registry.getTokenNetwork(tokenAddress)) as string;
+    const getTokenNetworkFn = this.registry.getTokenNetwork;
+    if (!getTokenNetworkFn) {
+      throw new Error('TokenNetworkRegistry contract missing getTokenNetwork method');
+    }
+    const existingTokenNetwork = (await getTokenNetworkFn(tokenAddress)) as string;
 
     if (existingTokenNetwork !== ethers.ZeroAddress) {
       // TokenNetwork exists, cache and return
@@ -698,7 +718,11 @@ export class PaymentChannelSDK {
     }
 
     // TokenNetwork doesn't exist, create it
-    const tx = await this.registry.createTokenNetwork(tokenAddress);
+    const createTokenNetworkFn = this.registry.createTokenNetwork;
+    if (!createTokenNetworkFn) {
+      throw new Error('TokenNetworkRegistry contract missing createTokenNetwork method');
+    }
+    const tx = await createTokenNetworkFn(tokenAddress);
     const receipt = await tx.wait(this.config.confirmations);
 
     // Extract TokenNetworkCreated event from receipt
@@ -741,7 +765,11 @@ export class PaymentChannelSDK {
     amount: bigint
   ): Promise<void> {
     const erc20 = new ethers.Contract(tokenAddress, ERC20_ABI, this.signer);
-    const tx = await erc20.approve(spender, amount);
+    const approveFn = erc20.approve;
+    if (!approveFn) {
+      throw new Error('ERC20 contract missing approve method');
+    }
+    const tx = await approveFn(spender, amount);
     await tx.wait(this.config.confirmations);
   }
 
@@ -761,7 +789,11 @@ export class PaymentChannelSDK {
     participant: string,
     totalDeposit: bigint
   ): Promise<void> {
-    const tx = await tokenNetwork.setTotalDeposit(channelId, participant, totalDeposit);
+    const setTotalDepositFn = tokenNetwork.setTotalDeposit;
+    if (!setTotalDepositFn) {
+      throw new Error('TokenNetwork contract missing setTotalDeposit method');
+    }
+    const tx = await setTotalDepositFn(channelId, participant, totalDeposit);
     await tx.wait(this.config.confirmations);
   }
 
@@ -794,17 +826,6 @@ export class PaymentChannelSDK {
    */
   private _getCachedState(channelId: string): ChannelState | null {
     return this.channelCache.get(channelId) ?? null;
-  }
-
-  /**
-   * Removes a channel from the cache
-   *
-   * @param channelId - Channel identifier (bytes32 hex)
-   *
-   * Source: Memory efficiency, called after settleChannel completes
-   */
-  private _removeCachedState(channelId: string): void {
-    this.channelCache.delete(channelId);
   }
 
   /**
@@ -864,6 +885,9 @@ export class PaymentChannelSDK {
     toBlock: number
   ): Promise<void> {
     // Filter for events where connector is participant1 or participant2
+    if (!tokenNetwork.filters?.ChannelOpened) {
+      throw new Error('TokenNetwork contract missing ChannelOpened event filter');
+    }
     const filter1 = tokenNetwork.filters.ChannelOpened(this.signer.address, null);
     const filter2 = tokenNetwork.filters.ChannelOpened(null, this.signer.address);
 
@@ -901,6 +925,9 @@ export class PaymentChannelSDK {
     fromBlock: number,
     toBlock: number
   ): Promise<void> {
+    if (!tokenNetwork.filters?.ChannelClosed) {
+      throw new Error('TokenNetwork contract missing ChannelClosed event filter');
+    }
     const filter = tokenNetwork.filters.ChannelClosed();
     const events = await tokenNetwork.queryFilter(filter, fromBlock, toBlock);
 
@@ -939,6 +966,9 @@ export class PaymentChannelSDK {
     fromBlock: number,
     toBlock: number
   ): Promise<void> {
+    if (!tokenNetwork.filters?.ChannelSettled) {
+      throw new Error('TokenNetwork contract missing ChannelSettled event filter');
+    }
     const filter = tokenNetwork.filters.ChannelSettled();
     const events = await tokenNetwork.queryFilter(filter, fromBlock, toBlock);
 
@@ -976,6 +1006,9 @@ export class PaymentChannelSDK {
     fromBlock: number,
     toBlock: number
   ): Promise<void> {
+    if (!tokenNetwork.filters?.ChannelDeposit) {
+      throw new Error('TokenNetwork contract missing ChannelDeposit event filter');
+    }
     const filter = tokenNetwork.filters.ChannelDeposit();
     const events = await tokenNetwork.queryFilter(filter, fromBlock, toBlock);
 
@@ -1022,6 +1055,10 @@ export class PaymentChannelSDK {
    * @param eventType - Event type name (onChannelOpened, onChannelClosed, etc.)
    * @param eventData - Event data to pass to listeners
    */
+  private _notifyListeners(eventType: 'onChannelOpened', eventData: ChannelOpenedEvent): void;
+  private _notifyListeners(eventType: 'onChannelClosed', eventData: ChannelClosedEvent): void;
+  private _notifyListeners(eventType: 'onChannelSettled', eventData: ChannelSettledEvent): void;
+  private _notifyListeners(eventType: 'onChannelDeposit', eventData: ChannelDepositEvent): void;
   private _notifyListeners(
     eventType: keyof ChannelEventListener,
     eventData: ChannelOpenedEvent | ChannelClosedEvent | ChannelSettledEvent | ChannelDepositEvent
@@ -1030,7 +1067,7 @@ export class PaymentChannelSDK {
       const callback = listener[eventType];
       if (callback) {
         try {
-          callback(eventData);
+          (callback as (event: typeof eventData) => void)(eventData);
         } catch (error) {
           // Log error but don't stop processing other listeners
           console.error(`Error in event listener ${eventType}:`, error);

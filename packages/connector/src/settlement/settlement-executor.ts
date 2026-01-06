@@ -13,6 +13,7 @@ import { SettlementMonitor } from './settlement-monitor.js';
 import { SettlementTriggerEvent } from '../config/types.js';
 import { Logger } from '../utils/logger.js';
 import { TelemetryEmitter } from '../telemetry/telemetry-emitter.js';
+import { TelemetryEvent } from '@m2m/shared';
 
 /**
  * SettlementExecutor
@@ -581,14 +582,14 @@ export class SettlementExecutor {
     }
 
     try {
-      const event: Record<string, unknown> = {
+      const event = {
         type,
         timestamp: Date.now(),
         nodeId: this.config.nodeId || 'unknown',
         ...data,
       };
 
-      this.telemetryEmitter.emit(event);
+      this.telemetryEmitter.emit(event as TelemetryEvent);
     } catch (error) {
       this.logger.warn(
         { error: error instanceof Error ? error.message : String(error) },
