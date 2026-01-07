@@ -17,6 +17,33 @@ Thank you for your interest in contributing to the Multi-node Interledger Connec
 
 This project adheres to a professional and respectful environment. Please be kind, constructive, and collaborative in all interactions.
 
+## Before You Start
+
+Before contributing, please read the following documentation to understand project workflows and quality standards:
+
+### Required Reading
+
+- **[Developer Guide](docs/development/developer-guide.md)** - Epic branch workflow, pre-push checklist, git hooks overview
+- **[Git Hooks](docs/development/git-hooks.md)** - How pre-commit/pre-push hooks work and troubleshooting
+- **[Test Strategy and Standards](docs/architecture/test-strategy-and-standards.md)** - Test quality anti-patterns, best practices, stability testing
+- **[Coding Standards](docs/architecture/coding-standards.md)** - TypeScript strict mode guidelines, critical rules, naming conventions
+
+### Key Concepts
+
+- **Epic Branch Workflow**: Multi-story features are developed on epic branches before merging to main
+- **Quality Gates**: Pre-commit and pre-push hooks catch issues before CI
+- **Test Anti-Patterns**: Avoid common testing mistakes (event listener cleanup, async timeouts, mock state leakage)
+- **CI/CD Pipeline**: GitHub Actions validates all changes with lint, test, build, and type-check jobs
+
+### Quick Setup
+
+After reading the documentation above:
+
+1. Fork and clone the repository
+2. Install dependencies: `npm install` (this also installs git hooks automatically)
+3. Verify setup: `npm run build && npm test && npm run lint`
+4. Pre-commit hooks are now active and will run on every commit
+
 ## Getting Started
 
 ### Prerequisites
@@ -346,6 +373,54 @@ describe('PacketHandler', () => {
   });
 });
 ```
+
+## When Things Go Wrong
+
+If you encounter issues during development or CI failures, use these resources:
+
+### CI Troubleshooting
+
+- **[CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)** - Comprehensive guide for debugging CI failures
+  - Common failure scenarios (lint, test, build, type-check, contracts, E2E)
+  - Job-specific debugging procedures with diagnostic commands
+  - Investigation runbook for systematic debugging
+
+### Test Failures
+
+- **[Test Anti-Patterns](docs/architecture/test-strategy-and-standards.md#common-test-anti-patterns-and-solutions)** - Common testing mistakes and fixes
+  - Event listener cleanup failures
+  - Async timeout issues
+  - Mock state leakage
+  - Testing implementation details instead of behavior
+  - Incomplete test cleanup (resources not released)
+  - Hardcoded timeouts in production code
+
+### Root Cause Analyses
+
+Past failures and their resolutions are documented in `docs/qa/`:
+
+- **[RCA 10.1: Settlement Executor Test Failures](docs/qa/root-cause-analysis-10.1.md)** - Event listener cleanup anti-patterns
+
+### Reporting Issues
+
+If you discover a bug or systematic issue:
+
+1. **Check Existing Issues**: Search [GitHub Issues](https://github.com/USERNAME/m2m/issues) for similar reports
+2. **Provide Context**:
+   - Clear description of the problem
+   - Steps to reproduce
+   - Expected vs actual behavior
+   - Environment (Node.js version, OS, npm version)
+   - Relevant logs or error messages
+3. **Create Issue**: Use the appropriate issue template (bug report, feature request)
+4. **Tag Appropriately**: Use labels like `bug`, `enhancement`, `documentation`, `test-quality`
+
+### Getting Help
+
+- **Documentation**: Start with [Developer Documentation Index](docs/development/README.md)
+- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/USERNAME/m2m/discussions)
+- **CI Failures**: Use [CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)
+- **Epic Branch Issues**: See [Epic Branch Workflow](docs/development/developer-guide.md#epic-branch-workflow)
 
 ## Coding Standards
 

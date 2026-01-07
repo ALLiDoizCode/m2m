@@ -27,6 +27,9 @@ Implement XRP-style payment channels as EVM smart contracts on Base L2, deploy p
 **Epic 9: XRP Payment Channels**
 Integrate XRP Ledger payment channels (PayChan) for settlement, implement XRP payment channel state management and claim verification, enable dual-settlement support (both EVM and XRP), and provide unified settlement API for multi-chain operations.
 
+**Epic 10: CI/CD Pipeline Reliability & Test Quality**
+Eliminate recurring CI/CD pipeline failures on epic branch pull requests by fixing test quality issues (async handling, mock coverage, timeouts), implementing pre-commit quality gates, and establishing systematic testing workflows that ensure code quality before CI execution.
+
 **Epic 11: AI Agent Wallet Infrastructure**
 Implement programmatic wallet creation and management for AI agents, provide HD wallet derivation for scalable agent provisioning, enable per-agent wallet isolation with automated lifecycle management, and deliver wallet monitoring, balance tracking, and recovery procedures for autonomous agent operations.
 

@@ -1,2 +1,8 @@
 # Run lint-staged to check staged files
+echo "🔍 Running pre-commit quality checks..."
 npx lint-staged
+
+# Check exit code
+if [ $? -eq 0 ]; then
+  echo "✅ Pre-commit checks passed!"
+fi

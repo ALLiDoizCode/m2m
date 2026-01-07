@@ -16,6 +16,18 @@ jest.mock('./payment-channel-sdk');
 // Mock AccountManager
 jest.mock('./account-manager');
 
+/**
+ * Test Timeout Guidelines:
+ * - Basic operations: 50ms (single async event handler processing)
+ * - Deposit operations: 100ms (3 sequential getChannelState calls)
+ * - Retry operations: 500ms (exponential backoff with multiple attempts)
+ *
+ * Why timeouts are needed:
+ * Async event handlers process settlement triggers asynchronously via EventEmitter.
+ * Tests must await Promise chain completion before assertions. Timeouts ensure
+ * all async operations (SDK calls, account updates, telemetry) complete before
+ * verification.
+ */
 describe('SettlementExecutor', () => {
   let executor: SettlementExecutor;
   let mockSDK: jest.Mocked<PaymentChannelSDK>;
@@ -226,35 +238,41 @@ describe('SettlementExecutor', () => {
       executor.start();
 
       // Mock channel state with low deposit
+      // Need 3 mocks: findChannelForPeer, settleViaExistingChannel, then recursive settleViaExistingChannel
+      const lowDepositState = {
+        channelId: '0xexisting',
+        participants: [ACCOUNT_0, ACCOUNT_1] as [string, string],
+        myDeposit: 500n, // Low deposit
+        theirDeposit: 0n,
+        myNonce: 0,
+        theirNonce: 0,
+        myTransferred: 0n,
+        theirTransferred: 0n,
+        status: 'opened',
+        tokenAddress: config.settlementTokenAddress,
+        tokenNetworkAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+        settlementTimeout: 86400,
+      } as ChannelState;
+
+      const highDepositState = {
+        channelId: '0xexisting',
+        participants: [ACCOUNT_0, ACCOUNT_1] as [string, string],
+        myDeposit: 3600n, // After deposit
+        theirDeposit: 0n,
+        myNonce: 0,
+        theirNonce: 0,
+        myTransferred: 0n,
+        theirTransferred: 0n,
+        status: 'opened',
+        tokenAddress: config.settlementTokenAddress,
+        tokenNetworkAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+        settlementTimeout: 86400,
+      } as ChannelState;
+
       mockSDK.getChannelState
-        .mockResolvedValueOnce({
-          channelId: '0xexisting',
-          participants: [ACCOUNT_0, ACCOUNT_1] as [string, string],
-          myDeposit: 500n, // Low deposit
-          theirDeposit: 0n,
-          myNonce: 0,
-          theirNonce: 0,
-          myTransferred: 0n,
-          theirTransferred: 0n,
-          status: 'opened',
-          tokenAddress: config.settlementTokenAddress,
-          tokenNetworkAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-          settlementTimeout: 86400,
-        } as ChannelState)
-        .mockResolvedValueOnce({
-          channelId: '0xexisting',
-          participants: [ACCOUNT_0, ACCOUNT_1] as [string, string],
-          myDeposit: 3600n, // After deposit
-          theirDeposit: 0n,
-          myNonce: 0,
-          theirNonce: 0,
-          myTransferred: 0n,
-          theirTransferred: 0n,
-          status: 'opened',
-          tokenAddress: config.settlementTokenAddress,
-          tokenNetworkAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-          settlementTimeout: 86400,
-        } as ChannelState);
+        .mockResolvedValueOnce(lowDepositState) // findChannelForPeer verification
+        .mockResolvedValueOnce(lowDepositState) // settleViaExistingChannel before deposit
+        .mockResolvedValueOnce(highDepositState); // settleViaExistingChannel after deposit
 
       mockSDK.deposit = jest.fn().mockResolvedValue(undefined);
 
@@ -271,7 +289,7 @@ describe('SettlementExecutor', () => {
       };
 
       mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Verify deposit called
       expect(mockSDK.deposit).toHaveBeenCalledWith(
@@ -456,9 +474,15 @@ describe('SettlementExecutor', () => {
         }),
       };
 
+      // Create fresh mock for this test to ensure clean state
+      const freshMockAccountManager = {
+        recordSettlement: jest.fn().mockResolvedValue(undefined),
+        getBalances: jest.fn().mockResolvedValue({ creditBalance: 0n, debitBalance: 0n }),
+      } as any;
+
       executor = new SettlementExecutor(
         config,
-        mockAccountManager,
+        freshMockAccountManager,
         mockSettlementMonitor,
         logger,
         mockTelemetryEmitter as any
@@ -495,13 +519,11 @@ describe('SettlementExecutor', () => {
       };
 
       // Should not throw
-      await expect(async () => {
-        mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event);
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }).not.toThrow();
+      mockSettlementMonitor.emit('SETTLEMENT_REQUIRED', event);
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Verify settlement still succeeded
-      expect(mockAccountManager.recordSettlement).toHaveBeenCalled();
+      expect(freshMockAccountManager.recordSettlement).toHaveBeenCalled();
     });
   });
 

@@ -1,21 +1,54 @@
-# Run linter on all files
-echo "Running linter..."
-npm run lint
+#!/usr/bin/env sh
 
-# Check if linter passed
-if [ $? -ne 0 ]; then
-  echo "❌ Linter failed. Please fix the errors before pushing."
-  exit 1
+echo "🚀 Running pre-push quality gates..."
+
+# Get current branch and remote branch
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+REMOTE_BRANCH="origin/$CURRENT_BRANCH"
+
+# Check if remote branch exists, fallback to origin/main if not
+if ! git rev-parse --verify "$REMOTE_BRANCH" >/dev/null 2>&1; then
+  REMOTE_BRANCH="origin/main"
 fi
 
-# Run format check
-echo "Checking code formatting..."
+# Get list of changed TypeScript files (exclude deleted, .test.ts, .d.ts)
+CHANGED_TS_FILES=$(git diff --name-only --diff-filter=ACM "$REMOTE_BRANCH" | grep -E '\.tsx?$' | grep -v '\.test\.ts$' | grep -v '\.d\.ts$' || true)
+
+# 1/3 Linting changed files
+echo "1/3 Linting changed TypeScript files..."
+if [ -n "$CHANGED_TS_FILES" ]; then
+  echo "$CHANGED_TS_FILES" | xargs npx eslint
+  if [ $? -ne 0 ]; then
+    echo "❌ Linting failed. Run 'npm run lint' to see all errors, or 'npx eslint --fix <file>' to auto-fix."
+    exit 1
+  fi
+else
+  echo "No TypeScript files changed, skipping lint."
+fi
+
+# 2/3 Format check
+echo "2/3 Checking code formatting..."
 npm run format:check
-
-# Check if format check passed
 if [ $? -ne 0 ]; then
-  echo "❌ Code formatting check failed. Run 'npm run format' to fix."
+  echo "❌ Formatting failed. Run 'npm run format' to fix all files."
   exit 1
 fi
 
-echo "✅ All pre-push checks passed!"
+# 3/3 Running related tests
+echo "3/3 Running tests for changed files..."
+if [ -n "$CHANGED_TS_FILES" ]; then
+  # Filter to source files only (exclude test files)
+  SOURCE_FILES=$(echo "$CHANGED_TS_FILES" | tr '\n' ' ')
+
+  if [ -n "$SOURCE_FILES" ]; then
+    npx jest --findRelatedTests --passWithNoTests --bail $SOURCE_FILES
+    if [ $? -ne 0 ]; then
+      echo "❌ Tests failed. Run 'npm test -- <file>' to debug, or fix the failing test."
+      exit 1
+    fi
+  fi
+else
+  echo "No source files changed, skipping tests."
+fi
+
+echo "✅ All pre-push checks passed! Ready to push."

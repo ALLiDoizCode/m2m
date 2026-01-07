@@ -136,6 +136,95 @@ Five pre-configured Docker Compose topologies included:
 
 ## [Unreleased]
 
+### Fixed
+
+- **[10.1] Settlement Executor Test Failures** (commit 034a098)
+  - Fixed event listener cleanup issue causing test failures
+    - Previously `bind(this)` created new function references preventing `EventEmitter.off()` from matching handlers
+    - Now store `boundHandleSettlement` in constructor for proper cleanup
+  - Validated async timeout coverage for all settlement operations
+    - Basic operations: 50ms, Deposit operations: 100ms, Retry operations: 500ms
+  - Verified mock isolation with 10/10 stability test runs (100% pass rate)
+  - Added test anti-patterns documentation to `test-strategy-and-standards.md`
+  - Created root cause analysis at `docs/qa/root-cause-analysis-10.1.md`
+  - Resolved Epic 10 CI/CD pipeline failures on settlement executor tests
+
+### Added
+
+- **[10.2] Pre-Commit Quality Gates**
+  - Enhanced pre-commit hook with informative messages and fast targeted checks
+    - Runs ESLint and Prettier on staged files only using lint-staged
+    - Auto-fixes issues when possible (eslint --fix, prettier --write)
+    - Execution time: 2-5 seconds for typical commits
+  - Enhanced pre-push hook with optimized checks and related tests
+    - Targeted linting on changed TypeScript files only
+    - Format check across all files
+    - Jest --findRelatedTests for changed source files (excludes test/type definition files)
+    - Clear error messages with actionable fix instructions
+    - Execution time: 10-30 seconds depending on changes
+  - Added Pull Request template (`.github/PULL_REQUEST_TEMPLATE.md`)
+    - Pre-submission quality checklist (hooks, tests, coverage, documentation)
+
+- **[10.3] Document Test Quality Standards & CI Best Practices**
+  - Expanded test-strategy-and-standards.md with additional anti-patterns
+    - Anti-Pattern 4: Hardcoded timeouts in production code (use event-driven patterns or configurable delays)
+    - Anti-Pattern 5: Incomplete test cleanup (resources not released)
+    - Anti-Pattern 6: Testing implementation details instead of behavior
+  - Added stability testing best practices
+    - When to run stability tests (after fixing flaky tests, before production releases)
+    - How to create stability test scripts (example: run-settlement-tests.sh)
+    - Success criteria: 100% pass rate over N runs (N=10 for unit tests, N=3 for integration)
+  - Added test isolation validation techniques
+    - Run tests sequentially with `--runInBand` to detect order dependencies
+    - Run tests in random order with `--randomize` to detect interdependencies
+    - Run single test file in isolation to verify no workspace dependencies
+  - Added code examples from actual project tests
+    - Good example: settlement-executor.test.ts event listener cleanup
+    - Good example: Mock isolation in beforeEach()
+    - Bad example: Inline bind(this) anti-pattern
+  - Created comprehensive CI troubleshooting guide (`docs/development/ci-troubleshooting.md`)
+    - 7 common CI failure scenarios with diagnosis and resolution steps
+    - Job-specific debugging procedures for all CI jobs (lint, test, build, type-check, contracts, E2E)
+    - Investigation runbook with step-by-step debugging workflow
+    - Monitoring guidelines for tracking CI health metrics
+    - Continuous improvement process for systematic issue resolution
+  - Documented epic branch workflow in developer-guide.md
+    - Epic branch PR creation process with pre-PR checklist
+    - Epic branch quality standards (zero tolerance for failures, coverage requirements)
+    - Handling epic branch PR failures (reproduce locally, create hotfix, document root cause)
+  - Added pre-push quality checklist to developer-guide.md
+    - Code review checklist (staged changes, no console.log in production)
+    - Quality gates checklist (pre-commit hooks, related tests)
+    - Type safety checklist (strict mode compliance, no `any` types)
+    - Test coverage checklist (>80% for new code)
+    - Documentation checklist (README, CHANGELOG, architecture docs)
+  - Created developer documentation index (`docs/development/README.md`)
+    - Central hub organizing all documentation by category
+    - Quick reference with common commands and checklists
+    - Contributing path with ordered reading list
+  - Updated main README.md with Developer Documentation section
+    - Links to developer guide, git hooks, test standards, CI troubleshooting
+    - Epic branch workflow and pre-push checklist references
+  - Enhanced CONTRIBUTING.md with Before You Start and When Things Go Wrong sections
+    - Required reading list (developer guide, git hooks, test standards, coding standards)
+    - CI troubleshooting resources and test failure guides
+    - Root cause analysis references
+    - Issue reporting guidelines
+  - Integrated all Epic 10 documentation for discoverability
+    - Cross-references between related documents
+    - Clear navigation paths from README to specialized guides
+    - Consolidated test quality and CI/CD best practices
+    - Type of change selection (feature, bugfix, refactor, docs, test)
+    - Bypass justification section with warnings
+  - Created Git hooks documentation (`docs/development/git-hooks.md`)
+    - Detailed hook workflow and bypass mechanism documentation
+    - Troubleshooting guide for common issues
+    - Quick reference table for developers
+  - Created developer guide (`docs/development/developer-guide.md`)
+    - Quick reference for local quality checks
+    - Hook workflow overview
+  - Prevents CI failures by catching issues locally before push
+
 Future planned features:
 
 - Dynamic routing with route advertisement

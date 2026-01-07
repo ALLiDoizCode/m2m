@@ -2384,6 +2384,28 @@ The current dashboard displays a placeholder welcome message. Future stories wil
 - **Tech Stack**: [docs/architecture/tech-stack.md](docs/architecture/tech-stack.md)
 - **Interledger RFCs**: [docs/rfcs/](docs/rfcs/)
 
+## Developer Documentation
+
+Essential guides for contributing to the M2M project:
+
+### Getting Started
+
+- **[Developer Documentation Index](docs/development/README.md)** - Central hub for all developer documentation
+- **[Developer Guide](docs/development/developer-guide.md)** - Epic branch workflow, pre-push checklist, git hooks
+- **[Git Hooks](docs/development/git-hooks.md)** - Automated quality gates (pre-commit, pre-push hooks)
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - How to contribute, code review process
+
+### Quality Standards
+
+- **[Test Strategy and Standards](docs/architecture/test-strategy-and-standards.md)** - Test anti-patterns, stability testing best practices
+- **[Coding Standards](docs/architecture/coding-standards.md)** - TypeScript and Solidity coding standards
+- **[CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)** - Debugging CI failures, investigation runbook
+
+### Workflows
+
+- **Epic Branch Workflow**: See [Developer Guide - Epic Branch Workflow](docs/development/developer-guide.md#epic-branch-workflow)
+- **Pre-Push Checklist**: See [Developer Guide - Pre-Push Quality Checklist](docs/development/developer-guide.md#pre-push-quality-checklist)
+
 ## Technology Stack
 
 | Category   | Technology | Version     | Purpose                               |
