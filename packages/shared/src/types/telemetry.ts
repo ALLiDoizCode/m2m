@@ -39,6 +39,8 @@ export enum TelemetryEventType {
   FUNDING_TRANSACTION_CONFIRMED = 'FUNDING_TRANSACTION_CONFIRMED',
   /** Funding transaction failed event - emitted when funding tx fails (Story 11.4) */
   FUNDING_TRANSACTION_FAILED = 'FUNDING_TRANSACTION_FAILED',
+  /** Agent wallet state changed event - emitted on wallet lifecycle state transitions (Story 11.5) */
+  AGENT_WALLET_STATE_CHANGED = 'AGENT_WALLET_STATE_CHANGED',
 }
 
 /**
@@ -443,6 +445,40 @@ export interface FundingTransactionFailedEvent {
 }
 
 /**
+ * Agent Wallet State Changed Telemetry Event
+ *
+ * Emitted when AgentWalletLifecycle (Story 11.5) transitions wallet state.
+ * Indicates wallet lifecycle progression (PENDING → ACTIVE → SUSPENDED → ARCHIVED).
+ *
+ * **Dashboard Usage:**
+ * - Story 11.7 dashboard displays lifecycle state badges on agent wallet cards
+ * - Real-time state transition visualization
+ *
+ * @example
+ * ```typescript
+ * const event: AgentWalletStateChangedEvent = {
+ *   type: 'AGENT_WALLET_STATE_CHANGED',
+ *   agentId: 'agent-001',
+ *   oldState: 'pending',
+ *   newState: 'active',
+ *   timestamp: 1704729600000
+ * };
+ * ```
+ */
+export interface AgentWalletStateChangedEvent {
+  /** Event type discriminator */
+  type: 'AGENT_WALLET_STATE_CHANGED';
+  /** Agent identifier */
+  agentId: string;
+  /** Previous state (null if newly created) */
+  oldState: string | null;
+  /** New state */
+  newState: string;
+  /** Event timestamp (Unix milliseconds) */
+  timestamp: number;
+}
+
+/**
  * Telemetry Event Union Type
  *
  * Discriminated union of all telemetry event types.
@@ -467,6 +503,9 @@ export interface FundingTransactionFailedEvent {
  *     case 'AGENT_WALLET_FUNDED':
  *       console.log(`Agent wallet funded: ${event.agentId} with ${event.transactions.length} transactions`);
  *       break;
+ *     case 'AGENT_WALLET_STATE_CHANGED':
+ *       console.log(`Agent wallet state changed: ${event.agentId} ${event.oldState} → ${event.newState}`);
+ *       break;
  *     default:
  *       console.log(`Unknown event type: ${event.type}`);
  *   }
@@ -481,4 +520,5 @@ export type TelemetryEvent =
   | AgentWalletFundedEvent
   | FundingRateLimitExceededEvent
   | FundingTransactionConfirmedEvent
-  | FundingTransactionFailedEvent;
+  | FundingTransactionFailedEvent
+  | AgentWalletStateChangedEvent;
