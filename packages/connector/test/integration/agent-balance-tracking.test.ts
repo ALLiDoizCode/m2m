@@ -116,7 +116,7 @@ describe('Agent Balance Tracking Integration', () => {
     }
 
     // Mock blockchain responses with varying balances
-    mockEvmProvider.getBalance.mockImplementation(async (address: string) => {
+    mockEvmProvider.getBalance.mockImplementation(async (address) => {
       // Generate deterministic balance based on address
       const addrStr = String(address);
       const hash = addrStr.substring(2, 10);
@@ -124,18 +124,21 @@ describe('Agent Balance Tracking Integration', () => {
       return balance;
     });
 
-    mockXrplClient.request.mockImplementation(async (req: { account: string; command: string }) => {
+    mockXrplClient.request.mockImplementation(async (req) => {
       // Generate deterministic balance based on account
-      const hash = req.account.substring(1, 9);
-      const drops =
-        (BigInt(`0x${hash.charCodeAt(0)}${hash.charCodeAt(1)}`) % 100000000n) + 10000000n; // 10-110 XRP
-      return {
-        result: {
-          account_data: {
-            Balance: drops.toString(),
+      if ('account' in req) {
+        const hash = req.account.substring(1, 9);
+        const drops =
+          (BigInt(`0x${hash.charCodeAt(0)}${hash.charCodeAt(1)}`) % 100000000n) + 10000000n; // 10-110 XRP
+        return {
+          result: {
+            account_data: {
+              Balance: drops.toString(),
+            },
           },
-        },
-      } as { result: { account_data: { Balance: string } } };
+        } as { result: { account_data: { Balance: string } } };
+      }
+      throw new Error('Unexpected request type');
     });
 
     // Initialize balance tracker
