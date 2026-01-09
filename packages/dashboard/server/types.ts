@@ -57,33 +57,37 @@ export interface RouteLookupMessage extends TelemetryMessage {
  * (ACCOUNT_BALANCE, SETTLEMENT_*) don't have a data field - they have fields directly on the event
  */
 export function isTelemetryMessage(msg: unknown): msg is TelemetryMessage {
+  // First check if msg is an object
+  if (typeof msg !== 'object' || msg === null) {
+    return false;
+  }
+
+  // Type narrow to object with type property
+  const obj = msg as { type?: unknown; nodeId?: unknown; timestamp?: unknown; data?: unknown };
+
+  // Check if type field exists and is a string
+  if (typeof obj.type !== 'string') {
+    return false;
+  }
+
   // Payment channel and settlement events don't have a data field
   const isPaymentChannelOrSettlementEvent =
-    msg.type === 'PAYMENT_CHANNEL_OPENED' ||
-    msg.type === 'PAYMENT_CHANNEL_BALANCE_UPDATE' ||
-    msg.type === 'PAYMENT_CHANNEL_SETTLED' ||
-    msg.type === 'ACCOUNT_BALANCE' ||
-    msg.type === 'SETTLEMENT_TRIGGERED' ||
-    msg.type === 'SETTLEMENT_COMPLETED';
+    obj.type === 'PAYMENT_CHANNEL_OPENED' ||
+    obj.type === 'PAYMENT_CHANNEL_BALANCE_UPDATE' ||
+    obj.type === 'PAYMENT_CHANNEL_SETTLED' ||
+    obj.type === 'ACCOUNT_BALANCE' ||
+    obj.type === 'SETTLEMENT_TRIGGERED' ||
+    obj.type === 'SETTLEMENT_COMPLETED';
 
   if (isPaymentChannelOrSettlementEvent) {
-    return (
-      typeof msg === 'object' &&
-      msg !== null &&
-      typeof msg.type === 'string' &&
-      typeof msg.nodeId === 'string' &&
-      typeof msg.timestamp === 'string'
-    );
+    return typeof obj.nodeId === 'string' && typeof obj.timestamp === 'string';
   }
 
   return (
-    typeof msg === 'object' &&
-    msg !== null &&
-    typeof msg.type === 'string' &&
-    typeof msg.nodeId === 'string' &&
-    typeof msg.timestamp === 'string' &&
-    typeof msg.data === 'object' &&
-    msg.data !== null
+    typeof obj.nodeId === 'string' &&
+    typeof obj.timestamp === 'string' &&
+    typeof obj.data === 'object' &&
+    obj.data !== null
   );
 }
 
@@ -95,7 +99,14 @@ export function isNodeStatusMessage(msg: unknown): msg is NodeStatusMessage {
     return false;
   }
 
-  const data = msg.data as unknown;
+  const data = msg.data as {
+    routes?: unknown;
+    peers?: unknown;
+    health?: unknown;
+    uptime?: unknown;
+    peersConnected?: unknown;
+    totalPeers?: unknown;
+  };
   return (
     Array.isArray(data.routes) &&
     Array.isArray(data.peers) &&
@@ -115,7 +126,7 @@ export function isPacketSentMessage(msg: unknown): msg is PacketSentMessage {
     return false;
   }
 
-  const data = msg.data as unknown;
+  const data = msg.data as { packetId?: unknown; nextHop?: unknown; timestamp?: unknown };
   return (
     typeof data.packetId === 'string' &&
     typeof data.nextHop === 'string' &&
@@ -131,7 +142,13 @@ export function isPacketReceivedMessage(msg: unknown): msg is PacketReceivedMess
     return false;
   }
 
-  const data = msg.data as unknown;
+  const data = msg.data as {
+    packetId?: unknown;
+    packetType?: unknown;
+    source?: unknown;
+    destination?: unknown;
+    amount?: unknown;
+  };
   return (
     typeof data.packetId === 'string' &&
     typeof data.packetType === 'string' &&
@@ -150,7 +167,7 @@ export function isRouteLookupMessage(msg: unknown): msg is RouteLookupMessage {
     return false;
   }
 
-  const data = msg.data as unknown;
+  const data = msg.data as { destination?: unknown; selectedPeer?: unknown; reason?: unknown };
   return (
     typeof data.destination === 'string' &&
     typeof data.selectedPeer === 'string' &&
