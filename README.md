@@ -446,6 +446,24 @@ Choose the right development command for your workflow:
 
 M2M uses **Foundry** for smart contract development, testing, and deployment. Smart contracts are deployed to **Base L2** (an Ethereum Layer 2 scaling solution) for low-cost payment channel operations.
 
+The project implements the **TokenNetworkRegistry** factory contract following the Raiden Network architecture pattern. TokenNetworkRegistry deploys isolated TokenNetwork contracts for each ERC20 token, enabling multi-token payment channel support with security isolation.
+
+**Current Status (Story 8.6 In Progress):**
+
+- ✅ TokenNetworkRegistry factory contract (Story 8.2)
+- ✅ TokenNetwork core with channel opening and deposits (Story 8.3)
+- ✅ Channel closure and settlement with EIP-712 signatures (Story 8.4)
+- ✅ Security hardening: pausable circuit breaker, token whitelist, fee-on-transfer support, deposit limits, channel expiry, cooperative settlement, withdrawal, emergency recovery, and fuzz testing (Story 8.5)
+- 🔄 Comprehensive testing and security audit (Story 8.6 - IN PROGRESS)
+  - ✅ **98.19% test coverage** for TokenNetwork.sol
+  - ✅ **Integration tests:** Multi-channel, multi-token, full lifecycle scenarios
+  - ✅ **Fuzz testing:** 100k iterations per test (45k-100k actual runs)
+  - ✅ **Gas benchmarks:** All operations measured, most well under targets
+  - ✅ **Invariant tests:** 128k function calls validating fund conservation
+  - ⏳ Professional security audit (deferred)
+  - ⏳ Testnet deployment & bug bounty (deferred)
+  - ⏳ Mainnet deployment plan (deferred)
+
 ### Quick Start
 
 1. **Initialize Foundry project** (already done in packages/contracts/):
@@ -463,34 +481,46 @@ M2M uses **Foundry** for smart contract development, testing, and deployment. Sm
 
 3. **Deploy to local Anvil** (requires Anvil running via docker-compose-dev.yml):
    ```bash
-   npm run deploy:local
+   ./deploy-local.sh
    ```
 
 ### Deployment Progression: Local → Testnet → Mainnet
+
+The M2M connector uses Foundry for payment channel smart contract development. Contracts are deployed to Base L2 (EVM-compatible blockchain). Development workflow follows a progressive deployment strategy:
 
 **1. Local Development (Anvil)**
 
 - Deploy to local Anvil fork of Base Sepolia
 - Instant feedback, free gas, offline development
-- Command: `npm run deploy:local`
+- Command: `cd packages/contracts && ./deploy-local.sh`
 
 **2. Testnet Deployment (Base Sepolia)**
 
 - Deploy to public Base Sepolia testnet
 - Test with real blockchain but $0 gas costs
-- Requires `BASE_SEPOLIA_RPC_URL` and `ETHERSCAN_API_KEY` in .env.dev
-- Command: `npm run deploy:sepolia`
+- Requires `BASE_SEPOLIA_RPC_URL` and `ETHERSCAN_API_KEY` in .env
+- Command: `cd packages/contracts && ./deploy-testnet.sh`
 
 **3. Mainnet Deployment (Base L2 Production)**
 
 - **CRITICAL: Security audit required before mainnet deployment**
 - Deploy to Base L2 mainnet with real cryptocurrency
 - Requires secure `PRIVATE_KEY` from hardware wallet or KMS
-- Command: `npm run deploy:mainnet`
+- Command: `forge script script/Deploy.s.sol --rpc-url $BASE_MAINNET_RPC_URL --broadcast --verify`
 
 ### Documentation
 
-- **Smart Contract Development Guide**: [docs/guides/smart-contract-development.md](docs/guides/smart-contract-development.md)
+See [Smart Contract Development Guide](docs/guides/smart-contract-development.md) for detailed instructions on:
+
+- Foundry toolchain setup
+- Project structure and workflow
+- Local development with Anvil
+- Environment variables configuration
+- Deployment to testnet and mainnet
+- Troubleshooting and best practices
+
+**Additional Guides:**
+
 - **Local Blockchain Development**: [docs/guides/local-blockchain-development.md](docs/guides/local-blockchain-development.md)
 - **Environment Configuration**: [docs/guides/local-vs-production-config.md](docs/guides/local-vs-production-config.md)
 
@@ -498,7 +528,7 @@ M2M uses **Foundry** for smart contract development, testing, and deployment. Sm
 
 ⚠️ **NEVER use development private keys for testnet or mainnet deployment**
 
-The default `PRIVATE_KEY` in `.env.dev` is Anvil Account #0 - a publicly known development key. This key should ONLY be used for local Anvil deployment. For testnet and mainnet, use a secure private key from a hardware wallet or key management service.
+The default `PRIVATE_KEY` in `packages/contracts/.env` is Anvil Account #0 - a publicly known development key. This key should ONLY be used for local Anvil deployment. For testnet and mainnet, use a secure private key from a hardware wallet or key management service.
 
 ## Quick Start
 

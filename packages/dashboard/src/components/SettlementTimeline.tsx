@@ -2,6 +2,7 @@
  * Settlement Timeline Component
  * Displays chronological list of settlement events (triggered and completed)
  * Story 6.8 - Dashboard Telemetry Integration for Settlement Visualization
+ * Story 8.10 - Add Payment Channel Lifecycle Events
  */
 
 import { useEffect, useState } from 'react';
@@ -41,7 +42,61 @@ export interface SettlementCompletedEvent {
   timestamp: string;
 }
 
-type SettlementEvent = SettlementTriggeredEvent | SettlementCompletedEvent;
+/**
+ * Payment Channel Opened Event (from @m2m/shared)
+ * Story 8.10 - Payment Channel Telemetry
+ */
+export interface PaymentChannelOpenedEvent {
+  type: 'PAYMENT_CHANNEL_OPENED';
+  nodeId: string;
+  channelId: string;
+  participants: [string, string];
+  peerId: string;
+  tokenAddress: string;
+  tokenSymbol: string;
+  settlementTimeout: number;
+  initialDeposits: {
+    [participant: string]: string;
+  };
+  timestamp: string;
+}
+
+/**
+ * Payment Channel Balance Update Event (from @m2m/shared)
+ * Story 8.10 - Payment Channel Telemetry
+ */
+export interface PaymentChannelBalanceUpdateEvent {
+  type: 'PAYMENT_CHANNEL_BALANCE_UPDATE';
+  nodeId: string;
+  channelId: string;
+  myNonce: number;
+  theirNonce: number;
+  myTransferred: string;
+  theirTransferred: string;
+  timestamp: string;
+}
+
+/**
+ * Payment Channel Settled Event (from @m2m/shared)
+ * Story 8.10 - Payment Channel Telemetry
+ */
+export interface PaymentChannelSettledEvent {
+  type: 'PAYMENT_CHANNEL_SETTLED';
+  nodeId: string;
+  channelId: string;
+  finalBalances: {
+    [participant: string]: string;
+  };
+  settlementType: 'cooperative' | 'unilateral' | 'disputed';
+  timestamp: string;
+}
+
+type SettlementEvent =
+  | SettlementTriggeredEvent
+  | SettlementCompletedEvent
+  | PaymentChannelOpenedEvent
+  | PaymentChannelBalanceUpdateEvent
+  | PaymentChannelSettledEvent;
 
 interface SettlementTimelineProps {
   /**
@@ -176,6 +231,44 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
             return updated.slice(0, 100);
           });
         }
+      } else if (event.type === 'PAYMENT_CHANNEL_OPENED') {
+        // Type guard for PAYMENT_CHANNEL_OPENED event (Story 8.10)
+        const channelEvent = event as unknown as PaymentChannelOpenedEvent;
+
+        if (
+          typeof channelEvent.channelId === 'string' &&
+          typeof channelEvent.peerId === 'string' &&
+          typeof channelEvent.tokenSymbol === 'string'
+        ) {
+          setSettlementEvents((prev) => {
+            const updated = [channelEvent, ...prev];
+            return updated.slice(0, 100);
+          });
+        }
+      } else if (event.type === 'PAYMENT_CHANNEL_BALANCE_UPDATE') {
+        // Type guard for PAYMENT_CHANNEL_BALANCE_UPDATE event (Story 8.10)
+        const channelEvent = event as unknown as PaymentChannelBalanceUpdateEvent;
+
+        if (
+          typeof channelEvent.channelId === 'string' &&
+          typeof channelEvent.myTransferred === 'string' &&
+          typeof channelEvent.theirTransferred === 'string'
+        ) {
+          setSettlementEvents((prev) => {
+            const updated = [channelEvent, ...prev];
+            return updated.slice(0, 100);
+          });
+        }
+      } else if (event.type === 'PAYMENT_CHANNEL_SETTLED') {
+        // Type guard for PAYMENT_CHANNEL_SETTLED event (Story 8.10)
+        const channelEvent = event as unknown as PaymentChannelSettledEvent;
+
+        if (typeof channelEvent.channelId === 'string' && channelEvent.finalBalances) {
+          setSettlementEvents((prev) => {
+            const updated = [channelEvent, ...prev];
+            return updated.slice(0, 100);
+          });
+        }
       }
     });
   }, [events]);
@@ -223,6 +316,12 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
                         >
                           {(event as SettlementCompletedEvent).success ? 'Completed' : 'Failed'}
                         </Badge>
+                      ) : event.type === 'PAYMENT_CHANNEL_OPENED' ? (
+                        <Badge variant="secondary">🔗 Channel Opened</Badge>
+                      ) : event.type === 'PAYMENT_CHANNEL_BALANCE_UPDATE' ? (
+                        <Badge variant="outline">💸 Balance Update</Badge>
+                      ) : event.type === 'PAYMENT_CHANNEL_SETTLED' ? (
+                        <Badge variant="default">✅ Channel Settled</Badge>
                       ) : null}
                       <span className="text-xs text-muted-foreground">
                         {formatTimestamp(event.timestamp)}
@@ -231,8 +330,33 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
 
                     {/* Peer and Token Info */}
                     <div className="text-sm">
-                      <span className="font-medium">{event.peerId}</span>
-                      <span className="text-muted-foreground"> · {event.tokenId}</span>
+                      {event.type === 'PAYMENT_CHANNEL_OPENED' ||
+                      event.type === 'PAYMENT_CHANNEL_BALANCE_UPDATE' ||
+                      event.type === 'PAYMENT_CHANNEL_SETTLED' ? (
+                        <>
+                          <span className="font-medium">
+                            {(event as PaymentChannelOpenedEvent).peerId ||
+                              `Channel ${(event as PaymentChannelSettledEvent).channelId.slice(0, 8)}...`}
+                          </span>
+                          {event.type === 'PAYMENT_CHANNEL_OPENED' && (
+                            <span className="text-muted-foreground">
+                              {' '}
+                              · {(event as PaymentChannelOpenedEvent).tokenSymbol}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span className="font-medium">
+                            {(event as SettlementTriggeredEvent | SettlementCompletedEvent).peerId}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {' '}
+                            ·{' '}
+                            {(event as SettlementTriggeredEvent | SettlementCompletedEvent).tokenId}
+                          </span>
+                        </>
+                      )}
                     </div>
 
                     {/* Event Details */}
@@ -267,6 +391,83 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
                               <span className="text-destructive">: {event.errorMessage}</span>
                             )}
                           </>
+                        )}
+                      </div>
+                    )}
+
+                    {event.type === 'PAYMENT_CHANNEL_OPENED' && (
+                      <div className="text-sm text-muted-foreground">
+                        Channel{' '}
+                        <span className="font-mono text-xs">
+                          {(event as PaymentChannelOpenedEvent).channelId.slice(0, 10)}...
+                        </span>{' '}
+                        opened for{' '}
+                        <span className="font-medium">
+                          {(event as PaymentChannelOpenedEvent).peerId}
+                        </span>{' '}
+                        ({(event as PaymentChannelOpenedEvent).tokenSymbol})
+                        <br />
+                        Initial deposits:{' '}
+                        {Object.entries((event as PaymentChannelOpenedEvent).initialDeposits).map(
+                          ([participant, amount], idx) => (
+                            <span key={participant}>
+                              {idx > 0 && ', '}
+                              <span className="font-mono">{formatBalance(amount)}</span>
+                            </span>
+                          )
+                        )}
+                        {' · '}
+                        Timeout:{' '}
+                        <span className="font-mono">
+                          {((event as PaymentChannelOpenedEvent).settlementTimeout / 3600).toFixed(
+                            1
+                          )}
+                          h
+                        </span>
+                      </div>
+                    )}
+
+                    {event.type === 'PAYMENT_CHANNEL_BALANCE_UPDATE' && (
+                      <div className="text-sm text-muted-foreground">
+                        Channel{' '}
+                        <span className="font-mono text-xs">
+                          {(event as PaymentChannelBalanceUpdateEvent).channelId.slice(0, 10)}...
+                        </span>{' '}
+                        transferred:{' '}
+                        <span className="font-mono">
+                          {formatBalance((event as PaymentChannelBalanceUpdateEvent).myTransferred)}
+                        </span>{' '}
+                        (nonce: {(event as PaymentChannelBalanceUpdateEvent).myNonce})
+                        <br />
+                        Received:{' '}
+                        <span className="font-mono">
+                          {formatBalance(
+                            (event as PaymentChannelBalanceUpdateEvent).theirTransferred
+                          )}
+                        </span>{' '}
+                        (nonce: {(event as PaymentChannelBalanceUpdateEvent).theirNonce})
+                      </div>
+                    )}
+
+                    {event.type === 'PAYMENT_CHANNEL_SETTLED' && (
+                      <div className="text-sm text-muted-foreground">
+                        Channel{' '}
+                        <span className="font-mono text-xs">
+                          {(event as PaymentChannelSettledEvent).channelId.slice(0, 10)}...
+                        </span>{' '}
+                        settled via{' '}
+                        <span className="font-medium">
+                          {(event as PaymentChannelSettledEvent).settlementType}
+                        </span>
+                        <br />
+                        Final balances:{' '}
+                        {Object.entries((event as PaymentChannelSettledEvent).finalBalances).map(
+                          ([participant, amount], idx) => (
+                            <span key={participant}>
+                              {idx > 0 && ', '}
+                              <span className="font-mono">{formatBalance(amount)}</span>
+                            </span>
+                          )
                         )}
                       </div>
                     )}

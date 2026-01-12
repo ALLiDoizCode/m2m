@@ -469,7 +469,7 @@ describe('TelemetryServer Integration Tests', () => {
       const client = new WebSocket(TEST_WS_URL);
 
       let connectorReady = false;
-      let receivedMessage: any = null;
+      let receivedMessage: unknown = null;
 
       connector.on('open', () => {
         // Send NODE_STATUS to cache
@@ -869,5 +869,322 @@ describe('TelemetryServer Integration Tests', () => {
         }, 150);
       });
     }, 10000);
+  });
+
+  describe('Payment Channel Telemetry (Story 8.10)', () => {
+    test('should store PAYMENT_CHANNEL_OPENED event in channel state', (done) => {
+      server.start();
+
+      const connector = new WebSocket(TEST_WS_URL);
+
+      connector.on('open', () => {
+        connector.send(
+          JSON.stringify({
+            type: 'PAYMENT_CHANNEL_OPENED',
+            timestamp: '2026-01-09T12:00:00.000Z',
+            nodeId: 'connector-a',
+            channelId: '0x1234567890abcdef',
+            participants: ['0xAddress1', '0xAddress2'],
+            peerId: 'connector-b',
+            tokenAddress: '0xToken',
+            tokenSymbol: 'USDC',
+            settlementTimeout: 86400,
+            initialDeposits: {
+              '0xAddress1': '1000000000000000000',
+              '0xAddress2': '0',
+            },
+          })
+        );
+
+        // Check channel state stored
+        setTimeout(() => {
+          const channels = server.getAllActiveChannels();
+          expect(channels).toHaveLength(1);
+          const channel = channels[0];
+          expect(channel).toBeDefined();
+          expect(channel!.channelId).toBe('0x1234567890abcdef');
+          expect(channel!.nodeId).toBe('connector-a');
+          expect(channel!.peerId).toBe('connector-b');
+          expect(channel!.tokenSymbol).toBe('USDC');
+          expect(channel!.status).toBe('active');
+          expect(channel!.myNonce).toBe(0);
+          expect(channel!.theirNonce).toBe(0);
+          expect(channel!.myTransferred).toBe('0');
+          expect(channel!.theirTransferred).toBe('0');
+          connector.close();
+          done();
+        }, 100);
+      });
+    }, 5000);
+
+    test('should update channel state on PAYMENT_CHANNEL_BALANCE_UPDATE event', (done) => {
+      server.start();
+
+      const connector = new WebSocket(TEST_WS_URL);
+
+      connector.on('open', () => {
+        // First, open channel
+        connector.send(
+          JSON.stringify({
+            type: 'PAYMENT_CHANNEL_OPENED',
+            timestamp: '2026-01-09T12:00:00.000Z',
+            nodeId: 'connector-a',
+            channelId: '0xabc123',
+            participants: ['0xAddress1', '0xAddress2'],
+            peerId: 'connector-b',
+            tokenAddress: '0xToken',
+            tokenSymbol: 'USDC',
+            settlementTimeout: 86400,
+            initialDeposits: {
+              '0xAddress1': '1000000000000000000',
+              '0xAddress2': '0',
+            },
+          })
+        );
+
+        // Wait for channel to be created, then update
+        setTimeout(() => {
+          connector.send(
+            JSON.stringify({
+              type: 'PAYMENT_CHANNEL_BALANCE_UPDATE',
+              timestamp: '2026-01-09T12:01:00.000Z',
+              nodeId: 'connector-a',
+              channelId: '0xabc123',
+              myNonce: 5,
+              theirNonce: 3,
+              myTransferred: '5000000000000000000',
+              theirTransferred: '2000000000000000000',
+            })
+          );
+
+          // Verify update
+          setTimeout(() => {
+            const channels = server.getAllActiveChannels();
+            expect(channels).toHaveLength(1);
+            const channel = channels[0];
+            expect(channel).toBeDefined();
+            expect(channel!.channelId).toBe('0xabc123');
+            expect(channel!.myNonce).toBe(5);
+            expect(channel!.theirNonce).toBe(3);
+            expect(channel!.myTransferred).toBe('5000000000000000000');
+            expect(channel!.theirTransferred).toBe('2000000000000000000');
+            expect(channel!.lastActivityAt).toBe('2026-01-09T12:01:00.000Z');
+            connector.close();
+            done();
+          }, 100);
+        }, 100);
+      });
+    }, 5000);
+
+    test('should update channel status on PAYMENT_CHANNEL_SETTLED event', (done) => {
+      server.start();
+
+      const connector = new WebSocket(TEST_WS_URL);
+
+      connector.on('open', () => {
+        // First, open channel
+        connector.send(
+          JSON.stringify({
+            type: 'PAYMENT_CHANNEL_OPENED',
+            timestamp: '2026-01-09T12:00:00.000Z',
+            nodeId: 'connector-a',
+            channelId: '0xdef456',
+            participants: ['0xAddress1', '0xAddress2'],
+            peerId: 'connector-b',
+            tokenAddress: '0xToken',
+            tokenSymbol: 'DAI',
+            settlementTimeout: 86400,
+            initialDeposits: {
+              '0xAddress1': '1000000000000000000',
+              '0xAddress2': '0',
+            },
+          })
+        );
+
+        // Wait for channel to be created, then settle
+        setTimeout(() => {
+          connector.send(
+            JSON.stringify({
+              type: 'PAYMENT_CHANNEL_SETTLED',
+              timestamp: '2026-01-09T14:00:00.000Z',
+              nodeId: 'connector-a',
+              channelId: '0xdef456',
+              finalBalances: {
+                '0xAddress1': '3000000000000000000',
+                '0xAddress2': '2000000000000000000',
+              },
+              settlementType: 'cooperative',
+            })
+          );
+
+          // Verify settlement
+          setTimeout(() => {
+            const channels = server.getAllActiveChannels();
+            expect(channels).toHaveLength(1);
+            const channel = channels[0];
+            expect(channel).toBeDefined();
+            expect(channel!.channelId).toBe('0xdef456');
+            expect(channel!.status).toBe('settled');
+            expect(channel!.settledAt).toBe('2026-01-09T14:00:00.000Z');
+            connector.close();
+            done();
+          }, 100);
+        }, 100);
+      });
+    }, 5000);
+
+    test('should broadcast payment channel events to clients', (done) => {
+      server.start();
+
+      const connector = new WebSocket(TEST_WS_URL);
+      const client = new WebSocket(TEST_WS_URL);
+
+      let receivedEvent = false;
+
+      client.on('open', () => {
+        client.send(
+          JSON.stringify({
+            type: 'CLIENT_CONNECT',
+            nodeId: 'dashboard-client',
+            timestamp: new Date().toISOString(),
+            data: {},
+          })
+        );
+      });
+
+      client.on('message', (data) => {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'PAYMENT_CHANNEL_OPENED') {
+          receivedEvent = true;
+          expect(message.channelId).toBe('0xbroadcast123');
+          expect(message.peerId).toBe('connector-b');
+        }
+      });
+
+      connector.on('open', () => {
+        // Wait for client to register
+        setTimeout(() => {
+          connector.send(
+            JSON.stringify({
+              type: 'PAYMENT_CHANNEL_OPENED',
+              timestamp: '2026-01-09T12:00:00.000Z',
+              nodeId: 'connector-a',
+              channelId: '0xbroadcast123',
+              participants: ['0xAddress1', '0xAddress2'],
+              peerId: 'connector-b',
+              tokenAddress: '0xToken',
+              tokenSymbol: 'USDC',
+              settlementTimeout: 86400,
+              initialDeposits: {
+                '0xAddress1': '1000000000000000000',
+                '0xAddress2': '0',
+              },
+            })
+          );
+
+          // Verify client received broadcast
+          setTimeout(() => {
+            expect(receivedEvent).toBe(true);
+            connector.close();
+            client.close();
+            done();
+          }, 200);
+        }, 100);
+      });
+    }, 5000);
+
+    test('should handle unknown channel in balance update gracefully', (done) => {
+      server.start();
+
+      const connector = new WebSocket(TEST_WS_URL);
+
+      connector.on('open', () => {
+        // Send balance update for non-existent channel
+        connector.send(
+          JSON.stringify({
+            type: 'PAYMENT_CHANNEL_BALANCE_UPDATE',
+            timestamp: '2026-01-09T12:01:00.000Z',
+            nodeId: 'connector-a',
+            channelId: '0xnonexistent',
+            myNonce: 5,
+            theirNonce: 3,
+            myTransferred: '5000000000000000000',
+            theirTransferred: '2000000000000000000',
+          })
+        );
+
+        // Verify no crash and no channel created
+        setTimeout(() => {
+          const channels = server.getAllActiveChannels();
+          expect(channels).toHaveLength(0);
+          connector.close();
+          done();
+        }, 100);
+      });
+    }, 5000);
+
+    test('should handle multiple channels simultaneously', (done) => {
+      server.start();
+
+      const connector = new WebSocket(TEST_WS_URL);
+
+      connector.on('open', () => {
+        // Open 3 different channels
+        connector.send(
+          JSON.stringify({
+            type: 'PAYMENT_CHANNEL_OPENED',
+            timestamp: '2026-01-09T12:00:00.000Z',
+            nodeId: 'connector-a',
+            channelId: '0xchannel1',
+            participants: ['0xAddress1', '0xAddress2'],
+            peerId: 'connector-b',
+            tokenAddress: '0xToken1',
+            tokenSymbol: 'USDC',
+            settlementTimeout: 86400,
+            initialDeposits: {},
+          })
+        );
+
+        connector.send(
+          JSON.stringify({
+            type: 'PAYMENT_CHANNEL_OPENED',
+            timestamp: '2026-01-09T12:00:00.000Z',
+            nodeId: 'connector-a',
+            channelId: '0xchannel2',
+            participants: ['0xAddress1', '0xAddress3'],
+            peerId: 'connector-c',
+            tokenAddress: '0xToken2',
+            tokenSymbol: 'DAI',
+            settlementTimeout: 86400,
+            initialDeposits: {},
+          })
+        );
+
+        connector.send(
+          JSON.stringify({
+            type: 'PAYMENT_CHANNEL_OPENED',
+            timestamp: '2026-01-09T12:00:00.000Z',
+            nodeId: 'connector-a',
+            channelId: '0xchannel3',
+            participants: ['0xAddress1', '0xAddress4'],
+            peerId: 'connector-d',
+            tokenAddress: '0xToken3',
+            tokenSymbol: 'USDT',
+            settlementTimeout: 86400,
+            initialDeposits: {},
+          })
+        );
+
+        // Verify all channels stored
+        setTimeout(() => {
+          const channels = server.getAllActiveChannels();
+          expect(channels).toHaveLength(3);
+          const channelIds = channels.map((c) => c.channelId).sort();
+          expect(channelIds).toEqual(['0xchannel1', '0xchannel2', '0xchannel3']);
+          connector.close();
+          done();
+        }, 100);
+      });
+    }, 5000);
   });
 });

@@ -12,6 +12,11 @@ import {
   SettlementTriggeredEvent,
   SettlementCompletedEvent,
   SettlementState,
+  PaymentChannelOpenedEvent,
+  PaymentChannelBalanceUpdateEvent,
+  PaymentChannelSettledEvent,
+  DashboardChannelState,
+  TelemetryEvent,
 } from '@m2m/shared';
 
 interface WebSocketWithMetadata extends WebSocket {
@@ -46,6 +51,9 @@ export class TelemetryServer {
   private accountBalances: Map<string, BalanceState> = new Map(); // Key: nodeId:peerId:tokenId
   private settlementEvents: (SettlementTriggeredEvent | SettlementCompletedEvent)[] = [];
   private readonly MAX_SETTLEMENT_EVENTS = 100; // Limit to last 100 events
+
+  // Payment channel state storage (Story 8.10)
+  private channelStates: Map<string, DashboardChannelState> = new Map(); // Key: channelId
 
   private port: number;
   private logger: Logger;
@@ -117,7 +125,7 @@ export class TelemetryServer {
    * Handle incoming WebSocket message
    */
   private handleMessage(ws: WebSocketWithMetadata, data: Buffer): void {
-    let message: any;
+    let message: unknown;
 
     // Level 1: Parse JSON
     try {
@@ -154,7 +162,10 @@ export class TelemetryServer {
       }
 
       // Handle settlement telemetry events (Story 6.8)
-      this.handleSettlementTelemetry(message);
+      this.handleSettlementTelemetry(message as unknown as TelemetryEvent);
+
+      // Handle payment channel telemetry events (Story 8.10)
+      this.handlePaymentChannelTelemetry(message as unknown as TelemetryEvent);
 
       // Broadcast to all clients
       this.broadcast(message);
@@ -174,6 +185,9 @@ export class TelemetryServer {
       'ACCOUNT_BALANCE',
       'SETTLEMENT_TRIGGERED',
       'SETTLEMENT_COMPLETED',
+      'PAYMENT_CHANNEL_OPENED',
+      'PAYMENT_CHANNEL_BALANCE_UPDATE',
+      'PAYMENT_CHANNEL_SETTLED',
     ].includes(type);
   }
 
@@ -181,7 +195,7 @@ export class TelemetryServer {
    * Handle settlement telemetry events (Story 6.8)
    * Stores balance state and settlement events in memory for dashboard visualization
    */
-  private handleSettlementTelemetry(message: any): void {
+  private handleSettlementTelemetry(message: TelemetryEvent): void {
     try {
       if (message.type === 'ACCOUNT_BALANCE') {
         const event = message as AccountBalanceEvent;
@@ -240,6 +254,102 @@ export class TelemetryServer {
       }
     } catch (error) {
       this.logger.warn('Failed to process settlement telemetry', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        messageType: message.type,
+      });
+    }
+  }
+
+  /**
+   * Handle payment channel telemetry events (Story 8.10)
+   * Stores channel state in memory for dashboard visualization
+   */
+  private handlePaymentChannelTelemetry(message: TelemetryEvent): void {
+    try {
+      if (message.type === 'PAYMENT_CHANNEL_OPENED') {
+        const event = message as PaymentChannelOpenedEvent;
+
+        // Create new channel state
+        const channelState: DashboardChannelState = {
+          channelId: event.channelId,
+          nodeId: event.nodeId,
+          peerId: event.peerId,
+          participants: event.participants,
+          tokenAddress: event.tokenAddress,
+          tokenSymbol: event.tokenSymbol,
+          settlementTimeout: event.settlementTimeout,
+          deposits: event.initialDeposits,
+          myNonce: 0,
+          theirNonce: 0,
+          myTransferred: '0',
+          theirTransferred: '0',
+          status: 'active',
+          openedAt: event.timestamp,
+          lastActivityAt: event.timestamp,
+        };
+
+        this.channelStates.set(event.channelId, channelState);
+        this.logger.info('Payment channel opened', {
+          channelId: event.channelId,
+          peerId: event.peerId,
+          tokenSymbol: event.tokenSymbol,
+        });
+      } else if (message.type === 'PAYMENT_CHANNEL_BALANCE_UPDATE') {
+        const event = message as PaymentChannelBalanceUpdateEvent;
+        const channelState = this.channelStates.get(event.channelId);
+
+        if (!channelState) {
+          this.logger.warn('Channel balance update for unknown channel', {
+            channelId: event.channelId,
+          });
+          return;
+        }
+
+        // Update channel state
+        channelState.myNonce = event.myNonce;
+        channelState.theirNonce = event.theirNonce;
+        channelState.myTransferred = event.myTransferred;
+        channelState.theirTransferred = event.theirTransferred;
+        channelState.lastActivityAt = event.timestamp;
+
+        this.logger.debug('Payment channel balance updated', {
+          channelId: event.channelId,
+          myNonce: event.myNonce,
+          theirNonce: event.theirNonce,
+        });
+      } else if (message.type === 'PAYMENT_CHANNEL_SETTLED') {
+        const event = message as PaymentChannelSettledEvent;
+        const channelState = this.channelStates.get(event.channelId);
+
+        if (!channelState) {
+          this.logger.warn('Channel settled for unknown channel', {
+            channelId: event.channelId,
+          });
+          return;
+        }
+
+        // Update channel status
+        channelState.status = 'settled';
+        channelState.settledAt = event.timestamp;
+
+        this.logger.info('Payment channel settled', {
+          channelId: event.channelId,
+          settlementType: event.settlementType,
+        });
+
+        // Remove channel from state after 5 minutes
+        setTimeout(
+          () => {
+            this.channelStates.delete(event.channelId);
+            this.logger.debug('Settled channel removed from state', {
+              channelId: event.channelId,
+            });
+          },
+          5 * 60 * 1000
+        );
+      }
+    } catch (error) {
+      this.logger.warn('Failed to process payment channel telemetry', {
         error: error instanceof Error ? error.message : 'Unknown error',
         messageType: message.type,
       });
@@ -350,5 +460,15 @@ export class TelemetryServer {
       const timeB = new Date(b.timestamp).getTime();
       return timeB - timeA;
     });
+  }
+
+  /**
+   * Get all active payment channels (Story 8.10)
+   * Returns all payment channel states currently tracked by the dashboard
+   * Used by REST API endpoint and dashboard frontend for channel visualization
+   * @returns Array of all channel states
+   */
+  getAllActiveChannels(): DashboardChannelState[] {
+    return Array.from(this.channelStates.values());
   }
 }

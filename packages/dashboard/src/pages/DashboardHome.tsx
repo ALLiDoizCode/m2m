@@ -5,6 +5,7 @@ import { usePacketAnimation } from '../hooks/usePacketAnimation';
 import { usePacketDetail } from '../hooks/usePacketDetail';
 import { useNodeStatus } from '../hooks/useNodeStatus';
 import { useLogViewer } from '../hooks/useLogViewer';
+import { usePaymentChannels } from '../hooks/usePaymentChannels';
 import { NetworkGraph } from '../components/NetworkGraph';
 import { PacketAnimation } from '../components/PacketAnimation';
 import { PacketDetailPanel } from '../components/PacketDetailPanel';
@@ -12,6 +13,7 @@ import { NodeStatusPanel } from '../components/NodeStatusPanel';
 import { LogViewer } from '../components/LogViewer';
 import { SettlementStatusPanel } from '../components/SettlementStatusPanel';
 import { SettlementTimeline } from '../components/SettlementTimeline';
+import { PaymentChannelsPanel } from '../components/PaymentChannelsPanel';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import Cytoscape from 'cytoscape';
@@ -41,6 +43,7 @@ function DashboardHome(): JSX.Element {
     toggleAutoScroll,
     clearFilters,
   } = useLogViewer(events);
+  const { channels } = usePaymentChannels();
   const [cyInstance, setCyInstance] = useState<Cytoscape.Core | null>(null);
 
   return (
@@ -152,6 +155,11 @@ function DashboardHome(): JSX.Element {
             {/* Settlement Status Panel */}
             <div>
               <SettlementStatusPanel events={events} connected={connected} />
+            </div>
+
+            {/* Payment Channels Panel (Story 8.10) */}
+            <div>
+              <PaymentChannelsPanel channels={channels} />
             </div>
 
             {/* Settlement Timeline */}

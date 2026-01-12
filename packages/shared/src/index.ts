@@ -53,12 +53,39 @@ export {
 // Routing Types
 export { RoutingTableEntry } from './types/routing';
 
-// Telemetry Types (Story 6.8)
+// Telemetry Types (Story 6.8, Story 11.3, Story 11.4, Story 11.5, Story 8.10)
 export {
   TelemetryEventType,
   SettlementState,
   AccountBalanceEvent,
   SettlementTriggeredEvent,
   SettlementCompletedEvent,
+  AgentBalanceChangedEvent,
+  FundingTransaction,
+  AgentWalletFundedEvent,
+  FundingRateLimitExceededEvent,
+  FundingTransactionConfirmedEvent,
+  FundingTransactionFailedEvent,
+  AgentWalletStateChangedEvent,
   TelemetryEvent,
 } from './types/telemetry';
+
+// Payment Channel Telemetry Types (Epic 8 Story 8.10)
+export {
+  PaymentChannelOpenedEvent,
+  PaymentChannelBalanceUpdateEvent,
+  PaymentChannelSettledEvent,
+  DashboardChannelState,
+} from './types/payment-channel-telemetry';
+
+// Payment Channel Types (Epic 8 Story 8.7)
+export {
+  ChannelStatus,
+  ChannelState,
+  BalanceProof,
+  ChannelOpenedEvent,
+  ChannelClosedEvent,
+  ChannelSettledEvent,
+  ChannelCooperativeSettledEvent,
+  ChannelEvent,
+} from './types/payment-channel';
