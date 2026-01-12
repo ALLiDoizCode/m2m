@@ -162,10 +162,10 @@ export class TelemetryServer {
       }
 
       // Handle settlement telemetry events (Story 6.8)
-      this.handleSettlementTelemetry(message);
+      this.handleSettlementTelemetry(message as unknown as TelemetryEvent);
 
       // Handle payment channel telemetry events (Story 8.10)
-      this.handlePaymentChannelTelemetry(message);
+      this.handlePaymentChannelTelemetry(message as unknown as TelemetryEvent);
 
       // Broadcast to all clients
       this.broadcast(message);
