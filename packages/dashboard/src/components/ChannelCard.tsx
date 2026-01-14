@@ -7,6 +7,7 @@ import { useMemo } from 'react';
 import type { DashboardChannelState } from '@m2m/shared';
 import { Card, CardContent, CardHeader } from './ui/card';
 import { Badge } from './ui/badge';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 
 export interface ChannelCardProps {
   /** Channel state to display */
@@ -28,6 +29,21 @@ function formatBalance(balance: string): string {
     return balanceNumber.toLocaleString('en-US');
   } catch {
     return balance; // Return original if parsing fails
+  }
+}
+
+/**
+ * Format XRP drops as "10000000000 drops (10,000 XRP)"
+ * @param drops - XRP amount in drops (string for bigint precision)
+ * @returns Formatted string with drops and XRP
+ */
+function formatXRPAmount(drops: string): string {
+  try {
+    const dropsNum = BigInt(drops);
+    const xrp = Number(dropsNum) / 1_000_000;
+    return `${Number(dropsNum).toLocaleString()} drops (${xrp.toLocaleString()} XRP)`;
+  } catch {
+    return drops;
   }
 }
 
@@ -56,6 +72,18 @@ export const ChannelCard = ({ channel }: ChannelCardProps): JSX.Element => {
     settled: 'bg-gray-500',
   }[channel.status];
 
+  // Determine settlement method badge (AC: 6)
+  const settlementBadge =
+    channel.settlementMethod === 'xrp' ? (
+      <Badge variant="outline" className="bg-orange-500 text-white">
+        🔗 XRP
+      </Badge>
+    ) : (
+      <Badge variant="outline" className="bg-blue-500 text-white">
+        🔗 EVM
+      </Badge>
+    );
+
   return (
     <Card className={`border-l-4 ${statusColorClass}`}>
       <CardHeader className="pb-3">
@@ -64,47 +92,105 @@ export const ChannelCard = ({ channel }: ChannelCardProps): JSX.Element => {
           <Badge variant="outline" className="text-xs">
             {channel.tokenSymbol}
           </Badge>
+          {settlementBadge}
           <Badge className={statusColorClass}>
             {channel.status.charAt(0).toUpperCase() + channel.status.slice(1)}
           </Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-2">
-        <div className="text-xs text-gray-500">
-          Channel ID: {channel.channelId.slice(0, 10)}...{channel.channelId.slice(-6)}
-        </div>
-        <div className="grid grid-cols-2 gap-2 text-sm">
-          <div>
-            <span className="text-gray-500">My Deposit:</span>
-            <div className="font-medium">
-              {formatBalance(channel.deposits[channel.participants[0]] || '0')}{' '}
-              {channel.tokenSymbol}
+        {/* XRP Channel Details with Tooltip (AC: 7) */}
+        {channel.settlementMethod === 'xrp' && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="text-xs text-gray-500 cursor-help">
+                  Channel ID: {channel.channelId.slice(0, 10)}...{channel.channelId.slice(-6)}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-sm">
+                <div className="space-y-1 text-xs">
+                  <div>
+                    <strong>Channel ID:</strong> {channel.channelId}
+                  </div>
+                  <div>
+                    <strong>Account:</strong> {channel.xrpAccount}
+                  </div>
+                  <div>
+                    <strong>Destination:</strong> {channel.xrpDestination}
+                  </div>
+                  <div>
+                    <strong>Amount:</strong> {formatXRPAmount(channel.xrpAmount || '0')}
+                  </div>
+                  <div>
+                    <strong>Balance:</strong> {formatXRPAmount(channel.xrpBalance || '0')}
+                  </div>
+                  <div>
+                    <strong>Settle Delay:</strong>{' '}
+                    {((channel.xrpSettleDelay || 0) / 3600).toFixed(1)} hours
+                  </div>
+                </div>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+
+        {/* EVM Channel Details */}
+        {channel.settlementMethod !== 'xrp' && (
+          <div className="text-xs text-gray-500">
+            Channel ID: {channel.channelId.slice(0, 10)}...{channel.channelId.slice(-6)}
+          </div>
+        )}
+
+        {/* XRP Amount Display */}
+        {channel.settlementMethod === 'xrp' ? (
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div>
+              <span className="text-gray-500">Total Amount:</span>
+              <div className="font-medium">{formatXRPAmount(channel.xrpAmount || '0')}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">Claimed:</span>
+              <div className="font-medium">{formatXRPAmount(channel.xrpBalance || '0')}</div>
             </div>
           </div>
-          <div>
-            <span className="text-gray-500">Their Deposit:</span>
-            <div className="font-medium">
-              {formatBalance(channel.deposits[channel.participants[1]] || '0')}{' '}
-              {channel.tokenSymbol}
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div>
+                <span className="text-gray-500">My Deposit:</span>
+                <div className="font-medium">
+                  {formatBalance(channel.deposits[channel.participants[0]] || '0')}{' '}
+                  {channel.tokenSymbol}
+                </div>
+              </div>
+              <div>
+                <span className="text-gray-500">Their Deposit:</span>
+                <div className="font-medium">
+                  {formatBalance(channel.deposits[channel.participants[1]] || '0')}{' '}
+                  {channel.tokenSymbol}
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-2 text-sm">
-          <div>
-            <span className="text-gray-500">Transferred:</span>
-            <div className="font-medium">
-              {formatBalance(channel.myTransferred)} {channel.tokenSymbol}
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div>
+                <span className="text-gray-500">Transferred:</span>
+                <div className="font-medium">
+                  {formatBalance(channel.myTransferred)} {channel.tokenSymbol}
+                </div>
+                <div className="text-xs text-gray-400">Nonce: {channel.myNonce}</div>
+              </div>
+              <div>
+                <span className="text-gray-500">Received:</span>
+                <div className="font-medium">
+                  {formatBalance(channel.theirTransferred)} {channel.tokenSymbol}
+                </div>
+                <div className="text-xs text-gray-400">Nonce: {channel.theirNonce}</div>
+              </div>
             </div>
-            <div className="text-xs text-gray-400">Nonce: {channel.myNonce}</div>
-          </div>
-          <div>
-            <span className="text-gray-500">Received:</span>
-            <div className="font-medium">
-              {formatBalance(channel.theirTransferred)} {channel.tokenSymbol}
-            </div>
-            <div className="text-xs text-gray-400">Nonce: {channel.theirNonce}</div>
-          </div>
-        </div>
+          </>
+        )}
+
         {timeRemaining !== null && (
           <div className="text-sm text-yellow-600 font-medium">
             Settlement Timeout: {timeRemaining.toFixed(1)} hours remaining

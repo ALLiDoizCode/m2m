@@ -91,12 +91,60 @@ export interface PaymentChannelSettledEvent {
   timestamp: string;
 }
 
+/**
+ * XRP Channel Opened Event (from @m2m/shared)
+ * Story 9.7 - XRP Payment Channel Telemetry
+ */
+export interface XRPChannelOpenedEvent {
+  type: 'XRP_CHANNEL_OPENED';
+  nodeId: string;
+  channelId: string;
+  account: string;
+  destination: string;
+  amount: string;
+  settleDelay: number;
+  publicKey: string;
+  peerId?: string;
+  timestamp: string;
+}
+
+/**
+ * XRP Channel Claimed Event (from @m2m/shared)
+ * Story 9.7 - XRP Payment Channel Telemetry
+ */
+export interface XRPChannelClaimedEvent {
+  type: 'XRP_CHANNEL_CLAIMED';
+  nodeId: string;
+  channelId: string;
+  claimAmount: string;
+  remainingBalance: string;
+  peerId?: string;
+  timestamp: string;
+}
+
+/**
+ * XRP Channel Closed Event (from @m2m/shared)
+ * Story 9.7 - XRP Payment Channel Telemetry
+ */
+export interface XRPChannelClosedEvent {
+  type: 'XRP_CHANNEL_CLOSED';
+  nodeId: string;
+  channelId: string;
+  finalBalance: string;
+  closeType: 'cooperative' | 'expiration' | 'unilateral';
+  peerId?: string;
+  timestamp: string;
+}
+
 type SettlementEvent =
   | SettlementTriggeredEvent
   | SettlementCompletedEvent
   | PaymentChannelOpenedEvent
   | PaymentChannelBalanceUpdateEvent
-  | PaymentChannelSettledEvent;
+  | PaymentChannelSettledEvent
+  | XRPChannelOpenedEvent
+  | XRPChannelClaimedEvent
+  | XRPChannelClosedEvent;
 
 interface SettlementTimelineProps {
   /**
@@ -116,6 +164,19 @@ interface SettlementTimelineProps {
 function formatBalance(balance: string): string {
   const num = BigInt(balance);
   return num.toLocaleString();
+}
+
+/**
+ * Format XRP drops as "10,000 XRP"
+ */
+function formatXRPAmount(drops: string): string {
+  try {
+    const dropsNum = BigInt(drops);
+    const xrp = Number(dropsNum) / 1_000_000;
+    return `${xrp.toLocaleString()} XRP`;
+  } catch {
+    return drops;
+  }
 }
 
 /**
@@ -269,6 +330,36 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
             return updated.slice(0, 100);
           });
         }
+      } else if (event.type === 'XRP_CHANNEL_OPENED') {
+        // Type guard for XRP_CHANNEL_OPENED event (Story 9.7)
+        const xrpEvent = event as unknown as XRPChannelOpenedEvent;
+
+        if (typeof xrpEvent.channelId === 'string' && typeof xrpEvent.amount === 'string') {
+          setSettlementEvents((prev) => {
+            const updated = [xrpEvent, ...prev];
+            return updated.slice(0, 100);
+          });
+        }
+      } else if (event.type === 'XRP_CHANNEL_CLAIMED') {
+        // Type guard for XRP_CHANNEL_CLAIMED event (Story 9.7)
+        const xrpEvent = event as unknown as XRPChannelClaimedEvent;
+
+        if (typeof xrpEvent.channelId === 'string' && typeof xrpEvent.claimAmount === 'string') {
+          setSettlementEvents((prev) => {
+            const updated = [xrpEvent, ...prev];
+            return updated.slice(0, 100);
+          });
+        }
+      } else if (event.type === 'XRP_CHANNEL_CLOSED') {
+        // Type guard for XRP_CHANNEL_CLOSED event (Story 9.7)
+        const xrpEvent = event as unknown as XRPChannelClosedEvent;
+
+        if (typeof xrpEvent.channelId === 'string' && typeof xrpEvent.finalBalance === 'string') {
+          setSettlementEvents((prev) => {
+            const updated = [xrpEvent, ...prev];
+            return updated.slice(0, 100);
+          });
+        }
       }
     });
   }, [events]);
@@ -322,6 +413,12 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
                         <Badge variant="outline">💸 Balance Update</Badge>
                       ) : event.type === 'PAYMENT_CHANNEL_SETTLED' ? (
                         <Badge variant="default">✅ Channel Settled</Badge>
+                      ) : event.type === 'XRP_CHANNEL_OPENED' ? (
+                        <Badge className="bg-orange-500 text-white">🔗 XRP Channel Opened</Badge>
+                      ) : event.type === 'XRP_CHANNEL_CLAIMED' ? (
+                        <Badge className="bg-orange-500 text-white">💸 XRP Claim Submitted</Badge>
+                      ) : event.type === 'XRP_CHANNEL_CLOSED' ? (
+                        <Badge className="bg-orange-500 text-white">✅ XRP Channel Closed</Badge>
                       ) : null}
                       <span className="text-xs text-muted-foreground">
                         {formatTimestamp(event.timestamp)}
@@ -345,6 +442,14 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
                             </span>
                           )}
                         </>
+                      ) : event.type === 'XRP_CHANNEL_OPENED' ||
+                        event.type === 'XRP_CHANNEL_CLAIMED' ||
+                        event.type === 'XRP_CHANNEL_CLOSED' ? (
+                        <span className="font-medium">
+                          {(event as XRPChannelOpenedEvent).peerId ||
+                            `Channel ${(event as XRPChannelClosedEvent).channelId.slice(0, 8)}...`}
+                          <span className="text-muted-foreground"> · XRP</span>
+                        </span>
                       ) : (
                         <>
                           <span className="font-medium">
@@ -469,6 +574,66 @@ export function SettlementTimeline({ events, connected }: SettlementTimelineProp
                             </span>
                           )
                         )}
+                      </div>
+                    )}
+
+                    {event.type === 'XRP_CHANNEL_OPENED' && (
+                      <div className="text-sm text-muted-foreground">
+                        Channel{' '}
+                        <span className="font-mono text-xs">
+                          {(event as XRPChannelOpenedEvent).channelId.slice(0, 10)}...
+                        </span>{' '}
+                        opened to{' '}
+                        <span className="font-medium">
+                          {(event as XRPChannelOpenedEvent).destination.slice(0, 12)}...
+                        </span>
+                        <br />
+                        Amount:{' '}
+                        <span className="font-mono">
+                          {formatXRPAmount((event as XRPChannelOpenedEvent).amount)}
+                        </span>
+                        {' · '}
+                        Settle Delay:{' '}
+                        <span className="font-mono">
+                          {((event as XRPChannelOpenedEvent).settleDelay / 3600).toFixed(1)}h
+                        </span>
+                      </div>
+                    )}
+
+                    {event.type === 'XRP_CHANNEL_CLAIMED' && (
+                      <div className="text-sm text-muted-foreground">
+                        Channel{' '}
+                        <span className="font-mono text-xs">
+                          {(event as XRPChannelClaimedEvent).channelId.slice(0, 10)}...
+                        </span>
+                        <br />
+                        Claim:{' '}
+                        <span className="font-mono">
+                          {formatXRPAmount((event as XRPChannelClaimedEvent).claimAmount)}
+                        </span>
+                        {' · '}
+                        Remaining:{' '}
+                        <span className="font-mono">
+                          {formatXRPAmount((event as XRPChannelClaimedEvent).remainingBalance)}
+                        </span>
+                      </div>
+                    )}
+
+                    {event.type === 'XRP_CHANNEL_CLOSED' && (
+                      <div className="text-sm text-muted-foreground">
+                        Channel{' '}
+                        <span className="font-mono text-xs">
+                          {(event as XRPChannelClosedEvent).channelId.slice(0, 10)}...
+                        </span>{' '}
+                        closed via{' '}
+                        <span className="font-medium">
+                          {(event as XRPChannelClosedEvent).closeType}
+                        </span>
+                        <br />
+                        Final Balance:{' '}
+                        <span className="font-mono">
+                          {formatXRPAmount((event as XRPChannelClosedEvent).finalBalance)}
+                        </span>
                       </div>
                     )}
 

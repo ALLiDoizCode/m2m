@@ -39,6 +39,7 @@ export class TreasuryWallet {
   private xrplClient: XRPLClient;
   public readonly evmAddress: string;
   public readonly xrpAddress: string;
+  private noncePromise: Promise<number> | null = null;
 
   /**
    * Creates a new TreasuryWallet instance
@@ -84,6 +85,18 @@ export class TreasuryWallet {
   }
 
   /**
+   * Gets the next nonce for EVM transactions, serializing requests to prevent nonce conflicts
+   */
+  private getNextNonce(): Promise<number> {
+    // Chain the new nonce request after any pending one
+    this.noncePromise = this.noncePromise
+      ? this.noncePromise.then(async (prevNonce) => prevNonce + 1)
+      : this.evmProvider.getTransactionCount(this.evmAddress, 'pending');
+
+    return this.noncePromise;
+  }
+
+  /**
    * Sends ETH from treasury to recipient address
    *
    * @param to - Recipient EVM address
@@ -97,6 +110,9 @@ export class TreasuryWallet {
         throw new Error(`Invalid EVM address: ${to}`);
       }
 
+      // Get next nonce - this serializes concurrent requests
+      const nonce = await this.getNextNonce();
+
       // Get current fee data for gas pricing
       const feeData = await this.evmProvider.getFeeData();
 
@@ -104,6 +120,7 @@ export class TreasuryWallet {
       const tx = await this.evmWallet.sendTransaction({
         to,
         value: amount,
+        nonce,
         gasLimit: 21000, // Standard ETH transfer gas limit
         maxFeePerGas: feeData.maxFeePerGas ?? undefined,
         maxPriorityFeePerGas: feeData.maxPriorityFeePerGas ?? undefined,
@@ -113,6 +130,7 @@ export class TreasuryWallet {
         to,
         amount: amount.toString(),
         txHash: tx.hash,
+        nonce,
       });
 
       return {
@@ -126,6 +144,8 @@ export class TreasuryWallet {
         amount: amount.toString(),
         error: error instanceof Error ? error.message : String(error),
       });
+      // Reset nonce promise on error to resync with chain on next request
+      this.noncePromise = null;
       throw error;
     }
   }
@@ -205,7 +225,8 @@ export class TreasuryWallet {
       const txHash =
         typeof result.result.hash === 'string'
           ? result.result.hash
-          : ((result.result.tx_json?.hash as string | undefined) ?? 'unknown');
+          : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ((result.result as any).tx_json?.hash ?? 'unknown');
 
       logger.info('XRP sent', {
         to,

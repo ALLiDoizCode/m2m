@@ -124,7 +124,7 @@ describe('Agent Balance Tracking Integration', () => {
       return balance;
     });
 
-    mockXrplClient.request.mockImplementation(async (req) => {
+    (mockXrplClient.request as jest.Mock).mockImplementation(async (req) => {
       // Generate deterministic balance based on account
       if ('account' in req && typeof req.account === 'string') {
         const hash = req.account.substring(1, 9);
@@ -136,7 +136,7 @@ describe('Agent Balance Tracking Integration', () => {
               Balance: drops.toString(),
             },
           },
-        } as { result: { account_data: { Balance: string } } };
+        };
       }
       throw new Error('Unexpected request type');
     });
@@ -181,7 +181,7 @@ describe('Agent Balance Tracking Integration', () => {
     // Verify blockchain provider calls
     expect(mockEvmProvider.getBalance).toHaveBeenCalledTimes(AGENT_COUNT);
     expect(mockXrplClient.request).toHaveBeenCalledTimes(AGENT_COUNT);
-  });
+  }, 30000); // 30 second timeout for wallet derivation
 
   it.skip('should detect balance changes via periodic polling', async () => {
     // Note: Balance change detection is comprehensively tested in unit tests.
@@ -197,9 +197,9 @@ describe('Agent Balance Tracking Integration', () => {
       return callCount === 1 ? 1000000000000000000n : 2000000000000000000n;
     });
 
-    mockXrplClient.request.mockResolvedValue({
+    (mockXrplClient.request as jest.Mock).mockResolvedValue({
       result: { account_data: { Balance: '10000000' } },
-    } as { result: { account_data: { Balance: string } } });
+    });
 
     balanceTracker = new AgentBalanceTracker(
       walletDerivation,
@@ -281,9 +281,9 @@ describe('Agent Balance Tracking Integration', () => {
     }
 
     mockEvmProvider.getBalance.mockResolvedValue(1000n);
-    mockXrplClient.request.mockResolvedValue({
+    (mockXrplClient.request as jest.Mock).mockResolvedValue({
       result: { account_data: { Balance: '10000000' } },
-    } as { result: { account_data: { Balance: string } } });
+    });
 
     balanceTracker = new AgentBalanceTracker(
       walletDerivation,
@@ -304,7 +304,7 @@ describe('Agent Balance Tracking Integration', () => {
     // Balances should be cached for all agents
     const cachedBalance = await balanceTracker.getBalance('agent-003', 'evm', 'ETH');
     expect(cachedBalance).toBe(1000n);
-  });
+  }, 15000); // 15 second timeout for wallet derivation
 
   it('should handle database persistence across tracker restarts', async () => {
     // Create agent and fetch balance

@@ -239,4 +239,20 @@ export interface DashboardChannelState {
   settledAt?: string;
   /** ISO 8601 timestamp of last balance update */
   lastActivityAt: string;
+
+  // XRP-specific fields (Story 9.7)
+  /** Settlement method discriminator (Story 9.7) */
+  settlementMethod?: 'evm' | 'xrp';
+  /** Source XRP account r-address (Story 9.7) */
+  xrpAccount?: string;
+  /** Destination XRP account r-address (Story 9.7) */
+  xrpDestination?: string;
+  /** Total XRP in channel in drops (Story 9.7) */
+  xrpAmount?: string;
+  /** XRP claimed so far in drops (Story 9.7) */
+  xrpBalance?: string;
+  /** Settlement delay in seconds (Story 9.7) */
+  xrpSettleDelay?: number;
+  /** Public key for claim verification (Story 9.7) */
+  xrpPublicKey?: string;
 }

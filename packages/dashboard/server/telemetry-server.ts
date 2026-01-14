@@ -17,6 +17,9 @@ import {
   PaymentChannelSettledEvent,
   DashboardChannelState,
   TelemetryEvent,
+  XRPChannelOpenedEvent,
+  XRPChannelClaimedEvent,
+  XRPChannelClosedEvent,
 } from '@m2m/shared';
 
 interface WebSocketWithMetadata extends WebSocket {
@@ -167,6 +170,9 @@ export class TelemetryServer {
       // Handle payment channel telemetry events (Story 8.10)
       this.handlePaymentChannelTelemetry(message as unknown as TelemetryEvent);
 
+      // Handle XRP channel telemetry events (Story 9.7)
+      this.handleXRPChannelTelemetry(message as unknown as TelemetryEvent);
+
       // Broadcast to all clients
       this.broadcast(message);
     }
@@ -188,6 +194,9 @@ export class TelemetryServer {
       'PAYMENT_CHANNEL_OPENED',
       'PAYMENT_CHANNEL_BALANCE_UPDATE',
       'PAYMENT_CHANNEL_SETTLED',
+      'XRP_CHANNEL_OPENED',
+      'XRP_CHANNEL_CLAIMED',
+      'XRP_CHANNEL_CLOSED',
     ].includes(type);
   }
 
@@ -470,5 +479,109 @@ export class TelemetryServer {
    */
   getAllActiveChannels(): DashboardChannelState[] {
     return Array.from(this.channelStates.values());
+  }
+
+  /**
+   * Handle XRP channel telemetry events (Story 9.7)
+   * Stores XRP channel state in memory for dashboard visualization
+   */
+  private handleXRPChannelTelemetry(message: TelemetryEvent): void {
+    try {
+      if (message.type === 'XRP_CHANNEL_OPENED') {
+        const event = message as XRPChannelOpenedEvent;
+
+        // Create unified DashboardChannelState for XRP channel
+        const channelState: DashboardChannelState = {
+          channelId: event.channelId,
+          nodeId: event.nodeId,
+          peerId: event.peerId || 'unknown',
+          settlementMethod: 'xrp',
+          // XRP-specific fields
+          xrpAccount: event.account,
+          xrpDestination: event.destination,
+          xrpAmount: event.amount,
+          xrpBalance: '0', // Initial balance (no claims yet)
+          xrpSettleDelay: event.settleDelay,
+          xrpPublicKey: event.publicKey,
+          // Unified fields (XRP doesn't use EVM structures)
+          participants: [event.account, event.destination] as [string, string],
+          tokenAddress: 'XRP', // Use "XRP" as placeholder
+          tokenSymbol: 'XRP',
+          settlementTimeout: event.settleDelay,
+          deposits: {}, // XRP doesn't use deposits concept
+          myNonce: 0,
+          theirNonce: 0,
+          myTransferred: '0',
+          theirTransferred: '0',
+          status: 'active',
+          openedAt: event.timestamp,
+          lastActivityAt: event.timestamp,
+        };
+
+        this.channelStates.set(event.channelId, channelState);
+        this.logger.info('XRP channel opened', {
+          channelId: event.channelId,
+          peerId: event.peerId,
+          amount: event.amount,
+        });
+      } else if (message.type === 'XRP_CHANNEL_CLAIMED') {
+        const event = message as XRPChannelClaimedEvent;
+        const channelState = this.channelStates.get(event.channelId);
+
+        if (!channelState) {
+          this.logger.warn('XRP claim for unknown channel', {
+            channelId: event.channelId,
+          });
+          return;
+        }
+
+        // Update balance and activity timestamp
+        channelState.xrpBalance = event.claimAmount;
+        channelState.lastActivityAt = event.timestamp;
+
+        this.logger.debug('XRP channel claimed', {
+          channelId: event.channelId,
+          claimAmount: event.claimAmount,
+          remainingBalance: event.remainingBalance,
+        });
+      } else if (message.type === 'XRP_CHANNEL_CLOSED') {
+        const event = message as XRPChannelClosedEvent;
+        const channelState = this.channelStates.get(event.channelId);
+
+        if (!channelState) {
+          this.logger.warn('XRP close for unknown channel', {
+            channelId: event.channelId,
+          });
+          return;
+        }
+
+        // Mark as settled
+        channelState.status = 'settled';
+        channelState.settledAt = event.timestamp;
+        channelState.lastActivityAt = event.timestamp;
+
+        this.logger.info('XRP channel closed', {
+          channelId: event.channelId,
+          closeType: event.closeType,
+          finalBalance: event.finalBalance,
+        });
+
+        // Remove channel from state after 5 minutes
+        setTimeout(
+          () => {
+            this.channelStates.delete(event.channelId);
+            this.logger.debug('Settled XRP channel removed from state', {
+              channelId: event.channelId,
+            });
+          },
+          5 * 60 * 1000
+        );
+      }
+    } catch (error) {
+      this.logger.warn('Failed to process XRP channel telemetry', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        messageType: message.type,
+      });
+    }
   }
 }
