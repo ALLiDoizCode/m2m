@@ -6,7 +6,17 @@
 import pino from 'pino';
 import { Transform } from 'stream';
 import { createTelemetryTransport, EmitLogFunction } from './pino-telemetry-transport';
-import { LogEntry } from '../../../dashboard/src/types/log';
+
+// LogEntry type is defined in pino-telemetry-transport.ts
+// We recreate it here for tests since it's not exported
+interface LogEntry {
+  level: 'debug' | 'info' | 'warn' | 'error';
+  timestamp: string;
+  nodeId: string;
+  message: string;
+  correlationId?: string;
+  context?: Record<string, unknown>;
+}
 
 /**
  * Helper to create test logger with transport and capture emitted logs

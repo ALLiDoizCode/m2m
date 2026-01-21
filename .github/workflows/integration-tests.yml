@@ -29,12 +29,12 @@ jobs:
       - name: Start docker-compose-dev infrastructure
         run: |
           echo "Starting Anvil (Base L2), rippled (XRP Ledger), and TigerBeetle..."
-          docker-compose -f docker-compose-dev.yml up -d anvil rippled tigerbeetle
+          docker compose -f docker-compose-dev.yml up -d anvil rippled tigerbeetle
 
           echo "Waiting for services to become healthy..."
           # Wait up to 60 seconds for all services to be healthy
           for i in {1..60}; do
-            if docker-compose -f docker-compose-dev.yml ps | grep -q "healthy"; then
+            if docker compose -f docker-compose-dev.yml ps | grep -q "healthy"; then
               echo "Services are healthy!"
               break
             fi
@@ -43,7 +43,7 @@ jobs:
           done
 
           # Show service status
-          docker-compose -f docker-compose-dev.yml ps
+          docker compose -f docker-compose-dev.yml ps
 
       - name: Verify Anvil is accessible
         run: |
@@ -67,11 +67,11 @@ jobs:
 
       - name: Show docker-compose logs on failure
         if: failure()
-        run: docker-compose -f docker-compose-dev.yml logs
+        run: docker compose -f docker-compose-dev.yml logs
 
       - name: Cleanup docker-compose infrastructure
         if: always()
-        run: docker-compose -f docker-compose-dev.yml down -v
+        run: docker compose -f docker-compose-dev.yml down -v
 
   # Summary job to check if integration tests should be required
   integration-tests-check:

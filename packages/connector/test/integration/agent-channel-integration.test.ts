@@ -173,7 +173,7 @@ describeIfEnabled('Agent Channel Integration Test', () => {
           },
         },
       }),
-    } as Partial<Client> as Client;
+    } as unknown as Client;
 
     treasuryWallet = new TreasuryWallet(
       anvilDefaultPrivateKey,
