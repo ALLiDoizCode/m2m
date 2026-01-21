@@ -3,7 +3,11 @@
  * Story 11.9: Security Hardening for Agent Wallets
  */
 
-import { WalletAuthenticationManager, AuthConfig, UnauthorizedError } from './wallet-authentication';
+import {
+  WalletAuthenticationManager,
+  AuthConfig,
+  UnauthorizedError,
+} from './wallet-authentication';
 import pino from 'pino';
 
 describe('WalletAuthenticationManager', () => {
@@ -221,7 +225,9 @@ describe('WalletAuthenticationManager', () => {
     it('should create error with operation name', () => {
       const error = new UnauthorizedError('wallet derivation');
 
-      expect(error.message).toBe('Unauthorized access to wallet derivation: authentication required');
+      expect(error.message).toBe(
+        'Unauthorized access to wallet derivation: authentication required'
+      );
       expect(error.name).toBe('UnauthorizedError');
     });
   });

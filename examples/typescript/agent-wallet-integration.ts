@@ -16,7 +16,7 @@ const logger = pino({ level: 'info' });
 /**
  * Example 1: Create and Initialize Agent Wallet
  */
-async function createWalletExample() {
+async function createWalletExample(): Promise<unknown> {
   const lifecycle = new AgentWalletLifecycle();
 
   try {
@@ -27,20 +27,19 @@ async function createWalletExample() {
       agentId: wallet.agentId,
       evmAddress: wallet.evmAddress,
       xrpAddress: wallet.xrpAddress,
-      status: wallet.status
+      status: wallet.status,
     });
 
     // Wait for wallet to become active (funding complete)
     let currentWallet = wallet;
     while (currentWallet.status === 'pending') {
       logger.info('Waiting for wallet activation...', { agentId: wallet.agentId });
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, 5000));
       currentWallet = await lifecycle.getAgentWallet(wallet.agentId);
     }
 
     logger.info('Wallet is now active', { agentId: wallet.agentId });
     return wallet;
-
   } catch (error) {
     logger.error('Wallet creation failed', { error: error.message });
     throw error;
@@ -50,7 +49,7 @@ async function createWalletExample() {
 /**
  * Example 2: Check Wallet Balances
  */
-async function checkBalancesExample(agentId: string) {
+async function checkBalancesExample(agentId: string): Promise<unknown> {
   const balanceTracker = new AgentBalanceTracker();
 
   try {
@@ -59,20 +58,19 @@ async function checkBalancesExample(agentId: string) {
 
     logger.info('Agent balances', {
       agentId,
-      balanceCount: balances.length
+      balanceCount: balances.length,
     });
 
     // Format and display balances
-    balances.forEach(balance => {
+    balances.forEach((balance) => {
       const formatted = formatBalance(balance.balance, balance.decimals);
       logger.info(`${balance.chain.toUpperCase()} ${balance.token}: ${formatted}`, {
         raw: balance.balance.toString(),
-        decimals: balance.decimals
+        decimals: balance.decimals,
       });
     });
 
     return balances;
-
   } catch (error) {
     logger.error('Balance check failed', { agentId, error: error.message });
     throw error;
@@ -82,7 +80,7 @@ async function checkBalancesExample(agentId: string) {
 /**
  * Example 3: Open Payment Channel and Send Payments
  */
-async function paymentChannelExample(agentId: string, peerId: string) {
+async function paymentChannelExample(agentId: string, peerId: string): Promise<void> {
   const channelManager = new AgentChannelManager();
 
   try {
@@ -110,19 +108,19 @@ async function paymentChannelExample(agentId: string, peerId: string) {
       logger.info('Payment sent', {
         paymentNumber: i,
         amount: '10 USDC',
-        channelId
+        channelId,
       });
     }
 
     // Get channel details
     const channels = await channelManager.getAgentChannels(agentId);
-    const channel = channels.find(c => c.id === channelId);
+    const channel = channels.find((c) => c.id === channelId);
 
     if (channel) {
       logger.info('Channel status', {
         channelId: channel.id,
         remainingBalance: formatBalance(channel.balance, 6),
-        paymentsCount: channel.paymentsCount
+        paymentsCount: channel.paymentsCount,
       });
     }
 
@@ -130,7 +128,6 @@ async function paymentChannelExample(agentId: string, peerId: string) {
     logger.info('Closing payment channel', { channelId });
     await channelManager.closeChannel(agentId, channelId);
     logger.info('Channel closed and settled', { channelId });
-
   } catch (error) {
     logger.error('Payment channel operation failed', { error: error.message });
     throw error;
@@ -140,7 +137,7 @@ async function paymentChannelExample(agentId: string, peerId: string) {
 /**
  * Example 4: Create and Restore Backup
  */
-async function backupExample() {
+async function backupExample(): Promise<unknown> {
   const backupManager = new WalletBackupManager();
 
   try {
@@ -151,7 +148,7 @@ async function backupExample() {
     logger.info('Backup created', {
       backupId: backup.id,
       walletCount: backup.wallets.length,
-      timestamp: backup.createdAt
+      timestamp: backup.createdAt,
     });
 
     // In production: Save backup to secure location
@@ -164,7 +161,6 @@ async function backupExample() {
     // logger.info('Backup restored successfully');
 
     return backup;
-
   } catch (error) {
     logger.error('Backup operation failed', { error: error.message });
     throw error;
@@ -174,7 +170,7 @@ async function backupExample() {
 /**
  * Example 5: Complete Agent Lifecycle
  */
-async function completeLifecycleExample() {
+async function completeLifecycleExample(): Promise<void> {
   const agentId = 'agent-example-001';
   const peerId = 'agent-example-002';
 
@@ -183,7 +179,7 @@ async function completeLifecycleExample() {
 
     // Step 1: Create wallet
     logger.info('Step 1: Creating agent wallet...');
-    const wallet = await createWalletExample();
+    await createWalletExample();
 
     // Step 2: Check balances
     logger.info('Step 2: Checking wallet balances...');
@@ -198,7 +194,6 @@ async function completeLifecycleExample() {
     await backupExample();
 
     logger.info('=== Complete Agent Lifecycle Example Finished Successfully ===');
-
   } catch (error) {
     logger.error('Lifecycle example failed', { error: error.message, stack: error.stack });
     throw error;
@@ -208,7 +203,7 @@ async function completeLifecycleExample() {
 /**
  * Example 6: Error Handling Patterns
  */
-async function errorHandlingExample(agentId: string) {
+async function errorHandlingExample(agentId: string): Promise<unknown> {
   const lifecycle = new AgentWalletLifecycle();
 
   try {
@@ -216,23 +211,19 @@ async function errorHandlingExample(agentId: string) {
     const wallet = await lifecycle.createAgentWallet(agentId);
     logger.info('Wallet created', { agentId });
     return wallet;
-
   } catch (error) {
     // Handle specific error types
     if (error.message.includes('already exists')) {
       logger.warn('Wallet already exists, retrieving existing wallet', { agentId });
       return await lifecycle.getAgentWallet(agentId);
-
     } else if (error.message.includes('rate limit')) {
       logger.error('Rate limit exceeded', { agentId });
       // Implement exponential backoff
-      await new Promise(resolve => setTimeout(resolve, 60000));
+      await new Promise((resolve) => setTimeout(resolve, 60000));
       throw error;
-
     } else if (error.message.includes('master-seed not found')) {
       logger.error('Master seed not initialized', { agentId });
       throw new Error('System configuration error - contact administrator');
-
     } else {
       logger.error('Unknown wallet error', { agentId, error: error.message });
       throw error;
@@ -243,7 +234,7 @@ async function errorHandlingExample(agentId: string) {
 /**
  * Example 7: Batch Wallet Creation
  */
-async function batchWalletExample() {
+async function batchWalletExample(): Promise<unknown> {
   const lifecycle = new AgentWalletLifecycle();
   const agentIds = ['agent-batch-001', 'agent-batch-002', 'agent-batch-003'];
 
@@ -251,21 +242,18 @@ async function batchWalletExample() {
     logger.info('Creating multiple wallets in parallel...', { count: agentIds.length });
 
     // Create all wallets in parallel
-    const wallets = await Promise.all(
-      agentIds.map(id => lifecycle.createAgentWallet(id))
-    );
+    const wallets = await Promise.all(agentIds.map((id) => lifecycle.createAgentWallet(id)));
 
     logger.info('Batch wallet creation complete', {
       count: wallets.length,
-      wallets: wallets.map(w => ({
+      wallets: wallets.map((w) => ({
         agentId: w.agentId,
         evmAddress: w.evmAddress,
-        xrpAddress: w.xrpAddress
-      }))
+        xrpAddress: w.xrpAddress,
+      })),
     });
 
     return wallets;
-
   } catch (error) {
     logger.error('Batch wallet creation failed', { error: error.message });
     throw error;
@@ -285,7 +273,7 @@ function formatBalance(balance: bigint, decimals: number): string {
 /**
  * Main execution
  */
-async function main() {
+async function main(): Promise<void> {
   try {
     // Run complete lifecycle example
     await completeLifecycleExample();
@@ -295,7 +283,6 @@ async function main() {
     await batchWalletExample();
 
     logger.info('All examples completed successfully');
-
   } catch (error) {
     logger.error('Example execution failed', { error: error.message });
     process.exit(1);
@@ -316,5 +303,5 @@ export {
   completeLifecycleExample,
   errorHandlingExample,
   batchWalletExample,
-  formatBalance
+  formatBalance,
 };

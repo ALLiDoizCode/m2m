@@ -9,12 +9,14 @@ The M2M AI Agent Wallet Infrastructure includes comprehensive backup and recover
 The system supports two types of backups:
 
 ### Full Backup
+
 - **Frequency**: Weekly (default: Sunday midnight)
 - **Contents**: All agent wallets, master seed, lifecycle records, balance snapshots
 - **Use Case**: Complete system recovery, long-term archival
 - **File Size**: ~1KB per wallet (~10MB for 10,000 wallets)
 
 ### Incremental Backup
+
 - **Frequency**: Daily (default: midnight)
 - **Contents**: Only wallets and records modified since last backup, plus master seed
 - **Use Case**: Daily protection with minimal storage overhead
@@ -23,16 +25,19 @@ The system supports two types of backups:
 ## Backup Security
 
 ### Encryption
+
 - Master seed always encrypted with AES-256-GCM
 - Password-based key derivation using PBKDF2 (100,000 iterations)
 - Strong password required (16+ chars, uppercase, lowercase, number, symbol)
 
 ### Integrity Validation
+
 - SHA-256 checksum over entire backup file
 - Checksum verified before restore to prevent corruption
 - Backup rejected if checksum validation fails
 
 ### Storage Locations
+
 - **Local Filesystem**: Default `./backups/wallet-backup-{timestamp}.json`
 - **Amazon S3**: Optional cloud backup for redundancy
 - **Permissions**: Local files should be restricted to owner only (`chmod 600`)
@@ -96,6 +101,7 @@ ls -lt ./backups/wallet-backup-*.json | head -5
 ```
 
 For recovery, you'll need:
+
 - The most recent full backup
 - All incremental backups created after that full backup (apply in chronological order)
 
@@ -116,6 +122,7 @@ console.log('Wallet restore completed successfully');
 ```
 
 The restore process:
+
 1. ✅ Validates backup checksum
 2. ✅ Decrypts and imports master seed
 3. ✅ Restores wallet metadata for all agents
@@ -131,6 +138,7 @@ grep "Balance mismatch detected" ./logs/connector.log
 ```
 
 Balance mismatches indicate:
+
 - Transactions occurred during downtime
 - On-chain state diverged from backup
 - Manual investigation may be required
@@ -148,11 +156,13 @@ systemctl start m2m-connector
 ## Backup Storage Best Practices
 
 ### Redundancy
+
 - **Local + S3**: Configure both local filesystem and S3 for redundancy
 - **Off-Site**: Store backups in geographically separate location
 - **Cross-Region**: Use S3 cross-region replication for disaster recovery
 
 ### Retention Policy
+
 - **Full Backups**: Retain for 1 year (52 weekly backups)
 - **Incremental Backups**: Retain for 30 days
 - **Automated Cleanup**: Implement rotation script to delete old backups
@@ -166,11 +176,13 @@ find ./backups/wallet-backup-*.json -mtime +30 -delete
 ```
 
 ### Access Control
+
 - **Filesystem Permissions**: `chmod 600 ./backups/*.json` (owner read/write only)
 - **S3 Bucket Policy**: Restrict access to specific IAM role
 - **Encryption at Rest**: Enable S3 SSE-S3 or SSE-KMS
 
 ### Password Management
+
 - **Secure Storage**: Store backup password in password manager, HSM, or KMS
 - **Rotation**: Rotate backup password quarterly
 - **Backup Password**: Never commit password to version control
@@ -204,6 +216,7 @@ console.log(`Backup valid: ${isValid}`);
 **Cause**: Backup file corrupted or tampered with
 
 **Solution**:
+
 1. Try loading an earlier backup file
 2. If S3 enabled, download backup from S3
 3. Contact support if all backups corrupted
@@ -213,6 +226,7 @@ console.log(`Backup valid: ${isValid}`);
 **Cause**: Incorrect backup password or corrupted master seed
 
 **Solution**:
+
 1. Verify backup password (check password manager)
 2. Try earlier backup file
 3. If password lost, recovery impossible (master seed encrypted)
@@ -222,6 +236,7 @@ console.log(`Backup valid: ${isValid}`);
 **Cause**: Transactions occurred during downtime between backup and restore
 
 **Solution**:
+
 1. Review logs for each mismatched wallet
 2. Query blockchain directly to verify on-chain balance
 3. Manual reconciliation may be required
@@ -232,6 +247,7 @@ console.log(`Backup valid: ${isValid}`);
 **Cause**: S3 credentials invalid, network issue, or bucket permissions
 
 **Solution**:
+
 1. Verify S3 credentials in config
 2. Check IAM role has `s3:PutObject` permission
 3. Test network connectivity to S3
@@ -242,6 +258,7 @@ console.log(`Backup valid: ${isValid}`);
 **Cause**: Large number of wallets (>100,000) or balance history
 
 **Solution**:
+
 1. Use incremental backups more frequently
 2. Compress backups: `gzip ./backups/wallet-backup-*.json`
 3. Implement backup sharding for very large deployments

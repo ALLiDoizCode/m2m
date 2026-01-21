@@ -7,8 +7,6 @@
 
 import { AgentWalletLifecycle } from '../../src/wallet/agent-wallet-lifecycle';
 import { AgentBalanceTracker } from '../../src/wallet/agent-balance-tracker';
-import { AgentChannelManager } from '../../src/wallet/agent-channel-manager';
-import { WalletBackupManager } from '../../src/wallet/wallet-backup-manager';
 import { pino } from 'pino';
 
 const logger = pino({ level: 'silent' }); // Suppress logs in tests
@@ -32,7 +30,7 @@ describe('Documentation Examples - Integration Guide', () => {
           agentId: wallet.agentId,
           evmAddress: wallet.evmAddress,
           xrpAddress: wallet.xrpAddress,
-          status: wallet.status
+          status: wallet.status,
         });
       } catch (error) {
         logger.error('Wallet creation failed', { error: error.message });
@@ -53,11 +51,11 @@ describe('Documentation Examples - Integration Guide', () => {
 
         logger.info('Agent balances retrieved', {
           agentId,
-          balances: balances.map(b => ({
+          balances: balances.map((b) => ({
             chain: b.chain,
             token: b.token,
-            balance: b.balance.toString()
-          }))
+            balance: b.balance.toString(),
+          })),
         });
       } catch (error) {
         logger.error('Balance check failed', { error: error.message });
@@ -92,9 +90,9 @@ describe('Documentation Examples - Integration Guide', () => {
       await lifecycle.createAgentWallet('doc-test-agent-003');
 
       // Try to create again - should throw error
-      await expect(
-        lifecycle.createAgentWallet('doc-test-agent-003')
-      ).rejects.toThrow('Wallet already exists');
+      await expect(lifecycle.createAgentWallet('doc-test-agent-003')).rejects.toThrow(
+        'Wallet already exists'
+      );
     });
   });
 
@@ -176,7 +174,7 @@ describe('Documentation Examples - Integration Guide', () => {
         agentId: 'agent-001',
         evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
         xrpAddress: 'rN7n7otQDd6FczFgLdlqtyMVrXqHr7XEEw',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       });
 
       // Verify logger is configured
@@ -193,7 +191,7 @@ describe('Documentation Examples - Integration Guide', () => {
         logger.error('Wallet creation failed', {
           agentId: 'doc-test-error-log',
           error: error.message,
-          stack: error.stack
+          stack: error.stack,
         });
         // Don't throw - just verify error was logged
       }
@@ -222,9 +220,7 @@ describe('Documentation Examples - Integration Guide', () => {
       const agentIds = ['doc-test-parallel-001', 'doc-test-parallel-002', 'doc-test-parallel-003'];
 
       // Create all wallets in parallel
-      const wallets = await Promise.all(
-        agentIds.map(id => lifecycle.createAgentWallet(id))
-      );
+      const wallets = await Promise.all(agentIds.map((id) => lifecycle.createAgentWallet(id)));
 
       expect(wallets).toHaveLength(3);
       logger.info('All agents initialized', { count: wallets.length });
@@ -301,7 +297,7 @@ describe('Documentation Examples - Security Best Practices', () => {
       evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
       xrpAddress: 'rN7n7otQDd6FczFgLdlqtyMVrXqHr7XEEw',
       privateKey: 'SENSITIVE-KEY-DATA', // Should never be logged
-      status: 'active'
+      status: 'active',
     };
 
     // Pino serializer should remove sensitive fields
@@ -309,7 +305,7 @@ describe('Documentation Examples - Security Best Practices', () => {
       agentId: wallet.agentId,
       evmAddress: wallet.evmAddress,
       xrpAddress: wallet.xrpAddress,
-      status: wallet.status
+      status: wallet.status,
       // privateKey intentionally omitted
     };
 
@@ -329,9 +325,9 @@ describe('Documentation Test Data Consistency', () => {
       mockBalances: {
         usdc: BigInt(1000000000), // 1000 USDC with 6 decimals
         eth: BigInt('1000000000000000000'), // 1 ETH with 18 decimals
-        xrp: BigInt(10000000) // 10 XRP with 6 decimals
+        xrp: BigInt(10000000), // 10 XRP with 6 decimals
       },
-      mockChannelIds: ['channel-evm-001', 'channel-xrp-002']
+      mockChannelIds: ['channel-evm-001', 'channel-xrp-002'],
     };
 
     // Verify format correctness

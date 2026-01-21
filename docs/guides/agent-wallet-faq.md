@@ -22,12 +22,14 @@ Frequently asked questions about agent wallet integration, functionality, and be
 **A:** Agent wallets are created via `AgentWalletLifecycle.createAgentWallet(agentId)`, which derives unique EVM and XRP addresses from a master seed using BIP-32/BIP-44 HD wallet standards.
 
 Each agent receives:
+
 - One EVM address (Base L2): `m/44'/60'/1'/0/{agentIndex}`
 - One XRP Ledger address: `m/44'/144'/1'/0/{agentIndex}`
 
 The master seed generates up to 2^31 (2.1 billion) unique agent wallets.
 
 **Example:**
+
 ```typescript
 import { AgentWalletLifecycle } from '@m2m/connector/wallet/agent-wallet-lifecycle';
 
@@ -52,6 +54,7 @@ const wallet = await lifecycle.createAgentWallet('agent-001');
 4. **Archived**: Permanently archived after inactivity (cannot be reactivated)
 
 **State Transitions:**
+
 ```
 pending → active → suspended → active (can be reactivated)
                  ↓
@@ -59,6 +62,7 @@ pending → active → suspended → active (can be reactivated)
 ```
 
 **Checking Wallet State:**
+
 ```typescript
 const wallet = await lifecycle.getAgentWallet('agent-001');
 
@@ -78,12 +82,14 @@ if (wallet.status === 'suspended') {
 **A:** Call `suspendWallet(agentId, reason)` to temporarily disable a wallet. The wallet can be reactivated later.
 
 **Use Cases:**
+
 - Security investigation
 - Fraud detection
 - Compliance review
 - Temporary agent deactivation
 
 **Example:**
+
 ```typescript
 // Suspend wallet
 await lifecycle.suspendWallet('agent-001', 'Security review pending');
@@ -107,20 +113,23 @@ logger.info('Wallet reactivated');
 **A:** Wallets are automatically archived after a configurable period of inactivity (default: 90 days).
 
 **Archival Criteria:**
+
 - No transactions in last 90 days
 - No payment channel activity
 - No funding requests
 - Wallet status is 'active' (not already suspended/archived)
 
 **Configuration:**
+
 ```typescript
 const archivalConfig = {
-  inactivityPeriodDays: 90,  // Days of inactivity before archival
-  enableAutoArchival: true    // Enable/disable auto-archival
+  inactivityPeriodDays: 90, // Days of inactivity before archival
+  enableAutoArchival: true, // Enable/disable auto-archival
 };
 ```
 
 **Manual Archival:**
+
 ```typescript
 // Archive inactive wallet manually
 const archive = await lifecycle.archiveWallet('agent-001');
@@ -128,7 +137,7 @@ const archive = await lifecycle.archiveWallet('agent-001');
 logger.info('Wallet archived', {
   archiveId: archive.id,
   finalBalances: archive.finalBalances,
-  archivedAt: archive.archivedAt
+  archivedAt: archive.archivedAt,
 });
 ```
 
@@ -145,12 +154,14 @@ logger.info('Wallet archived', {
 **A:** Use `WalletBackupManager.createFullBackup(password)` to create an encrypted backup of the master seed and all agent wallet metadata.
 
 **What's Included in Backup:**
+
 - Encrypted master seed (BIP-39 mnemonic)
 - All agent wallet metadata (addresses, derivation indices)
 - Balance snapshots at backup time
 - Wallet lifecycle states
 
 **Example:**
+
 ```typescript
 import { WalletBackupManager } from '@m2m/connector/wallet/wallet-backup-manager';
 
@@ -162,7 +173,7 @@ const backup = await backupManager.createFullBackup('strong-password-123456789')
 logger.info('Backup created', {
   backupId: backup.id,
   walletCount: backup.wallets.length,
-  timestamp: backup.createdAt
+  timestamp: backup.createdAt,
 });
 
 // Save to secure location (NOT version control!)
@@ -181,6 +192,7 @@ await writeFile(`/secure/backups/backup-${backup.id}.enc`, JSON.stringify(backup
 **A:** Yes! Use `restoreFromBackup(backupData, password)` to restore all agent wallets on a new server.
 
 **Restore Process:**
+
 1. Load backup file from secure storage
 2. Decrypt master seed using password
 3. Re-derive all agent wallet addresses
@@ -188,6 +200,7 @@ await writeFile(`/secure/backups/backup-${backup.id}.enc`, JSON.stringify(backup
 5. Reconcile balances with current on-chain data
 
 **Example:**
+
 ```typescript
 import { readFile } from 'fs/promises';
 
@@ -200,7 +213,7 @@ await backupManager.restoreFromBackup(backup, 'strong-password-123456789');
 
 logger.info('Backup restored successfully', {
   backupId: backup.id,
-  walletsRestored: backup.wallets.length
+  walletsRestored: backup.wallets.length,
 });
 
 // Verify restoration
@@ -219,11 +232,13 @@ logger.info('Wallet verified', { agentId: wallet.agentId });
 **A:** Follow this backup schedule for production:
 
 **Recommended Schedule:**
+
 - **Daily**: Incremental backups (metadata only)
 - **Weekly**: Full backups (master seed + metadata)
 - **Monthly**: Off-site backups (stored offline in safe)
 
 **Backup Strategy:**
+
 ```typescript
 // Daily incremental backup (fast)
 const incrementalBackup = await backupManager.createIncrementalBackup();
@@ -240,6 +255,7 @@ await saveToOfflineMedia(monthlyBackup); // USB, offline storage
 ```
 
 **Automation:**
+
 ```bash
 # Cron schedule
 0 2 * * * /usr/local/bin/wallet-backup daily     # 2 AM daily
@@ -256,17 +272,20 @@ await saveToOfflineMedia(monthlyBackup); // USB, offline storage
 **A:** **All agent wallets are permanently lost** if you lose the master seed without a backup.
 
 **Impact:**
+
 - Cannot derive any agent wallet private keys
 - Cannot access agent funds
 - Cannot recover wallet addresses
 - All agent wallets must be recreated with new master seed
 
 **Recovery Options:**
+
 1. **If you have a backup**: Restore from most recent backup
 2. **If you have the mnemonic phrase**: Import mnemonic and regenerate seed
 3. **If you have neither**: **No recovery possible** - funds are lost
 
 **Prevention (Critical):**
+
 - ✅ Create encrypted backups immediately after seed generation
 - ✅ Store backups in multiple secure locations
 - ✅ Test backup restore regularly (quarterly)
@@ -285,11 +304,13 @@ await saveToOfflineMedia(monthlyBackup); // USB, offline storage
 **A:** Yes! Each agent automatically receives one address on each supported chain:
 
 **EVM (Base L2):**
+
 - Format: 0x-prefixed hex (42 characters)
 - Derivation path: `m/44'/60'/1'/0/{agentIndex}`
 - Example: `0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb`
 
 **XRP Ledger:**
+
 - Format: r-prefixed base58 (25-35 characters)
 - Derivation path: `m/44'/144'/1'/0/{agentIndex}`
 - Example: `rN7n7otQDd6FczFgLdlqtyMVrXqHr7XEEw`
@@ -297,6 +318,7 @@ await saveToOfflineMedia(monthlyBackup); // USB, offline storage
 **Both addresses are derived from the same agent index**, ensuring deterministic recovery.
 
 **Example:**
+
 ```typescript
 const wallet = await lifecycle.createAgentWallet('agent-001');
 
@@ -304,7 +326,7 @@ logger.info('Multi-chain wallet created', {
   agentId: wallet.agentId,
   evmAddress: wallet.evmAddress,
   xrpAddress: wallet.xrpAddress,
-  derivationIndex: wallet.derivationIndex
+  derivationIndex: wallet.derivationIndex,
 });
 ```
 
@@ -317,6 +339,7 @@ logger.info('Multi-chain wallet created', {
 **A:** Yes! Specify the chain when opening payment channels:
 
 **Example:**
+
 ```typescript
 import { AgentChannelManager } from '@m2m/connector/wallet/agent-channel-manager';
 
@@ -326,7 +349,7 @@ const channelManager = new AgentChannelManager();
 const evmChannelId = await channelManager.openChannel(
   'agent-001',
   'peer-agent-002',
-  'evm',  // Chain selection
+  'evm', // Chain selection
   'USDC',
   BigInt(1000000000)
 );
@@ -335,13 +358,14 @@ const evmChannelId = await channelManager.openChannel(
 const xrpChannelId = await channelManager.openChannel(
   'agent-002',
   'peer-agent-003',
-  'xrp',  // Chain selection
+  'xrp', // Chain selection
   'XRP',
   BigInt(50000000)
 );
 ```
 
 **Chain Selection Criteria:**
+
 - **EVM**: Lower transaction costs, more token options (ERC20)
 - **XRP**: Faster settlement (~4s vs ~15s), native DEX support
 
@@ -354,24 +378,27 @@ const xrpChannelId = await channelManager.openChannel(
 **A:** The system supports native tokens and ERC20 tokens on EVM:
 
 **EVM (Base L2):**
+
 - **Native**: ETH (for gas fees)
 - **ERC20**: USDC, DAI, USDT, and any ERC20-compliant token
 - **Custom**: Add token by configuring contract address
 
 **XRP Ledger:**
+
 - **Native**: XRP (only native XRP supported in MVP)
 - **Issued Currencies**: Future support in Epic 12
 
 **Token Configuration:**
+
 ```typescript
 // Check supported tokens
 const balances = await balanceTracker.getAllBalances('agent-001');
 
-balances.forEach(b => {
+balances.forEach((b) => {
   logger.info('Supported token', {
     chain: b.chain,
     token: b.token,
-    decimals: b.decimals
+    decimals: b.decimals,
   });
 });
 
@@ -390,6 +417,7 @@ balances.forEach(b => {
 **A:** Configure the token in the balance tracker with its contract address:
 
 **Example:**
+
 ```typescript
 import { AgentBalanceTracker } from '@m2m/connector/wallet/agent-balance-tracker';
 
@@ -400,22 +428,19 @@ const balanceTracker = new AgentBalanceTracker({
       { symbol: 'USDC', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },
       { symbol: 'DAI', address: '0x6B175474E89094C44Da98b954EedeAC495271d0F', decimals: 18 },
       // Add custom token
-      { symbol: 'CUSTOM', address: '0x1234567890abcdef...', decimals: 18 }
-    ]
-  }
+      { symbol: 'CUSTOM', address: '0x1234567890abcdef...', decimals: 18 },
+    ],
+  },
 });
 
 // Query custom token balance
-const customBalance = await balanceTracker.getBalance(
-  'agent-001',
-  'evm',
-  '0x1234567890abcdef...'
-);
+const customBalance = await balanceTracker.getBalance('agent-001', 'evm', '0x1234567890abcdef...');
 
 logger.info('Custom token balance', { balance: customBalance.toString() });
 ```
 
 **Token Requirements:**
+
 - Must be ERC20-compliant
 - Contract must be deployed on Base L2
 - Token decimals must be specified correctly
@@ -431,18 +456,21 @@ logger.info('Custom token balance', { balance: customBalance.toString() });
 **A:** Up to **2^31 agents (2.1 billion)** from a single master seed.
 
 **Technical Details:**
+
 - Derivation index range: 0 to 2,147,483,647
 - Each agent uses one index
 - Addresses are deterministically derived
 - No practical limit for most applications
 
 **Scalability Benchmarks:**
+
 - **Wallet Creation**: 1000 wallets/hour (rate limited)
 - **Balance Queries**: 10,000 queries/second (cached)
 - **Payment Channels**: 50 channels/agent (recommended)
 - **Storage**: ~1KB per agent wallet (metadata)
 
 **Example:**
+
 ```typescript
 // High-scale deployment
 const agentCount = 1000000; // 1 million agents
@@ -451,13 +479,11 @@ const agentCount = 1000000; // 1 million agents
 for (let i = 0; i < agentCount; i += 100) {
   const batch = Array.from({ length: 100 }, (_, j) => `agent-${i + j}`);
 
-  await Promise.all(
-    batch.map(id => lifecycle.createAgentWallet(id))
-  );
+  await Promise.all(batch.map((id) => lifecycle.createAgentWallet(id)));
 
   // Rate limit: 100/hour
   if (i % 100 === 0 && i < agentCount - 100) {
-    await new Promise(resolve => setTimeout(resolve, 3600000)); // 1 hour
+    await new Promise((resolve) => setTimeout(resolve, 3600000)); // 1 hour
   }
 }
 
@@ -474,19 +500,20 @@ logger.info('All agents created', { count: agentCount });
 
 **Performance Metrics:**
 
-| Scenario | Response Time | Caching |
-|----------|---------------|---------|
-| **First Query** (Cold) | 1-2 seconds | No |
-| **Cached Query** (Hot) | < 50ms | Yes |
-| **Batch Query** (10 balances) | 2-3 seconds | No |
-| **Polling Interval** | 30 seconds | Automatic |
+| Scenario                      | Response Time | Caching   |
+| ----------------------------- | ------------- | --------- |
+| **First Query** (Cold)        | 1-2 seconds   | No        |
+| **Cached Query** (Hot)        | < 50ms        | Yes       |
+| **Batch Query** (10 balances) | 2-3 seconds   | No        |
+| **Polling Interval**          | 30 seconds    | Automatic |
 
 **Optimization:**
+
 ```typescript
 const balanceTracker = new AgentBalanceTracker({
   cacheEnabled: true,
-  cacheTTL: 30000,        // 30 seconds
-  pollingInterval: 30000   // Poll every 30 seconds
+  cacheTTL: 30000, // 30 seconds
+  pollingInterval: 30000, // Poll every 30 seconds
 });
 
 // First call: Fetches from blockchain (slow)
@@ -498,6 +525,7 @@ const balance2 = await balanceTracker.getBalance('agent-001', 'evm', 'ETH');
 ```
 
 **Factors Affecting Performance:**
+
 - RPC endpoint latency (Infura/Alchemy: ~100-200ms)
 - Network congestion
 - Number of tokens tracked per agent
@@ -512,6 +540,7 @@ const balance2 = await balanceTracker.getBalance('agent-001', 'evm', 'ETH');
 **A:** Yes! Use parallel wallet creation, but respect rate limits:
 
 **Efficient Batch Creation:**
+
 ```typescript
 import { AgentWalletLifecycle } from '@m2m/connector/wallet/agent-wallet-lifecycle';
 
@@ -526,20 +555,18 @@ async function batchCreateWallets(agentIds: string[]) {
 
     logger.info('Creating wallet batch', {
       batchNumber: Math.floor(i / batchSize) + 1,
-      batchSize: batch.length
+      batchSize: batch.length,
     });
 
     // Create all wallets in parallel (within rate limit)
-    const wallets = await Promise.all(
-      batch.map(id => lifecycle.createAgentWallet(id))
-    );
+    const wallets = await Promise.all(batch.map((id) => lifecycle.createAgentWallet(id)));
 
     logger.info('Batch complete', { walletsCreated: wallets.length });
 
     // Wait 1 hour before next batch (rate limit window)
     if (i + batchSize < agentIds.length) {
       logger.info('Waiting for rate limit window reset (1 hour)');
-      await new Promise(resolve => setTimeout(resolve, 3600000));
+      await new Promise((resolve) => setTimeout(resolve, 3600000));
     }
   }
 }
@@ -550,6 +577,7 @@ await batchCreateWallets(agentIds);
 ```
 
 **Alternative: Use `batchDeriveWallets()` (Future)**
+
 ```typescript
 import { AgentWalletDerivation } from '@m2m/connector/wallet/agent-wallet-derivation';
 
@@ -574,12 +602,14 @@ logger.info('Batch derivation complete', { count: wallets.length });
 **Protection Mechanisms:**
 
 1. **Pino Logger Serializers** (Automatic)
+
    ```typescript
    // Wallet objects automatically sanitized
    logger.info('Wallet created', { wallet }); // privateKey removed
    ```
 
 2. **Telemetry Sanitization**
+
    ```typescript
    import { sanitizeWalletForTelemetry } from '@m2m/connector/wallet/wallet-security';
 
@@ -597,6 +627,7 @@ logger.info('Batch derivation complete', { count: wallets.length });
 
 **Verification:**
 Run security penetration tests to verify:
+
 ```bash
 npm test -- --testPathPattern=wallet-security-penetration
 ```
@@ -627,6 +658,7 @@ npm test -- --testPathPattern=wallet-security-penetration
    - Private keys never leave HSM
 
 **Example:**
+
 ```typescript
 import { AgentWalletAuthentication } from '@m2m/connector/wallet/wallet-authentication';
 
@@ -635,7 +667,7 @@ const auth = new AgentWalletAuthentication();
 // Password authentication
 await auth.authenticate({
   method: 'password',
-  password: 'strong-password-123456789'
+  password: 'strong-password-123456789',
 });
 
 // Now authorized to perform wallet operations
@@ -643,6 +675,7 @@ const wallet = await derivation.deriveAgentWallet('agent-001');
 ```
 
 **Operations Requiring Authentication:**
+
 - Wallet derivation
 - Master seed access
 - Backup creation
@@ -671,6 +704,7 @@ const wallet = await derivation.deriveAgentWallet('agent-001');
    - Long-term spending cap
 
 **Enforcement Flow:**
+
 ```typescript
 // Transaction validation (automatic)
 try {
@@ -684,7 +718,7 @@ try {
     logger.warn('Transaction rejected by spending limits', {
       agentId: 'agent-001',
       amount: '150000000',
-      reason: error.message
+      reason: error.message,
     });
     // Handle limit violation
   }
@@ -692,6 +726,7 @@ try {
 ```
 
 **Custom Limits:**
+
 ```typescript
 import { AgentWalletSecurity } from '@m2m/connector/wallet/wallet-security';
 
@@ -699,9 +734,9 @@ const security = new AgentWalletSecurity();
 
 // Configure custom limits for VIP agent
 await security.setSpendingLimits('agent-vip-001', {
-  maxTransactionSize: BigInt(5000000000),   // 5000 USDC
-  dailyLimit: BigInt(25000000000),           // 25,000 USDC
-  monthlyLimit: BigInt(250000000000)         // 250,000 USDC
+  maxTransactionSize: BigInt(5000000000), // 5000 USDC
+  dailyLimit: BigInt(25000000000), // 25,000 USDC
+  monthlyLimit: BigInt(250000000000), // 250,000 USDC
 });
 ```
 
@@ -722,12 +757,14 @@ await security.setSpendingLimits('agent-vip-001', {
 3. **Close Channel**: Settle final balance on-chain
 
 **Benefits:**
+
 - ⚡ **Instant**: Sub-second payment confirmation
 - 💰 **Low Cost**: No gas fees per payment
 - 🔒 **Secure**: Cryptographic balance proofs
 - 📈 **Scalable**: Thousands of payments per second
 
 **Example:**
+
 ```typescript
 import { AgentChannelManager } from '@m2m/connector/wallet/agent-channel-manager';
 
@@ -766,15 +803,16 @@ await channelManager.closeChannel('agent-001', channelId);
 
 **Channel Limits:**
 
-| Factor | Limit | Reason |
-|--------|-------|--------|
-| **Technical Maximum** | Unlimited | No protocol restriction |
-| **Recommended** | 50 channels/agent | Memory and performance |
-| **Open Simultaneously** | 10-20 channels | Blockchain resource limits |
+| Factor                  | Limit             | Reason                     |
+| ----------------------- | ----------------- | -------------------------- |
+| **Technical Maximum**   | Unlimited         | No protocol restriction    |
+| **Recommended**         | 50 channels/agent | Memory and performance     |
+| **Open Simultaneously** | 10-20 channels    | Blockchain resource limits |
 
 **Scaling Strategies:**
 
 1. **Close Unused Channels**
+
    ```typescript
    // Get all channels
    const channels = await channelManager.getAgentChannels('agent-001');
@@ -791,6 +829,7 @@ await channelManager.closeChannel('agent-001', channelId);
    ```
 
 2. **Reuse Channels**
+
    ```typescript
    // Check for existing channel before opening
    const existingChannel = channels.find(c => c.peerId === peerId);
@@ -832,11 +871,13 @@ await channelManager.closeChannel('agent-001', channelId);
    - HTTP requests library
 
 **Code Examples:**
+
 - TypeScript: `examples/typescript/agent-wallet-integration.ts`
 - JavaScript: `examples/javascript/agent-wallet-integration.js`
 - Python: `examples/python/agent_wallet_integration.py`
 
 **Future Language Support:**
+
 - Go (Epic 12)
 - Rust (Epic 12)
 - Java (Epic 13)
@@ -852,16 +893,19 @@ await channelManager.closeChannel('agent-001', channelId);
 **Recommended RPC Providers:**
 
 **EVM (Base L2):**
+
 - **Infura**: https://infura.io
 - **Alchemy**: https://alchemy.com
 - **Public RPC**: https://mainnet.base.org (rate limited)
 
 **XRP Ledger:**
+
 - **Ripple Public**: https://s1.ripple.com:51234
 - **Infura XRP**: https://infura.io/product/xrpl
 - **Self-Hosted**: rippled node (advanced)
 
 **Configuration:**
+
 ```bash
 # .env
 EVM_RPC_ENDPOINT=https://base-mainnet.infura.io/v3/YOUR-API-KEY
@@ -869,11 +913,12 @@ XRP_RPC_ENDPOINT=https://s1.ripple.com:51234
 ```
 
 **Fallback Configuration:**
+
 ```typescript
 const rpcEndpoints = [
-  'https://base-mainnet.infura.io/v3/YOUR-KEY',  // Primary
-  'https://base.llamarpc.com',                   // Fallback 1
-  'https://mainnet.base.org'                     // Fallback 2 (rate limited)
+  'https://base-mainnet.infura.io/v3/YOUR-KEY', // Primary
+  'https://base.llamarpc.com', // Fallback 1
+  'https://mainnet.base.org', // Fallback 2 (rate limited)
 ];
 ```
 
@@ -888,6 +933,7 @@ const rpcEndpoints = [
 **Testing Strategy:**
 
 1. **Local Testing** (No Real Funds)
+
    ```typescript
    // Use mock wallet manager
    import { MockWalletLifecycle } from '@m2m/connector/test/mocks';
@@ -898,6 +944,7 @@ const rpcEndpoints = [
    ```
 
 2. **Testnet Testing** (Free Test Tokens)
+
    ```bash
    # Use Base Goerli testnet
    export EVM_RPC_ENDPOINT=https://goerli.base.org
@@ -909,6 +956,7 @@ const rpcEndpoints = [
    ```
 
 3. **Integration Tests**
+
    ```bash
    # Run integration test suite
    npm test -- --testPathPattern=integration
@@ -918,6 +966,7 @@ const rpcEndpoints = [
    ```
 
 **Test Coverage:**
+
 - Unit tests: `packages/connector/src/wallet/*.test.ts`
 - Integration tests: `packages/connector/test/integration/`
 - Security tests: `wallet-security-penetration.test.ts`
@@ -933,27 +982,35 @@ const rpcEndpoints = [
 **A:** Common causes and solutions:
 
 **1. Master Seed Not Found**
+
 ```
 Error: master-seed not found in storage
 ```
+
 **Solution:** Initialize seed manager with `generateMasterSeed()` or import existing seed.
 
 **2. Rate Limit Exceeded**
+
 ```
 Error: Funding rate limit exceeded - max 100 wallets/hour
 ```
+
 **Solution:** Wait 1 hour or adjust rate limit configuration.
 
 **3. Wallet Already Exists**
+
 ```
 Error: Wallet already exists for agent: agent-001
 ```
+
 **Solution:** Use `getAgentWallet()` to retrieve existing wallet instead of creating.
 
 **4. Insufficient Permissions**
+
 ```
 Error: EACCES: permission denied
 ```
+
 **Solution:** Check file permissions on `data/wallet/` directory (should be 700).
 
 **Reference:** [Troubleshooting Guide](agent-wallet-troubleshooting.md#wallet-creation-problems)
@@ -965,6 +1022,7 @@ Error: EACCES: permission denied
 **A:** Follow this debugging checklist:
 
 **1. Verify Wallet Status**
+
 ```typescript
 const wallet = await lifecycle.getAgentWallet(agentId);
 
@@ -974,6 +1032,7 @@ if (wallet.status !== 'active') {
 ```
 
 **2. Check On-Chain Balance**
+
 ```typescript
 import { ethers } from 'ethers';
 
@@ -982,11 +1041,12 @@ const balance = await provider.getBalance(wallet.evmAddress);
 
 logger.info('On-chain balance', {
   address: wallet.evmAddress,
-  balance: balance.toString()
+  balance: balance.toString(),
 });
 ```
 
 **3. Verify RPC Endpoint**
+
 ```bash
 # Test EVM RPC
 curl -X POST $EVM_RPC_ENDPOINT \
@@ -1000,15 +1060,16 @@ curl -X POST $XRP_RPC_ENDPOINT \
 ```
 
 **4. Check Transaction History**
+
 ```typescript
 const balances = await balanceTracker.getAllBalances(agentId);
 
-balances.forEach(b => {
+balances.forEach((b) => {
   logger.info('Balance details', {
     chain: b.chain,
     token: b.token,
     balance: b.balance.toString(),
-    lastUpdated: b.lastUpdated
+    lastUpdated: b.lastUpdated,
   });
 });
 ```
@@ -1031,12 +1092,14 @@ balances.forEach(b => {
 ## Still Have Questions?
 
 **Support Channels:**
+
 - **GitHub Issues**: https://github.com/interledger/m2m/issues
 - **Documentation**: https://docs.interledger.org/m2m
 - **Community Forum**: https://forum.interledger.org
 - **Security Issues**: security@interledger.org
 
 **Before Asking:**
+
 1. Check this FAQ
 2. Review troubleshooting guide
 3. Search existing GitHub issues

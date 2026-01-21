@@ -124,7 +124,8 @@ export class SuspiciousActivityDetector {
     // Calculate mean and standard deviation
     const amounts = tokenTransactions.map((tx) => Number(tx.amount));
     const mean = amounts.reduce((sum, val) => sum + val, 0) / amounts.length;
-    const variance = amounts.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / amounts.length;
+    const variance =
+      amounts.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / amounts.length;
     const stdDev = Math.sqrt(variance);
 
     // Check if transaction is outlier (>3 std deviations from mean)

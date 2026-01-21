@@ -880,9 +880,7 @@ export class AgentWalletLifecycle {
     try {
       // Insert or replace record in database
       const totalVolumeJson = JSON.stringify(
-        Object.fromEntries(
-          Object.entries(record.totalVolume).map(([k, v]) => [k, v.toString()])
-        )
+        Object.fromEntries(Object.entries(record.totalVolume).map(([k, v]) => [k, v.toString()]))
       );
 
       const stmt = this.db.prepare(`

@@ -20,6 +20,7 @@ Common issues and solutions for agent wallet integration and operations.
 ### Issue: Master Seed Not Found
 
 **Symptom:**
+
 ```
 Error: master-seed not found in storage
 ```
@@ -30,6 +31,7 @@ Seed manager not initialized, or seed file missing from storage.
 **Solution:**
 
 **Option 1: Initialize New Seed (New Deployment)**
+
 ```typescript
 import { AgentSeedManager } from '@m2m/connector/wallet/agent-seed-manager';
 
@@ -42,19 +44,18 @@ logger.info('Master seed generated successfully');
 ```
 
 **Option 2: Import Existing Seed (Recovery)**
+
 ```typescript
 // If you have backed up mnemonic
 const mnemonic = '...24 word mnemonic phrase...';
 
-await seedManager.importMasterSeed(
-  mnemonic,
-  'strong-password-min-16-chars'
-);
+await seedManager.importMasterSeed(mnemonic, 'strong-password-min-16-chars');
 
 logger.info('Master seed imported successfully');
 ```
 
 **Prevention:**
+
 - Always backup master seed after generation
 - Store encrypted backups in multiple locations
 - Test backup restore regularly
@@ -66,6 +67,7 @@ logger.info('Master seed imported successfully');
 ### Issue: Invalid Master Seed Password
 
 **Symptom:**
+
 ```
 Error: Failed to decrypt master seed: invalid password
 ```
@@ -81,6 +83,7 @@ Incorrect password provided for seed decryption.
    - Try password from secure password manager
 
 2. **Reset Password (If Backup Available):**
+
    ```typescript
    // Restore from backup with correct password
    const backup = await loadBackup('backup-file.enc');
@@ -94,6 +97,7 @@ Incorrect password provided for seed decryption.
    - Create new wallets for all agents
 
 **Prevention:**
+
 - Store password in enterprise password manager
 - Document password recovery procedure
 - Test password regularly
@@ -103,6 +107,7 @@ Incorrect password provided for seed decryption.
 ### Issue: Master Seed File Corrupted
 
 **Symptom:**
+
 ```
 Error: Failed to decrypt master seed: malformed data
 ```
@@ -113,18 +118,21 @@ Seed file corrupted due to disk error or interrupted write.
 **Solution:**
 
 1. **Check File Permissions:**
+
    ```bash
    ls -la data/wallet/master-seed.enc
    # Should show: -rw------- (600 permissions)
    ```
 
 2. **Verify File Integrity:**
+
    ```bash
    # Check file size (should be > 100 bytes)
    wc -c data/wallet/master-seed.enc
    ```
 
 3. **Restore from Backup:**
+
    ```typescript
    import { WalletBackupManager } from '@m2m/connector/wallet/wallet-backup-manager';
 
@@ -135,6 +143,7 @@ Seed file corrupted due to disk error or interrupted write.
    ```
 
 **Prevention:**
+
 - Use reliable storage (SSD with ECC)
 - Enable filesystem journaling
 - Maintain multiple backup copies
@@ -146,6 +155,7 @@ Seed file corrupted due to disk error or interrupted write.
 ### Issue: Wallet Already Exists for Agent
 
 **Symptom:**
+
 ```
 Error: Wallet already exists for agent: agent-001
 ```
@@ -156,6 +166,7 @@ Agent ID already has a derived wallet.
 **Solution:**
 
 **Use Existing Wallet:**
+
 ```typescript
 import { AgentWalletLifecycle } from '@m2m/connector/wallet/agent-wallet-lifecycle';
 
@@ -168,7 +179,7 @@ if (wallet) {
   logger.info('Using existing wallet', {
     agentId: wallet.agentId,
     evmAddress: wallet.evmAddress,
-    xrpAddress: wallet.xrpAddress
+    xrpAddress: wallet.xrpAddress,
   });
 } else {
   // Wallet doesn't exist, safe to create
@@ -177,7 +188,9 @@ if (wallet) {
 ```
 
 **If You Need New Wallet:**
+
 1. Archive old wallet:
+
    ```typescript
    await lifecycle.archiveWallet('agent-001');
    ```
@@ -188,6 +201,7 @@ if (wallet) {
    ```
 
 **Prevention:**
+
 - Check if wallet exists before creating
 - Use unique agent IDs
 - Document agent ID naming convention
@@ -197,6 +211,7 @@ if (wallet) {
 ### Issue: Wallet Derivation Index Collision
 
 **Symptom:**
+
 ```
 Error: Derivation index collision at index 42
 ```
@@ -207,6 +222,7 @@ Internal database inconsistency - derivation index already used by another agent
 **Solution:**
 
 1. **Check Agent Mapping:**
+
    ```typescript
    import { AgentWalletDerivation } from '@m2m/connector/wallet/agent-wallet-derivation';
 
@@ -218,6 +234,7 @@ Internal database inconsistency - derivation index already used by another agent
    ```
 
 2. **Database Repair (Advanced):**
+
    ```bash
    # Backup database first
    cp data/wallet/agent-wallets.db data/wallet/agent-wallets.db.bak
@@ -231,6 +248,7 @@ Internal database inconsistency - derivation index already used by another agent
    - Provide agent ID and derivation index
 
 **Prevention:**
+
 - Regular database integrity checks
 - Atomic transactions for wallet creation
 - Database backups before major operations
@@ -242,6 +260,7 @@ Internal database inconsistency - derivation index already used by another agent
 ### Issue: Insufficient Funds for Gas
 
 **Symptom:**
+
 ```
 Error: Transaction failed: insufficient funds for gas
 ```
@@ -252,6 +271,7 @@ EVM wallet needs native ETH for gas fees, but balance is zero or too low.
 **Solution:**
 
 1. **Check ETH Balance:**
+
    ```typescript
    import { AgentBalanceTracker } from '@m2m/connector/wallet/agent-balance-tracker';
 
@@ -263,6 +283,7 @@ EVM wallet needs native ETH for gas fees, but balance is zero or too low.
    ```
 
 2. **Fund Wallet with ETH:**
+
    ```typescript
    import { AgentWalletFunder } from '@m2m/connector/wallet/agent-wallet-funder';
 
@@ -271,18 +292,19 @@ EVM wallet needs native ETH for gas fees, but balance is zero or too low.
    await funder.fundAgentWallet('agent-001', {
      chain: 'evm',
      token: 'ETH',
-     amount: BigInt('100000000000000000') // 0.1 ETH
+     amount: BigInt('100000000000000000'), // 0.1 ETH
    });
 
    logger.info('Agent wallet funded with ETH');
    ```
 
 3. **Wait for Confirmation:**
+
    ```typescript
    // Poll for balance update
    let balance = ethBalance;
    while (balance === ethBalance) {
-     await new Promise(resolve => setTimeout(resolve, 5000));
+     await new Promise((resolve) => setTimeout(resolve, 5000));
      balance = await balanceTracker.getBalance('agent-001', 'evm', 'ETH');
    }
 
@@ -290,6 +312,7 @@ EVM wallet needs native ETH for gas fees, but balance is zero or too low.
    ```
 
 **Prevention:**
+
 - Automatic funding includes ETH for gas (0.1 ETH)
 - Monitor ETH balance (alert if < 0.01 ETH)
 - Implement automatic gas top-up
@@ -301,6 +324,7 @@ EVM wallet needs native ETH for gas fees, but balance is zero or too low.
 ### Issue: XRP Account Not Activated
 
 **Symptom:**
+
 ```
 Error: XRP transaction failed: Account not found
 ```
@@ -311,29 +335,33 @@ XRP accounts require minimum 10 XRP reserve to activate on the ledger.
 **Solution:**
 
 1. **Check XRP Balance:**
+
    ```typescript
    const xrpBalance = await balanceTracker.getBalance('agent-001', 'xrp', 'XRP');
 
-   if (xrpBalance < BigInt(10000000)) { // 10 XRP (6 decimals)
+   if (xrpBalance < BigInt(10000000)) {
+     // 10 XRP (6 decimals)
      logger.warn('XRP account not activated - balance below reserve');
    }
    ```
 
 2. **Fund XRP Wallet (15 XRP recommended):**
+
    ```typescript
    await funder.fundAgentWallet('agent-001', {
      chain: 'xrp',
      token: 'XRP',
-     amount: BigInt(15000000) // 15 XRP (10 reserve + 5 buffer)
+     amount: BigInt(15000000), // 15 XRP (10 reserve + 5 buffer)
    });
 
    logger.info('XRP account activation pending');
    ```
 
 3. **Wait for Ledger Confirmation:**
+
    ```typescript
    // XRP ledger closes every ~4 seconds
-   await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds
+   await new Promise((resolve) => setTimeout(resolve, 10000)); // Wait 10 seconds
 
    const newBalance = await balanceTracker.getBalance('agent-001', 'xrp', 'XRP');
 
@@ -343,11 +371,13 @@ XRP accounts require minimum 10 XRP reserve to activate on the ledger.
    ```
 
 **Key Facts:**
+
 - **Reserve**: 10 XRP minimum (not spendable)
 - **Activation**: Requires one transaction >= 10 XRP
 - **Recommendation**: Fund with 15 XRP (10 reserve + 5 usable)
 
 **Prevention:**
+
 - Automatic funding includes 15 XRP
 - Document XRP reserve requirements
 - Alert if XRP balance < 12 XRP
@@ -359,6 +389,7 @@ XRP accounts require minimum 10 XRP reserve to activate on the ledger.
 ### Issue: Balance Mismatch After Backup Restore
 
 **Symptom:**
+
 ```
 Warning: Restored balance (1000 USDC) != on-chain balance (850 USDC)
 ```
@@ -369,6 +400,7 @@ Transactions occurred after backup timestamp - backup is stale.
 **Solution:**
 
 **Automatic Reconciliation (Built-in):**
+
 ```typescript
 import { WalletBackupManager } from '@m2m/connector/wallet/wallet-backup-manager';
 
@@ -381,6 +413,7 @@ logger.info('Backup restored - balances reconciled with on-chain data');
 ```
 
 **Manual Reconciliation (If Needed):**
+
 ```typescript
 import { AgentBalanceTracker } from '@m2m/connector/wallet/agent-balance-tracker';
 
@@ -394,12 +427,14 @@ logger.info('Balance reconciled', { balance: currentBalance.toString() });
 ```
 
 **Understanding the Mismatch:**
+
 - Backup captures balance at snapshot time
 - Transactions after backup change on-chain balance
 - Restore process reconciles with current on-chain state
 - This is expected behavior, not an error
 
 **Prevention:**
+
 - Take backups immediately after transactions
 - Document time of last backup
 - Test restore in isolated environment first
@@ -411,6 +446,7 @@ logger.info('Balance reconciled', { balance: currentBalance.toString() });
 ### Issue: Channel Already Exists
 
 **Symptom:**
+
 ```
 Error: Channel already exists between agent-001 and peer-agent-002
 ```
@@ -421,6 +457,7 @@ Payment channel already open with the specified peer.
 **Solution:**
 
 **Option 1: Use Existing Channel**
+
 ```typescript
 import { AgentChannelManager } from '@m2m/connector/wallet/agent-channel-manager';
 
@@ -430,21 +467,18 @@ const channelManager = new AgentChannelManager();
 const channels = await channelManager.getAgentChannels('agent-001');
 
 // Find channel with peer
-const existingChannel = channels.find(c => c.peerId === 'peer-agent-002');
+const existingChannel = channels.find((c) => c.peerId === 'peer-agent-002');
 
 if (existingChannel) {
   logger.info('Using existing channel', { channelId: existingChannel.id });
 
   // Send payment through existing channel
-  await channelManager.sendPayment(
-    'agent-001',
-    existingChannel.id,
-    BigInt(10000000)
-  );
+  await channelManager.sendPayment('agent-001', existingChannel.id, BigInt(10000000));
 }
 ```
 
 **Option 2: Close and Reopen**
+
 ```typescript
 // Close existing channel
 await channelManager.closeChannel('agent-001', existingChannel.id);
@@ -452,7 +486,7 @@ await channelManager.closeChannel('agent-001', existingChannel.id);
 logger.info('Old channel closed');
 
 // Wait for settlement
-await new Promise(resolve => setTimeout(resolve, 20000)); // 20 seconds
+await new Promise((resolve) => setTimeout(resolve, 20000)); // 20 seconds
 
 // Open new channel
 const newChannelId = await channelManager.openChannel(
@@ -467,6 +501,7 @@ logger.info('New channel opened', { channelId: newChannelId });
 ```
 
 **Prevention:**
+
 - Check for existing channels before opening
 - Maintain channel inventory
 - Close unused channels promptly
@@ -476,6 +511,7 @@ logger.info('New channel opened', { channelId: newChannelId });
 ### Issue: Insufficient Channel Balance
 
 **Symptom:**
+
 ```
 Error: Payment exceeds remaining channel balance
 ```
@@ -486,30 +522,29 @@ Payment amount greater than channel's remaining balance.
 **Solution:**
 
 1. **Check Channel Balance:**
+
    ```typescript
    const channels = await channelManager.getAgentChannels('agent-001');
-   const channel = channels.find(c => c.id === 'channel-evm-001');
+   const channel = channels.find((c) => c.id === 'channel-evm-001');
 
    logger.info('Channel balance', {
      channelId: channel.id,
      balance: channel.balance.toString(),
-     initialAmount: channel.initialAmount.toString()
+     initialAmount: channel.initialAmount.toString(),
    });
    ```
 
 2. **Option A: Send Smaller Payment**
+
    ```typescript
    // Send payment within available balance
    const paymentAmount = channel.balance / BigInt(2); // Half of balance
 
-   await channelManager.sendPayment(
-     'agent-001',
-     channel.id,
-     paymentAmount
-   );
+   await channelManager.sendPayment('agent-001', channel.id, paymentAmount);
    ```
 
 3. **Option B: Close and Open Larger Channel**
+
    ```typescript
    // Close depleted channel
    await channelManager.closeChannel('agent-001', channel.id);
@@ -525,6 +560,7 @@ Payment amount greater than channel's remaining balance.
    ```
 
 **Prevention:**
+
 - Monitor channel balances
 - Open channels with sufficient capacity
 - Implement automatic channel rebalancing
@@ -534,6 +570,7 @@ Payment amount greater than channel's remaining balance.
 ### Issue: Channel Opening Timeout
 
 **Symptom:**
+
 ```
 Error: Channel opening timed out after 120 seconds
 ```
@@ -544,6 +581,7 @@ Blockchain congestion or RPC endpoint issues delaying confirmation.
 **Solution:**
 
 1. **Check Blockchain Status:**
+
    ```bash
    # EVM (Base L2) - check block explorer
    curl https://base.blockscout.com/api/v2/stats
@@ -553,6 +591,7 @@ Blockchain congestion or RPC endpoint issues delaying confirmation.
    ```
 
 2. **Retry with Higher Gas (EVM only):**
+
    ```typescript
    // Retry with higher gas price
    const channelId = await channelManager.openChannel(
@@ -566,6 +605,7 @@ Blockchain congestion or RPC endpoint issues delaying confirmation.
    ```
 
 3. **Check RPC Endpoint:**
+
    ```typescript
    import { ethers } from 'ethers';
 
@@ -580,6 +620,7 @@ Blockchain congestion or RPC endpoint issues delaying confirmation.
    ```
 
 **Prevention:**
+
 - Use reliable RPC providers (Infura, Alchemy)
 - Implement RPC endpoint failover
 - Set appropriate timeout values (300s for congestion)
@@ -592,6 +633,7 @@ Blockchain congestion or RPC endpoint issues delaying confirmation.
 ### Issue: Funding Rate Limit Exceeded
 
 **Symptom:**
+
 ```
 Error: Funding rate limit exceeded - max 100 wallets/hour
 ```
@@ -602,19 +644,21 @@ Exceeded maximum wallet creations per hour (default: 100).
 **Solution:**
 
 1. **Wait for Rate Limit Window to Reset:**
+
    ```typescript
    // Rate limit is sliding window (1 hour)
    const waitTime = 60 * 60 * 1000; // 1 hour in milliseconds
 
    logger.info('Rate limit exceeded - waiting', { waitTimeMs: waitTime });
 
-   await new Promise(resolve => setTimeout(resolve, waitTime));
+   await new Promise((resolve) => setTimeout(resolve, waitTime));
 
    // Retry wallet creation
    const wallet = await lifecycle.createAgentWallet('agent-new');
    ```
 
 2. **Batch Wallet Creation (If Needed):**
+
    ```typescript
    // Create wallets in smaller batches
    const agentIds = ['agent-100', 'agent-101', ...]; // 200 agents
@@ -643,6 +687,7 @@ Exceeded maximum wallet creations per hour (default: 100).
    ```
 
 **Prevention:**
+
 - Plan bulk wallet creation in advance
 - Stagger wallet creation over multiple hours
 - Request rate limit increase for production
@@ -654,6 +699,7 @@ Exceeded maximum wallet creations per hour (default: 100).
 ### Issue: Payment Rate Limit Exceeded
 
 **Symptom:**
+
 ```
 Error: Payment rate limit exceeded - max 1000 payments/minute
 ```
@@ -664,6 +710,7 @@ Too many payments sent through channels in short time period.
 **Solution:**
 
 1. **Implement Payment Queuing:**
+
    ```typescript
    class PaymentQueue {
      private queue: Payment[] = [];
@@ -683,15 +730,10 @@ Too many payments sent through channels in short time period.
          const payment = this.queue.shift();
 
          try {
-           await channelManager.sendPayment(
-             payment.agentId,
-             payment.channelId,
-             payment.amount
-           );
+           await channelManager.sendPayment(payment.agentId, payment.channelId, payment.amount);
 
            // Rate limit: 1000/minute = ~60ms between payments
-           await new Promise(resolve => setTimeout(resolve, 60));
-
+           await new Promise((resolve) => setTimeout(resolve, 60));
          } catch (error) {
            logger.error('Payment failed', { error: error.message });
            // Re-queue or handle error
@@ -704,12 +746,13 @@ Too many payments sent through channels in short time period.
    ```
 
 2. **Batch Payments:**
+
    ```typescript
    // Instead of many small payments, send fewer larger payments
    const smallPayments = [
-     BigInt(1000000),  // 1 USDC
-     BigInt(2000000),  // 2 USDC
-     BigInt(3000000)   // 3 USDC
+     BigInt(1000000), // 1 USDC
+     BigInt(2000000), // 2 USDC
+     BigInt(3000000), // 3 USDC
    ];
 
    const totalAmount = smallPayments.reduce((sum, amt) => sum + amt, BigInt(0));
@@ -719,6 +762,7 @@ Too many payments sent through channels in short time period.
    ```
 
 **Prevention:**
+
 - Design for sustainable payment rates
 - Use payment queuing system
 - Monitor payment velocity
@@ -730,6 +774,7 @@ Too many payments sent through channels in short time period.
 ### Issue: Invalid Backup Password
 
 **Symptom:**
+
 ```
 Error: Invalid password - cannot decrypt backup
 ```
@@ -745,6 +790,7 @@ Wrong password provided for backup decryption.
    - Verify password doesn't have hidden characters
 
 2. **Check Backup Metadata:**
+
    ```typescript
    import { readFile } from 'fs/promises';
 
@@ -754,7 +800,7 @@ Wrong password provided for backup decryption.
    logger.info('Backup metadata', {
      id: backup.id,
      createdAt: backup.createdAt,
-     walletCount: backup.wallets.length
+     walletCount: backup.wallets.length,
    });
    ```
 
@@ -763,6 +809,7 @@ Wrong password provided for backup decryption.
    - Test restore in isolated environment first
 
 **Prevention:**
+
 - Store backup passwords in enterprise password manager
 - Test backup restore with correct password quarterly
 - Document password recovery procedure
@@ -774,6 +821,7 @@ Wrong password provided for backup decryption.
 ### Issue: Corrupt Backup Data
 
 **Symptom:**
+
 ```
 Error: Corrupt backup data - decryption failed
 ```
@@ -784,6 +832,7 @@ Backup file corrupted during storage or transfer.
 **Solution:**
 
 1. **Verify Backup Integrity:**
+
    ```bash
    # Check file size
    ls -lh backup-2026-01-21.enc
@@ -796,6 +845,7 @@ Backup file corrupted during storage or transfer.
    ```
 
 2. **Try Alternative Backup:**
+
    ```typescript
    // List all available backups
    const backups = ['backup-daily.enc', 'backup-weekly.enc', 'backup-monthly.enc'];
@@ -807,7 +857,6 @@ Backup file corrupted during storage or transfer.
 
        logger.info('Backup restored successfully', { backupFile });
        break; // Success - stop trying
-
      } catch (error) {
        logger.warn('Backup failed', { backupFile, error: error.message });
        // Try next backup
@@ -820,6 +869,7 @@ Backup file corrupted during storage or transfer.
    - Use offline backup if network backups corrupted
 
 **Prevention:**
+
 - Store backups in multiple locations
 - Verify backup integrity after creation
 - Test restore procedure regularly
@@ -831,6 +881,7 @@ Backup file corrupted during storage or transfer.
 ### Issue: RPC Endpoint Unreachable
 
 **Symptom:**
+
 ```
 Error: Failed to connect to EVM RPC endpoint
 ```
@@ -841,6 +892,7 @@ RPC provider down or network connectivity issues.
 **Solution:**
 
 1. **Test RPC Connectivity:**
+
    ```bash
    # EVM (Base L2)
    curl -X POST https://mainnet.base.org \
@@ -854,13 +906,14 @@ RPC provider down or network connectivity issues.
    ```
 
 2. **Configure Fallback RPC:**
+
    ```typescript
    import { ethers } from 'ethers';
 
    const rpcEndpoints = [
      'https://mainnet.base.org',
      'https://base.llamarpc.com',
-     'https://base-rpc.publicnode.com'
+     'https://base-rpc.publicnode.com',
    ];
 
    let provider: ethers.JsonRpcProvider | null = null;
@@ -873,7 +926,6 @@ RPC provider down or network connectivity issues.
        provider = testProvider;
        logger.info('Connected to RPC', { endpoint });
        break;
-
      } catch (error) {
        logger.warn('RPC endpoint failed', { endpoint, error: error.message });
      }
@@ -885,6 +937,7 @@ RPC provider down or network connectivity issues.
    ```
 
 3. **Use Commercial RPC Provider:**
+
    ```bash
    # Infura
    export EVM_RPC_ENDPOINT="https://base-mainnet.infura.io/v3/YOUR-API-KEY"
@@ -894,6 +947,7 @@ RPC provider down or network connectivity issues.
    ```
 
 **Prevention:**
+
 - Use commercial RPC providers (Infura, Alchemy)
 - Configure multiple RPC endpoints
 - Implement automatic failover
@@ -904,6 +958,7 @@ RPC provider down or network connectivity issues.
 ### Issue: Blockchain Transaction Stuck
 
 **Symptom:**
+
 ```
 Warning: Transaction pending for 10 minutes without confirmation
 ```
@@ -914,6 +969,7 @@ Low gas price (EVM) or network congestion.
 **Solution:**
 
 **For EVM (Base L2):**
+
 ```typescript
 import { ethers } from 'ethers';
 
@@ -927,8 +983,8 @@ if (tx && !tx.blockNumber) {
   // Speed up transaction with higher gas
   const speedUpTx = await wallet.sendTransaction({
     ...tx,
-    gasPrice: tx.gasPrice! * BigInt(150) / BigInt(100), // 1.5x gas price
-    nonce: tx.nonce
+    gasPrice: (tx.gasPrice! * BigInt(150)) / BigInt(100), // 1.5x gas price
+    nonce: tx.nonce,
   });
 
   logger.info('Speed-up transaction sent', { newTxHash: speedUpTx.hash });
@@ -936,6 +992,7 @@ if (tx && !tx.blockNumber) {
 ```
 
 **For XRP Ledger:**
+
 ```bash
 # Check transaction by hash
 curl -X POST https://s1.ripple.com:51234 \
@@ -947,6 +1004,7 @@ curl -X POST https://s1.ripple.com:51234 \
 ```
 
 **Prevention:**
+
 - Use appropriate gas prices (check current network gas)
 - Set reasonable transaction timeouts
 - Implement transaction monitoring
@@ -966,13 +1024,14 @@ RPC endpoint latency or balance not cached.
 **Solution:**
 
 1. **Enable Balance Caching:**
+
    ```typescript
    import { AgentBalanceTracker } from '@m2m/connector/wallet/agent-balance-tracker';
 
    const balanceTracker = new AgentBalanceTracker({
      cacheEnabled: true,
      cacheTTL: 30000, // 30 seconds
-     pollingInterval: 30000 // Poll every 30 seconds
+     pollingInterval: 30000, // Poll every 30 seconds
    });
 
    // First call: Slow (fetches from blockchain)
@@ -987,6 +1046,7 @@ RPC endpoint latency or balance not cached.
    - Use regional RPC endpoint closer to your server
 
 3. **Batch Balance Queries:**
+
    ```typescript
    // Instead of individual queries
    // const eth = await balanceTracker.getBalance('agent-001', 'evm', 'ETH');
@@ -997,6 +1057,7 @@ RPC endpoint latency or balance not cached.
    ```
 
 **Performance Benchmarks:**
+
 - **Target**: Balance query < 1 second
 - **Cached**: Balance query < 50ms
 - **Batch**: 10 balances < 2 seconds
@@ -1014,6 +1075,7 @@ Too many cached balances or wallet objects in memory.
 **Solution:**
 
 1. **Check Memory Usage:**
+
    ```bash
    # Monitor Node.js heap
    node --max-old-space-size=4096 server.js --expose-gc
@@ -1024,11 +1086,12 @@ Too many cached balances or wallet objects in memory.
    ```
 
 2. **Configure Cache Limits:**
+
    ```typescript
    const balanceTracker = new AgentBalanceTracker({
      maxCachedAgents: 1000, // Limit cached agents
-     cacheTTL: 30000,       // Expire cache after 30s
-     evictionPolicy: 'lru'  // Least Recently Used eviction
+     cacheTTL: 30000, // Expire cache after 30s
+     evictionPolicy: 'lru', // Least Recently Used eviction
    });
    ```
 
@@ -1044,6 +1107,7 @@ Too many cached balances or wallet objects in memory.
    ```
 
 **Prevention:**
+
 - Set appropriate cache size limits
 - Use LRU eviction policy
 - Monitor memory usage with metrics

@@ -77,9 +77,7 @@ export class WalletAuthenticationManager {
   async setPassword(password: string): Promise<void> {
     // Validate password strength
     if (password.length < this.config.passwordMinLength) {
-      throw new Error(
-        `Password must be at least ${this.config.passwordMinLength} characters long`
-      );
+      throw new Error(`Password must be at least ${this.config.passwordMinLength} characters long`);
     }
 
     // Generate random salt
@@ -166,7 +164,10 @@ export class WalletAuthenticationManager {
 
       // For MVP: Simple validation (in production, use speakeasy library)
       // This is a placeholder implementation - Epic 12 will integrate proper TOTP library
-      this.logger.info({ method: '2fa' }, '2FA authentication requested (placeholder implementation)');
+      this.logger.info(
+        { method: '2fa' },
+        '2FA authentication requested (placeholder implementation)'
+      );
 
       // TODO: Integrate speakeasy library in Epic 12
       // const isValid = speakeasy.totp.verify({

@@ -252,7 +252,8 @@ describe('Logger Configuration', () => {
       // Arrange
       const wallet = {
         agentId: 'agent-001',
-        mnemonic: 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+        mnemonic:
+          'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
       };
 
       // Act

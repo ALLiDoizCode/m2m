@@ -40,7 +40,7 @@ async function createAgentWallet() {
       agentId: wallet.agentId,
       evmAddress: wallet.evmAddress,
       xrpAddress: wallet.xrpAddress,
-      status: wallet.status
+      status: wallet.status,
     });
     return wallet;
   } catch (error) {
@@ -53,6 +53,7 @@ createAgentWallet();
 ```
 
 **Expected Output:**
+
 ```json
 {
   "level": "info",
@@ -78,11 +79,11 @@ async function checkBalance(agentId: string) {
 
     logger.info('Agent balances retrieved', {
       agentId,
-      balances: balances.map(b => ({
+      balances: balances.map((b) => ({
         chain: b.chain,
         token: b.token,
-        balance: b.balance.toString()
-      }))
+        balance: b.balance.toString(),
+      })),
     });
 
     return balances;
@@ -96,6 +97,7 @@ checkBalance('agent-001');
 ```
 
 **Expected Output:**
+
 ```json
 {
   "level": "info",
@@ -103,7 +105,11 @@ checkBalance('agent-001');
   "agentId": "agent-001",
   "balances": [
     { "chain": "evm", "token": "ETH", "balance": "100000000000000000" },
-    { "chain": "evm", "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "balance": "1000000000" },
+    {
+      "chain": "evm",
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "balance": "1000000000"
+    },
     { "chain": "xrp", "token": "XRP", "balance": "15000000" }
   ]
 }
@@ -120,9 +126,9 @@ async function openPaymentChannel(agentId: string) {
   try {
     const channelId = await channelManager.openChannel(
       agentId,
-      'peer-agent-002',  // Peer agent ID
-      'evm',             // Chain: 'evm' or 'xrp'
-      'USDC',            // Token
+      'peer-agent-002', // Peer agent ID
+      'evm', // Chain: 'evm' or 'xrp'
+      'USDC', // Token
       BigInt(1000000000) // Amount: 1000 USDC (6 decimals)
     );
 
@@ -132,7 +138,7 @@ async function openPaymentChannel(agentId: string) {
       peerId: 'peer-agent-002',
       chain: 'evm',
       token: 'USDC',
-      amount: '1000000000'
+      amount: '1000000000',
     });
 
     return channelId;
@@ -146,6 +152,7 @@ openPaymentChannel('agent-001');
 ```
 
 **Expected Output:**
+
 ```json
 {
   "level": "info",
@@ -175,7 +182,7 @@ async function sendPayment(agentId: string, channelId: string) {
     logger.info('Payment sent', {
       agentId,
       channelId,
-      amount: '50000000'
+      amount: '50000000',
     });
   } catch (error) {
     logger.error('Payment failed', { error: error.message });
@@ -187,6 +194,7 @@ sendPayment('agent-001', 'channel-evm-001');
 ```
 
 **Expected Output:**
+
 ```json
 {
   "level": "info",
@@ -225,12 +233,12 @@ const wallet = await lifecycle.createAgentWallet('agent-001');
 
 // Wallet structure
 interface AgentWallet {
-  agentId: string;           // Unique agent identifier
-  evmAddress: string;        // EVM address (0x-prefixed, 42 chars)
-  xrpAddress: string;        // XRP address (r-prefixed, 25-35 chars)
-  derivationIndex: number;   // HD wallet index
+  agentId: string; // Unique agent identifier
+  evmAddress: string; // EVM address (0x-prefixed, 42 chars)
+  xrpAddress: string; // XRP address (r-prefixed, 25-35 chars)
+  derivationIndex: number; // HD wallet index
   createdAt: Date;
-  status: WalletStatus;      // 'pending' | 'active' | 'suspended' | 'archived'
+  status: WalletStatus; // 'pending' | 'active' | 'suspended' | 'archived'
 }
 ```
 
@@ -307,7 +315,7 @@ const wallet = await lifecycle.createAgentWallet('agent-002');
 // Wait for wallet to become active (funding complete)
 let status = wallet.status;
 while (status === 'pending') {
-  await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+  await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait 5 seconds
   const updatedWallet = await lifecycle.getAgentWallet('agent-002');
   status = updatedWallet.status;
 }
@@ -331,7 +339,7 @@ try {
 } catch (error) {
   if (error.message.includes('rate limit exceeded')) {
     logger.warn('Rate limit hit, waiting before retry');
-    await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
+    await new Promise((resolve) => setTimeout(resolve, 60000)); // Wait 1 minute
     // Retry wallet creation
   }
 }
@@ -350,14 +358,14 @@ const funder = new AgentWalletFunder();
 await funder.fundAgentWallet('agent-001', {
   chain: 'evm',
   token: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC contract
-  amount: BigInt(5000000000) // 5000 USDC
+  amount: BigInt(5000000000), // 5000 USDC
 });
 
 // Fund XRP Ledger
 await funder.fundAgentWallet('agent-001', {
   chain: 'xrp',
   token: 'XRP',
-  amount: BigInt(50000000) // 50 XRP
+  amount: BigInt(50000000), // 50 XRP
 });
 ```
 
@@ -378,12 +386,12 @@ const balanceTracker = new AgentBalanceTracker();
 const balances = await balanceTracker.getAllBalances('agent-001');
 
 // Balances are returned as bigint (wei for ETH, drops for XRP, token decimals)
-balances.forEach(balance => {
+balances.forEach((balance) => {
   logger.info('Balance', {
-    chain: balance.chain,      // 'evm' | 'xrp'
-    token: balance.token,      // 'ETH', 'USDC address', 'XRP'
+    chain: balance.chain, // 'evm' | 'xrp'
+    token: balance.token, // 'ETH', 'USDC address', 'XRP'
     balance: balance.balance.toString(),
-    decimals: balance.decimals // 18 for ETH, 6 for USDC/XRP
+    decimals: balance.decimals, // 18 for ETH, 6 for USDC/XRP
   });
 });
 ```
@@ -429,7 +437,7 @@ async function displayAllBalances(agentId: string) {
     return `${whole}.${fraction.toString().padStart(decimals, '0')}`;
   };
 
-  balances.forEach(b => {
+  balances.forEach((b) => {
     const formatted = formatBalance(b.balance, b.decimals);
     logger.info(`${b.chain.toUpperCase()} ${b.token}: ${formatted}`);
   });
@@ -471,11 +479,11 @@ const channelManager = new AgentChannelManager();
 
 // Open EVM payment channel
 const evmChannelId = await channelManager.openChannel(
-  'agent-001',          // Your agent ID
-  'peer-agent-002',     // Peer agent ID
-  'evm',                // Chain
-  'USDC',               // Token (or contract address)
-  BigInt(1000000000)    // Amount: 1000 USDC (6 decimals)
+  'agent-001', // Your agent ID
+  'peer-agent-002', // Peer agent ID
+  'evm', // Chain
+  'USDC', // Token (or contract address)
+  BigInt(1000000000) // Amount: 1000 USDC (6 decimals)
 );
 
 // Open XRP payment channel
@@ -484,12 +492,12 @@ const xrpChannelId = await channelManager.openChannel(
   'peer-agent-002',
   'xrp',
   'XRP',
-  BigInt(50000000)      // Amount: 50 XRP (6 decimals)
+  BigInt(50000000) // Amount: 50 XRP (6 decimals)
 );
 
 logger.info('Channels opened', {
   evmChannelId,
-  xrpChannelId
+  xrpChannelId,
 });
 ```
 
@@ -502,14 +510,14 @@ Once a channel is open, send instant micropayments:
 await channelManager.sendPayment(
   'agent-001',
   evmChannelId,
-  BigInt(10000000)  // Amount: 10 USDC
+  BigInt(10000000) // Amount: 10 USDC
 );
 
 // Send payment through XRP channel
 await channelManager.sendPayment(
   'agent-001',
   xrpChannelId,
-  BigInt(1000000)   // Amount: 1 XRP
+  BigInt(1000000) // Amount: 1 XRP
 );
 
 logger.info('Payments sent successfully');
@@ -542,14 +550,14 @@ Get all channels for an agent:
 ```typescript
 const channels = await channelManager.getAgentChannels('agent-001');
 
-channels.forEach(channel => {
+channels.forEach((channel) => {
   logger.info('Channel details', {
     channelId: channel.id,
     peerId: channel.peerId,
     chain: channel.chain,
     token: channel.token,
     balance: channel.balance.toString(),
-    status: channel.status  // 'open' | 'closing' | 'closed'
+    status: channel.status, // 'open' | 'closing' | 'closed'
   });
 });
 ```
@@ -594,7 +602,6 @@ async function completeChannelLifecycle() {
     logger.info('Closing channel...');
     await channelManager.closeChannel('agent-001', channelId);
     logger.info('Channel closed and settled');
-
   } catch (error) {
     logger.error('Channel lifecycle failed', { error: error.message });
     throw error;
@@ -638,7 +645,7 @@ async function initializeAgent(agentId: string) {
     // 3. Wait for wallet to become active
     while (wallet.status === 'pending') {
       logger.info('Waiting for wallet activation', { agentId });
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, 5000));
       wallet = await lifecycle.getAgentWallet(agentId);
     }
 
@@ -648,7 +655,7 @@ async function initializeAgent(agentId: string) {
       agentId,
       evmAddress: wallet.evmAddress,
       xrpAddress: wallet.xrpAddress,
-      balanceCount: balances.length
+      balanceCount: balances.length,
     });
 
     return wallet;
@@ -708,7 +715,7 @@ class AgentWalletManager {
     logger.info('Wallet archived', {
       agentId,
       archiveId: archive.id,
-      archivedAt: archive.archivedAt
+      archivedAt: archive.archivedAt,
     });
   }
 }
@@ -728,25 +735,21 @@ async function safeWalletOperation(agentId: string) {
     const wallet = await lifecycle.createAgentWallet(agentId);
     logger.info('Wallet created successfully', { agentId });
     return wallet;
-
   } catch (error) {
     // Categorize error types
     if (error.message.includes('already exists')) {
       logger.warn('Wallet already exists', { agentId });
       // Return existing wallet
       return await lifecycle.getAgentWallet(agentId);
-
     } else if (error.message.includes('rate limit')) {
       logger.error('Rate limit exceeded', { agentId });
       // Implement exponential backoff
-      await new Promise(resolve => setTimeout(resolve, 60000));
+      await new Promise((resolve) => setTimeout(resolve, 60000));
       throw error;
-
     } else if (error.message.includes('master-seed not found')) {
       logger.error('Master seed not initialized', { agentId });
       // Critical error - requires manual intervention
       throw new Error('System configuration error - contact administrator');
-
     } else {
       // Unknown error
       logger.error('Wallet operation failed', { agentId, error: error.message });
@@ -771,7 +774,7 @@ logger.info('Agent wallet operation', {
   agentId: 'agent-001',
   evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
   xrpAddress: 'rN7n7otQDd6FczFgLdlqtyMVrXqHr7XEEw',
-  timestamp: new Date().toISOString()
+  timestamp: new Date().toISOString(),
 });
 
 // Good: Error logging with stack traces
@@ -781,7 +784,7 @@ try {
   logger.error('Wallet creation failed', {
     agentId: 'agent-001',
     error: error.message,
-    stack: error.stack
+    stack: error.stack,
   });
   throw error;
 }
@@ -811,9 +814,7 @@ async function initializeMultipleAgents(agentIds: string[]) {
   const lifecycle = new AgentWalletLifecycle();
 
   // Create all wallets in parallel
-  const wallets = await Promise.all(
-    agentIds.map(id => lifecycle.createAgentWallet(id))
-  );
+  const wallets = await Promise.all(agentIds.map((id) => lifecycle.createAgentWallet(id)));
 
   logger.info('All agents initialized', { count: wallets.length });
 }
@@ -837,6 +838,7 @@ async function initializeMultipleAgents(agentIds: string[]) {
 ## Support
 
 For questions or issues:
+
 - **GitHub Issues**: https://github.com/interledger/m2m/issues
 - **Documentation**: https://docs.interledger.org/m2m
 - **Community**: Interledger community forum

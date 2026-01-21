@@ -28,20 +28,19 @@ async function createWalletExample() {
       agentId: wallet.agentId,
       evmAddress: wallet.evmAddress,
       xrpAddress: wallet.xrpAddress,
-      status: wallet.status
+      status: wallet.status,
     });
 
     // Wait for wallet to become active (funding complete)
     let currentWallet = wallet;
     while (currentWallet.status === 'pending') {
       logger.info({ msg: 'Waiting for wallet activation...', agentId: wallet.agentId });
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, 5000));
       currentWallet = await lifecycle.getAgentWallet(wallet.agentId);
     }
 
     logger.info({ msg: 'Wallet is now active', agentId: wallet.agentId });
     return wallet;
-
   } catch (error) {
     logger.error({ msg: 'Wallet creation failed', error: error.message });
     throw error;
@@ -61,21 +60,20 @@ async function checkBalancesExample(agentId) {
     logger.info({
       msg: 'Agent balances',
       agentId,
-      balanceCount: balances.length
+      balanceCount: balances.length,
     });
 
     // Format and display balances
-    balances.forEach(balance => {
+    balances.forEach((balance) => {
       const formatted = formatBalance(balance.balance, balance.decimals);
       logger.info({
         msg: `${balance.chain.toUpperCase()} ${balance.token}: ${formatted}`,
         raw: balance.balance.toString(),
-        decimals: balance.decimals
+        decimals: balance.decimals,
       });
     });
 
     return balances;
-
   } catch (error) {
     logger.error({ msg: 'Balance check failed', agentId, error: error.message });
     throw error;
@@ -114,20 +112,20 @@ async function paymentChannelExample(agentId, peerId) {
         msg: 'Payment sent',
         paymentNumber: i,
         amount: '10 USDC',
-        channelId
+        channelId,
       });
     }
 
     // Get channel details
     const channels = await channelManager.getAgentChannels(agentId);
-    const channel = channels.find(c => c.id === channelId);
+    const channel = channels.find((c) => c.id === channelId);
 
     if (channel) {
       logger.info({
         msg: 'Channel status',
         channelId: channel.id,
         remainingBalance: formatBalance(channel.balance, 6),
-        paymentsCount: channel.paymentsCount
+        paymentsCount: channel.paymentsCount,
       });
     }
 
@@ -135,7 +133,6 @@ async function paymentChannelExample(agentId, peerId) {
     logger.info({ msg: 'Closing payment channel', channelId });
     await channelManager.closeChannel(agentId, channelId);
     logger.info({ msg: 'Channel closed and settled', channelId });
-
   } catch (error) {
     logger.error({ msg: 'Payment channel operation failed', error: error.message });
     throw error;
@@ -157,7 +154,7 @@ async function backupExample() {
       msg: 'Backup created',
       backupId: backup.id,
       walletCount: backup.wallets.length,
-      timestamp: backup.createdAt
+      timestamp: backup.createdAt,
     });
 
     // In production: Save backup to secure location
@@ -170,7 +167,6 @@ async function backupExample() {
     // logger.info({ msg: 'Backup restored successfully' });
 
     return backup;
-
   } catch (error) {
     logger.error({ msg: 'Backup operation failed', error: error.message });
     throw error;
@@ -204,7 +200,6 @@ async function completeLifecycleExample() {
     await backupExample();
 
     logger.info({ msg: '=== Complete Agent Lifecycle Example Finished Successfully ===' });
-
   } catch (error) {
     logger.error({ msg: 'Lifecycle example failed', error: error.message, stack: error.stack });
     throw error;
@@ -222,23 +217,19 @@ async function errorHandlingExample(agentId) {
     const wallet = await lifecycle.createAgentWallet(agentId);
     logger.info({ msg: 'Wallet created', agentId });
     return wallet;
-
   } catch (error) {
     // Handle specific error types
     if (error.message.includes('already exists')) {
       logger.warn({ msg: 'Wallet already exists, retrieving existing wallet', agentId });
       return await lifecycle.getAgentWallet(agentId);
-
     } else if (error.message.includes('rate limit')) {
       logger.error({ msg: 'Rate limit exceeded', agentId });
       // Implement exponential backoff
-      await new Promise(resolve => setTimeout(resolve, 60000));
+      await new Promise((resolve) => setTimeout(resolve, 60000));
       throw error;
-
     } else if (error.message.includes('master-seed not found')) {
       logger.error({ msg: 'Master seed not initialized', agentId });
       throw new Error('System configuration error - contact administrator');
-
     } else {
       logger.error({ msg: 'Unknown wallet error', agentId, error: error.message });
       throw error;
@@ -257,22 +248,19 @@ async function batchWalletExample() {
     logger.info({ msg: 'Creating multiple wallets in parallel...', count: agentIds.length });
 
     // Create all wallets in parallel
-    const wallets = await Promise.all(
-      agentIds.map(id => lifecycle.createAgentWallet(id))
-    );
+    const wallets = await Promise.all(agentIds.map((id) => lifecycle.createAgentWallet(id)));
 
     logger.info({
       msg: 'Batch wallet creation complete',
       count: wallets.length,
-      wallets: wallets.map(w => ({
+      wallets: wallets.map((w) => ({
         agentId: w.agentId,
         evmAddress: w.evmAddress,
-        xrpAddress: w.xrpAddress
-      }))
+        xrpAddress: w.xrpAddress,
+      })),
     });
 
     return wallets;
-
   } catch (error) {
     logger.error({ msg: 'Batch wallet creation failed', error: error.message });
     throw error;
@@ -302,7 +290,6 @@ async function main() {
     await batchWalletExample();
 
     logger.info({ msg: 'All examples completed successfully' });
-
   } catch (error) {
     logger.error({ msg: 'Example execution failed', error: error.message });
     process.exit(1);
@@ -323,5 +310,5 @@ module.exports = {
   completeLifecycleExample,
   errorHandlingExample,
   batchWalletExample,
-  formatBalance
+  formatBalance,
 };
