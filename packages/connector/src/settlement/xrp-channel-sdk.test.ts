@@ -11,21 +11,18 @@ import type { Logger } from 'pino';
 import { XRPChannelSDK } from './xrp-channel-sdk';
 import type { PaymentChannelManager } from './xrp-channel-manager';
 import type { XRPClaim } from './types';
+import type { IXRPLClient } from './xrpl-client';
 
 describe('XRPChannelSDK', () => {
   let sdk: XRPChannelSDK;
-  let mockXRPLClient: {
-    address: string;
-    request: jest.Mock;
-    submitAndWait: jest.Mock;
-  };
+  let mockXRPLClient: jest.Mocked<Pick<IXRPLClient, 'address' | 'request' | 'submitAndWait'>>;
   let mockChannelManager: jest.Mocked<PaymentChannelManager>;
   let mockClaimSigner: {
     signClaim: jest.Mock;
     getPublicKey: jest.Mock;
     verifyClaim: jest.Mock;
   };
-  let mockLogger: jest.Mocked<Logger>;
+  let mockLogger: jest.Mocked<Pick<Logger, 'info' | 'error' | 'warn' | 'debug' | 'child'>>;
 
   beforeEach(() => {
     // Create fresh mock instances (Anti-Pattern 3 solution)
@@ -56,10 +53,9 @@ describe('XRPChannelSDK', () => {
       warn: jest.fn(),
       debug: jest.fn(),
       child: jest.fn().mockReturnThis(),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
+    };
 
-    sdk = new XRPChannelSDK(mockXRPLClient as any, mockChannelManager, mockClaimSigner, mockLogger);
+    sdk = new XRPChannelSDK(mockXRPLClient, mockChannelManager, mockClaimSigner, mockLogger);
   });
 
   afterEach(() => {

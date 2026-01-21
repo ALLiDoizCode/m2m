@@ -11,7 +11,7 @@ import { AgentBalanceTracker } from './agent-balance-tracker';
 import { AgentWalletDerivation, AgentWallet } from './agent-wallet-derivation';
 import { TelemetryEmitter } from '../telemetry/telemetry-emitter';
 import { ethers } from 'ethers';
-import { Client as XRPLClient } from 'xrpl';
+import { Client as XRPLClient, AccountInfoResponse } from 'xrpl';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -180,7 +180,7 @@ describe('AgentBalanceTracker', () => {
             Balance: '10000000', // 10 XRP in drops (1 XRP = 1,000,000 drops)
           },
         },
-      } as any);
+      } as AccountInfoResponse);
 
       tracker = new AgentBalanceTracker(
         mockWalletDerivation,
