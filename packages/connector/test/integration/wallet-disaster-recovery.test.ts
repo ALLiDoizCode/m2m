@@ -10,15 +10,17 @@
  * 5. Verification: Validate restored state matches original
  */
 
+/* eslint-disable no-console */
+
 import { WalletSeedManager } from '../../src/wallet/wallet-seed-manager';
 import { AgentWalletDerivation } from '../../src/wallet/agent-wallet-derivation';
-import { AgentWalletLifecycle, WalletState } from '../../src/wallet/agent-wallet-lifecycle';
+import { AgentWalletLifecycle } from '../../src/wallet/agent-wallet-lifecycle';
 import { AgentBalanceTracker } from '../../src/wallet/agent-balance-tracker';
 import { AgentWalletFunder } from '../../src/wallet/agent-wallet-funder';
 import { WalletBackupManager, BackupConfig } from '../../src/wallet/wallet-backup-manager';
 import { TelemetryEmitter } from '../../src/telemetry/telemetry-emitter';
 import { ethers } from 'ethers';
-import { Client as XRPLClient } from 'xrpl';
+import { Client as XRPLClient, Wallet as XRPLWallet } from 'xrpl';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -44,8 +46,8 @@ describe('Wallet Disaster Recovery Integration Test', () => {
   // Test data
   const testAgentIds = ['agent-001', 'agent-002', 'agent-003', 'agent-004', 'agent-005'];
   let backupFilePath: string;
-  let originalWallets: Map<string, any>;
-  let originalLifecycleRecords: Map<string, any>;
+  let originalWallets: Map<string, unknown>;
+  let originalLifecycleRecords: Map<string, unknown>;
 
   beforeAll(async () => {
     // Create temporary directory for test files
@@ -146,7 +148,7 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         balanceTracker,
         mockTelemetryEmitter,
         mockTreasuryWallet.evmSigner,
-        mockTreasuryWallet.xrpWallet as any,
+        mockTreasuryWallet.xrpWallet as XRPLWallet,
         { minimumEVMBalance: BigInt('100000000000000000'), minimumXRPBalance: BigInt('100000') }
       );
 
@@ -178,9 +180,19 @@ describe('Wallet Disaster Recovery Integration Test', () => {
       expect(originalLifecycleRecords.size).toBe(5);
 
       // Track activity for some agents
-      await lifecycleManager.recordActivity('agent-001', 'evm', 'ETH', BigInt('100000000000000000'));
+      await lifecycleManager.recordActivity(
+        'agent-001',
+        'evm',
+        'ETH',
+        BigInt('100000000000000000')
+      );
       await lifecycleManager.recordActivity('agent-002', 'xrp', 'XRP', BigInt('50000'));
-      await lifecycleManager.recordActivity('agent-003', 'evm', 'ETH', BigInt('200000000000000000'));
+      await lifecycleManager.recordActivity(
+        'agent-003',
+        'evm',
+        'ETH',
+        BigInt('200000000000000000')
+      );
 
       /**
        * PHASE 2: Backup - Create full backup of all wallet state
@@ -214,7 +226,9 @@ describe('Wallet Disaster Recovery Integration Test', () => {
       console.log(`Checksum: ${backup.checksum.slice(0, 16)}...`);
 
       // Find backup file
-      const backupFiles = fs.readdirSync(tempBackupPath).filter((f) => f.startsWith('wallet-backup-'));
+      const backupFiles = fs
+        .readdirSync(tempBackupPath)
+        .filter((f) => f.startsWith('wallet-backup-'));
       expect(backupFiles.length).toBeGreaterThan(0);
       backupFilePath = path.join(tempBackupPath, backupFiles[0]);
       console.log(`Backup file: ${backupFilePath}`);
@@ -267,7 +281,11 @@ describe('Wallet Disaster Recovery Integration Test', () => {
       });
       await newSeedManager.initialize();
 
-      const newWalletDerivation = new AgentWalletDerivation(newSeedManager, backupPassword, tempDbPath);
+      const newWalletDerivation = new AgentWalletDerivation(
+        newSeedManager,
+        backupPassword,
+        tempDbPath
+      );
 
       const newBalanceTracker = new AgentBalanceTracker(
         newWalletDerivation,
@@ -283,7 +301,7 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         newBalanceTracker,
         mockTelemetryEmitter,
         mockTreasuryWallet.evmSigner,
-        mockTreasuryWallet.xrpWallet as any,
+        mockTreasuryWallet.xrpWallet as XRPLWallet,
         { minimumEVMBalance: BigInt('100000000000000000'), minimumXRPBalance: BigInt('100000') }
       );
 
@@ -308,7 +326,9 @@ describe('Wallet Disaster Recovery Integration Test', () => {
 
       // Load backup from file
       const loadedBackup = await newBackupManager.loadBackupFromFile(backupFilePath);
-      console.log(`Loaded backup: version=${loadedBackup.version}, wallets=${loadedBackup.wallets.length}`);
+      console.log(
+        `Loaded backup: version=${loadedBackup.version}, wallets=${loadedBackup.wallets.length}`
+      );
 
       // Restore from backup
       await newBackupManager.restoreFromBackup(loadedBackup, backupPassword);
@@ -404,7 +424,7 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         balanceTracker,
         mockTelemetryEmitter,
         ethers.Wallet.createRandom(),
-        { classicAddress: 'rTest', seed: 'test' } as any,
+        { classicAddress: 'rTest', seed: 'test' } as XRPLWallet,
         {}
       );
 
@@ -472,7 +492,11 @@ describe('Wallet Disaster Recovery Integration Test', () => {
       });
       await newSeedManager.initialize();
 
-      const newWalletDerivation = new AgentWalletDerivation(newSeedManager, backupPassword, tempDbPath);
+      const newWalletDerivation = new AgentWalletDerivation(
+        newSeedManager,
+        backupPassword,
+        tempDbPath
+      );
       const newBalanceTracker = new AgentBalanceTracker(
         newWalletDerivation,
         mockEvmProvider,
@@ -486,7 +510,7 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         newBalanceTracker,
         mockTelemetryEmitter,
         ethers.Wallet.createRandom(),
-        { classicAddress: 'rTest', seed: 'test' } as any,
+        { classicAddress: 'rTest', seed: 'test' } as XRPLWallet,
         {}
       );
       const newLifecycleManager = new AgentWalletLifecycle(
@@ -555,7 +579,7 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         balanceTracker,
         mockTelemetryEmitter,
         ethers.Wallet.createRandom(),
-        { classicAddress: 'rTest', seed: 'test' } as any,
+        { classicAddress: 'rTest', seed: 'test' } as XRPLWallet,
         {}
       );
 

@@ -5,8 +5,15 @@
  * Comprehensive security testing validating all security controls against common attack vectors
  */
 
-import { WalletSecurityManager, SecurityConfig, SpendingLimitExceededError } from '../../src/wallet/wallet-security';
-import { WalletAuthenticationManager, UnauthorizedError } from '../../src/wallet/wallet-authentication';
+import {
+  WalletSecurityManager,
+  SecurityConfig,
+  SpendingLimitExceededError,
+} from '../../src/wallet/wallet-security';
+import {
+  WalletAuthenticationManager,
+  UnauthorizedError,
+} from '../../src/wallet/wallet-authentication';
 import { RateLimiter, RateLimitExceededError } from '../../src/wallet/rate-limiter';
 import { AuditLogger } from '../../src/wallet/audit-logger';
 import { SuspiciousActivityDetector } from '../../src/wallet/suspicious-activity-detector';
@@ -92,7 +99,8 @@ describe('Wallet Security Penetration Tests (Story 11.9 AC 10)', () => {
         evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
         xrpAddress: 'rN7n7otQDd6FczFgLdlqtyMVrn3z1v735',
         privateKey: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
-        mnemonic: 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+        mnemonic:
+          'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
       };
 
       // Attempt to sanitize for logging/API response
@@ -175,7 +183,11 @@ describe('Wallet Security Penetration Tests (Story 11.9 AC 10)', () => {
   describe('Attack Vector 4: Spending Limit Bypass (Fund Theft)', () => {
     it('should reject transaction exceeding max transaction size', async () => {
       // Attempt transaction of 2000 USDC (exceeds 1000 limit)
-      const isValid = await securityManager.validateTransaction('agent-pentest-001', BigInt(2000_000000), 'USDC');
+      const isValid = await securityManager.validateTransaction(
+        'agent-pentest-001',
+        BigInt(2000_000000),
+        'USDC'
+      );
 
       // Verify transaction rejected
       expect(isValid).toBe(false);
@@ -197,7 +209,11 @@ describe('Wallet Security Penetration Tests (Story 11.9 AC 10)', () => {
       );
 
       // Attempt transaction of 200 USDC (total 5100, exceeds 5000 daily limit)
-      const isValid = await testSecurityManager.validateTransaction('agent-pentest-001', BigInt(200_000000), 'USDC');
+      const isValid = await testSecurityManager.validateTransaction(
+        'agent-pentest-001',
+        BigInt(200_000000),
+        'USDC'
+      );
 
       // Verify transaction rejected
       expect(isValid).toBe(false);
@@ -219,7 +235,11 @@ describe('Wallet Security Penetration Tests (Story 11.9 AC 10)', () => {
       );
 
       // Attempt transaction of 300 USDC (total 50100, exceeds 50000 monthly limit)
-      const isValid = await testSecurityManager.validateTransaction('agent-pentest-001', BigInt(300_000000), 'USDC');
+      const isValid = await testSecurityManager.validateTransaction(
+        'agent-pentest-001',
+        BigInt(300_000000),
+        'USDC'
+      );
 
       // Verify transaction rejected
       expect(isValid).toBe(false);
@@ -254,7 +274,11 @@ describe('Wallet Security Penetration Tests (Story 11.9 AC 10)', () => {
       }
 
       // Attempt transaction with new token (XRP)
-      const isUnusual = detector.detectUnusualTransactions('agent-pentest-001', BigInt(1000_000000), 'XRP');
+      const isUnusual = detector.detectUnusualTransactions(
+        'agent-pentest-001',
+        BigInt(1000_000000),
+        'XRP'
+      );
 
       // Verify unusual activity detected
       expect(isUnusual).toBe(true);
@@ -263,11 +287,19 @@ describe('Wallet Security Penetration Tests (Story 11.9 AC 10)', () => {
     it('should detect statistical outliers', () => {
       // Record 20 transactions with mean ~1000 USDC
       for (let i = 0; i < 20; i++) {
-        detector.recordTransaction('agent-pentest-001', BigInt(1000_000000 + i * 10_000000), 'USDC');
+        detector.recordTransaction(
+          'agent-pentest-001',
+          BigInt(1000_000000 + i * 10_000000),
+          'USDC'
+        );
       }
 
       // Attempt transaction 100x larger (outlier)
-      const isUnusual = detector.detectUnusualTransactions('agent-pentest-001', BigInt(100000_000000), 'USDC');
+      const isUnusual = detector.detectUnusualTransactions(
+        'agent-pentest-001',
+        BigInt(100000_000000),
+        'USDC'
+      );
 
       // Verify outlier detected
       expect(isUnusual).toBe(true);
@@ -350,11 +382,19 @@ describe('Wallet Security Penetration Tests (Story 11.9 AC 10)', () => {
       await auditLogger.auditLog('wallet_funded', agentId, { amount: '1000000000' });
 
       // Step 6: Execute transaction (within spending limits)
-      const validTx = await securityManager.validateTransaction(agentId, BigInt(100_000000), 'USDC');
+      const validTx = await securityManager.validateTransaction(
+        agentId,
+        BigInt(100_000000),
+        'USDC'
+      );
       expect(validTx).toBe(true);
 
       // Step 7: Attempt to exceed spending limit
-      const invalidTx = await securityManager.validateTransaction(agentId, BigInt(2000_000000), 'USDC');
+      const invalidTx = await securityManager.validateTransaction(
+        agentId,
+        BigInt(2000_000000),
+        'USDC'
+      );
       expect(invalidTx).toBe(false); // Rejected (exceeds max transaction size)
 
       // Step 8: Simulate rapid funding (should trigger suspension)
