@@ -324,8 +324,10 @@ describe('Logger Configuration', () => {
 
       // Assert
       expect(sanitized.agentId).toBe('agent-001');
-      expect(sanitized.signer.address).toBe('0x1234567890123456789012345678901234567890');
-      expect(sanitized.signer.privateKey).toBe('[REDACTED]');
+      expect((sanitized.signer as Record<string, unknown>).address).toBe(
+        '0x1234567890123456789012345678901234567890'
+      );
+      expect((sanitized.signer as Record<string, unknown>).privateKey).toBe('[REDACTED]');
     });
 
     it('should not mutate original wallet object', () => {
