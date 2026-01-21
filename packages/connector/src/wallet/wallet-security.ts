@@ -128,9 +128,9 @@ export class WalletSecurityManager {
 
     // Also handle nested objects (e.g., wallet.signer.privateKey)
     if (sanitized.signer && typeof sanitized.signer === 'object') {
-      sanitized.signer = { ...sanitized.signer };
-      sanitized.signer.privateKey = undefined;
-      sanitized.signer.secret = undefined;
+      sanitized.signer = { ...(sanitized.signer as Record<string, unknown>) };
+      (sanitized.signer as Record<string, unknown>).privateKey = undefined;
+      (sanitized.signer as Record<string, unknown>).secret = undefined;
     }
 
     return sanitized;
@@ -180,7 +180,7 @@ export class WalletSecurityManager {
           AND json_extract(details, '$.token') = ?
       `);
 
-      const result = stmt.get(agentId, oneDayAgo, token);
+      const result = stmt.get(agentId, oneDayAgo, token) as { total: number | null } | undefined;
       return BigInt(result?.total ?? 0);
     } catch (error) {
       this.logger.warn({ error, agentId, token }, 'Failed to query daily spending');
@@ -215,7 +215,9 @@ export class WalletSecurityManager {
           AND json_extract(details, '$.token') = ?
       `);
 
-      const result = stmt.get(agentId, thirtyDaysAgo, token);
+      const result = stmt.get(agentId, thirtyDaysAgo, token) as
+        | { total: number | null }
+        | undefined;
       return BigInt(result?.total ?? 0);
     } catch (error) {
       this.logger.warn({ error, agentId, token }, 'Failed to query monthly spending');

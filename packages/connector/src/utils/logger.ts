@@ -78,9 +78,9 @@ export function sanitizeWalletForLogs(wallet: Record<string, unknown>): Record<s
 
   // Also handle nested objects (e.g., wallet.signer.privateKey)
   if (sanitized.signer && typeof sanitized.signer === 'object') {
-    sanitized.signer = { ...sanitized.signer };
-    sanitized.signer.privateKey = '[REDACTED]';
-    sanitized.signer.secret = '[REDACTED]';
+    sanitized.signer = { ...(sanitized.signer as Record<string, unknown>) };
+    (sanitized.signer as Record<string, unknown>).privateKey = '[REDACTED]';
+    (sanitized.signer as Record<string, unknown>).secret = '[REDACTED]';
   }
 
   return sanitized;

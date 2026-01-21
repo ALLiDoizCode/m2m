@@ -169,18 +169,18 @@ export class AuditLogger {
         LIMIT 1000
       `);
 
-      const rows = stmt.all(...params);
+      const rows = stmt.all(...params) as Record<string, unknown>[];
 
-      return rows.map((row: Record<string, unknown>) => ({
-        id: row.id,
-        timestamp: row.timestamp,
-        operation: row.operation,
-        agentId: row.agentId,
-        details: JSON.parse(row.details),
-        result: row.result,
-        ip: row.ip,
-        userAgent: row.userAgent,
-      }));
+      return rows.map((row) => ({
+        id: row.id as number,
+        timestamp: row.timestamp as number,
+        operation: row.operation as string,
+        agentId: row.agentId as string,
+        details: JSON.parse(row.details as string) as Record<string, unknown>,
+        result: row.result as 'success' | 'failure',
+        ip: row.ip as string | undefined,
+        userAgent: row.userAgent as string | undefined,
+      })) as AuditLogEntry[];
     } catch (error) {
       this.logger.error({ error }, 'Failed to query audit log');
       return [];
