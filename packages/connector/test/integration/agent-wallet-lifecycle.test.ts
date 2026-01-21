@@ -47,12 +47,26 @@ async function createTestMasterSeed(): Promise<MasterSeed> {
 
 // Helper to start Anvil
 function startAnvil(): child_process.ChildProcess {
-  // Start Anvil with auto-mining enabled (default) and block time of 0 for instant mining
-  const anvil = child_process.spawn('anvil', ['--port', '8545', '--block-time', '0'], {
-    detached: true,
-    stdio: 'ignore',
+  // Start Anvil with auto-mining enabled (instant mining by default)
+  const anvil = child_process.spawn('anvil', ['--port', '8545'], {
+    stdio: 'pipe',
   });
-  anvil.unref();
+
+  // Log Anvil output for debugging
+  anvil.stdout?.on('data', (data) => {
+    // Only log the "Listening on" message
+    const output = data.toString();
+    if (output.includes('Listening on')) {
+      // eslint-disable-next-line no-console
+      console.log('Anvil:', output.trim());
+    }
+  });
+
+  anvil.stderr?.on('data', (data) => {
+    // eslint-disable-next-line no-console
+    console.error('Anvil error:', data.toString());
+  });
+
   return anvil;
 }
 
@@ -60,7 +74,7 @@ function startAnvil(): child_process.ChildProcess {
 function stopAnvil(anvil: child_process.ChildProcess): void {
   if (anvil && anvil.pid) {
     try {
-      process.kill(-anvil.pid);
+      anvil.kill('SIGTERM');
     } catch (error) {
       // Ignore errors on cleanup
     }
@@ -68,17 +82,22 @@ function stopAnvil(anvil: child_process.ChildProcess): void {
 }
 
 // Helper to wait for Anvil to be ready
-async function waitForAnvil(provider: ethers.Provider, maxAttempts = 20): Promise<void> {
+async function waitForAnvil(provider: ethers.Provider, maxAttempts = 30): Promise<void> {
+  // Give Anvil a moment to start
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+
   for (let i = 0; i < maxAttempts; i++) {
     try {
       await provider.getBlockNumber();
+      // eslint-disable-next-line no-console
+      console.log('Anvil is ready!');
       return;
     } catch (error) {
-      // Wait longer in CI environments
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Wait between attempts
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }
-  throw new Error('Anvil not ready after 20 attempts');
+  throw new Error(`Anvil not ready after ${maxAttempts} attempts`);
 }
 
 // These tests require Anvil (Foundry's local Ethereum node)
@@ -333,13 +352,29 @@ describeIfAnvil('Agent Wallet Lifecycle Integration', () => {
     }
 
     // Wait for balance tracking and transaction confirmations
-    // CI environments may need more time for block confirmations
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-
-    // Verify all agents have balances on-chain
+    // Check each wallet's balance with retries since concurrent transactions may take time to mine
     for (const agentId of agents) {
       const wallet = await walletDerivation.getAgentWallet(agentId);
-      const balance = await evmProvider.getBalance(wallet!.evmAddress);
+
+      // Retry balance check up to 15 times (15 seconds total)
+      let balance = 0n;
+      for (let i = 0; i < 15; i++) {
+        balance = await evmProvider.getBalance(wallet!.evmAddress);
+        if (balance > 0n) {
+          // eslint-disable-next-line no-console
+          console.log(`${agentId}: Balance confirmed (${balance.toString()} wei)`);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      if (balance === 0n) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `${agentId}: Still has 0 balance after 15 retries (address: ${wallet!.evmAddress})`
+        );
+      }
+
       expect(balance).toBeGreaterThan(0n);
     }
 
@@ -361,7 +396,7 @@ describeIfAnvil('Agent Wallet Lifecycle Integration', () => {
         'No lifecycle record for agent'
       );
     }
-  }, 90000);
+  }, 120000);
 
   it('should persist lifecycle state across restarts', async () => {
     const agentId = 'agent-persistence-001';

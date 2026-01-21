@@ -39,8 +39,10 @@ M2M provides a complete ILP routing infrastructure for learning and testing mult
 ### Key Features
 
 - **ILP Connector**: RFC-compliant ILPv4 packet routing with BTP WebSocket protocol for connector-to-connector communication
-- **Network Dashboard**: Real-time visualization of packet flows, routing topology, connector telemetry, and structured logs
-- **Docker Compose Topologies**: Pre-configured multi-node networks (linear chain, full mesh, hub-spoke, complex 8-node)
+- **Dual-Settlement Support**: EVM payment channels (Epic 8) and XRP payment channels (Epic 9) with automatic routing based on token type
+- **XRP Settlement**: Complete XRP Ledger integration with payment channel lifecycle management, off-chain claim signing, and dashboard visualization
+- **Network Dashboard**: Real-time visualization of packet flows, routing topology, connector telemetry, structured logs, and settlement channels (EVM + XRP)
+- **Docker Compose Topologies**: Pre-configured multi-node networks (linear chain, full mesh, hub-spoke, complex 8-node) with local rippled for XRP development
 - **Test Packet Sender**: CLI utility for injecting test packets into the network without external dependencies
 - **Structured Logging**: Filterable log viewer in dashboard for debugging multi-node networks with live telemetry
 - **Configuration Flexibility**: YAML-based topology configuration with validation for custom network designs
@@ -629,6 +631,105 @@ docker-compose ps
 # If containers show "unhealthy", view logs
 docker-compose logs dashboard
 ```
+
+## XRP Settlement
+
+M2M supports XRP Ledger payment channels for settlement operations with dual-settlement routing (EVM + XRP). The connector automatically routes settlements based on token type and peer configuration.
+
+### Quick Start: XRP Development
+
+Start the local rippled instance (from Epic 7) and connector with XRP settlement enabled:
+
+```bash
+# Start local rippled (standalone mode, instant finality)
+docker-compose -f docker-compose-dev.yml up rippled
+
+# Verify rippled is running
+curl -X POST http://localhost:5005 \
+  -H 'Content-Type: application/json' \
+  -d '{"method": "server_info"}'
+```
+
+### XRP Environment Configuration
+
+Add XRP configuration to `packages/connector/.env`:
+
+```bash
+# XRP Ledger Configuration
+XRPL_WSS_URL=ws://localhost:6006              # Local development
+# XRPL_WSS_URL=wss://s.altnet.rippletest.net:51233  # Testnet
+# XRPL_WSS_URL=wss://xrplcluster.com                # Mainnet
+
+XRPL_ACCOUNT_SECRET=sEdV...                  # Your account secret
+XRPL_ACCOUNT_ADDRESS=rN7n7o...               # Your account address (r-address)
+XRPL_CLAIM_SIGNER_SEED=sEdTM1...             # Optional: deterministic claim signer seed
+```
+
+### Dual-Settlement Peer Configuration
+
+Configure peers with settlement preferences in `config.yaml`:
+
+```yaml
+peers:
+  - id: peer-alice
+    ilpAddress: g.alice.connector
+    settlementPreference: both # 'evm' | 'xrp' | 'both'
+    settlementTokens:
+      - XRP # Prefer XRP first
+      - USDC # Fallback to USDC
+    evmAddress: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0
+    xrpAddress: rLHzPsX6oXkzU9rFkRaYT8yBqJcQwPgHWN
+    settlementThreshold: 1000000000 # 1000 XRP in drops
+    settlementInterval: 3600000 # 1 hour
+```
+
+**Settlement Routing Logic:**
+
+- `tokenId === 'XRP'` + `settlementPreference: 'xrp' | 'both'` → XRP settlement via PaymentChannelManager
+- `tokenId !== 'XRP'` (ERC20) + `settlementPreference: 'evm' | 'both'` → EVM settlement via PaymentChannelSDK
+- Incompatible combinations throw error
+
+### XRP Channel Lifecycle Management
+
+The `XRPChannelLifecycleManager` automates channel operations:
+
+```typescript
+const lifecycleConfig = {
+  enabled: true,
+  initialChannelAmount: '10000000000', // 10,000 XRP
+  defaultSettleDelay: 86400, // 24 hours
+  idleChannelThreshold: 86400, // Close after 24h idle
+  minBalanceThreshold: 0.3, // Fund when < 30% remaining
+  cancelAfter: 2592000, // Auto-expire after 30 days
+};
+```
+
+**Automatic Lifecycle Events (Every 1 Hour):**
+
+- Idle detection: Closes channels with no activity for `idleChannelThreshold` seconds
+- Expiration handling: Closes channels within 1 hour of `cancelAfter` timestamp
+- Funding checks: Funds channels when balance falls below `minBalanceThreshold`
+
+### Dashboard XRP Visualization
+
+The dashboard displays XRP payment channels with:
+
+- **Settlement Filter**: Filter by settlement type (EVM, XRP, or All)
+- **XRP Badges**: Orange badges indicating XRP settlement
+- **XRP Tooltips**: Hover tooltips showing drops, settle delay, and remaining balance
+- **Channel Timeline**: Visual timeline of XRP channel lifecycle events
+
+Access dashboard at `http://localhost:8080` and use the settlement type filter to view XRP channels.
+
+### Documentation
+
+For complete XRP settlement documentation, see:
+
+- [XRP Payment Channels Setup Guide](docs/guides/xrp-payment-channels-setup.md)
+- [XRP Channel SDK API Reference](docs/api/xrp-channel-sdk.md)
+- [Unified Settlement Executor API Reference](docs/api/unified-settlement-executor.md)
+- [XRP Channel Lifecycle Manager API Reference](docs/api/xrp-channel-lifecycle-manager.md)
+- [Production XRP Deployment Checklist](docs/deployment/production-xrp-checklist.md)
 
 ### Development Mode
 

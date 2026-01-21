@@ -8,6 +8,7 @@ import type { DashboardChannelState } from '@m2m/shared';
 import { ChannelCard } from './ChannelCard';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Input } from './ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
 export interface PaymentChannelsPanelProps {
   /** List of payment channels to display */
@@ -20,17 +21,22 @@ export interface PaymentChannelsPanelProps {
 export const PaymentChannelsPanel = ({ channels }: PaymentChannelsPanelProps): JSX.Element => {
   const [filterPeer, setFilterPeer] = useState<string>('');
   const [filterToken, setFilterToken] = useState<string>('');
+  const [filterSettlement, setFilterSettlement] = useState<string>('all');
 
-  // Filter channels based on peer and token filters
+  // Filter channels based on peer, token, and settlement type filters
   const filteredChannels = useMemo(() => {
     return channels.filter((channel) => {
       const peerMatch =
         !filterPeer || channel.peerId.toLowerCase().includes(filterPeer.toLowerCase());
       const tokenMatch =
         !filterToken || channel.tokenSymbol.toLowerCase().includes(filterToken.toLowerCase());
-      return peerMatch && tokenMatch;
+      const settlementMatch =
+        filterSettlement === 'all' ||
+        (filterSettlement === 'evm' && channel.settlementMethod === 'evm') ||
+        (filterSettlement === 'xrp' && channel.settlementMethod === 'xrp');
+      return peerMatch && tokenMatch && settlementMatch;
     });
-  }, [channels, filterPeer, filterToken]);
+  }, [channels, filterPeer, filterToken, filterSettlement]);
 
   return (
     <Card>
@@ -54,6 +60,16 @@ export const PaymentChannelsPanel = ({ channels }: PaymentChannelsPanelProps): J
             onChange={(e) => setFilterToken(e.target.value)}
             className="flex-1"
           />
+          <Select value={filterSettlement} onValueChange={setFilterSettlement}>
+            <SelectTrigger className="w-[180px]">
+              <SelectValue placeholder="All Settlements" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="evm">EVM Only</SelectItem>
+              <SelectItem value="xrp">XRP Only</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Channel list */}

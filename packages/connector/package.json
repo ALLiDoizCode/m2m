@@ -28,7 +28,7 @@
     "tigerbeetle-node": "^0.16.67",
     "tslib": "^2.8.1",
     "ws": "^8.16.0",
-    "xrpl": "^4.5.0"
+    "xrpl": "^2.14.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

@@ -5,6 +5,7 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src', '<rootDir>/test'],
   testMatch: ['**/*.test.ts'],
+  testTimeout: 30000, // 30 second default timeout for integration tests
   collectCoverageFrom: [
     'src/**/*.ts',
     '!src/**/*.d.ts',

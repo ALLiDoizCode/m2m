@@ -53,6 +53,12 @@ export enum TelemetryEventType {
   PAYMENT_CHANNEL_BALANCE_UPDATE = 'PAYMENT_CHANNEL_BALANCE_UPDATE',
   /** Payment channel settled event - emitted when channel settlement completes on-chain (Story 8.10) */
   PAYMENT_CHANNEL_SETTLED = 'PAYMENT_CHANNEL_SETTLED',
+  /** XRP payment channel opened event - emitted when XRP channel created on-ledger (Story 9.7) */
+  XRP_CHANNEL_OPENED = 'XRP_CHANNEL_OPENED',
+  /** XRP payment channel claimed event - emitted when XRP claim submitted to ledger (Story 9.7) */
+  XRP_CHANNEL_CLAIMED = 'XRP_CHANNEL_CLAIMED',
+  /** XRP payment channel closed event - emitted when XRP channel closure initiated (Story 9.7) */
+  XRP_CHANNEL_CLOSED = 'XRP_CHANNEL_CLOSED',
 }
 
 /**
@@ -491,6 +497,240 @@ export interface AgentWalletStateChangedEvent {
 }
 
 /**
+ * XRP Channel Opened Telemetry Event
+ *
+ * Emitted when XRPChannelSDK.openChannel() successfully creates payment channel.
+ * Indicates XRP payment channel has been created on the XRP Ledger.
+ *
+ * **BigInt Serialization:** All XRP amount fields are strings (bigint serialized for JSON).
+ * XRP amounts stored in "drops" (1 XRP = 1,000,000 drops).
+ *
+ * **Dashboard Usage:**
+ * - PaymentChannelsPanel displays XRP channels with orange badge
+ * - ChannelTimeline shows channel opened event
+ * - NetworkGraph displays XRP channel indicator
+ *
+ * @example
+ * ```typescript
+ * const event: XRPChannelOpenedEvent = {
+ *   type: 'XRP_CHANNEL_OPENED',
+ *   timestamp: '2026-01-12T12:00:00.000Z',
+ *   nodeId: 'connector-a',
+ *   channelId: 'A1B2C3D4E5F6789...',
+ *   account: 'rN7n7otQDd6FczFgLdlqtyMVrn3HMfXEEW',
+ *   destination: 'rLHzPsX6oXkzU9rFkRaYT8yBqJcQwPgHWN',
+ *   amount: '10000000000',
+ *   settleDelay: 86400,
+ *   publicKey: 'ED01234567890ABCDEF...',
+ *   peerId: 'peer-bob'
+ * };
+ * ```
+ */
+export interface XRPChannelOpenedEvent {
+  /**
+   * Event type discriminator
+   */
+  type: 'XRP_CHANNEL_OPENED';
+
+  /**
+   * Event timestamp (ISO 8601 format)
+   * Format: '2026-01-12T12:00:00.000Z'
+   */
+  timestamp: string;
+
+  /**
+   * Connector node ID emitting event
+   * Example: 'connector-a'
+   */
+  nodeId: string;
+
+  /**
+   * XRP payment channel identifier (transaction hash)
+   * Format: 64-character hex string
+   * Example: 'A1B2C3D4E5F6...'
+   */
+  channelId: string;
+
+  /**
+   * Source account (channel sender, us)
+   * Format: XRP Ledger r-address
+   * Example: 'rN7n7otQDd6FczFgLdlqtyMVrn3HMfXEEW'
+   */
+  account: string;
+
+  /**
+   * Destination account (channel recipient, peer)
+   * Format: XRP Ledger r-address
+   * Example: 'rLHzPsX6oXkzU9rFkRaYT8yBqJcQwPgHWN'
+   */
+  destination: string;
+
+  /**
+   * Total XRP deposited in channel (drops)
+   * Format: String for bigint precision
+   * Example: '10000000000' = 10,000 XRP (1 XRP = 1,000,000 drops)
+   */
+  amount: string;
+
+  /**
+   * Settlement delay in seconds
+   * Example: 86400 (24 hours)
+   */
+  settleDelay: number;
+
+  /**
+   * ed25519 public key for claim signature verification
+   * Format: 66-character hex string (ED prefix + 64 hex)
+   * Example: 'ED01234567890ABCDEF...'
+   */
+  publicKey: string;
+
+  /**
+   * Peer identifier from connector configuration
+   * Example: 'peer-bob'
+   */
+  peerId?: string;
+}
+
+/**
+ * XRP Channel Claimed Telemetry Event
+ *
+ * Emitted when XRPChannelSDK.submitClaim() redeems XRP from channel.
+ * Indicates XRP has been claimed from the payment channel on the XRP Ledger.
+ *
+ * **BigInt Serialization:** All XRP amount fields are strings (bigint serialized for JSON).
+ *
+ * **Dashboard Usage:**
+ * - ChannelTimeline shows claim submission event
+ * - PaymentChannelsPanel updates XRP channel balance
+ *
+ * @example
+ * ```typescript
+ * const event: XRPChannelClaimedEvent = {
+ *   type: 'XRP_CHANNEL_CLAIMED',
+ *   timestamp: '2026-01-12T12:05:00.000Z',
+ *   nodeId: 'connector-a',
+ *   channelId: 'A1B2C3D4E5F6789...',
+ *   claimAmount: '5000000000',
+ *   remainingBalance: '5000000000',
+ *   peerId: 'peer-bob'
+ * };
+ * ```
+ */
+export interface XRPChannelClaimedEvent {
+  /**
+   * Event type discriminator
+   */
+  type: 'XRP_CHANNEL_CLAIMED';
+
+  /**
+   * Event timestamp (ISO 8601 format)
+   */
+  timestamp: string;
+
+  /**
+   * Connector node ID emitting event
+   */
+  nodeId: string;
+
+  /**
+   * XRP payment channel identifier (transaction hash)
+   * Format: 64-character hex string
+   */
+  channelId: string;
+
+  /**
+   * XRP claimed in this claim transaction (cumulative drops)
+   * Format: String for bigint precision
+   * Example: '5000000000' = 5,000 XRP claimed total
+   */
+  claimAmount: string;
+
+  /**
+   * XRP remaining in channel after claim (drops)
+   * Format: String for bigint precision
+   * Calculation: channel.amount - claimAmount
+   * Example: '5000000000' = 5,000 XRP remaining
+   */
+  remainingBalance: string;
+
+  /**
+   * Peer identifier from connector configuration
+   * Example: 'peer-bob'
+   */
+  peerId?: string;
+}
+
+/**
+ * XRP Channel Closed Telemetry Event
+ *
+ * Emitted when XRPChannelSDK.closeChannel() initiates or finalizes closure.
+ * Indicates XRP payment channel closure has been initiated on the XRP Ledger.
+ *
+ * **BigInt Serialization:** All XRP amount fields are strings (bigint serialized for JSON).
+ *
+ * **Dashboard Usage:**
+ * - ChannelTimeline shows channel closed event
+ * - PaymentChannelsPanel marks channel as settled
+ *
+ * @example
+ * ```typescript
+ * const event: XRPChannelClosedEvent = {
+ *   type: 'XRP_CHANNEL_CLOSED',
+ *   timestamp: '2026-01-12T12:10:00.000Z',
+ *   nodeId: 'connector-a',
+ *   channelId: 'A1B2C3D4E5F6789...',
+ *   finalBalance: '5000000000',
+ *   closeType: 'cooperative',
+ *   peerId: 'peer-bob'
+ * };
+ * ```
+ */
+export interface XRPChannelClosedEvent {
+  /**
+   * Event type discriminator
+   */
+  type: 'XRP_CHANNEL_CLOSED';
+
+  /**
+   * Event timestamp (ISO 8601 format)
+   */
+  timestamp: string;
+
+  /**
+   * Connector node ID emitting event
+   */
+  nodeId: string;
+
+  /**
+   * XRP payment channel identifier (transaction hash)
+   * Format: 64-character hex string
+   */
+  channelId: string;
+
+  /**
+   * Final XRP distributed when channel closed (drops)
+   * Format: String for bigint precision
+   * Example: '5000000000' = 5,000 XRP distributed to destination
+   */
+  finalBalance: string;
+
+  /**
+   * Channel closure method
+   * - 'cooperative': Both parties agreed to close (closeChannel())
+   * - 'expiration': Channel auto-expired via CancelAfter timestamp
+   * - 'unilateral': One party closed during settle delay
+   */
+  closeType: 'cooperative' | 'expiration' | 'unilateral';
+
+  /**
+   * Peer identifier from connector configuration
+   * Example: 'peer-bob'
+   */
+  peerId?: string;
+}
+
+/**
  * Telemetry Event Union Type
  *
  * Discriminated union of all telemetry event types.
@@ -527,6 +767,15 @@ export interface AgentWalletStateChangedEvent {
  *     case 'PAYMENT_CHANNEL_SETTLED':
  *       console.log(`Payment channel settled: ${event.channelId} via ${event.settlementType}`);
  *       break;
+ *     case 'XRP_CHANNEL_OPENED':
+ *       console.log(`XRP channel opened: ${event.channelId} to ${event.destination}`);
+ *       break;
+ *     case 'XRP_CHANNEL_CLAIMED':
+ *       console.log(`XRP channel claimed: ${event.channelId} amount ${event.claimAmount}`);
+ *       break;
+ *     case 'XRP_CHANNEL_CLOSED':
+ *       console.log(`XRP channel closed: ${event.channelId} via ${event.closeType}`);
+ *       break;
  *     default:
  *       console.log(`Unknown event type: ${event.type}`);
  *   }
@@ -545,4 +794,7 @@ export type TelemetryEvent =
   | AgentWalletStateChangedEvent
   | PaymentChannelOpenedEvent
   | PaymentChannelBalanceUpdateEvent
-  | PaymentChannelSettledEvent;
+  | PaymentChannelSettledEvent
+  | XRPChannelOpenedEvent
+  | XRPChannelClaimedEvent
+  | XRPChannelClosedEvent;

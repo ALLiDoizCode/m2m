@@ -204,6 +204,98 @@
 
 **Technology Stack:** Node.js CLI script, TypeScript compiled to executable
 
+## XRPChannelSDK
+
+**Responsibility:** High-level SDK for XRP payment channel lifecycle management. Consolidates XRPLClient, PaymentChannelManager, and ClaimSigner into unified API with automatic state caching.
+
+**Key Interfaces:**
+
+- `openChannel(destination: string, amount: string, settleDelay: number): Promise<string>` - Create new XRP channel
+- `fundChannel(channelId: string, additionalAmount: string): Promise<void>` - Add XRP to existing channel
+- `signClaim(channelId: string, amount: string): Promise<XRPClaim>` - Sign claim off-chain
+- `verifyClaim(claim: XRPClaim): Promise<boolean>` - Verify claim signature
+- `submitClaim(claim: XRPClaim): Promise<void>` - Submit claim to ledger
+- `closeChannel(channelId: string): Promise<void>` - Close channel cooperatively
+- `getChannelState(channelId: string): Promise<XRPChannelState>` - Query ledger for channel state
+- `startAutoRefresh(): void` - Start automatic channel state refresh (30s interval)
+- `stopAutoRefresh(): void` - Stop automatic refresh
+
+**Dependencies:**
+
+- XRPLClient (ledger interactions)
+- PaymentChannelManager (channel operations)
+- ClaimSigner (off-chain signatures)
+- TelemetryEmitter (optional, dashboard integration)
+- Logger
+
+**Technology Stack:** TypeScript, xrpl.js library, Map-based state cache, 30-second auto-refresh interval
+
+## UnifiedSettlementExecutor
+
+**Responsibility:** Routes settlement operations to appropriate settlement method (EVM or XRP) based on peer configuration and token type. Listens for SETTLEMENT_REQUIRED events and determines whether to settle via EVM payment channels or XRP payment channels.
+
+**Key Interfaces:**
+
+- `start(): void` - Start settlement executor (register event listeners)
+- `stop(): void` - Stop settlement executor (unregister event listeners)
+- `handleSettlement(event: SettlementRequiredEvent): Promise<void>` - Private method handling settlement routing
+
+**Settlement Routing Logic:**
+
+```typescript
+// XRP token + peer supports XRP → XRP settlement
+if (tokenId === 'XRP' && canUseXRP) {
+  await settleViaXRP(peerId, amount, peerConfig);
+}
+// ERC20 token + peer supports EVM → EVM settlement
+else if (tokenId !== 'XRP' && canUseEVM) {
+  await settleViaEVM(peerId, amount, tokenAddress, peerConfig);
+}
+// Incompatible combination → Error
+else {
+  throw new Error(`No compatible settlement method`);
+}
+```
+
+**Dependencies:**
+
+- PaymentChannelSDK (EVM settlements, Epic 8)
+- PaymentChannelManager (XRP settlements, Epic 9)
+- ClaimSigner (XRP claim generation)
+- SettlementMonitor (emits SETTLEMENT_REQUIRED events)
+- AccountManager (TigerBeetle balance updates)
+- Logger
+
+**Technology Stack:** TypeScript event-driven architecture, integrates with TigerBeetle accounting layer
+
+## XRPChannelLifecycleManager
+
+**Responsibility:** Manages automatic XRP payment channel lifecycle: opens channels when first settlement needed, funds channels when balance low, closes idle channels, handles expiration-based closures.
+
+**Key Interfaces:**
+
+- `start(): Promise<void>` - Start lifecycle manager (begin periodic checks)
+- `stop(): void` - Stop lifecycle manager (clear timers)
+- `getOrCreateChannel(peerId: string, destination: string): Promise<string>` - Get existing or create new channel
+- `updateChannelActivity(peerId: string, claimAmount: string): void` - Update activity timestamp
+- `needsFunding(peerId: string): boolean` - Check if channel needs funding
+- `fundChannel(peerId: string, additionalAmount: string): Promise<void>` - Fund existing channel
+- `closeChannel(peerId: string, reason: 'idle' | 'expiration' | 'manual'): Promise<void>` - Close channel
+- `getChannelForPeer(peerId: string): XRPChannelTrackingState | null` - Get tracked state
+
+**Automatic Lifecycle Events (every 1 hour):**
+
+- Idle detection: Close channels with no activity for `idleChannelThreshold` seconds
+- Expiration handling: Close channels within 1 hour of `cancelAfter` timestamp
+- Funding checks: Monitor balance and fund when below `minBalanceThreshold`
+
+**Dependencies:**
+
+- XRPChannelSDK (channel operations)
+- Logger
+
+**Technology Stack:** TypeScript, Map-based channel tracking, 1-hour periodic checks via setInterval
+
 ## Component Diagrams
 
 ```mermaid
