@@ -465,8 +465,10 @@ describeIfEnabled('Agent Channel Integration Test', () => {
     }, 60000); // 60s timeout for concurrent operations
 
     it('should restore channel state from database on restart', async () => {
-      // Create and activate agent
+      // Create and activate agents (including peers for channel opening)
       await lifecycleManager.createAgentWallet(AGENT_001_ID);
+      await lifecycleManager.createAgentWallet(AGENT_002_ID);
+      await lifecycleManager.createAgentWallet('agent-003');
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
       // Open 2 channels
