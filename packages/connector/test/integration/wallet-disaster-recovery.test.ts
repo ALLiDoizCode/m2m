@@ -27,6 +27,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+interface StoredWalletInfo {
+  agentId: string;
+  evmAddress: string;
+  xrpAddress: string;
+  derivationIndex: number;
+}
+
+interface StoredLifecycleRecord {
+  agentId: string;
+  state: string;
+  totalTransactions: number;
+}
+
 describe('Wallet Disaster Recovery Integration Test', () => {
   let tempDir: string;
   let tempDbPath: string;
@@ -48,8 +61,8 @@ describe('Wallet Disaster Recovery Integration Test', () => {
   // Test data
   const testAgentIds = ['agent-001', 'agent-002', 'agent-003', 'agent-004', 'agent-005'];
   let backupFilePath: string;
-  let originalWallets: Map<string, unknown>;
-  let originalLifecycleRecords: Map<string, unknown>;
+  let originalWallets: Map<string, StoredWalletInfo>;
+  let originalLifecycleRecords: Map<string, StoredLifecycleRecord>;
 
   beforeAll(async () => {
     // Create temporary directory for test files
@@ -229,7 +242,11 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         .readdirSync(tempBackupPath)
         .filter((f) => f.startsWith('wallet-backup-'));
       expect(backupFiles.length).toBeGreaterThan(0);
-      backupFilePath = path.join(tempBackupPath, backupFiles[0]);
+      const backupFileName = backupFiles[0];
+      if (!backupFileName) {
+        throw new Error('No backup file found');
+      }
+      backupFilePath = path.join(tempBackupPath, backupFileName);
       console.log(`Backup file: ${backupFilePath}`);
 
       // Verify backup file exists
@@ -349,10 +366,11 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         const originalWallet = originalWallets.get(agentId);
 
         expect(restoredWallet).toBeDefined();
-        expect(restoredWallet!.agentId).toBe(originalWallet.agentId);
-        expect(restoredWallet!.evmAddress).toBe(originalWallet.evmAddress);
-        expect(restoredWallet!.xrpAddress).toBe(originalWallet.xrpAddress);
-        expect(restoredWallet!.derivationIndex).toBe(originalWallet.derivationIndex);
+        expect(originalWallet).toBeDefined();
+        expect(restoredWallet!.agentId).toBe(originalWallet!.agentId);
+        expect(restoredWallet!.evmAddress).toBe(originalWallet!.evmAddress);
+        expect(restoredWallet!.xrpAddress).toBe(originalWallet!.xrpAddress);
+        expect(restoredWallet!.derivationIndex).toBe(originalWallet!.derivationIndex);
 
         console.log(`✅ ${agentId}: Wallet addresses match`);
       }
@@ -363,8 +381,9 @@ describe('Wallet Disaster Recovery Integration Test', () => {
         const originalRecord = originalLifecycleRecords.get(agentId);
 
         expect(restoredRecord).toBeDefined();
-        expect(restoredRecord!.agentId).toBe(originalRecord.agentId);
-        expect(restoredRecord!.state).toBe(originalRecord.state);
+        expect(originalRecord).toBeDefined();
+        expect(restoredRecord!.agentId).toBe(originalRecord!.agentId);
+        expect(restoredRecord!.state).toBe(originalRecord!.state);
 
         console.log(`✅ ${agentId}: Lifecycle state=${restoredRecord!.state}`);
       }
