@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build packages
+        run: npm run build
+
       - name: Start docker-compose-dev infrastructure
         run: |
           echo "Starting Anvil (Base L2), rippled (XRP Ledger), and TigerBeetle..."
