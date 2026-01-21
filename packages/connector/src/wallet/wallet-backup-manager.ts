@@ -13,7 +13,7 @@ import { promises as fs } from 'fs';
 import pino from 'pino';
 import cron from 'node-cron';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { WalletSeedManager, MasterSeed } from './wallet-seed-manager';
+import { WalletSeedManager, BackupData } from './wallet-seed-manager';
 import { AgentWalletDerivation, AgentWallet } from './agent-wallet-derivation';
 import { AgentWalletLifecycle, WalletLifecycleRecord } from './agent-wallet-lifecycle';
 import { AgentBalanceTracker, AgentBalance } from './agent-balance-tracker';
@@ -126,9 +126,9 @@ export class WalletBackupManager {
    * Get most recent backup metadata
    * @returns Last backup metadata or null if no backups exist
    */
-  private getLastBackup(): BackupMetadata | null {
+  private getLastBackup(): BackupMetadata | undefined {
     if (this.backupHistory.length === 0) {
-      return null;
+      return undefined;
     }
     // Sort by timestamp descending and return first
     const sorted = [...this.backupHistory].sort((a, b) => b.timestamp - a.timestamp);
@@ -196,9 +196,7 @@ export class WalletBackupManager {
       // Export balance snapshots for all wallets
       const balanceSnapshots: Record<string, AgentBalance[]> = {};
       for (const wallet of wallets) {
-        balanceSnapshots[wallet.agentId] = await this.balanceTracker.getAllBalances(
-          wallet.agentId
-        );
+        balanceSnapshots[wallet.agentId] = await this.balanceTracker.getAllBalances(wallet.agentId);
       }
 
       // Create backup object
@@ -258,9 +256,7 @@ export class WalletBackupManager {
       // Export balance snapshots for changed wallets only
       const balanceSnapshots: Record<string, AgentBalance[]> = {};
       for (const wallet of changedWallets) {
-        balanceSnapshots[wallet.agentId] = await this.balanceTracker.getAllBalances(
-          wallet.agentId
-        );
+        balanceSnapshots[wallet.agentId] = await this.balanceTracker.getAllBalances(wallet.agentId);
       }
 
       // Create incremental backup object
@@ -448,25 +444,21 @@ export class WalletBackupManager {
    * @param password - Password for decryption
    * @returns Plaintext mnemonic
    */
-  private async decryptSeedFromBackup(
-    encryptedSeed: string,
-    password: string
-  ): Promise<string> {
+  private async decryptSeedFromBackup(encryptedSeed: string, password: string): Promise<string> {
     // The encryptedSeed from backup is the same format as stored by WalletSeedManager
-    // We can use the decryptAndLoad method after temporarily storing it
-    // For simplicity, we'll use the importBackup method from WalletSeedManager
-    // which handles decryption internally
+    // We can use the restoreFromBackup method from WalletSeedManager
+    // which handles decryption and validation internally
 
-    // Create a minimal BackupData object for importBackup
-    const backupData = {
+    // Create a BackupData object for restoreFromBackup
+    const backupData: BackupData = {
       version: '1.0',
       createdAt: Date.now(),
       encryptedSeed,
       backupDate: Date.now(),
-      checksum: '', // Not validated in importBackup
+      checksum: '', // Checksum will be calculated by WalletSeedManager
     };
 
-    const masterSeed = await this.seedManager.importBackup(backupData, password);
+    const masterSeed = await this.seedManager.restoreFromBackup(backupData, password);
     return masterSeed.mnemonic;
   }
 
@@ -475,9 +467,7 @@ export class WalletBackupManager {
    * Task 6: Implement Balance Reconciliation (AC: 8)
    * @param snapshots - Balance snapshots from backup
    */
-  private async reconcileBalances(
-    snapshots: Record<string, AgentBalance[]>
-  ): Promise<void> {
+  private async reconcileBalances(snapshots: Record<string, AgentBalance[]>): Promise<void> {
     try {
       logger.info('Reconciling on-chain balances', {
         agentCount: Object.keys(snapshots).length,
@@ -509,10 +499,7 @@ export class WalletBackupManager {
             }
           }
         } catch (error) {
-          logger.error(
-            { agentId, error },
-            'Failed to reconcile balances for agent'
-          );
+          logger.error({ agentId, error }, 'Failed to reconcile balances for agent');
         }
       }
 
