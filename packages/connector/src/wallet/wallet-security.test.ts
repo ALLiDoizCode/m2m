@@ -229,7 +229,7 @@ describe('WalletSecurityManager', () => {
 
     it('should query database for daily spending', async () => {
       const mockGet = jest.fn().mockReturnValue({ total: 1000_000000 }); // 1000 USDC
-      mockDb.prepare.mockReturnValue({ get: mockGet });
+      (mockDb.prepare as jest.Mock).mockReturnValue({ get: mockGet });
 
       const dailySpending = await securityManager.getDailySpending('agent-001', 'USDC');
 
@@ -239,7 +239,7 @@ describe('WalletSecurityManager', () => {
     });
 
     it('should return 0 on database query error', async () => {
-      mockDb.prepare.mockImplementation(() => {
+      (mockDb.prepare as jest.Mock).mockImplementation(() => {
         throw new Error('Database error');
       });
 
@@ -266,7 +266,7 @@ describe('WalletSecurityManager', () => {
 
     it('should query database for monthly spending', async () => {
       const mockGet = jest.fn().mockReturnValue({ total: 10000_000000 }); // 10000 USDC
-      mockDb.prepare.mockReturnValue({ get: mockGet });
+      (mockDb.prepare as jest.Mock).mockReturnValue({ get: mockGet });
 
       const monthlySpending = await securityManager.getMonthlySpending('agent-001', 'USDC');
 
@@ -276,7 +276,7 @@ describe('WalletSecurityManager', () => {
     });
 
     it('should return 0 on database query error', async () => {
-      mockDb.prepare.mockImplementation(() => {
+      (mockDb.prepare as jest.Mock).mockImplementation(() => {
         throw new Error('Database error');
       });
 
@@ -315,7 +315,7 @@ describe('WalletSecurityManager', () => {
     it('should return false for transaction exceeding daily limit', async () => {
       // Mock daily spending at 4900 USDC
       const mockGet = jest.fn().mockReturnValue({ total: 4900_000000 });
-      mockDb.prepare.mockReturnValue({ get: mockGet });
+      (mockDb.prepare as jest.Mock).mockReturnValue({ get: mockGet });
 
       // Attempt transaction for 200 USDC (total 5100, exceeds 5000 limit)
       const valid = await securityManager.validateTransaction(
@@ -330,7 +330,7 @@ describe('WalletSecurityManager', () => {
     it('should return false for transaction exceeding monthly limit', async () => {
       // Mock monthly spending at 49800 USDC
       const mockGet = jest.fn().mockReturnValue({ total: 49800_000000 });
-      mockDb.prepare.mockReturnValue({ get: mockGet });
+      (mockDb.prepare as jest.Mock).mockReturnValue({ get: mockGet });
 
       // Attempt transaction for 300 USDC (total 50100, exceeds 50000 limit)
       const valid = await securityManager.validateTransaction(

@@ -6,30 +6,123 @@
  */
 
 import { AgentWalletLifecycle } from '../../src/wallet/agent-wallet-lifecycle';
-import { AgentBalanceTracker } from '../../src/wallet/agent-balance-tracker';
-import { AgentWalletDerivation } from '../../src/wallet/agent-wallet-derivation';
+import { AgentBalanceTracker, AgentBalance } from '../../src/wallet/agent-balance-tracker';
+import { AgentWalletDerivation, AgentWallet } from '../../src/wallet/agent-wallet-derivation';
 import { AgentWalletFunder } from '../../src/wallet/agent-wallet-funder';
 import { TelemetryEmitter } from '../../src/telemetry/telemetry-emitter';
 import { pino } from 'pino';
 
 const logger = pino({ level: 'silent' }); // Suppress logs in tests
 
-// Create minimal mocks for documentation tests
-const mockWalletDerivation = {} as AgentWalletDerivation;
-const mockWalletFunder = {} as AgentWalletFunder;
-const mockBalanceTracker = {} as AgentBalanceTracker;
-const mockTelemetryEmitter = {} as TelemetryEmitter;
+// Create proper mocks for documentation tests with required methods
+const createMockWalletDerivation = (): jest.Mocked<AgentWalletDerivation> =>
+  ({
+    deriveAgentWallet: jest.fn().mockImplementation((agentId: string) =>
+      Promise.resolve({
+        agentId,
+        derivationIndex: 0,
+        evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+        xrpAddress: 'rN7n7otQDd6FczFgLdlqtyMVrXqHr7XEEw',
+        createdAt: Date.now(),
+      } as AgentWallet)
+    ),
+    getAgentWallet: jest.fn().mockImplementation((agentId: string) =>
+      Promise.resolve({
+        agentId,
+        derivationIndex: 0,
+        evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+        xrpAddress: 'rN7n7otQDd6FczFgLdlqtyMVrXqHr7XEEw',
+        createdAt: Date.now(),
+      } as AgentWallet)
+    ),
+  }) as unknown as jest.Mocked<AgentWalletDerivation>;
+
+const createMockWalletFunder = (): jest.Mocked<AgentWalletFunder> =>
+  ({
+    fundAgentWallet: jest.fn().mockResolvedValue({
+      agentId: 'test-agent',
+      transactions: [],
+      timestamp: Date.now(),
+    }),
+  }) as unknown as jest.Mocked<AgentWalletFunder>;
+
+const createMockBalanceTracker = (): jest.Mocked<AgentBalanceTracker> =>
+  ({
+    getBalance: jest.fn().mockResolvedValue(BigInt('1000000000000000000')), // 1 ETH
+    getAllBalances: jest.fn().mockImplementation((agentId: string) =>
+      Promise.resolve([
+        {
+          agentId,
+          chain: 'evm',
+          token: 'ETH',
+          balance: BigInt('1000000000000000000'),
+          decimals: 18,
+          lastUpdated: Date.now(),
+        } as AgentBalance,
+        {
+          agentId,
+          chain: 'evm',
+          token: 'USDC',
+          balance: BigInt('1000000000'),
+          decimals: 6,
+          lastUpdated: Date.now(),
+        } as AgentBalance,
+      ])
+    ),
+  }) as unknown as jest.Mocked<AgentBalanceTracker>;
+
+const createMockTelemetryEmitter = (): jest.Mocked<TelemetryEmitter> =>
+  ({
+    emit: jest.fn(),
+  }) as unknown as jest.Mocked<TelemetryEmitter>;
+
+// Global mocks for use in tests
+let mockWalletDerivation: jest.Mocked<AgentWalletDerivation>;
+let mockWalletFunder: jest.Mocked<AgentWalletFunder>;
+let mockBalanceTracker: jest.Mocked<AgentBalanceTracker>;
+let mockTelemetryEmitter: jest.Mocked<TelemetryEmitter>;
+
+// Track lifecycle instances for cleanup
+const lifecycleInstances: AgentWalletLifecycle[] = [];
+
+// Helper to create lifecycle and track it for cleanup
+const createTrackedLifecycle = (): AgentWalletLifecycle => {
+  const lifecycle = new AgentWalletLifecycle(
+    mockWalletDerivation,
+    mockWalletFunder,
+    mockBalanceTracker,
+    mockTelemetryEmitter,
+    { inactivityDays: 1, autoArchive: false },
+    ':memory:'
+  );
+  lifecycleInstances.push(lifecycle);
+  return lifecycle;
+};
+
+beforeEach(() => {
+  mockWalletDerivation = createMockWalletDerivation();
+  mockWalletFunder = createMockWalletFunder();
+  mockBalanceTracker = createMockBalanceTracker();
+  mockTelemetryEmitter = createMockTelemetryEmitter();
+});
+
+afterEach(() => {
+  // Close all lifecycle instances
+  lifecycleInstances.forEach((lifecycle) => {
+    try {
+      lifecycle.close();
+    } catch {
+      // Ignore close errors
+    }
+  });
+  lifecycleInstances.length = 0;
+});
 
 describe('Documentation Examples - Integration Guide', () => {
   describe('Quick Start Examples', () => {
     test('should create agent wallet (Quick Start Step 1)', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Step 1
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       try {
         const wallet = await lifecycle.createAgentWallet('doc-test-agent-001');
@@ -79,12 +172,7 @@ describe('Documentation Examples - Integration Guide', () => {
   describe('Wallet Creation Examples', () => {
     test('should demonstrate wallet derivation', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Wallet Creation
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       // Create agent wallet
       const wallet = await lifecycle.createAgentWallet('doc-test-agent-002');
@@ -97,12 +185,7 @@ describe('Documentation Examples - Integration Guide', () => {
 
     test('should handle existing wallet error', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Error Handling
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       // Create wallet first
       await lifecycle.createAgentWallet('doc-test-agent-003');
@@ -146,12 +229,7 @@ describe('Documentation Examples - Integration Guide', () => {
   describe('Error Handling Examples', () => {
     test('should demonstrate try-catch pattern', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Error Handling
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       try {
         const wallet = await lifecycle.createAgentWallet('doc-test-agent-error');
@@ -166,12 +244,7 @@ describe('Documentation Examples - Integration Guide', () => {
 
     test('should categorize error types', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Safe Wallet Operation
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       // First create wallet
       await lifecycle.createAgentWallet('doc-test-error-categorize');
@@ -213,12 +286,7 @@ describe('Documentation Examples - Integration Guide', () => {
 
     test('should handle errors with logging', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Error Logging
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       try {
         await lifecycle.createAgentWallet('doc-test-error-log');
@@ -237,12 +305,7 @@ describe('Documentation Examples - Integration Guide', () => {
   describe('Async/Await Patterns', () => {
     test('should use async/await for sequential operations', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Async/Await Pattern
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
       const balanceTracker = mockBalanceTracker;
 
       // Sequential operations
@@ -257,12 +320,7 @@ describe('Documentation Examples - Integration Guide', () => {
 
     test('should use Promise.all for parallel operations', async () => {
       // Example from: docs/guides/agent-wallet-integration.md - Parallel Operations
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
       const agentIds = ['doc-test-parallel-001', 'doc-test-parallel-002', 'doc-test-parallel-003'];
 
       // Create all wallets in parallel
@@ -278,12 +336,7 @@ describe('Documentation Examples - API Reference', () => {
   describe('AgentWalletLifecycle API', () => {
     test('should match API signature for createAgentWallet', async () => {
       // Verify API signature matches documentation
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       const record = await lifecycle.createAgentWallet('doc-api-test-001');
 
@@ -296,12 +349,7 @@ describe('Documentation Examples - API Reference', () => {
     });
 
     test('should match API signature for getLifecycleRecord', async () => {
-      const lifecycle = new AgentWalletLifecycle(
-        mockWalletDerivation,
-        mockWalletFunder,
-        mockBalanceTracker,
-        mockTelemetryEmitter
-      );
+      const lifecycle = createTrackedLifecycle();
 
       // First create the wallet
       await lifecycle.createAgentWallet('doc-api-test-lifecycle');
@@ -373,8 +421,8 @@ describe('Documentation Test Data Consistency', () => {
     // Verify test data matches Story 11.10 Dev Notes > Testing subsection
     const testData = {
       sampleAgentIds: ['agent-001', 'agent-002', 'test-agent-123'],
-      mockEvmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
-      mockXrpAddress: 'rN7n7otQDd6FczFgLdlqtyMVrXqHr7XEEw',
+      mockEvmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0', // 40 hex chars
+      mockXrpAddress: 'rN7n7otQDd6FczFgLdqtyMVrXqHr7XEEwAB', // Valid base58 (no 0, I, O, l)
       mockBalances: {
         usdc: BigInt(1000000000), // 1000 USDC with 6 decimals
         eth: BigInt('1000000000000000000'), // 1 ETH with 18 decimals
@@ -385,6 +433,7 @@ describe('Documentation Test Data Consistency', () => {
 
     // Verify format correctness
     expect(testData.mockEvmAddress).toMatch(/^0x[a-fA-F0-9]{40}$/);
+    // XRP address uses base58check: r prefix + 24-34 chars (1-9, A-H, J-N, P-Z, a-k, m-z - no 0, I, O, l)
     expect(testData.mockXrpAddress).toMatch(/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/);
 
     expect(testData.sampleAgentIds).toHaveLength(3);

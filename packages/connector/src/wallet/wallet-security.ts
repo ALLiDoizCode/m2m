@@ -111,29 +111,29 @@ export class WalletSecurityManager {
    * Removes: privateKey, mnemonic, seed, encryptionKey, secret
    * CRITICAL: Use this method before logging, emitting telemetry, or returning API responses
    */
-  sanitizeWalletData(wallet: Record<string, unknown>): Record<string, unknown> {
+  sanitizeWalletData<T>(wallet: T): T {
     if (!wallet || typeof wallet !== 'object') {
       return wallet;
     }
 
     // Create shallow copy to avoid mutating original
-    const sanitized = { ...wallet };
+    const sanitized = { ...wallet } as Record<string, unknown>;
 
     // Remove all sensitive fields
-    sanitized.privateKey = undefined;
-    sanitized.mnemonic = undefined;
-    sanitized.seed = undefined;
-    sanitized.encryptionKey = undefined;
-    sanitized.secret = undefined;
+    delete sanitized.privateKey;
+    delete sanitized.mnemonic;
+    delete sanitized.seed;
+    delete sanitized.encryptionKey;
+    delete sanitized.secret;
 
     // Also handle nested objects (e.g., wallet.signer.privateKey)
     if (sanitized.signer && typeof sanitized.signer === 'object') {
       sanitized.signer = { ...(sanitized.signer as Record<string, unknown>) };
-      (sanitized.signer as Record<string, unknown>).privateKey = undefined;
-      (sanitized.signer as Record<string, unknown>).secret = undefined;
+      delete (sanitized.signer as Record<string, unknown>).privateKey;
+      delete (sanitized.signer as Record<string, unknown>).secret;
     }
 
-    return sanitized;
+    return sanitized as T;
   }
 
   /**
