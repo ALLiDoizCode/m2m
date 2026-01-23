@@ -4,6 +4,9 @@
   "description": "ILP Connector with BTP support",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "m2m-connector": "./dist/cli/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -12,7 +15,8 @@
     "test:watch": "jest --watch",
     "test:rfc-links": "jest test/integration/rfc-links.test.ts",
     "lint": "eslint src --ext .ts",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "benchmark": "ts-node scripts/benchmark.ts"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "^3.500.0",
@@ -21,15 +25,23 @@
     "@azure/keyvault-keys": "^4.8.0",
     "@google-cloud/kms": "^3.2.0",
     "@m2m/shared": "*",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.52.0",
+    "@opentelemetry/resources": "^1.25.0",
+    "@opentelemetry/sdk-node": "^0.52.0",
+    "@opentelemetry/semantic-conventions": "^1.25.0",
     "better-sqlite3": "^11.8.1",
     "bip39": "^3.1.0",
+    "commander": "^12.1.0",
     "ethereum-cryptography": "^3.2.0",
     "ethers": "^6.16.0",
     "express": "4.18.x",
+    "inquirer": "^9.3.8",
     "js-yaml": "^4.1.0",
     "node-cron": "^3.0.3",
     "pino": "^8.21.0",
     "pino-abstract-transport": "^3.0.0",
+    "prom-client": "^15.1.0",
     "qrcode": "^1.5.4",
     "tigerbeetle-node": "^0.16.67",
     "tslib": "^2.8.1",
@@ -48,6 +60,7 @@
     "@types/ws": "^8.18.1",
     "jest": "^29.7.0",
     "supertest": "^7.1.4",
-    "ts-jest": "^29.1.2"
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2"
   }
 }

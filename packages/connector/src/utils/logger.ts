@@ -187,3 +187,31 @@ export function createLogger(
 export function generateCorrelationId(): string {
   return `pkt_${randomBytes(8).toString('hex')}`;
 }
+
+/**
+ * Generate correlation ID that includes OpenTelemetry trace ID if available
+ * @param traceId - Optional OpenTelemetry trace ID to include
+ * @returns Correlation ID with optional trace ID linkage
+ *
+ * @example
+ * ```typescript
+ * // Without trace ID
+ * const correlationId = generateCorrelationIdWithTraceId();
+ * // Returns: "pkt_abc123def4567890"
+ *
+ * // With trace ID
+ * const correlationId = generateCorrelationIdWithTraceId('0123456789abcdef0123456789abcdef');
+ * // Returns: "pkt_abc123def4567890|trace:0123456789abcdef0123456789abcdef"
+ * ```
+ *
+ * @remarks
+ * Links log entries to distributed traces when OpenTelemetry tracing is enabled.
+ * The trace ID allows correlation between logs and traces in observability tools.
+ */
+export function generateCorrelationIdWithTraceId(traceId?: string): string {
+  const baseId = `pkt_${randomBytes(8).toString('hex')}`;
+  if (traceId) {
+    return `${baseId}|trace:${traceId}`;
+  }
+  return baseId;
+}

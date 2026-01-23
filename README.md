@@ -1877,7 +1877,47 @@ connector-a:
 
 ## Production Deployment
 
-Deploy a production-ready single-node ILP connector with security hardening, secrets management, and operational best practices.
+Deploy a production-ready ILP connector stack with TigerBeetle accounting, monitoring, and security hardening.
+
+### Quick Start (Production)
+
+```bash
+# 1. Run the onboarding wizard to generate configuration
+npx @m2m/connector setup
+
+# 2. Initialize TigerBeetle (one-time)
+docker run --rm -v tigerbeetle-data:/data tigerbeetle/tigerbeetle \
+  format --cluster=0 --replica=0 --replica-count=1 /data/0_0.tigerbeetle
+
+# 3. Build the connector image
+docker build -t m2m/connector:latest .
+
+# 4. Start all services
+docker compose -f docker-compose-production.yml up -d
+
+# 5. Check health
+curl http://localhost:8080/health
+```
+
+### Production Documentation
+
+For complete deployment instructions, see:
+
+- **[Production Deployment Guide](docs/operators/production-deployment-guide.md)** - Step-by-step installation and configuration
+- **[Peer Onboarding Guide](docs/operators/peer-onboarding-guide.md)** - Joining the network and peer configuration
+- **[Monitoring Setup Guide](docs/operators/monitoring-setup-guide.md)** - Prometheus, Grafana, and alerting
+- **[Incident Response Runbook](docs/operators/incident-response-runbook.md)** - Troubleshooting and operations
+
+### Production Stack Services
+
+| Service           | Port            | Purpose                   |
+| ----------------- | --------------- | ------------------------- |
+| Connector BTP     | 4000            | WebSocket connections     |
+| Connector Health  | 8080            | Health checks and metrics |
+| TigerBeetle       | 3000 (internal) | Accounting database       |
+| Prometheus        | 9090            | Metrics collection        |
+| Grafana           | 3001            | Dashboards                |
+| Jaeger (optional) | 16686           | Distributed tracing       |
 
 ### Overview
 
@@ -2373,6 +2413,173 @@ performance:
 ```
 
 See the [Performance Tuning Guide](docs/operators/performance-tuning-guide.md) for complete configuration recommendations and troubleshooting steps.
+
+## Production Monitoring and Alerting
+
+M2M includes comprehensive production monitoring infrastructure for observability, metrics collection, alerting, and distributed tracing.
+
+### Monitoring Stack Components
+
+| Component         | Purpose                              | Default Port    |
+| ----------------- | ------------------------------------ | --------------- |
+| Prometheus        | Metrics collection and storage       | 9090            |
+| Grafana           | Metrics visualization and dashboards | 3001            |
+| Alertmanager      | Alert routing and notifications      | 9093 (optional) |
+| Jaeger            | Distributed tracing                  | 16686           |
+| Connector Metrics | Application metrics endpoint         | 8080/metrics    |
+
+### Quick Start
+
+Start the monitoring stack alongside the connector:
+
+```bash
+# Start full monitoring stack
+docker-compose -f docker-compose-dev.yml -f docker-compose-monitoring.yml up -d
+
+# Access monitoring interfaces
+# Grafana: http://localhost:3001 (admin/admin)
+# Prometheus: http://localhost:9090
+# Jaeger UI: http://localhost:16686
+
+# View connector metrics
+curl http://localhost:8080/metrics
+```
+
+### Available Dashboards
+
+Three pre-configured Grafana dashboards are automatically provisioned:
+
+- **Connector Overview**: Packet throughput, settlement success rates, account balances, active channels, error rates
+- **Connector Health**: P99 latency, memory/CPU usage, dependency status, uptime
+- **Settlement Activity**: Settlement volume, latency by method, channel lifecycle events, disputes
+
+### Prometheus Metrics
+
+The connector exposes Prometheus-format metrics on the `/metrics` endpoint:
+
+| Metric                        | Type      | Description                                          |
+| ----------------------------- | --------- | ---------------------------------------------------- |
+| `ilp_packets_processed_total` | Counter   | Total packets processed (labels: type, status)       |
+| `ilp_packet_latency_seconds`  | Histogram | Packet processing latency                            |
+| `settlements_executed_total`  | Counter   | Total settlements (labels: method, status)           |
+| `settlement_latency_seconds`  | Histogram | Settlement operation latency                         |
+| `account_balance_units`       | Gauge     | Current account balances (labels: peer_id, token_id) |
+| `payment_channels_active`     | Gauge     | Active payment channels (labels: method, status)     |
+| `connector_errors_total`      | Counter   | Error count (labels: type, severity)                 |
+
+### Alert Rules
+
+Pre-configured Prometheus alert rules for production monitoring:
+
+| Alert                  | Severity | Description                              |
+| ---------------------- | -------- | ---------------------------------------- |
+| HighPacketErrorRate    | warning  | Error rate > 5% for 2 minutes            |
+| SettlementFailures     | critical | Any settlement failure for 1 minute      |
+| TigerBeetleUnavailable | critical | TigerBeetle down for 1 minute            |
+| ChannelDispute         | high     | Payment channel in disputed state        |
+| HighP99Latency         | warning  | P99 latency > 10ms for 5 minutes         |
+| LowThroughput          | warning  | Throughput < 1000 TPS for 5 minutes      |
+| ConnectorDown          | critical | Health endpoint unreachable for 1 minute |
+
+### OpenTelemetry Distributed Tracing
+
+Enable distributed tracing to track packet flow across multi-hop connector networks:
+
+```yaml
+observability:
+  opentelemetry:
+    enabled: true
+    serviceName: 'ilp-connector'
+    exporterEndpoint: 'http://jaeger:4318/v1/traces'
+    samplingRatio: 1.0 # 100% sampling (reduce in production)
+```
+
+Traces include span attributes for packet processing, settlement operations, and channel lifecycle events.
+
+### Health Check Endpoints
+
+Extended health endpoints for Kubernetes integration and production monitoring:
+
+- `GET /health` - Full health status with dependencies and SLA metrics
+- `GET /health/live` - Kubernetes liveness probe (process alive)
+- `GET /health/ready` - Kubernetes readiness probe (dependencies up)
+- `GET /metrics` - Prometheus metrics endpoint
+
+### SLA Monitoring
+
+The connector tracks SLA metrics and reports degraded status when thresholds are breached:
+
+- **Packet Success Rate**: Target 99.9% (configurable)
+- **Settlement Success Rate**: Target 99% (configurable)
+- **P99 Latency**: Target <10ms (configurable)
+
+### Documentation
+
+For complete monitoring setup and configuration:
+
+- **[Monitoring Setup Guide](docs/operators/monitoring-setup-guide.md)** - Prometheus, Grafana, OpenTelemetry configuration
+- **[Incident Response Runbook](docs/operators/incident-response-runbook.md)** - Alert diagnosis and resolution procedures
+
+## CI/CD Pipeline
+
+The project uses GitHub Actions for automated testing, building, and deployment.
+
+### Workflows
+
+| Workflow                | Trigger              | Purpose                                         |
+| ----------------------- | -------------------- | ----------------------------------------------- |
+| CI (`ci.yml`)           | Push/PR to main      | Lint, test, build, type-check, security audit   |
+| CD (`cd.yml`)           | Push to main, manual | Deploy to staging/production environments       |
+| Release (`release.yml`) | Push to main         | Semantic versioning, changelog, GitHub releases |
+
+### CI Pipeline Jobs
+
+- **lint-and-format** - ESLint and Prettier checks
+- **test** - Jest unit and integration tests with coverage
+- **build** - TypeScript compilation, artifact upload
+- **type-check** - Strict TypeScript type checking
+- **contracts-coverage** - Foundry smart contract tests
+- **security** - npm audit and Snyk vulnerability scanning
+- **e2e-test** - Full system end-to-end tests
+- **docker-build-push** - Build and push to GHCR (main branch only)
+- **container-scan** - Trivy container security scanning
+- **performance-benchmark** - TPS performance regression testing
+
+### Required Secrets
+
+| Secret               | Description                                          |
+| -------------------- | ---------------------------------------------------- |
+| `GITHUB_TOKEN`       | Auto-provided, used for GHCR and releases            |
+| `SNYK_TOKEN`         | Snyk API token for security scanning                 |
+| `STAGING_HOST`       | Staging server SSH host                              |
+| `STAGING_SSH_KEY`    | SSH private key for staging deployment               |
+| `PRODUCTION_HOST`    | Production server SSH host (optional)                |
+| `PRODUCTION_SSH_KEY` | SSH private key for production deployment (optional) |
+
+### Running Locally
+
+```bash
+# Run the full test suite
+npm test
+
+# Run linting
+npm run lint
+
+# Run performance benchmark
+npm run benchmark
+
+# Validate workflow syntax
+npx yaml-lint .github/workflows/*.yml
+```
+
+### Deployment
+
+Deployments are managed through the CD workflow:
+
+- **Staging**: Automatic on merge to main
+- **Production**: Requires manual approval via GitHub Environments
+
+For rollback procedures, see the [Production Deployment Guide](docs/operators/production-deployment-guide.md).
 
 ## Documentation
 

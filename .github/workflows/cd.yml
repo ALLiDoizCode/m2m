@@ -1,0 +1,275 @@
+name: CD - Deploy
+
+on:
+  # Manual trigger with environment selection
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: 'Docker image tag to deploy (default: latest)'
+        required: false
+        default: 'latest'
+        type: string
+
+  # Automatic trigger on push to main (deploys to staging)
+  push:
+    branches:
+      - main
+
+# Prevent concurrent deployments to same environment
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/m2m-connector
+
+jobs:
+  # Deploy to staging environment
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    # Run on push to main OR manual dispatch with staging selected
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL || 'https://staging.example.com' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: image
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to staging server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USERNAME || 'deploy' }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_SSH_PORT || 22 }}
+          script: |
+            set -e
+            echo "Deploying image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}"
+
+            # Navigate to deployment directory
+            cd ${{ vars.STAGING_DEPLOY_PATH || '/opt/m2m' }}
+
+            # Save current image tag for potential rollback
+            docker inspect --format='{{.Config.Image}}' m2m-connector 2>/dev/null | cut -d: -f2 > .previous-tag || echo "none" > .previous-tag
+
+            # Pull new image
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}
+
+            # Update docker-compose with new image tag
+            export IMAGE_TAG="${{ steps.image.outputs.tag }}"
+            export IMAGE_REGISTRY="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+            # Restart services with new image
+            docker-compose -f docker-compose-production.yml up -d --force-recreate connector
+
+            echo "Deployment initiated, waiting for health check..."
+
+      - name: Verify deployment health
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USERNAME || 'deploy' }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_SSH_PORT || 22 }}
+          script: |
+            set -e
+            cd ${{ vars.STAGING_DEPLOY_PATH || '/opt/m2m' }}
+
+            # Wait for container to be healthy (max 60 seconds)
+            echo "Waiting for health check..."
+            for i in {1..12}; do
+              if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+                echo "✓ Health check passed!"
+                exit 0
+              fi
+              echo "Attempt $i/12: Waiting for service to be healthy..."
+              sleep 5
+            done
+
+            echo "✗ Health check failed after 60 seconds"
+            exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USERNAME || 'deploy' }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_SSH_PORT || 22 }}
+          script: |
+            cd ${{ vars.STAGING_DEPLOY_PATH || '/opt/m2m' }}
+
+            # Check if previous tag exists
+            if [ -f .previous-tag ] && [ "$(cat .previous-tag)" != "none" ]; then
+              PREV_TAG=$(cat .previous-tag)
+              echo "Rolling back to previous version: $PREV_TAG"
+
+              export IMAGE_TAG="$PREV_TAG"
+              export IMAGE_REGISTRY="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+              docker-compose -f docker-compose-production.yml up -d --force-recreate connector
+
+              # Verify rollback health
+              sleep 10
+              if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+                echo "✓ Rollback successful"
+              else
+                echo "✗ Rollback health check failed - manual intervention required"
+              fi
+            else
+              echo "No previous version to rollback to"
+            fi
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "Staging Deployment Successful!"
+          echo "=========================================="
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}"
+          echo "Environment: staging"
+          echo "Time: $(date -u)"
+          echo "=========================================="
+
+  # Deploy to production environment (requires approval)
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    # Only run on manual dispatch with production selected
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production'
+    needs: []  # Can be changed to [deploy-staging] if staging must pass first
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL || 'https://production.example.com' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: image
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to production server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USERNAME || 'deploy' }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          port: ${{ secrets.PRODUCTION_SSH_PORT || 22 }}
+          script: |
+            set -e
+            echo "Deploying image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}"
+
+            # Navigate to deployment directory
+            cd ${{ vars.PRODUCTION_DEPLOY_PATH || '/opt/m2m' }}
+
+            # Save current image tag for potential rollback
+            docker inspect --format='{{.Config.Image}}' m2m-connector 2>/dev/null | cut -d: -f2 > .previous-tag || echo "none" > .previous-tag
+
+            # Pull new image
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}
+
+            # Update docker-compose with new image tag
+            export IMAGE_TAG="${{ steps.image.outputs.tag }}"
+            export IMAGE_REGISTRY="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+            # Restart services with new image
+            docker-compose -f docker-compose-production.yml up -d --force-recreate connector
+
+            echo "Deployment initiated, waiting for health check..."
+
+      - name: Verify deployment health
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USERNAME || 'deploy' }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          port: ${{ secrets.PRODUCTION_SSH_PORT || 22 }}
+          script: |
+            set -e
+            cd ${{ vars.PRODUCTION_DEPLOY_PATH || '/opt/m2m' }}
+
+            # Wait for container to be healthy (max 90 seconds for production)
+            echo "Waiting for health check..."
+            for i in {1..18}; do
+              if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+                echo "✓ Health check passed!"
+                exit 0
+              fi
+              echo "Attempt $i/18: Waiting for service to be healthy..."
+              sleep 5
+            done
+
+            echo "✗ Health check failed after 90 seconds"
+            exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USERNAME || 'deploy' }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          port: ${{ secrets.PRODUCTION_SSH_PORT || 22 }}
+          script: |
+            cd ${{ vars.PRODUCTION_DEPLOY_PATH || '/opt/m2m' }}
+
+            # Check if previous tag exists
+            if [ -f .previous-tag ] && [ "$(cat .previous-tag)" != "none" ]; then
+              PREV_TAG=$(cat .previous-tag)
+              echo "Rolling back to previous version: $PREV_TAG"
+
+              export IMAGE_TAG="$PREV_TAG"
+              export IMAGE_REGISTRY="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+              docker-compose -f docker-compose-production.yml up -d --force-recreate connector
+
+              # Verify rollback health
+              sleep 15
+              if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+                echo "✓ Rollback successful"
+              else
+                echo "✗ Rollback health check failed - manual intervention required"
+              fi
+            else
+              echo "No previous version to rollback to"
+            fi
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "Production Deployment Successful!"
+          echo "=========================================="
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}"
+          echo "Environment: production"
+          echo "Time: $(date -u)"
+          echo "=========================================="

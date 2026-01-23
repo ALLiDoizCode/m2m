@@ -1208,3 +1208,85 @@ export interface PerformanceConfig {
     };
   };
 }
+
+/**
+ * Observability Configuration Interface
+ *
+ * Configures production monitoring, metrics, tracing, and SLA settings.
+ * Added in Epic 12 Story 12.6 (Production Monitoring and Alerting).
+ *
+ * @property prometheus - Prometheus metrics exporter configuration
+ * @property opentelemetry - OpenTelemetry distributed tracing configuration
+ * @property sla - SLA monitoring thresholds
+ *
+ * @example
+ * ```typescript
+ * const observability: ObservabilityConfig = {
+ *   prometheus: {
+ *     enabled: true,
+ *     metricsPath: '/metrics',
+ *     includeDefaultMetrics: true,
+ *     labels: { environment: 'production', nodeId: 'connector-1' }
+ *   },
+ *   opentelemetry: {
+ *     enabled: true,
+ *     serviceName: 'ilp-connector',
+ *     exporterEndpoint: 'http://jaeger:4318/v1/traces',
+ *     samplingRatio: 1.0
+ *   },
+ *   sla: {
+ *     packetSuccessRateThreshold: 0.999,
+ *     settlementSuccessRateThreshold: 0.99,
+ *     p99LatencyThresholdMs: 10
+ *   }
+ * };
+ * ```
+ */
+export interface ObservabilityConfig {
+  /**
+   * Prometheus metrics exporter configuration
+   * Enables Prometheus metrics collection and export via /metrics endpoint
+   *
+   * @property enabled - Whether Prometheus metrics are enabled (default: true)
+   * @property metricsPath - Path for metrics endpoint (default: '/metrics')
+   * @property includeDefaultMetrics - Include Node.js default metrics (default: true)
+   * @property labels - Global labels for all metrics (e.g., environment, nodeId)
+   */
+  prometheus?: {
+    enabled?: boolean;
+    metricsPath?: string;
+    includeDefaultMetrics?: boolean;
+    labels?: Record<string, string>;
+  };
+
+  /**
+   * OpenTelemetry distributed tracing configuration
+   * Enables distributed tracing across connector hops via OTLP
+   *
+   * @property enabled - Whether tracing is enabled (default: false)
+   * @property serviceName - Service name for traces (default: 'ilp-connector')
+   * @property exporterEndpoint - OTLP exporter endpoint (default: http://localhost:4318)
+   * @property samplingRatio - Trace sampling ratio 0.0-1.0 (default: 1.0)
+   */
+  opentelemetry?: {
+    enabled?: boolean;
+    serviceName?: string;
+    exporterEndpoint?: string;
+    samplingRatio?: number;
+  };
+
+  /**
+   * SLA monitoring thresholds
+   * Defines thresholds for packet success, settlement success, and latency
+   * Health endpoint reports 'degraded' status when thresholds are breached
+   *
+   * @property packetSuccessRateThreshold - Min packet success rate (default: 0.999 = 99.9%)
+   * @property settlementSuccessRateThreshold - Min settlement success rate (default: 0.99 = 99%)
+   * @property p99LatencyThresholdMs - Max p99 latency in ms (default: 10)
+   */
+  sla?: {
+    packetSuccessRateThreshold?: number;
+    settlementSuccessRateThreshold?: number;
+    p99LatencyThresholdMs?: number;
+  };
+}
