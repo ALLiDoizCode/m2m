@@ -34,6 +34,12 @@ import {
   PeerAccountBalance,
   AccountLedgerCodes,
 } from './types';
+import {
+  TigerBeetleBatchWriter,
+  BatchWriterConfig,
+  Transfer as BatchWriterTransfer,
+  TransferError,
+} from './tigerbeetle-batch-writer';
 
 /**
  * Configuration for AccountManager initialization
@@ -72,6 +78,13 @@ export interface AccountManagerConfig {
    * Used for telemetry emission to include threshold in ACCOUNT_BALANCE events
    */
   settlementThresholds?: Map<string, string>;
+
+  /**
+   * Optional batch writer configuration for high-throughput settlement (Story 12.5)
+   * When provided, enables batched transfer writes for better performance
+   * When not provided, uses direct synchronous writes (backward compatibility)
+   */
+  batchWriterConfig?: BatchWriterConfig;
 }
 
 /**
@@ -105,12 +118,16 @@ export interface AccountManagerConfig {
  */
 export class AccountManager {
   private readonly _config: Required<
-    Omit<AccountManagerConfig, 'creditLimits' | 'telemetryEmitter' | 'settlementThresholds'>
+    Omit<
+      AccountManagerConfig,
+      'creditLimits' | 'telemetryEmitter' | 'settlementThresholds' | 'batchWriterConfig'
+    >
   >;
   private readonly _accountCache: Map<string, PeerAccountPair>;
   private readonly _creditLimitConfig: CreditLimitConfig | undefined;
   private readonly _telemetryEmitter: TelemetryEmitter | undefined;
   private readonly _settlementThresholds: Map<string, string> | undefined;
+  private readonly _batchWriter: TigerBeetleBatchWriter | undefined;
 
   constructor(
     config: AccountManagerConfig,
@@ -127,6 +144,23 @@ export class AccountManager {
     this._settlementThresholds = config.settlementThresholds;
     this._accountCache = new Map();
 
+    // Initialize batch writer if configured (Story 12.5)
+    if (config.batchWriterConfig) {
+      this._batchWriter = new TigerBeetleBatchWriter(
+        config.batchWriterConfig,
+        this._createTransferFn.bind(this),
+        this._logger
+      );
+
+      this._logger.info(
+        {
+          batchSize: config.batchWriterConfig.batchSize,
+          flushIntervalMs: config.batchWriterConfig.flushIntervalMs,
+        },
+        'AccountManager batch writer enabled for high-throughput settlement'
+      );
+    }
+
     // Log credit limit status at INFO level
     if (this._creditLimitConfig) {
       this._logger.info(
@@ -136,6 +170,7 @@ export class AccountManager {
           creditLimitsEnabled: true,
           defaultLimit: this._creditLimitConfig.defaultLimit?.toString(),
           globalCeiling: this._creditLimitConfig.globalCeiling?.toString(),
+          batchingEnabled: !!this._batchWriter,
         },
         'AccountManager initialized with credit limits enabled'
       );
@@ -145,6 +180,7 @@ export class AccountManager {
           nodeId: this._config.nodeId,
           defaultLedger: this._config.defaultLedger,
           creditLimitsEnabled: false,
+          batchingEnabled: !!this._batchWriter,
         },
         'AccountManager initialized (credit limits disabled - unlimited exposure)'
       );
@@ -720,6 +756,38 @@ export class AccountManager {
   }
 
   /**
+   * Shutdown the account manager and flush any pending batched transfers
+   * (Story 12.5 - Batch Writer Integration)
+   *
+   * This method should be called during connector shutdown to ensure all
+   * pending transfers are flushed before termination.
+   *
+   * @returns Promise that resolves when shutdown is complete
+   */
+  async shutdown(): Promise<void> {
+    if (this._batchWriter) {
+      this._logger.info('Shutting down AccountManager batch writer');
+      await this._batchWriter.shutdown();
+    }
+  }
+
+  /**
+   * Get batch writer statistics (if batching is enabled)
+   *
+   * @returns Batch writer stats or undefined if batching is disabled
+   */
+  getBatchWriterStats():
+    | {
+        pendingTransfers: number;
+        totalTransfersProcessed: number;
+        totalBatchesFlushed: number;
+        isFlushing: boolean;
+      }
+    | undefined {
+    return this._batchWriter?.getStats();
+  }
+
+  /**
    * Record settlement transfer to TigerBeetle
    *
    * Records a settlement transfer that reduces peer's creditBalance (debt to us).
@@ -735,6 +803,10 @@ export class AccountManager {
    * - Transfer recorded to TigerBeetle (balance reduced)
    * - NO real blockchain transaction sent (Epic 7 will add real settlement)
    * - Caller logs "settlement_type=MOCK" tag
+   *
+   * **Batching Behavior (Story 12.5):**
+   * - If batch writer is enabled, transfer is queued and flushed asynchronously
+   * - If batch writer is disabled, transfer is posted synchronously (backward compatibility)
    *
    * @param peerId - Peer connector ID
    * @param tokenId - Token identifier
@@ -762,6 +834,7 @@ export class AccountManager {
         amount: amount.toString(),
         debitAccountId: accountPair.debitAccountId.toString(),
         creditAccountId: accountPair.creditAccountId.toString(),
+        batchingEnabled: !!this._batchWriter,
       },
       'Recording settlement transfer'
     );
@@ -778,35 +851,48 @@ export class AccountManager {
     // Settlement transfer reduces creditBalance by:
     // - Debiting credit account (reduce debt we owe peer)
     // - Crediting debit account (reduce debt peer owes us)
-    const transfer: Transfer = {
+    const transfer: BatchWriterTransfer = {
       id: transferId,
-      debit_account_id: accountPair.creditAccountId, // Reduce our debt to peer
-      credit_account_id: accountPair.debitAccountId, // Reduce peer's debt to us
+      debitAccountId: accountPair.creditAccountId, // Reduce our debt to peer
+      creditAccountId: accountPair.debitAccountId, // Reduce peer's debt to us
       amount,
-      pending_id: 0n, // No pending transfer for settlement
       ledger: this._config.defaultLedger,
       code: 1, // Settlement transfer code (distinguishes from packet transfers)
       flags: TransferFlags.none,
-      user_data_128: 0n, // Future: Settlement metadata (settlement ID, blockchain tx hash)
-      user_data_64: 0n, // Future: Settlement reason code
-      user_data_32: 0,
+      userData128: 0n, // Future: Settlement metadata (settlement ID, blockchain tx hash)
+      userData64: 0n, // Future: Settlement reason code
+      userData32: 0,
       timeout: 0,
       timestamp: 0n,
     };
 
     try {
-      // Post settlement transfer to TigerBeetle
-      await this._tigerBeetleClient.createTransfersBatch([transfer]);
-
-      this._logger.debug(
-        {
-          transferId: transferId.toString(),
-          peerId,
-          tokenId,
-          amount: amount.toString(),
-        },
-        'Settlement transfer recorded successfully'
-      );
+      if (this._batchWriter) {
+        // Use batch writer for high-throughput settlement (Story 12.5)
+        await this._batchWriter.addTransfer(transfer);
+        this._logger.trace(
+          {
+            transferId: transferId.toString(),
+            peerId,
+            tokenId,
+            amount: amount.toString(),
+          },
+          'Settlement transfer queued for batched write'
+        );
+      } else {
+        // Direct synchronous write (backward compatibility)
+        const tbTransfer: Transfer = this._convertToBatchWriterTransfer(transfer);
+        await this._tigerBeetleClient.createTransfersBatch([tbTransfer]);
+        this._logger.debug(
+          {
+            transferId: transferId.toString(),
+            peerId,
+            tokenId,
+            amount: amount.toString(),
+          },
+          'Settlement transfer recorded successfully (direct write)'
+        );
+      }
     } catch (error) {
       this._logger.error(
         {
@@ -1033,5 +1119,67 @@ export class AccountManager {
         'Failed to emit account balance telemetry'
       );
     }
+  }
+
+  /**
+   * Transfer creation function for TigerBeetleBatchWriter (Story 12.5)
+   *
+   * This function is passed to the batch writer and called when a batch is flushed.
+   * It converts batch writer transfers to TigerBeetle transfers and posts them.
+   *
+   * @param transfers - Array of batch writer transfers to post
+   * @returns Array of transfer errors (empty if all succeeded)
+   * @private
+   */
+  private async _createTransferFn(transfers: BatchWriterTransfer[]): Promise<TransferError[]> {
+    // Convert batch writer transfers to TigerBeetle transfers
+    const tbTransfers: Transfer[] = transfers.map((t) => this._convertToBatchWriterTransfer(t));
+
+    try {
+      // Post transfers to TigerBeetle
+      await this._tigerBeetleClient.createTransfersBatch(tbTransfers);
+      return []; // All transfers succeeded
+    } catch (error) {
+      // TigerBeetle error - convert to transfer errors
+      // For now, return generic error for all transfers
+      // Future enhancement: Parse TigerBeetle error details for per-transfer errors
+      this._logger.error(
+        {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          transferCount: transfers.length,
+        },
+        'Batch transfer creation failed'
+      );
+
+      return transfers.map((_, index) => ({
+        index,
+        code: 1, // Generic error code
+      }));
+    }
+  }
+
+  /**
+   * Convert batch writer transfer to TigerBeetle transfer format
+   *
+   * @param transfer - Batch writer transfer
+   * @returns TigerBeetle transfer
+   * @private
+   */
+  private _convertToBatchWriterTransfer(transfer: BatchWriterTransfer): Transfer {
+    return {
+      id: transfer.id,
+      debit_account_id: transfer.debitAccountId,
+      credit_account_id: transfer.creditAccountId,
+      amount: transfer.amount,
+      pending_id: 0n,
+      ledger: transfer.ledger,
+      code: transfer.code,
+      flags: transfer.flags,
+      user_data_128: transfer.userData128 ?? 0n,
+      user_data_64: transfer.userData64 ?? 0n,
+      user_data_32: transfer.userData32 ?? 0,
+      timeout: transfer.timeout ?? 0,
+      timestamp: transfer.timestamp ?? 0n,
+    };
   }
 }

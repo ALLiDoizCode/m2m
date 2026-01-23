@@ -17,15 +17,20 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
     "send-packet": "npm run --workspace=tools/send-packet start",
+    "benchmark": "npm run benchmark --workspace=packages/connector",
     "prepare": "husky"
   },
   "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
+    "conventional-changelog-conventionalcommits": "^8.0.0",
     "eslint": "^8.56.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
     "prettier": "^3.2.5",
+    "semantic-release": "^24.2.0",
     "typescript": "^5.3.3"
   },
   "engines": {

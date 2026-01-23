@@ -18,6 +18,9 @@ import type {
 } from '@m2m/shared';
 import { getDomainSeparator, getBalanceProofTypes } from './eip712-helper';
 import type { Logger } from '../utils/logger';
+import type { KeyManager } from '../security/key-manager';
+import { KeyManagerSigner } from '../security/key-manager-signer';
+import type { EVMRPCConnectionPool } from '../utils/evm-rpc-connection-pool';
 
 // TokenNetworkRegistry ABI - only methods we need
 const REGISTRY_ABI = [
@@ -66,6 +69,8 @@ export class ChallengeNotExpiredError extends Error {
 export class PaymentChannelSDK {
   private provider: ethers.Provider;
   private signer: ethers.Signer;
+  private keyManager: KeyManager;
+  private evmKeyId: string;
   private registryContract: ethers.Contract;
   private tokenNetworkCache: Map<string, ethers.Contract>; // token address → TokenNetwork contract
   private channelStateCache: Map<string, ChannelState>; // channelId → channel state
@@ -76,23 +81,62 @@ export class PaymentChannelSDK {
    * Create a new PaymentChannelSDK instance
    *
    * @param provider - Ethers.js provider for blockchain queries
-   * @param signer - Ethers.js signer for transaction signing
+   * @param keyManager - KeyManager for secure key operations (EIP-712 signing and transaction signing)
+   * @param evmKeyId - EVM key identifier for KeyManager (backend-specific format)
    * @param registryAddress - TokenNetworkRegistry contract address
    * @param logger - Pino logger instance
    */
   constructor(
     provider: ethers.Provider,
-    signer: ethers.Signer,
+    keyManager: KeyManager,
+    evmKeyId: string,
     registryAddress: string,
     logger: Logger
   ) {
     this.provider = provider;
-    this.signer = signer;
-    this.registryContract = new ethers.Contract(registryAddress, REGISTRY_ABI, signer);
+    this.keyManager = keyManager;
+    this.evmKeyId = evmKeyId;
+
+    // Create KeyManager-backed signer for transaction signing
+    this.signer = new KeyManagerSigner(keyManager, evmKeyId, provider);
+
+    this.registryContract = new ethers.Contract(registryAddress, REGISTRY_ABI, this.signer);
     this.tokenNetworkCache = new Map();
     this.channelStateCache = new Map();
     this.logger = logger;
     this.eventListeners = new Map();
+  }
+
+  /**
+   * Create a PaymentChannelSDK instance from a connection pool
+   *
+   * Uses the connection pool for failover and load balancing across multiple RPC endpoints.
+   * For high-throughput scenarios, consider creating multiple SDK instances from the pool.
+   *
+   * @param pool - EVM RPC connection pool
+   * @param keyManager - KeyManager for secure key operations
+   * @param evmKeyId - EVM key identifier for KeyManager
+   * @param registryAddress - TokenNetworkRegistry contract address
+   * @param logger - Pino logger instance
+   * @returns PaymentChannelSDK instance
+   * @throws Error if no healthy connection available in pool
+   *
+   * [Source: Epic 12 Story 12.5 Task 6.4 - Connection pool integration]
+   */
+  static fromConnectionPool(
+    pool: EVMRPCConnectionPool,
+    keyManager: KeyManager,
+    evmKeyId: string,
+    registryAddress: string,
+    logger: Logger
+  ): PaymentChannelSDK {
+    const provider = pool.getProvider();
+    if (!provider) {
+      throw new Error('No healthy EVM RPC connection available in pool');
+    }
+
+    logger.info('Creating PaymentChannelSDK from connection pool');
+    return new PaymentChannelSDK(provider, keyManager, evmKeyId, registryAddress, logger);
   }
 
   /**
@@ -316,8 +360,17 @@ export class PaymentChannelSDK {
       locksRoot,
     };
 
-    // Sign using EIP-712
-    const signature = await this.signer.signTypedData(domain, types, balanceProof);
+    // Create EIP-712 hash
+    const hash = ethers.TypedDataEncoder.hash(domain, types, balanceProof);
+
+    // Sign the hash with KeyManager
+    const signatureBuffer = await this.keyManager.sign(
+      Buffer.from(hash.slice(2), 'hex'),
+      this.evmKeyId
+    );
+
+    // Convert signature Buffer to hex string for blockchain submission
+    const signature = '0x' + signatureBuffer.toString('hex');
 
     this.logger.debug('Balance proof signed', {
       channelId,

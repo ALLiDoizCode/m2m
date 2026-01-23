@@ -168,7 +168,7 @@ export class XRPChannelSDK {
 
     // Delegate to ClaimSigner (Story 9.3)
     const signature = await this.claimSigner.signClaim(channelId, amount);
-    const publicKey = this.claimSigner.getPublicKey();
+    const publicKey = await this.claimSigner.getPublicKey();
 
     return {
       channelId,

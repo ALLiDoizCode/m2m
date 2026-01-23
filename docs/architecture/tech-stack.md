@@ -31,6 +31,9 @@ This section represents the single source of truth for all technology decisions.
 | **CI/CD**                      | GitHub Actions            | N/A            | Automated testing, linting, and Docker builds         | Free for open-source, GitHub integration, supports matrix testing across Node versions                                                  |
 | **Database (Accounting)**      | TigerBeetle               | 0.x            | Persistent balance tracking for agent wallets         | High-performance distributed accounting, ACID guarantees, designed for financial workloads                                              |
 | **Database (Agent Wallet)**    | SQLite                    | 3.x            | Agent wallet state and payment channel tracking       | Embedded database, zero-configuration, sufficient for single-agent deployment                                                           |
+| **Database (Agent Events)**    | libSQL                    | 0.14.0         | Nostr event storage for Agent Society Protocol        | SQLite fork with MVCC concurrent writes, eliminates single-writer bottleneck, encryption at rest, async API                             |
+| **Serialization (Agent)**      | TOON                      | 3.0.0          | Token-Oriented Object Notation for Nostr events       | 30-60% smaller than JSON, LLM-friendly format, efficient for ILP packet data field                                                      |
+| **Nostr Crypto**               | nostr-tools               | 2.10.0         | Nostr event signing and verification                  | Standard Nostr library, Ed25519/Schnorr signatures, event ID generation                                                                 |
 | **Blockchain Libraries**       | xrpl.js + ethers.js       | Latest         | XRP and EVM payment channel interactions              | Official XRP library, standard Ethereum library, settlement integration for dual-settlement support                                     |
 
 **Important Notes:**
@@ -38,6 +41,7 @@ This section represents the single source of truth for all technology decisions.
 1. **External APIs Required:** XRP Ledger testnet/mainnet, EVM-compatible blockchains (Ethereum, Polygon, etc.)
 2. **Monorepo Package Structure:**
    - `packages/connector` - Uses Node.js, TypeScript, Pino, ws, Express (health endpoint), settlement engines
+   - `packages/connector/src/agent` - Agent Society Protocol components (libSQL, TOON, nostr-tools)
    - `packages/shared` - Pure TypeScript types and utilities (ILP packet definitions, OER encoding, telemetry types)
 3. **TypeScript Configuration:** Strict mode enabled across all packages, shared tsconfig.base.json in monorepo root
 4. **Version Pinning Strategy:** Patch versions flexible (^), minor versions locked for stability, LTS/stable releases preferred

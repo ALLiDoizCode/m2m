@@ -63,6 +63,7 @@ describe('SettlementExecutor', () => {
       {} as any,
       {} as any,
       '0x1234',
+      {} as any,
       {} as any
     ) as jest.Mocked<PaymentChannelSDK>;
     mockSettlementMonitor = new SettlementMonitor(

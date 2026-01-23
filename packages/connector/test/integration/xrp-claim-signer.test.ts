@@ -1,16 +1,20 @@
 /**
  * Integration tests for ClaimSigner with real database
  *
+ * Refactored for Story 12.2 to use KeyManager with environment backend.
+ *
  * File: packages/connector/test/integration/xrp-claim-signer.test.ts
  */
 import { ClaimSigner } from '../../src/settlement/xrp-claim-signer';
 import Database from 'better-sqlite3';
 import pino from 'pino';
+import { KeyManager } from '../../src/security/key-manager';
 
 describe('ClaimSigner Integration', () => {
   let signer: ClaimSigner;
   let db: Database.Database;
   let logger: pino.Logger;
+  let keyManager: KeyManager;
 
   beforeAll(() => {
     logger = pino({ level: 'info' });
@@ -36,9 +40,20 @@ describe('ClaimSigner Integration', () => {
         ON xrp_claims(channel_id, amount);
     `);
 
-    // Create ClaimSigner with deterministic seed
-    const testSeed = 'sEdTM1uX8pu2do5XvTnutH6HsouMaM2';
-    signer = new ClaimSigner(db, logger, testSeed);
+    // Set up environment variable backend with deterministic XRP seed
+    process.env.XRP_SEED = 'sEdTM1uX8pu2do5XvTnutH6HsouMaM2';
+
+    // Create KeyManager with environment backend
+    keyManager = new KeyManager(
+      {
+        backend: 'env',
+        nodeId: 'test-node',
+      },
+      logger
+    );
+
+    // Create ClaimSigner with KeyManager
+    signer = new ClaimSigner(db, logger, keyManager, 'xrp');
   });
 
   afterAll(() => {
@@ -54,7 +69,7 @@ describe('ClaimSigner Integration', () => {
     expect(signature).toBeDefined();
 
     // Verify signature
-    const publicKey = signer.getPublicKey();
+    const publicKey = await signer.getPublicKey();
     const isValid = await signer.verifyClaim(channelId, amount, signature, publicKey);
     expect(isValid).toBe(true);
   });
@@ -98,7 +113,7 @@ describe('ClaimSigner Integration', () => {
     const channelAmount = '2000000000'; // Channel has 2,000 XRP
 
     const signature = await signer.signClaim(channelId, claimAmount);
-    const publicKey = signer.getPublicKey();
+    const publicKey = await signer.getPublicKey();
 
     // Should pass: claim < channel balance
     const isValid = await signer.verifyClaim(
@@ -175,7 +190,7 @@ describe('ClaimSigner Integration', () => {
     const largeAmount = '1000000000000'; // 1 million XRP = 1,000,000,000,000 drops
 
     const signature = await signer.signClaim(channelId, largeAmount);
-    const publicKey = signer.getPublicKey();
+    const publicKey = await signer.getPublicKey();
 
     const isValid = await signer.verifyClaim(channelId, largeAmount, signature, publicKey);
     expect(isValid).toBe(true);

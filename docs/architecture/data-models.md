@@ -249,3 +249,107 @@
 - Tracked by XRPChannelLifecycleManager in Map<peerId, XRPChannelTrackingState>
 - Updated after claim submissions and funding operations
 - Used for idle detection and expiration handling
+
+## NostrEvent
+
+**Purpose:** Represents a Nostr protocol event (NIP-01) used for agent-to-agent communication
+
+**Key Attributes:**
+
+- `id: string` - Event ID (32-byte SHA256 hash of serialized event, 64-character hex)
+- `pubkey: string` - Author public key (32-byte Schnorr pubkey, 64-character hex)
+- `kind: number` - Event kind (integer, determines event semantics)
+- `created_at: number` - Unix timestamp (seconds since epoch)
+- `content: string` - Event content (kind-specific payload)
+- `tags: string[][]` - Array of tags (e.g., `['p', '<pubkey>']`, `['e', '<eventid>']`)
+- `sig: string` - Schnorr signature (64-byte, 128-character hex)
+
+**Common Event Kinds:**
+
+- `1` - Text note (social post)
+- `3` - Follow list (contact list)
+- `5` - Event deletion
+- `10000` - Query request (agent-specific)
+
+**Relationships:**
+
+- Serialized as TOON in ILP packet `data` field
+- Stored in AgentEventDatabase
+- Validated using nostr-tools library
+
+## NostrFilter
+
+**Purpose:** Query filter for Nostr events (NIP-01) used to retrieve matching events from agent database
+
+**Key Attributes:**
+
+- `ids?: string[]` - Event IDs to match
+- `authors?: string[]` - Author pubkeys to match
+- `kinds?: number[]` - Event kinds to match
+- `since?: number` - Unix timestamp lower bound (>=)
+- `until?: number` - Unix timestamp upper bound (<=)
+- `limit?: number` - Maximum results to return
+- `#e?: string[]` - Events referenced in tags
+- `#p?: string[]` - Pubkeys referenced in tags
+
+**Relationships:**
+
+- Used in Kind 10000 query requests
+- Used by SubscriptionManager to match events
+- Passed to AgentEventDatabase.queryEvents()
+
+## AgentFollowEvent
+
+**Purpose:** Extended Kind 3 event with ILP address information for routing
+
+**Key Attributes:**
+
+- `kind: 3` - Follow list event kind
+- `pubkey: string` - Agent pubkey
+- `tags: string[][]` - Follow tags including:
+  - `['p', '<pubkey>', '<relay hint>', '<petname>']` - Standard Nostr follow
+  - `['ilp', '<pubkey>', '<ilp address>']` - ILP address extension
+- `content: ''` - Empty for follow lists
+
+**Relationships:**
+
+- Parsed by FollowGraphRouter to populate routing table
+- Maps agent pubkeys to ILP addresses (e.g., `g.agent.alice`)
+
+## AgentConfig
+
+**Purpose:** Configuration for autonomous agent including identity, database, and pricing settings
+
+**Key Attributes:**
+
+- `agentId: string` - Unique agent identifier
+- `privateKeyPath?: string` - Path to Nostr private key file
+- `privateKey?: string` - Direct private key (dev only)
+- `databasePath: string` - Path to libSQL database file
+- `databaseMaxSize?: number` - Maximum database size in bytes
+- `follows: AgentFollow[]` - Static follow list with ILP addresses
+- `pricing: AgentPricing` - Service pricing configuration
+- `enabledKinds: number[]` - Event kinds this agent handles
+
+**Relationships:**
+
+- Extends ConnectorConfig with agent-specific settings
+- Loaded from YAML configuration file
+- Used by AgentNode for initialization
+
+## AgentPricing
+
+**Purpose:** Pricing configuration for agent services
+
+**Key Attributes:**
+
+- `storeEvent: bigint` - Cost to store an event (ILP units)
+- `queryBase: bigint` - Base cost for query request
+- `queryPerResult: bigint` - Additional cost per result returned
+- `subscription: bigint` - Cost per subscription registration
+- `forwardHop: bigint` - Cost to forward event to another agent
+
+**Relationships:**
+
+- Used by AgentEventHandler for payment validation
+- Referenced in F03_INVALID_AMOUNT rejection messages

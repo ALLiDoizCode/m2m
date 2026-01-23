@@ -27,6 +27,7 @@ import { XRPChannelSDK } from '../../src/settlement/xrp-channel-sdk';
 import { XRPLClient, XRPLClientConfig } from '../../src/settlement/xrpl-client';
 import { PaymentChannelManager } from '../../src/settlement/xrp-channel-manager';
 import { ClaimSigner } from '../../src/settlement/xrp-claim-signer';
+import type { KeyManager } from '../../src/security/key-manager';
 import Database from 'better-sqlite3';
 import pino, { Logger } from 'pino';
 
@@ -123,7 +124,14 @@ describeIfLocal('XRP Channel Lifecycle Integration', () => {
 
     // Initialize components for XRP Channel SDK
     channelManager = new PaymentChannelManager(xrplClient, db, logger);
-    claimSigner = new ClaimSigner(db, logger);
+
+    // Create mock KeyManager for ClaimSigner
+    const mockKeyManager = {
+      signXrpClaim: jest.fn().mockResolvedValue('mock-signature'),
+      getXrpPublicKey: jest.fn().mockResolvedValue('ED' + '0'.repeat(64)),
+    } as unknown as KeyManager;
+
+    claimSigner = new ClaimSigner(db, logger, mockKeyManager, 'test-xrp-key');
 
     // Initialize XRP Channel SDK
     xrpChannelSDK = new XRPChannelSDK(xrplClient, channelManager, claimSigner, logger);

@@ -1,97 +1,275 @@
-# Docker Compose configuration for Production Single-Node ILP Connector
+# =============================================================================
+# M2M ILP Connector - Production Docker Compose Stack
+# =============================================================================
 #
-# This configuration deploys a production-ready single ILP connector with security hardening:
-# - Non-root container user (security)
-# - Environment-based secrets management (no hardcoded secrets)
-# - Minimal port exposure (BTP only, health internal)
-# - Auto-restart policy (restart: unless-stopped)
-# - Structured JSON logging at INFO level
+# Complete production deployment including:
+# - ILP Connector with settlement support
+# - TigerBeetle high-performance accounting database
+# - Prometheus metrics collection
+# - Grafana dashboards and visualization
+# - Jaeger distributed tracing (optional)
 #
 # Prerequisites:
-#   1. Build the connector image: docker build -t ilp-connector .
-#   2. Create .env file from template: cp .env.production.example .env
-#   3. Edit .env file with your production secrets and configuration
-#   4. Configure peers in examples/production-single-node.yaml
-#   5. Docker Engine 20.10+ and Docker Compose 2.x installed
+#   1. Build connector image: docker build -t m2m/connector:latest .
+#   2. Initialize TigerBeetle (one-time):
+#      docker run --rm -v tigerbeetle-data:/data tigerbeetle/tigerbeetle \
+#        format --cluster=0 --replica=0 --replica-count=1 /data/0_0.tigerbeetle
+#   3. Create .env from template: cp .env.example .env
+#   4. Configure .env with your settings
 #
 # Usage:
-#   Start:  docker-compose -f docker-compose-production.yml up -d
-#   Logs:   docker logs -f ilp-production-connector
-#   Health: docker exec ilp-production-connector wget -qO- http://localhost:8080/health
-#   Stop:   docker-compose -f docker-compose-production.yml down
+#   Start all services:  docker-compose -f docker-compose-production.yml up -d
+#   View logs:          docker-compose -f docker-compose-production.yml logs -f
+#   Stop all services:  docker-compose -f docker-compose-production.yml down
+#   Stop with cleanup:  docker-compose -f docker-compose-production.yml down -v
 #
-# Configuration:
-#   - Connector config: examples/production-single-node.yaml (mounted read-only)
-#   - Secrets/env vars: .env file (never commit to git!)
-#   - BTP peer secrets: BTP_PEER_<PEER_ID>_SECRET environment variables
+# Service Endpoints:
+#   - Connector BTP:     ws://localhost:4000
+#   - Connector Health:  http://localhost:8080/health
+#   - Connector Metrics: http://localhost:8080/metrics
+#   - Prometheus:        http://localhost:9090
+#   - Grafana:           http://localhost:3001 (admin/admin)
+#   - Jaeger UI:         http://localhost:16686 (if enabled)
 #
-# Security Notes:
-#   - ALL secrets MUST be in .env file, not in YAML files
-#   - Container runs as non-root user (nodejs, uid 1001)
-#   - Only essential BTP port exposed to host
-#   - Health check port internal only (not exposed)
-#   - Use strong secrets: openssl rand -base64 32
+# =============================================================================
 
 version: '3.8'
 
 services:
-  # Production Connector - Single Node Deployment
-  production-connector:
-    image: ilp-connector
-    container_name: ilp-production-connector
-    environment:
-      CONFIG_FILE: /app/config.yaml
-      NODE_ID: ${NODE_ID:-production-connector}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      HEALTH_CHECK_PORT: ${HEALTH_CHECK_PORT:-8080}
-      # Optional dashboard telemetry (leave empty to disable)
-      DASHBOARD_TELEMETRY_URL: ${DASHBOARD_TELEMETRY_URL:-}
-      # BTP peer authentication secrets loaded from .env file
-      # Pattern: BTP_PEER_<PEER_ID_UPPERCASE>_SECRET=<secret_value>
-      # Example: BTP_PEER_REMOTE_CONNECTOR_SECRET=${BTP_PEER_REMOTE_CONNECTOR_SECRET:-}
-      # Add your peer secrets here following the pattern above
+  # ===========================================================================
+  # TigerBeetle - High-Performance Accounting Database
+  # ===========================================================================
+  # IMPORTANT: Must initialize data file before first start:
+  # docker run --rm -v tigerbeetle-data:/data tigerbeetle/tigerbeetle \
+  #   format --cluster=0 --replica=0 --replica-count=1 /data/0_0.tigerbeetle
+  tigerbeetle:
+    image: tigerbeetle/tigerbeetle:latest
+    container_name: m2m-tigerbeetle
+    command: start --addresses=0.0.0.0:3000 /data/0_0.tigerbeetle
     volumes:
-      # Configuration file (read-only for security)
-      - ./examples/production-single-node.yaml:/app/config.yaml:ro
-      # Optional: Persistent logs (uncomment if needed)
-      # - ./production-logs:/var/log/ilp:rw
-    ports:
-      # BTP server port (configurable via .env, default 3000)
-      - "${BTP_PORT:-3000}:3000"
-      # Note: Health check port NOT exposed to host (internal only for Docker health check)
+      - tigerbeetle-data:/data
     networks:
       - ilp-production-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      # TigerBeetle doesn't have HTTP endpoint; use TCP check
+      test: ["CMD-SHELL", "nc -z localhost 3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===========================================================================
+  # M2M ILP Connector - Core Payment Processing
+  # ===========================================================================
+  connector:
+    image: m2m/connector:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: m2m-connector
+    environment:
+      # Core Configuration
+      NODE_ID: ${NODE_ID:-m2m-connector}
+      CONFIG_FILE: /app/config.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # Network Ports
+      BTP_SERVER_PORT: 4000
+      HEALTH_CHECK_PORT: 8080
+
+      # Settlement Configuration
+      SETTLEMENT_PREFERENCE: ${SETTLEMENT_PREFERENCE:-both}
+
+      # Blockchain RPC URLs
+      BASE_RPC_URL: ${BASE_RPC_URL:-https://mainnet.base.org}
+      XRPL_WSS_URL: ${XRPL_WSS_URL:-wss://xrplcluster.com}
+
+      # Wallet Addresses (for settlement)
+      EVM_ADDRESS: ${EVM_ADDRESS:-}
+      XRP_ADDRESS: ${XRP_ADDRESS:-}
+
+      # Key Management
+      KEY_BACKEND: ${KEY_BACKEND:-env}
+      EVM_PRIVATE_KEY: ${EVM_PRIVATE_KEY:-}
+      XRP_SEED: ${XRP_SEED:-}
+
+      # AWS KMS (if KEY_BACKEND=aws-kms)
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_KMS_EVM_KEY_ID: ${AWS_KMS_EVM_KEY_ID:-}
+      AWS_KMS_XRP_KEY_ID: ${AWS_KMS_XRP_KEY_ID:-}
+
+      # GCP KMS (if KEY_BACKEND=gcp-kms)
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+      GCP_LOCATION_ID: ${GCP_LOCATION_ID:-}
+      GCP_KEY_RING_ID: ${GCP_KEY_RING_ID:-}
+      GCP_KMS_EVM_KEY_ID: ${GCP_KMS_EVM_KEY_ID:-}
+      GCP_KMS_XRP_KEY_ID: ${GCP_KMS_XRP_KEY_ID:-}
+
+      # Azure Key Vault (if KEY_BACKEND=azure-kv)
+      AZURE_VAULT_URL: ${AZURE_VAULT_URL:-}
+      AZURE_EVM_KEY_NAME: ${AZURE_EVM_KEY_NAME:-}
+      AZURE_XRP_KEY_NAME: ${AZURE_XRP_KEY_NAME:-}
+
+      # TigerBeetle Connection
+      TIGERBEETLE_CLUSTER_ID: "0"
+      TIGERBEETLE_REPLICAS: tigerbeetle:3000
+
+      # Monitoring
+      PROMETHEUS_ENABLED: ${PROMETHEUS_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+
+      # Peer Discovery (optional)
+      PEER_DISCOVERY_ENABLED: ${PEER_DISCOVERY_ENABLED:-false}
+      PEER_DISCOVERY_ENDPOINTS: ${PEER_DISCOVERY_ENDPOINTS:-}
+      PEER_ANNOUNCE_ADDRESS: ${PEER_ANNOUNCE_ADDRESS:-}
+    volumes:
+      # Configuration file (read-only)
+      - ./examples/production-single-node.yaml:/app/config.yaml:ro
+      # Persistent data for connector state
+      - connector-data:/app/data
+      # Optional: Persistent logs
+      - connector-logs:/app/logs
+    ports:
+      # BTP WebSocket server
+      - "${BTP_PORT:-4000}:4000"
+      # Health check and metrics HTTP server
+      - "${HEALTH_CHECK_PORT:-8080}:8080"
+    networks:
+      - ilp-production-network
+    depends_on:
+      tigerbeetle:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
-  # Optional: Dashboard (commented out by default)
-  # Uncomment if you need visualization/monitoring in production
-  # dashboard:
-  #   build:
-  #     context: .
-  #     dockerfile: packages/dashboard/Dockerfile
-  #   container_name: ilp-production-dashboard
-  #   environment:
-  #     TELEMETRY_WS_PORT: 9000
-  #     LOG_LEVEL: ${LOG_LEVEL:-info}
-  #   ports:
-  #     - "${DASHBOARD_HTTP_PORT:-8080}:8080"  # Dashboard HTTP port
-  #     - "${DASHBOARD_WS_PORT:-9000}:9000"    # Telemetry WebSocket port
-  #   networks:
-  #     - ilp-production-network
-  #   restart: unless-stopped
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 10s
+  # ===========================================================================
+  # Prometheus - Metrics Collection and Alerting
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: m2m-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--storage.tsdb.retention.time=15d'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - ilp-production-network
+    depends_on:
+      connector:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # ===========================================================================
+  # Grafana - Metrics Visualization and Dashboards
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: m2m-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      # Anonymous access for dashboards (optional)
+      - GF_AUTH_ANONYMOUS_ENABLED=${GF_AUTH_ANONYMOUS_ENABLED:-false}
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # Port 3001 to avoid conflict with TigerBeetle (3000)
+      - "3001:3000"
+    networks:
+      - ilp-production-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # Jaeger - Distributed Tracing (Optional)
+  # ===========================================================================
+  # Enable with: docker-compose -f docker-compose-production.yml --profile tracing up -d
+  jaeger:
+    image: jaegertracing/all-in-one:1.51
+    container_name: m2m-jaeger
+    profiles:
+      - tracing
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=memory
+      - MEMORY_MAX_TRACES=100000
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4318:4318"    # OTLP HTTP receiver
+      - "14250:14250"  # gRPC receiver
+    networks:
+      - ilp-production-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:16686/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# =============================================================================
+# Volumes - Persistent Data Storage
+# =============================================================================
+volumes:
+  # TigerBeetle accounting database
+  # Contains: 0_0.tigerbeetle data file
+  tigerbeetle-data:
+    driver: local
+
+  # Connector persistent state
+  # Contains: channel data, peer info, wallet state
+  connector-data:
+    driver: local
+
+  # Connector logs (optional)
+  # Contains: JSON log files
+  connector-logs:
+    driver: local
+
+  # Prometheus time-series data
+  # Contains: metrics history (15 day retention)
+  prometheus-data:
+    driver: local
+
+  # Grafana configuration and state
+  # Contains: dashboards, user preferences, alerts
+  grafana-data:
+    driver: local
+
+# =============================================================================
+# Networks - Service Communication
+# =============================================================================
 networks:
   ilp-production-network:
     driver: bridge
+    name: m2m-ilp-production-network

@@ -1,0 +1,349 @@
+import {
+  DoubleSpendDetectionRule,
+  ClaimEvent,
+} from '../../../../src/security/rules/double-spend-detection-rule';
+
+describe('DoubleSpendDetectionRule', () => {
+  let rule: DoubleSpendDetectionRule;
+  const peerId = 'test-peer-123';
+  const channelId = 'channel-abc-123';
+
+  beforeEach(() => {
+    rule = new DoubleSpendDetectionRule();
+  });
+
+  afterEach(() => {
+    rule.clearHistory();
+  });
+
+  describe('check', () => {
+    it('should not detect fraud with first claim', async () => {
+      const event: ClaimEvent = {
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: Date.now(),
+        channelId,
+        claimAmount: 1000,
+      };
+
+      const result = await rule.check(event);
+
+      expect(result.detected).toBe(false);
+    });
+
+    it('should not detect fraud with increasing claim amounts', async () => {
+      const now = Date.now();
+
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now - 10000,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      const result = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: now,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      expect(result.detected).toBe(false);
+    });
+
+    it('should detect double-spend with decreasing claim amount', async () => {
+      const now = Date.now();
+
+      // First claim: 2000 units
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: now - 10000,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      // Second claim: 1000 units (lower than first) - DOUBLE-SPEND
+      const result = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      expect(result.detected).toBe(true);
+      expect(result.peerId).toBe(peerId);
+      expect(result.details?.description).toContain('Double-spend attempt detected');
+      expect(result.details?.currentClaimAmount).toBe(1000);
+      expect(result.details?.previousClaimAmount).toBe(2000);
+    });
+
+    it('should detect multiple double-spend attempts', async () => {
+      const now = Date.now();
+
+      // First claim: 3000 units
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 3000,
+        timestamp: now - 20000,
+        channelId,
+        claimAmount: 3000,
+      } as ClaimEvent);
+
+      // Second claim: 2000 units - DOUBLE-SPEND
+      const result1 = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: now - 10000,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      expect(result1.detected).toBe(true);
+
+      // Third claim: 1000 units - ANOTHER DOUBLE-SPEND
+      const result2 = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      expect(result2.detected).toBe(true);
+      expect(result2.details?.previousClaimAmount).toBe(3000); // Compares to first valid claim, not the fraudulent second claim
+    });
+
+    it('should track separate histories for different channels', async () => {
+      const now = Date.now();
+      const channel1 = 'channel-1';
+      const channel2 = 'channel-2';
+
+      // Channel 1: Normal claims
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now - 10000,
+        channelId: channel1,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: now,
+        channelId: channel1,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      // Channel 2: Double-spend
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: now - 10000,
+        channelId: channel2,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      const result = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now,
+        channelId: channel2,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      expect(result.detected).toBe(true);
+      expect(result.details?.channelId).toBe(channel2);
+    });
+
+    it('should track separate histories for different peers', async () => {
+      const now = Date.now();
+      const peer1 = 'peer-1';
+      const peer2 = 'peer-2';
+
+      // Peer 1: Normal claims
+      await rule.check({
+        type: 'settlement',
+        peerId: peer1,
+        amount: 1000,
+        timestamp: now - 10000,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      await rule.check({
+        type: 'settlement',
+        peerId: peer1,
+        amount: 2000,
+        timestamp: now,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      // Peer 2: Double-spend
+      await rule.check({
+        type: 'settlement',
+        peerId: peer2,
+        amount: 2000,
+        timestamp: now - 10000,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      const result = await rule.check({
+        type: 'settlement',
+        peerId: peer2,
+        amount: 1000,
+        timestamp: now,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      expect(result.detected).toBe(true);
+      expect(result.peerId).toBe(peer2);
+    });
+
+    it('should ignore settlement events without channelId', async () => {
+      const result = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: Date.now(),
+        // No channelId
+      });
+
+      expect(result.detected).toBe(false);
+    });
+
+    it('should ignore settlement events without claimAmount', async () => {
+      const result = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: Date.now(),
+        channelId,
+        // No claimAmount
+      });
+
+      expect(result.detected).toBe(false);
+    });
+
+    it('should ignore non-settlement events', async () => {
+      const result = await rule.check({
+        type: 'packet',
+        peerId,
+        packetCount: 100,
+        timestamp: Date.now(),
+      });
+
+      expect(result.detected).toBe(false);
+    });
+
+    it('should include timestamp information in detection details', async () => {
+      const now = Date.now();
+      const previousTimestamp = now - 10000;
+
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: previousTimestamp,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      const result = await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      expect(result.detected).toBe(true);
+      expect(result.details?.timestamp).toBe(now);
+      expect(result.details?.previousClaimTimestamp).toBe(previousTimestamp);
+    });
+
+    it('should complete double-spend check within 50ms timeout', async () => {
+      const now = Date.now();
+
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: now - 10000,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      const startTime = Date.now();
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+      const elapsed = Date.now() - startTime;
+
+      expect(elapsed).toBeLessThan(50);
+    });
+
+    it('should maintain claim history across multiple claims', async () => {
+      const now = Date.now();
+
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 1000,
+        timestamp: now - 30000,
+        channelId,
+        claimAmount: 1000,
+      } as ClaimEvent);
+
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 2000,
+        timestamp: now - 20000,
+        channelId,
+        claimAmount: 2000,
+      } as ClaimEvent);
+
+      await rule.check({
+        type: 'settlement',
+        peerId,
+        amount: 3000,
+        timestamp: now - 10000,
+        channelId,
+        claimAmount: 3000,
+      } as ClaimEvent);
+
+      const history = rule.getClaimHistory(peerId, channelId);
+
+      expect(history).toBeDefined();
+      expect(history?.claims).toHaveLength(3);
+      expect(history?.claims[0]?.amount).toBe(1000);
+      expect(history?.claims[2]?.amount).toBe(3000);
+    });
+  });
+});

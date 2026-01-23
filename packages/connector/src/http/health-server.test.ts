@@ -1,11 +1,17 @@
 /**
  * Unit Tests for HealthServer
- * Tests HTTP health check endpoint behavior
+ * Tests HTTP health check endpoint behavior including extended endpoints for Story 12.6
  */
 
 import request from 'supertest';
+import { Request, Response } from 'express';
 import { HealthServer } from './health-server';
-import { HealthStatus, HealthStatusProvider } from './types';
+import {
+  HealthStatus,
+  HealthStatusProvider,
+  HealthStatusExtended,
+  HealthStatusExtendedProvider,
+} from './types';
 import pino from 'pino';
 
 // Mock HealthStatusProvider for testing
@@ -22,6 +28,27 @@ class MockHealthStatusProvider implements HealthStatusProvider {
 
   setHealthStatus(healthStatus: HealthStatus): void {
     this._healthStatus = healthStatus;
+  }
+}
+
+// Mock Extended HealthStatusProvider for testing Story 12.6 features
+class MockExtendedHealthStatusProvider
+  extends MockHealthStatusProvider
+  implements HealthStatusExtendedProvider
+{
+  private _extendedStatus: HealthStatusExtended;
+
+  constructor(extendedStatus: HealthStatusExtended) {
+    super(extendedStatus as unknown as HealthStatus);
+    this._extendedStatus = extendedStatus;
+  }
+
+  getHealthStatusExtended(): HealthStatusExtended {
+    return this._extendedStatus;
+  }
+
+  setExtendedStatus(status: HealthStatusExtended): void {
+    this._extendedStatus = status;
   }
 }
 
@@ -277,6 +304,320 @@ describe('HealthServer', () => {
       // Assert - This is a basic check; actual log capture may vary
       // The important part is that the server started and responded
       expect(true).toBe(true); // Health check completed without error
+    });
+  });
+
+  // Story 12.6: Extended Health Endpoints Tests
+  describe('GET /health/live (liveness probe)', () => {
+    it('should return 200 OK with alive status', async () => {
+      // Arrange
+      const healthyStatus: HealthStatus = {
+        status: 'healthy',
+        uptime: 100,
+        peersConnected: 1,
+        totalPeers: 1,
+        timestamp: new Date().toISOString(),
+      };
+      mockProvider = new MockHealthStatusProvider(healthyStatus);
+      healthServer = new HealthServer(mockLogger, mockProvider);
+      await healthServer.start(8089);
+
+      // Act
+      const response = await request('http://localhost:8089').get('/health/live');
+
+      // Assert
+      expect(response.status).toBe(200);
+      expect(response.body.status).toBe('alive');
+      expect(response.body.timestamp).toBeDefined();
+    });
+
+    it('should return 200 even when health status is unhealthy', async () => {
+      // Arrange - Liveness should pass even if unhealthy (process is running)
+      const unhealthyStatus: HealthStatus = {
+        status: 'unhealthy',
+        uptime: 10,
+        peersConnected: 0,
+        totalPeers: 2,
+        timestamp: new Date().toISOString(),
+      };
+      mockProvider = new MockHealthStatusProvider(unhealthyStatus);
+      healthServer = new HealthServer(mockLogger, mockProvider);
+      await healthServer.start(8090);
+
+      // Act
+      const response = await request('http://localhost:8090').get('/health/live');
+
+      // Assert
+      expect(response.status).toBe(200);
+      expect(response.body.status).toBe('alive');
+    });
+  });
+
+  describe('GET /health/ready (readiness probe)', () => {
+    it('should return 200 when healthy without extended provider', async () => {
+      // Arrange
+      const healthyStatus: HealthStatus = {
+        status: 'healthy',
+        uptime: 100,
+        peersConnected: 2,
+        totalPeers: 2,
+        timestamp: new Date().toISOString(),
+      };
+      mockProvider = new MockHealthStatusProvider(healthyStatus);
+      healthServer = new HealthServer(mockLogger, mockProvider);
+      await healthServer.start(8091);
+
+      // Act
+      const response = await request('http://localhost:8091').get('/health/ready');
+
+      // Assert
+      expect(response.status).toBe(200);
+      expect(response.body.status).toBe('ready');
+    });
+
+    it('should return 503 when unhealthy without extended provider', async () => {
+      // Arrange
+      const unhealthyStatus: HealthStatus = {
+        status: 'unhealthy',
+        uptime: 10,
+        peersConnected: 0,
+        totalPeers: 2,
+        timestamp: new Date().toISOString(),
+      };
+      mockProvider = new MockHealthStatusProvider(unhealthyStatus);
+      healthServer = new HealthServer(mockLogger, mockProvider);
+      await healthServer.start(8092);
+
+      // Act
+      const response = await request('http://localhost:8092').get('/health/ready');
+
+      // Assert
+      expect(response.status).toBe(503);
+      expect(response.body.status).toBe('not_ready');
+    });
+
+    it('should return 200 when extended provider reports healthy with deps up', async () => {
+      // Arrange
+      const extendedStatus: HealthStatusExtended = {
+        status: 'healthy',
+        uptime: 100,
+        peersConnected: 2,
+        totalPeers: 2,
+        timestamp: new Date().toISOString(),
+        nodeId: 'test-node',
+        version: '1.0.0',
+        dependencies: {
+          tigerbeetle: { status: 'up', latencyMs: 5 },
+          xrpl: { status: 'up', latencyMs: 50 },
+        },
+        sla: {
+          packetSuccessRate: 0.999,
+          settlementSuccessRate: 0.99,
+          p99LatencyMs: 5,
+        },
+      };
+      const extendedProvider = new MockExtendedHealthStatusProvider(extendedStatus);
+      healthServer = new HealthServer(mockLogger, extendedProvider, {
+        extendedProvider,
+      });
+      await healthServer.start(8093);
+
+      // Act
+      const response = await request('http://localhost:8093').get('/health/ready');
+
+      // Assert
+      expect(response.status).toBe(200);
+      expect(response.body.status).toBe('ready');
+      expect(response.body.dependencies.tigerbeetle.status).toBe('up');
+    });
+
+    it('should return 503 when TigerBeetle is down', async () => {
+      // Arrange
+      const extendedStatus: HealthStatusExtended = {
+        status: 'unhealthy',
+        uptime: 100,
+        peersConnected: 2,
+        totalPeers: 2,
+        timestamp: new Date().toISOString(),
+        dependencies: {
+          tigerbeetle: { status: 'down' },
+        },
+        sla: {
+          packetSuccessRate: 0.5,
+          settlementSuccessRate: 0.5,
+          p99LatencyMs: 100,
+        },
+      };
+      const extendedProvider = new MockExtendedHealthStatusProvider(extendedStatus);
+      healthServer = new HealthServer(mockLogger, extendedProvider, {
+        extendedProvider,
+      });
+      await healthServer.start(8094);
+
+      // Act
+      const response = await request('http://localhost:8094').get('/health/ready');
+
+      // Assert
+      expect(response.status).toBe(503);
+      expect(response.body.status).toBe('not_ready');
+      expect(response.body.dependencies.tigerbeetle.status).toBe('down');
+    });
+
+    it('should return 200 when degraded but TigerBeetle is up', async () => {
+      // Arrange - Degraded status but TigerBeetle up means we can still serve traffic
+      const extendedStatus: HealthStatusExtended = {
+        status: 'degraded',
+        uptime: 100,
+        peersConnected: 1,
+        totalPeers: 2,
+        timestamp: new Date().toISOString(),
+        dependencies: {
+          tigerbeetle: { status: 'up', latencyMs: 10 },
+          xrpl: { status: 'down' }, // XRPL down causes degraded but not unready
+        },
+        sla: {
+          packetSuccessRate: 0.95,
+          settlementSuccessRate: 0.9,
+          p99LatencyMs: 15,
+        },
+      };
+      const extendedProvider = new MockExtendedHealthStatusProvider(extendedStatus);
+      healthServer = new HealthServer(mockLogger, extendedProvider, {
+        extendedProvider,
+      });
+      await healthServer.start(8095);
+
+      // Act
+      const response = await request('http://localhost:8095').get('/health/ready');
+
+      // Assert
+      expect(response.status).toBe(200);
+      expect(response.body.status).toBe('ready');
+    });
+  });
+
+  describe('GET /metrics endpoint', () => {
+    it('should return metrics when middleware is configured', async () => {
+      // Arrange
+      const healthyStatus: HealthStatus = {
+        status: 'healthy',
+        uptime: 100,
+        peersConnected: 1,
+        totalPeers: 1,
+        timestamp: new Date().toISOString(),
+      };
+      mockProvider = new MockHealthStatusProvider(healthyStatus);
+
+      // Mock metrics middleware
+      const mockMetricsMiddleware = (_req: Request, res: Response): void => {
+        res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+        res.send('# HELP test_metric A test metric\n# TYPE test_metric gauge\ntest_metric 42\n');
+      };
+
+      healthServer = new HealthServer(mockLogger, mockProvider, {
+        metricsMiddleware: mockMetricsMiddleware,
+      });
+      await healthServer.start(8096);
+
+      // Act
+      const response = await request('http://localhost:8096').get('/metrics');
+
+      // Assert
+      expect(response.status).toBe(200);
+      expect(response.text).toContain('test_metric');
+      expect(response.headers['content-type']).toContain('text/plain');
+    });
+
+    it('should return 404 when metrics middleware is not configured', async () => {
+      // Arrange
+      const healthyStatus: HealthStatus = {
+        status: 'healthy',
+        uptime: 100,
+        peersConnected: 1,
+        totalPeers: 1,
+        timestamp: new Date().toISOString(),
+      };
+      mockProvider = new MockHealthStatusProvider(healthyStatus);
+      healthServer = new HealthServer(mockLogger, mockProvider);
+      await healthServer.start(8097);
+
+      // Act
+      const response = await request('http://localhost:8097').get('/metrics');
+
+      // Assert
+      expect(response.status).toBe(404);
+    });
+  });
+
+  describe('extended health status', () => {
+    it('should return extended status with dependencies and SLA when provider available', async () => {
+      // Arrange
+      const extendedStatus: HealthStatusExtended = {
+        status: 'healthy',
+        uptime: 300,
+        peersConnected: 3,
+        totalPeers: 3,
+        timestamp: new Date().toISOString(),
+        nodeId: 'prod-connector-1',
+        version: '2.0.0',
+        dependencies: {
+          tigerbeetle: { status: 'up', latencyMs: 2 },
+          xrpl: { status: 'up', latencyMs: 100 },
+          evm: { status: 'up', latencyMs: 50 },
+        },
+        sla: {
+          packetSuccessRate: 0.9995,
+          settlementSuccessRate: 0.995,
+          p99LatencyMs: 3,
+        },
+      };
+      const extendedProvider = new MockExtendedHealthStatusProvider(extendedStatus);
+      healthServer = new HealthServer(mockLogger, extendedProvider, {
+        extendedProvider,
+      });
+      await healthServer.start(8098);
+
+      // Act
+      const response = await request('http://localhost:8098').get('/health');
+
+      // Assert
+      expect(response.status).toBe(200);
+      expect(response.body.dependencies).toBeDefined();
+      expect(response.body.dependencies.tigerbeetle.status).toBe('up');
+      expect(response.body.sla).toBeDefined();
+      expect(response.body.sla.packetSuccessRate).toBe(0.9995);
+    });
+
+    it('should return 200 for degraded status (still operational)', async () => {
+      // Arrange
+      const degradedStatus: HealthStatusExtended = {
+        status: 'degraded',
+        uptime: 100,
+        peersConnected: 1,
+        totalPeers: 2,
+        timestamp: new Date().toISOString(),
+        dependencies: {
+          tigerbeetle: { status: 'up', latencyMs: 5 },
+          xrpl: { status: 'down' },
+        },
+        sla: {
+          packetSuccessRate: 0.95,
+          settlementSuccessRate: 0.85,
+          p99LatencyMs: 20,
+        },
+      };
+      const extendedProvider = new MockExtendedHealthStatusProvider(degradedStatus);
+      healthServer = new HealthServer(mockLogger, extendedProvider, {
+        extendedProvider,
+      });
+      await healthServer.start(8099);
+
+      // Act
+      const response = await request('http://localhost:8099').get('/health');
+
+      // Assert
+      expect(response.status).toBe(200); // Degraded still returns 200
+      expect(response.body.status).toBe('degraded');
     });
   });
 });

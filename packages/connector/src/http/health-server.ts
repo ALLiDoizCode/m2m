@@ -3,20 +3,33 @@
  * @packageDocumentation
  * @remarks
  * Provides lightweight HTTP health check endpoint separate from BTP WebSocket server.
- * Compliant with Docker HEALTHCHECK and external monitoring tool requirements.
+ * Compliant with Docker HEALTHCHECK, Kubernetes probes, and Prometheus monitoring.
+ *
+ * **Story 12.6 Extensions:**
+ * - GET /metrics - Prometheus metrics endpoint
+ * - GET /health/ready - Kubernetes readiness probe
+ * - GET /health/live - Kubernetes liveness probe
+ * - Extended health status with dependencies and SLA metrics
  */
 
-import express, { Express, Request, Response, Router } from 'express';
+import express, { Express, Request, Response, Router, RequestHandler } from 'express';
 import { Server } from 'http';
 import { Logger } from '../utils/logger';
-import { HealthStatus, HealthStatusProvider } from './types';
+import {
+  HealthStatus,
+  HealthStatusProvider,
+  HealthStatusExtended,
+  HealthStatusExtendedProvider,
+} from './types';
 
 /**
  * Health Server Configuration
  *
- * Optional configuration for additional routers to mount on the health server.
+ * Optional configuration for additional routers and monitoring integration.
  *
  * @property settlementRouter - Optional settlement API router (Story 6.7)
+ * @property metricsMiddleware - Optional Prometheus metrics middleware (Story 12.6)
+ * @property extendedProvider - Optional extended health status provider
  */
 export interface HealthServerConfig {
   /**
@@ -25,6 +38,18 @@ export interface HealthServerConfig {
    * Enables settlement API to share port with health check endpoint
    */
   settlementRouter?: Router;
+
+  /**
+   * Optional Prometheus metrics middleware
+   * If provided, mounts /metrics endpoint for Prometheus scraping
+   */
+  metricsMiddleware?: RequestHandler;
+
+  /**
+   * Optional extended health status provider
+   * If provided, enables extended health status with dependencies and SLA
+   */
+  extendedProvider?: HealthStatusExtendedProvider;
 }
 
 /**
@@ -68,12 +93,13 @@ export class HealthServer {
   private _server: Server | null = null;
   private readonly _logger: Logger;
   private readonly _healthStatusProvider: HealthStatusProvider;
+  private readonly _extendedProvider?: HealthStatusExtendedProvider;
 
   /**
    * Create health check server instance
    * @param logger - Pino logger instance for structured logging
    * @param healthStatusProvider - Component providing current health status (typically ConnectorNode)
-   * @param config - Optional configuration (e.g., settlement router)
+   * @param config - Optional configuration (e.g., settlement router, metrics middleware)
    */
   constructor(
     logger: Logger,
@@ -82,10 +108,17 @@ export class HealthServer {
   ) {
     this._logger = logger.child({ component: 'HealthServer' });
     this._healthStatusProvider = healthStatusProvider;
+    this._extendedProvider = config?.extendedProvider;
     this._app = express();
 
-    // Configure health check endpoint
+    // Configure health check endpoints
     this._setupRoutes();
+
+    // Mount Prometheus metrics endpoint if provided
+    if (config?.metricsMiddleware) {
+      this._app.get('/metrics', config.metricsMiddleware);
+      this._logger.info('Prometheus metrics endpoint mounted at /metrics');
+    }
 
     // Mount settlement router if provided
     if (config?.settlementRouter) {
@@ -95,15 +128,17 @@ export class HealthServer {
   }
 
   /**
-   * Configure Express routes (only /health endpoint)
+   * Configure Express routes for health checks
    * @private
    */
   private _setupRoutes(): void {
-    // GET /health - Returns current health status
+    // GET /health - Returns current health status (extended if available)
     this._app.get('/health', (req: Request, res: Response) => {
       try {
-        // Get current health status from provider
-        const healthStatus: HealthStatus = this._healthStatusProvider.getHealthStatus();
+        // Use extended provider if available, otherwise use basic provider
+        const healthStatus: HealthStatus | HealthStatusExtended = this._extendedProvider
+          ? this._extendedProvider.getHealthStatusExtended()
+          : this._healthStatusProvider.getHealthStatus();
 
         // Log health check request at DEBUG level (avoid log noise)
         this._logger.debug({
@@ -113,7 +148,9 @@ export class HealthServer {
         });
 
         // Set HTTP status code based on health status
-        const statusCode = healthStatus.status === 'healthy' ? 200 : 503;
+        // healthy = 200, degraded = 200 (still operational), unhealthy/starting = 503
+        const statusCode =
+          healthStatus.status === 'healthy' || healthStatus.status === 'degraded' ? 200 : 503;
 
         // Return JSON response
         res.status(statusCode).json(healthStatus);
@@ -128,6 +165,89 @@ export class HealthServer {
         res.status(503).json({
           status: 'unhealthy',
           error: 'Failed to retrieve health status',
+        });
+      }
+    });
+
+    // GET /health/live - Kubernetes liveness probe
+    // Returns 200 if the process is running (always returns 200 unless server crashed)
+    this._app.get('/health/live', (_req: Request, res: Response) => {
+      this._logger.trace({ event: 'liveness_probe' });
+      res.status(200).json({
+        status: 'alive',
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    // GET /health/ready - Kubernetes readiness probe
+    // Returns 200 if dependencies are up and connector is ready to handle traffic
+    this._app.get('/health/ready', (req: Request, res: Response) => {
+      try {
+        // Use extended provider if available for dependency checks
+        if (this._extendedProvider) {
+          const extendedStatus = this._extendedProvider.getHealthStatusExtended();
+
+          // Check if critical dependencies are up
+          const tigerBeetleUp = extendedStatus.dependencies.tigerbeetle.status === 'up';
+          const isReady =
+            tigerBeetleUp &&
+            (extendedStatus.status === 'healthy' || extendedStatus.status === 'degraded');
+
+          this._logger.debug({
+            event: 'readiness_probe',
+            ready: isReady,
+            tigerBeetleUp,
+            status: extendedStatus.status,
+            ip: req.ip,
+          });
+
+          if (isReady) {
+            res.status(200).json({
+              status: 'ready',
+              dependencies: extendedStatus.dependencies,
+              timestamp: new Date().toISOString(),
+            });
+          } else {
+            res.status(503).json({
+              status: 'not_ready',
+              dependencies: extendedStatus.dependencies,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        } else {
+          // Fall back to basic health check
+          const healthStatus = this._healthStatusProvider.getHealthStatus();
+          const isReady = healthStatus.status === 'healthy';
+
+          this._logger.debug({
+            event: 'readiness_probe',
+            ready: isReady,
+            status: healthStatus.status,
+            ip: req.ip,
+          });
+
+          if (isReady) {
+            res.status(200).json({
+              status: 'ready',
+              timestamp: new Date().toISOString(),
+            });
+          } else {
+            res.status(503).json({
+              status: 'not_ready',
+              reason: healthStatus.status,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
+      } catch (error) {
+        this._logger.error({
+          event: 'readiness_probe_error',
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+
+        res.status(503).json({
+          status: 'not_ready',
+          error: 'Failed to check readiness',
         });
       }
     });

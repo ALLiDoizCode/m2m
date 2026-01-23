@@ -3,12 +3,37 @@
  *
  * Signs and verifies XRP payment channel claims using ed25519 signatures.
  * Enhanced from Story 9.2 stub to implement full signing/verification.
+ * Refactored in Story 12.2 to use KeyManager for enterprise-grade key management.
  *
  * File: packages/connector/src/settlement/xrp-claim-signer.ts
  */
-import { Wallet, signPaymentChannelClaim, verifyPaymentChannelClaim } from 'xrpl';
 import { Database } from 'better-sqlite3';
 import pino from 'pino';
+import { KeyManager } from '../security/key-manager';
+import { encodeForSigningClaim } from 'ripple-binary-codec';
+import { verify as verifySignature } from 'ripple-keypairs';
+
+/**
+ * Create XRP payment channel claim message for signing
+ *
+ * Uses ripple-binary-codec to encode claim data per XRPL specification.
+ * This ensures compatibility with xrpl.js verification functions.
+ *
+ * @param channelId - Channel ID (64-character hex string)
+ * @param amount - XRP drops as string (for bigint precision)
+ * @returns Buffer containing encoded claim message ready for signing
+ */
+function createClaimMessage(channelId: string, amount: string): Buffer {
+  // Use ripple-binary-codec to encode claim data
+  // This matches the encoding used by xrpl.signPaymentChannelClaim()
+  const signingData = encodeForSigningClaim({
+    channel: channelId,
+    amount: amount,
+  });
+
+  // Convert hex string to buffer
+  return Buffer.from(signingData, 'hex');
+}
 
 /**
  * XRP Payment Channel Claim
@@ -55,27 +80,29 @@ export interface PaymentChannelClaim {
  *
  * Signs and verifies off-chain claims for XRP payment channels per XRP Ledger specification.
  * Stores claims in database for dispute resolution and enforces monotonic claim amounts.
+ * Refactored to use KeyManager for HSM/KMS integration (Story 12.2).
  */
 export class ClaimSigner {
-  private readonly wallet: Wallet;
+  private readonly keyManager: KeyManager;
+  private readonly xrpKeyId: string;
   private readonly logger: pino.Logger;
 
   /**
-   * Initialize ClaimSigner with database and optional seed for deterministic keypair generation.
+   * Initialize ClaimSigner with KeyManager for enterprise-grade key management.
    *
    * @param db - SQLite database instance for claim storage
    * @param logger - Pino logger instance
-   * @param seed - Optional ed25519 seed (e.g., from XRPL_CLAIM_SIGNER_SEED env var)
-   *               If not provided, generates random keypair
+   * @param keyManager - KeyManager instance for signing operations
+   * @param xrpKeyId - XRP key identifier for KeyManager (backend-specific format)
    */
   constructor(
     private readonly db: Database,
     logger: pino.Logger,
-    seed?: string
+    keyManager: KeyManager,
+    xrpKeyId: string
   ) {
-    // Generate ed25519 keypair
-    // If seed provided, use it; otherwise generate random
-    this.wallet = seed ? Wallet.fromSeed(seed) : Wallet.generate();
+    this.keyManager = keyManager;
+    this.xrpKeyId = xrpKeyId;
     this.logger = logger.child({ component: 'ClaimSigner' });
   }
 
@@ -84,8 +111,10 @@ export class ClaimSigner {
    *
    * @returns Hex-encoded public key (66 chars: ED prefix + 64 hex)
    */
-  getPublicKey(): string {
-    return this.wallet.publicKey;
+  async getPublicKey(): Promise<string> {
+    const pubKeyBuffer = await this.keyManager.getPublicKey(this.xrpKeyId);
+    // Convert buffer to hex string with ED prefix for XRPL format
+    return 'ED' + pubKeyBuffer.toString('hex').toUpperCase();
   }
 
   /**
@@ -125,10 +154,19 @@ export class ClaimSigner {
       );
     }
 
-    // Sign payment channel claim using xrpl.js
-    const signature = signPaymentChannelClaim(channelId, amount, this.wallet.privateKey);
+    // Create claim message: 'CLM\0' + channelId + amount (uint64 big-endian)
+    const message = createClaimMessage(channelId, amount);
+
+    // Sign with KeyManager
+    const signatureBuffer = await this.keyManager.sign(message, this.xrpKeyId);
+
+    // Convert signature buffer to hex string for XRPL
+    const signature = signatureBuffer.toString('hex').toUpperCase();
 
     this.logger.info({ channelId, amount, signature }, 'Claim signed successfully');
+
+    // Get public key for storage
+    const publicKey = await this.getPublicKey();
 
     // Store claim in database
     this.db
@@ -136,7 +174,7 @@ export class ClaimSigner {
         `INSERT INTO xrp_claims (channel_id, amount, signature, public_key, created_at)
          VALUES (?, ?, ?, ?, ?)`
       )
-      .run(channelId, amount, signature, this.wallet.publicKey, Date.now());
+      .run(channelId, amount, signature, publicKey, Date.now());
 
     return signature;
   }
@@ -201,8 +239,15 @@ export class ClaimSigner {
         return false;
       }
 
-      // Verify payment channel claim using xrpl.js
-      const isValid = verifyPaymentChannelClaim(channelId, amount, signature, publicKey);
+      // Verify payment channel claim using ripple-keypairs
+      // Note: Using ripple-keypairs.verify directly because verifyPaymentChannelClaim
+      // expects XRP amounts and converts to drops, but we already use drop amounts
+      const signingData = encodeForSigningClaim({
+        channel: channelId,
+        amount: amount, // Amount already in drops
+      });
+
+      const isValid = verifySignature(signingData, signature, publicKey);
 
       this.logger.info({ channelId, isValid }, 'Claim verification complete');
       return isValid;

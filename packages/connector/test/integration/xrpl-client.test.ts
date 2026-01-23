@@ -16,6 +16,7 @@
 import { XRPLClient, XRPLClientConfig, XRPLErrorCode } from '../../src/settlement/xrpl-client';
 import { PaymentChannelManager } from '../../src/settlement/xrp-channel-manager';
 import { ClaimSigner } from '../../src/settlement/xrp-claim-signer';
+import { KeyManager } from '../../src/security/key-manager';
 import { Logger } from 'pino';
 import pino from 'pino';
 import Database from 'better-sqlite3';
@@ -221,8 +222,17 @@ describeIfLocal('XRPLClient Integration - Claim Submission', () => {
     client = new XRPLClient(TEST_CONFIG, logger);
     await client.connect();
 
+    // Initialize KeyManager with environment backend
+    const keyManager = new KeyManager(
+      {
+        backend: 'env',
+        nodeId: 'xrpl-test',
+      },
+      logger
+    );
+
     // Initialize ClaimSigner and PaymentChannelManager
-    claimSigner = new ClaimSigner(db, logger);
+    claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
     channelManager = new PaymentChannelManager(client, db, logger);
   });
 
@@ -264,7 +274,7 @@ describeIfLocal('XRPLClient Integration - Claim Submission', () => {
     // 2. Sign claim for 0.5 XRP
     const claimAmount = '500000'; // 0.5 XRP
     const signature = await claimSigner.signClaim(channelId, claimAmount);
-    const publicKey = claimSigner.getPublicKey();
+    const publicKey = await claimSigner.getPublicKey();
 
     expect(signature).toBeDefined();
     expect(signature).toMatch(/^[0-9A-Fa-f]{128}$/);
@@ -315,7 +325,7 @@ describeIfLocal('XRPLClient Integration - Claim Submission', () => {
 
     // 2. Sign final claim (full channel amount)
     const signature = await claimSigner.signClaim(channelId, channelAmount);
-    const publicKey = claimSigner.getPublicKey();
+    const publicKey = await claimSigner.getPublicKey();
 
     // 3. Submit final claim with close flag
     const result = await client.submitClaim(channelId, channelAmount, signature, publicKey, true);

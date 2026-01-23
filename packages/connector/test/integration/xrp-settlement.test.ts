@@ -35,6 +35,7 @@ import {
 import { XRPLClient as M2MXRPLClient, XRPLClientConfig } from '../../src/settlement/xrpl-client';
 import { XRPChannelSDK } from '../../src/settlement/xrp-channel-sdk';
 import { ClaimSigner } from '../../src/settlement/xrp-claim-signer';
+import { KeyManager } from '../../src/security/key-manager';
 import { PaymentChannelManager } from '../../src/settlement/xrp-channel-manager';
 import { TelemetryEmitter } from '../../src/telemetry/telemetry-emitter';
 import Database from 'better-sqlite3';
@@ -149,7 +150,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
       logger.info(`Created destination account: ${destinationWallet.address}`);
 
       // Create XRP channel components
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(DASHBOARD_URL, 'test-connector', logger);
 
@@ -256,7 +258,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         fundAmount: '50000000000',
       });
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(DASHBOARD_URL, 'test-connector-2', logger);
 
@@ -312,7 +315,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         fundAmount: '50000000000',
       });
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(DASHBOARD_URL, 'test-connector-3', logger);
 
@@ -385,7 +389,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         fundAmount: '5000000', // 5 XRP (below 10 XRP reserve)
       });
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(DASHBOARD_URL, 'test-connector-error', logger);
 
@@ -421,7 +426,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         fundAmount: '50000000000',
       });
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(
         DASHBOARD_URL,
@@ -452,7 +458,7 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         channelId,
         amount: '1000000000',
         signature: 'INVALID_SIGNATURE_HEX',
-        publicKey: claimSigner.getPublicKey(),
+        publicKey: await claimSigner.getPublicKey(),
       };
 
       // ASSERT: Claim verification fails
@@ -471,7 +477,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
       }
 
       // ARRANGE: Create components
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(
         DASHBOARD_URL,
@@ -541,7 +548,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         fundAmount: '50000000000',
       });
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(DASHBOARD_URL, 'test-connector-dual', logger);
 
@@ -602,7 +610,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         fundAmount: '50000000000',
       });
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
 
       // Create telemetry emitter that connects to dashboard
@@ -663,7 +672,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         return;
       }
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelId = 'A'.repeat(64); // Mock channel ID
       const amount = '1000000000'; // 1000 XRP
 
@@ -685,11 +695,12 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         return;
       }
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelId = 'A'.repeat(64);
       const amount = '1000000000';
       const signature = await claimSigner.signClaim(channelId, amount);
-      const publicKey = claimSigner.getPublicKey();
+      const publicKey = await claimSigner.getPublicKey();
 
       // Warm up
       await claimSigner.verifyClaim(channelId, amount, signature, publicKey);
@@ -712,7 +723,8 @@ describeIfLocal('XRP Settlement End-to-End Integration', () => {
         fundAmount: '50000000000',
       });
 
-      const claimSigner = new ClaimSigner(db, logger);
+      const keyManager = new KeyManager({ backend: 'env', nodeId: 'test-xrp' }, logger);
+      const claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
       const channelManager = new PaymentChannelManager(m2mXrplClient, db, logger);
       const telemetryEmitter = new TelemetryEmitter(DASHBOARD_URL, 'test-connector-perf', logger);
 

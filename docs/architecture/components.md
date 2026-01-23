@@ -257,6 +257,122 @@ else {
 
 **Technology Stack:** TypeScript, Map-based channel tracking, 1-hour periodic checks via setInterval
 
+## AgentNode
+
+**Responsibility:** Main orchestrator for autonomous agent peers. Extends ConnectorNode functionality with Nostr event handling, local event storage, and subscription management.
+
+**Key Interfaces:**
+
+- `start(): Promise<void>` - Initialize event database, register handlers, start connector
+- `stop(): Promise<void>` - Graceful shutdown with database close
+- `handleAgentPacket(packet: ILPPreparePacket): Promise<ILPFulfillPacket | ILPRejectPacket>` - Process agent-addressed packets
+
+**Dependencies:**
+
+- ConnectorNode (base connector functionality)
+- AgentEventDatabase (event storage)
+- AgentEventHandler (kind-based dispatch)
+- SubscriptionManager (push subscriptions)
+- FollowGraphRouter (routing from follow list)
+- ToonCodec (serialization)
+- Logger
+
+**Technology Stack:** TypeScript, extends existing ConnectorNode pattern
+
+## AgentEventDatabase
+
+**Responsibility:** Persistent storage and retrieval of Nostr events using libSQL with MVCC concurrent writes.
+
+**Key Interfaces:**
+
+- `storeEvent(event: NostrEvent): Promise<void>` - Store single event
+- `storeEvents(events: NostrEvent[]): Promise<void>` - Batch store
+- `deleteEvent(eventId: string): Promise<boolean>` - Delete by ID
+- `queryEvents(filter: NostrFilter): Promise<NostrEvent[]>` - Query with NIP-01 filter
+- `countEvents(filter: NostrFilter): Promise<number>` - Count matching events
+- `initialize(): Promise<void>` - Create tables and indexes
+- `close(): Promise<void>` - Close database connection
+
+**Dependencies:**
+
+- @libsql/client (database driver)
+- Logger
+
+**Technology Stack:** libSQL (SQLite fork with MVCC), async API
+
+## AgentEventHandler
+
+**Responsibility:** Dispatch incoming Nostr events to appropriate handlers based on event kind. Validates payment before execution.
+
+**Key Interfaces:**
+
+- `registerHandler(kind: number, handler: EventKindHandler): void` - Register handler for kind
+- `handlePacket(packet: ILPPreparePacket): Promise<ILPFulfillPacket | ILPRejectPacket>` - Process packet
+- `getRegisteredKinds(): number[]` - List supported event kinds
+
+**Dependencies:**
+
+- ToonCodec (decode packet data)
+- AgentEventDatabase (storage)
+- Logger
+
+**Technology Stack:** TypeScript, Map-based handler registry
+
+## SubscriptionManager
+
+**Responsibility:** Manage Nostr REQ/CLOSE subscriptions and push matching events to subscribers over BTP.
+
+**Key Interfaces:**
+
+- `registerSubscription(peerId: string, subscriptionId: string, filters: NostrFilter[]): void` - Register subscription
+- `unregisterSubscription(peerId: string, subscriptionId: string): void` - Unregister subscription
+- `onEventStored(event: NostrEvent): Promise<void>` - Push to matching subscriptions
+- `getSubscriptions(peerId: string): Map<string, NostrFilter[]>` - Get peer's subscriptions
+- `cleanupPeer(peerId: string): void` - Remove all subscriptions for disconnected peer
+
+**Dependencies:**
+
+- BTPClientManager (push events to peers)
+- ToonCodec (encode events)
+- Logger
+
+**Technology Stack:** TypeScript, in-memory Map storage (subscriptions not persisted)
+
+## FollowGraphRouter
+
+**Responsibility:** Maintain routing table from Kind 3 follow list events. Maps agent pubkeys to ILP addresses.
+
+**Key Interfaces:**
+
+- `updateFromFollowList(event: NostrEvent): void` - Update routing from follow event
+- `getNextHop(destination: ILPAddress): string | null` - Get next hop for destination
+- `getKnownAgents(): Map<string, ILPAddress>` - Get pubkey → address mapping
+- `exportGraph(): FollowGraphEdge[]` - Export graph for debugging
+
+**Dependencies:**
+
+- RoutingTable (underlying route storage)
+- Logger
+
+**Technology Stack:** TypeScript, extends existing RoutingTable
+
+## ToonCodec
+
+**Responsibility:** Encode and decode Nostr events to/from TOON format for ILP packet data field.
+
+**Key Interfaces:**
+
+- `encodeEvent(event: NostrEvent): Buffer` - Encode single event
+- `decodeEvent(buffer: Buffer): NostrEvent` - Decode single event
+- `encodeEvents(events: NostrEvent[]): Buffer` - Encode array of events
+- `decodeEvents(buffer: Buffer): NostrEvent[]` - Decode array of events
+
+**Dependencies:**
+
+- @toon-format/toon (TOON encoding library)
+
+**Technology Stack:** TypeScript wrapper around TOON library
+
 ## Component Diagrams
 
 ```mermaid

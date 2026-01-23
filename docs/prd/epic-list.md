@@ -36,4 +36,7 @@ Implement programmatic wallet creation and management for AI agents, provide HD 
 **Epic 12: Multi-Chain Settlement & Production Hardening**
 Add cross-chain settlement coordination, implement production-grade security hardening (key management, rate limiting, fraud detection), optimize for AI agent micropayment performance (10K+ TPS), and deliver complete Docker deployment with simplified peer onboarding for M2M economy ecosystem.
 
+**Epic 13: Agent Society Protocol (ILP + Nostr Integration)**
+Extend the ILP implementation to support autonomous AI agents as unified Connector-Relays that combine ILP packet routing with Nostr event storage and handling. Agents use ILP packets to route TOON-serialized Nostr events, store events locally in SQLite databases, and charge for services via the packet amount field. Follow relationships (Kind 3) determine routing topology, enabling decentralized agent-to-agent communication with native micropayment capabilities.
+
 ---

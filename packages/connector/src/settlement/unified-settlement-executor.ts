@@ -213,7 +213,7 @@ export class UnifiedSettlementExecutor {
 
     // Sign claim for amount
     const signature = await this.xrpClaimSigner.signClaim(channelId, amount);
-    const publicKey = this.xrpClaimSigner.getPublicKey();
+    const publicKey = await this.xrpClaimSigner.getPublicKey();
 
     // Send claim to peer off-chain (peer submits to ledger)
     // TODO: Implement off-chain claim delivery mechanism (Story 9.6+)

@@ -27,6 +27,11 @@ import {
   PeerStatus,
 } from './types';
 import type { XRPChannelState } from '../settlement/xrp-channel-manager';
+import {
+  TelemetryBuffer,
+  TelemetryBufferConfig,
+  TelemetryEvent as BufferEvent,
+} from './telemetry-buffer';
 
 /**
  * TelemetryEmitter class - Sends telemetry events to dashboard telemetry server
@@ -45,6 +50,7 @@ export class TelemetryEmitter {
   private _reconnectDelay: number = 1000; // Start at 1 second
   private _reconnectTimeout: NodeJS.Timeout | null = null;
   private _intentionalDisconnect: boolean = false; // Track if disconnect was intentional
+  private _buffer: TelemetryBuffer | null = null; // Optional buffer for batching (Story 12.5)
 
   /**
    * Create a TelemetryEmitter instance
@@ -56,6 +62,86 @@ export class TelemetryEmitter {
     this._dashboardUrl = dashboardUrl;
     this._nodeId = nodeId;
     this._logger = logger;
+  }
+
+  /**
+   * Create a TelemetryEmitter with buffering enabled for high-throughput scenarios
+   *
+   * When buffering is enabled, telemetry events are accumulated and flushed in batches,
+   * reducing WebSocket overhead and improving performance at high packet rates.
+   *
+   * @param dashboardUrl - WebSocket URL of dashboard telemetry server
+   * @param nodeId - Connector node ID for telemetry message identification
+   * @param logger - Pino logger instance
+   * @param bufferConfig - Buffer configuration (size and flush interval)
+   * @returns TelemetryEmitter with buffering enabled
+   *
+   * [Source: Epic 12 Story 12.5 Task 5.2 - TelemetryBuffer integration]
+   */
+  static withBuffer(
+    dashboardUrl: string,
+    nodeId: string,
+    logger: Logger,
+    bufferConfig: TelemetryBufferConfig = { bufferSize: 1000, flushIntervalMs: 100 }
+  ): TelemetryEmitter {
+    const emitter = new TelemetryEmitter(dashboardUrl, nodeId, logger);
+
+    // Create buffer with flush callback that sends batch via WebSocket
+    emitter._buffer = new TelemetryBuffer(
+      bufferConfig,
+      (events: BufferEvent[]) => {
+        emitter._flushBufferedEvents(events);
+      },
+      logger
+    );
+
+    logger.info(
+      {
+        bufferSize: bufferConfig.bufferSize,
+        flushIntervalMs: bufferConfig.flushIntervalMs,
+      },
+      'TelemetryEmitter created with buffering enabled'
+    );
+
+    return emitter;
+  }
+
+  /**
+   * Flush buffered events via WebSocket (internal)
+   * @param events - Array of buffered telemetry events
+   */
+  private _flushBufferedEvents(events: BufferEvent[]): void {
+    if (!this._connected || !this._ws || events.length === 0) {
+      return;
+    }
+
+    try {
+      // Convert buffered events back to TelemetryMessage format for sending
+      const messages: TelemetryMessage[] = events.map((event) => ({
+        type: event.eventType as TelemetryMessage['type'],
+        nodeId: this._nodeId,
+        timestamp: new Date(event.timestamp).toISOString(),
+        data: event.data as unknown as TelemetryMessage['data'],
+      }));
+
+      // Send batch as single message array
+      this._ws.send(JSON.stringify({ batch: messages }));
+
+      this._logger.debug({ eventCount: events.length }, 'Flushed buffered telemetry events');
+    } catch (error) {
+      this._logger.warn(
+        { error, eventCount: events.length },
+        'Failed to flush buffered telemetry events'
+      );
+    }
+  }
+
+  /**
+   * Check if buffering is enabled
+   * @returns True if TelemetryBuffer is active
+   */
+  isBufferingEnabled(): boolean {
+    return this._buffer !== null;
   }
 
   /**
@@ -128,6 +214,11 @@ export class TelemetryEmitter {
     if (this._reconnectTimeout) {
       clearTimeout(this._reconnectTimeout);
       this._reconnectTimeout = null;
+    }
+
+    // Shutdown buffer if active (flushes remaining events and stops timer)
+    if (this._buffer) {
+      this._buffer.shutdown();
     }
 
     if (this._ws) {
@@ -342,6 +433,19 @@ export class TelemetryEmitter {
    * Send failures are logged at WARN level but never throw.
    */
   private _sendTelemetry(message: TelemetryMessage): void {
+    // If buffering is enabled, add to buffer instead of sending directly
+    if (this._buffer) {
+      const bufferEvent: BufferEvent = {
+        eventType: message.type,
+        timestamp: Date.now(),
+        data: message.data as unknown as Record<string, unknown>,
+        metadata: { nodeId: message.nodeId },
+      };
+      this._buffer.addEvent(bufferEvent);
+      return;
+    }
+
+    // Direct send (no buffering)
     if (!this._connected || !this._ws) {
       this._logger.debug(
         { event: 'telemetry_not_connected', messageType: message.type },

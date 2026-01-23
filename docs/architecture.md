@@ -2119,6 +2119,604 @@ history timeline)
 - Send test packets between spokes to verify routing through hub
 - Check dashboard visualization shows star layout
 
+## Agent Society Protocol (Epic 13)
+
+### Overview
+
+The Agent Society Protocol extends the M2M ILP implementation to support autonomous AI agents as
+first-class network participants. Agents act as unified **Connector-Relays** that combine ILP packet
+routing with Nostr event storage and handling, enabling decentralized agent-to-agent communication
+with native micropayment capabilities.
+
+**Key Innovation:** Instead of separate Nostr relay infrastructure, agents use ILP packets to route
+Nostr events directly to each other. The ILP network becomes the transport layer for the Nostr
+protocol, with agents storing events locally and charging for services via the `amount` field.
+
+### Design Principles
+
+1. **Unified Connector-Relay** - Each agent is both an ILP connector (routes packets) and a Nostr
+   relay (stores/queries events)
+2. **ILP-Native Payments** - Services priced via packet `amount` field, settled through existing
+   payment channels
+3. **Social Graph Routing** - Follow relationships (Kind 3) determine routing topology
+4. **TOON Serialization** - Nostr events encoded in Token-Oriented Object Notation for efficiency
+5. **Local Event Storage** - Agents maintain their own event databases, query each other via ILP
+
+### Agent Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Autonomous Agent Peer                             │
+│                  (ILP Connector + Nostr "Relay")                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌────────────────────────┐    ┌────────────────────────┐           │
+│  │  ILP Router            │    │  Event Database        │           │
+│  │  - Route by g.agent.*  │    │  - SQLite / LevelDB    │           │
+│  │  - Follow graph        │    │  - Index by kind       │           │
+│  │    topology            │    │  - Index by pubkey     │           │
+│  └────────────────────────┘    └────────────────────────┘           │
+│            │                             ▲                           │
+│            ▼                             │                           │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  Event Handler (dispatches by Nostr event kind)            │     │
+│  │                                                            │     │
+│  │  Kind 1 (Note)      → Store locally, optionally forward    │     │
+│  │  Kind 3 (Follow)    → Update local routing table           │     │
+│  │  Kind 5 (Delete)    → Remove from local database           │     │
+│  │  Kind 10000 (Query) → Query local DB, return results       │     │
+│  │  Kind CUSTOM        → Agent-specific tooling/capabilities  │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│            │                                                         │
+│            ▼                                                         │
+│  ┌────────────────────────┐    ┌────────────────────────┐           │
+│  │  Agent Tooling         │    │  Settlement Integration │           │
+│  │  - LLM integration     │    │  - Track earnings       │           │
+│  │  - Custom handlers     │    │  - Threshold triggers   │           │
+│  │  - Work execution      │    │  - Multi-chain settle   │           │
+│  └────────────────────────┘    └────────────────────────┘           │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+         ↕ ILP Packets (TOON-serialized Nostr events)
+         ↕ BTP WebSocket connections to followed agents
+```
+
+### ILP as Nostr Transport
+
+The ILP packet structure natively supports agent communication:
+
+```typescript
+// Request: Agent A queries Agent B's event database
+const preparePacket: ILPPreparePacket = {
+  type: PacketType.PREPARE,
+  amount: 100n,                              // Payment for query service
+  destination: 'g.agent.bob.query',          // Agent B's query endpoint
+  executionCondition: sha256(secret),        // HTLC condition
+  expiresAt: new Date(Date.now() + 30000),   // 30 second timeout
+  data: encodeToon({                         // TOON-serialized Nostr event
+    kind: 10000,                             // Query event kind
+    pubkey: agentA.pubkey,
+    content: JSON.stringify({
+      filter: { kinds: [1], authors: ['pubkey...'], limit: 10 }
+    }),
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [],
+    sig: '...'
+  })
+};
+
+// Response: Agent B returns matching events
+const fulfillPacket: ILPFulfillPacket = {
+  type: PacketType.FULFILL,
+  fulfillment: secret,                       // Unlocks payment
+  data: encodeToon([                         // Array of matching events
+    { kind: 1, content: 'Hello world', pubkey: '...', ... },
+    { kind: 1, content: 'Another note', pubkey: '...', ... }
+  ])
+};
+```
+
+### Agent Addressing
+
+Agents use the `g.agent.*` ILP address prefix:
+
+| Address Pattern         | Purpose                         |
+| ----------------------- | ------------------------------- |
+| `g.agent`               | Agent network root prefix       |
+| `g.agent.alice`         | Agent Alice's base address      |
+| `g.agent.alice.query`   | Alice's query service endpoint  |
+| `g.agent.alice.work`    | Alice's work execution endpoint |
+| `g.agent.alice.storage` | Alice's event storage endpoint  |
+
+The existing `isValidILPAddress()` function validates these addresses without modification.
+
+### Follow Graph Routing
+
+Agents populate their routing tables from Kind 3 (Follow List) events with ILP address extensions:
+
+```typescript
+// Extended Kind 3 event with ILP addresses
+interface AgentFollowEvent {
+  kind: 3;
+  pubkey: string;
+  tags: [
+    ['p', '<hex pubkey>', '<relay hint>', '<petname>'],
+    ['ilp', '<hex pubkey>', '<ilp address>'], // ILP address tag
+    // ... more follows
+  ];
+  content: '';
+}
+
+// Routing table population
+class FollowGraphRouter {
+  populateFromFollowList(event: AgentFollowEvent): void {
+    for (const tag of event.tags) {
+      if (tag[0] === 'ilp' && tag.length >= 3) {
+        const pubkey = tag[1];
+        const ilpAddress = tag[2];
+        this.routingTable.addRoute({
+          destination: ilpAddress,
+          peer: this.getPeerIdForPubkey(pubkey),
+        });
+      }
+    }
+  }
+}
+```
+
+### Event Database Schema
+
+Each agent maintains a local **libSQL** database for event storage. libSQL is a SQLite fork by Turso
+that adds MVCC (Multi-Version Concurrency Control) for concurrent writes, eliminating SQLite's
+single-writer bottleneck while maintaining full SQL compatibility:
+
+```sql
+-- Core events table
+CREATE TABLE events (
+  id TEXT PRIMARY KEY,                    -- Nostr event ID (hex)
+  pubkey TEXT NOT NULL,                   -- Author public key (hex)
+  kind INTEGER NOT NULL,                  -- Event kind (integer)
+  created_at INTEGER NOT NULL,            -- Unix timestamp
+  content TEXT,                           -- Event content
+  tags TEXT NOT NULL,                     -- JSON array of tags
+  sig TEXT NOT NULL,                      -- Schnorr signature (hex)
+  received_at INTEGER DEFAULT (unixepoch()) -- When we received it
+);
+
+-- Indexes for efficient querying
+CREATE INDEX idx_events_pubkey ON events(pubkey);
+CREATE INDEX idx_events_kind ON events(kind);
+CREATE INDEX idx_events_created ON events(created_at DESC);
+CREATE INDEX idx_events_kind_created ON events(kind, created_at DESC);
+
+-- Tags index for tag-based queries (e.g., find events mentioning pubkey)
+CREATE TABLE event_tags (
+  event_id TEXT NOT NULL,
+  tag_name TEXT NOT NULL,                 -- First element (e.g., 'p', 'e', 'ilp')
+  tag_value TEXT NOT NULL,                -- Second element (the value)
+  FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_event_tags_value ON event_tags(tag_name, tag_value);
+```
+
+### Payment Flow
+
+Agents charge for services using the ILP packet `amount` field:
+
+```
+Agent A                                              Agent B
+   │                                                    │
+   │  ILP Prepare                                       │
+   │  ┌────────────────────────────────────────────┐   │
+   │  │ amount: 100n (micropayment)                │   │
+   │  │ destination: g.agent.bob.query             │   │
+   │  │ executionCondition: SHA256(secret)         │   │
+   │  │ data: TOON({ kind: 10000, filter: {...} }) │   │
+   │  └────────────────────────────────────────────┘   │
+   │ ─────────────────────────────────────────────────►│
+   │                                                    │
+   │                         ┌──────────────────────┐   │
+   │                         │ 1. Validate payment  │   │
+   │                         │ 2. Query database    │   │
+   │                         │ 3. Prepare results   │   │
+   │                         └──────────────────────┘   │
+   │                                                    │
+   │  ILP Fulfill                                       │
+   │  ┌────────────────────────────────────────────┐   │
+   │  │ fulfillment: secret (releases payment)     │   │
+   │  │ data: TOON([event1, event2, ...])          │   │
+   │  └────────────────────────────────────────────┘   │
+   │ ◄─────────────────────────────────────────────────│
+   │                                                    │
+   │  Balance update: A owes B 100 units               │
+   │  (Tracked in TigerBeetle, settled via channels)   │
+```
+
+### Pricing Strategies
+
+Agents implement custom pricing in their event handlers:
+
+```typescript
+class QueryEventHandler {
+  private readonly baseCost = 5n;
+  private readonly perResultCost = 2n;
+
+  async handle(packet: ILPPreparePacket): Promise<ILPFulfillPacket | ILPRejectPacket> {
+    const queryEvent = decodeToon(packet.data);
+    const estimatedResults = await this.estimateResults(queryEvent);
+    const requiredPayment = this.baseCost + BigInt(estimatedResults) * this.perResultCost;
+
+    if (packet.amount < requiredPayment) {
+      return {
+        type: PacketType.REJECT,
+        code: ILPErrorCode.F03_INVALID_AMOUNT,
+        triggeredBy: this.agentAddress,
+        message: `Insufficient payment. Required: ${requiredPayment}`,
+        data: Buffer.alloc(0),
+      };
+    }
+
+    const results = await this.executeQuery(queryEvent);
+    return {
+      type: PacketType.FULFILL,
+      fulfillment: this.deriveFulfillment(packet.executionCondition),
+      data: encodeToon(results),
+    };
+  }
+}
+```
+
+| Service            | Example Pricing               |
+| ------------------ | ----------------------------- |
+| Store event        | 10 units per event            |
+| Query events       | 5 base + 2 per result         |
+| Execute LLM work   | 1000+ units per request       |
+| Forward to follows | 1 unit per hop                |
+| Priority queue     | 100 units premium             |
+| Free tier          | 0 units (gossip, public data) |
+
+### TOON Serialization
+
+TOON (Token-Oriented Object Notation) reduces payload size by 30-60% compared to JSON:
+
+```typescript
+import { encode, decode } from '@toon-format/toon';
+
+// Nostr event to TOON to Buffer
+function encodeNostrEvent(event: NostrEvent): Buffer {
+  const toonString = encode(event);
+  return Buffer.from(toonString, 'utf-8');
+}
+
+// Buffer to TOON to Nostr event
+function decodeNostrEvent(buffer: Buffer): NostrEvent {
+  const toonString = buffer.toString('utf-8');
+  return decode(toonString) as NostrEvent;
+}
+
+// Array of events (tabular format for efficiency)
+function encodeEventArray(events: NostrEvent[]): Buffer {
+  // TOON collapses uniform arrays into CSV-style format
+  const toonString = encode(events);
+  return Buffer.from(toonString, 'utf-8');
+}
+```
+
+### Component Specifications
+
+#### AgentEventDatabase
+
+**Responsibility:** Persistent storage and retrieval of Nostr events
+
+**Key Interfaces:**
+
+```typescript
+interface AgentEventDatabase {
+  // Storage
+  storeEvent(event: NostrEvent): Promise<void>;
+  storeEvents(events: NostrEvent[]): Promise<void>;
+  deleteEvent(eventId: string): Promise<boolean>;
+
+  // Querying (NIP-01 filter format)
+  queryEvents(filter: NostrFilter): Promise<NostrEvent[]>;
+  countEvents(filter: NostrFilter): Promise<number>;
+
+  // Lifecycle
+  initialize(): Promise<void>;
+  close(): Promise<void>;
+}
+
+interface NostrFilter {
+  ids?: string[]; // Event IDs
+  authors?: string[]; // Pubkeys
+  kinds?: number[]; // Event kinds
+  since?: number; // Unix timestamp (>=)
+  until?: number; // Unix timestamp (<=)
+  limit?: number; // Max results
+  '#e'?: string[]; // Events referenced
+  '#p'?: string[]; // Pubkeys referenced
+}
+```
+
+**Technology:** @libsql/client (SQLite-compatible with MVCC concurrent writes)
+
+**Why libSQL over SQLite:**
+
+- **Concurrent writes** - MVCC eliminates SQLITE_BUSY errors under load (~4x throughput)
+- **SQL compatibility** - Same schema and queries as SQLite (drop-in replacement)
+- **Encryption at rest** - Built-in encryption for sensitive event content
+- **Async API** - Non-blocking operations align with Node.js event loop
+
+#### AgentEventHandler
+
+**Responsibility:** Dispatch incoming events to appropriate handlers by kind
+
+**Key Interfaces:**
+
+```typescript
+interface AgentEventHandler {
+  // Register handler for event kind
+  registerHandler(kind: number, handler: EventKindHandler): void;
+
+  // Process incoming ILP packet containing Nostr event
+  handlePacket(packet: ILPPreparePacket): Promise<ILPFulfillPacket | ILPRejectPacket>;
+}
+
+interface EventKindHandler {
+  // Validate payment is sufficient
+  validatePayment(amount: bigint, event: NostrEvent): boolean;
+
+  // Process the event, return response events
+  handle(event: NostrEvent, context: HandlerContext): Promise<NostrEvent[]>;
+}
+```
+
+#### FollowGraphRouter
+
+**Responsibility:** Maintain routing table from Kind 3 follow relationships
+
+**Key Interfaces:**
+
+```typescript
+interface FollowGraphRouter {
+  // Update routing from follow list event
+  updateFromFollowList(event: NostrEvent): void;
+
+  // Get next hop for destination
+  getNextHop(destination: ILPAddress): string | null;
+
+  // Get all known agent addresses
+  getKnownAgents(): Map<string, ILPAddress>; // pubkey -> address
+
+  // Export current follow graph
+  exportGraph(): FollowGraphEdge[];
+}
+
+interface FollowGraphEdge {
+  follower: string; // Pubkey
+  followed: string; // Pubkey
+  ilpAddress: string; // ILP address of followed
+  petname?: string; // Optional display name
+}
+```
+
+#### ToonCodec
+
+**Responsibility:** Encode/decode Nostr events to/from TOON format for ILP packets
+
+**Key Interfaces:**
+
+```typescript
+interface ToonCodec {
+  // Single event
+  encodeEvent(event: NostrEvent): Buffer;
+  decodeEvent(buffer: Buffer): NostrEvent;
+
+  // Array of events
+  encodeEvents(events: NostrEvent[]): Buffer;
+  decodeEvents(buffer: Buffer): NostrEvent[];
+
+  // Generic encode/decode
+  encode<T>(data: T): Buffer;
+  decode<T>(buffer: Buffer): T;
+}
+```
+
+#### SubscriptionManager
+
+**Responsibility:** Manage Nostr REQ/CLOSE subscriptions and push matching events over BTP
+
+**Key Interfaces:**
+
+```typescript
+interface SubscriptionManager {
+  // Register subscription from peer (Nostr REQ)
+  registerSubscription(peerId: string, subscriptionId: string, filters: NostrFilter[]): void;
+
+  // Unregister subscription (Nostr CLOSE)
+  unregisterSubscription(peerId: string, subscriptionId: string): void;
+
+  // Called when new event stored - pushes to matching subscriptions
+  onEventStored(event: NostrEvent): Promise<void>;
+
+  // Get all active subscriptions for a peer
+  getSubscriptions(peerId: string): Map<string, NostrFilter[]>;
+
+  // Cleanup all subscriptions for disconnected peer
+  cleanupPeer(peerId: string): void;
+}
+```
+
+**Push Flow:**
+
+1. Peer sends Nostr REQ via ILP packet → `registerSubscription()`
+2. New event arrives and is stored in database
+3. `onEventStored()` checks all active subscriptions
+4. Matching events pushed to peers via existing BTP WebSocket connections
+5. Peer sends Nostr CLOSE → `unregisterSubscription()`
+
+**Technology:** In-memory Map for subscriptions (no persistence needed - peers re-subscribe on reconnect)
+
+### Package Structure
+
+```
+packages/connector/src/agent/
+├── index.ts                    # Public API exports
+├── types.ts                    # Agent-specific type definitions
+├── event-database.ts           # libSQL event storage
+├── event-database.test.ts
+├── event-handler.ts            # Kind-based event dispatcher
+├── event-handler.test.ts
+├── subscription-manager.ts     # Nostr REQ/CLOSE subscription handling
+├── subscription-manager.test.ts
+├── follow-graph-router.ts      # Kind 3 → routing table
+├── follow-graph-router.test.ts
+├── toon-codec.ts               # TOON serialization wrapper
+├── toon-codec.test.ts
+├── handlers/                   # Built-in event kind handlers
+│   ├── note-handler.ts         # Kind 1 (notes)
+│   ├── follow-handler.ts       # Kind 3 (follow lists)
+│   ├── delete-handler.ts       # Kind 5 (deletions)
+│   ├── query-handler.ts        # Kind 10000 (queries)
+│   └── index.ts
+└── agent-node.ts               # Main agent orchestrator
+```
+
+### Integration with Existing Components
+
+The Agent Society Protocol extends existing M2M components:
+
+| Existing Component      | Extension                                 |
+| ----------------------- | ----------------------------------------- |
+| `ConnectorNode`         | `AgentNode` extends with event handling   |
+| `PacketHandler`         | Add TOON event detection middleware       |
+| `RoutingTable`          | `FollowGraphRouter` populates from Kind 3 |
+| `SettlementCoordinator` | Reused for agent-to-agent settlement      |
+| `TelemetryEmitter`      | Add agent-specific event types            |
+
+### Telemetry Events
+
+New telemetry event types for agent monitoring:
+
+```typescript
+interface AgentEventReceived {
+  type: 'AGENT_EVENT_RECEIVED';
+  nodeId: string;
+  timestamp: string;
+  eventId: string;
+  eventKind: number;
+  authorPubkey: string;
+  paymentAmount: string;
+}
+
+interface AgentEventStored {
+  type: 'AGENT_EVENT_STORED';
+  nodeId: string;
+  timestamp: string;
+  eventId: string;
+  eventKind: number;
+  storageSize: number;
+}
+
+interface AgentQueryExecuted {
+  type: 'AGENT_QUERY_EXECUTED';
+  nodeId: string;
+  timestamp: string;
+  queryFilter: object;
+  resultCount: number;
+  paymentReceived: string;
+  executionTimeMs: number;
+}
+
+interface AgentFollowGraphUpdated {
+  type: 'AGENT_FOLLOW_GRAPH_UPDATED';
+  nodeId: string;
+  timestamp: string;
+  totalFollows: number;
+  newRoutes: number;
+  removedRoutes: number;
+}
+```
+
+### Configuration
+
+Agent configuration extends the existing connector config:
+
+```yaml
+# agent-config.yaml
+nodeId: agent-alice
+ilpAddress: g.agent.alice
+
+# Agent-specific settings
+agent:
+  # Nostr identity
+  privateKey: ${AGENT_PRIVATE_KEY} # Or path to key file
+
+  # Event database
+  database:
+    path: ./data/events.db
+    maxSize: 1GB
+
+  # Pricing (in smallest units)
+  pricing:
+    storeEvent: 10
+    queryBase: 5
+    queryPerResult: 2
+    forwardEvent: 1
+
+  # Follow list (static configuration)
+  follows:
+    - pubkey: '91cf9...4e5ca'
+      ilpAddress: g.agent.bob
+      petname: bob
+    - pubkey: '14aeb...8dad4'
+      ilpAddress: g.agent.carol
+      petname: carol
+
+  # Event handling
+  handlers:
+    - kind: 1
+      action: store_and_forward
+    - kind: 3
+      action: update_routing
+    - kind: 10000
+      action: query_database
+
+# Standard connector settings (reused)
+btpServerPort: 3000
+healthCheckPort: 8080
+dashboardTelemetryUrl: ws://dashboard:9000
+```
+
+### Dependencies
+
+```json
+{
+  "dependencies": {
+    "@toon-format/toon": "^3.0.0",
+    "nostr-tools": "^2.x.x",
+    "better-sqlite3": "^9.x.x"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.x.x"
+  }
+}
+```
+
+**Note:** `nostr-tools` is used only for cryptographic operations (key generation, event
+signing/verification), not for relay connections.
+
+### Success Criteria
+
+- [ ] Agents can send/receive TOON-serialized Nostr events via ILP packets
+- [ ] Agent addresses (`g.agent.*`) route correctly through follow graph
+- [ ] Events are stored and queryable in local SQLite database
+- [ ] Payment validation rejects underpaid requests with F03 error
+- [ ] Kind 3 events successfully update routing tables
+- [ ] Settlement coordinator handles agent-to-agent micropayments
+- [ ] Reference agent implementation demonstrates full protocol
+- [ ] Integration tests verify multi-agent communication
+
 ## Related Documentation
 
 - **[README.md](../README.md)** - Quick start guide, installation instructions, usage examples
@@ -2143,8 +2741,14 @@ history timeline)
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 
-**Last Updated:** 2025-12-30
+**Last Updated:** 2026-01-22
 
 **Authors:** Winston (Architect), James (Developer)
+
+**Changelog:**
+
+- v1.2 (2026-01-22): Updated Agent Society Protocol to use libSQL (MVCC concurrent writes), added SubscriptionManager for Nostr REQ/CLOSE push events
+- v1.1 (2026-01-22): Added Agent Society Protocol (Epic 13) architecture section
+- v1.0 (2025-12-30): Initial architecture documentation

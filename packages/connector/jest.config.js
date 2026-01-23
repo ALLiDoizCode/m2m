@@ -5,6 +5,13 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src', '<rootDir>/test'],
   testMatch: ['**/*.test.ts'],
+  // Ignore cloud KMS backend tests - they require optional provider-specific packages
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    'aws-kms-backend\\.test\\.ts$',
+    'azure-kv-backend\\.test\\.ts$',
+    'gcp-kms-backend\\.test\\.ts$',
+  ],
   testTimeout: 30000, // 30 second default timeout for integration tests
   collectCoverageFrom: [
     'src/**/*.ts',

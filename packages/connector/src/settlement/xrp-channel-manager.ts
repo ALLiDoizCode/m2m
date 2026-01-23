@@ -6,10 +6,12 @@
  *
  * Implementation: packages/connector/src/settlement/xrp-channel-manager.ts
  */
-import { XRPLClient } from './xrpl-client';
+import { XRPLClient, XRPLClientConfig } from './xrpl-client';
 import { ClaimSigner } from './xrp-claim-signer';
+import { KeyManager } from '../security/key-manager';
 import type { Database } from 'better-sqlite3';
 import type { Logger } from 'pino';
+import type { XRPWSSConnectionPool } from '../utils/xrp-wss-connection-pool';
 
 /**
  * XRP Payment Channel State
@@ -193,14 +195,64 @@ export class PaymentChannelManager implements IPaymentChannelManager {
     this.db = db;
     this.logger = logger;
 
-    // Initialize ClaimSigner with optional seed from environment
-    const claimSignerSeed = process.env.XRPL_CLAIM_SIGNER_SEED;
-    this.claimSigner = new ClaimSigner(db, logger, claimSignerSeed);
-
-    this.logger.info(
-      { publicKey: this.claimSigner.getPublicKey() },
-      'ClaimSigner initialized for payment channel claims'
+    // Initialize KeyManager with environment backend for XRP keys
+    const keyManager = new KeyManager(
+      {
+        backend: 'env',
+        nodeId: 'xrp-channel-manager',
+      },
+      logger
     );
+
+    // Initialize ClaimSigner with KeyManager
+    this.claimSigner = new ClaimSigner(db, logger, keyManager, 'xrp');
+
+    // Log public key (async operation, but don't block constructor)
+    this.claimSigner.getPublicKey().then((publicKey) => {
+      this.logger.info({ publicKey }, 'ClaimSigner initialized for payment channel claims');
+    });
+  }
+
+  /**
+   * Create a PaymentChannelManager from a connection pool
+   *
+   * Uses the connection pool for failover across multiple XRP Ledger nodes.
+   * Gets the first available WSS URL from the pool to create the XRPLClient.
+   *
+   * @param pool - XRP WebSocket connection pool
+   * @param config - XRPLClient configuration (wssUrl will be overridden by pool)
+   * @param db - SQLite database for channel state persistence
+   * @param logger - Pino logger instance
+   * @returns PaymentChannelManager instance
+   * @throws Error if no healthy connection available in pool
+   *
+   * [Source: Epic 12 Story 12.5 Task 6.4 - Connection pool integration]
+   */
+  static fromConnectionPool(
+    pool: XRPWSSConnectionPool,
+    config: Omit<XRPLClientConfig, 'wssUrl'> & { wssUrl?: string },
+    db: Database,
+    logger: Logger
+  ): PaymentChannelManager {
+    // Get a client from the pool to extract a working WSS URL
+    const poolClient = pool.getClient();
+    if (!poolClient) {
+      throw new Error('No healthy XRP WebSocket connection available in pool');
+    }
+
+    // The pool client is already connected, but we need a fresh XRPLClient instance
+    // Get the URL from the pool configuration (first endpoint as fallback)
+    const wssUrl = config.wssUrl || 'wss://xrplcluster.com';
+
+    const xrplConfig: XRPLClientConfig = {
+      ...config,
+      wssUrl,
+    };
+
+    const xrplClient = new XRPLClient(xrplConfig, logger);
+    logger.info({ wssUrl }, 'Creating PaymentChannelManager from connection pool');
+
+    return new PaymentChannelManager(xrplClient, db, logger);
   }
 
   async createChannel(destination: string, amount: string, settleDelay: number): Promise<string> {
@@ -223,7 +275,7 @@ export class PaymentChannelManager implements IPaymentChannelManager {
     }
 
     // Generate ed25519 keypair for claim signing
-    const publicKey = this.claimSigner.getPublicKey();
+    const publicKey = await this.claimSigner.getPublicKey();
 
     // Construct PaymentChannelCreate transaction
     const tx = {

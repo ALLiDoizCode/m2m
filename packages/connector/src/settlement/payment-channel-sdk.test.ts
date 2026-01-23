@@ -7,14 +7,19 @@ import { ethers } from 'ethers';
 import { PaymentChannelSDK, ChallengeNotExpiredError } from './payment-channel-sdk';
 import type { BalanceProof } from '@m2m/shared';
 import type { Logger } from '../utils/logger';
+import type { KeyManager } from '../security/key-manager';
 
 // Mock ethers
 jest.mock('ethers');
+
+// Mock KeyManagerSigner
+jest.mock('../security/key-manager-signer');
 
 describe('PaymentChannelSDK', () => {
   let sdk: PaymentChannelSDK;
   let mockProvider: jest.Mocked<ethers.Provider>;
   let mockSigner: jest.Mocked<ethers.Signer>;
+  let mockKeyManager: jest.Mocked<KeyManager>;
   let mockRegistryContract: jest.Mocked<ethers.Contract>;
   let mockTokenNetworkContract: jest.Mocked<ethers.Contract>;
   let mockLogger: jest.Mocked<Logger>;
@@ -25,6 +30,7 @@ describe('PaymentChannelSDK', () => {
   const mockMyAddress = '0x1111111111111111111111111111111111111111';
   const mockPeerAddress = '0x2222222222222222222222222222222222222222';
   const mockChannelId = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const mockEvmKeyId = 'test-evm-key';
 
   beforeEach(() => {
     // Reset mocks
@@ -35,7 +41,21 @@ describe('PaymentChannelSDK', () => {
       getNetwork: jest.fn().mockResolvedValue({ chainId: 8453n }), // Base mainnet
     } as unknown as jest.Mocked<ethers.Provider>;
 
-    // Mock signer
+    // Mock KeyManager
+    mockKeyManager = {
+      sign: jest
+        .fn()
+        .mockResolvedValue(
+          Buffer.from(
+            'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234ab',
+            'hex'
+          )
+        ),
+      getPublicKey: jest.fn().mockResolvedValue(Buffer.from('04' + 'a'.repeat(128), 'hex')),
+      rotateKey: jest.fn().mockResolvedValue('new-key-id'),
+    } as unknown as jest.Mocked<KeyManager>;
+
+    // Mock signer (KeyManagerSigner instance created internally)
     mockSigner = {
       getAddress: jest.fn().mockResolvedValue(mockMyAddress),
       signTypedData: jest
@@ -44,6 +64,11 @@ describe('PaymentChannelSDK', () => {
           '0xabcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234ab'
         ),
     } as unknown as jest.Mocked<ethers.Signer>;
+
+    // Mock KeyManagerSigner to return mockSigner
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { KeyManagerSigner } = require('../security/key-manager-signer');
+    KeyManagerSigner.mockImplementation(() => mockSigner);
 
     // Mock registry contract
     mockRegistryContract = {
@@ -140,13 +165,24 @@ describe('PaymentChannelSDK', () => {
     // Mock ethers.verifyTypedData
     (ethers.verifyTypedData as jest.Mock) = jest.fn().mockReturnValue(mockPeerAddress);
 
+    // Mock ethers.TypedDataEncoder.hash
+    (ethers.TypedDataEncoder.hash as jest.Mock) = jest
+      .fn()
+      .mockReturnValue('0x1234567890123456789012345678901234567890123456789012345678901234');
+
     // Mock ethers.ZeroAddress and ZeroHash
     (ethers.ZeroAddress as string) = '0x0000000000000000000000000000000000000000';
     (ethers.ZeroHash as string) =
       '0x0000000000000000000000000000000000000000000000000000000000000000';
 
     // Create SDK instance
-    sdk = new PaymentChannelSDK(mockProvider, mockSigner, mockRegistryAddress, mockLogger);
+    sdk = new PaymentChannelSDK(
+      mockProvider,
+      mockKeyManager,
+      mockEvmKeyId,
+      mockRegistryAddress,
+      mockLogger
+    );
   });
 
   describe('constructor', () => {
@@ -262,7 +298,10 @@ describe('PaymentChannelSDK', () => {
       );
 
       expect(signature).toBeDefined();
-      expect(mockSigner.signTypedData).toHaveBeenCalledWith(
+      expect(signature).toMatch(/^0x[a-f0-9]+$/); // Should be hex string
+
+      // Verify EIP-712 hash was created
+      expect(ethers.TypedDataEncoder.hash).toHaveBeenCalledWith(
         expect.objectContaining({
           name: 'TokenNetwork',
           version: '1',
@@ -280,6 +319,10 @@ describe('PaymentChannelSDK', () => {
           locksRoot: ethers.ZeroHash,
         })
       );
+
+      // Verify KeyManager.sign() was called with the hash
+      expect(mockKeyManager.sign).toHaveBeenCalledWith(expect.any(Buffer), mockEvmKeyId);
+
       expect(mockLogger.debug).toHaveBeenCalledWith('Balance proof signed', expect.any(Object));
     });
 
@@ -396,7 +439,8 @@ describe('PaymentChannelSDK', () => {
       // Create a fresh SDK instance without cached state
       const freshSDK = new PaymentChannelSDK(
         mockProvider,
-        mockSigner,
+        mockKeyManager,
+        mockEvmKeyId,
         mockRegistryAddress,
         mockLogger
       );
@@ -475,7 +519,8 @@ describe('PaymentChannelSDK', () => {
       // Create a fresh SDK instance without cached state
       const freshSDK = new PaymentChannelSDK(
         mockProvider,
-        mockSigner,
+        mockKeyManager,
+        mockEvmKeyId,
         mockRegistryAddress,
         mockLogger
       );
@@ -501,7 +546,8 @@ describe('PaymentChannelSDK', () => {
       // Create a fresh SDK instance without cached state
       const freshSDK = new PaymentChannelSDK(
         mockProvider,
-        mockSigner,
+        mockKeyManager,
+        mockEvmKeyId,
         mockRegistryAddress,
         mockLogger
       );
@@ -526,7 +572,8 @@ describe('PaymentChannelSDK', () => {
       // Create a fresh SDK instance without cached state
       const freshSDK = new PaymentChannelSDK(
         mockProvider,
-        mockSigner,
+        mockKeyManager,
+        mockEvmKeyId,
         mockRegistryAddress,
         mockLogger
       );

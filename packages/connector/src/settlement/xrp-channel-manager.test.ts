@@ -42,6 +42,7 @@ describe('PaymentChannelManager', () => {
       info: jest.fn(),
       error: jest.fn(),
       warn: jest.fn(),
+      child: jest.fn().mockReturnThis(),
     } as unknown as jest.Mocked<Logger>;
 
     // Mock ClaimSigner constructor
@@ -50,7 +51,7 @@ describe('PaymentChannelManager', () => {
         ({
           getPublicKey: jest
             .fn()
-            .mockReturnValue('ED1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890AB'),
+            .mockResolvedValue('ED1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890AB'),
           signClaim: jest.fn(),
           verifyClaim: jest.fn(),
         }) as unknown as ClaimSigner
