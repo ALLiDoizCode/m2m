@@ -136,8 +136,8 @@ export class AzureKeyVaultBackend implements KeyManagerBackend {
       // Extract public key from JWK format
       // For EC keys, we need to combine x and y coordinates
       if (key.key.x && key.key.y) {
-        const xBuffer = Buffer.from(key.key.x, 'base64');
-        const yBuffer = Buffer.from(key.key.y, 'base64');
+        const xBuffer = Buffer.from(key.key.x);
+        const yBuffer = Buffer.from(key.key.y);
 
         // Combine x and y for uncompressed public key format (0x04 + x + y)
         const publicKey = Buffer.concat([Buffer.from([0x04]), xBuffer, yBuffer]);

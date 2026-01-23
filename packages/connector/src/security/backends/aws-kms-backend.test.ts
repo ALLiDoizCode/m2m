@@ -67,7 +67,7 @@ describeIf('AWSKMSBackend', () => {
       });
     });
 
-    it('should sign message using AWS KMS SignCommand with ED25519 for XRP keys', async () => {
+    it('should sign message using AWS KMS SignCommand with ED25519_SHA_512 for XRP keys', async () => {
       const message = Buffer.from('test-message');
       const mockSignature = Buffer.from('mock-signature');
 
@@ -80,9 +80,9 @@ describeIf('AWSKMSBackend', () => {
       expect(mockKMSClient.send).toHaveBeenCalled();
       expect(result).toEqual(mockSignature);
 
-      // Verify ED25519 algorithm was used
+      // Verify ED25519_SHA_512 algorithm was used (for RAW message signing)
       const call = mockKMSClient.send.mock.calls[0][0];
-      expect(call.input.SigningAlgorithm).toBe('ED25519');
+      expect(call.input.SigningAlgorithm).toBe('ED25519_SHA_512');
     });
 
     it('should detect EVM key type from keyId containing "evm"', async () => {
@@ -112,7 +112,7 @@ describeIf('AWSKMSBackend', () => {
       await backend.sign(message, xrpKeyId);
 
       const call = mockKMSClient.send.mock.calls[0][0];
-      expect(call.input.SigningAlgorithm).toBe('ED25519');
+      expect(call.input.SigningAlgorithm).toBe('ED25519_SHA_512');
     });
 
     it('should throw error if AWS KMS returns no signature', async () => {
@@ -202,7 +202,7 @@ describeIf('AWSKMSBackend', () => {
       expect(call.input.Description).toContain('EVM');
     });
 
-    it('should rotate XRP key using CreateKeyCommand with ED25519 KeySpec', async () => {
+    it('should rotate XRP key using CreateKeyCommand with ECC_NIST_EDWARDS25519 KeySpec', async () => {
       const newKeyArn = 'arn:aws:kms:us-east-1:123456789012:key/new-xrp-key-id';
 
       mockKMSClient.send.mockResolvedValueOnce({
@@ -216,11 +216,11 @@ describeIf('AWSKMSBackend', () => {
       expect(mockKMSClient.send).toHaveBeenCalled();
       expect(result).toBe(newKeyArn);
 
-      // Verify ED25519 KeySpec
+      // Verify ECC_NIST_EDWARDS25519 KeySpec (ed25519 for XRP)
       const call = mockKMSClient.send.mock.calls[0][0];
       expect(call.input).toMatchObject({
         KeyUsage: 'SIGN_VERIFY',
-        KeySpec: 'ED25519',
+        KeySpec: 'ECC_NIST_EDWARDS25519',
       });
       expect(call.input.Description).toContain('XRP');
     });

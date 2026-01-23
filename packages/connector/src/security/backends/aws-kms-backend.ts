@@ -61,8 +61,8 @@ export class AWSKMSBackend implements KeyManagerBackend {
     if (keyType === 'evm') {
       return SigningAlgorithmSpec.ECDSA_SHA_256;
     } else {
-      // XRP uses ed25519
-      return SigningAlgorithmSpec.ED25519;
+      // XRP uses ed25519 - ED25519_SHA_512 for RAW message signing
+      return SigningAlgorithmSpec.ED25519_SHA_512;
     }
   }
 
@@ -75,7 +75,7 @@ export class AWSKMSBackend implements KeyManagerBackend {
     if (keyType === 'evm') {
       return KeySpec.ECC_SECG_P256K1; // secp256k1 for EVM
     } else {
-      return KeySpec.ED25519; // ed25519 for XRP
+      return KeySpec.ECC_NIST_EDWARDS25519; // ed25519 for XRP
     }
   }
 

@@ -138,7 +138,7 @@ program
         let errors = 0;
 
         for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
+          const line = lines[i]?.trim() ?? '';
           if (line && !line.startsWith('#') && !line.includes('=')) {
             console.log(`Line ${i + 1}: Invalid format (missing =)`);
             errors++;
