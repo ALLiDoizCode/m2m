@@ -14,6 +14,9 @@
     "test:coverage": "jest --coverage",
     "test:watch": "jest --watch",
     "test:rfc-links": "jest test/integration/rfc-links.test.ts",
+    "test:acceptance": "jest --config jest.acceptance.config.js --testPathPattern=acceptance",
+    "test:load": "jest --config jest.load.config.js --testPathPattern=load-test",
+    "test:security": "jest --testPathPattern=security --testTimeout=60000",
     "lint": "eslint src --ext .ts",
     "dev": "tsc --watch",
     "benchmark": "ts-node scripts/benchmark.ts"
