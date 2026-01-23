@@ -41,5 +41,8 @@ module.exports = {
         tsconfig: '<rootDir>/tsconfig.json',
       },
     ],
+    '^.+\\.m?js$': 'babel-jest',
   },
+  // Allow transformation of ESM-only packages
+  transformIgnorePatterns: ['node_modules/(?!(@toon-format|@libsql)/)'],
 };

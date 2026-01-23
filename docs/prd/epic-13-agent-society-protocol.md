@@ -59,8 +59,8 @@ interface ILPPreparePacket {
 ```
 
 - ILP packet types (Prepare, Fulfill, Reject) unchanged
-- `data` field: Always contains TOON-serialized Nostr event(s)
-- TOON serialization: 30-60% smaller than JSON, LLM-friendly format
+- `data` field: Always contains TOON-serialized Nostr event(s) (UTF-8 encoded)
+- TOON serialization: ~40% smaller than JSON, LLM-friendly text format
 
 ### 2. Agent Addressing
 
@@ -182,7 +182,7 @@ Standard ILP rejection codes for agent errors:
 ```json
 {
   "dependencies": {
-    "@toon-format/toon": "3.0.0",
+    "@toon-format/toon": "2.1.0",
     "nostr-tools": "2.10.0",
     "@libsql/client": "0.14.0"
   }
