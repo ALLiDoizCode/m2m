@@ -16,6 +16,7 @@ import { HealthServer } from '../http/health-server';
 import { HealthStatus, HealthStatusProvider } from '../http/types';
 import { TelemetryEmitter } from '../telemetry/telemetry-emitter';
 import { PeerStatus } from '../telemetry/types';
+import { EventStore, ExplorerServer } from '../explorer';
 // Import package.json for version information
 import packageJson from '../../package.json';
 
@@ -33,6 +34,8 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _btpServer: BTPServer;
   private readonly _healthServer: HealthServer;
   private readonly _telemetryEmitter: TelemetryEmitter | null;
+  private _eventStore: EventStore | null = null;
+  private _explorerServer: ExplorerServer | null = null;
   private _healthStatus: 'healthy' | 'unhealthy' | 'starting' = 'starting';
   private readonly _startTime: Date = new Date();
   private _btpServerStarted: boolean = false;
@@ -184,6 +187,70 @@ export class ConnectorNode implements HealthStatusProvider {
         'Health server started'
       );
 
+      // Start explorer if enabled (default: true)
+      if (this._config.explorer?.enabled !== false && this._telemetryEmitter) {
+        try {
+          const explorerConfig = this._config.explorer || {};
+          const explorerPort = explorerConfig.port ?? 3001;
+          const retentionDays = explorerConfig.retentionDays ?? 7;
+          const maxEvents = explorerConfig.maxEvents ?? 1000000;
+
+          // Initialize EventStore
+          this._eventStore = new EventStore(
+            {
+              path: `./data/explorer-${this._config.nodeId}.db`,
+              maxEventCount: maxEvents,
+              maxAgeMs: retentionDays * 24 * 60 * 60 * 1000,
+            },
+            this._logger.child({ component: 'EventStore' })
+          );
+          await this._eventStore.initialize();
+
+          // Wire TelemetryEmitter to EventStore for persistence
+          this._telemetryEmitter.onEvent((event) => {
+            this._eventStore?.storeEvent(event).catch((err) => {
+              this._logger.warn({ error: err.message }, 'Failed to store telemetry event');
+            });
+          });
+
+          // Initialize ExplorerServer
+          this._explorerServer = new ExplorerServer(
+            {
+              port: explorerPort,
+              nodeId: this._config.nodeId,
+            },
+            this._eventStore,
+            this._telemetryEmitter,
+            this._logger
+          );
+          await this._explorerServer.start();
+
+          this._logger.info(
+            {
+              event: 'explorer_server_started',
+              port: explorerPort,
+              retentionDays,
+              maxEvents,
+            },
+            'Explorer server started'
+          );
+        } catch (error) {
+          // Explorer failures should not prevent connector startup
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          this._logger.warn(
+            { event: 'explorer_start_failed', error: errorMessage },
+            'Failed to start explorer (connector continues running)'
+          );
+        }
+      } else if (this._config.explorer?.enabled === false) {
+        this._logger.info({ event: 'explorer_disabled' }, 'Explorer UI disabled by configuration');
+      } else if (!this._telemetryEmitter) {
+        this._logger.info(
+          { event: 'explorer_skipped' },
+          'Explorer UI skipped (telemetry emitter not available)'
+        );
+      }
+
       // Connect BTP clients to all configured peers
       // Convert PeerConfig to Peer format
       const peerConnections: Promise<void>[] = [];
@@ -297,6 +364,20 @@ export class ConnectorNode implements HealthStatusProvider {
     );
 
     try {
+      // Stop explorer server if running (before health server)
+      if (this._explorerServer) {
+        await this._explorerServer.stop();
+        this._logger.info({ event: 'explorer_server_stopped' }, 'Explorer server stopped');
+        this._explorerServer = null;
+      }
+
+      // Close event store if initialized
+      if (this._eventStore) {
+        await this._eventStore.close();
+        this._logger.info({ event: 'event_store_closed' }, 'Event store closed');
+        this._eventStore = null;
+      }
+
       // Disconnect telemetry emitter if enabled
       if (this._telemetryEmitter) {
         await this._telemetryEmitter.disconnect();
@@ -349,7 +430,7 @@ export class ConnectorNode implements HealthStatusProvider {
     const totalPeers = this._config.peers.length;
     const uptime = Math.floor((Date.now() - this._startTime.getTime()) / 1000);
 
-    return {
+    const healthStatus: HealthStatus = {
       status: this._healthStatus,
       uptime,
       peersConnected,
@@ -358,6 +439,18 @@ export class ConnectorNode implements HealthStatusProvider {
       nodeId: this._config.nodeId,
       version: packageJson.version,
     };
+
+    // Add explorer status if enabled
+    if (this._explorerServer && this._eventStore) {
+      healthStatus.explorer = {
+        enabled: true,
+        port: this._explorerServer.getPort(),
+        eventCount: 0, // Will be fetched asynchronously if needed
+        wsConnections: this._explorerServer.getBroadcaster().getClientCount(),
+      };
+    }
+
+    return healthStatus;
   }
 
   /**

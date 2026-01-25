@@ -15,6 +15,12 @@
 # Total connections: 6 bidirectional (A↔B, A↔C, A↔D, B↔C, B↔D, C↔D)
 # Each connector has 3 peers
 #
+# Explorer UI Access:
+#   - Connector A: http://localhost:3010
+#   - Connector B: http://localhost:3011
+#   - Connector C: http://localhost:3012
+#   - Connector D: http://localhost:3013
+#
 # Usage:
 #   Start: docker-compose -f docker/docker-compose.mesh.yml up -d
 #   Logs:  docker-compose -f docker/docker-compose.mesh.yml logs -f
@@ -32,6 +38,7 @@ version: '3.8'
 
 services:
   # Connector A - Mesh node 1
+  # Explorer UI: http://localhost:3010
   connector-a:
     image: ilp-connector
     container_name: connector-a
@@ -39,20 +46,26 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: connector-a
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3010"
     volumes:
       - ../examples/mesh-4-nodes-a.yaml:/app/config.yaml:ro
     ports:
       - "3000:3000"
+      - "3010:3010"
     networks:
       - ilp-network
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
   # Connector B - Mesh node 2
+  # Explorer UI: http://localhost:3011
   connector-b:
     image: ilp-connector
     container_name: connector-b
@@ -60,22 +73,28 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: connector-b
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3011"
     volumes:
       - ../examples/mesh-4-nodes-b.yaml:/app/config.yaml:ro
     ports:
       - "3001:3001"
+      - "3011:3011"
     networks:
       - ilp-network
     depends_on:
       - connector-a
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
   # Connector C - Mesh node 3
+  # Explorer UI: http://localhost:3012
   connector-c:
     image: ilp-connector
     container_name: connector-c
@@ -83,10 +102,14 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: connector-c
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3012"
     volumes:
       - ../examples/mesh-4-nodes-c.yaml:/app/config.yaml:ro
     ports:
       - "3002:3002"
+      - "3012:3012"
     networks:
       - ilp-network
     depends_on:
@@ -94,12 +117,14 @@ services:
       - connector-b
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
   # Connector D - Mesh node 4
+  # Explorer UI: http://localhost:3013
   connector-d:
     image: ilp-connector
     container_name: connector-d
@@ -107,10 +132,14 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: connector-d
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3013"
     volumes:
       - ../examples/mesh-4-nodes-d.yaml:/app/config.yaml:ro
     ports:
       - "3003:3003"
+      - "3013:3013"
     networks:
       - ilp-network
     depends_on:
@@ -119,6 +148,7 @@ services:
       - connector-c
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3

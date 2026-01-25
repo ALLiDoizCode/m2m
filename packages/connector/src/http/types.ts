@@ -46,6 +46,21 @@ export interface HealthStatus {
    * Example: "1.0.0"
    */
   version?: string;
+
+  /**
+   * Optional explorer status when explorer UI is enabled
+   * Present only when config.explorer.enabled is true (or not explicitly false)
+   */
+  explorer?: {
+    /** Whether explorer is enabled */
+    enabled: boolean;
+    /** Explorer server port */
+    port: number;
+    /** Number of events stored in EventStore */
+    eventCount: number;
+    /** Number of active WebSocket connections */
+    wsConnections: number;
+  };
 }
 
 /**

@@ -280,6 +280,20 @@ export interface ConnectorConfig {
    * - Connection pooling for blockchain RPC endpoints
    */
   performance?: PerformanceConfig;
+
+  /**
+   * Optional explorer UI configuration for embedded telemetry visualization
+   * When provided, enables the Packet/Event Explorer web interface
+   * Defaults to explorer enabled on port 3001 if not specified
+   *
+   * Epic 14 (Packet/Event Explorer UI)
+   * Environment variables:
+   * - EXPLORER_ENABLED: Enable/disable explorer (default: true)
+   * - EXPLORER_PORT: HTTP/WebSocket port (default: 3001)
+   * - EXPLORER_RETENTION_DAYS: Event retention in days (default: 7)
+   * - EXPLORER_MAX_EVENTS: Maximum events to retain (default: 1000000)
+   */
+  explorer?: ExplorerConfig;
 }
 
 /**
@@ -1207,6 +1221,97 @@ export interface PerformanceConfig {
       wssUrls?: string[];
     };
   };
+}
+
+/**
+ * Observability Configuration Interface
+ *
+ * Configures production monitoring, metrics, tracing, and SLA settings.
+ * Added in Epic 12 Story 12.6 (Production Monitoring and Alerting).
+ *
+ * @property prometheus - Prometheus metrics exporter configuration
+ * @property opentelemetry - OpenTelemetry distributed tracing configuration
+ * @property sla - SLA monitoring thresholds
+ *
+ * @example
+ * ```typescript
+ * const observability: ObservabilityConfig = {
+ *   prometheus: {
+ *     enabled: true,
+ *     metricsPath: '/metrics',
+ *     includeDefaultMetrics: true,
+ *     labels: { environment: 'production', nodeId: 'connector-1' }
+ *   },
+ *   opentelemetry: {
+ *     enabled: true,
+ *     serviceName: 'ilp-connector',
+ *     exporterEndpoint: 'http://jaeger:4318/v1/traces',
+ *     samplingRatio: 1.0
+ *   },
+ *   sla: {
+ *     packetSuccessRateThreshold: 0.999,
+ *     settlementSuccessRateThreshold: 0.99,
+ *     p99LatencyThresholdMs: 10
+ *   }
+ * };
+ * ```
+ */
+/**
+ * Explorer UI Configuration Interface
+ *
+ * Configures the embedded Packet/Event Explorer for telemetry visualization.
+ * All settings can be overridden via environment variables.
+ *
+ * @property enabled - Enable/disable explorer (ENV: EXPLORER_ENABLED, default: true)
+ * @property port - Explorer server port (ENV: EXPLORER_PORT, default: 3001)
+ * @property retentionDays - Event retention in days (ENV: EXPLORER_RETENTION_DAYS, default: 7)
+ * @property maxEvents - Maximum events to retain (ENV: EXPLORER_MAX_EVENTS, default: 1000000)
+ *
+ * @example
+ * ```typescript
+ * const explorer: ExplorerConfig = {
+ *   enabled: true,
+ *   port: 3001,
+ *   retentionDays: 7,
+ *   maxEvents: 1000000
+ * };
+ * ```
+ */
+export interface ExplorerConfig {
+  /**
+   * Enable/disable explorer UI
+   * When false, explorer server is not started
+   * Environment variable: EXPLORER_ENABLED (default: 'true')
+   * Default: true
+   */
+  enabled?: boolean;
+
+  /**
+   * Port for explorer HTTP/WebSocket server
+   * Must not conflict with BTP server port (default: 3000) or health port (default: 8080)
+   * Environment variable: EXPLORER_PORT (default: '3001')
+   * Valid range: 1-65535
+   * Default: 3001
+   */
+  port?: number;
+
+  /**
+   * Maximum event age in days
+   * Events older than this are automatically pruned
+   * Environment variable: EXPLORER_RETENTION_DAYS (default: '7')
+   * Valid range: 1-365
+   * Default: 7
+   */
+  retentionDays?: number;
+
+  /**
+   * Maximum number of events to retain
+   * Oldest events are pruned when limit is exceeded
+   * Environment variable: EXPLORER_MAX_EVENTS (default: '1000000')
+   * Valid range: 1000-10000000
+   * Default: 1000000
+   */
+  maxEvents?: number;
 }
 
 /**

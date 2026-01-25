@@ -55,14 +55,24 @@ The goal is quality delivery, not just checking boxes.]]
    - [ ] Functionality has been manually verified by the developer (e.g., running the app locally, checking UI, testing API endpoints).
    - [ ] Edge cases and potential error conditions considered and handled gracefully.
 
-5. **Story Administration:**
+5. **UI/Frontend Verification (If Applicable):**
+
+   [[LLM: For stories involving UI components, pages, or frontend changes, Playwright MCP verification is REQUIRED. This is not optional for UI stories.]]
+   - [ ] **Playwright Browser Verification**: Used `mcp__playwright__browser_*` tools to verify UI renders correctly in the browser.
+   - [ ] **Component Rendering**: Verified all new/modified UI components display correctly using `browser_snapshot` or `browser_take_screenshot`.
+   - [ ] **User Interactions**: Tested interactive elements (buttons, forms, navigation) work correctly using `browser_click`, `browser_type`, `browser_fill_form`.
+   - [ ] **Visual State**: Verified different UI states (loading, error, empty, populated) render correctly.
+   - [ ] **Accessibility Snapshot**: Used `browser_snapshot` to capture accessibility tree and verify structure.
+   - [ ] If story has NO UI changes, mark all items as [N/A] with note: "No UI changes in this story"
+
+6. **Story Administration:**
 
    [[LLM: Documentation helps the next developer. What should they know?]]
    - [ ] All tasks within the story file are marked as complete.
    - [ ] Any clarifications or decisions made during development are documented in the story file or linked appropriately.
    - [ ] The story wrap up section has been completed with notes of changes or information relevant to the next story or overall project, the agent model that was primarily used during development, and the changelog of any changes is properly updated.
 
-6. **Dependencies, Build & Configuration:**
+7. **Dependencies, Build & Configuration:**
 
    [[LLM: Build issues block everyone. Ensure everything compiles and runs cleanly]]
    - [ ] Project builds successfully without errors.
@@ -72,7 +82,7 @@ The goal is quality delivery, not just checking boxes.]]
    - [ ] No known security vulnerabilities introduced by newly added and approved dependencies.
    - [ ] If new environment variables or configurations were introduced by the story, they are documented and handled securely.
 
-7. **Documentation (If Applicable):**
+8. **Documentation (If Applicable):**
 
    [[LLM: Good documentation prevents future confusion. What needs explaining?]]
    - [ ] Relevant inline code documentation (e.g., JSDoc, TSDoc, Python docstrings) for new public APIs or complex logic is complete.
