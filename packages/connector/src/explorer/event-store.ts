@@ -207,7 +207,8 @@ function extractIndexedFields(event: TelemetryEvent): ExtractedFields {
     case 'AGENT_CHANNEL_PAYMENT_SENT':
       base.direction = 'sent';
       base.peer_id = event.to ?? event.peerId ?? null;
-      base.packet_id = event.channelId;
+      // Use packetId for correlation, fall back to channelId
+      base.packet_id = event.packetId ?? event.channelId ?? null;
       base.amount = event.amount;
       base.destination = event.destination;
       base.packet_type = event.packetType ?? null;

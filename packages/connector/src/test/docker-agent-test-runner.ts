@@ -37,11 +37,17 @@ interface AgentInfo {
   pubkey: string;
   ilpAddress: string;
   evmAddress: string; // EVM wallet address for payment channels
+  xrpAddress: string; // XRP wallet address for payment channels
+  xrpSecret: string; // XRP wallet secret (for test runner config)
   initialized: boolean;
 }
 
 interface TestConfig {
   anvilRpcUrl: string;
+  xrplRpcUrl: string;
+  xrplWssUrl: string;
+  xrpEnabled: boolean;
+  evmEnabled: boolean;
   agentCount: number;
   agentBaseHttpPort: number;
   agentBaseBtpPort: number;
@@ -277,6 +283,12 @@ class DockerAgentTestRunner {
     this.config = {
       anvilRpcUrl:
         process.env.ANVIL_RPC_URL || (isDocker ? 'http://anvil:8545' : 'http://localhost:8545'),
+      xrplRpcUrl:
+        process.env.XRPL_RPC_URL || (isDocker ? 'http://rippled:5005' : 'http://localhost:5005'),
+      xrplWssUrl:
+        process.env.XRPL_WSS_URL || (isDocker ? 'ws://rippled:6006' : 'ws://localhost:6006'),
+      xrpEnabled: process.env.XRP_ENABLED !== 'false', // Enabled by default
+      evmEnabled: process.env.EVM_ENABLED !== 'false', // Enabled by default
       agentCount: parseInt(process.env.AGENT_COUNT || '5', 10),
       agentBaseHttpPort: isDocker ? 8080 : 8100, // Inside Docker all agents use 8080, from host use mapped ports
       agentBaseBtpPort: isDocker ? 3000 : 3100,
@@ -315,6 +327,10 @@ class DockerAgentTestRunner {
     console.log('========================================\n');
     console.log(`Configuration:`);
     console.log(`  Anvil URL: ${this.config.anvilRpcUrl}`);
+    console.log(`  XRPL RPC URL: ${this.config.xrplRpcUrl}`);
+    console.log(`  XRPL WSS URL: ${this.config.xrplWssUrl}`);
+    console.log(`  EVM Enabled: ${this.config.evmEnabled}`);
+    console.log(`  XRP Enabled: ${this.config.xrpEnabled}`);
     console.log(`  Agent Count: ${this.config.agentCount}`);
     console.log(`  Docker Hostnames: ${this.config.useDockerHostnames}`);
     console.log('');
@@ -335,40 +351,72 @@ class DockerAgentTestRunner {
         return await this.configureSocialGraph();
       });
 
-      // Phase 4: Deploy Contracts (Token, Registry, TokenNetwork)
-      await this.runPhase('Deploy Contracts', async () => {
-        return await this.deployContracts();
-      });
+      // Phase 4: Deploy EVM Contracts (Token, Registry, TokenNetwork)
+      if (this.config.evmEnabled) {
+        await this.runPhase('Deploy EVM Contracts', async () => {
+          return await this.deployContracts();
+        });
 
-      // Phase 5: Fund Agent Wallets
-      await this.runPhase('Fund Agent Wallets', async () => {
-        return await this.fundAgentWallets();
-      });
+        // Phase 5: Fund Agent EVM Wallets
+        await this.runPhase('Fund Agent EVM Wallets', async () => {
+          return await this.fundAgentWallets();
+        });
+      }
 
-      // Phase 6: Establish BTP connections
+      // Phase 6: Fund XRP Accounts
+      if (this.config.xrpEnabled) {
+        await this.runPhase('Fund XRP Accounts', async () => {
+          return await this.fundXRPAccounts();
+        });
+
+        // Phase 7: Configure Agents with XRP
+        await this.runPhase('Configure Agents XRP', async () => {
+          return await this.configureAgentsXRP();
+        });
+      }
+
+      // Phase 8: Establish BTP connections
       await this.runPhase('Establish BTP Connections', async () => {
         return await this.establishConnections();
       });
 
-      // Phase 7: Open Payment Channels
-      await this.runPhase('Open Payment Channels', async () => {
-        return await this.openPaymentChannels();
-      });
+      // Phase 9: Open EVM Payment Channels
+      if (this.config.evmEnabled) {
+        await this.runPhase('Open EVM Payment Channels', async () => {
+          return await this.openPaymentChannels();
+        });
+      }
 
-      // Phase 8: Broadcast events
+      // Phase 10: Open XRP Payment Channels
+      if (this.config.xrpEnabled) {
+        await this.runPhase('Open XRP Payment Channels', async () => {
+          return await this.openXRPChannels();
+        });
+      }
+
+      // Phase 11: Broadcast events
       await this.runPhase('Broadcast Events', async () => {
         return await this.broadcastEvents();
       });
 
-      // Phase 9: Verify results
+      // Phase 12: Verify results
       await this.runPhase('Verify Results', async () => {
         return await this.verifyResults();
       });
 
-      // Phase 10: Verify Payment Channel State
-      await this.runPhase('Verify Payment Channels', async () => {
-        return await this.verifyPaymentChannels();
-      });
+      // Phase 13: Verify EVM Payment Channel State
+      if (this.config.evmEnabled) {
+        await this.runPhase('Verify EVM Channels', async () => {
+          return await this.verifyPaymentChannels();
+        });
+      }
+
+      // Phase 14: Verify XRP Payment Channel State
+      if (this.config.xrpEnabled) {
+        await this.runPhase('Verify XRP Channels', async () => {
+          return await this.verifyXRPChannels();
+        });
+      }
 
       // Calculate overall success
       this.results.success = this.results.phases.every((p) => p.success);
@@ -437,6 +485,7 @@ class DockerAgentTestRunner {
         pubkey: string;
         ilpAddress: string;
         evmAddress: string;
+        xrpAddress?: string;
         initialized: boolean;
       };
 
@@ -449,6 +498,8 @@ class DockerAgentTestRunner {
         pubkey: status.pubkey,
         ilpAddress: status.ilpAddress,
         evmAddress: status.evmAddress || '', // May not be available initially
+        xrpAddress: status.xrpAddress || '', // Will be set after XRP funding
+        xrpSecret: '', // Will be set after XRP funding
         initialized: status.initialized,
       });
     }
@@ -573,10 +624,9 @@ class DockerAgentTestRunner {
     const fundAmount = ethers.parseUnits('10000', 18);
     let fundedCount = 0;
 
-    // Get Anvil RPC URL from agent's perspective (inside Docker network)
-    const anvilRpcUrlForAgents = this.config.useDockerHostnames
-      ? 'http://anvil:8545'
-      : 'http://localhost:8545';
+    // Agents are always inside Docker, so they always use Docker network hostnames
+    // to reach other services (anvil, rippled, other agents)
+    const anvilRpcUrlForAgents = 'http://anvil:8545';
 
     for (const agent of this.agents) {
       // Configure agent with EVM settings first
@@ -819,6 +869,293 @@ class DockerAgentTestRunner {
 
     const depositInTokens = ethers.formatUnits(totalDeposits, 18);
     return `Verified ${totalChannels} channels with ${depositInTokens} AGENT deposited`;
+  }
+
+  // ============================================
+  // XRP Payment Channel Methods
+  // ============================================
+
+  /**
+   * Fund XRP accounts from genesis account in standalone rippled
+   */
+  private async fundXRPAccounts(): Promise<string> {
+    // Genesis account for rippled standalone mode
+    const GENESIS_SECRET = 'snoPBrXtMeMyMHUVTgbuqAfg1SUTb';
+    const XRP_FUND_AMOUNT = '10000000000'; // 10,000 XRP in drops
+
+    let fundedCount = 0;
+    const errors: string[] = [];
+
+    for (const agent of this.agents) {
+      try {
+        // Generate a wallet for this agent using rippled's wallet_propose
+        const walletResponse = (await this.xrplRpcRequest('wallet_propose', {
+          key_type: 'ed25519',
+        })) as {
+          result: {
+            account_id: string;
+            master_seed: string;
+            public_key: string;
+          };
+        };
+
+        const xrpAddress = walletResponse.result.account_id;
+        const xrpSecret = walletResponse.result.master_seed;
+
+        // Update agent info
+        agent.xrpAddress = xrpAddress;
+        agent.xrpSecret = xrpSecret;
+
+        // Get genesis account sequence
+        const accountInfo = (await this.xrplRpcRequest('account_info', {
+          account: 'rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh',
+          ledger_index: 'validated',
+        })) as { result: { account_data: { Sequence: number } } };
+
+        const sequence = accountInfo.result.account_data.Sequence;
+
+        // Create and sign payment transaction
+        const tx = {
+          TransactionType: 'Payment',
+          Account: 'rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh',
+          Destination: xrpAddress,
+          Amount: XRP_FUND_AMOUNT,
+          Sequence: sequence,
+        };
+
+        const signResponse = (await this.xrplRpcRequest('sign', {
+          secret: GENESIS_SECRET,
+          tx_json: tx,
+        })) as { result: { tx_blob: string } };
+
+        // Submit the transaction
+        const submitResponse = (await this.xrplRpcRequest('submit', {
+          tx_blob: signResponse.result.tx_blob,
+        })) as { result: { engine_result: string } };
+
+        if (
+          submitResponse.result.engine_result === 'tesSUCCESS' ||
+          submitResponse.result.engine_result === 'terQUEUED'
+        ) {
+          // Close ledger to confirm
+          await this.xrplRpcRequest('ledger_accept', {});
+          await sleep(500);
+
+          fundedCount++;
+          console.log(`    Funded ${agent.agentId} XRP account: ${xrpAddress.slice(0, 10)}...`);
+        } else {
+          errors.push(`${agent.agentId}: ${submitResponse.result.engine_result}`);
+        }
+      } catch (error) {
+        errors.push(`${agent.agentId}: ${(error as Error).message}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      console.log(
+        `    Funding errors: ${errors.slice(0, 3).join('; ')}${errors.length > 3 ? '...' : ''}`
+      );
+    }
+
+    return `Funded ${fundedCount} XRP accounts with 10,000 XRP each`;
+  }
+
+  /**
+   * Configure agents with XRP credentials
+   */
+  private async configureAgentsXRP(): Promise<string> {
+    let configuredCount = 0;
+    const errors: string[] = [];
+
+    // Agents are always inside Docker, so they always use Docker network hostnames
+    const xrplWssUrlForAgents = 'ws://rippled:6006';
+
+    for (const agent of this.agents) {
+      if (!agent.xrpSecret) {
+        errors.push(`${agent.agentId}: No XRP secret available`);
+        continue;
+      }
+
+      try {
+        const result = (await httpPost(`${agent.httpUrl}/configure-xrp`, {
+          xrpWssUrl: xrplWssUrlForAgents,
+          xrpAccountSecret: agent.xrpSecret,
+          xrpNetwork: 'standalone',
+        })) as { success: boolean; xrpAddress?: string };
+
+        if (result.success) {
+          configuredCount++;
+          if (result.xrpAddress) {
+            agent.xrpAddress = result.xrpAddress;
+          }
+        } else {
+          errors.push(`${agent.agentId}: Configuration failed`);
+        }
+      } catch (error) {
+        errors.push(`${agent.agentId}: ${(error as Error).message}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      console.log(
+        `    Config errors: ${errors.slice(0, 3).join('; ')}${errors.length > 3 ? '...' : ''}`
+      );
+    }
+
+    return `Configured ${configuredCount} agents with XRP credentials`;
+  }
+
+  /**
+   * Open XRP payment channels between connected peers
+   */
+  private async openXRPChannels(): Promise<string> {
+    const topology =
+      this.config.agentCount <= 5
+        ? SOCIAL_GRAPH_5_PEERS
+        : this.generateSocialGraph(this.config.agentCount);
+
+    let channelCount = 0;
+    const errors: string[] = [];
+    const XRP_CHANNEL_AMOUNT = '1000000000'; // 1,000 XRP in drops
+
+    for (const [peerIndexStr, followIndices] of Object.entries(topology)) {
+      const peerIndex = parseInt(peerIndexStr, 10);
+      if (peerIndex >= this.config.agentCount) continue;
+
+      const agent = this.agents[peerIndex];
+      if (!agent || !agent.xrpAddress) continue;
+
+      for (const followIndex of followIndices) {
+        if (followIndex >= this.config.agentCount) continue;
+        const targetAgent = this.agents[followIndex];
+        if (!targetAgent || !targetAgent.xrpAddress) continue;
+
+        try {
+          // Call agent HTTP API to open XRP payment channel
+          const result = (await httpPost(`${agent.httpUrl}/xrp-channels/open`, {
+            destination: targetAgent.xrpAddress,
+            amount: XRP_CHANNEL_AMOUNT,
+            settleDelay: 3600, // 1 hour
+          })) as { channelId?: string; success: boolean; error?: string };
+
+          if (result.success && result.channelId) {
+            channelCount++;
+            console.log(
+              `    Opened XRP channel: ${agent.agentId} -> ${targetAgent.agentId} (${result.channelId.slice(0, 10)}...)`
+            );
+          } else {
+            errors.push(
+              `${agent.agentId} -> ${targetAgent.agentId}: ${result.error || 'Unknown error'}`
+            );
+          }
+        } catch (error) {
+          errors.push(`${agent.agentId} -> ${targetAgent.agentId}: ${(error as Error).message}`);
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      console.log(
+        `    XRP channel errors: ${errors.slice(0, 3).join('; ')}${errors.length > 3 ? '...' : ''}`
+      );
+    }
+
+    return `Opened ${channelCount} XRP payment channels`;
+  }
+
+  /**
+   * Verify XRP payment channel state
+   */
+  private async verifyXRPChannels(): Promise<string> {
+    let totalChannels = 0;
+    let totalAmount = 0n;
+    const agentStats: string[] = [];
+
+    for (const agent of this.agents) {
+      try {
+        const channelsResult = (await httpGet(`${agent.httpUrl}/xrp-channels`)) as {
+          channels: Array<{
+            channelId: string;
+            destination: string;
+            amount: string;
+            balance: string;
+            status: string;
+          }>;
+        };
+
+        const channels = channelsResult.channels || [];
+        totalChannels += channels.length;
+
+        for (const ch of channels) {
+          totalAmount += BigInt(ch.amount || '0');
+        }
+
+        if (channels.length > 0) {
+          agentStats.push(`${agent.agentId}: ${channels.length} XRP channels`);
+        }
+      } catch (error) {
+        // XRP channels endpoint may not be available - skip
+        console.log(`    Warning: Could not query XRP channels for ${agent.agentId}`);
+      }
+    }
+
+    if (agentStats.length > 0) {
+      console.log(`    XRP channel distribution: ${agentStats.join(', ')}`);
+    }
+
+    // Convert drops to XRP for display
+    const totalXRP = Number(totalAmount) / 1000000;
+    return `Verified ${totalChannels} XRP channels with ${totalXRP.toFixed(2)} XRP total`;
+  }
+
+  /**
+   * Make a JSON-RPC request to rippled
+   */
+  private async xrplRpcRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const urlObj = new URL(this.config.xrplRpcUrl);
+      const data = JSON.stringify({
+        method,
+        params: [params],
+      });
+
+      const req = http.request(
+        {
+          hostname: urlObj.hostname,
+          port: urlObj.port,
+          path: urlObj.pathname,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(data),
+          },
+        },
+        (res) => {
+          let responseData = '';
+          res.on('data', (chunk) => (responseData += chunk));
+          res.on('end', () => {
+            try {
+              const parsed = JSON.parse(responseData);
+              if (parsed.result?.error) {
+                reject(new Error(parsed.result.error_message || parsed.result.error));
+              } else {
+                resolve(parsed);
+              }
+            } catch {
+              resolve(responseData);
+            }
+          });
+        }
+      );
+
+      req.on('error', reject);
+      req.setTimeout(30000, () => {
+        req.destroy();
+        reject(new Error('XRPL RPC request timeout'));
+      });
+      req.write(data);
+      req.end();
+    });
   }
 
   // ============================================

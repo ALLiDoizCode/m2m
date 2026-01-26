@@ -24,6 +24,7 @@ import { getPublicKey } from 'nostr-tools';
 import { WebSocketServer, WebSocket } from 'ws';
 import pino, { Logger } from 'pino';
 import { ethers } from 'ethers';
+import { Client as XrplClient, Wallet as XrplWallet } from 'xrpl';
 import { AgentNode, AgentNodeConfig } from './agent-node';
 import { ToonCodec, NostrEvent } from './toon-codec';
 import { PacketType, ILPPreparePacket, ILPFulfillPacket, ILPRejectPacket } from '@m2m/shared';
@@ -51,9 +52,15 @@ interface AgentServerConfig {
   anvilRpcUrl: string | null;
   tokenNetworkAddress: string | null;
   agentTokenAddress: string | null;
+  // XRP Payment Channel Configuration
+  xrpEnabled: boolean;
+  xrpWssUrl: string | null;
+  xrpNetwork: string;
+  xrpAccountSecret: string | null;
+  xrpAccountAddress: string | null;
 }
 
-// Payment channel state tracking
+// EVM Payment channel state tracking
 interface PaymentChannel {
   channelId: string;
   peerAddress: string;
@@ -63,10 +70,23 @@ interface PaymentChannel {
   transferredAmount: bigint;
 }
 
+// XRP Payment channel state tracking
+interface XRPPaymentChannel {
+  channelId: string;
+  destination: string;
+  amount: string; // XRP drops
+  balance: string; // XRP drops claimed
+  status: 'open' | 'closing' | 'closed';
+  settleDelay: number;
+  publicKey: string;
+}
+
 interface PeerConnection {
   peerId: string;
   ilpAddress: string;
   btpUrl: string;
+  evmAddress?: string; // For EVM payment channel lookup
+  xrpAddress?: string; // For XRP payment channel lookup
   ws?: WebSocket;
 }
 
@@ -79,6 +99,8 @@ interface SendEventRequest {
 
 interface AddFollowRequest {
   pubkey: string;
+  evmAddress?: string;
+  xrpAddress?: string;
   ilpAddress: string;
   petname?: string;
   btpUrl?: string;
@@ -105,7 +127,7 @@ export class AgentServer {
   // Track pending packets for response correlation
   private pendingPackets: Map<
     string,
-    { peerId: string; destination: string; amount: string; timestamp: number }
+    { peerId: string; destination: string; amount: string; timestamp: number; packetId: string }
   > = new Map();
   // EVM Payment Channel state
   private evmProvider: ethers.JsonRpcProvider | null = null;
@@ -113,6 +135,10 @@ export class AgentServer {
   private paymentChannels: Map<string, PaymentChannel> = new Map(); // channelId -> PaymentChannel
   private tokenNetworkContract: ethers.Contract | null = null;
   private agentTokenContract: ethers.Contract | null = null;
+  // XRP Payment Channel state
+  private xrplClient: XrplClient | null = null;
+  private xrplWallet: XrplWallet | null = null;
+  private xrpChannels: Map<string, XRPPaymentChannel> = new Map(); // channelId -> XRPPaymentChannel
 
   constructor(config: Partial<AgentServerConfig> = {}) {
     // Generate keypair if not provided
@@ -152,6 +178,12 @@ export class AgentServer {
       anvilRpcUrl: config.anvilRpcUrl || process.env.ANVIL_RPC_URL || null,
       tokenNetworkAddress: config.tokenNetworkAddress || process.env.TOKEN_NETWORK_ADDRESS || null,
       agentTokenAddress: config.agentTokenAddress || process.env.AGENT_TOKEN_ADDRESS || null,
+      // XRP configuration
+      xrpEnabled: config.xrpEnabled ?? process.env.XRP_ENABLED === 'true',
+      xrpWssUrl: config.xrpWssUrl || process.env.XRPL_WSS_URL || null,
+      xrpNetwork: config.xrpNetwork || process.env.XRPL_NETWORK || 'standalone',
+      xrpAccountSecret: config.xrpAccountSecret || process.env.XRPL_ACCOUNT_SECRET || null,
+      xrpAccountAddress: config.xrpAccountAddress || process.env.XRPL_ACCOUNT_ADDRESS || null,
     };
 
     this.logger = pino({
@@ -215,6 +247,9 @@ export class AgentServer {
 
     // Initialize EVM provider and contracts if configured
     await this.initializeEVM();
+
+    // Initialize XRP client if configured
+    await this.initializeXRP();
 
     // Start HTTP server
     await this.startHttpServer();
@@ -292,6 +327,54 @@ export class AgentServer {
     }
   }
 
+  private async initializeXRP(): Promise<void> {
+    if (!this.config.xrpEnabled || !this.config.xrpWssUrl) {
+      this.logger.debug('XRP not enabled or no WSS URL configured, skipping XRP initialization');
+      return;
+    }
+
+    // Only initialize if we have account credentials
+    if (!this.config.xrpAccountSecret) {
+      this.logger.debug('No XRP account secret configured, XRP will be configured at runtime');
+      return;
+    }
+
+    try {
+      this.xrplClient = new XrplClient(this.config.xrpWssUrl, {
+        timeout: 10000,
+      });
+
+      // Initialize wallet from secret
+      this.xrplWallet = XrplWallet.fromSeed(this.config.xrpAccountSecret);
+
+      // Validate address matches derived wallet if provided
+      if (
+        this.config.xrpAccountAddress &&
+        this.xrplWallet.address !== this.config.xrpAccountAddress
+      ) {
+        throw new Error(
+          `XRP account address mismatch: expected ${this.config.xrpAccountAddress}, got ${this.xrplWallet.address}`
+        );
+      }
+
+      this.config.xrpAccountAddress = this.xrplWallet.address;
+
+      // Connect to rippled
+      await this.xrplClient.connect();
+
+      this.logger.info(
+        {
+          xrpAddress: this.config.xrpAccountAddress,
+          xrpNetwork: this.config.xrpNetwork,
+        },
+        'XRP initialized'
+      );
+    } catch (error) {
+      this.logger.error({ err: error }, 'Failed to initialize XRP');
+      // Don't throw - XRP is optional and can be configured at runtime
+    }
+  }
+
   async shutdown(): Promise<void> {
     if (this.isShutdown) return;
     this.isShutdown = true;
@@ -323,6 +406,11 @@ export class AgentServer {
 
     // Disconnect TelemetryEmitter
     await this.telemetryEmitter.disconnect();
+
+    // Disconnect XRP client
+    if (this.xrplClient?.isConnected()) {
+      await this.xrplClient.disconnect();
+    }
 
     // Shutdown AgentNode
     await this.agentNode.shutdown();
@@ -380,6 +468,8 @@ export class AgentServer {
             ilpAddress: this.config.ilpAddress,
             pubkey: this.config.nostrPubkey,
             evmAddress: this.config.evmAddress,
+            xrpAddress: this.config.xrpAccountAddress,
+            xrpEnabled: this.config.xrpEnabled,
             initialized: this.agentNode.isInitialized,
             followCount: this.agentNode.followGraphRouter.getFollowCount(),
             peerCount: this.peers.size,
@@ -387,6 +477,7 @@ export class AgentServer {
             eventsSent: this.eventsSent,
             eventsReceived: this.eventsReceived,
             channelCount: this.paymentChannels.size,
+            xrpChannelCount: this.xrpChannels.size,
           })
         );
         return;
@@ -409,6 +500,8 @@ export class AgentServer {
             peerId: data.petname || data.pubkey,
             ilpAddress: data.ilpAddress,
             btpUrl: data.btpUrl,
+            evmAddress: data.evmAddress,
+            xrpAddress: data.xrpAddress,
           });
         }
 
@@ -520,6 +613,69 @@ export class AgentServer {
         return;
       }
 
+      // Configure XRP (called by test runner)
+      if (req.method === 'POST' && url.pathname === '/configure-xrp') {
+        const body = await this.readRequestBody(req);
+        const data = JSON.parse(body) as {
+          xrpWssUrl: string;
+          xrpAccountSecret: string;
+          xrpNetwork?: string;
+        };
+
+        // Update config
+        this.config.xrpEnabled = true;
+        this.config.xrpWssUrl = data.xrpWssUrl;
+        this.config.xrpAccountSecret = data.xrpAccountSecret;
+        if (data.xrpNetwork) {
+          this.config.xrpNetwork = data.xrpNetwork;
+        }
+
+        // Re-initialize XRP
+        await this.initializeXRP();
+
+        res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            success: true,
+            xrpAddress: this.config.xrpAccountAddress,
+          })
+        );
+        return;
+      }
+
+      // Get XRP payment channels
+      if (req.method === 'GET' && url.pathname === '/xrp-channels') {
+        const channels = Array.from(this.xrpChannels.values()).map((ch) => ({
+          channelId: ch.channelId,
+          destination: ch.destination,
+          amount: ch.amount,
+          balance: ch.balance,
+          status: ch.status,
+          settleDelay: ch.settleDelay,
+        }));
+        res.writeHead(200);
+        res.end(JSON.stringify({ channels }));
+        return;
+      }
+
+      // Open XRP payment channel
+      if (req.method === 'POST' && url.pathname === '/xrp-channels/open') {
+        const body = await this.readRequestBody(req);
+        const data = JSON.parse(body) as {
+          destination: string;
+          amount: string;
+          settleDelay?: number;
+        };
+        const result = await this.openXRPPaymentChannel(
+          data.destination,
+          data.amount,
+          data.settleDelay || 3600
+        );
+        res.writeHead(result.success ? 200 : 400);
+        res.end(JSON.stringify(result));
+        return;
+      }
+
       // Not found
       res.writeHead(404);
       res.end(JSON.stringify({ error: 'Not found' }));
@@ -594,14 +750,22 @@ export class AgentServer {
           this.eventsReceived++;
 
           // Emit FULFILL telemetry event
+          // Get peer's ILP address for display
+          const peerConnection = this.peers.get(peerId);
+          const peerIlpAddress = peerConnection?.ilpAddress || `g.agent.${peerId}`;
+          // Use Nostr event ID as packet ID for correlation (unique per packet)
+          const fulfillPacketId =
+            decodedEvent?.id ||
+            `${peerId}-${packet.executionCondition.toString('hex').slice(0, 16)}`;
           this.telemetryEmitter.emit({
             type: 'AGENT_CHANNEL_PAYMENT_SENT',
             timestamp: Date.now(),
             nodeId: this.config.agentId,
             agentId: this.config.agentId,
             packetType: 'fulfill',
-            from: this.config.agentId,
-            to: peerId,
+            packetId: fulfillPacketId,
+            from: this.config.ilpAddress,
+            to: peerIlpAddress,
             peerId: peerId,
             channelId: `${this.config.agentId}-${peerId}`,
             amount: packet.amount.toString(),
@@ -624,14 +788,21 @@ export class AgentServer {
         } else if (response.type === PacketType.REJECT) {
           // Emit REJECT telemetry event
           const rejectResponse = response as ILPRejectPacket;
+          const rejectPeerConnection = this.peers.get(peerId);
+          const rejectPeerIlpAddress = rejectPeerConnection?.ilpAddress || `g.agent.${peerId}`;
+          // Use Nostr event ID as packet ID for correlation (unique per packet)
+          const rejectPacketId =
+            decodedEvent?.id ||
+            `${peerId}-${packet.executionCondition.toString('hex').slice(0, 16)}`;
           this.telemetryEmitter.emit({
             type: 'AGENT_CHANNEL_PAYMENT_SENT',
             timestamp: Date.now(),
             nodeId: this.config.agentId,
             agentId: this.config.agentId,
             packetType: 'reject',
-            from: this.config.agentId,
-            to: peerId,
+            packetId: rejectPacketId,
+            from: this.config.ilpAddress,
+            to: rejectPeerIlpAddress,
             peerId: peerId,
             channelId: `${this.config.agentId}-${peerId}`,
             amount: packet.amount.toString(),
@@ -722,14 +893,17 @@ export class AgentServer {
 
         // Emit response received telemetry
         const packetType = response.type === PacketType.FULFILL ? 'fulfill' : 'reject';
+        const responsePeerConnection = this.peers.get(peerId);
+        const responsePeerIlpAddress = responsePeerConnection?.ilpAddress || `g.agent.${peerId}`;
         this.telemetryEmitter.emit({
           type: 'AGENT_CHANNEL_PAYMENT_SENT',
           timestamp: Date.now(),
           nodeId: this.config.agentId,
           agentId: this.config.agentId,
           packetType: packetType as 'prepare' | 'fulfill' | 'reject',
-          from: peerId, // Response comes FROM the peer
-          to: this.config.agentId, // Response goes TO us
+          packetId: pendingPacket.packetId, // Correlate with PREPARE
+          from: responsePeerIlpAddress, // Response comes FROM the peer
+          to: this.config.ilpAddress, // Response goes TO us
           peerId: peerId,
           channelId: `${peerId}-${this.config.agentId}`,
           amount: pendingPacket.amount,
@@ -761,15 +935,21 @@ export class AgentServer {
     // Create Nostr event
     const event = this.createNostrEvent(request.kind, request.content, request.tags);
 
+    // Define packet amount (in token units for EVM, drops for XRP)
+    const packetAmount = 100n;
+
     // Create ILP Prepare packet
     const packet: ILPPreparePacket = {
       type: PacketType.PREPARE,
-      amount: 100n,
+      amount: packetAmount,
       destination: peer.ilpAddress,
       executionCondition: AgentNode.AGENT_CONDITION,
       expiresAt: new Date(Date.now() + 30000),
       data: this.toonCodec.encode(event),
     };
+
+    // Find payment channel for this peer and update balance
+    const channelInfo = this.updateChannelBalanceForPeer(peer, packetAmount);
 
     // Send via BTP
     try {
@@ -777,29 +957,41 @@ export class AgentServer {
       peer.ws!.send(btpData);
       this.eventsSent++;
 
+      // Use Nostr event ID as packet ID for correlation (same ID used by receiver)
+      const packetId = event.id;
+
       // Track pending packet for response correlation
       this.pendingPackets.set(request.targetPeerId, {
         peerId: request.targetPeerId,
         destination: packet.destination,
         amount: packet.amount.toString(),
         timestamp: Date.now(),
+        packetId,
       });
 
-      // Emit PREPARE telemetry event
+      // Emit PREPARE telemetry event with channel info
+      const preparePeerConnection = this.peers.get(request.targetPeerId);
+      const preparePeerIlpAddress =
+        preparePeerConnection?.ilpAddress || `g.agent.${request.targetPeerId}`;
       this.telemetryEmitter.emit({
         type: 'AGENT_CHANNEL_PAYMENT_SENT',
         timestamp: Date.now(),
         nodeId: this.config.agentId,
         agentId: this.config.agentId,
         packetType: 'prepare',
-        from: this.config.agentId,
-        to: request.targetPeerId,
+        packetId,
+        from: this.config.ilpAddress,
+        to: preparePeerIlpAddress,
         peerId: request.targetPeerId,
-        channelId: `${this.config.agentId}-${request.targetPeerId}`,
+        channelId: channelInfo.channelId || `${this.config.agentId}-${request.targetPeerId}`,
         amount: packet.amount.toString(),
         destination: packet.destination,
         executionCondition: packet.executionCondition.toString('hex'),
         expiresAt: packet.expiresAt.toISOString(),
+        // Extended fields for channel tracking
+        channelType: channelInfo.channelType,
+        channelBalance: channelInfo.balance,
+        channelDeposit: channelInfo.deposit,
         event: {
           id: event.id,
           pubkey: event.pubkey,
@@ -809,12 +1001,89 @@ export class AgentServer {
           tags: event.tags,
           sig: event.sig,
         },
-      });
+      } as Parameters<typeof this.telemetryEmitter.emit>[0]);
+
+      // Emit balance update telemetry if channel found
+      if (channelInfo.channelId) {
+        this.telemetryEmitter.emit({
+          type: 'AGENT_CHANNEL_BALANCE_UPDATE',
+          timestamp: Date.now(),
+          nodeId: this.config.agentId,
+          agentId: this.config.agentId,
+          channelId: channelInfo.channelId,
+          channelType: channelInfo.channelType,
+          peerId: request.targetPeerId,
+          previousBalance: channelInfo.previousBalance,
+          newBalance: channelInfo.balance,
+          amount: packetAmount.toString(),
+          direction: 'outgoing',
+          deposit: channelInfo.deposit,
+        } as unknown as Parameters<typeof this.telemetryEmitter.emit>[0]);
+      }
 
       return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
+  }
+
+  /**
+   * Find and update the payment channel balance for a peer
+   * Prefers EVM channels, falls back to XRP channels
+   */
+  private updateChannelBalanceForPeer(
+    peer: { evmAddress?: string; xrpAddress?: string },
+    amount: bigint
+  ): {
+    channelId: string | null;
+    channelType: 'evm' | 'xrp' | 'none';
+    balance: string;
+    previousBalance: string;
+    deposit: string;
+  } {
+    // Try EVM channel first
+    if (peer.evmAddress) {
+      for (const [channelId, channel] of this.paymentChannels) {
+        if (channel.peerAddress === peer.evmAddress && channel.status === 'opened') {
+          const previousBalance = channel.transferredAmount.toString();
+          channel.transferredAmount += amount;
+          channel.nonce++;
+          return {
+            channelId,
+            channelType: 'evm',
+            balance: channel.transferredAmount.toString(),
+            previousBalance,
+            deposit: channel.deposit.toString(),
+          };
+        }
+      }
+    }
+
+    // Try XRP channel
+    if (peer.xrpAddress) {
+      for (const [channelId, channel] of this.xrpChannels) {
+        if (channel.destination === peer.xrpAddress && channel.status === 'open') {
+          const previousBalance = channel.balance;
+          const newBalance = (BigInt(channel.balance) + amount).toString();
+          channel.balance = newBalance;
+          return {
+            channelId,
+            channelType: 'xrp',
+            balance: newBalance,
+            previousBalance,
+            deposit: channel.amount,
+          };
+        }
+      }
+    }
+
+    return {
+      channelId: null,
+      channelType: 'none',
+      balance: '0',
+      previousBalance: '0',
+      deposit: '0',
+    };
   }
 
   private async broadcastToFollows(
@@ -1006,9 +1275,125 @@ export class AgentServer {
 
       this.logger.info({ channelId, peerEvmAddress }, 'Payment channel opened');
 
+      // Emit telemetry for payment channel opened
+      this.telemetryEmitter.emit({
+        type: 'AGENT_CHANNEL_OPENED',
+        timestamp: Date.now(),
+        nodeId: this.config.agentId,
+        agentId: this.config.agentId,
+        channelId,
+        chain: 'evm',
+        peerId: peerEvmAddress,
+        amount: depositAmount.toString(),
+      });
+
       return { success: true, channelId };
     } catch (error) {
       this.logger.error({ err: error, peerEvmAddress }, 'Failed to open payment channel');
+      return { success: false, error: (error as Error).message };
+    }
+  }
+
+  // ============================================
+  // XRP Payment Channels
+  // ============================================
+
+  private async openXRPPaymentChannel(
+    destination: string,
+    amount: string,
+    settleDelay: number
+  ): Promise<{ success: boolean; channelId?: string; error?: string }> {
+    if (!this.xrplClient || !this.xrplWallet) {
+      return { success: false, error: 'XRP not initialized' };
+    }
+
+    if (!this.xrplClient.isConnected()) {
+      try {
+        await this.xrplClient.connect();
+      } catch (error) {
+        return {
+          success: false,
+          error: `Failed to connect to XRP ledger: ${(error as Error).message}`,
+        };
+      }
+    }
+
+    try {
+      this.logger.info({ destination, amount, settleDelay }, 'Opening XRP payment channel');
+
+      // Get the public key from the wallet for the channel
+      const publicKey = this.xrplWallet.publicKey;
+
+      // Construct PaymentChannelCreate transaction
+      const tx = {
+        TransactionType: 'PaymentChannelCreate' as const,
+        Account: this.xrplWallet.address,
+        Destination: destination,
+        Amount: amount,
+        SettleDelay: settleDelay,
+        PublicKey: publicKey,
+      };
+
+      // Autofill and sign transaction
+      const prepared = await this.xrplClient.autofill(tx);
+      const signed = this.xrplWallet.sign(prepared);
+
+      // Submit and wait for confirmation
+      const result = await this.xrplClient.submitAndWait(signed.tx_blob);
+
+      // The channel ID is derived from the transaction
+      // For PaymentChannelCreate, the channel ID is in the meta.AffectedNodes
+      const meta = result.result.meta as {
+        AffectedNodes?: Array<{
+          CreatedNode?: {
+            LedgerEntryType: string;
+            LedgerIndex: string;
+          };
+        }>;
+      };
+
+      let channelId: string | undefined;
+      if (meta?.AffectedNodes) {
+        for (const node of meta.AffectedNodes) {
+          if (node.CreatedNode?.LedgerEntryType === 'PayChannel') {
+            channelId = node.CreatedNode.LedgerIndex;
+            break;
+          }
+        }
+      }
+
+      if (!channelId) {
+        return { success: false, error: 'Channel ID not found in transaction result' };
+      }
+
+      // Track channel
+      this.xrpChannels.set(channelId, {
+        channelId,
+        destination,
+        amount,
+        balance: '0',
+        status: 'open',
+        settleDelay,
+        publicKey,
+      });
+
+      this.logger.info({ channelId, destination }, 'XRP payment channel opened');
+
+      // Emit telemetry for XRP channel opened
+      this.telemetryEmitter.emit({
+        type: 'AGENT_CHANNEL_OPENED',
+        timestamp: Date.now(),
+        nodeId: this.config.agentId,
+        agentId: this.config.agentId,
+        channelId,
+        chain: 'xrp',
+        peerId: destination,
+        amount,
+      });
+
+      return { success: true, channelId };
+    } catch (error) {
+      this.logger.error({ err: error, destination }, 'Failed to open XRP payment channel');
       return { success: false, error: (error as Error).message };
     }
   }

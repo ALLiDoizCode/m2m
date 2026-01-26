@@ -150,11 +150,79 @@ function formatDestination(destination: string): string {
 }
 
 /**
+ * Get Explorer URL for a peer ID or ILP address
+ * Maps peer IDs like "peer-0", "peer-1" or ILP addresses like "g.agent.peer-0"
+ * to their Explorer ports. Returns null if no peer pattern is found.
+ */
+function getPeerExplorerUrl(address: string | null): string | null {
+  if (!address) return null;
+
+  // Try to extract peer index from ILP address (e.g., "g.agent.peer-0" -> 0)
+  // or peer ID (e.g., "peer-0" -> 0)
+  const peerMatch = address.match(/peer-(\d+)/i);
+  if (peerMatch) {
+    const peerIndex = parseInt(peerMatch[1], 10);
+    const explorerPort = 9100 + peerIndex;
+    // Use current hostname but different port
+    const currentHost = window.location.hostname;
+    return `http://${currentHost}:${explorerPort}`;
+  }
+
+  // Also handle agent-0, agent-1 patterns
+  const agentMatch = address.match(/agent-(\d+)/i);
+  if (agentMatch) {
+    const agentIndex = parseInt(agentMatch[1], 10);
+    const explorerPort = 9100 + agentIndex;
+    const currentHost = window.location.hostname;
+    return `http://${currentHost}:${explorerPort}`;
+  }
+
+  return null;
+}
+
+/**
  * Determine event status (success/failure/pending/neutral)
  */
 type EventStatus = 'success' | 'failure' | 'pending' | 'neutral';
 
-function getEventStatus(event: TelemetryEvent): EventStatus {
+/**
+ * Build a map of packet_id -> resolved status from FULFILL/REJECT packets
+ * This is used to show the resolved status for PREPARE packets
+ */
+function buildPacketStatusMap(events: TelemetryEvent[]): Map<string, 'success' | 'failure'> {
+  const statusMap = new Map<string, 'success' | 'failure'>();
+
+  for (const event of events) {
+    if (event.type === 'AGENT_CHANNEL_PAYMENT_SENT' && 'packetType' in event) {
+      const packetEvent = event as { packetType?: string; packetId?: string };
+      const packetId = packetEvent.packetId;
+      if (!packetId) continue;
+
+      if (packetEvent.packetType === 'fulfill') {
+        statusMap.set(packetId, 'success');
+      } else if (packetEvent.packetType === 'reject') {
+        statusMap.set(packetId, 'failure');
+      }
+    }
+  }
+
+  return statusMap;
+}
+
+/**
+ * Get packet ID from event
+ */
+function getPacketId(event: TelemetryEvent): string | null {
+  if ('packetId' in event && typeof event.packetId === 'string') {
+    return event.packetId;
+  }
+  return null;
+}
+
+function getEventStatus(
+  event: TelemetryEvent,
+  resolvedStatus?: 'success' | 'failure'
+): EventStatus {
   const type = event.type;
 
   // For packet events, status is based on packet type
@@ -162,7 +230,10 @@ function getEventStatus(event: TelemetryEvent): EventStatus {
     const packetType = (event as { packetType?: string }).packetType;
     if (packetType === 'fulfill') return 'success';
     if (packetType === 'reject') return 'failure';
-    if (packetType === 'prepare') return 'pending';
+    // For PREPARE packets, use the resolved status if available
+    if (packetType === 'prepare') {
+      return resolvedStatus || 'pending';
+    }
   }
 
   const successTypes = [
@@ -172,6 +243,10 @@ function getEventStatus(event: TelemetryEvent): EventStatus {
     'PAYMENT_CHANNEL_SETTLED',
     'XRP_CHANNEL_CLAIMED',
     'AGENT_WALLET_FUNDED',
+    // Channel opened events are emitted after successful on-chain confirmation
+    'PAYMENT_CHANNEL_OPENED',
+    'XRP_CHANNEL_OPENED',
+    'AGENT_CHANNEL_OPENED',
   ];
 
   const failureTypes = [
@@ -182,12 +257,7 @@ function getEventStatus(event: TelemetryEvent): EventStatus {
     'FUNDING_RATE_LIMIT_EXCEEDED',
   ];
 
-  const pendingTypes = [
-    'SETTLEMENT_TRIGGERED',
-    'PAYMENT_CHANNEL_OPENED',
-    'XRP_CHANNEL_OPENED',
-    'AGENT_CHANNEL_OPENED',
-  ];
+  const pendingTypes = ['SETTLEMENT_TRIGGERED'];
 
   if (successTypes.includes(type)) return 'success';
   if (failureTypes.includes(type)) return 'failure';
@@ -212,16 +282,48 @@ function getStatusDisplay(status: EventStatus): { icon: string; text: string; cl
 }
 
 /**
+ * Clickable peer link component
+ * Opens the peer's Explorer in a new tab
+ */
+function PeerLink({ peerId }: { peerId: string | null }) {
+  if (!peerId) return <span>-</span>;
+
+  const explorerUrl = getPeerExplorerUrl(peerId);
+
+  if (!explorerUrl) {
+    // Not a recognized peer ID format, just display as text
+    return <span title={peerId}>{peerId}</span>;
+  }
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent row click
+    window.open(explorerUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      className="text-blue-500 hover:text-blue-700 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 rounded"
+      title={`Open ${peerId} Explorer (${explorerUrl})`}
+    >
+      {peerId}
+    </button>
+  );
+}
+
+/**
  * Memoized row component for better performance
  */
 const EventRow = React.memo(function EventRow({
   event,
   onClick,
   style,
+  resolvedStatus,
 }: {
   event: TelemetryEvent;
   onClick?: () => void;
   style: React.CSSProperties;
+  resolvedStatus?: 'success' | 'failure';
 }) {
   const displayType = getDisplayType(event);
   const from = getFrom(event);
@@ -229,7 +331,7 @@ const EventRow = React.memo(function EventRow({
   const amount = getAmount(event);
   const timestamp = normalizeTimestamp(event.timestamp);
   const destination = getDestination(event);
-  const status = getEventStatus(event);
+  const status = getEventStatus(event, resolvedStatus);
   const statusDisplay = getStatusDisplay(status);
 
   return (
@@ -238,10 +340,10 @@ const EventRow = React.memo(function EventRow({
       style={style}
       onClick={onClick}
     >
-      <div className="w-[100px] px-4 font-mono text-sm text-muted-foreground truncate">
+      <div className="w-[8%] min-w-[80px] px-3 font-mono text-sm text-muted-foreground truncate">
         {formatRelativeTime(timestamp)}
       </div>
-      <div className="w-[120px] px-4">
+      <div className="w-[12%] min-w-[100px] px-3">
         <Badge
           variant="secondary"
           className={`${displayType.colorClass} text-white text-xs max-w-full truncate`}
@@ -250,17 +352,22 @@ const EventRow = React.memo(function EventRow({
           {displayType.label}
         </Badge>
       </div>
-      <div className="w-[120px] px-4 font-mono text-sm truncate" title={from || undefined}>
-        {from || '-'}
+      <div className="w-[16%] min-w-[120px] px-3 font-mono text-sm truncate">
+        <PeerLink peerId={from} />
       </div>
-      <div className="w-[120px] px-4 font-mono text-sm truncate" title={to || undefined}>
-        {to || '-'}
+      <div className="w-[16%] min-w-[120px] px-3 font-mono text-sm truncate">
+        <PeerLink peerId={to} />
       </div>
-      <div className="w-[180px] px-4 font-mono text-sm truncate" title={destination || undefined}>
+      <div
+        className="w-[24%] min-w-[150px] px-3 font-mono text-sm truncate"
+        title={destination || undefined}
+      >
         {destination ? formatDestination(destination) : '-'}
       </div>
-      <div className="w-[100px] px-4 font-mono text-sm">{amount ? formatAmount(amount) : '-'}</div>
-      <div className={`w-[80px] px-4 text-sm ${statusDisplay.className}`}>
+      <div className="w-[12%] min-w-[80px] px-3 font-mono text-sm truncate">
+        {amount ? formatAmount(amount) : '-'}
+      </div>
+      <div className={`w-[12%] min-w-[80px] px-3 text-sm ${statusDisplay.className}`}>
         <span title={statusDisplay.text}>
           {statusDisplay.icon} {statusDisplay.text}
         </span>
@@ -279,6 +386,9 @@ export function EventTable({
 }: EventTableProps) {
   const parentRef = React.useRef<HTMLDivElement>(null);
 
+  // Build a map of packet_id -> resolved status for PREPARE packets
+  const packetStatusMap = React.useMemo(() => buildPacketStatusMap(events), [events]);
+
   const virtualizer = useVirtualizer({
     count: events.length,
     getScrollElement: () => parentRef.current,
@@ -292,13 +402,13 @@ export function EventTable({
     <div className="flex flex-col h-[calc(100vh-280px)]">
       {/* Header */}
       <div className="flex items-center border-b border-border bg-muted/50 h-10 shrink-0">
-        <div className="w-[100px] px-4 text-sm font-medium">Time</div>
-        <div className="w-[120px] px-4 text-sm font-medium">Type</div>
-        <div className="w-[120px] px-4 text-sm font-medium">From</div>
-        <div className="w-[120px] px-4 text-sm font-medium">To</div>
-        <div className="w-[180px] px-4 text-sm font-medium">Destination</div>
-        <div className="w-[100px] px-4 text-sm font-medium">Amount</div>
-        <div className="w-[80px] px-4 text-sm font-medium">Status</div>
+        <div className="w-[8%] min-w-[80px] px-3 text-sm font-medium">Time</div>
+        <div className="w-[12%] min-w-[100px] px-3 text-sm font-medium">Type</div>
+        <div className="w-[16%] min-w-[120px] px-3 text-sm font-medium">From</div>
+        <div className="w-[16%] min-w-[120px] px-3 text-sm font-medium">To</div>
+        <div className="w-[24%] min-w-[150px] px-3 text-sm font-medium">Destination</div>
+        <div className="w-[12%] min-w-[80px] px-3 text-sm font-medium">Amount</div>
+        <div className="w-[12%] min-w-[80px] px-3 text-sm font-medium">Status</div>
       </div>
 
       {/* Body with virtual scrolling */}
@@ -322,12 +432,15 @@ export function EventTable({
             {virtualItems.map((virtualRow) => {
               const event = events[virtualRow.index];
               const timestamp = normalizeTimestamp(event.timestamp);
+              const packetId = getPacketId(event);
+              const resolvedStatus = packetId ? packetStatusMap.get(packetId) : undefined;
 
               return (
                 <EventRow
                   key={`${timestamp}-${virtualRow.index}`}
                   event={event}
                   onClick={() => onEventClick?.(event)}
+                  resolvedStatus={resolvedStatus}
                   style={{
                     position: 'absolute',
                     top: 0,
