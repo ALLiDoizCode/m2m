@@ -1,15 +1,16 @@
-import { useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react';
+import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useEventFilters } from './hooks/useEventFilters';
 import { useEvents, EventMode } from './hooks/useEvents';
 import { EventTable } from './components/EventTable';
 import { Header } from './components/Header';
 import { JumpToLive } from './components/JumpToLive';
 import { AccountsView } from './components/AccountsView';
+import { PeersView } from './components/PeersView';
 import { TelemetryEvent, StoredEvent } from './lib/event-types';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { KeyboardHelpDialog } from './components/KeyboardHelpDialog';
-import { Radio, History, Wallet, ListTree } from 'lucide-react';
+import { Radio, History, Wallet, ListTree, Network } from 'lucide-react';
 
 const FilterBar = lazy(() =>
   import('./components/FilterBar').then((m) => ({ default: m.FilterBar }))
@@ -19,7 +20,7 @@ const EventDetailPanel = lazy(() =>
 );
 
 /** Tab view types */
-type TabView = 'events' | 'accounts';
+type TabView = 'events' | 'accounts' | 'peers';
 
 function App() {
   // Filter state management
@@ -53,25 +54,10 @@ function App() {
   // Help dialog state (Task 3)
   const [helpOpen, setHelpOpen] = useState(false);
 
-  // Auto-switch to Live mode when at top of scroll and new events arrive (Task 9)
-  const isAtTopRef = useRef(true);
-  const prevEventsLenRef = useRef(events.length);
-
-  const handleScrollStateChange = useCallback((isAtTop: boolean) => {
-    isAtTopRef.current = isAtTop;
+  // Scroll state tracking (used by EventTable)
+  const handleScrollStateChange = useCallback((_isAtTop: boolean) => {
+    // Reserved for future scroll-position-aware features
   }, []);
-
-  useEffect(() => {
-    if (
-      mode === 'history' &&
-      isAtTopRef.current &&
-      events.length > prevEventsLenRef.current &&
-      connectionStatus === 'connected'
-    ) {
-      setMode('live');
-    }
-    prevEventsLenRef.current = events.length;
-  }, [events.length, mode, connectionStatus, setMode]);
 
   // Global keyboard shortcuts (Task 2)
   useEffect(() => {
@@ -95,6 +81,9 @@ function App() {
           break;
         case '2':
           setActiveTab('accounts');
+          break;
+        case '3':
+          setActiveTab('peers');
           break;
         case '/': {
           e.preventDefault();
@@ -197,6 +186,10 @@ function App() {
               <Wallet className="h-4 w-4" />
               Accounts
             </TabsTrigger>
+            <TabsTrigger value="peers" className="gap-2">
+              <Network className="h-4 w-4" />
+              Peers
+            </TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -233,8 +226,10 @@ function App() {
             onClearFilters={resetFilters}
             onScrollStateChange={handleScrollStateChange}
           />
-        ) : (
+        ) : activeTab === 'accounts' ? (
           <AccountsView />
+        ) : (
+          <PeersView />
         )}
       </main>
 

@@ -18,6 +18,7 @@ const SHORTCUTS = [
   { key: 'Escape', action: 'Close detail panel', context: 'Detail panel open' },
   { key: '1', action: 'Switch to Events tab', context: 'Global' },
   { key: '2', action: 'Switch to Accounts tab', context: 'Global' },
+  { key: '3', action: 'Switch to Peers tab', context: 'Global' },
   { key: '/', action: 'Focus search input', context: 'Global' },
   { key: '?', action: 'Show this help', context: 'Global' },
 ];

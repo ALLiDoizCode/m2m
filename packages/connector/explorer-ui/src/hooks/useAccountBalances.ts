@@ -36,8 +36,8 @@ interface UseAccountBalancesResult {
   accounts: AccountState[];
   /** Map of accounts by peerId for quick lookup */
   accountsMap: Map<string, AccountState>;
-  /** WebSocket connection status */
-  status: 'connecting' | 'connected' | 'disconnected' | 'error';
+  /** Connection status including hydration */
+  status: 'hydrating' | 'connecting' | 'connected' | 'disconnected' | 'error';
   /** Error message if status is 'error' */
   error: string | null;
   /** Total number of accounts */
@@ -82,14 +82,15 @@ export function useAccountBalances(
   } = options;
 
   const [accountsMap, setAccountsMap] = useState<Map<string, AccountState>>(new Map());
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>(
-    'connecting'
-  );
+  const [status, setStatus] = useState<
+    'hydrating' | 'connecting' | 'connected' | 'disconnected' | 'error'
+  >('hydrating');
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hydratedRef = useRef(false);
 
   // RAF batching refs
   const bufferRef = useRef<TelemetryEvent[]>([]);
@@ -297,9 +298,62 @@ export function useAccountBalances(
     connect();
   }, [connect]);
 
-  // Connect on mount
-  useEffect(() => {
+  /**
+   * Hydrate account state from historical events via REST API
+   */
+  const hydrate = useCallback(async () => {
+    if (hydratedRef.current) {
+      connect();
+      return;
+    }
+
+    setStatus('hydrating');
+
+    try {
+      const baseUrl = `${window.location.protocol}//${window.location.host}`;
+      const url = `${baseUrl}/api/accounts/events?types=ACCOUNT_BALANCE,AGENT_CHANNEL_PAYMENT_SENT&limit=5000`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      const events = data.events as Array<{ payload: TelemetryEvent }>;
+
+      if (events.length > 0) {
+        setAccountsMap(() => {
+          const newMap = new Map<string, AccountState>();
+          for (const storedEvent of events) {
+            const event = storedEvent.payload;
+            if (isAccountBalanceEvent(event)) {
+              applyAccountBalanceEvent(newMap, event);
+            } else if (event.type === 'AGENT_CHANNEL_PAYMENT_SENT') {
+              applyAgentPaymentEvent(
+                newMap,
+                event as TelemetryEvent & {
+                  peerId: string;
+                  amount: string;
+                  packetType: string;
+                  channelId: string;
+                }
+              );
+            }
+          }
+          return newMap;
+        });
+      }
+    } catch {
+      // Hydration failed — fall back to WebSocket-only behavior
+    }
+
+    hydratedRef.current = true;
     connect();
+  }, [connect, applyAccountBalanceEvent, applyAgentPaymentEvent]);
+
+  // Hydrate on mount, then connect WebSocket
+  useEffect(() => {
+    hydrate();
 
     return () => {
       if (wsRef.current) {
@@ -337,7 +391,7 @@ export function useAccountBalances(
         });
       }
     };
-  }, [connect, applyAccountBalanceEvent, applyAgentPaymentEvent]);
+  }, [hydrate, applyAccountBalanceEvent, applyAgentPaymentEvent]);
 
   // Sort accounts by net balance (highest first)
   const accounts = useMemo(() => {

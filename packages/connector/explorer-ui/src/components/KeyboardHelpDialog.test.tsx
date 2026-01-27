@@ -9,6 +9,7 @@ describe('KeyboardHelpDialog', () => {
     expect(screen.getByText('Keyboard Shortcuts')).toBeDefined();
     expect(screen.getByText('Move selection down')).toBeDefined();
     expect(screen.getByText('Switch to Events tab')).toBeDefined();
+    expect(screen.getByText('Switch to Peers tab')).toBeDefined();
     expect(screen.getByText('Focus search input')).toBeDefined();
     expect(screen.getByText('Show this help')).toBeDefined();
   });

@@ -421,7 +421,10 @@ export class EventStore {
    * @param filter - Query filter criteria
    * @returns Array of stored events matching the filter
    */
-  async queryEvents(filter: EventQueryFilter): Promise<StoredEvent[]> {
+  async queryEvents(
+    filter: EventQueryFilter,
+    sortOrder: 'ASC' | 'DESC' = 'DESC'
+  ): Promise<StoredEvent[]> {
     const client = this._getClient();
 
     const conditions: string[] = [];
@@ -463,7 +466,7 @@ export class EventStore {
     const limit = filter.limit ?? DEFAULT_QUERY_LIMIT;
     const offset = filter.offset ?? DEFAULT_QUERY_OFFSET;
 
-    const sql = `SELECT * FROM events ${whereClause} ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
+    const sql = `SELECT * FROM events ${whereClause} ORDER BY timestamp ${sortOrder} LIMIT ? OFFSET ?`;
     args.push(limit, offset);
 
     const result = await client.execute({ sql, args });

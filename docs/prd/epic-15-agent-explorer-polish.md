@@ -26,7 +26,10 @@ Transform the functional Explorer into a polished, high-performance observabilit
 4. **User Experience:** Improve navigation flow, add keyboard shortcuts for power users, improve responsive behavior, refine filter interactions, and add contextual empty states.
 5. **Visual Quality:** Audit and refine typography scale, spacing consistency, color palette usage, animation timing, component alignment, and dark theme contrast ratios.
 
-**How it integrates:** All changes are within the existing `packages/connector/explorer-ui/` frontend and the `packages/connector/src/explorer/` backend. No new services, APIs, or schema changes required.
+6. **Historical Data Hydration:** Accounts and payment channels views hydrate from historical event data on page load, so the Explorer works correctly when opened after events have already occurred (not just live WebSocket).
+7. **Peers & Routing View:** New Peers tab showing connected peers with ILP addresses, on-chain addresses, BTP connection status, and routing table entries for network topology visibility.
+
+**How it integrates:** All changes are within the existing `packages/connector/explorer-ui/` frontend and the `packages/connector/src/explorer/` backend. Stories 15.5 and 15.6 add new REST API endpoints to the explorer server for historical event replay, peer data, and routing table access.
 
 **Success criteria:**
 
@@ -36,6 +39,8 @@ Transform the functional Explorer into a polished, high-performance observabilit
 - Lighthouse accessibility score ≥ 90
 - Visual consistency audit passes (no orphaned styles, consistent spacing, proper contrast)
 - Keyboard navigation works for core workflows (event selection, tab switching, filter toggling)
+- Accounts tab populates from historical events (peer accounts and payment channels visible after test completes)
+- Peers tab shows all connected peers with ILP addresses and routing table
 
 ---
 
@@ -190,6 +195,71 @@ Transform the functional Explorer into a polished, high-performance observabilit
 
 ---
 
+### Story 15.5: Historical Data Hydration for Accounts & Channels
+
+**Goal:** Ensure the Accounts tab displays peer account balances and payment channel state from historical events, not just live WebSocket data — so the Explorer works correctly when opened after events have already occurred.
+
+**Scope:**
+
+- Add a REST API endpoint (`GET /api/accounts/events`) that returns account/channel-related telemetry events for client-side state reconstruction
+- Modify `useAccountBalances` hook to hydrate from historical events on mount before connecting WebSocket
+- Modify `usePaymentChannels` hook to hydrate from historical events on mount before connecting WebSocket
+- Update `AccountsView` to handle `hydrating` loading state with skeleton loaders
+- Verify against Docker Agent Society test: Accounts tab shows peer accounts and payment channels after test completes
+
+**Acceptance Criteria:**
+
+- [ ] Accounts tab shows peer account balances derived from historical events when opening Explorer after events occurred
+- [ ] Payment channel cards appear showing all channels (EVM and XRP) reconstructed from historical events
+- [ ] Summary stats (Total Accounts, Near Threshold, Active Channels) are accurate and non-zero after hydration
+- [ ] WebSocket events after hydration merge correctly into existing state (no duplicates)
+- [ ] Wallet overview panel continues to work as before (no regression)
+- [ ] Verified against Docker Agent Society test data: ≥1 peer account and ≥1 payment channel visible
+
+**Technical Notes:**
+
+- Uses event replay pattern: fetch historical events from EventStore and replay through existing hook reducer functions
+- Reuses existing `applyAccountBalanceEvent`, `applyAgentPaymentEvent`, and `applyChannelEvent` functions
+- Account balance events: `ACCOUNT_BALANCE`, `AGENT_CHANNEL_PAYMENT_SENT`
+- Channel events (9 types): `PAYMENT_CHANNEL_OPENED`, `PAYMENT_CHANNEL_BALANCE_UPDATE`, `PAYMENT_CHANNEL_SETTLED`, `XRP_CHANNEL_OPENED`, `XRP_CHANNEL_CLAIMED`, `XRP_CHANNEL_CLOSED`, `AGENT_CHANNEL_OPENED`, `AGENT_CHANNEL_BALANCE_UPDATE`, `AGENT_CHANNEL_CLOSED`
+- The existing `/api/events` endpoint supports `?types=` filtering; new endpoint is a convenience wrapper
+
+---
+
+### Story 15.6: Peers & Routing Table View
+
+**Goal:** Add a Peers tab to the Agent Explorer showing connected peers with their ILP addresses, on-chain addresses, BTP status, and routing table entries — enabling operators to understand network topology.
+
+**Scope:**
+
+- Add REST API endpoints for peer data (`GET /api/peers`) and routing table (`GET /api/routes`)
+- Create `usePeers` and `useRoutingTable` hooks with REST polling
+- Create `PeersView` component with peer cards grid and routing table
+- Add "Peers" tab to App.tsx navigation alongside Events and Accounts
+- Add keyboard shortcut `3` for Peers tab
+- Verify against Docker Agent Society test: ≥2 peers with ILP addresses and ≥2 routing entries visible
+
+**Acceptance Criteria:**
+
+- [ ] "Peers" tab appears in Agent Explorer navigation
+- [ ] Peer cards display: peer ID, ILP address, EVM address, XRP address, BTP connection status
+- [ ] Routing table section shows prefix, next hop peer, and priority for all entries
+- [ ] Peer data fetched from REST API on mount and refreshed periodically
+- [ ] Routing table next-hop links reference peer cards
+- [ ] Keyboard shortcut `3` switches to Peers tab
+- [ ] Verified against Docker Agent Society test data: ≥2 peers and ≥2 routing entries
+
+**Technical Notes:**
+
+- Peer data assembled from: `AccountManager.getAccountPairs()`, `AgentNode` follows list, `Connector.getPeers()` (BTP connected)
+- Routing data from `ConnectorNode.getRoutes()` — longest-prefix matching per ILP RFC-0027
+- `ExplorerServer` constructor already receives `ConnectorNode` instance for backend access
+- Follow `useWalletBalances` pattern for REST polling hooks (10s for peers, 30s for routes)
+- Use shadcn/ui `Card`, `Badge`, `Table` components
+- Wrap `PeersView` with `React.memo`
+
+---
+
 ## Compatibility Requirements
 
 - [x] Existing connector APIs remain unchanged
@@ -198,6 +268,7 @@ Transform the functional Explorer into a polished, high-performance observabilit
 - [x] Explorer server configuration unchanged (same env vars, same ports)
 - [x] All existing Docker Compose topologies continue working
 - [x] No changes to backend `explorer-server.ts` required (frontend-only for Stories 15.1, 15.3, 15.4; minor backend batching possible in 15.2)
+- [ ] New REST endpoints in Stories 15.5 and 15.6 are additive (no breaking changes to existing API surface)
 
 ## Risk Mitigation
 
@@ -211,7 +282,7 @@ Transform the functional Explorer into a polished, high-performance observabilit
 
 ## Definition of Done
 
-- [ ] All 4 stories completed with acceptance criteria met
+- [ ] All 6 stories completed with acceptance criteria met
 - [ ] "Agent Explorer" branding applied consistently (zero "M2M Explorer" references)
 - [ ] Performance benchmarks documented (60fps @ 1000 events, <100ms WebSocket latency)
 - [ ] All views verified against Docker Agent Society test data (real ILP packets, settlements, channels)
@@ -220,6 +291,8 @@ Transform the functional Explorer into a polished, high-performance observabilit
 - [ ] Responsive layout verified at 768px, 1024px, 1440px
 - [ ] Keyboard shortcuts documented and functional
 - [ ] No regression in existing Explorer functionality
+- [ ] Accounts tab populates from historical events (not WebSocket-only)
+- [ ] Peers tab shows connected peers with ILP addresses and routing table
 
 ## Dependencies
 
@@ -236,8 +309,8 @@ Transform the functional Explorer into a polished, high-performance observabilit
 
 ---
 
-**Epic Status:** Ready for Story Development
+**Epic Status:** In Progress (Stories 15.1–15.4 Done, Stories 15.5–15.6 Draft)
 
-**Estimated Stories:** 4
+**Estimated Stories:** 6
 
 **Architecture Reference:** Frontend enhancement to existing Explorer infrastructure (Epic 14)

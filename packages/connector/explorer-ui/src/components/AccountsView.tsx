@@ -13,8 +13,13 @@ import { WalletOverview } from './WalletOverview';
  * Story 15.2: Performance optimized with React.memo and useMemo
  */
 export const AccountsView = React.memo(function AccountsView() {
-  const { accounts, status, totalAccounts, nearThresholdCount } = useAccountBalances();
-  const { channels, activeChannelCount } = usePaymentChannels();
+  const {
+    accounts,
+    status: accountsStatus,
+    totalAccounts,
+    nearThresholdCount,
+  } = useAccountBalances();
+  const { channels, status: channelsStatus, activeChannelCount } = usePaymentChannels();
   const {
     data: walletData,
     loading: walletLoading,
@@ -43,10 +48,16 @@ export const AccountsView = React.memo(function AccountsView() {
     [accounts, channels]
   );
 
+  const isLoading =
+    accountsStatus === 'hydrating' ||
+    accountsStatus === 'connecting' ||
+    channelsStatus === 'hydrating' ||
+    channelsStatus === 'connecting';
+
   // If no peer accounts and no wallet data, show skeleton or empty state
-  if (totalAccounts === 0 && !walletData) {
-    // Show skeleton loaders while connecting
-    if (status === 'connecting') {
+  if (totalAccounts === 0 && channels.length === 0 && !walletData) {
+    // Show skeleton loaders while hydrating or connecting
+    if (isLoading) {
       return (
         <div className="space-y-6">
           {/* Skeleton summary stats */}
@@ -97,7 +108,7 @@ export const AccountsView = React.memo(function AccountsView() {
         <p className="text-sm mt-1">
           Balance events will appear as packets flow through the connector.
         </p>
-        {status === 'error' && (
+        {accountsStatus === 'error' && (
           <p className="text-xs mt-4 text-destructive">
             Failed to connect to event stream. Please check the connector is running.
           </p>

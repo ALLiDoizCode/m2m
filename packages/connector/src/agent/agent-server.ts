@@ -215,6 +215,8 @@ export class AgentServer {
         nodeId: this.config.agentId,
         staticPath: path.resolve(__dirname, '../../dist/explorer-ui'),
         balancesFetcher: () => this.getBalances(),
+        peersFetcher: () => this.getPeers(),
+        routesFetcher: () => this.getRoutes(),
       },
       this.eventStore,
       this.telemetryEmitter,
@@ -1800,6 +1802,54 @@ export class AgentServer {
         status: ch.status,
       })),
     };
+  }
+
+  // ============================================
+  // Peer & Routing Data for Explorer
+  // ============================================
+
+  private async getPeers(): Promise<
+    Array<{
+      peerId: string;
+      ilpAddress: string;
+      evmAddress?: string;
+      xrpAddress?: string;
+      btpUrl?: string;
+      connected: boolean;
+      petname?: string;
+      pubkey?: string;
+    }>
+  > {
+    const follows = this.agentNode.followGraphRouter.getAllFollows();
+    return follows.map((follow) => {
+      // Find matching peer connection by ILP address to get richer data
+      const peerConn = Array.from(this.peers.values()).find(
+        (p) => p.ilpAddress === follow.ilpAddress
+      );
+      const isConnected = peerConn?.ws?.readyState === WebSocket.OPEN;
+
+      return {
+        peerId: follow.petname || follow.pubkey.slice(0, 8),
+        ilpAddress: follow.ilpAddress,
+        evmAddress: peerConn?.evmAddress,
+        xrpAddress: peerConn?.xrpAddress,
+        btpUrl: peerConn?.btpUrl,
+        connected: isConnected,
+        petname: follow.petname,
+        pubkey: follow.pubkey,
+      };
+    });
+  }
+
+  private async getRoutes(): Promise<
+    Array<{ prefix: string; nextHop: string; priority?: number }>
+  > {
+    // Build routing table from follows — each follow's ILP address is a route prefix
+    const follows = this.agentNode.followGraphRouter.getAllFollows();
+    return follows.map((follow) => ({
+      prefix: follow.ilpAddress,
+      nextHop: follow.petname || follow.pubkey.slice(0, 8),
+    }));
   }
 
   // ============================================

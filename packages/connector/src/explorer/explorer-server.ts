@@ -22,6 +22,29 @@ import { EventBroadcaster } from './event-broadcaster';
 /**
  * Configuration for ExplorerServer.
  */
+/**
+ * Peer information returned by the peers API endpoint.
+ */
+export interface PeerInfo {
+  peerId: string;
+  ilpAddress: string;
+  evmAddress?: string;
+  xrpAddress?: string;
+  btpUrl?: string;
+  connected: boolean;
+  petname?: string;
+  pubkey?: string;
+}
+
+/**
+ * Routing table entry returned by the routes API endpoint.
+ */
+export interface RouteInfo {
+  prefix: string;
+  nextHop: string;
+  priority?: number;
+}
+
 export interface ExplorerServerConfig {
   /** Server port (default: 3001) */
   port: number;
@@ -33,6 +56,10 @@ export interface ExplorerServerConfig {
   nodeId: string;
   /** Optional callback to fetch on-chain wallet balances */
   balancesFetcher?: () => Promise<unknown>;
+  /** Optional callback to fetch peer information */
+  peersFetcher?: () => Promise<PeerInfo[]>;
+  /** Optional callback to fetch routing table entries */
+  routesFetcher?: () => Promise<RouteInfo[]>;
 }
 
 // Default configuration values
@@ -58,7 +85,7 @@ const SHUTDOWN_TIMEOUT_MS = 10000;
  */
 export class ExplorerServer {
   private readonly _config: Required<
-    Omit<ExplorerServerConfig, 'corsOrigins' | 'balancesFetcher'>
+    Omit<ExplorerServerConfig, 'corsOrigins' | 'balancesFetcher' | 'peersFetcher' | 'routesFetcher'>
   > & {
     corsOrigins: (string | RegExp)[];
   };
@@ -69,6 +96,8 @@ export class ExplorerServer {
   private readonly _wss: WebSocketServer;
   private readonly _broadcaster: EventBroadcaster;
   private readonly _balancesFetcher?: () => Promise<unknown>;
+  private readonly _peersFetcher?: () => Promise<PeerInfo[]>;
+  private readonly _routesFetcher?: () => Promise<RouteInfo[]>;
   private _unsubscribe: (() => void) | null = null;
   private _port: number = 0;
   private _started: boolean = false;
@@ -98,6 +127,8 @@ export class ExplorerServer {
     };
     this._eventStore = eventStore;
     this._balancesFetcher = config.balancesFetcher;
+    this._peersFetcher = config.peersFetcher;
+    this._routesFetcher = config.routesFetcher;
     this._logger = logger.child({ component: 'ExplorerServer' });
 
     // Initialize Express app
@@ -268,6 +299,34 @@ export class ExplorerServer {
       }
     });
 
+    // GET /api/accounts/events - Account/channel event replay for hydration
+    router.get('/api/accounts/events', async (req: Request, res: Response) => {
+      try {
+        const limit = req.query.limit ? Number(req.query.limit) : 1000;
+
+        if (isNaN(limit) || limit < 1 || limit > 5000) {
+          res.status(400).json({ error: 'limit must be between 1 and 5000' });
+          return;
+        }
+
+        const types = req.query.types ? String(req.query.types).split(',') : undefined;
+
+        const filter: EventQueryFilter = {
+          eventTypes: types,
+          limit,
+          offset: 0,
+        };
+
+        const events = await this._eventStore.queryEvents(filter, 'ASC');
+        const total = await this._eventStore.countEvents(filter);
+
+        res.json({ events, total });
+      } catch (error) {
+        this._logger.error({ error }, 'Failed to query account events');
+        res.status(500).json({ error: 'Failed to query account events' });
+      }
+    });
+
     // GET /api/balances - On-chain wallet balances
     router.get('/api/balances', async (_req: Request, res: Response) => {
       if (!this._balancesFetcher) {
@@ -281,6 +340,38 @@ export class ExplorerServer {
       } catch (error) {
         this._logger.error({ error }, 'Failed to fetch balances');
         res.status(500).json({ error: 'Failed to fetch balances' });
+      }
+    });
+
+    // GET /api/peers - Connected peer information
+    router.get('/api/peers', async (_req: Request, res: Response) => {
+      if (!this._peersFetcher) {
+        res.status(404).json({ error: 'Peers not available' });
+        return;
+      }
+
+      try {
+        const peers = await this._peersFetcher();
+        res.json({ peers });
+      } catch (error) {
+        this._logger.error({ error }, 'Failed to fetch peers');
+        res.json({ peers: [] });
+      }
+    });
+
+    // GET /api/routes - Routing table entries
+    router.get('/api/routes', async (_req: Request, res: Response) => {
+      if (!this._routesFetcher) {
+        res.status(404).json({ error: 'Routes not available' });
+        return;
+      }
+
+      try {
+        const routes = await this._routesFetcher();
+        res.json({ routes });
+      } catch (error) {
+        this._logger.error({ error }, 'Failed to fetch routes');
+        res.json({ routes: [] });
       }
     });
 

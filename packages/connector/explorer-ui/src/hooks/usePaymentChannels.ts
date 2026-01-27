@@ -13,8 +13,8 @@ interface UsePaymentChannelsResult {
   channels: ChannelState[];
   /** Map of channels by channelId */
   channelsMap: Map<string, ChannelState>;
-  /** WebSocket connection status */
-  status: 'connecting' | 'connected' | 'disconnected' | 'error';
+  /** Connection status including hydration */
+  status: 'hydrating' | 'connecting' | 'connected' | 'disconnected' | 'error';
   /** Error message if status is 'error' */
   error: string | null;
   /** Total number of channels */
@@ -43,14 +43,15 @@ export function usePaymentChannels(
   } = options;
 
   const [channelsMap, setChannelsMap] = useState<Map<string, ChannelState>>(new Map());
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>(
-    'connecting'
-  );
+  const [status, setStatus] = useState<
+    'hydrating' | 'connecting' | 'connected' | 'disconnected' | 'error'
+  >('hydrating');
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hydratedRef = useRef(false);
 
   // RAF batching refs
   const bufferRef = useRef<TelemetryEvent[]>([]);
@@ -397,8 +398,60 @@ export function usePaymentChannels(
     connect();
   }, [connect]);
 
-  useEffect(() => {
+  /**
+   * Hydrate channel state from historical events via REST API
+   */
+  const hydrate = useCallback(async () => {
+    if (hydratedRef.current) {
+      connect();
+      return;
+    }
+
+    setStatus('hydrating');
+
+    try {
+      const baseUrl = `${window.location.protocol}//${window.location.host}`;
+      const types = [
+        'PAYMENT_CHANNEL_OPENED',
+        'PAYMENT_CHANNEL_BALANCE_UPDATE',
+        'PAYMENT_CHANNEL_SETTLED',
+        'XRP_CHANNEL_OPENED',
+        'XRP_CHANNEL_CLAIMED',
+        'XRP_CHANNEL_CLOSED',
+        'AGENT_CHANNEL_OPENED',
+        'AGENT_CHANNEL_BALANCE_UPDATE',
+        'AGENT_CHANNEL_CLOSED',
+      ].join(',');
+      const url = `${baseUrl}/api/accounts/events?types=${types}&limit=5000`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      const events = data.events as Array<{ payload: TelemetryEvent }>;
+
+      if (events.length > 0) {
+        setChannelsMap(() => {
+          const newMap = new Map<string, ChannelState>();
+          for (const storedEvent of events) {
+            applyChannelEvent(newMap, storedEvent.payload);
+          }
+          return newMap;
+        });
+      }
+    } catch {
+      // Hydration failed — fall back to WebSocket-only behavior
+    }
+
+    hydratedRef.current = true;
     connect();
+  }, [connect, applyChannelEvent]);
+
+  // Hydrate on mount, then connect WebSocket
+  useEffect(() => {
+    hydrate();
 
     return () => {
       if (wsRef.current) {
@@ -423,7 +476,7 @@ export function usePaymentChannels(
         });
       }
     };
-  }, [connect, applyChannelEvent]);
+  }, [hydrate, applyChannelEvent]);
 
   // Sort channels by lastActivityAt (most recent first)
   const channels = useMemo(() => {

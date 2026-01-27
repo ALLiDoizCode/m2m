@@ -218,6 +218,18 @@ export class ConnectorNode implements HealthStatusProvider {
             {
               port: explorerPort,
               nodeId: this._config.nodeId,
+              routesFetcher: () => Promise.resolve(this.getRoutingTable()),
+              peersFetcher: () => {
+                const peerIds = this._btpClientManager.getPeerIds();
+                const peerStatus = this._btpClientManager.getPeerStatus();
+                return Promise.resolve(
+                  peerIds.map((id) => ({
+                    peerId: id,
+                    ilpAddress: '',
+                    connected: peerStatus.get(id) ?? false,
+                  }))
+                );
+              },
             },
             this._eventStore,
             this._telemetryEmitter,

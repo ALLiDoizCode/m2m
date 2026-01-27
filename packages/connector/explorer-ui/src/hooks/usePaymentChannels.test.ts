@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { usePaymentChannels } from './usePaymentChannels';
 import { createRAFMock } from '@/test/raf-helpers';
 
@@ -38,6 +38,19 @@ class MockWebSocket {
 const rafMock = createRAFMock();
 const flushRAF = rafMock.flush;
 
+/**
+ * Create a mock fetch that returns stored events for hydration
+ */
+function createMockFetch(events: object[] = []) {
+  return vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      events: events.map((e) => ({ payload: e })),
+      total: events.length,
+    }),
+  });
+}
+
 describe('usePaymentChannels', () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
@@ -45,6 +58,7 @@ describe('usePaymentChannels', () => {
     vi.stubGlobal('WebSocket', MockWebSocket);
     vi.stubGlobal('requestAnimationFrame', rafMock.requestAnimationFrame);
     vi.stubGlobal('cancelAnimationFrame', rafMock.cancelAnimationFrame);
+    vi.stubGlobal('fetch', createMockFetch());
   });
 
   afterEach(() => {
@@ -59,16 +73,158 @@ describe('usePaymentChannels', () => {
       expect(result.current.totalChannels).toBe(0);
     });
 
-    it('starts with connecting status', () => {
+    it('starts with hydrating status', () => {
       const { result } = renderHook(() => usePaymentChannels());
 
-      expect(result.current.status).toBe('connecting');
+      expect(result.current.status).toBe('hydrating');
+    });
+  });
+
+  describe('hydration', () => {
+    it('populates channels from REST API before WebSocket connects', async () => {
+      const mockFetch = createMockFetch([
+        {
+          type: 'PAYMENT_CHANNEL_OPENED',
+          channelId: '0x123',
+          nodeId: 'connector-a',
+          peerId: 'connector-b',
+          participants: ['0xabc', '0xdef'],
+          tokenAddress: '0xtoken',
+          tokenSymbol: 'USDC',
+          settlementTimeout: 86400,
+          initialDeposits: { '0xabc': '1000000' },
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+      vi.stubGlobal('fetch', mockFetch);
+
+      const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(result.current.totalChannels).toBe(1);
+      });
+
+      expect(result.current.channels[0].channelId).toBe('0x123');
+      expect(result.current.channels[0].status).toBe('active');
+      expect(result.current.channels[0].settlementMethod).toBe('evm');
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/accounts/events?types=PAYMENT_CHANNEL_OPENED')
+      );
+    });
+
+    it('replays channel events in order for correct state reconstruction', async () => {
+      const mockFetch = createMockFetch([
+        {
+          type: 'AGENT_CHANNEL_OPENED',
+          channelId: 'agent-ch-1',
+          chain: 'evm',
+          peerId: 'agent-1',
+          amount: '1000',
+          agentId: 'agent-0',
+          timestamp: new Date(Date.now() - 20000).toISOString(),
+        },
+        {
+          type: 'AGENT_CHANNEL_BALANCE_UPDATE',
+          channelId: 'agent-ch-1',
+          peerId: 'agent-1',
+          previousBalance: '0',
+          newBalance: '500',
+          amount: '500',
+          direction: 'outgoing',
+          timestamp: new Date(Date.now() - 10000).toISOString(),
+        },
+      ]);
+      vi.stubGlobal('fetch', mockFetch);
+
+      const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(result.current.totalChannels).toBe(1);
+      });
+
+      expect(result.current.channels[0].channelId).toBe('agent-ch-1');
+      expect(result.current.channels[0].myTransferred).toBe('500');
+    });
+
+    it('falls back to WebSocket-only if hydration fetch fails', async () => {
+      const mockFetch = vi.fn().mockRejectedValue(new Error('Network error'));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
+
+      await act(async () => {
+        MockWebSocket.instances[0].simulateOpen();
+      });
+
+      expect(result.current.status).toBe('connected');
+      expect(result.current.totalChannels).toBe(0);
+    });
+
+    it('merges WebSocket events on top of hydrated channels', async () => {
+      const mockFetch = createMockFetch([
+        {
+          type: 'PAYMENT_CHANNEL_OPENED',
+          channelId: '0x123',
+          nodeId: 'connector-a',
+          peerId: 'connector-b',
+          participants: ['0xabc', '0xdef'],
+          tokenAddress: '0xtoken',
+          tokenSymbol: 'USDC',
+          settlementTimeout: 86400,
+          initialDeposits: {},
+          timestamp: new Date(Date.now() - 10000).toISOString(),
+        },
+      ]);
+      vi.stubGlobal('fetch', mockFetch);
+
+      const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(result.current.totalChannels).toBe(1);
+      });
+
+      expect(result.current.channels[0].myNonce).toBe(0);
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
+
+      await act(async () => {
+        MockWebSocket.instances[0].simulateOpen();
+      });
+
+      // Send balance update via WebSocket
+      await act(async () => {
+        MockWebSocket.instances[0].simulateMessage({
+          type: 'PAYMENT_CHANNEL_BALANCE_UPDATE',
+          channelId: '0x123',
+          myNonce: 5,
+          theirNonce: 3,
+          myTransferred: '5000',
+          theirTransferred: '2000',
+          timestamp: new Date().toISOString(),
+        });
+      });
+
+      await flushRAF();
+
+      expect(result.current.totalChannels).toBe(1);
+      expect(result.current.channels[0].myNonce).toBe(5);
+      expect(result.current.channels[0].myTransferred).toBe('5000');
     });
   });
 
   describe('EVM channel events', () => {
     it('creates channel on PAYMENT_CHANNEL_OPENED event', async () => {
       const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
 
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
@@ -99,6 +255,10 @@ describe('usePaymentChannels', () => {
 
     it('updates channel on PAYMENT_CHANNEL_BALANCE_UPDATE event', async () => {
       const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
 
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
@@ -145,6 +305,10 @@ describe('usePaymentChannels', () => {
     it('marks channel settled on PAYMENT_CHANNEL_SETTLED event', async () => {
       const { result } = renderHook(() => usePaymentChannels());
 
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
+
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
       });
@@ -188,6 +352,10 @@ describe('usePaymentChannels', () => {
     it('creates XRP channel on XRP_CHANNEL_OPENED event', async () => {
       const { result } = renderHook(() => usePaymentChannels());
 
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
+
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
       });
@@ -217,6 +385,10 @@ describe('usePaymentChannels', () => {
 
     it('updates XRP balance on XRP_CHANNEL_CLAIMED event', async () => {
       const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
 
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
@@ -256,6 +428,10 @@ describe('usePaymentChannels', () => {
     it('marks XRP channel settled on XRP_CHANNEL_CLOSED event', async () => {
       const { result } = renderHook(() => usePaymentChannels());
 
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
+
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
       });
@@ -294,6 +470,10 @@ describe('usePaymentChannels', () => {
   describe('sorting', () => {
     it('returns channels sorted by lastActivityAt (most recent first)', async () => {
       const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
 
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
@@ -340,6 +520,10 @@ describe('usePaymentChannels', () => {
   describe('active channel count', () => {
     it('counts only active channels', async () => {
       const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
 
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
@@ -396,6 +580,10 @@ describe('usePaymentChannels', () => {
   describe('batching', () => {
     it('batches multiple channel events into single state update', async () => {
       const { result } = renderHook(() => usePaymentChannels());
+
+      await waitFor(() => {
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+      });
 
       await act(async () => {
         MockWebSocket.instances[0].simulateOpen();
