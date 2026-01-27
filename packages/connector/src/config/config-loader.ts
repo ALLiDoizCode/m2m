@@ -18,6 +18,7 @@ import {
   BaseBlockchainConfig,
   XRPLBlockchainConfig,
   Environment,
+  ExplorerConfig,
 } from './types';
 import { validateEnvironment } from './environment-validator';
 
@@ -124,17 +125,25 @@ export class ConfigLoader {
     // Load blockchain configuration from environment variables
     const blockchain = this.loadBlockchainConfig(environment);
 
+    // Extract port values for explorer config validation
+    const btpServerPort = rawConfig.btpServerPort as number;
+    const healthCheckPort = (rawConfig.healthCheckPort as number | undefined) ?? 8080;
+
+    // Load explorer configuration from environment variables
+    const explorer = this.loadExplorerConfig(btpServerPort, healthCheckPort);
+
     // Apply default values for optional fields
     const connectorConfig: ConnectorConfig = {
       nodeId: rawConfig.nodeId as string,
-      btpServerPort: rawConfig.btpServerPort as number,
-      healthCheckPort: (rawConfig.healthCheckPort as number | undefined) ?? 8080,
+      btpServerPort,
+      healthCheckPort,
       logLevel: (rawConfig.logLevel as 'debug' | 'info' | 'warn' | 'error' | undefined) ?? 'info',
       peers: rawConfig.peers as PeerConfig[],
       routes: rawConfig.routes as RouteConfig[],
       dashboardTelemetryUrl: rawConfig.dashboardTelemetryUrl as string | undefined,
       environment,
       blockchain,
+      explorer,
     };
 
     // Validate environment configuration
@@ -309,6 +318,77 @@ export class ConfigLoader {
       rpcUrl: process.env.XRPL_RPC_URL || envDefaults.rpcUrl,
       network,
       privateKey: process.env.XRPL_PRIVATE_KEY,
+    };
+  }
+
+  /**
+   * Load Explorer Configuration from Environment Variables
+   *
+   * Loads explorer UI configuration from environment variables with validation.
+   *
+   * Environment variables:
+   * - EXPLORER_ENABLED (optional): 'true' or 'false' (default: 'true')
+   * - EXPLORER_PORT (optional): Port number 1-65535 (default: '3001')
+   * - EXPLORER_RETENTION_DAYS (optional): Days 1-365 (default: '7')
+   * - EXPLORER_MAX_EVENTS (optional): Count 1000-10000000 (default: '1000000')
+   *
+   * @param btpServerPort - BTP server port to check for conflicts
+   * @param healthCheckPort - Health check port to check for conflicts
+   * @returns ExplorerConfig with validated values
+   * @throws ConfigurationError if validation fails
+   * @private
+   */
+  private static loadExplorerConfig(
+    btpServerPort: number,
+    healthCheckPort: number
+  ): ExplorerConfig {
+    // Parse EXPLORER_ENABLED (default: true)
+    const enabled = process.env.EXPLORER_ENABLED !== 'false';
+
+    // Parse EXPLORER_PORT (default: 3001)
+    const portStr = process.env.EXPLORER_PORT || '3001';
+    const port = parseInt(portStr, 10);
+    if (isNaN(port) || port < 1 || port > 65535) {
+      throw new ConfigurationError(
+        `EXPLORER_PORT must be a valid port number (1-65535), got: ${portStr}`
+      );
+    }
+
+    // Check for port conflicts
+    if (port === btpServerPort) {
+      throw new ConfigurationError(
+        `EXPLORER_PORT (${port}) conflicts with btpServerPort (${btpServerPort})`
+      );
+    }
+    if (port === healthCheckPort) {
+      throw new ConfigurationError(
+        `EXPLORER_PORT (${port}) conflicts with healthCheckPort (${healthCheckPort})`
+      );
+    }
+
+    // Parse EXPLORER_RETENTION_DAYS (default: 7)
+    const retentionStr = process.env.EXPLORER_RETENTION_DAYS || '7';
+    const retentionDays = parseInt(retentionStr, 10);
+    if (isNaN(retentionDays) || retentionDays < 1 || retentionDays > 365) {
+      throw new ConfigurationError(
+        `EXPLORER_RETENTION_DAYS must be between 1-365, got: ${retentionStr}`
+      );
+    }
+
+    // Parse EXPLORER_MAX_EVENTS (default: 1000000)
+    const maxEventsStr = process.env.EXPLORER_MAX_EVENTS || '1000000';
+    const maxEvents = parseInt(maxEventsStr, 10);
+    if (isNaN(maxEvents) || maxEvents < 1000 || maxEvents > 10000000) {
+      throw new ConfigurationError(
+        `EXPLORER_MAX_EVENTS must be between 1000-10000000, got: ${maxEventsStr}`
+      );
+    }
+
+    return {
+      enabled,
+      port,
+      retentionDays,
+      maxEvents,
     };
   }
 

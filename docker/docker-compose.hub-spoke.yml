@@ -11,6 +11,12 @@
 # Connections: Hub ← Spokes (spokes initiate connections to hub)
 # All traffic must route through the hub
 #
+# Explorer UI Access:
+#   - Hub:    http://localhost:3010
+#   - Spoke1: http://localhost:3011
+#   - Spoke2: http://localhost:3012
+#   - Spoke3: http://localhost:3013
+#
 # Usage:
 #   Start: docker-compose -f docker/docker-compose.hub-spoke.yml up -d
 #   Logs:  docker-compose -f docker/docker-compose.hub-spoke.yml logs -f
@@ -29,6 +35,7 @@ version: '3.8'
 
 services:
   # Hub - Central routing node
+  # Explorer UI: http://localhost:3010
   connector-hub:
     image: ilp-connector
     container_name: connector-hub
@@ -36,20 +43,26 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: connector-hub
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3010"
     volumes:
       - ../examples/hub-spoke-hub.yaml:/app/config.yaml:ro
     ports:
       - "3000:3000"
+      - "3010:3010"
     networks:
       - ilp-network
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
   # Spoke 1
+  # Explorer UI: http://localhost:3011
   connector-spoke1:
     image: ilp-connector
     container_name: connector-spoke1
@@ -57,22 +70,28 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: spoke-1
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3011"
     volumes:
       - ../examples/hub-spoke-spoke1.yaml:/app/config.yaml:ro
     ports:
       - "3001:3001"
+      - "3011:3011"
     networks:
       - ilp-network
     depends_on:
       - connector-hub
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
   # Spoke 2
+  # Explorer UI: http://localhost:3012
   connector-spoke2:
     image: ilp-connector
     container_name: connector-spoke2
@@ -80,22 +99,28 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: spoke-2
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3012"
     volumes:
       - ../examples/hub-spoke-spoke2.yaml:/app/config.yaml:ro
     ports:
       - "3002:3002"
+      - "3012:3012"
     networks:
       - ilp-network
     depends_on:
       - connector-hub
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
   # Spoke 3
+  # Explorer UI: http://localhost:3013
   connector-spoke3:
     image: ilp-connector
     container_name: connector-spoke3
@@ -103,16 +128,21 @@ services:
       CONFIG_FILE: /app/config.yaml
       NODE_ID: spoke-3
       LOG_LEVEL: info
+      DASHBOARD_TELEMETRY_URL: ws://localhost:9999
+      EXPLORER_ENABLED: "true"
+      EXPLORER_PORT: "3013"
     volumes:
       - ../examples/hub-spoke-spoke3.yaml:/app/config.yaml:ro
     ports:
       - "3003:3003"
+      - "3013:3013"
     networks:
       - ilp-network
     depends_on:
       - connector-hub
     restart: unless-stopped
     healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3

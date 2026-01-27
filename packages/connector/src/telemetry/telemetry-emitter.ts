@@ -32,6 +32,7 @@ import {
   TelemetryBufferConfig,
   TelemetryEvent as BufferEvent,
 } from './telemetry-buffer';
+import type { EventStore } from '../explorer/event-store';
 
 /**
  * TelemetryEmitter class - Sends telemetry events to dashboard telemetry server
@@ -51,17 +52,21 @@ export class TelemetryEmitter {
   private _reconnectTimeout: NodeJS.Timeout | null = null;
   private _intentionalDisconnect: boolean = false; // Track if disconnect was intentional
   private _buffer: TelemetryBuffer | null = null; // Optional buffer for batching (Story 12.5)
+  private _eventStore: EventStore | null = null; // Optional EventStore for persistence (Story 14.1)
+  private _eventCallbacks: Set<(event: TelemetryEvent) => void> = new Set(); // Callbacks for Explorer (Story 14.2)
 
   /**
    * Create a TelemetryEmitter instance
    * @param dashboardUrl - WebSocket URL of dashboard telemetry server (e.g., ws://dashboard:9000)
    * @param nodeId - Connector node ID for telemetry message identification
    * @param logger - Pino logger instance for logging telemetry events
+   * @param eventStore - Optional EventStore for persisting telemetry events (Story 14.1)
    */
-  constructor(dashboardUrl: string, nodeId: string, logger: Logger) {
+  constructor(dashboardUrl: string, nodeId: string, logger: Logger, eventStore?: EventStore) {
     this._dashboardUrl = dashboardUrl;
     this._nodeId = nodeId;
     this._logger = logger;
+    this._eventStore = eventStore ?? null;
   }
 
   /**
@@ -74,6 +79,7 @@ export class TelemetryEmitter {
    * @param nodeId - Connector node ID for telemetry message identification
    * @param logger - Pino logger instance
    * @param bufferConfig - Buffer configuration (size and flush interval)
+   * @param eventStore - Optional EventStore for persisting telemetry events (Story 14.1)
    * @returns TelemetryEmitter with buffering enabled
    *
    * [Source: Epic 12 Story 12.5 Task 5.2 - TelemetryBuffer integration]
@@ -82,9 +88,10 @@ export class TelemetryEmitter {
     dashboardUrl: string,
     nodeId: string,
     logger: Logger,
-    bufferConfig: TelemetryBufferConfig = { bufferSize: 1000, flushIntervalMs: 100 }
+    bufferConfig: TelemetryBufferConfig = { bufferSize: 1000, flushIntervalMs: 100 },
+    eventStore?: EventStore
   ): TelemetryEmitter {
-    const emitter = new TelemetryEmitter(dashboardUrl, nodeId, logger);
+    const emitter = new TelemetryEmitter(dashboardUrl, nodeId, logger, eventStore);
 
     // Create buffer with flush callback that sends batch via WebSocket
     emitter._buffer = new TelemetryBuffer(
@@ -235,6 +242,29 @@ export class TelemetryEmitter {
    */
   isConnected(): boolean {
     return this._connected;
+  }
+
+  /**
+   * Register callback for telemetry events (used by Explorer for live streaming)
+   *
+   * @param callback - Function to call when event is emitted
+   * @returns Unsubscribe function
+   *
+   * @example
+   * ```typescript
+   * const unsubscribe = telemetryEmitter.onEvent((event) => {
+   *   broadcaster.broadcast(event);
+   * });
+   *
+   * // Later, to unsubscribe:
+   * unsubscribe();
+   * ```
+   *
+   * [Source: Story 14.2 Task 4 - Explorer callback registration]
+   */
+  onEvent(callback: (event: TelemetryEvent) => void): () => void {
+    this._eventCallbacks.add(callback);
+    return () => this._eventCallbacks.delete(callback);
   }
 
   /**
@@ -399,6 +429,25 @@ export class TelemetryEmitter {
    * ```
    */
   emit(event: TelemetryEvent): void {
+    // Persist to EventStore if configured (Story 14.1)
+    // Non-blocking: failures logged but never thrown
+    if (this._eventStore) {
+      this._eventStore.storeEvent(event).catch((error) => {
+        this._logger.warn({ error, eventType: event.type }, 'Failed to store telemetry event');
+      });
+    }
+
+    // Invoke registered callbacks (Story 14.2 - Explorer live streaming)
+    // Non-blocking: callback failures logged but never thrown
+    for (const callback of this._eventCallbacks) {
+      try {
+        callback(event);
+      } catch (error) {
+        this._logger.warn({ error }, 'Event callback failed');
+      }
+    }
+
+    // Emit via WebSocket
     if (!this._connected || !this._ws) {
       this._logger.debug(
         { event: 'telemetry_not_connected', eventType: event.type },

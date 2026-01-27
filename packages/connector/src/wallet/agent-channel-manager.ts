@@ -366,8 +366,12 @@ export class AgentChannelManager {
         timestamp: Date.now(),
         nodeId: process.env.NODE_ID || 'unknown',
         agentId: params.agentId,
+        packetType: 'prepare',
+        from: params.agentId,
+        to: channel.peerId,
         channelId: params.channelId,
         amount: params.amount.toString(),
+        destination: `g.agent.${channel.peerId}`,
       });
     } catch (error) {
       // Non-blocking telemetry errors

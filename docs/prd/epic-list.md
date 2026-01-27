@@ -39,4 +39,10 @@ Add cross-chain settlement coordination, implement production-grade security har
 **Epic 13: Agent Society Protocol (ILP + Nostr Integration)**
 Extend the ILP implementation to support autonomous AI agents as unified Connector-Relays that combine ILP packet routing with Nostr event storage and handling. Agents use ILP packets to route TOON-serialized Nostr events, store events locally in SQLite databases, and charge for services via the packet amount field. Follow relationships (Kind 3) determine routing topology, enabling decentralized agent-to-agent communication with native micropayment capabilities.
 
+**Epic 14: Packet/Event Explorer UI**
+Deliver a per-node web-based explorer interface embedded in each connector that visualizes packets and events in real-time. The explorer provides block explorer-style inspection for ILP packets, TOON events, settlements, and agent activity, with full event persistence via libSQL for historical browsing and analysis. Built with React, shadcn/ui, and WebSocket streaming.
+
+**Epic 15: Agent Explorer — Performance, UX & Visual Quality**
+Rebrand "M2M Explorer" to "Agent Explorer" and polish the Explorer UI with performance optimizations (60fps at 1000+ events, WebSocket batching), UX improvements (keyboard shortcuts, filter persistence, responsive layout, empty states), visual quality refinements (typography audit, spacing consistency, WCAG AA contrast, animations), historical data hydration for accounts and payment channels, and a new Peers & Routing Table view for network topology visibility. All work verified against real Docker Agent Society test data.
+
 ---

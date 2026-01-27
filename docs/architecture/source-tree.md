@@ -15,7 +15,18 @@ m2m/                                  # Monorepo root
 │   │   │   │   ├── btp-client-manager.ts  # Peer connection manager
 │   │   │   │   └── btp-message-parser.ts  # BTP protocol encoding/decoding
 │   │   │   ├── telemetry/
-│   │   │   │   └── telemetry-emitter.ts   # Telemetry event emission
+│   │   │   │   ├── telemetry-emitter.ts   # Telemetry event emission
+│   │   │   │   ├── telemetry-buffer.ts    # Event buffering for high throughput
+│   │   │   │   └── types.ts               # Telemetry message types
+│   │   │   ├── agent/                     # Agent Society Protocol (Epic 13)
+│   │   │   │   ├── event-database.ts      # libSQL Nostr event storage
+│   │   │   │   ├── toon-codec.ts          # TOON encoder/decoder
+│   │   │   │   ├── agent-config.ts        # Agent configuration schema
+│   │   │   │   └── index.ts               # Agent module exports
+│   │   │   ├── explorer/                  # Packet/Event Explorer (Epic 14)
+│   │   │   │   ├── event-store.ts         # libSQL telemetry event storage
+│   │   │   │   ├── event-store.test.ts    # EventStore unit tests
+│   │   │   │   └── index.ts               # Explorer module exports
 │   │   │   ├── settlement/
 │   │   │   │   ├── unified-settlement-executor.ts  # Dual-settlement router
 │   │   │   │   ├── xrp-channel-lifecycle-manager.ts  # XRP channel lifecycle
@@ -30,6 +41,26 @@ m2m/                                  # Monorepo root
 │   │   │   ├── utils/
 │   │   │   │   └── logger.ts              # Pino logger configuration
 │   │   │   └── index.ts                   # Connector entry point
+│   │   ├── explorer-ui/                   # Explorer UI Frontend (Epic 14)
+│   │   │   ├── src/
+│   │   │   │   ├── App.tsx                # Main application component
+│   │   │   │   ├── main.tsx               # React entry point
+│   │   │   │   ├── index.css              # Tailwind + shadcn theme
+│   │   │   │   ├── components/
+│   │   │   │   │   ├── EventTable.tsx     # Event streaming table
+│   │   │   │   │   ├── Header.tsx         # Header with node ID
+│   │   │   │   │   └── ui/                # shadcn/ui components
+│   │   │   │   ├── hooks/
+│   │   │   │   │   ├── useEventStream.ts  # WebSocket connection hook
+│   │   │   │   │   └── useEventStream.test.ts
+│   │   │   │   └── lib/
+│   │   │   │       ├── event-types.ts     # Frontend telemetry types
+│   │   │   │       └── utils.ts           # shadcn cn() helper
+│   │   │   ├── index.html
+│   │   │   ├── vite.config.ts
+│   │   │   ├── tailwind.config.js
+│   │   │   ├── tsconfig.json
+│   │   │   └── package.json               # Standalone package (not workspace)
 │   │   ├── test/
 │   │   │   ├── unit/
 │   │   │   │   ├── packet-handler.test.ts
@@ -37,7 +68,8 @@ m2m/                                  # Monorepo root
 │   │   │   │   └── btp-message-parser.test.ts
 │   │   │   └── integration/
 │   │   │       ├── multi-node-forwarding.test.ts
-│   │   │       └── agent-channel-integration.test.ts
+│   │   │       ├── agent-channel-integration.test.ts
+│   │   │       └── telemetry-event-store.test.ts  # EventStore integration (Epic 14)
 │   │   ├── Dockerfile                     # Connector container build
 │   │   ├── package.json
 │   │   └── tsconfig.json
@@ -48,7 +80,8 @@ m2m/                                  # Monorepo root
 │       │   │   ├── ilp.ts                 # ILP packet type definitions
 │       │   │   ├── btp.ts                 # BTP message types
 │       │   │   ├── routing.ts             # Routing table types
-│       │   │   └── telemetry.ts           # Telemetry event types
+│       │   │   ├── telemetry.ts           # Telemetry event types
+│       │   │   └── payment-channel-telemetry.ts  # Payment channel telemetry types
 │       │   ├── encoding/
 │       │   │   └── oer.ts                 # OER encoder/decoder implementation
 │       │   ├── validation/
@@ -112,5 +145,6 @@ m2m/                                  # Monorepo root
 4. **Docker configs at root:** Easier access for `docker-compose up`
 5. **Examples directory:** Pre-configured topologies for quick experimentation
 6. **Tools separate:** CLI utilities independent of main packages
+7. **Explorer UI standalone:** `explorer-ui/` is a nested package with its own dependencies (not a workspace)
 
 **Note:** Dashboard package removed - visualization deferred. See DASHBOARD-DEFERRED.md in root.

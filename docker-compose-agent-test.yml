@@ -1,0 +1,297 @@
+# Docker Compose configuration for Agent Society Integration Test
+#
+# This configuration runs multiple agent nodes as separate containers,
+# along with Anvil for EVM operations. Each agent runs with real network
+# communication instead of in-process simulation.
+#
+# Usage:
+#   # Start the test infrastructure (5 agents + Anvil)
+#   docker compose -f docker-compose-agent-test.yml up -d
+#
+#   # Run the test orchestrator
+#   ./scripts/run-docker-agent-test.sh
+#
+#   # View logs
+#   docker compose -f docker-compose-agent-test.yml logs -f
+#
+#   # Stop and cleanup
+#   docker compose -f docker-compose-agent-test.yml down -v
+#
+# Explorer UI Ports:
+#   agent-0: http://localhost:9100
+#   agent-1: http://localhost:9101
+#   agent-2: http://localhost:9102
+#   agent-3: http://localhost:9103
+#   agent-4: http://localhost:9104
+#
+# Environment Variables:
+#   AGENT_COUNT - Number of agent containers to create (default: 5)
+#   BASE_SEPOLIA_RPC_URL - RPC URL for Anvil fork
+#   FORK_BLOCK_NUMBER - Block number for Anvil fork
+
+services:
+  # rippled - Local XRP Ledger node for payment channel operations
+  rippled:
+    image: xrpllabsofficial/xrpld:latest
+    container_name: rippled_agent_test
+    command: ["--standalone"]
+    volumes:
+      - ./config/rippled.cfg:/etc/opt/ripple/rippled.cfg:ro
+    ports:
+      - "5005:5005"   # HTTP/RPC
+      - "6006:6006"   # WebSocket
+    networks:
+      - agent_test_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - --post-data='{\"method\":\"server_info\"}' http://localhost:5005 2>/dev/null | grep -q result"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 45s
+    restart: unless-stopped
+
+  # Anvil - Local EVM node for smart contract operations
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    container_name: anvil_agent_test
+    entrypoint: []
+    command:
+      - anvil
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8545"
+      - --chain-id
+      - "31337"
+      - --accounts
+      - "10"
+      - --balance
+      - "10000"
+    ports:
+      - "8545:8545"
+    networks:
+      - agent_test_network
+    # Note: Skip internal health check - Anvil doesn't have curl/wget
+    # The test script checks health from host before starting agents
+    restart: unless-stopped
+
+  # Agent 0 (Hub) - Central node in hub-and-spoke topology
+  agent-0:
+    build:
+      context: .
+      dockerfile: packages/connector/Dockerfile.agent
+    container_name: agent_peer_0
+    environment:
+      AGENT_ID: peer-0
+      AGENT_HTTP_PORT: 8080
+      AGENT_BTP_PORT: 3000
+      AGENT_EXPLORER_PORT: 9000
+      AGENT_DATABASE_PATH: ":memory:"
+      AGENT_EXPLORER_DB_PATH: ":memory:"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # EVM configuration (set by orchestrator after contract deployment)
+      EVM_ENABLED: ${EVM_ENABLED:-true}
+      ANVIL_RPC_URL: http://anvil:8545
+      # XRP configuration (set by orchestrator after account funding)
+      XRP_ENABLED: ${XRP_ENABLED:-true}
+      XRPL_WSS_URL: ws://rippled:6006
+      XRPL_NETWORK: standalone
+    ports:
+      - "8100:8080"  # HTTP API
+      - "3100:3000"  # BTP WebSocket
+      - "9100:9000"  # Explorer UI
+    networks:
+      - agent_test_network
+    depends_on:
+      - anvil
+      - rippled
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # Agent 1
+  agent-1:
+    build:
+      context: .
+      dockerfile: packages/connector/Dockerfile.agent
+    container_name: agent_peer_1
+    environment:
+      AGENT_ID: peer-1
+      AGENT_HTTP_PORT: 8080
+      AGENT_BTP_PORT: 3000
+      AGENT_EXPLORER_PORT: 9000
+      AGENT_DATABASE_PATH: ":memory:"
+      AGENT_EXPLORER_DB_PATH: ":memory:"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      EVM_ENABLED: ${EVM_ENABLED:-true}
+      ANVIL_RPC_URL: http://anvil:8545
+      XRP_ENABLED: ${XRP_ENABLED:-true}
+      XRPL_WSS_URL: ws://rippled:6006
+      XRPL_NETWORK: standalone
+    ports:
+      - "8101:8080"
+      - "3101:3000"
+      - "9101:9000"  # Explorer UI
+    networks:
+      - agent_test_network
+    depends_on:
+      - anvil
+      - rippled
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # Agent 2
+  agent-2:
+    build:
+      context: .
+      dockerfile: packages/connector/Dockerfile.agent
+    container_name: agent_peer_2
+    environment:
+      AGENT_ID: peer-2
+      AGENT_HTTP_PORT: 8080
+      AGENT_BTP_PORT: 3000
+      AGENT_EXPLORER_PORT: 9000
+      AGENT_DATABASE_PATH: ":memory:"
+      AGENT_EXPLORER_DB_PATH: ":memory:"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      EVM_ENABLED: ${EVM_ENABLED:-true}
+      ANVIL_RPC_URL: http://anvil:8545
+      XRP_ENABLED: ${XRP_ENABLED:-true}
+      XRPL_WSS_URL: ws://rippled:6006
+      XRPL_NETWORK: standalone
+    ports:
+      - "8102:8080"
+      - "3102:3000"
+      - "9102:9000"  # Explorer UI
+    networks:
+      - agent_test_network
+    depends_on:
+      - anvil
+      - rippled
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # Agent 3
+  agent-3:
+    build:
+      context: .
+      dockerfile: packages/connector/Dockerfile.agent
+    container_name: agent_peer_3
+    environment:
+      AGENT_ID: peer-3
+      AGENT_HTTP_PORT: 8080
+      AGENT_BTP_PORT: 3000
+      AGENT_EXPLORER_PORT: 9000
+      AGENT_DATABASE_PATH: ":memory:"
+      AGENT_EXPLORER_DB_PATH: ":memory:"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      EVM_ENABLED: ${EVM_ENABLED:-true}
+      ANVIL_RPC_URL: http://anvil:8545
+      XRP_ENABLED: ${XRP_ENABLED:-true}
+      XRPL_WSS_URL: ws://rippled:6006
+      XRPL_NETWORK: standalone
+    ports:
+      - "8103:8080"
+      - "3103:3000"
+      - "9103:9000"  # Explorer UI
+    networks:
+      - agent_test_network
+    depends_on:
+      - anvil
+      - rippled
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # Agent 4
+  agent-4:
+    build:
+      context: .
+      dockerfile: packages/connector/Dockerfile.agent
+    container_name: agent_peer_4
+    environment:
+      AGENT_ID: peer-4
+      AGENT_HTTP_PORT: 8080
+      AGENT_BTP_PORT: 3000
+      AGENT_EXPLORER_PORT: 9000
+      AGENT_DATABASE_PATH: ":memory:"
+      AGENT_EXPLORER_DB_PATH: ":memory:"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      EVM_ENABLED: ${EVM_ENABLED:-true}
+      ANVIL_RPC_URL: http://anvil:8545
+      XRP_ENABLED: ${XRP_ENABLED:-true}
+      XRPL_WSS_URL: ws://rippled:6006
+      XRPL_NETWORK: standalone
+    ports:
+      - "8104:8080"
+      - "3104:3000"
+      - "9104:9000"  # Explorer UI
+    networks:
+      - agent_test_network
+    depends_on:
+      - anvil
+      - rippled
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # Test orchestrator - runs once to configure and test agents
+  test-orchestrator:
+    build:
+      context: .
+      dockerfile: packages/connector/Dockerfile.agent
+    container_name: agent_test_orchestrator
+    environment:
+      ANVIL_RPC_URL: http://anvil:8545
+      XRPL_WSS_URL: ws://rippled:6006
+      XRPL_NETWORK: standalone
+      EVM_ENABLED: ${EVM_ENABLED:-true}
+      XRP_ENABLED: ${XRP_ENABLED:-true}
+      AGENT_COUNT: 5
+      RUNNING_IN_DOCKER: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - agent_test_network
+    depends_on:
+      rippled:
+        condition: service_healthy
+      agent-0:
+        condition: service_healthy
+      agent-1:
+        condition: service_healthy
+      agent-2:
+        condition: service_healthy
+      agent-3:
+        condition: service_healthy
+      agent-4:
+        condition: service_healthy
+    # Override entrypoint to run the test script
+    entrypoint: ["node", "packages/connector/dist/test/docker-agent-test-runner.js"]
+    profiles:
+      - test  # Only start when running tests with --profile test
+
+networks:
+  agent_test_network:
+    driver: bridge

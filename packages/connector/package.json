@@ -8,8 +8,11 @@
     "m2m-connector": "./dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:ui && tsc",
+    "build:ui": "cd explorer-ui && NODE_ENV=development npm install && npm run build",
+    "build:connector-only": "tsc",
     "start": "node dist/index.js",
+    "dev:ui": "cd explorer-ui && npm run dev",
     "test": "jest",
     "test:coverage": "jest --coverage",
     "test:watch": "jest --watch",

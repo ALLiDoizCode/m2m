@@ -56,7 +56,17 @@ To identify the next logical story based on project progress and epic definition
 
 **For Frontend/UI Stories, additionally:** frontend-architecture.md, components.md, core-workflows.md, data-models.md
 
-**For Full-Stack Stories:** Read both Backend and Frontend sections above
+**CRITICAL - Frontend/UI Story Playwright Requirement:**
+- All Frontend/UI stories MUST include **Playwright MCP browser verification** as a mandatory task
+- Reference CLAUDE.md "UI Development and Browser Verification" section
+- The Playwright verification task must include:
+  - Starting the dev server
+  - Using `mcp__playwright__browser_navigate` to open the UI
+  - Using `mcp__playwright__browser_snapshot` to verify component rendering
+  - Testing user interactions with `browser_click`, `browser_type`, `browser_fill_form` as applicable
+  - Verifying different UI states (loading, error, empty, populated)
+
+**For Full-Stack Stories:** Read both Backend and Frontend sections above (including Playwright requirement)
 
 #### 3.3 Extract Story-Specific Technical Details
 
@@ -100,6 +110,13 @@ ALWAYS cite source documents: `[Source: architecture/{filename}.md#{section}]`
   - Each task must reference relevant architecture documentation
   - Include unit testing as explicit subtasks based on the Testing Strategy
   - Link tasks to ACs where applicable (e.g., `Task 1 (AC: 1, 3)`)
+  - **For Frontend/UI Stories**: MUST include a "Playwright MCP Browser Verification" task with subtasks:
+    - [ ] Start dev server (e.g., `npm run dev` in UI package)
+    - [ ] Use `mcp__playwright__browser_navigate` to open UI at localhost URL
+    - [ ] Use `mcp__playwright__browser_snapshot` to verify components render correctly
+    - [ ] Test interactive elements with `browser_click`, `browser_type`, `browser_fill_form`
+    - [ ] Verify UI states (loading, error, empty, populated) display correctly
+    - [ ] [Source: CLAUDE.md "UI Development and Browser Verification" section]
 - Add notes on project structure alignment or discrepancies found in Step 4
 
 ### 6. Story Draft Completion and Review

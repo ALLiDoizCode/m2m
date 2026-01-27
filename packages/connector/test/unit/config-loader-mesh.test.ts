@@ -26,6 +26,19 @@ const MESH_CONFIG_FILES = {
 };
 
 describe('Mesh Configuration Files', () => {
+  // Set EXPLORER_PORT to avoid conflict with btpServerPort 3001 (connector-b default)
+  const originalExplorerPort = process.env.EXPLORER_PORT;
+  beforeAll(() => {
+    process.env.EXPLORER_PORT = '9100';
+  });
+  afterAll(() => {
+    if (originalExplorerPort === undefined) {
+      delete process.env.EXPLORER_PORT;
+    } else {
+      process.env.EXPLORER_PORT = originalExplorerPort;
+    }
+  });
+
   describe('Load All Mesh Configurations', () => {
     it('Test 1: should load mesh-4-nodes-a.yaml successfully', () => {
       // Arrange
