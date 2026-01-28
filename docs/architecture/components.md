@@ -416,3 +416,55 @@ graph TB
     style CN fill:#059669,color:#fff
     style TYPES fill:#8b5cf6,color:#fff
 ```
+
+## AIAgentDispatcher
+
+**Responsibility:** AI-powered event handler that uses Vercel AI SDK's `generateText()` with registered skills to intelligently process incoming Nostr events. Falls back to direct `AgentEventHandler` dispatch when AI is unavailable, budget is exhausted, or AI is disabled.
+
+**Key Interfaces:**
+
+- `handleEvent(context: EventHandlerContext): Promise<EventHandlerResult>` - Process event using AI agent with skill invocation
+- `getBudgetStatus(): TokenBudgetStatus` - Get current token budget status
+- `isEnabled: boolean` - Check if AI dispatch is enabled
+- `skillRegistry: SkillRegistry` - Access registered skills
+
+**Dependencies:**
+
+- Vercel AI SDK (`generateText`)
+- SkillRegistry (skill management and tool conversion)
+- SystemPromptBuilder (dynamic prompt construction)
+- TokenBudget (cost management)
+- AgentEventHandler (direct dispatch fallback)
+
+**Technology Stack:** Vercel AI SDK, Zod, TypeScript
+
+## SkillRegistry
+
+**Responsibility:** Manages agent skills — modular AI capabilities mapped to Nostr event kinds. Each skill is registered as an AI SDK `tool()` with a description, Zod schema, and execute function. Supports dynamic registration for future NIP extensions.
+
+**Key Interfaces:**
+
+- `register(skill: AgentSkill): void` - Register a new skill
+- `unregister(name: string): boolean` - Remove a skill
+- `toTools(context: SkillExecuteContext): Record<string, CoreTool>` - Convert skills to AI SDK tools
+- `getSkillsForKind(kind: number): AgentSkill[]` - Find skills for an event kind
+- `getSkillSummary(): SkillSummary[]` - Get skill descriptions for prompt building
+
+**Dependencies:** Vercel AI SDK (`tool`), Zod
+
+**Technology Stack:** TypeScript, Zod, Vercel AI SDK
+
+## TokenBudget
+
+**Responsibility:** Rolling-window token budget tracker that enforces hourly cost limits for AI operations. Emits telemetry at 80% and 95% usage thresholds and triggers auto-fallback to direct dispatch when exhausted.
+
+**Key Interfaces:**
+
+- `canSpend(estimatedTokens?: number): boolean` - Check if budget is available
+- `recordUsage(usage: TokenUsageRecord): void` - Record token usage from completed request
+- `getStatus(): TokenBudgetStatus` - Get current budget status
+- `getRemainingBudget(): number` - Get remaining tokens in window
+
+**Dependencies:** None (pure data structure with telemetry callback)
+
+**Technology Stack:** TypeScript

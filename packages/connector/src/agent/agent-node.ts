@@ -19,6 +19,8 @@ import {
 import { FollowGraphRouter } from './follow-graph-router';
 import { SubscriptionManager, Subscription } from './subscription-manager';
 import { registerBuiltInHandlers } from './handlers';
+import type { AIAgentConfig } from './ai/ai-agent-config';
+import type { AIAgentDispatcher } from './ai/ai-agent-dispatcher';
 
 // ============================================
 // Configuration Interface (Task 1)
@@ -53,6 +55,8 @@ export interface AgentNodeConfig {
   enableBuiltInHandlers?: boolean;
   /** Maximum subscriptions per peer (default: 10) */
   maxSubscriptionsPerPeer?: number;
+  /** AI agent configuration (optional — AI enabled by default if configured) */
+  ai?: AIAgentConfig;
 }
 
 // ============================================
@@ -146,6 +150,7 @@ export class AgentNode {
   private readonly _subscriptionManager: SubscriptionManager;
   private readonly _followGraphRouter: FollowGraphRouter;
   private readonly _toonCodec: ToonCodec;
+  private _aiDispatcher?: AIAgentDispatcher;
   private _initialized: boolean = false;
 
   /**
@@ -248,8 +253,103 @@ export class AgentNode {
       });
     }
 
+    // Log AI configuration status
+    if (this._agentConfig.ai) {
+      this._logger.info(
+        {
+          enabled: this._agentConfig.ai.enabled,
+          model: this._agentConfig.ai.model,
+          maxTokensPerRequest: this._agentConfig.ai.maxTokensPerRequest,
+        },
+        'AI config present'
+      );
+    }
+
+    // Initialize AI dispatcher if configured
+    if (this._agentConfig.ai?.enabled) {
+      await this._initializeAIDispatcher();
+    }
+
     this._initialized = true;
     this._logger.info('AgentNode initialized');
+    if (this._aiDispatcher) {
+      this._logger.info({ aiEnabled: true }, 'AI agent dispatcher active');
+    }
+  }
+
+  // ============================================
+  // AI Dispatcher Initialization
+  // ============================================
+
+  /**
+   * Initialize the AI agent dispatcher.
+   * Dynamically imports AI modules to keep them optional.
+   */
+  private async _initializeAIDispatcher(): Promise<void> {
+    const aiConfig = this._agentConfig.ai;
+    if (!aiConfig) return;
+
+    try {
+      // Dynamic imports to keep AI SDK optional
+      const { createModelFromConfig } = await import('./ai/provider-factory');
+      const { SkillRegistry } = await import('./ai/skill-registry');
+      const { SystemPromptBuilder } = await import('./ai/system-prompt');
+      const { TokenBudget } = await import('./ai/token-budget');
+      const { AIAgentDispatcher } = await import('./ai/ai-agent-dispatcher');
+      const { registerBuiltInSkills } = await import('./ai/skills');
+
+      // Create AI model from config
+      const model = await createModelFromConfig(aiConfig);
+
+      // Create skill registry and register built-in skills
+      const skillRegistry = new SkillRegistry();
+      registerBuiltInSkills(skillRegistry, {
+        followGraphRouter: this._followGraphRouter,
+        registeredKinds: () => this._eventHandler.getRegisteredKinds(),
+      });
+
+      // Create system prompt builder
+      const systemPromptBuilder = new SystemPromptBuilder({
+        agentPubkey: this._agentConfig.agentPubkey,
+        personality: aiConfig.personality,
+        skillRegistry,
+      });
+
+      // Create token budget
+      const tokenBudget = new TokenBudget({
+        maxTokensPerWindow: aiConfig.budget.maxTokensPerHour,
+        onTelemetry: (event) => {
+          this._logger.debug({ telemetry: event }, 'AI budget telemetry');
+        },
+      });
+
+      // Create AI dispatcher
+      this._aiDispatcher = new AIAgentDispatcher({
+        aiConfig,
+        model,
+        skillRegistry,
+        systemPromptBuilder,
+        tokenBudget,
+        fallbackHandler: this._eventHandler,
+        logger: this._logger,
+      });
+
+      this._logger.info(
+        {
+          model: aiConfig.model,
+          skillCount: skillRegistry.size,
+          skills: skillRegistry.getSkillNames(),
+          maxTokensPerHour: aiConfig.budget.maxTokensPerHour,
+        },
+        'AI agent dispatcher initialized'
+      );
+    } catch (error) {
+      this._logger.warn(
+        { err: error },
+        'Failed to initialize AI dispatcher, falling back to direct handler dispatch'
+      );
+      // AI initialization failure is non-fatal — direct dispatch continues to work
+    }
   }
 
   // ============================================
@@ -334,9 +434,10 @@ export class AgentNode {
       database: this._database,
     };
 
-    // Route to event handler
+    // Route to event handler (AI dispatch primary, direct fallback)
     try {
-      const result = await this._eventHandler.handleEvent(context);
+      const handler = this._aiDispatcher ?? this._eventHandler;
+      const result = await handler.handleEvent(context);
 
       // Emit AGENT_EVENT_HANDLED telemetry
       this._emitTelemetry({
@@ -572,6 +673,13 @@ export class AgentNode {
    */
   get followGraphRouter(): FollowGraphRouter {
     return this._followGraphRouter;
+  }
+
+  /**
+   * Get the AI dispatcher instance (if AI is enabled).
+   */
+  get aiDispatcher(): AIAgentDispatcher | undefined {
+    return this._aiDispatcher;
   }
 
   /**

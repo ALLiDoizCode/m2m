@@ -863,6 +863,250 @@ describe('AgentConfigLoader', () => {
   });
 
   // ==========================================================================
+  // validateAIConfig Tests (Story 16.1)
+  // ==========================================================================
+  describe('validateConfig - AI config', () => {
+    it('should accept valid AI config', () => {
+      const config = createValidConfig({
+        ai: {
+          enabled: true,
+          model: 'anthropic:claude-haiku-4-5',
+          apiKey: 'sk-test-key',
+          maxTokensPerRequest: 1024,
+          budget: {
+            maxTokensPerHour: 100000,
+            fallbackOnExhaustion: true,
+          },
+          personality: {
+            name: 'TestBot',
+            role: 'Assistant',
+            instructions: 'Be helpful',
+          },
+        },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./valid.yaml')).not.toThrow();
+    });
+
+    it('should accept config without AI section', () => {
+      const config = createValidConfig();
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./valid.yaml')).not.toThrow();
+    });
+
+    it('should accept minimal AI config (empty object)', () => {
+      const config = createValidConfig({ ai: {} });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./valid.yaml')).not.toThrow();
+    });
+
+    it('should reject non-boolean enabled', () => {
+      const config = createValidConfig({
+        ai: { enabled: 'yes' as unknown as boolean },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.enabled must be a boolean/
+      );
+    });
+
+    it('should reject invalid model format (no colon)', () => {
+      const config = createValidConfig({
+        ai: { model: 'invalid-model' },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.model must be in "provider:model" format/
+      );
+    });
+
+    it('should reject model with empty provider', () => {
+      const config = createValidConfig({
+        ai: { model: ':some-model' },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.model must be in "provider:model" format/
+      );
+    });
+
+    it('should reject model with empty model name', () => {
+      const config = createValidConfig({
+        ai: { model: 'anthropic:' },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.model must be in "provider:model" format/
+      );
+    });
+
+    it('should reject non-positive maxTokensPerRequest', () => {
+      const config = createValidConfig({
+        ai: { maxTokensPerRequest: 0 },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.maxTokensPerRequest must be a positive number/
+      );
+    });
+
+    it('should reject negative maxTokensPerRequest', () => {
+      const config = createValidConfig({
+        ai: { maxTokensPerRequest: -100 },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.maxTokensPerRequest must be a positive number/
+      );
+    });
+
+    it('should reject non-object budget', () => {
+      const config = createValidConfig({
+        ai: { budget: 'invalid' as unknown as object },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.budget must be an object/
+      );
+    });
+
+    it('should reject non-positive budget.maxTokensPerHour', () => {
+      const config = createValidConfig({
+        ai: { budget: { maxTokensPerHour: 0 } },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.budget\.maxTokensPerHour must be a positive number/
+      );
+    });
+
+    it('should reject non-boolean budget.fallbackOnExhaustion', () => {
+      const config = createValidConfig({
+        ai: { budget: { fallbackOnExhaustion: 'yes' as unknown as boolean } },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.budget\.fallbackOnExhaustion must be a boolean/
+      );
+    });
+
+    it('should reject non-object personality', () => {
+      const config = createValidConfig({
+        ai: { personality: 'invalid' as unknown as object },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.personality must be an object/
+      );
+    });
+
+    it('should reject non-string personality.name', () => {
+      const config = createValidConfig({
+        ai: { personality: { name: 123 as unknown as string } },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.personality\.name must be a string/
+      );
+    });
+
+    it('should reject non-string personality.role', () => {
+      const config = createValidConfig({
+        ai: { personality: { role: 456 as unknown as string } },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.personality\.role must be a string/
+      );
+    });
+
+    it('should reject non-string personality.instructions', () => {
+      const config = createValidConfig({
+        ai: { personality: { instructions: true as unknown as string } },
+      });
+      mockFs.readFileSync.mockReturnValue(yaml.dump(config));
+
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(AgentConfigurationError);
+      expect(() => AgentConfigLoader.loadConfig('./invalid.yaml')).toThrow(
+        /ai\.personality\.instructions must be a string/
+      );
+    });
+  });
+
+  // ==========================================================================
+  // toAgentNodeConfig - AI config passthrough (Story 16.1)
+  // ==========================================================================
+  describe('toAgentNodeConfig - AI config', () => {
+    it('should pass parsed AI config through to AgentNodeConfig', () => {
+      const config = createValidConfig({
+        ai: {
+          enabled: true,
+          model: 'anthropic:claude-haiku-4-5',
+          maxTokensPerRequest: 2048,
+        },
+      });
+
+      const nodeConfig = AgentConfigLoader.toAgentNodeConfig(config);
+
+      expect(nodeConfig.ai).toBeDefined();
+      expect(nodeConfig.ai?.enabled).toBe(true);
+      expect(nodeConfig.ai?.model).toBe('anthropic:claude-haiku-4-5');
+      expect(nodeConfig.ai?.maxTokensPerRequest).toBe(2048);
+    });
+
+    it('should apply defaults when AI section is minimal', () => {
+      const config = createValidConfig({
+        ai: {},
+      });
+
+      const nodeConfig = AgentConfigLoader.toAgentNodeConfig(config);
+
+      expect(nodeConfig.ai).toBeDefined();
+      expect(nodeConfig.ai?.enabled).toBe(true);
+      expect(nodeConfig.ai?.model).toBe('anthropic:claude-haiku-4-5');
+      expect(nodeConfig.ai?.maxTokensPerRequest).toBe(1024);
+      expect(nodeConfig.ai?.budget.maxTokensPerHour).toBe(100000);
+    });
+
+    it('should pass AI config even when no AI section in YAML', () => {
+      const config = createValidConfig();
+
+      const nodeConfig = AgentConfigLoader.toAgentNodeConfig(config);
+
+      // parseAIConfig(undefined) returns defaults
+      expect(nodeConfig.ai).toBeDefined();
+      expect(nodeConfig.ai?.enabled).toBe(true);
+    });
+  });
+
+  // ==========================================================================
   // Error Class Tests
   // ==========================================================================
   describe('AgentConfigurationError', () => {

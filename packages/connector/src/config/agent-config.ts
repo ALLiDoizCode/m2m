@@ -16,6 +16,7 @@ import { isValidILPAddress } from '@m2m/shared';
 import type { AgentNodeConfig } from '../agent/agent-node';
 import type { FollowGraphRouter } from '../agent/follow-graph-router';
 import type { Logger } from 'pino';
+import { parseAIConfig, type AIYamlConfig } from '../agent/ai/ai-agent-config';
 
 // ============================================
 // Constants
@@ -160,6 +161,8 @@ export interface AgentYamlConfig {
   handlers?: AgentHandlersConfig;
   /** Subscription settings (optional) */
   subscriptions?: AgentSubscriptionsConfig;
+  /** AI agent configuration (optional) */
+  ai?: AIYamlConfig;
 }
 
 /**
@@ -349,6 +352,11 @@ export class AgentConfigLoader {
     // Validate subscriptions config
     if (rawConfig.subscriptions !== undefined) {
       this.validateSubscriptionsConfig(rawConfig.subscriptions);
+    }
+
+    // Validate AI config (optional section)
+    if (rawConfig.ai !== undefined) {
+      this.validateAIConfig(rawConfig.ai);
     }
   }
 
@@ -668,6 +676,99 @@ export class AgentConfigLoader {
   }
 
   /**
+   * Validate AI Configuration
+   */
+  private static validateAIConfig(ai: unknown): void {
+    if (typeof ai !== 'object' || ai === null) {
+      throw new AgentConfigurationError('ai must be an object', 'ai');
+    }
+
+    const aiConfig = ai as Record<string, unknown>;
+
+    // Validate enabled (boolean)
+    if ('enabled' in aiConfig && aiConfig.enabled !== undefined) {
+      if (typeof aiConfig.enabled !== 'boolean') {
+        throw new AgentConfigurationError('ai.enabled must be a boolean', 'ai.enabled');
+      }
+    }
+
+    // Validate model (string, provider:model format)
+    if ('model' in aiConfig && aiConfig.model !== undefined) {
+      if (typeof aiConfig.model !== 'string') {
+        throw new AgentConfigurationError('ai.model must be a string', 'ai.model');
+      }
+      const parts = (aiConfig.model as string).split(':');
+      if (parts.length < 2 || (parts[0]?.length ?? 0) === 0 || (parts[1]?.length ?? 0) === 0) {
+        throw new AgentConfigurationError(
+          'ai.model must be in "provider:model" format (e.g., "anthropic:claude-haiku-4-5")',
+          'ai.model'
+        );
+      }
+    }
+
+    // Validate apiKey (string)
+    if ('apiKey' in aiConfig && aiConfig.apiKey !== undefined) {
+      if (typeof aiConfig.apiKey !== 'string') {
+        throw new AgentConfigurationError('ai.apiKey must be a string', 'ai.apiKey');
+      }
+    }
+
+    // Validate maxTokensPerRequest (positive number)
+    if ('maxTokensPerRequest' in aiConfig && aiConfig.maxTokensPerRequest !== undefined) {
+      if (typeof aiConfig.maxTokensPerRequest !== 'number' || aiConfig.maxTokensPerRequest <= 0) {
+        throw new AgentConfigurationError(
+          'ai.maxTokensPerRequest must be a positive number',
+          'ai.maxTokensPerRequest'
+        );
+      }
+    }
+
+    // Validate budget sub-object
+    if ('budget' in aiConfig && aiConfig.budget !== undefined) {
+      if (typeof aiConfig.budget !== 'object' || aiConfig.budget === null) {
+        throw new AgentConfigurationError('ai.budget must be an object', 'ai.budget');
+      }
+      const budget = aiConfig.budget as Record<string, unknown>;
+
+      if ('maxTokensPerHour' in budget && budget.maxTokensPerHour !== undefined) {
+        if (typeof budget.maxTokensPerHour !== 'number' || budget.maxTokensPerHour <= 0) {
+          throw new AgentConfigurationError(
+            'ai.budget.maxTokensPerHour must be a positive number',
+            'ai.budget.maxTokensPerHour'
+          );
+        }
+      }
+
+      if ('fallbackOnExhaustion' in budget && budget.fallbackOnExhaustion !== undefined) {
+        if (typeof budget.fallbackOnExhaustion !== 'boolean') {
+          throw new AgentConfigurationError(
+            'ai.budget.fallbackOnExhaustion must be a boolean',
+            'ai.budget.fallbackOnExhaustion'
+          );
+        }
+      }
+    }
+
+    // Validate personality sub-object
+    if ('personality' in aiConfig && aiConfig.personality !== undefined) {
+      if (typeof aiConfig.personality !== 'object' || aiConfig.personality === null) {
+        throw new AgentConfigurationError('ai.personality must be an object', 'ai.personality');
+      }
+      const personality = aiConfig.personality as Record<string, unknown>;
+      for (const key of ['name', 'role', 'instructions']) {
+        if (key in personality && personality[key] !== undefined) {
+          if (typeof personality[key] !== 'string') {
+            throw new AgentConfigurationError(
+              `ai.personality.${key} must be a string`,
+              `ai.personality.${key}`
+            );
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Load Private Key from File (Task 4)
    *
    * Reads a key file from disk and extracts the private key.
@@ -965,6 +1066,7 @@ export class AgentConfigLoader {
       enableBuiltInHandlers,
       maxSubscriptionsPerPeer:
         yamlConfig.subscriptions?.maxPerPeer ?? DEFAULT_MAX_SUBSCRIPTIONS_PER_PEER,
+      ai: parseAIConfig(yamlConfig.ai),
     };
   }
 

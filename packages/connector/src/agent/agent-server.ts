@@ -490,6 +490,12 @@ export class AgentServer {
             eventsReceived: this.eventsReceived,
             channelCount: this.paymentChannels.size,
             xrpChannelCount: this.xrpChannels.size,
+            ai: this.agentNode.aiDispatcher
+              ? {
+                  enabled: this.agentNode.aiDispatcher.isEnabled,
+                  budget: this.agentNode.aiDispatcher.getBudgetStatus(),
+                }
+              : { enabled: false },
           })
         );
         return;

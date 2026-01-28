@@ -45,4 +45,7 @@ Deliver a per-node web-based explorer interface embedded in each connector that 
 **Epic 15: Agent Explorer — Performance, UX & Visual Quality**
 Rebrand "M2M Explorer" to "Agent Explorer" and polish the Explorer UI with performance optimizations (60fps at 1000+ events, WebSocket batching), UX improvements (keyboard shortcuts, filter persistence, responsive layout, empty states), visual quality refinements (typography audit, spacing consistency, WCAG AA contrast, animations), historical data hydration for accounts and payment channels, and a new Peers & Routing Table view for network topology visibility. All work verified against real Docker Agent Society test data.
 
+**Epic 16: AI Agent Node — Vercel AI SDK Integration**
+Integrate the Vercel AI SDK to make the M2M agent node AI-native. The AI agent uses agent skills — modular capabilities mapped to Nostr event kinds — to process events, compose responses, and route packets. Each skill wraps an existing handler as an AI SDK tool() with a description, Zod schema, and execute function. The AI agent orchestrates which skills to invoke based on the incoming event. AI dispatch is enabled by default, with direct handler dispatch (from Epic 13) serving as a fallback when the AI is unavailable (budget exhausted, API error) or explicitly disabled. Provider-agnostic via the AI SDK provider system (Anthropic, OpenAI, Google, etc.).
+
 ---

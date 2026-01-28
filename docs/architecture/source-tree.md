@@ -22,6 +22,30 @@ m2m/                                  # Monorepo root
 │   │   │   │   ├── event-database.ts      # libSQL Nostr event storage
 │   │   │   │   ├── toon-codec.ts          # TOON encoder/decoder
 │   │   │   │   ├── agent-config.ts        # Agent configuration schema
+│   │   │   │   ├── agent-node.ts          # Main AgentNode orchestrator
+│   │   │   │   ├── event-handler.ts       # Kind-based event dispatch
+│   │   │   │   ├── follow-graph-router.ts # Nostr follow-based routing
+│   │   │   │   ├── subscription-manager.ts # Event subscription matching
+│   │   │   │   ├── handlers/              # Built-in event kind handlers
+│   │   │   │   │   ├── note-handler.ts    # Kind 1 note storage
+│   │   │   │   │   ├── follow-handler.ts  # Kind 3 follow updates
+│   │   │   │   │   ├── delete-handler.ts  # Kind 5 event deletion
+│   │   │   │   │   └── query-handler.ts   # Kind 10000 query service
+│   │   │   │   ├── ai/                    # AI Agent Module (Epic 16)
+│   │   │   │   │   ├── ai-agent-config.ts       # AI config types and parsing
+│   │   │   │   │   ├── ai-agent-dispatcher.ts   # Core AI event dispatcher
+│   │   │   │   │   ├── provider-factory.ts      # AI SDK model factory
+│   │   │   │   │   ├── skill-registry.ts        # Skill registration and management
+│   │   │   │   │   ├── system-prompt.ts         # System prompt builder
+│   │   │   │   │   ├── token-budget.ts          # Rolling window token budget
+│   │   │   │   │   ├── skills/                  # Agent skills (AI SDK tools)
+│   │   │   │   │   │   ├── store-note-skill.ts  # Kind 1 skill
+│   │   │   │   │   │   ├── update-follow-skill.ts # Kind 3 skill
+│   │   │   │   │   │   ├── delete-events-skill.ts # Kind 5 skill
+│   │   │   │   │   │   ├── query-events-skill.ts  # Kind 10000 skill
+│   │   │   │   │   │   ├── forward-packet-skill.ts # Packet forwarding skill
+│   │   │   │   │   │   └── get-agent-info-skill.ts # Agent introspection skill
+│   │   │   │   │   └── __tests__/               # AI module tests
 │   │   │   │   └── index.ts               # Agent module exports
 │   │   │   ├── explorer/                  # Packet/Event Explorer (Epic 14)
 │   │   │   │   ├── event-store.ts         # libSQL telemetry event storage
