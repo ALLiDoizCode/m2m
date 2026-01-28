@@ -1,0 +1,40 @@
+schema: 1
+story: '18.1'
+story_title: 'Capability Event Types & Schema'
+gate: PASS
+status_reason: 'All acceptance criteria met with excellent test coverage. Implementation follows TypeScript best practices with comprehensive Zod validation.'
+reviewer: 'Quinn (Test Architect)'
+updated: '2026-01-28T00:00:00Z'
+
+top_issues: []
+waiver: { active: false }
+
+quality_score: 100
+expires: '2026-02-11T00:00:00Z'
+
+evidence:
+  tests_reviewed: 44
+  risks_identified: 0
+  trace:
+    ac_covered: [1, 2, 3, 4, 5, 6, 7]
+    ac_gaps: []
+
+nfr_validation:
+  security:
+    status: PASS
+    notes: 'No security concerns - pure type definitions and validation schemas'
+  performance:
+    status: PASS
+    notes: 'Zod validation is efficient. No performance-critical operations in type definitions'
+  reliability:
+    status: PASS
+    notes: 'Robust validation with clear error messages from Zod. BigInt handling properly implemented'
+  maintainability:
+    status: PASS
+    notes: 'Excellent code organization, comprehensive documentation, clear type definitions'
+
+recommendations:
+  immediate: []
+  future:
+    - action: 'Consider adding JSDoc examples for complex types like AgentCapability'
+      refs: ['packages/connector/src/agent/discovery/types.ts']
