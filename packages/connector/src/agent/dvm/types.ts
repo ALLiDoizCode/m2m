@@ -54,6 +54,29 @@ export interface DVMJobRequest {
 }
 
 /**
+ * Priority level for task delegation requests (Kind 5900).
+ * Used to indicate task urgency for agent-to-agent collaboration.
+ */
+export type TaskPriority = 'high' | 'normal' | 'low';
+
+/**
+ * Task delegation request (Kind 5900) with agent-specific fields.
+ * Extends DVMJobRequest with timeout, priority, and preferred agent fields.
+ */
+export interface TaskDelegationRequest extends DVMJobRequest {
+  /** Event kind (always 5900 for task delegation) */
+  kind: 5900;
+  /** Maximum execution time in seconds */
+  timeout?: number;
+  /** Preferred agent pubkeys for task execution */
+  preferredAgents: string[];
+  /** Task priority level */
+  priority: TaskPriority;
+  /** Optional schema URL for input/output validation */
+  schema?: string;
+}
+
+/**
  * Result status for DVM job results.
  */
 export type DVMResultStatus = 'success' | 'error' | 'partial';

@@ -19,6 +19,8 @@ export type {
   DVMFeedbackStatus,
   ResolvedDependency,
   ResolvedDependencies,
+  TaskPriority,
+  TaskDelegationRequest,
 } from './types';
 
 // Constants and Error class
@@ -31,7 +33,7 @@ export {
 } from './types';
 
 // Parser
-export { parseDVMJobRequest } from './dvm-job-parser';
+export { parseDVMJobRequest, parseTaskDelegationRequest } from './dvm-job-parser';
 
 // Result formatter
 export { formatDVMJobResult, formatDVMErrorResult } from './dvm-result-formatter';

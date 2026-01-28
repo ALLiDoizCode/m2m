@@ -1,5 +1,11 @@
 import type { NostrEvent } from '../../toon-codec';
-import { parseDVMJobRequest, DVMParseError, DVM_ERROR_CODES, DVM_KIND_RANGE } from '../index';
+import {
+  parseDVMJobRequest,
+  parseTaskDelegationRequest,
+  DVMParseError,
+  DVM_ERROR_CODES,
+  DVM_KIND_RANGE,
+} from '../index';
 
 /**
  * Creates a test DVM job event with optional overrides.
@@ -810,6 +816,194 @@ describe('parseDVMJobRequest', () => {
       expect(result.dependencies).toEqual(['translation-job-id']);
       expect(result.outputType).toBe('text/plain');
       expect(result.params.get('max_length')).toBe('500');
+    });
+  });
+
+  describe('parseTaskDelegationRequest (Kind 5900)', () => {
+    it('should parse Kind 5900 with all task delegation fields', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [
+          ['i', 'Translate this text', 'text'],
+          ['output', 'application/json'],
+          ['timeout', '30'],
+          ['p', 'agent-pubkey-1'],
+          ['p', 'agent-pubkey-2'],
+          ['priority', 'high'],
+          ['schema', 'https://example.com/schema.json'],
+        ],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.kind).toBe(5900);
+      expect(result.timeout).toBe(30);
+      expect(result.preferredAgents).toEqual(['agent-pubkey-1', 'agent-pubkey-2']);
+      expect(result.priority).toBe('high');
+      expect(result.schema).toBe('https://example.com/schema.json');
+    });
+
+    it('should use default priority when not specified', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [['i', 'Task', 'text']],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.priority).toBe('normal');
+    });
+
+    it('should handle timeout as undefined when not present', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [['i', 'Task', 'text']],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.timeout).toBeUndefined();
+    });
+
+    it('should handle schema as undefined when not present', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [['i', 'Task', 'text']],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.schema).toBeUndefined();
+    });
+
+    it('should parse empty preferred agents array', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [['i', 'Task', 'text']],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.preferredAgents).toEqual([]);
+    });
+
+    it('should reject non-5900 kinds', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5000,
+        tags: [['i', 'Task', 'text']],
+      });
+
+      // Act & Assert
+      expect(() => parseTaskDelegationRequest(event)).toThrow(DVMParseError);
+      try {
+        parseTaskDelegationRequest(event);
+      } catch (error) {
+        expect(error).toBeInstanceOf(DVMParseError);
+        expect((error as DVMParseError).code).toBe(DVM_ERROR_CODES.INVALID_KIND);
+        expect((error as DVMParseError).message).toContain('5900');
+      }
+    });
+
+    it('should parse all priority levels', () => {
+      // Arrange & Act & Assert
+      const priorities: Array<'high' | 'normal' | 'low'> = ['high', 'normal', 'low'];
+
+      for (const priority of priorities) {
+        const event = createDVMJobEvent({
+          kind: 5900,
+          tags: [
+            ['i', 'Task', 'text'],
+            ['priority', priority],
+          ],
+        });
+
+        const result = parseTaskDelegationRequest(event);
+        expect(result.priority).toBe(priority);
+      }
+    });
+
+    it('should normalize priority to lowercase', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [
+          ['i', 'Task', 'text'],
+          ['priority', 'HIGH'],
+        ],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.priority).toBe('high');
+    });
+
+    it('should default to normal for invalid priority', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [
+          ['i', 'Task', 'text'],
+          ['priority', 'invalid'],
+        ],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.priority).toBe('normal');
+    });
+
+    it('should ignore invalid timeout values', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [
+          ['i', 'Task', 'text'],
+          ['timeout', 'not-a-number'],
+        ],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.timeout).toBeUndefined();
+    });
+
+    it('should ignore negative timeout values', () => {
+      // Arrange
+      const event = createDVMJobEvent({
+        kind: 5900,
+        tags: [
+          ['i', 'Task', 'text'],
+          ['timeout', '-10'],
+        ],
+      });
+
+      // Act
+      const result = parseTaskDelegationRequest(event);
+
+      // Assert
+      expect(result.timeout).toBeUndefined();
     });
   });
 });

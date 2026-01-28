@@ -6,6 +6,7 @@ import {
   type DVMJobRequest,
   type DVMInput,
   type DVMInputType,
+  type TaskDelegationRequest,
 } from './types';
 
 /** Valid input types for DVM job requests */
@@ -168,6 +169,79 @@ function parseDependencyTags(tags: string[][]): string[] {
 }
 
 /**
+ * Parses 'timeout' tag from a task delegation request.
+ * Format: ['timeout', seconds]
+ *
+ * @param tags - The event tags array
+ * @returns Timeout in seconds or undefined if not present
+ */
+function parseTimeoutTag(tags: string[][]): number | undefined {
+  for (const tag of tags) {
+    if (tag[0] === 'timeout' && tag.length >= 2 && tag[1]) {
+      const timeout = parseInt(tag[1], 10);
+      if (!isNaN(timeout) && timeout > 0) {
+        return timeout;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Parses 'p' tags as preferred agent pubkeys for task delegation.
+ * Format: ['p', pubkey]
+ *
+ * @param tags - The event tags array
+ * @returns Array of preferred agent pubkeys
+ */
+function parsePreferredAgentsTags(tags: string[][]): string[] {
+  const agents: string[] = [];
+
+  for (const tag of tags) {
+    if (tag[0] === 'p' && tag.length >= 2 && tag[1]) {
+      agents.push(tag[1]);
+    }
+  }
+
+  return agents;
+}
+
+/**
+ * Parses 'priority' tag from a task delegation request.
+ * Format: ['priority', 'high'|'normal'|'low']
+ *
+ * @param tags - The event tags array
+ * @returns Task priority or 'normal' as default
+ */
+function parsePriorityTag(tags: string[][]): 'high' | 'normal' | 'low' {
+  for (const tag of tags) {
+    if (tag[0] === 'priority' && tag.length >= 2 && tag[1]) {
+      const priority = tag[1].toLowerCase();
+      if (priority === 'high' || priority === 'normal' || priority === 'low') {
+        return priority;
+      }
+    }
+  }
+  return 'normal'; // Default priority
+}
+
+/**
+ * Parses 'schema' tag from a task delegation request.
+ * Format: ['schema', url]
+ *
+ * @param tags - The event tags array
+ * @returns Schema URL or undefined if not present
+ */
+function parseSchemaTag(tags: string[][]): string | undefined {
+  for (const tag of tags) {
+    if (tag[0] === 'schema' && tag.length >= 2 && tag[1]) {
+      return tag[1];
+    }
+  }
+  return undefined;
+}
+
+/**
  * Parses a NIP-90 DVM job request from a Nostr event.
  *
  * Extracts all DVM-specific tags (i, output, param, bid, relays) and
@@ -198,5 +272,41 @@ export function parseDVMJobRequest(event: NostrEvent): DVMJobRequest {
     relays: parseRelaysTag(tags),
     dependencies: parseDependencyTags(tags),
     event,
+  };
+}
+
+/**
+ * Parses a Kind 5900 task delegation request with agent-specific fields.
+ *
+ * Extends the standard DVM job request parsing with additional fields for
+ * agent-to-agent task delegation: timeout, preferred agents, priority, and schema.
+ *
+ * @param event - The Nostr event to parse (must be Kind 5900)
+ * @returns Parsed TaskDelegationRequest object
+ * @throws DVMParseError if the event is not Kind 5900
+ */
+export function parseTaskDelegationRequest(event: NostrEvent): TaskDelegationRequest {
+  // Validate kind is 5900
+  if (event.kind !== 5900) {
+    throw new DVMParseError(
+      DVM_ERROR_CODES.INVALID_KIND,
+      `Invalid kind for task delegation: ${event.kind}. Expected Kind 5900`,
+      'kind'
+    );
+  }
+
+  // Parse base DVM job request fields
+  const baseRequest = parseDVMJobRequest(event);
+
+  const tags = event.tags;
+
+  // Parse task delegation-specific fields
+  return {
+    ...baseRequest,
+    kind: 5900,
+    timeout: parseTimeoutTag(tags),
+    preferredAgents: parsePreferredAgentsTags(tags),
+    priority: parsePriorityTag(tags),
+    schema: parseSchemaTag(tags),
   };
 }
