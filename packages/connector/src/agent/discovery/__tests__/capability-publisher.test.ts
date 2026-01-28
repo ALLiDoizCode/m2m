@@ -10,6 +10,7 @@ import { CapabilityPublisher, type CapabilityPublisherConfig } from '../capabili
 import type { SkillRegistry } from '../../ai/skill-registry';
 import type { AgentEventDatabase } from '../../event-database';
 import { TAG_NAMES, type AgentMetadata, type CapacityInfo } from '../types';
+import type { Logger } from 'pino';
 
 // Mock nostr-tools
 jest.mock('nostr-tools', () => ({
@@ -26,12 +27,7 @@ jest.mock('nostr-tools', () => ({
 describe('CapabilityPublisher', () => {
   let mockSkillRegistry: jest.Mocked<SkillRegistry>;
   let mockEventDatabase: jest.Mocked<AgentEventDatabase>;
-  let mockLogger: {
-    info: jest.Mock;
-    debug: jest.Mock;
-    warn: jest.Mock;
-    error: jest.Mock;
-  };
+  let mockLogger: Logger;
   let config: CapabilityPublisherConfig;
 
   beforeEach(() => {
