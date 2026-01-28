@@ -92,3 +92,7 @@ export type {
   TokenBudgetTelemetryEvent,
   PromptContext,
 } from './ai';
+
+// DVM Module - NIP-90 Compatibility
+export { DVM_KIND_RANGE, DVM_ERROR_CODES, DVMParseError, parseDVMJobRequest } from './dvm';
+export type { DVMJobRequest, DVMInput, DVMInputType, DVMErrorCode } from './dvm';

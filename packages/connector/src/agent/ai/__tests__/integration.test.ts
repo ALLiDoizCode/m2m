@@ -322,11 +322,12 @@ describe('Built-in Skills Registration', () => {
       registeredKinds: () => [1, 3, 5, 10000],
     });
 
-    expect(registry.size).toBe(6);
+    expect(registry.size).toBe(7);
     expect(registry.has('store_note')).toBe(true);
     expect(registry.has('update_follow')).toBe(true);
     expect(registry.has('delete_events')).toBe(true);
     expect(registry.has('query_events')).toBe(true);
+    expect(registry.has('dvm_query')).toBe(true);
     expect(registry.has('forward_packet')).toBe(true);
     expect(registry.has('get_agent_info')).toBe(true);
   });

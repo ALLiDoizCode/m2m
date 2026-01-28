@@ -11,6 +11,7 @@ import { createStoreNoteSkill } from './store-note-skill';
 import { createUpdateFollowSkill } from './update-follow-skill';
 import { createDeleteEventsSkill } from './delete-events-skill';
 import { createQueryEventsSkill } from './query-events-skill';
+import { createDVMQuerySkill } from './dvm-query-skill';
 import { createForwardPacketSkill } from './forward-packet-skill';
 import { createGetAgentInfoSkill } from './get-agent-info-skill';
 
@@ -30,7 +31,8 @@ export function registerBuiltInSkills(registry: SkillRegistry, config: RegisterS
   registry.register(createStoreNoteSkill());
   registry.register(createUpdateFollowSkill(config.followGraphRouter));
   registry.register(createDeleteEventsSkill());
-  registry.register(createQueryEventsSkill(config.queryMaxResults));
+  registry.register(createQueryEventsSkill(config.queryMaxResults)); // Deprecated, backward compat
+  registry.register(createDVMQuerySkill(config.queryMaxResults)); // DVM Kind 5000
   registry.register(createForwardPacketSkill(config.followGraphRouter));
   registry.register(createGetAgentInfoSkill(config.followGraphRouter, config.registeredKinds));
 }
@@ -40,5 +42,6 @@ export { createStoreNoteSkill } from './store-note-skill';
 export { createUpdateFollowSkill } from './update-follow-skill';
 export { createDeleteEventsSkill } from './delete-events-skill';
 export { createQueryEventsSkill } from './query-events-skill';
+export { createDVMQuerySkill } from './dvm-query-skill';
 export { createForwardPacketSkill } from './forward-packet-skill';
 export { createGetAgentInfoSkill } from './get-agent-info-skill';

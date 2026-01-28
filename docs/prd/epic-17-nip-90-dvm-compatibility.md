@@ -155,9 +155,9 @@ Implement parsing of NIP-90 DVM job requests with support for all standard tags.
 interface DVMJobRequest {
   kind: number; // 5000-5999
   inputs: DVMInput[]; // From 'i' tags
-  outputType: string; // From 'output' tag
+  outputType?: string; // From 'output' tag (optional per NIP-90)
   params: Map<string, string>; // From 'param' tags
-  bid: bigint; // From 'bid' tag (informational)
+  bid?: bigint; // From 'bid' tag (optional, informational)
   relays: string[]; // From 'relays' tag
   event: NostrEvent; // Original event
 }
@@ -187,7 +187,7 @@ Implement formatting of NIP-90 DVM job results for return to requesters.
 5. Result includes `amount` tag with actual payment received
 6. Content field contains result data
 7. Formatter handles various content types (text, JSON, binary)
-8. Formatter signs result with agent's Nostr key
+8. Formatter creates unsigned event template ready for signing (signing handled separately by caller)
 
 ### Technical Notes
 

@@ -3,6 +3,16 @@
  *
  * Queries the event database using NIP-01 compatible filters.
  * Wraps the existing Kind 10000 query handler logic.
+ *
+ * @deprecated Use `dvm-query-skill.ts` (Kind 5000) for new implementations.
+ * This skill is maintained for backward compatibility with existing Kind 10000 clients.
+ * The DVM Kind 5000 version provides better ecosystem compatibility with NIP-90.
+ *
+ * **Migration Guide:**
+ * - Kind 10000 → Kind 5000
+ * - JSON content filter → `param` tags
+ * - Kind 10000 response → Kind 6000 DVM job result
+ * - See `dvm-query-skill.ts` for DVM-compatible implementation
  */
 
 import { z } from 'zod';
