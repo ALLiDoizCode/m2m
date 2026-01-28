@@ -1,0 +1,174 @@
+import type { NostrEvent } from '../toon-codec';
+
+/**
+ * DVM kind range as specified in NIP-90.
+ * Valid DVM job request kinds are 5000-5999.
+ */
+export const DVM_KIND_RANGE = { min: 5000, max: 5999 } as const;
+
+/**
+ * Offset to calculate result kind from request kind.
+ * Result kind = request kind + 1000 (e.g., Kind 5000 request → Kind 6000 result)
+ */
+export const DVM_RESULT_KIND_OFFSET = 1000;
+
+/**
+ * Valid input types for DVM job requests per NIP-90.
+ */
+export type DVMInputType = 'text' | 'url' | 'event' | 'job';
+
+/**
+ * Input data extracted from 'i' tags in DVM job requests.
+ */
+export interface DVMInput {
+  /** The input data value */
+  data: string;
+  /** Type hint for input interpretation */
+  type: DVMInputType;
+  /** Optional relay hint for event/job types */
+  relay?: string;
+  /** Optional marker for input identification */
+  marker?: string;
+}
+
+/**
+ * Parsed DVM job request containing all extracted fields.
+ */
+export interface DVMJobRequest {
+  /** Event kind (5000-5999) */
+  kind: number;
+  /** Input data from 'i' tags */
+  inputs: DVMInput[];
+  /** Expected output MIME type from 'output' tag */
+  outputType?: string;
+  /** Key-value parameters from 'param' tags */
+  params: Map<string, string>;
+  /** Bid amount in millisatoshis from 'bid' tag (informational) */
+  bid?: bigint;
+  /** Preferred relay URLs from 'relays' tag */
+  relays: string[];
+  /** Original Nostr event for downstream access */
+  event: NostrEvent;
+}
+
+/**
+ * Result status for DVM job results.
+ */
+export type DVMResultStatus = 'success' | 'error' | 'partial';
+
+/**
+ * Input to the DVM job result formatter.
+ * Contains all information needed to create a result event.
+ */
+export interface DVMJobResult {
+  /** Original request event (required for tags and kind calculation) */
+  requestEvent: NostrEvent;
+  /** Result content (string, object, or Buffer) */
+  content: string | object | Buffer;
+  /** Payment amount received from ILP packet */
+  amount: bigint;
+  /** Result status */
+  status: DVMResultStatus;
+}
+
+/**
+ * Unsigned DVM result event template ready for signing.
+ * Matches NostrEvent structure with empty signature fields.
+ */
+export interface DVMResultEvent {
+  /** Empty string - to be filled after signing */
+  id: string;
+  /** Empty string - to be filled with agent pubkey before signing */
+  pubkey: string;
+  /** Calculated kind (request kind + 1000) */
+  kind: number;
+  /** Unix timestamp in seconds */
+  created_at: number;
+  /** Result content (may be JSON string, plain text, or base64) */
+  content: string;
+  /** Tags array with request, e, p, amount, status */
+  tags: string[][];
+  /** Empty string - to be filled after signing */
+  sig: string;
+}
+
+/**
+ * Error codes for DVM parsing failures.
+ */
+export type DVMErrorCode = 'INVALID_KIND' | 'INVALID_INPUT_TYPE' | 'INVALID_BID';
+
+/**
+ * Constant object for programmatic error code access.
+ */
+export const DVM_ERROR_CODES = {
+  INVALID_KIND: 'INVALID_KIND',
+  INVALID_INPUT_TYPE: 'INVALID_INPUT_TYPE',
+  INVALID_BID: 'INVALID_BID',
+} as const satisfies Record<DVMErrorCode, DVMErrorCode>;
+
+/**
+ * Error thrown when DVM job request parsing fails.
+ * Contains a typed error code and optional field reference.
+ */
+export class DVMParseError extends Error {
+  readonly code: DVMErrorCode;
+  readonly field?: string;
+
+  constructor(code: DVMErrorCode, message: string, field?: string) {
+    super(message);
+    this.name = 'DVMParseError';
+    this.code = code;
+    this.field = field;
+  }
+}
+
+/**
+ * NIP-90 job feedback kind constant.
+ */
+export const DVM_FEEDBACK_KIND = 7000;
+
+/**
+ * Valid status values for DVM job feedback events.
+ * Per NIP-90 specification.
+ */
+export type DVMFeedbackStatus = 'payment-required' | 'processing' | 'error' | 'success' | 'partial';
+
+/**
+ * Input to the DVM feedback formatter.
+ * Contains all information needed to create a feedback event.
+ */
+export interface DVMFeedback {
+  /** Event kind (always 7000) */
+  kind: 7000;
+  /** Feedback status */
+  status: DVMFeedbackStatus;
+  /** Job request event ID being referenced */
+  jobEventId: string;
+  /** Requester's pubkey */
+  requesterPubkey: string;
+  /** Optional payment amount (for payment-required status) */
+  amount?: bigint;
+  /** Optional status message or error details */
+  message?: string;
+}
+
+/**
+ * Unsigned DVM feedback event template ready for signing.
+ * Matches NostrEvent structure with empty signature fields.
+ */
+export interface DVMFeedbackEvent {
+  /** Empty string - to be filled after signing */
+  id: string;
+  /** Empty string - to be filled with agent pubkey before signing */
+  pubkey: string;
+  /** Always 7000 */
+  kind: number;
+  /** Unix timestamp in seconds */
+  created_at: number;
+  /** Status message or error details */
+  content: string;
+  /** Tags array with e, p, status, amount (optional) */
+  tags: string[][];
+  /** Empty string - to be filled after signing */
+  sig: string;
+}

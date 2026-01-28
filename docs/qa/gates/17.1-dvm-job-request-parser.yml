@@ -1,0 +1,44 @@
+# Quality Gate: Story 17.1
+schema: 1
+story: "17.1"
+story_title: "DVM Job Request Parser (Kind 5XXX)"
+gate: PASS
+status_reason: "All 9 ACs implemented with 100% test coverage. Clean, well-documented parsing module following NIP-90 spec."
+reviewer: "Quinn (Test Architect)"
+updated: "2026-01-28T12:00:00Z"
+
+waiver: { active: false }
+
+top_issues: []
+
+quality_score: 100
+expires: "2026-02-11T00:00:00Z"
+
+evidence:
+  tests_reviewed: 41
+  risks_identified: 0
+  trace:
+    ac_covered: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    ac_gaps: []
+
+nfr_validation:
+  security:
+    status: PASS
+    notes: "Pure parsing module with no external I/O or auth logic"
+  performance:
+    status: PASS
+    notes: "Synchronous single-pass parsing, O(n) complexity"
+  reliability:
+    status: PASS
+    notes: "Graceful handling of malformed inputs with typed errors"
+  maintainability:
+    status: PASS
+    notes: "Clean separation of types, parser logic, and exports with JSDoc"
+
+recommendations:
+  immediate: []
+  future:
+    - action: "Consider adding relay URL format validation (wss:// or ws:// prefix)"
+      refs: ["packages/connector/src/agent/dvm/dvm-job-parser.ts:parseInputTags"]
+    - action: "Consider validating event ID format (64-char hex) for 'event' input type"
+      refs: ["packages/connector/src/agent/dvm/dvm-job-parser.ts:parseInputTags"]
