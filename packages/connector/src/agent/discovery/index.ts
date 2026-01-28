@@ -26,3 +26,5 @@ export {
   // Constants
   TAG_NAMES,
 } from './types';
+
+export { CapabilityPublisher, type CapabilityPublisherConfig } from './capability-publisher';

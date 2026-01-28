@@ -110,8 +110,8 @@ agent:
 
 | Story | Description                                | Status      |
 | ----- | ------------------------------------------ | ----------- |
-| 18.1  | Capability Event Types & Schema            | Not Started |
-| 18.2  | Capability Publisher (Kind 31990)          | Not Started |
+| 18.1  | Capability Event Types & Schema            | Done        |
+| 18.2  | Capability Publisher (Kind 31990)          | Done        |
 | 18.3  | Pricing Tag Generation from Skill Registry | Not Started |
 | 18.4  | Capability Query & Filter                  | Not Started |
 | 18.5  | Social Graph Capability Discovery          | Not Started |
