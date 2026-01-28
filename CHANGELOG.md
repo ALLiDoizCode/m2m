@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0](https://github.com/ALLiDoizCode/m2m/compare/v1.3.0...v1.4.0) (2026-01-28)
+
+### Features
+
+- **agent:** add AI agent module with Vercel AI SDK integration (Epic 16) ([3a36c64](https://github.com/ALLiDoizCode/m2m/commit/3a36c64893180e1956b299ad574428f109f8a941))
+- **agent:** complete Epic 16 stories 16.3-16.7 with QA gates ([f96e0db](https://github.com/ALLiDoizCode/m2m/commit/f96e0db6404eb6220961daa44ef3f07ae48c87b7))
+
 ## [1.3.0](https://github.com/ALLiDoizCode/m2m/compare/v1.2.0...v1.3.0) (2026-01-27)
 
 ### Features
