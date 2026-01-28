@@ -1,0 +1,171 @@
+---
+story_id: '18.2'
+story_title: 'Capability Publisher (Kind 31990)'
+review_date: '2026-01-28'
+reviewer: 'Quinn (Test Architect)'
+gate_decision: PASS
+
+risk_assessment:
+  level: medium
+  factors:
+    - Cryptographic signing with private key handling
+    - New functionality with external dependencies
+    - Auto-refresh timer management
+  review_depth: comprehensive
+
+requirements_traceability:
+  - ac: '1'
+    description: 'Publisher generates Kind 31990 from skill registry'
+    status: met
+    test_coverage:
+      - 'should generate Kind 31990 event with all required tags'
+
+  - ac: '2'
+    description: 'Event includes all required tags'
+    status: met
+    test_coverage:
+      - 'should generate Kind 31990 event with all required tags'
+
+  - ac: '3'
+    description: 'Event includes pricing tags'
+    status: deferred
+    notes: 'Intentionally deferred to Story 18.3, documented with TODO'
+    test_coverage:
+      - 'Empty pricing tags verified in tests'
+
+  - ac: '4'
+    description: 'Event includes capacity tags'
+    status: met
+    test_coverage:
+      - 'should include capacity tags when capacity is configured'
+      - 'should not include capacity tags when capacity is not configured'
+
+  - ac: '5'
+    description: 'Content JSON includes agent metadata'
+    status: met
+    test_coverage:
+      - 'Content field verified with all metadata fields'
+
+  - ac: '6'
+    description: 'Event signed with agent Nostr key'
+    status: met
+    notes: 'Uses nostr-tools finalizeEvent, secure private key handling'
+    test_coverage:
+      - 'should sign event with private key'
+
+  - ac: '7'
+    description: 'Event stored in local database'
+    status: met
+    test_coverage:
+      - 'All publish tests verify storeEvent called'
+
+  - ac: '8'
+    description: 'Event broadcast to configured relays'
+    status: deferred
+    notes: 'Intentionally deferred to Story 18.8, documented with TODO'
+    test_coverage:
+      - 'should not fail if broadcast fails'
+
+  - ac: '9'
+    description: 'Manual trigger and auto-refresh support'
+    status: met
+    test_coverage:
+      - 'publishNow() alias tested'
+      - 'Auto-refresh timer start/stop/error handling tested'
+
+code_quality:
+  strengths:
+    - Clean separation of concerns with private methods
+    - Comprehensive JSDoc documentation
+    - Type-safe interfaces
+    - Graceful error handling
+    - Optional logging throughout
+    - Secure private key handling
+    - Proper resource cleanup
+
+  concerns: []
+
+test_architecture:
+  total_tests: 24
+  test_quality: excellent
+  coverage: complete
+  test_design:
+    - Well-structured with beforeEach setup
+    - Appropriate mocking strategy
+    - Edge cases covered
+    - Proper async/await usage
+    - Modern Jest timer testing
+
+  test_levels:
+    unit: appropriate
+    integration: deferred_to_story_18_8
+    e2e: not_needed
+
+non_functional_requirements:
+  security:
+    status: pass
+    notes:
+      - Private key converted to Uint8Array securely
+      - No sensitive data in logs
+      - Cryptographically secure nostr-tools library
+
+  performance:
+    status: pass
+    notes:
+      - Efficient Set-based deduplication
+      - Minimal allocations
+      - Proper timer management
+
+  reliability:
+    status: pass
+    notes:
+      - Comprehensive error handling
+      - Broadcast failures non-fatal
+      - Auto-refresh resilient to errors
+      - Proper cleanup on shutdown
+
+  maintainability:
+    status: pass
+    notes:
+      - Clear code structure
+      - Comprehensive documentation
+      - TODO comments reference future stories
+
+testability:
+  controllability: pass
+  observability: pass
+  debuggability: pass
+
+technical_debt:
+  intentional:
+    - description: 'Pricing tag generation placeholder'
+      story: '18.3'
+      documented: true
+    - description: 'Broadcast implementation placeholder'
+      story: '18.8'
+      documented: true
+
+  unintentional: []
+
+standards_compliance:
+  coding_standards: pass
+  project_structure: pass
+  testing_strategy: pass
+
+files_reviewed:
+  - 'packages/connector/src/agent/discovery/capability-publisher.ts'
+  - 'packages/connector/src/agent/discovery/__tests__/capability-publisher.test.ts'
+  - 'packages/connector/src/agent/discovery/index.ts'
+  - 'docs/stories/18.2.story.md'
+
+recommended_next_status: Done
+
+conditions:
+  - 'No changes required'
+  - 'Story ready for merge'
+
+notes:
+  - 'Excellent implementation quality'
+  - 'Comprehensive test coverage'
+  - 'Security-sensitive operations handled properly'
+  - 'Intentional deferrals properly documented'
