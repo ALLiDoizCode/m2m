@@ -34,7 +34,9 @@ export function registerBuiltInSkills(registry: SkillRegistry, config: RegisterS
   registry.register(createQueryEventsSkill(config.queryMaxResults)); // Deprecated, backward compat
   registry.register(createDVMQuerySkill(config.queryMaxResults)); // DVM Kind 5000
   registry.register(createForwardPacketSkill(config.followGraphRouter));
-  registry.register(createGetAgentInfoSkill(config.followGraphRouter, config.registeredKinds));
+  registry.register(
+    createGetAgentInfoSkill(config.followGraphRouter, config.registeredKinds, registry)
+  );
 }
 
 // Re-export individual skill creators for custom registration

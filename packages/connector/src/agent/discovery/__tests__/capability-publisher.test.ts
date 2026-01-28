@@ -86,8 +86,18 @@ describe('CapabilityPublisher', () => {
   describe('publish()', () => {
     it('should generate Kind 31990 event with all required tags', async () => {
       mockSkillRegistry.getSkillSummary.mockReturnValue([
-        { name: 'store_note', description: 'Store a note', eventKinds: [1] },
-        { name: 'query_events', description: 'Query events', eventKinds: [10000] },
+        {
+          name: 'store_note',
+          description: 'Store a note',
+          eventKinds: [1],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+        {
+          name: 'query_events',
+          description: 'Query events',
+          eventKinds: [10000],
+          pricing: { base: 200n, model: 'flat' as const },
+        },
       ]);
 
       const publisher = new CapabilityPublisher(
@@ -192,9 +202,24 @@ describe('CapabilityPublisher', () => {
 
     it('should include skills tag with all skill names', async () => {
       mockSkillRegistry.getSkillSummary.mockReturnValue([
-        { name: 'store_note', description: 'Store a note', eventKinds: [1] },
-        { name: 'update_follow', description: 'Update follows', eventKinds: [3] },
-        { name: 'query_events', description: 'Query events', eventKinds: [10000] },
+        {
+          name: 'store_note',
+          description: 'Store a note',
+          eventKinds: [1],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+        {
+          name: 'update_follow',
+          description: 'Update follows',
+          eventKinds: [3],
+          pricing: { base: 150n, model: 'flat' as const },
+        },
+        {
+          name: 'query_events',
+          description: 'Query events',
+          eventKinds: [10000],
+          pricing: { base: 200n, model: 'flat' as const },
+        },
       ]);
 
       const publisher = new CapabilityPublisher(config, mockSkillRegistry, mockEventDatabase);
@@ -231,9 +256,24 @@ describe('CapabilityPublisher', () => {
 
     it('should deduplicate event kinds from multiple skills', async () => {
       mockSkillRegistry.getSkillSummary.mockReturnValue([
-        { name: 'skill1', description: 'Skill 1', eventKinds: [1, 3] },
-        { name: 'skill2', description: 'Skill 2', eventKinds: [3, 5] },
-        { name: 'skill3', description: 'Skill 3', eventKinds: [1] },
+        {
+          name: 'skill1',
+          description: 'Skill 1',
+          eventKinds: [1, 3],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+        {
+          name: 'skill2',
+          description: 'Skill 2',
+          eventKinds: [3, 5],
+          pricing: { base: 150n, model: 'flat' as const },
+        },
+        {
+          name: 'skill3',
+          description: 'Skill 3',
+          eventKinds: [1],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
       ]);
 
       const publisher = new CapabilityPublisher(config, mockSkillRegistry, mockEventDatabase);
@@ -252,7 +292,12 @@ describe('CapabilityPublisher', () => {
     it('should handle skills without eventKinds', async () => {
       mockSkillRegistry.getSkillSummary.mockReturnValue([
         { name: 'meta_skill', description: 'Meta skill', eventKinds: undefined },
-        { name: 'store_note', description: 'Store a note', eventKinds: [1] },
+        {
+          name: 'store_note',
+          description: 'Store a note',
+          eventKinds: [1],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
       ]);
 
       const publisher = new CapabilityPublisher(config, mockSkillRegistry, mockEventDatabase);
@@ -503,5 +548,228 @@ describe('CapabilityPublisher', () => {
         expect(event.tags).toContainEqual([TAG_NAMES.AGENT_TYPE, agentType]);
       }
     );
+  });
+
+  describe('pricing tags', () => {
+    it('should generate pricing tags from skills with pricing', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'skill1',
+          description: 'Test skill 1',
+          eventKinds: [5000],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+        {
+          name: 'skill2',
+          description: 'Test skill 2',
+          eventKinds: [5100],
+          pricing: { base: 5000n, model: 'per-token' as const, perUnit: 10n },
+        },
+      ]);
+
+      const publisher = new CapabilityPublisher(config, mockSkillRegistry, mockEventDatabase);
+
+      const event = await publisher.publish();
+
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5000', '100', 'msat']);
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5100', '5000', 'msat']);
+    });
+
+    it('should skip skills without pricing', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'skill1',
+          description: 'Test skill with pricing',
+          eventKinds: [5000],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+        {
+          name: 'skill2',
+          description: 'Test skill without pricing',
+          eventKinds: [5100],
+        },
+      ]);
+
+      const assistantConfig = { ...config, agentType: 'assistant' as const };
+      const publisher = new CapabilityPublisher(
+        assistantConfig,
+        mockSkillRegistry,
+        mockEventDatabase
+      );
+
+      const event = await publisher.publish();
+
+      const pricingTags = event.tags.filter((tag) => tag[0] === TAG_NAMES.PRICING);
+      expect(pricingTags).toHaveLength(1);
+      expect(pricingTags[0]).toEqual([TAG_NAMES.PRICING, '5000', '100', 'msat']);
+    });
+
+    it('should generate multiple pricing tags for skills with multiple event kinds', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'multi-kind-skill',
+          description: 'Skill supporting multiple kinds',
+          eventKinds: [5000, 5100, 5200],
+          pricing: { base: 250n, model: 'flat' as const },
+        },
+      ]);
+
+      const publisher = new CapabilityPublisher(config, mockSkillRegistry, mockEventDatabase);
+
+      const event = await publisher.publish();
+
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5000', '250', 'msat']);
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5100', '250', 'msat']);
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5200', '250', 'msat']);
+    });
+
+    it('should apply pricing overrides from config', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'skill1',
+          description: 'Skill with default pricing',
+          eventKinds: [5000],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+      ]);
+
+      const pricingOverrides = new Map([
+        [5000, { base: 500n, model: 'flat' as const }], // Override skill1 pricing
+      ]);
+
+      const configWithOverrides = { ...config, pricingOverrides };
+      const publisher = new CapabilityPublisher(
+        configWithOverrides,
+        mockSkillRegistry,
+        mockEventDatabase
+      );
+
+      const event = await publisher.publish();
+
+      // Should use override pricing (500) not skill pricing (100)
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5000', '500', 'msat']);
+      const pricingTags = event.tags.filter(
+        (tag) => tag[0] === TAG_NAMES.PRICING && tag[1] === '5000'
+      );
+      expect(pricingTags).toHaveLength(1);
+    });
+
+    it('should add pricing for kinds not in skills via overrides', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'skill1',
+          description: 'Skill with pricing',
+          eventKinds: [5000],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+      ]);
+
+      const pricingOverrides = new Map([
+        [5100, { base: 200n, model: 'per-token' as const, perUnit: 5n }], // New kind
+      ]);
+
+      const configWithOverrides = { ...config, pricingOverrides };
+      const publisher = new CapabilityPublisher(
+        configWithOverrides,
+        mockSkillRegistry,
+        mockEventDatabase
+      );
+
+      const event = await publisher.publish();
+
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5000', '100', 'msat']);
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5100', '200', 'msat']);
+    });
+
+    it('should handle different pricing models (flat, per-token, per-byte)', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'flat-skill',
+          description: 'Flat pricing',
+          eventKinds: [5000],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+        {
+          name: 'per-token-skill',
+          description: 'Per-token pricing',
+          eventKinds: [5100],
+          pricing: { base: 50n, model: 'per-token' as const, perUnit: 2n },
+        },
+        {
+          name: 'per-byte-skill',
+          description: 'Per-byte pricing',
+          eventKinds: [5200],
+          pricing: { base: 25n, model: 'per-byte' as const, perUnit: 1n },
+        },
+      ]);
+
+      const publisher = new CapabilityPublisher(config, mockSkillRegistry, mockEventDatabase);
+
+      const event = await publisher.publish();
+
+      // All should generate pricing tags (model type not in tag, just base price)
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5000', '100', 'msat']);
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5100', '50', 'msat']);
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5200', '25', 'msat']);
+    });
+  });
+
+  describe('DVM pricing validation', () => {
+    it('should throw error when DVM has unpriced kinds', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'unpriced-skill',
+          description: 'Skill without pricing',
+          eventKinds: [5000],
+        },
+      ]);
+
+      const dvmConfig = { ...config, agentType: 'dvm' as const };
+      const publisher = new CapabilityPublisher(dvmConfig, mockSkillRegistry, mockEventDatabase);
+
+      await expect(publisher.publish()).rejects.toThrow(
+        'DVM agents must have pricing for all supported event kinds. Unpriced kinds: 5000'
+      );
+    });
+
+    it('should allow non-DVM agents to have unpriced kinds', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'unpriced-skill',
+          description: 'Free skill',
+          eventKinds: [5000],
+        },
+      ]);
+
+      const assistantConfig = { ...config, agentType: 'assistant' as const };
+      const publisher = new CapabilityPublisher(
+        assistantConfig,
+        mockSkillRegistry,
+        mockEventDatabase
+      );
+
+      // Should not throw
+      const event = await publisher.publish();
+      expect(event).toBeDefined();
+      expect(event.tags).toContainEqual([TAG_NAMES.AGENT_TYPE, 'assistant']);
+    });
+
+    it('should pass validation when all DVM kinds have pricing', async () => {
+      mockSkillRegistry.getSkillSummary.mockReturnValue([
+        {
+          name: 'priced-skill',
+          description: 'Skill with pricing',
+          eventKinds: [5000],
+          pricing: { base: 100n, model: 'flat' as const },
+        },
+      ]);
+
+      const dvmConfig = { ...config, agentType: 'dvm' as const };
+      const publisher = new CapabilityPublisher(dvmConfig, mockSkillRegistry, mockEventDatabase);
+
+      const event = await publisher.publish();
+      expect(event).toBeDefined();
+      expect(event.tags).toContainEqual([TAG_NAMES.PRICING, '5000', '100', 'msat']);
+    });
   });
 });

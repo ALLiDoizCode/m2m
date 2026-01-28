@@ -14,6 +14,7 @@ import type { AgentEventDatabase } from '../event-database';
 import type { SkillRegistry } from '../ai/skill-registry';
 import type { Logger } from 'pino';
 import { TAG_NAMES, type AgentType, type AgentMetadata, type CapacityInfo } from './types';
+import type { SkillPricing } from '../ai/skill-registry';
 
 /**
  * Configuration for the capability publisher
@@ -35,6 +36,8 @@ export interface CapabilityPublisherConfig {
   model?: string;
   /** Optional auto-refresh interval in milliseconds (default: no auto-refresh) */
   refreshInterval?: number;
+  /** Optional pricing overrides per event kind (takes precedence over skill pricing) */
+  pricingOverrides?: Map<number, SkillPricing>;
 }
 
 /**
@@ -83,6 +86,12 @@ export class CapabilityPublisher {
     const skillSummaries = this._skillRegistry.getSkillSummary();
     const supportedKinds = this._extractSupportedKinds(skillSummaries);
 
+    // Build pricing tags
+    const pricingTags = this._buildPricingTags();
+
+    // Validate DVM pricing requirements
+    this._validateDvmPricing(supportedKinds, pricingTags);
+
     // Build event tags
     const tags: string[][] = [
       [TAG_NAMES.IDENTIFIER, this._config.ilpAddress],
@@ -92,7 +101,7 @@ export class CapabilityPublisher {
       [TAG_NAMES.NIP, 'xx1'],
       [TAG_NAMES.AGENT_TYPE, this._config.agentType],
       [TAG_NAMES.ILP_ADDRESS, this._config.ilpAddress],
-      ...this._buildPricingTags(),
+      ...pricingTags,
       ...this._buildCapacityTags(),
     ];
 
@@ -203,16 +212,74 @@ export class CapabilityPublisher {
    * Build pricing tags from skill registry
    *
    * Generates pricing tags for each skill that has pricing information.
+   * Config overrides take precedence over skill-declared pricing.
    * Format: ['pricing', kind, amount, currency]
    */
   private _buildPricingTags(): string[][] {
     const tags: string[][] = [];
+    const skills = this._skillRegistry.getSkillSummary();
 
-    // For now, we don't have pricing in the skill interface
-    // This will be implemented in Story 18.3
-    // Return empty array for now
+    // Build a map of kind -> pricing
+    // Start with skill pricing, then apply overrides
+    const pricingMap = new Map<number, SkillPricing>();
+
+    // Extract pricing from skills
+    for (const skill of skills) {
+      if (skill.pricing && skill.eventKinds) {
+        for (const kind of skill.eventKinds) {
+          pricingMap.set(kind, skill.pricing);
+        }
+      }
+    }
+
+    // Apply config overrides (these take precedence)
+    if (this._config.pricingOverrides) {
+      for (const [kind, pricing] of this._config.pricingOverrides.entries()) {
+        pricingMap.set(kind, pricing);
+      }
+    }
+
+    // Generate pricing tags
+    for (const [kind, pricing] of pricingMap.entries()) {
+      tags.push([TAG_NAMES.PRICING, kind.toString(), pricing.base.toString(), 'msat']);
+    }
 
     return tags;
+  }
+
+  /**
+   * Validate that DVM agents have pricing for all supported kinds
+   *
+   * DVM (Data Vending Machine) agents MUST have pricing for all event kinds per NIP-90.
+   * Non-DVM agents (assistant, specialist, coordinator, relay) may have free services.
+   *
+   * @param supportedKinds - All supported event kinds
+   * @param pricingTags - Generated pricing tags
+   * @throws Error if DVM has unpriced kinds
+   */
+  private _validateDvmPricing(supportedKinds: number[], pricingTags: string[][]): void {
+    // Only validate DVM agents
+    if (this._config.agentType !== 'dvm') {
+      return;
+    }
+
+    // Extract kinds that have pricing
+    const pricedKinds = new Set(
+      pricingTags.map((tag) => (tag[1] ? parseInt(tag[1], 10) : NaN)).filter((k) => !isNaN(k))
+    );
+
+    // Check for unpriced kinds
+    const unpricedKinds = supportedKinds.filter((kind) => !pricedKinds.has(kind));
+
+    if (unpricedKinds.length > 0) {
+      this._logger?.warn(
+        { unpricedKinds, agentType: this._config.agentType },
+        'DVM agent has unpriced event kinds'
+      );
+      throw new Error(
+        `DVM agents must have pricing for all supported event kinds. Unpriced kinds: ${unpricedKinds.join(', ')}`
+      );
+    }
   }
 
   /**

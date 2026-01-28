@@ -6,7 +6,7 @@
  */
 
 import { z } from 'zod';
-import type { AgentSkill, SkillExecuteContext } from '../skill-registry';
+import type { AgentSkill, SkillExecuteContext, SkillRegistry } from '../skill-registry';
 import type { EventHandlerResult } from '../../event-handler';
 import type { FollowGraphRouter } from '../../follow-graph-router';
 
@@ -16,7 +16,8 @@ const GetAgentInfoParams = z.object({
 
 export function createGetAgentInfoSkill(
   followGraphRouter: FollowGraphRouter,
-  registeredKinds: () => number[]
+  registeredKinds: () => number[],
+  skillRegistry: SkillRegistry
 ): AgentSkill<typeof GetAgentInfoParams> {
   return {
     name: 'get_agent_info',
@@ -32,6 +33,22 @@ export function createGetAgentInfoSkill(
     ): Promise<EventHandlerResult> => {
       const follows = followGraphRouter.getAllFollows();
       const kinds = registeredKinds();
+      const skills = skillRegistry.getSkillSummary();
+
+      // Build pricing map from skills
+      const pricingMap: Record<number, { base: string; model: string; perUnit?: string }> = {};
+      for (const skill of skills) {
+        if (skill.pricing && skill.eventKinds) {
+          for (const kind of skill.eventKinds) {
+            // Convert bigint to string for JSON serialization
+            pricingMap[kind] = {
+              base: skill.pricing.base.toString(),
+              model: skill.pricing.model,
+              perUnit: skill.pricing.perUnit?.toString(),
+            };
+          }
+        }
+      }
 
       const info = {
         agentPubkey: context.agentPubkey,
@@ -41,6 +58,12 @@ export function createGetAgentInfoSkill(
           pubkey: f.pubkey,
           ilpAddress: f.ilpAddress,
           petname: f.petname,
+        })),
+        pricing: pricingMap,
+        skills: skills.map((s) => ({
+          name: s.name,
+          description: s.description,
+          eventKinds: s.eventKinds,
         })),
       };
 

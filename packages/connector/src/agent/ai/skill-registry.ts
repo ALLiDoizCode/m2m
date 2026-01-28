@@ -22,6 +22,18 @@ export interface SkillExecuteContext extends EventHandlerContext {
 }
 
 /**
+ * Pricing information for a skill.
+ */
+export interface SkillPricing {
+  /** Base price in millisatoshis */
+  base: bigint;
+  /** Pricing model type */
+  model: 'flat' | 'per-token' | 'per-byte';
+  /** Price per unit for per-token/per-byte models */
+  perUnit?: bigint;
+}
+
+/**
  * Summary of a skill for system prompt generation.
  */
 export interface SkillSummary {
@@ -31,6 +43,8 @@ export interface SkillSummary {
   description: string;
   /** Associated Nostr event kinds */
   eventKinds?: number[];
+  /** Pricing information */
+  pricing?: SkillPricing;
 }
 
 /**
@@ -53,6 +67,8 @@ export interface AgentSkill<T extends z.ZodTypeAny = z.ZodTypeAny> {
   execute: (params: z.infer<T>, context: SkillExecuteContext) => Promise<EventHandlerResult>;
   /** Associated Nostr event kind(s), if any */
   eventKinds?: number[];
+  /** Pricing information for this skill */
+  pricing?: SkillPricing;
 }
 
 /**
@@ -169,6 +185,7 @@ export class SkillRegistry {
       name: skill.name,
       description: skill.description,
       eventKinds: skill.eventKinds,
+      pricing: skill.pricing,
     }));
   }
 }
