@@ -38,12 +38,12 @@ describe('CapabilityPublisher', () => {
     // Mock SkillRegistry
     mockSkillRegistry = {
       getSkillSummary: jest.fn(),
-    } as jest.Mocked<SkillRegistry>;
+    } as unknown as jest.Mocked<SkillRegistry>;
 
     // Mock AgentEventDatabase
     mockEventDatabase = {
       storeEvent: jest.fn(),
-    } as jest.Mocked<AgentEventDatabase>;
+    } as unknown as jest.Mocked<AgentEventDatabase>;
 
     // Mock Logger
     mockLogger = {
@@ -51,7 +51,11 @@ describe('CapabilityPublisher', () => {
       debug: jest.fn(),
       warn: jest.fn(),
       error: jest.fn(),
-    };
+      fatal: jest.fn(),
+      trace: jest.fn(),
+      silent: jest.fn(),
+      level: 'info',
+    } as unknown as Logger;
 
     // Default config
     const metadata: AgentMetadata = {
