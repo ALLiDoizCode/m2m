@@ -27,7 +27,7 @@ jest.mock('nostr-tools', () => ({
 describe('CapabilityPublisher', () => {
   let mockSkillRegistry: jest.Mocked<SkillRegistry>;
   let mockEventDatabase: jest.Mocked<AgentEventDatabase>;
-  let mockLogger: Logger;
+  let mockLogger: jest.Mocked<Logger>;
   let config: CapabilityPublisherConfig;
 
   beforeEach(() => {
@@ -51,7 +51,8 @@ describe('CapabilityPublisher', () => {
       trace: jest.fn(),
       silent: jest.fn(),
       level: 'info',
-    } as unknown as Logger;
+      child: jest.fn(() => mockLogger as unknown as Logger),
+    } as unknown as jest.Mocked<Logger>;
 
     // Default config
     const metadata: AgentMetadata = {
