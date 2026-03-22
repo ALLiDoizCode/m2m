@@ -34,7 +34,6 @@ function createTestPreparePacket(index: number): ILPPreparePacket {
     type: PacketType.PREPARE,
     amount: BigInt(1000 + index),
     destination: `g.alice.payment_${index}`,
-    executionCondition: Buffer.alloc(32, index % 256),
     expiresAt: new Date('2025-12-31T23:59:59.999Z'), // Fixed date for consistent encoding
     data: Buffer.from(`Payment ${index} data`),
   };
@@ -43,7 +42,6 @@ function createTestPreparePacket(index: number): ILPPreparePacket {
 function createTestFulfillPacket(index: number): ILPFulfillPacket {
   return {
     type: PacketType.FULFILL,
-    fulfillment: Buffer.alloc(32, (index * 2) % 256),
     data: Buffer.from(`Fulfillment ${index} data`),
   };
 }

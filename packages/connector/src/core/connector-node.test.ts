@@ -775,9 +775,7 @@ describe('ConnectorNode', () => {
 
     it('should set the handler and propagate to PacketHandler', () => {
       // Arrange
-      const handler = jest
-        .fn()
-        .mockResolvedValue({ fulfill: { fulfillment: 'dGVzdA==', data: '' } });
+      const handler = jest.fn().mockResolvedValue({ fulfill: { data: '' } });
 
       // Act
       connectorNode.setLocalDeliveryHandler(handler);
@@ -795,7 +793,7 @@ describe('ConnectorNode', () => {
 
     it('should be callable before start()', () => {
       // Arrange
-      const handler = jest.fn().mockResolvedValue({ fulfill: { fulfillment: 'dGVzdA==' } });
+      const handler = jest.fn().mockResolvedValue({ fulfill: { data: '' } });
 
       // Act - call before start()
       connectorNode.setLocalDeliveryHandler(handler);
@@ -806,7 +804,7 @@ describe('ConnectorNode', () => {
 
     it('should be callable after construction (handler propagated to PacketHandler)', async () => {
       // Arrange
-      const handler = jest.fn().mockResolvedValue({ fulfill: { fulfillment: 'dGVzdA==' } });
+      const handler = jest.fn().mockResolvedValue({ fulfill: { data: '' } });
       await connectorNode.start();
       jest.clearAllMocks();
 
@@ -819,7 +817,7 @@ describe('ConnectorNode', () => {
 
     it('should clear the handler when called with null (reverts to HTTP fallback)', () => {
       // Arrange
-      const handler = jest.fn().mockResolvedValue({ fulfill: { fulfillment: 'dGVzdA==' } });
+      const handler = jest.fn().mockResolvedValue({ fulfill: { data: '' } });
       connectorNode.setLocalDeliveryHandler(handler);
       jest.clearAllMocks();
 
@@ -894,7 +892,7 @@ describe('ConnectorNode', () => {
 
     it('should overwrite previous setLocalDeliveryHandler (last writer wins)', () => {
       // Arrange — set a raw local delivery handler first
-      const rawHandler = jest.fn().mockResolvedValue({ fulfill: { fulfillment: 'dGVzdA==' } });
+      const rawHandler = jest.fn().mockResolvedValue({ fulfill: { data: '' } });
       connectorNode.setLocalDeliveryHandler(rawHandler);
       jest.clearAllMocks();
 
@@ -913,13 +911,11 @@ describe('ConnectorNode', () => {
     const validParams = {
       destination: 'g.peerA.alice',
       amount: 1000n,
-      executionCondition: Buffer.alloc(32, 0xab),
       expiresAt: new Date(Date.now() + 30000),
     };
 
     const createMockFulfill = (): ILPFulfillPacket => ({
       type: PacketType.FULFILL as const,
-      fulfillment: Buffer.alloc(32, 0xcd),
       data: Buffer.alloc(0),
     });
 
@@ -951,7 +947,6 @@ describe('ConnectorNode', () => {
           type: PacketType.PREPARE,
           destination: validParams.destination,
           amount: validParams.amount,
-          executionCondition: validParams.executionCondition,
           expiresAt: validParams.expiresAt,
         }),
         'connector-test' // nodeId as fromPeerId
@@ -1022,7 +1017,6 @@ describe('ConnectorNode', () => {
       expect(packet.type).toBe(PacketType.PREPARE);
       expect(packet.destination).toBe(validParams.destination);
       expect(packet.amount).toBe(validParams.amount);
-      expect(packet.executionCondition).toBe(validParams.executionCondition);
       expect(packet.expiresAt).toBe(validParams.expiresAt);
       expect(packet.data).toEqual(Buffer.alloc(0)); // default when not provided
     });

@@ -3,7 +3,6 @@
  * @packageDocumentation
  */
 
-import * as crypto from 'crypto';
 import { Logger } from '../utils/logger';
 import { LocalDeliveryRequest } from '../config/types';
 import {
@@ -11,8 +10,6 @@ import {
   PaymentHandler,
   PaymentRequest,
   REJECT_CODE_MAP,
-  computeFulfillmentFromData,
-  validateFulfillment,
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
@@ -39,61 +36,12 @@ const createTestPacket = (overrides?: Partial<LocalDeliveryRequest>): LocalDeliv
   return {
     destination: 'g.peerA.alice',
     amount: '1000',
-    executionCondition: crypto
-      .createHash('sha256')
-      .update(crypto.createHash('sha256').update(data).digest())
-      .digest()
-      .toString('base64'),
     expiresAt: new Date(Date.now() + 30000).toISOString(),
     data: data.toString('base64'),
     sourcePeer: 'peerA',
     ...overrides,
   };
 };
-
-describe('computeFulfillmentFromData', () => {
-  it('should return SHA256 of input data', () => {
-    const data = Buffer.from('test-payload');
-    const result = computeFulfillmentFromData(data);
-
-    const expected = crypto.createHash('sha256').update(data).digest();
-    expect(result).toEqual(expected);
-    expect(result.length).toBe(32);
-  });
-});
-
-describe('validateFulfillment', () => {
-  it('should return true when SHA256(fulfillment) equals condition', () => {
-    const data = Buffer.from('test-payload');
-    const fulfillment = crypto.createHash('sha256').update(data).digest();
-    const condition = crypto.createHash('sha256').update(fulfillment).digest();
-
-    expect(validateFulfillment(fulfillment, condition)).toBe(true);
-  });
-
-  it('should return false when fulfillment does not match condition', () => {
-    const fulfillment = Buffer.alloc(32, 0xaa);
-    const wrongCondition = Buffer.alloc(32, 0xbb);
-
-    expect(validateFulfillment(fulfillment, wrongCondition)).toBe(false);
-  });
-
-  it('should work with computeFulfillmentFromData output', () => {
-    const data = Buffer.from('some-packet-data');
-    const fulfillment = computeFulfillmentFromData(data);
-    const condition = crypto.createHash('sha256').update(fulfillment).digest();
-
-    expect(validateFulfillment(fulfillment, condition)).toBe(true);
-  });
-
-  it('should return false when fulfillment is all zeros', () => {
-    const fulfillment = Buffer.alloc(32, 0);
-    const condition = Buffer.alloc(32, 0);
-
-    // SHA256(zeros) != zeros
-    expect(validateFulfillment(fulfillment, condition)).toBe(false);
-  });
-});
 
 describe('generatePaymentId', () => {
   it('should return a base64url string', () => {
@@ -208,7 +156,7 @@ describe('createPaymentHandlerAdapter', () => {
   });
 
   describe('PaymentRequest transformation', () => {
-    it('should create PaymentRequest with paymentId, no executionCondition, no sourcePeer', async () => {
+    it('should create PaymentRequest with paymentId, no sourcePeer', async () => {
       const adapter = createPaymentHandlerAdapter(handler, logger);
       const packet = createTestPacket();
 
@@ -222,8 +170,7 @@ describe('createPaymentHandlerAdapter', () => {
       expect(capturedRequest!.amount).toBe(packet.amount);
       expect(capturedRequest!.expiresAt).toBe(packet.expiresAt);
       expect(capturedRequest!.data).toBe(packet.data);
-      // Should NOT have executionCondition or sourcePeer
-      expect(capturedRequest).not.toHaveProperty('executionCondition');
+      // Should NOT have sourcePeer
       expect(capturedRequest).not.toHaveProperty('sourcePeer');
     });
 
@@ -238,7 +185,7 @@ describe('createPaymentHandlerAdapter', () => {
   });
 
   describe('accept response', () => {
-    it('should compute fulfillment as SHA256(data) and return fulfill', async () => {
+    it('should return fulfill on accept', async () => {
       const adapter = createPaymentHandlerAdapter(handler, logger);
       const packet = createTestPacket();
 
@@ -246,14 +193,6 @@ describe('createPaymentHandlerAdapter', () => {
 
       expect(result.fulfill).toBeDefined();
       expect(result.reject).toBeUndefined();
-
-      // Verify fulfillment = SHA256(decoded data)
-      const expectedFulfillment = crypto
-        .createHash('sha256')
-        .update(Buffer.from(packet.data, 'base64'))
-        .digest()
-        .toString('base64');
-      expect(result.fulfill!.fulfillment).toBe(expectedFulfillment);
     });
 
     it('should pass through response data on accept', async () => {

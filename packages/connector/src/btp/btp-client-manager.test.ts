@@ -46,7 +46,6 @@ const createTestPreparePacket = (): ILPPreparePacket => ({
   type: PacketType.PREPARE,
   amount: BigInt(1000),
   destination: 'g.test.destination',
-  executionCondition: Buffer.alloc(32),
   expiresAt: new Date(Date.now() + 10000),
   data: Buffer.alloc(0),
 });
@@ -276,7 +275,6 @@ describe('BTPClientManager', () => {
       const packet = createTestPreparePacket();
       const fulfillResponse: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32),
         data: Buffer.alloc(0),
       };
 
@@ -404,7 +402,6 @@ describe('BTPClientManager', () => {
       const packet = createTestPreparePacket();
       const fulfillResponse: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32),
         data: Buffer.alloc(0),
       };
 

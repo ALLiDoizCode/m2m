@@ -214,7 +214,6 @@ program.action(async (options) => {
         logger.info(
           {
             packetType: 'FULFILL',
-            fulfillment: response.fulfillment.toString('hex').substring(0, 16) + '...',
           },
           'Packet fulfilled'
         );

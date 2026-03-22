@@ -2,9 +2,8 @@
  * ILP Send Handler
  *
  * Handles `POST /admin/ilp/send` requests from the BLS to initiate outbound ILP packets.
- * Validates the request, computes the execution condition using SHA256(SHA256(data)),
- * constructs an ILP Prepare packet, sends it via the injected `sendPacket` callback,
- * and maps the response back to HTTP.
+ * Validates the request, constructs an ILP Prepare packet, sends it via the injected
+ * `sendPacket` callback, and maps the response back to HTTP.
  *
  * HTTP Response Codes:
  * - 200: Both FULFILL and REJECT ILP responses (distinguished by `accepted` boolean)
@@ -13,7 +12,6 @@
  * - 503: Connector not ready or sendPacket not configured
  */
 
-import * as crypto from 'crypto';
 import { Request, Response } from 'express';
 import { Logger } from '../utils/logger';
 import { PacketType, isValidILPAddress } from '@toon-protocol/shared';
@@ -25,22 +23,6 @@ const DEFAULT_TIMEOUT_MS = 30000;
 
 /** Maximum decoded data size in bytes (64KB) */
 const MAX_DATA_SIZE = 65536;
-
-/**
- * Compute the execution condition and fulfillment from raw data bytes.
- *
- * Uses the simplified fulfillment scheme (not STREAM-based):
- * - `fulfillment = SHA256(data)`
- * - `condition = SHA256(fulfillment)`
- *
- * @param data - Raw data bytes
- * @returns Object with 32-byte condition and fulfillment Buffers
- */
-export function computeConditionFromData(data: Buffer): { condition: Buffer; fulfillment: Buffer } {
-  const fulfillment = crypto.createHash('sha256').update(data).digest();
-  const condition = crypto.createHash('sha256').update(fulfillment).digest();
-  return { condition, fulfillment };
-}
 
 /**
  * Validate an ILP send request body.
@@ -165,14 +147,10 @@ export class IlpSendHandler {
       const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const rawDataBytes = Buffer.from(request.data, 'base64');
 
-      // Compute condition
-      const { condition } = computeConditionFromData(rawDataBytes);
-
       // Construct SendPacketParams
       const params: SendPacketParams = {
         destination: request.destination,
         amount: BigInt(request.amount),
-        executionCondition: condition,
         expiresAt: new Date(Date.now() + timeoutMs),
         data: rawDataBytes,
       };
@@ -194,8 +172,6 @@ export class IlpSendHandler {
       if (response.type === PacketType.FULFILL) {
         const fulfillResponse: IlpSendResponse = {
           accepted: true,
-          fulfilled: true,
-          fulfillment: response.fulfillment.toString('base64'),
           data: response.data.length > 0 ? response.data.toString('base64') : undefined,
         };
         this._logger.info(
@@ -206,7 +182,6 @@ export class IlpSendHandler {
       } else {
         const rejectResponse: IlpSendResponse = {
           accepted: false,
-          fulfilled: false,
           code: response.code,
           message: response.message,
           data: response.data.length > 0 ? response.data.toString('base64') : undefined,

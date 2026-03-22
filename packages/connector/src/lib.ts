@@ -22,16 +22,11 @@ import { UnifiedSettlementExecutor } from './settlement/unified-settlement-execu
 import {
   createPaymentHandlerAdapter,
   REJECT_CODE_MAP,
-  computeFulfillmentFromData,
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
 } from './core/payment-handler';
-import {
-  IlpSendHandler,
-  computeConditionFromData,
-  validateIlpSendRequest,
-} from './http/ilp-send-handler';
+import { IlpSendHandler, validateIlpSendRequest } from './http/ilp-send-handler';
 
 // Export public API
 export {
@@ -54,13 +49,11 @@ export {
   // Payment handler utilities
   createPaymentHandlerAdapter,
   REJECT_CODE_MAP,
-  computeFulfillmentFromData,
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
   // ILP send handler
   IlpSendHandler,
-  computeConditionFromData,
   validateIlpSendRequest,
 };
 

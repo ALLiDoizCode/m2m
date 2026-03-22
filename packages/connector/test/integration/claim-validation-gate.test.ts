@@ -16,7 +16,7 @@
  */
 
 import WebSocket from 'ws';
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes } from 'crypto';
 import { ethers } from 'ethers';
 import {
   createMultiHopTestNetwork,
@@ -161,29 +161,16 @@ async function sendRawBTPPrepare(
 
 /**
  * Create a test ILP PREPARE packet.
- *
- * The payment handler adapter computes: fulfillment = SHA256(data)
- * The packet handler validates: SHA256(fulfillment) === condition
- * So condition must be SHA256(SHA256(data)).
  */
-function createTestPrepare(
-  destination: string,
-  amount: bigint
-): { packet: ILPPreparePacket; fulfillment: Buffer } {
-  const data = Buffer.alloc(0);
-  const fulfillment = createHash('sha256').update(data).digest();
-  const condition = createHash('sha256').update(fulfillment).digest();
-
+function createTestPrepare(destination: string, amount: bigint): { packet: ILPPreparePacket } {
   return {
     packet: {
       type: PacketType.PREPARE,
       destination,
       amount,
-      executionCondition: condition,
       expiresAt: new Date(Date.now() + 60_000),
-      data,
+      data: Buffer.alloc(0),
     },
-    fulfillment,
   };
 }
 

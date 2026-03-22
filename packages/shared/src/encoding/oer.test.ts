@@ -370,7 +370,6 @@ function createTestPreparePacket(overrides?: Partial<ILPPreparePacket>): ILPPrep
     type: PacketType.PREPARE,
     amount: 1000n,
     destination: 'g.alice',
-    executionCondition: Buffer.alloc(32, 0xaa),
     expiresAt: new Date('2025-12-31T23:59:59.999Z'),
     data: Buffer.from('test data'),
     ...overrides,
@@ -380,7 +379,6 @@ function createTestPreparePacket(overrides?: Partial<ILPPreparePacket>): ILPPrep
 function createTestFulfillPacket(overrides?: Partial<ILPFulfillPacket>): ILPFulfillPacket {
   return {
     type: PacketType.FULFILL,
-    fulfillment: Buffer.alloc(32, 0xbb),
     data: Buffer.from('return data'),
     ...overrides,
   };
@@ -410,12 +408,12 @@ describe('serializePrepare', () => {
     expect(result.length).toBeGreaterThan(50); // Reasonable size check
   });
 
-  it('should throw InvalidPacketError when executionCondition is not 32 bytes', () => {
-    const packet = createTestPreparePacket({
-      executionCondition: Buffer.alloc(16), // Wrong size
-    });
+  it('should serialize Prepare packet with 32 zero bytes for wire-format executionCondition', () => {
+    const packet = createTestPreparePacket();
+    const result = serializePrepare(packet);
 
-    expect(() => serializePrepare(packet)).toThrow(InvalidPacketError);
+    // OER writes 32 zero bytes for the executionCondition field (wire compatibility)
+    expect(result.length).toBeGreaterThan(50);
   });
 });
 
@@ -428,9 +426,9 @@ describe('deserializePrepare', () => {
     expect(deserialized.type).toBe(PacketType.PREPARE);
     expect(deserialized.amount).toBe(original.amount);
     expect(deserialized.destination).toBe(original.destination);
-    expect(deserialized.executionCondition).toEqual(original.executionCondition);
     expect(deserialized.expiresAt).toEqual(original.expiresAt);
     expect(deserialized.data).toEqual(original.data);
+    // executionCondition is not in the deserialized interface (skipped on wire)
   });
 
   it('should throw BufferUnderflowError when buffer is empty (Line 515)', () => {
@@ -522,15 +520,16 @@ describe('serializeFulfill', () => {
     const result = serializeFulfill(packet);
 
     expect(result[0]).toBe(PacketType.FULFILL);
-    expect(result.length).toBeGreaterThan(33); // Type + fulfillment + data
+    expect(result.length).toBeGreaterThan(33); // Type + 32 zero bytes + data
   });
 
-  it('should throw InvalidPacketError when fulfillment is not 32 bytes', () => {
-    const packet = createTestFulfillPacket({
-      fulfillment: Buffer.alloc(16), // Wrong size
-    });
+  it('should serialize Fulfill packet with 32 zero bytes for wire-format fulfillment', () => {
+    const packet = createTestFulfillPacket();
+    const result = serializeFulfill(packet);
 
-    expect(() => serializeFulfill(packet)).toThrow(InvalidPacketError);
+    // OER writes 32 zero bytes for the fulfillment field (wire compatibility)
+    expect(result[0]).toBe(PacketType.FULFILL);
+    expect(result.length).toBeGreaterThan(33);
   });
 });
 
@@ -541,8 +540,8 @@ describe('deserializeFulfill', () => {
     const deserialized = deserializeFulfill(serialized);
 
     expect(deserialized.type).toBe(PacketType.FULFILL);
-    expect(deserialized.fulfillment).toEqual(original.fulfillment);
     expect(deserialized.data).toEqual(original.data);
+    // fulfillment is not in the deserialized interface (skipped on wire)
   });
 
   it('should throw InvalidPacketError when type byte is incorrect', () => {
@@ -563,20 +562,22 @@ describe('deserializeFulfill', () => {
     expect(deserialized.data).toEqual(Buffer.alloc(0));
   });
 
-  it('should handle fulfillment with all zeros', () => {
-    const packet = createTestFulfillPacket({ fulfillment: Buffer.alloc(32, 0x00) });
+  it('should round-trip Fulfill packet with empty data', () => {
+    const packet = createTestFulfillPacket({ data: Buffer.alloc(0) });
     const serialized = serializeFulfill(packet);
     const deserialized = deserializeFulfill(serialized);
 
-    expect(deserialized.fulfillment).toEqual(Buffer.alloc(32, 0x00));
+    expect(deserialized.type).toBe(PacketType.FULFILL);
+    expect(deserialized.data).toEqual(Buffer.alloc(0));
   });
 
-  it('should handle fulfillment with all 0xFF', () => {
-    const packet = createTestFulfillPacket({ fulfillment: Buffer.alloc(32, 0xff) });
+  it('should round-trip Fulfill packet with non-empty data', () => {
+    const packet = createTestFulfillPacket({ data: Buffer.from('test') });
     const serialized = serializeFulfill(packet);
     const deserialized = deserializeFulfill(serialized);
 
-    expect(deserialized.fulfillment).toEqual(Buffer.alloc(32, 0xff));
+    expect(deserialized.type).toBe(PacketType.FULFILL);
+    expect(deserialized.data).toEqual(Buffer.from('test'));
   });
 });
 
@@ -780,10 +781,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
         type: PacketType.PREPARE,
         amount: 1000n,
         destination: 'g.example.alice',
-        executionCondition: Buffer.from(
-          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-          'hex'
-        ),
         expiresAt: new Date('2024-01-01T12:00:00.000Z'),
         data: Buffer.from([]),
       };
@@ -809,8 +806,8 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
       expect(expiresAtStr).toBe('20240101120000.000Z');
       offset += 19;
 
-      // ExecutionCondition: 32 bytes (fixed)
-      expect(serialized.slice(offset, offset + 32)).toEqual(packet.executionCondition);
+      // ExecutionCondition: 32 zero bytes (wire format compatibility)
+      expect(serialized.slice(offset, offset + 32)).toEqual(Buffer.alloc(32));
       offset += 32;
 
       // Destination: VarOctetString
@@ -832,10 +829,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
         type: PacketType.PREPARE,
         amount: 1000n,
         destination: 'g.example.alice',
-        executionCondition: Buffer.from(
-          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-          'hex'
-        ),
         expiresAt: new Date('2024-01-01T12:00:00.000Z'),
         data: Buffer.from([]),
       };
@@ -851,7 +844,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
         type: PacketType.PREPARE,
         amount: 0n,
         destination: 'g.bob',
-        executionCondition: Buffer.alloc(32, 0xff),
         expiresAt: new Date('2025-12-31T23:59:59.999Z'),
         data: Buffer.from('test payload'),
       };
@@ -870,7 +862,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
         type: PacketType.PREPARE,
         amount: maxAmount,
         destination: 'g.connector',
-        executionCondition: Buffer.alloc(32, 0x55),
         expiresAt: new Date('2025-06-15T10:30:00.500Z'),
         data: Buffer.from([0x01, 0x02, 0x03]),
       };
@@ -888,10 +879,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
       // Test Vector: Fulfill packet with empty data
       const packet: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.from(
-          'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
-          'hex'
-        ),
         data: Buffer.from([]),
       };
 
@@ -904,8 +891,8 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
       expect(serialized[offset]).toBe(0x0d);
       offset += 1;
 
-      // Fulfillment: 32 bytes (fixed)
-      expect(serialized.slice(offset, offset + 32)).toEqual(packet.fulfillment);
+      // Fulfillment: 32 zero bytes (wire format compatibility)
+      expect(serialized.slice(offset, offset + 32)).toEqual(Buffer.alloc(32));
       offset += 32;
 
       // Data: Empty VarOctetString
@@ -919,10 +906,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
     it('should deserialize Fulfill packet from RFC-0027 binary format', () => {
       const packet: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.from(
-          'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
-          'hex'
-        ),
         data: Buffer.from([]),
       };
 
@@ -935,14 +918,12 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
     it('should round-trip Fulfill packet with non-empty data', () => {
       const packet: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0x42),
         data: Buffer.from('return value'),
       };
 
       const serialized = serializeFulfill(packet);
       const deserialized = deserializeFulfill(serialized);
 
-      expect(deserialized.fulfillment).toEqual(Buffer.alloc(32, 0x42));
       expect(deserialized.data.toString()).toBe('return value');
     });
   });
@@ -1045,7 +1026,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
         type: PacketType.PREPARE,
         amount: 100n,
         destination: 'g.test',
-        executionCondition: Buffer.alloc(32),
         expiresAt: new Date('2025-01-01T00:00:00.000Z'),
         data: Buffer.from('test'),
       };
@@ -1063,7 +1043,6 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
         type: PacketType.PREPARE,
         amount: 500n,
         destination: 'g.receiver',
-        executionCondition: Buffer.alloc(32, 0xaa),
         expiresAt: new Date('2025-06-01T00:00:00.000Z'),
         data: largeData,
       };
@@ -1075,30 +1054,30 @@ describe('RFC-0027 ILPv4 Test Vectors - Binary Format Validation', () => {
       expect(deserialized.data).toEqual(largeData);
     });
 
-    it('should handle Fulfill packet with all-zero fulfillment', () => {
+    it('should handle Fulfill packet with empty data', () => {
       const packet: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0x00),
         data: Buffer.from([]),
       };
 
       const serialized = serializeFulfill(packet);
       const deserialized = deserializeFulfill(serialized);
 
-      expect(deserialized.fulfillment).toEqual(Buffer.alloc(32, 0x00));
+      expect(deserialized.type).toBe(PacketType.FULFILL);
+      expect(deserialized.data).toEqual(Buffer.from([]));
     });
 
-    it('should handle Fulfill packet with all-FF fulfillment', () => {
+    it('should handle Fulfill packet with data payload', () => {
       const packet: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0xff),
-        data: Buffer.from([]),
+        data: Buffer.from('test-data'),
       };
 
       const serialized = serializeFulfill(packet);
       const deserialized = deserializeFulfill(serialized);
 
-      expect(deserialized.fulfillment).toEqual(Buffer.alloc(32, 0xff));
+      expect(deserialized.type).toBe(PacketType.FULFILL);
+      expect(deserialized.data).toEqual(Buffer.from('test-data'));
     });
 
     it('should handle Reject packet with empty message string', () => {
@@ -1269,14 +1248,13 @@ describe('OER Encoding Uncovered Edge Cases (Coverage Improvement)', () => {
     it('should throw BufferUnderflowError when Fulfill packet buffer is truncated', () => {
       const validPacket: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0x99),
         data: Buffer.from('response data'),
       };
 
       const serialized = serializeFulfill(validPacket);
 
-      // Truncate after type byte but before full fulfillment
-      const truncated = serialized.slice(0, 20); // Type (1) + partial fulfillment (19 of 32)
+      // Truncate after type byte but before full wire-format fulfillment (32 zero bytes)
+      const truncated = serialized.slice(0, 20); // Type (1) + partial zero bytes (19 of 32)
 
       expect(() => deserializeFulfill(truncated)).toThrow(BufferUnderflowError);
     });
@@ -1286,7 +1264,6 @@ describe('OER Encoding Uncovered Edge Cases (Coverage Improvement)', () => {
         type: PacketType.PREPARE,
         amount: 1000n,
         destination: 'g.alice',
-        executionCondition: Buffer.alloc(32, 0xcc),
         expiresAt: new Date('2025-12-31T23:59:59.999Z'),
         data: Buffer.from([]),
       };

@@ -27,7 +27,6 @@ export function createTestPreparePacket(overrides?: Partial<ILPPreparePacket>): 
     type: PacketType.PREPARE,
     amount: BigInt(1000),
     destination: 'g.alice',
-    executionCondition: Buffer.alloc(32, 0),
     expiresAt: new Date('2025-12-31T23:59:59Z'),
     data: Buffer.alloc(0),
     ...overrides,
@@ -42,7 +41,6 @@ export function createTestPreparePacket(overrides?: Partial<ILPPreparePacket>): 
 export function createTestFulfillPacket(overrides?: Partial<ILPFulfillPacket>): ILPFulfillPacket {
   return {
     type: PacketType.FULFILL,
-    fulfillment: Buffer.alloc(32, 1),
     data: Buffer.alloc(0),
     ...overrides,
   };

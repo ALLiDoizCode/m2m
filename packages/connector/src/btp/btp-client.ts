@@ -502,9 +502,6 @@ export class BTPClient extends EventEmitter {
             if (json.type === 'FULFILL') {
               const fulfillPacket: ILPFulfillPacket = {
                 type: PacketType.FULFILL,
-                fulfillment: json.fulfillment
-                  ? Buffer.from(json.fulfillment, 'base64')
-                  : Buffer.alloc(32),
                 data: json.data ? Buffer.from(json.data, 'base64') : Buffer.alloc(0),
               };
               pending.resolve(fulfillPacket);

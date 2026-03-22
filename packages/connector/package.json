@@ -1,6 +1,6 @@
 {
   "name": "@toon-protocol/connector",
-  "version": "1.8.2",
+  "version": "2.0.0",
   "description": "Connector with BTP support and EVM settlement",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
@@ -67,7 +67,7 @@
     "test:btp": "jest --testPathPattern='btp-'",
     "test:evm": "jest --testPathPattern='embedded-evm-settlement|per-packet-claims-e2e'",
     "test:embedded": "jest --testPathPattern='test/integration' --testPathIgnorePatterns='docker-|deployment|mesh-topology|full-stack'",
-    "test:crosstown-e2e": "jest --testPathPattern='crosstown-comprehensive-e2e'",
+    "test:town-e2e": "jest --testPathPattern='town-comprehensive-e2e'",
     "lint": "eslint src --ext .ts",
     "dev": "tsc --watch",
     "benchmark": "ts-node scripts/benchmark.ts",

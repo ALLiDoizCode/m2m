@@ -112,7 +112,6 @@ describe('consumer-types compilation test', () => {
       ): Promise<LocalDeliveryResponse> => {
         return {
           fulfill: {
-            fulfillment: Buffer.alloc(32).toString('base64'),
             data: Buffer.alloc(0).toString('base64'),
           },
         };
@@ -125,7 +124,6 @@ describe('consumer-types compilation test', () => {
       const params: SendPacketParams = {
         destination: 'g.test.receiver',
         amount: 1000n,
-        executionCondition: Buffer.alloc(32),
         expiresAt: new Date(),
         data: Buffer.from('test'),
       };
@@ -150,7 +148,6 @@ describe('consumer-types compilation test', () => {
         type: 12 as ILPPreparePacket['type'],
         destination: 'g.test',
         amount: 100n,
-        executionCondition: Buffer.alloc(32),
         expiresAt: new Date(),
         data: Buffer.alloc(0),
       };
@@ -158,7 +155,6 @@ describe('consumer-types compilation test', () => {
       // ILPFulfillPacket - type uses PacketType.FULFILL enum (value 13)
       const fulfill: ILPFulfillPacket = {
         type: 13 as ILPFulfillPacket['type'],
-        fulfillment: Buffer.alloc(32),
         data: Buffer.alloc(0),
       };
 

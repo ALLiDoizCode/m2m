@@ -375,7 +375,6 @@ export class ConnectorNode implements HealthStatusProvider {
       type: PacketType.PREPARE,
       destination: params.destination,
       amount: params.amount,
-      executionCondition: params.executionCondition,
       expiresAt: params.expiresAt,
       data: params.data ?? Buffer.alloc(0),
     };

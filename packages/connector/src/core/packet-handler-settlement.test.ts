@@ -10,7 +10,6 @@
  * @packageDocumentation
  */
 
-import * as crypto from 'crypto';
 import { PacketHandler } from './packet-handler';
 import { RoutingTable } from '../routing/routing-table';
 import { BTPClientManager } from '../btp/btp-client-manager';
@@ -24,7 +23,6 @@ import {
 } from '@toon-protocol/shared';
 import { SettlementConfig } from '../config/types';
 import type { PerPacketClaimService } from '../settlement/per-packet-claim-service';
-import { computeFulfillmentFromData } from './payment-handler';
 import pino from 'pino';
 
 // Mock AccountManager
@@ -36,13 +34,10 @@ describe('PacketHandler Settlement Integration (Story 6.4)', () => {
 
   const createValidPreparePacket = (): ILPPreparePacket => {
     const data = Buffer.alloc(0);
-    const fulfillment = computeFulfillmentFromData(data);
-    const condition = crypto.createHash('sha256').update(fulfillment).digest();
     return {
       type: PacketType.PREPARE,
       amount: 100000n,
       destination: 'g.alice.wallet.USD',
-      executionCondition: condition,
       expiresAt: new Date(Date.now() + 30000), // 30 seconds from now
       data,
     };
@@ -66,10 +61,9 @@ describe('PacketHandler Settlement Integration (Story 6.4)', () => {
 
   const createMockBTPClientManager = (): jest.Mocked<BTPClientManager> => {
     const mockClientManager = {
-      sendToPeer: jest.fn().mockImplementation((_peerId: string, packet: ILPPreparePacket) => {
+      sendToPeer: jest.fn().mockImplementation((_peerId: string, _packet: ILPPreparePacket) => {
         return Promise.resolve({
           type: PacketType.FULFILL,
-          fulfillment: computeFulfillmentFromData(packet.data),
           data: Buffer.alloc(0),
         } as ILPFulfillPacket);
       }),
@@ -532,7 +526,7 @@ describe('PacketHandler Settlement Integration (Story 6.4)', () => {
   });
 
   describe('Metadata Correlation Tests', () => {
-    it('should use executionCondition as packetId for settlement metadata', async () => {
+    it('should record settlement metadata for packet transfers', async () => {
       // Arrange
       const routingTable = new RoutingTable([{ prefix: 'g.alice', nextHop: 'peer-a' }]);
       const mockBTPClientManager = createMockBTPClientManager();
@@ -559,7 +553,7 @@ describe('PacketHandler Settlement Integration (Story 6.4)', () => {
       // Assert - recordPacketTransfers called (settlement recording occurred)
       expect(mockAccountManager.recordPacketTransfers).toHaveBeenCalled();
 
-      // Note: Transfer IDs are deterministically generated from executionCondition
+      // Note: Transfer IDs are deterministically generated
       // in the generateTransferId() helper method
     });
   });

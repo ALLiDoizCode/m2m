@@ -4,7 +4,6 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import * as crypto from 'crypto';
 import { PacketType, ILPErrorCode, ILPPreparePacket } from '@toon-protocol/shared';
 import { LocalDeliveryClient } from './local-delivery-client';
 import type { PaymentResponse } from './payment-handler';
@@ -28,14 +27,11 @@ const createMockLogger = (): any => ({
 /** Build a valid ILPPreparePacket for testing. */
 const createTestPacket = (overrides?: Partial<ILPPreparePacket>): ILPPreparePacket => {
   const data = Buffer.from('test-payload');
-  const fulfillment = crypto.createHash('sha256').update(data).digest();
-  const condition = crypto.createHash('sha256').update(fulfillment).digest();
 
   return {
     type: PacketType.PREPARE,
     destination: 'g.peerA.alice',
     amount: 1000n,
-    executionCondition: condition,
     expiresAt: new Date(Date.now() + 30000),
     data,
     ...overrides,
@@ -143,7 +139,7 @@ describe('LocalDeliveryClient', () => {
   // ── deliver() — accept ─────────────────────────────────────────────────
 
   describe('deliver — accept', () => {
-    it('should return fulfillment as SHA256(data)', async () => {
+    it('should return FULFILL on accept', async () => {
       global.fetch = jest.fn(
         async () => new Response(JSON.stringify({ accept: true }), { status: 200 })
       ) as any;
@@ -153,10 +149,6 @@ describe('LocalDeliveryClient', () => {
       const result = await client.deliver(packet, 'peerA');
 
       expect(result.type).toBe(PacketType.FULFILL);
-      if (result.type !== PacketType.FULFILL) throw new Error('Expected FULFILL');
-
-      const expectedFulfillment = crypto.createHash('sha256').update(packet.data).digest();
-      expect(result.fulfillment).toEqual(expectedFulfillment);
     });
 
     it('should pass through valid response data on accept', async () => {

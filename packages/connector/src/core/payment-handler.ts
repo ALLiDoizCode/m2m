@@ -2,20 +2,10 @@
  * Payment Handler — Simple payment handler for in-process delivery
  *
  * Provides a simplified DX for handling inbound payments without
- * requiring knowledge of ILP packet types, fulfillment computation,
- * or error code mappings.
+ * requiring knowledge of ILP packet types or error code mappings.
  *
- * ## Fulfillment Scheme (Simplified, Non-STREAM)
- *
- * This connector uses a simplified data-based fulfillment scheme rather than
- * STREAM's HMAC-based approach:
- *
- *   fulfillment = SHA256(packet.data)
- *   condition   = SHA256(fulfillment)
- *
- * This is safe in trusted bilateral peering networks with on-chain settlement,
- * where both sides cooperate and the fulfillment serves as a consistency check
- * rather than a security boundary.
+ * Payment verification relies on self-described claims in the packet data
+ * rather than fulfillment/condition cryptography.
  *
  * @packageDocumentation
  */
@@ -33,7 +23,7 @@ const ILP_MAX_DATA_BYTES = 32768;
 
 /**
  * Simplified inbound payment request.
- * Drops executionCondition and sourcePeer — users don't need them.
+ * Drops sourcePeer — users don't need it.
  */
 export interface PaymentRequest {
   /** Unique payment identifier (base64url) */
@@ -103,30 +93,6 @@ export const REJECT_CODE_MAP: Record<string, string> = {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Compute fulfillment from raw packet data.
- * fulfillment = SHA256(data)
- *
- * @param data - Raw packet data bytes
- * @returns 32-byte SHA-256 hash (fulfillment preimage)
- */
-export function computeFulfillmentFromData(data: Buffer): Buffer {
-  return crypto.createHash('sha256').update(data).digest();
-}
-
-/**
- * Validate that a fulfillment matches its expected condition.
- * Checks: SHA256(fulfillment) === condition
- *
- * @param fulfillment - 32-byte fulfillment preimage
- * @param condition - 32-byte execution condition
- * @returns true if SHA256(fulfillment) equals condition
- */
-export function validateFulfillment(fulfillment: Buffer, condition: Buffer): boolean {
-  const expected = crypto.createHash('sha256').update(fulfillment).digest();
-  return expected.equals(condition);
-}
-
-/**
  * Generate a random payment ID.
  *
  * @returns URL-safe base64 string (16 random bytes)
@@ -190,7 +156,7 @@ export function validateResponseData(data: string | undefined, logger: Logger): 
  * 2. LocalDeliveryRequest → PaymentRequest transformation
  * 3. User handler invocation (catches throws → T00 reject)
  * 4. PaymentResponse → LocalDeliveryResponse transformation
- *    (computing fulfillment on accept, mapping reject codes)
+ *    (mapping reject codes on reject)
  *
  * @param handler - Simple payment handler function
  * @param logger - Logger instance
@@ -241,14 +207,10 @@ export function createPaymentHandlerAdapter(
 
     // 4. Transform PaymentResponse → LocalDeliveryResponse
     if (response.accept) {
-      // Compute fulfillment as SHA256(data)
-      const fulfillment = computeFulfillmentFromData(Buffer.from(packet.data, 'base64'));
-
       logger.info({ paymentId, amount: packet.amount }, 'Payment fulfilled');
 
       return {
         fulfill: {
-          fulfillment: fulfillment.toString('base64'),
           data: validateResponseData(response.data, logger),
         },
       };

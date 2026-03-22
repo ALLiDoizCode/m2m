@@ -376,17 +376,11 @@ export function decodeGeneralizedTime(
  * @see {@link https://interledger.org/rfcs/0027-interledger-protocol-4/#ilp-prepare|RFC-0027 Section 3.1}
  */
 export function serializePrepare(packet: ILPPreparePacket): Buffer {
-  // Validate executionCondition is 32 bytes
-  if (packet.executionCondition.length !== 32) {
-    throw new InvalidPacketError(
-      `executionCondition must be 32 bytes, got ${packet.executionCondition.length}`
-    );
-  }
-
   const type = Buffer.from([PacketType.PREPARE]);
   const amount = encodeVarUInt(packet.amount);
   const expiresAt = encodeGeneralizedTime(packet.expiresAt);
-  const executionCondition = encodeFixedOctetString(packet.executionCondition, 32);
+  // Write 32 zero bytes for ILPv4 wire format compatibility (executionCondition field unused)
+  const executionCondition = encodeFixedOctetString(Buffer.alloc(32), 32);
   const destination = encodeVarOctetString(Buffer.from(packet.destination, 'utf8'));
   const data = encodeVarOctetString(packet.data);
 
@@ -410,13 +404,9 @@ export function serializePrepare(packet: ILPPreparePacket): Buffer {
  * @see {@link https://interledger.org/rfcs/0027-interledger-protocol-4/#ilp-fulfill|RFC-0027 Section 3.2}
  */
 export function serializeFulfill(packet: ILPFulfillPacket): Buffer {
-  // Validate fulfillment is 32 bytes
-  if (packet.fulfillment.length !== 32) {
-    throw new InvalidPacketError(`fulfillment must be 32 bytes, got ${packet.fulfillment.length}`);
-  }
-
   const type = Buffer.from([PacketType.FULFILL]);
-  const fulfillment = encodeFixedOctetString(packet.fulfillment, 32);
+  // Write 32 zero bytes for ILPv4 wire format compatibility (fulfillment field unused)
+  const fulfillment = encodeFixedOctetString(Buffer.alloc(32), 32);
   const data = encodeVarOctetString(packet.data);
 
   return Buffer.concat([type, fulfillment, data]);
@@ -527,12 +517,8 @@ export function deserializePrepare(buffer: Buffer): ILPPreparePacket {
   const { value: expiresAt, bytesRead: expiresAtBytes } = decodeGeneralizedTime(buffer, offset);
   offset += expiresAtBytes;
 
-  // Decode executionCondition (32 bytes)
-  const { value: executionCondition, bytesRead: conditionBytes } = decodeFixedOctetString(
-    buffer,
-    offset,
-    32
-  );
+  // Skip executionCondition field (32 bytes, unused — kept for ILPv4 wire compatibility)
+  const { bytesRead: conditionBytes } = decodeFixedOctetString(buffer, offset, 32);
   offset += conditionBytes;
 
   // Decode destination
@@ -557,7 +543,6 @@ export function deserializePrepare(buffer: Buffer): ILPPreparePacket {
     type: PacketType.PREPARE,
     amount,
     destination,
-    executionCondition,
     expiresAt,
     data,
   };
@@ -592,12 +577,8 @@ export function deserializeFulfill(buffer: Buffer): ILPFulfillPacket {
     );
   }
 
-  // Decode fulfillment (32 bytes)
-  const { value: fulfillment, bytesRead: fulfillmentBytes } = decodeFixedOctetString(
-    buffer,
-    offset,
-    32
-  );
+  // Skip fulfillment field (32 bytes, unused — kept for ILPv4 wire compatibility)
+  const { bytesRead: fulfillmentBytes } = decodeFixedOctetString(buffer, offset, 32);
   offset += fulfillmentBytes;
 
   // Decode data
@@ -606,7 +587,6 @@ export function deserializeFulfill(buffer: Buffer): ILPFulfillPacket {
 
   return {
     type: PacketType.FULFILL,
-    fulfillment,
     data,
   };
 }

@@ -2,7 +2,6 @@
  * Unit tests for packet-factory.ts
  */
 
-import { createHash } from 'crypto';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import {
   createTestPreparePacket,
@@ -17,25 +16,13 @@ describe('packet-factory', () => {
       const amount = 1000n;
       const expirySeconds = 30;
 
-      const { packet, preimage } = createTestPreparePacket(destination, amount, expirySeconds);
+      const { packet } = createTestPreparePacket(destination, amount, expirySeconds);
 
       expect(packet.type).toBe(PacketType.PREPARE);
       expect(packet.destination).toBe(destination);
       expect(packet.amount).toBe(amount);
-      expect(packet.executionCondition).toBeInstanceOf(Buffer);
-      expect(packet.executionCondition.length).toBe(32);
       expect(packet.expiresAt).toBeInstanceOf(Date);
       expect(packet.data).toBeInstanceOf(Buffer);
-      expect(preimage).toBeInstanceOf(Buffer);
-      expect(preimage.length).toBe(32);
-    });
-
-    it('should generate execution condition that matches SHA-256 hash of preimage', () => {
-      const { packet, preimage } = createTestPreparePacket('g.test', 1000n, 30);
-
-      const hash = createHash('sha256').update(preimage).digest();
-
-      expect(hash.equals(packet.executionCondition)).toBe(true);
     });
 
     it('should throw error for invalid destination address', () => {
@@ -79,46 +66,22 @@ describe('packet-factory', () => {
 
       expect(packet.data.length).toBe(0);
     });
-
-    it('should generate unique preimages for each packet', () => {
-      const { preimage: preimage1 } = createTestPreparePacket('g.test', 1000n, 30);
-      const { preimage: preimage2 } = createTestPreparePacket('g.test', 1000n, 30);
-
-      expect(preimage1.equals(preimage2)).toBe(false);
-    });
   });
 
   describe('createTestFulfillPacket', () => {
     it('should create valid Fulfill packet', () => {
-      const { preimage } = createTestPreparePacket('g.test', 1000n, 30);
-      const fulfillPacket = createTestFulfillPacket(preimage);
+      const fulfillPacket = createTestFulfillPacket();
 
       expect(fulfillPacket.type).toBe(PacketType.FULFILL);
-      expect(fulfillPacket.fulfillment).toBeInstanceOf(Buffer);
-      expect(fulfillPacket.fulfillment.equals(preimage)).toBe(true);
       expect(fulfillPacket.data).toBeInstanceOf(Buffer);
       expect(fulfillPacket.data.length).toBe(0);
     });
 
     it('should include optional data payload', () => {
-      const { preimage } = createTestPreparePacket('g.test', 1000n, 30);
       const dataPayload = Buffer.from('return data', 'utf8');
-      const fulfillPacket = createTestFulfillPacket(preimage, dataPayload);
+      const fulfillPacket = createTestFulfillPacket(dataPayload);
 
       expect(fulfillPacket.data.equals(dataPayload)).toBe(true);
-    });
-
-    it('should throw error if preimage is not 32 bytes', () => {
-      const tooShort = Buffer.alloc(16);
-      const tooLong = Buffer.alloc(64);
-
-      expect(() => {
-        createTestFulfillPacket(tooShort);
-      }).toThrow('Preimage must be 32 bytes');
-
-      expect(() => {
-        createTestFulfillPacket(tooLong);
-      }).toThrow('Preimage must be 32 bytes');
     });
   });
 

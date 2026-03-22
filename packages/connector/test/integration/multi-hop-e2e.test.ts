@@ -17,7 +17,6 @@
  * @packageDocumentation
  */
 
-import { randomBytes, createHash } from 'crypto';
 import {
   createMultiHopTestNetwork,
   waitForAnvilReady,
@@ -71,9 +70,6 @@ describeEvm('Multi-Hop E2E Integration (5-Peer Linear Chain)', () => {
       const result = await network.sendPacket(0, 'test.peer5.receiver', amount);
 
       expect(result.type).toBe(PacketType.FULFILL);
-      expect((result as ILPFulfillPacket).fulfillment).toBeDefined();
-      expect((result as ILPFulfillPacket).fulfillment).toBeInstanceOf(Buffer);
-      expect((result as ILPFulfillPacket).fulfillment.length).toBe(32);
     });
 
     // T-002: Balance verification after fulfill
@@ -339,13 +335,9 @@ describeEvm('Multi-Hop E2E Integration (5-Peer Linear Chain)', () => {
     it('T-013: should reject expired packet with R00 or R02', async () => {
       // Create a packet with very short expiry (2 seconds)
       // By the time it traverses 4 hops, it should expire
-      const preimage = randomBytes(32);
-      const condition = createHash('sha256').update(preimage).digest();
-
       const result = await network.peers[0]!.sendPacket({
         destination: 'test.peer5.receiver',
         amount: 1000n,
-        executionCondition: condition,
         expiresAt: new Date(Date.now() + 2000), // 2 seconds
         data: Buffer.alloc(0),
       });
@@ -361,25 +353,19 @@ describeEvm('Multi-Hop E2E Integration (5-Peer Linear Chain)', () => {
       // If it somehow succeeds in 2s, that's also acceptable on fast machines
     });
 
-    // T-014: Invalid packet rejection (F01)
-    it('T-014: should reject packet with invalid execution condition', async () => {
-      // 16-byte condition instead of required 32 bytes
-      const shortCondition = randomBytes(16);
-
+    // T-014: Invalid packet rejection
+    it('T-014: should reject packet with unroutable destination', async () => {
       const result = await network.peers[0]!.sendPacket({
-        destination: 'test.peer5.receiver',
+        destination: 'test.nonexistent.invalid',
         amount: 1000n,
-        executionCondition: shortCondition,
         expiresAt: new Date(Date.now() + 60_000),
         data: Buffer.alloc(0),
       });
 
-      // Should reject with F01 or the packet handler may catch it differently
-      if (result.type === PacketType.REJECT) {
-        const reject = result as ILPRejectPacket;
-        // Could be F01 or F00 depending on validation layer
-        expect(reject.code).toBeDefined();
-      }
+      // Should reject with F02 for unroutable destination
+      expect(result.type).toBe(PacketType.REJECT);
+      const reject = result as ILPRejectPacket;
+      expect(reject.code).toBe(ILPErrorCode.F02_UNREACHABLE);
     });
 
     // T-015: Routing table verification

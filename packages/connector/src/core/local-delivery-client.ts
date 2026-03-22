@@ -3,8 +3,8 @@
  *
  * HTTP client for forwarding ILP packets to an external business logic server
  * for local delivery handling. Sends simplified PaymentRequest/PaymentResponse
- * (no ILP knowledge required on the BLS side) and handles fulfillment
- * computation, reject code mapping, and data validation internally.
+ * (no ILP knowledge required on the BLS side) and handles reject code mapping
+ * and data validation internally.
  */
 
 import { Logger } from 'pino';
@@ -19,8 +19,6 @@ import { LocalDeliveryConfig } from '../config/types';
 import {
   PaymentRequest,
   PaymentResponse,
-  computeFulfillmentFromData,
-  validateFulfillment,
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
@@ -181,29 +179,6 @@ export class LocalDeliveryClient {
       }
 
       if (result.accept) {
-        // Compute fulfillment = SHA256(data)
-        const fulfillment = computeFulfillmentFromData(packet.data);
-
-        // Validate fulfillment matches the packet's execution condition.
-        // A mismatch here indicates a bug in condition generation.
-        if (!validateFulfillment(fulfillment, packet.executionCondition)) {
-          this.logger.error(
-            {
-              paymentId,
-              destination: request.destination,
-              event: 'invalid_fulfillment',
-            },
-            'Computed fulfillment does not match execution condition (bug in condition generation)'
-          );
-          return {
-            type: PacketType.REJECT,
-            code: ILPErrorCode.T00_INTERNAL_ERROR,
-            triggeredBy: '',
-            message: 'Fulfillment/condition mismatch',
-            data: Buffer.alloc(0),
-          };
-        }
-
         const validatedData = validateResponseData(result.data, this.logger);
 
         this.logger.info(
@@ -213,7 +188,6 @@ export class LocalDeliveryClient {
 
         return {
           type: PacketType.FULFILL,
-          fulfillment,
           data: validatedData ? Buffer.from(validatedData, 'base64') : Buffer.alloc(0),
         };
       } else {

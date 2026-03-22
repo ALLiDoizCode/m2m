@@ -74,7 +74,6 @@ const createValidPreparePacket = (): ILPPreparePacket => {
     type: PacketType.PREPARE,
     amount: BigInt(1000),
     destination: 'g.alice.wallet',
-    executionCondition: Buffer.alloc(32),
     expiresAt: futureExpiry,
     data: Buffer.alloc(0),
   };
@@ -85,7 +84,6 @@ const createValidPreparePacket = (): ILPPreparePacket => {
  */
 const createValidFulfillPacket = (): ILPFulfillPacket => ({
   type: PacketType.FULFILL,
-  fulfillment: Buffer.alloc(32),
   data: Buffer.alloc(0),
 });
 

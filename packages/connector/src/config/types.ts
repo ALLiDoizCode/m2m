@@ -1410,15 +1410,13 @@ export interface LocalDeliveryConfig {
  * ```
  */
 /**
- * Request sent to agent runtime for local delivery.
+ * Request sent to BLS for local delivery.
  */
 export interface LocalDeliveryRequest {
   /** Full ILP destination address */
   destination: string;
   /** Amount in smallest unit (as string for precision) */
   amount: string;
-  /** Execution condition (base64-encoded 32-byte hash) */
-  executionCondition: string;
   /** ISO 8601 expiration timestamp */
   expiresAt: string;
   /** Prepare packet data (base64) */
@@ -1430,13 +1428,11 @@ export interface LocalDeliveryRequest {
 }
 
 /**
- * Response from agent runtime.
+ * Response from BLS.
  */
 export interface LocalDeliveryResponse {
   /** Fulfill response (mutually exclusive with reject) */
   fulfill?: {
-    /** Fulfillment preimage (base64-encoded 32-byte value) */
-    fulfillment: string;
     /** Optional response data (base64) */
     data?: string;
   };
@@ -1471,8 +1467,6 @@ export interface SendPacketParams {
   destination: string;
   /** Transfer amount in smallest currency unit */
   amount: bigint;
-  /** 32-byte SHA-256 execution condition */
-  executionCondition: Buffer;
   /** Packet expiration timestamp */
   expiresAt: Date;
   /** Optional application data payload */
@@ -1566,15 +1560,12 @@ export interface IlpSendRequest {
  *
  * @property accepted - Whether the ILP packet was accepted (fulfilled)
  * @property fulfilled - Deprecated alias for `accepted` (backward compatibility)
- * @property fulfillment - Base64-encoded 32-byte fulfillment preimage (when accepted=true)
  * @property code - ILP error code (when accepted=false)
  * @property message - Human-readable error message (when accepted=false)
  * @property data - Base64-encoded response data (optional)
  */
 export interface IlpSendResponse {
   accepted: boolean;
-  fulfilled?: boolean;
-  fulfillment?: string;
   code?: string;
   message?: string;
   data?: string;

@@ -51,9 +51,10 @@ export interface ILPPacket {
 /**
  * ILP Prepare Packet
  *
- * Represents a conditional payment packet initiating an ILP transaction.
- * The prepare packet sets up a conditional transfer that can only be fulfilled
- * by providing the preimage to the executionCondition.
+ * Represents a payment packet initiating an ILP transaction.
+ * Self-described claims in the data field provide payment semantics;
+ * the legacy executionCondition field is written as 32 zero bytes
+ * on the wire for ILPv4 format compatibility.
  *
  * @see {@link https://interledger.org/rfcs/0027-interledger-protocol-4/#ilp-prepare|RFC-0027 Section 3.1: ILP Prepare}
  */
@@ -65,36 +66,27 @@ export interface ILPPreparePacket {
   /** Payment destination address (hierarchical ILP address per RFC-0015) */
   destination: ILPAddress;
   /**
-   * Execution condition - 32-byte SHA-256 hash
-   * Payment can only be fulfilled by providing the preimage to this hash
-   */
-  executionCondition: Buffer;
-  /**
    * Expiration timestamp (ISO 8601)
    * Payment must be fulfilled or rejected before this time
    */
   expiresAt: Date;
-  /** Optional application data payload */
+  /** Application data payload (contains self-described claims) */
   data: Buffer;
 }
 
 /**
  * ILP Fulfill Packet
  *
- * Represents successful payment fulfillment in response to a Prepare packet.
- * Contains the preimage (fulfillment) that hashes to the executionCondition
- * from the corresponding Prepare packet.
+ * Represents successful payment acceptance in response to a Prepare packet.
+ * The legacy fulfillment field is written as 32 zero bytes on the wire
+ * for ILPv4 format compatibility. Payment verification relies on
+ * self-described claims rather than fulfillment/condition cryptography.
  *
  * @see {@link https://interledger.org/rfcs/0027-interledger-protocol-4/#ilp-fulfill|RFC-0027 Section 3.2: ILP Fulfill}
  */
 export interface ILPFulfillPacket {
   /** Packet type identifier - always FULFILL (13) */
   type: PacketType.FULFILL;
-  /**
-   * Fulfillment - 32-byte preimage
-   * SHA-256 hash of this value must match the executionCondition from Prepare packet
-   */
-  fulfillment: Buffer;
   /** Optional return data */
   data: Buffer;
 }

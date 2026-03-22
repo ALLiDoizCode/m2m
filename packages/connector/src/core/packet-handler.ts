@@ -26,8 +26,8 @@ import {
   LocalDeliveryResponse,
 } from '../config/types';
 import { AccountLedgerCodes } from '../settlement/types';
+import * as crypto from 'crypto';
 import { LocalDeliveryClient } from './local-delivery-client';
-import { computeFulfillmentFromData, validateFulfillment } from './payment-handler';
 import type { PerPacketClaimService } from '../settlement/per-packet-claim-service';
 
 /**
@@ -121,10 +121,10 @@ export class PacketHandler {
   private settlementConfig: SettlementConfig | null;
 
   /**
-   * Local delivery client for forwarding to agent runtime via HTTP (optional)
+   * Local delivery client for forwarding to BLS via HTTP (optional)
    * @remarks
    * When enabled, packets destined for local addresses are forwarded
-   * via HTTP to an external agent runtime instead of auto-fulfilling.
+   * via HTTP to an external BLS instead of auto-fulfilling.
    */
   private localDeliveryClient: LocalDeliveryClient | null = null;
 
@@ -227,11 +227,11 @@ export class PacketHandler {
   }
 
   /**
-   * Set LocalDeliveryClient for forwarding local packets to agent runtime
+   * Set LocalDeliveryClient for forwarding local packets to BLS
    * @param config - Local delivery configuration
    * @remarks
    * When enabled, packets destined for local addresses (nextHop === nodeId || 'local')
-   * are forwarded via HTTP to an external agent runtime instead of auto-fulfilling.
+   * are forwarded via HTTP to an external BLS instead of auto-fulfilling.
    * This allows custom business logic to handle payments.
    */
   setLocalDelivery(config: LocalDeliveryConfig): void {
@@ -288,23 +288,23 @@ export class PacketHandler {
   }
 
   /**
-   * Generate deterministic transfer ID from packet execution condition and direction
+   * Generate deterministic transfer ID from packet data and direction
    *
-   * TigerBeetle requires unique 128-bit transfer IDs. We derive them from the packet's
-   * execution condition (32 bytes) combined with a direction indicator to ensure:
-   * 1. Uniqueness: execution condition is cryptographically unique (SHA-256 hash)
+   * TigerBeetle requires unique 128-bit transfer IDs. We derive them from a
+   * SHA-256 hash of the packet data combined with a direction indicator to ensure:
+   * 1. Uniqueness: SHA-256 of packet data is cryptographically unique
    * 2. Determinism: same packet+direction always generates same transfer ID
    * 3. Idempotency: safe to retry transfer creation
    *
-   * @param executionCondition - Packet's 32-byte execution condition
+   * @param packetData - Packet's application data payload
    * @param direction - 'incoming' or 'outgoing' to differentiate the two transfers
    * @returns 128-bit transfer ID as bigint
    * @private
    */
-  private generateTransferId(
-    executionCondition: Buffer,
-    direction: 'incoming' | 'outgoing'
-  ): bigint {
+  private generateTransferId(packetData: Buffer, direction: 'incoming' | 'outgoing'): bigint {
+    // Hash packet data to get a 32-byte digest for transfer ID derivation
+    const dataHash = crypto.createHash('sha256').update(packetData).digest();
+
     // Generate unique transfer IDs per connector by incorporating nodeId
     // This ensures each connector in a multi-hop chain has unique transfer IDs
     const directionByte = direction === 'incoming' ? 0x01 : 0x02;
@@ -317,9 +317,9 @@ export class PacketHandler {
     }
     nodeIdHash.writeBigUInt64BE((BigInt(hash >>> 0) << 32n) | BigInt(hash >>> 0), 0);
 
-    // Read first 16 bytes of execution condition as two 64-bit values
-    const high = executionCondition.readBigUInt64BE(0);
-    const low = executionCondition.readBigUInt64BE(8);
+    // Read first 16 bytes of data hash as two 64-bit values
+    const high = dataHash.readBigUInt64BE(0);
+    const low = dataHash.readBigUInt64BE(8);
 
     // XOR with nodeId hash to make unique per connector
     const nodeIdValue = nodeIdHash.readBigUInt64BE(0);
@@ -401,7 +401,7 @@ export class PacketHandler {
       return;
     }
 
-    const packetId = packet.executionCondition.toString('hex');
+    const packetId = crypto.createHash('sha256').update(packet.data).digest('hex').slice(0, 16);
 
     this.logger.debug(
       {
@@ -418,8 +418,8 @@ export class PacketHandler {
 
     try {
       // Generate deterministic transfer IDs for incoming and outgoing transfers
-      const incomingTransferId = this.generateTransferId(packet.executionCondition, 'incoming');
-      const outgoingTransferId = this.generateTransferId(packet.executionCondition, 'outgoing');
+      const incomingTransferId = this.generateTransferId(packet.data, 'incoming');
+      const outgoingTransferId = this.generateTransferId(packet.data, 'outgoing');
 
       // Record both transfers atomically via AccountManager
       // This posts two TigerBeetle transfers in a single batch:
@@ -471,26 +471,18 @@ export class PacketHandler {
    * @returns Validation result with isValid flag and optional error details
    * @remarks
    * Validates per RFC-0027:
-   * - All required fields present (amount, destination, executionCondition, expiresAt, data)
+   * - All required fields present (amount, destination, expiresAt, data)
    * - Destination is valid ILP address format per RFC-0015
    * - Packet has not expired (current time < expiresAt)
-   * - executionCondition is exactly 32 bytes
    */
   validatePacket(packet: ILPPreparePacket): ValidationResult {
     // Check all required fields present
-    if (
-      packet.amount === undefined ||
-      !packet.destination ||
-      !packet.executionCondition ||
-      !packet.expiresAt ||
-      !packet.data
-    ) {
+    if (packet.amount === undefined || !packet.destination || !packet.expiresAt || !packet.data) {
       this.logger.error(
         {
           packetType: packet.type,
           hasAmount: packet.amount !== undefined,
           hasDestination: !!packet.destination,
-          hasExecutionCondition: !!packet.executionCondition,
           hasExpiresAt: !!packet.expiresAt,
           hasData: !!packet.data,
           errorCode: ILPErrorCode.F01_INVALID_PACKET,
@@ -517,22 +509,6 @@ export class PacketHandler {
         isValid: false,
         errorCode: ILPErrorCode.F01_INVALID_PACKET,
         errorMessage: `Invalid ILP address format: ${packet.destination}`,
-      };
-    }
-
-    // Validate executionCondition is 32 bytes
-    if (packet.executionCondition.length !== 32) {
-      this.logger.error(
-        {
-          executionConditionLength: packet.executionCondition.length,
-          errorCode: ILPErrorCode.F01_INVALID_PACKET,
-        },
-        'Packet validation failed: executionCondition must be 32 bytes'
-      );
-      return {
-        isValid: false,
-        errorCode: ILPErrorCode.F01_INVALID_PACKET,
-        errorMessage: 'executionCondition must be exactly 32 bytes',
       };
     }
 
@@ -629,31 +605,13 @@ export class PacketHandler {
   /**
    * Convert LocalDeliveryResponse to ILP packet.
    * Handles fulfill, reject, and invalid (neither) cases.
-   * Validates fulfillment against execution condition when present.
    */
   private convertLocalDeliveryResponse(
-    result: LocalDeliveryResponse,
-    executionCondition: Buffer
+    result: LocalDeliveryResponse
   ): ILPFulfillPacket | ILPRejectPacket {
     if (result.fulfill) {
-      const fulfillment = Buffer.from(result.fulfill.fulfillment, 'base64');
-      if (!validateFulfillment(fulfillment, executionCondition)) {
-        this.logger.warn(
-          {
-            event: 'invalid_fulfillment',
-            source: 'local_delivery_handler',
-          },
-          'Local delivery handler returned invalid fulfillment (SHA256(fulfillment) != condition)'
-        );
-        return this.generateReject(
-          ILPErrorCode.T00_INTERNAL_ERROR,
-          'Invalid fulfillment from local delivery handler',
-          this.nodeId
-        );
-      }
       return {
         type: PacketType.FULFILL,
-        fulfillment,
         data: result.fulfill.data ? Buffer.from(result.fulfill.data, 'base64') : Buffer.alloc(0),
       };
     } else if (result.reject) {
@@ -922,14 +880,14 @@ export class PacketHandler {
         const request: LocalDeliveryRequest = {
           destination: packet.destination,
           amount: packet.amount.toString(),
-          executionCondition: packet.executionCondition.toString('base64'),
+
           expiresAt: packet.expiresAt.toISOString(),
           data: packet.data.toString('base64'),
           sourcePeer: sourcePeerId,
         };
         try {
           const result = await this.localDeliveryHandler(request, sourcePeerId);
-          return this.convertLocalDeliveryResponse(result, packet.executionCondition);
+          return this.convertLocalDeliveryResponse(result);
         } catch (error) {
           return this.generateReject(
             ILPErrorCode.T00_INTERNAL_ERROR,
@@ -939,11 +897,11 @@ export class PacketHandler {
         }
       }
 
-      // If local delivery client is enabled, forward to agent runtime via HTTP
+      // If local delivery client is enabled, forward to BLS via HTTP
       if (this.isLocalDeliveryEnabled() && this.localDeliveryClient) {
         this.logger.debug(
           { correlationId, destination: packet.destination },
-          'Forwarding to agent runtime for local delivery'
+          'Forwarding to BLS for local delivery'
         );
 
         const response = await this.localDeliveryClient.deliver(packet, sourcePeerId);
@@ -957,18 +915,16 @@ export class PacketHandler {
             timestamp: Date.now(),
           },
           response.type === PacketType.FULFILL
-            ? 'Packet fulfilled by agent runtime'
-            : 'Packet rejected by agent runtime'
+            ? 'Packet fulfilled by BLS'
+            : 'Packet rejected by BLS'
         );
 
         return response;
       }
 
       // Fallback: auto-fulfill local packets (educational/testing purposes)
-      // Computes fulfillment = SHA256(data) per simplified scheme (see payment-handler.ts)
       const fulfillPacket: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: computeFulfillmentFromData(packet.data),
         data: Buffer.from('Local delivery - auto-fulfill stub'),
       };
 
@@ -1135,7 +1091,7 @@ export class PacketHandler {
         const transitRequest: LocalDeliveryRequest = {
           destination: packet.destination,
           amount: packet.amount.toString(),
-          executionCondition: packet.executionCondition.toString('base64'),
+
           expiresAt: packet.expiresAt.toISOString(),
           data: packet.data.toString('base64'),
           sourcePeer: sourcePeerId,
@@ -1234,28 +1190,6 @@ export class PacketHandler {
       correlationId,
       claimProtocolData
     );
-
-    // Validate fulfillment from downstream peer before propagating upstream
-    if (response.type === PacketType.FULFILL) {
-      const fulfill = response as ILPFulfillPacket;
-      if (!validateFulfillment(fulfill.fulfillment, packet.executionCondition)) {
-        this.logger.warn(
-          {
-            correlationId,
-            event: 'invalid_fulfillment',
-            source: 'downstream_peer',
-            peerId: nextHop,
-            destination: packet.destination,
-          },
-          'Downstream peer returned invalid fulfillment (SHA256(fulfillment) != condition)'
-        );
-        return this.generateReject(
-          ILPErrorCode.T00_INTERNAL_ERROR,
-          'Invalid fulfillment from downstream peer',
-          this.nodeId
-        );
-      }
-    }
 
     this.logger.info(
       {

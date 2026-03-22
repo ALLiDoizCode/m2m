@@ -2,21 +2,16 @@
  * ILP Send Handler Tests
  *
  * Unit tests for the POST /admin/ilp/send endpoint handler.
- * Tests condition computation, request validation, response mapping,
- * timeout handling, and connector readiness checks.
+ * Tests request validation, response mapping, timeout handling,
+ * and connector readiness checks.
  */
 
-import * as crypto from 'crypto';
 import express, { Express } from 'express';
 import request from 'supertest';
 import pino from 'pino';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
-import {
-  IlpSendHandler,
-  computeConditionFromData,
-  validateIlpSendRequest,
-} from './ilp-send-handler';
+import { IlpSendHandler, validateIlpSendRequest } from './ilp-send-handler';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { SendPacketParams } from '../config/types';
 
@@ -43,45 +38,6 @@ function createApp(
   app.post('/ilp/send', handler.handle.bind(handler));
   return app;
 }
-
-describe('computeConditionFromData', () => {
-  it('should compute condition = SHA256(SHA256(data)) for known test vector', () => {
-    const data = Buffer.from('Hello World');
-    const { condition, fulfillment } = computeConditionFromData(data);
-
-    // Verify fulfillment = SHA256(data)
-    const expectedFulfillment = crypto.createHash('sha256').update(data).digest();
-    expect(fulfillment.equals(expectedFulfillment)).toBe(true);
-
-    // Verify condition = SHA256(fulfillment)
-    const expectedCondition = crypto.createHash('sha256').update(expectedFulfillment).digest();
-    expect(condition.equals(expectedCondition)).toBe(true);
-  });
-
-  it('should produce valid 32-byte buffers for empty data', () => {
-    const data = Buffer.alloc(0);
-    const { condition, fulfillment } = computeConditionFromData(data);
-
-    expect(condition.length).toBe(32);
-    expect(fulfillment.length).toBe(32);
-  });
-
-  it('should produce different conditions for different data', () => {
-    const { condition: c1 } = computeConditionFromData(Buffer.from('data1'));
-    const { condition: c2 } = computeConditionFromData(Buffer.from('data2'));
-
-    expect(c1.equals(c2)).toBe(false);
-  });
-
-  it('should be deterministic', () => {
-    const data = Buffer.from('deterministic test');
-    const result1 = computeConditionFromData(data);
-    const result2 = computeConditionFromData(data);
-
-    expect(result1.condition.equals(result2.condition)).toBe(true);
-    expect(result1.fulfillment.equals(result2.fulfillment)).toBe(true);
-  });
-});
 
 describe('validateIlpSendRequest', () => {
   it('should accept a valid request with all fields', () => {
@@ -280,11 +236,9 @@ describe('IlpSendHandler', () => {
   describe('FULFILL response mapping', () => {
     it('should return accepted: true on FULFILL response', async () => {
       const responseData = Buffer.from('response data');
-      const fulfillmentBuf = Buffer.alloc(32, 0xaa);
 
       const fulfillPacket: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: fulfillmentBuf,
         data: responseData,
       };
       mockSendPacket.mockResolvedValue(fulfillPacket);
@@ -293,7 +247,6 @@ describe('IlpSendHandler', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.accepted).toBe(true);
-      expect(res.body.fulfillment).toBe(fulfillmentBuf.toString('base64'));
       expect(res.body.data).toBe(responseData.toString('base64'));
     });
 
@@ -316,41 +269,9 @@ describe('IlpSendHandler', () => {
       expect(res.body.data).toBe(Buffer.from('error details').toString('base64'));
     });
 
-    it('should include deprecated fulfilled field matching accepted value', async () => {
-      const fulfillPacket: ILPFulfillPacket = {
-        type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0xaa),
-        data: Buffer.alloc(0),
-      };
-      mockSendPacket.mockResolvedValue(fulfillPacket);
-
-      const res = await request(app).post('/ilp/send').send(validRequestBody());
-
-      expect(res.body.accepted).toBe(true);
-      expect(res.body.fulfilled).toBe(true);
-      expect(res.body.accepted).toBe(res.body.fulfilled);
-
-      // Also verify on reject
-      const rejectPacket: ILPRejectPacket = {
-        type: PacketType.REJECT,
-        code: ILPErrorCode.F02_UNREACHABLE,
-        triggeredBy: 'g.connector',
-        message: 'No route',
-        data: Buffer.alloc(0),
-      };
-      mockSendPacket.mockResolvedValue(rejectPacket);
-
-      const res2 = await request(app).post('/ilp/send').send(validRequestBody());
-
-      expect(res2.body.accepted).toBe(false);
-      expect(res2.body.fulfilled).toBe(false);
-      expect(res2.body.accepted).toBe(res2.body.fulfilled);
-    });
-
     it('should omit data field when response data is empty', async () => {
       const fulfillPacket: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0xbb),
         data: Buffer.alloc(0),
       };
       mockSendPacket.mockResolvedValue(fulfillPacket);
@@ -392,7 +313,6 @@ describe('IlpSendHandler', () => {
               () =>
                 resolve({
                   type: PacketType.FULFILL,
-                  fulfillment: Buffer.alloc(32),
                   data: Buffer.alloc(0),
                 } as ILPFulfillPacket),
               500
@@ -413,7 +333,6 @@ describe('IlpSendHandler', () => {
     it('should use default timeout of 30000ms when timeoutMs not specified', async () => {
       const fulfillPacket: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0xcc),
         data: Buffer.alloc(0),
       };
       mockSendPacket.mockResolvedValue(fulfillPacket);
@@ -434,7 +353,6 @@ describe('IlpSendHandler', () => {
     it('should construct SendPacketParams with correct fields', async () => {
       const fulfillPacket: ILPFulfillPacket = {
         type: PacketType.FULFILL,
-        fulfillment: Buffer.alloc(32, 0xdd),
         data: Buffer.alloc(0),
       };
       mockSendPacket.mockResolvedValue(fulfillPacket);
@@ -448,13 +366,7 @@ describe('IlpSendHandler', () => {
 
       expect(paramsArg.destination).toBe('g.connector.peer1');
       expect(paramsArg.amount).toBe(BigInt('1500000'));
-      expect(paramsArg.executionCondition.length).toBe(32);
       expect(paramsArg.data!.equals(Buffer.from('Hello World'))).toBe(true);
-
-      // Verify condition matches SHA256(SHA256(data))
-      const rawData = Buffer.from(body.data as string, 'base64');
-      const { condition: expectedCondition } = computeConditionFromData(rawData);
-      expect(paramsArg.executionCondition.equals(expectedCondition)).toBe(true);
     }, 60_000);
   });
 
