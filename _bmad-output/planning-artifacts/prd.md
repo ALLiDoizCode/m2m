@@ -1,4 +1,4 @@
-# Crosstown Connector — Product Requirements Document (As-Built)
+# Town Connector — Product Requirements Document (As-Built)
 
 **Package:** `@toon-protocol/connector` v1.6.0
 **Date:** 2026-03-09
@@ -30,7 +30,7 @@
 
 ### What It Is
 
-Crosstown Connector is a production-ready Interledger Protocol (ILP) connector designed as both a TypeScript library and CLI tool for building payment networks between AI agents and services. It routes ILP packets across a network of peers via the Bilateral Transfer Protocol (BTP) over WebSocket, tracks balances with double-entry accounting, and settles to EVM-compatible blockchains (Base L2) through on-chain payment channels.
+Town Connector is a production-ready Interledger Protocol (ILP) connector designed as both a TypeScript library and CLI tool for building payment networks between AI agents and services. It routes ILP packets across a network of peers via the Bilateral Transfer Protocol (BTP) over WebSocket, tracks balances with double-entry accounting, and settles across multiple blockchains — EVM (Base L2), Solana, and Mina Protocol — through on-chain payment channels with a pluggable chain-provider architecture.
 
 ### Who It's For
 
@@ -40,7 +40,7 @@ Crosstown Connector is a production-ready Interledger Protocol (ILP) connector d
 
 ### Core Value Proposition
 
-A single npm package that provides ILP packet routing, BTP peer connectivity, EVM settlement with per-packet cryptographic claims, double-entry accounting, and real-time observability — deployable as an embedded library or standalone service with zero external dependencies beyond Node.js.
+A single npm package that provides ILP packet routing, BTP peer connectivity, multi-chain settlement (EVM, Solana, Mina Protocol) with per-packet cryptographic claims, optional transport privacy via NIP-59 Gift Wrap, double-entry accounting, and real-time observability — deployable as an embedded library or standalone service with zero external dependencies beyond Node.js.
 
 ---
 
@@ -48,7 +48,7 @@ A single npm package that provides ILP packet routing, BTP peer connectivity, EV
 
 - **Route ILP packets** between agents and peers across multi-hop networks using RFC-compliant ILPv4 and BTP protocols
 - **Track balances off-chain** with double-entry accounting (in-memory ledger by default, TigerBeetle optional) and enforce configurable credit limits per peer
-- **Settle to Base L2** via EVM payment channels with per-packet cryptographic balance proofs, enabling trustless micropayment settlement
+- **Settle across multiple chains** via a pluggable provider architecture — EVM (Base L2) with EIP-712 proofs, Solana with Ed25519 proofs, and Mina Protocol with zk-SNARK private balance proofs — enabling trustless micropayment settlement with per-peer chain selection
 - **Deploy flexibly** as an in-process library (embedded mode), standalone HTTP service, or Docker container — same codebase, same configuration schema
 - **Provide real-time observability** through an embedded Explorer UI with WebSocket event streaming, structured logging, and optional Prometheus/OpenTelemetry integration
 - **Minimize dependencies** — the connector runs with zero external services by default (in-memory accounting, no database required); TigerBeetle and EVM settlement are opt-in
@@ -71,19 +71,25 @@ The Bilateral Transfer Protocol (RFC-0023) provides WebSocket-based peer-to-peer
 - Automatic reconnection on connection drop
 - Per-packet claim attachment via BTP `protocolData` field
 
-### 3.3 EVM Settlement
+### 3.3 Multi-Chain Settlement
 
-Settlement occurs on Base L2 through a three-contract system:
+Settlement uses a pluggable `PaymentChannelProvider` interface (Epic 32), supporting multiple blockchains with per-peer chain selection. The `ChainProviderRegistry` manages active providers and routes settlement operations to the correct chain.
 
-| Contract               | Purpose                                                           |
-| ---------------------- | ----------------------------------------------------------------- |
-| `TokenNetworkRegistry` | Registry of token network instances                               |
-| `TokenNetwork`         | Per-token payment channel management                              |
-| `PaymentChannel`       | Bidirectional payment channels with EIP-712 signed balance proofs |
+| Chain             | On-Chain Program                      | Signature Scheme            | Claim Privacy       | Deployment Cost           |
+| ----------------- | ------------------------------------- | --------------------------- | ------------------- | ------------------------- |
+| **EVM (Base L2)** | `TokenNetwork.sol` (Solidity/Foundry) | EIP-712 (secp256k1)         | Public amounts      | Gas fees                  |
+| **Solana**        | Rust program (Pinocchio/native)       | Ed25519 (native precompile) | Public amounts      | ~$19-38 (refundable rent) |
+| **Mina Protocol** | TypeScript zkApp (o1js)               | Poseidon + zk-SNARK         | **Private amounts** | ~$0.06                    |
 
-**Per-Packet Claims (Epic 31):** Each outgoing ILP packet generates a cryptographically signed balance proof (EIP-712) containing cumulative transferred amount, monotonic nonce, and channel metadata. Claims are self-describing — they embed `chainId`, `tokenNetworkAddress`, and `tokenAddress` so the receiver can verify channels dynamically on first contact without prior negotiation.
+**Per-Packet Claims (Epic 31, extended in Epic 32):** Each outgoing ILP packet generates a chain-specific cryptographically signed balance proof — EIP-712 for EVM, Ed25519 for Solana, or Poseidon commitment with zk-SNARK for Mina. Claims are self-describing with a `blockchain` discriminator field and chain-specific metadata, enabling dynamic on-chain channel verification without prior negotiation.
 
-**Dynamic Channel Verification (Epic 31):** When a connector receives a claim for an unknown channel, it verifies the channel state on-chain and auto-registers the peer. This eliminates the requirement for Admin API channel pre-registration and supports unilateral channel opening.
+**Dynamic Channel Verification (Epic 31):** When a connector receives a claim for an unknown channel, it dispatches to the appropriate chain provider (based on the `blockchain` discriminator) to verify the channel state on-chain and auto-registers the peer.
+
+**Solana Settlement (Epic 33):** Payment channels on Solana use PDA-based state accounts keyed by participant pair + token mint. Ed25519 balance proofs are verified on-chain via Solana's native precompile. SPL Token escrow holds deposits in program-owned vault PDAs. Account subscriptions (`onAccountChange`) drive event-based settlement monitoring.
+
+**Mina ZK-Private Settlement (Epic 34):** The first payment channel implementation on Mina Protocol. Uses zk-SNARK proofs with Poseidon hash commitments so transferred amounts are never revealed on-chain — only balance commitments are stored. On-chain state is limited to 8 fields (Mina constraint); extended metadata uses off-chain Merkle trees with on-chain root commitments. Proof generation happens client-side on the connector node.
+
+**NIP-59 Transport Privacy (Epic 32):** Optional three-layer claim wrapping inspired by Nostr NIP-59 Gift Wrap. Applies to all chains at the BTP transport layer. Hides sender identity (ephemeral keys), claim content (double encryption via NIP-44 ChaCha20), and timing (randomized timestamps). Does not affect ILP packet routing or fee deduction — those operate at a separate protocol layer.
 
 ### 3.4 Double-Entry Accounting
 
@@ -219,12 +225,16 @@ Configuration is provided via YAML file (path set by `CONFIG_FILE` env var), dir
 
 ### 5.2 Peer Configuration
 
-| Field        | Type   | Required | Description                                         |
-| ------------ | ------ | -------- | --------------------------------------------------- |
-| `id`         | string | Yes      | Unique peer identifier                              |
-| `url`        | string | Yes      | WebSocket URL (`ws://` or `wss://`)                 |
-| `authToken`  | string | Yes      | BTP shared secret (empty string for permissionless) |
-| `evmAddress` | string | No       | Peer's EVM address for settlement                   |
+| Field           | Type    | Required | Description                                                                  |
+| --------------- | ------- | -------- | ---------------------------------------------------------------------------- |
+| `id`            | string  | Yes      | Unique peer identifier                                                       |
+| `url`           | string  | Yes      | WebSocket URL (`ws://` or `wss://`)                                          |
+| `authToken`     | string  | Yes      | BTP shared secret (empty string for permissionless)                          |
+| `evmAddress`    | string  | No       | Peer's EVM address for settlement                                            |
+| `solanaAddress` | string  | No       | Peer's Solana public key for settlement                                      |
+| `minaAddress`   | string  | No       | Peer's Mina public key for settlement                                        |
+| `chain`         | string  | No       | Settlement chain for this peer (`evm`, `solana`, `mina`) — defaults to `evm` |
+| `nip59Enabled`  | boolean | No       | Enable NIP-59 transport privacy for claims with this peer                    |
 
 ### 5.3 Route Configuration
 
@@ -301,44 +311,58 @@ Configuration is provided via YAML file (path set by `CONFIG_FILE` env var), dir
 1. Connector sends ILP PREPARE to peer via BTP
 2. `PerPacketClaimService.generateClaimForPacket()` called with peer ID, token ID, and packet amount
 3. Cumulative transferred amount incremented, nonce incremented (atomic under Node.js single-thread model)
-4. EIP-712 balance proof signed by connector's EVM private key
-5. Self-describing `EVMClaimMessage` constructed with channel metadata (`chainId`, `tokenNetworkAddress`, `tokenAddress`)
-6. Claim attached to BTP `protocolData` field (protocol name: `payment-channel-claim`)
-7. Claim persisted to SQLite for dispute resolution (non-blocking)
-8. Telemetry event emitted (non-blocking)
-9. On restart, nonce and cumulative state recovered from database — gap-free balance proof chain maintained
+4. Balance proof signed via the peer's chain provider (EIP-712 for EVM, Ed25519 for Solana, Poseidon commitment for Mina)
+5. Self-describing claim message constructed with chain-specific metadata and `blockchain` discriminator
+6. Optionally wrapped via NIP-59 Gift Wrap if transport privacy is enabled for this peer
+7. Claim attached to BTP `protocolData` field (protocol name: `payment-channel-claim`)
+8. Claim persisted to SQLite for dispute resolution (non-blocking)
+9. Telemetry event emitted (non-blocking)
+10. On restart, nonce and cumulative state recovered from database — gap-free balance proof chain maintained
 
-### 6.3 Self-Describing Claim Format
+### 6.3 Self-Describing Claim Format (Multi-Chain)
+
+All claims include a `blockchain` discriminator field that determines which chain provider handles verification. Each chain type has chain-specific self-describing fields:
+
+**Base claim fields (all chains):**
 
 ```typescript
 {
   version: '1.0',
-  blockchain: 'evm',
-  messageId: string,              // "evm-{channelId}-{nonce}-{timestamp}"
+  blockchain: 'evm' | 'solana' | 'mina',
+  messageId: string,
   timestamp: ISO8601,
-  senderId: string,               // Connector node ID
-  channelId: string,              // bytes32 hex
+  senderId: string,
   nonce: number,                  // Monotonically increasing
-  transferredAmount: string,      // Cumulative (JSON for BigInt precision)
-  lockedAmount: string,
-  locksRoot: string,              // bytes32 Merkle root
-  signature: string,              // EIP-712 signed
-  signerAddress: string,          // Sender's EVM address
-  chainId: number,                // Network chain ID (84532 = Base Sepolia)
-  tokenNetworkAddress: string,    // TokenNetwork contract
-  tokenAddress: string            // ERC-20 token contract
 }
 ```
 
+**EVM-specific fields:** `channelId`, `transferredAmount`, `signature` (EIP-712), `signerAddress`, `chainId`, `tokenNetworkAddress`, `tokenAddress`
+
+**Solana-specific fields:** `channelPDA`, `transferredAmount`, `signature` (Ed25519), `signerPubkey`, `programId`, `tokenMint`, `cluster`
+
+**Mina-specific fields:** `channelHash`, `balanceCommitment` (Poseidon hash — actual amount is private), `proof` (serialized zk-SNARK), `zkAppAddress`, `tokenId`, `network`
+
 ### 6.4 Settlement Trigger Flow
 
-1. `SettlementMonitor` polls peer balances at configurable interval
+1. `SettlementMonitor` monitors peer balances (event-driven via claim receipt)
 2. When credit balance exceeds threshold → emits `SETTLEMENT_REQUIRED` event
 3. `SettlementExecutor` receives event, transitions state to `IN_PROGRESS`
 4. Retrieves latest per-packet claim for the peer's channel
-5. Submits claim on-chain to `PaymentChannel` contract
+5. Dispatches to the peer's chain provider for on-chain submission (EVM `claimFromChannel()`, Solana `claim` instruction, or Mina zkApp method with proof generation)
 6. On success → resets channel tracking, transitions state to `IDLE`
-7. On failure → logs error, state returns to `PENDING` for retry
+7. On failure → logs error, state returns to `PENDING` for retry (chain-specific retry strategies)
+
+### 6.5 NIP-59 Transport Privacy Flow
+
+When enabled for a peer, claims are wrapped before BTP transmission:
+
+1. Claim payload constructed as an unsigned **Rumor** (provides deniability)
+2. Rumor encrypted to peer's public key as a **Seal** (NIP-44 ChaCha20), signed by sender's real key
+3. Seal encrypted with an **ephemeral one-time key** as a **Gift Wrap**, with randomized timestamp
+4. Gift Wrap transmitted via BTP `protocolData`
+5. Receiver unwraps: decrypt gift wrap → decrypt seal → extract rumor → verify claim via chain provider
+
+This wrapping is transparent to the chain provider — it operates at the BTP transport layer.
 
 ---
 
@@ -406,17 +430,47 @@ Optional integration via configuration:
 
 Shared-secret authentication per peer. Permissionless mode available (empty auth token). Authentication occurs during WebSocket handshake with 5-second timeout.
 
+### 9.2.1 Fraud Detection (Multi-Chain)
+
+- **Duplicate claim detection** — Claims with previously-seen messageIds are rejected (all chains)
+- **Nonce validation** — Claim nonces must be monotonically increasing per channel (all chains)
+- **Signature verification** — Dispatched to correct chain provider: EIP-712 `ecrecover` for EVM, Ed25519 precompile for Solana, zk-SNARK proof verification for Mina
+- **Balance proof validation** — Transferred amounts must be non-decreasing (cumulative) for EVM/Solana; commitment consistency verified via zk proof for Mina
+- **Replay protection** — Channel ID + nonce + chain type prevent cross-chain and within-chain replay
+- **NIP-59 unwrapping validation** — If transport privacy is enabled, Gift Wrap must decrypt successfully with valid ephemeral key signature before claim is processed
+
 ### 9.3 Key Management
 
-Multi-backend key management for EVM signing:
+Multi-backend key management for signing keys across all supported chains:
 
-| Backend    | Description                                               |
-| ---------- | --------------------------------------------------------- |
-| `env`      | Private key from environment variable or config (default) |
-| `aws-kms`  | AWS Key Management Service                                |
-| `gcp-kms`  | Google Cloud Key Management                               |
-| `azure-kv` | Azure Key Vault                                           |
-| `hsm`      | Hardware Security Module                                  |
+| Backend    | Description                                               | Chains Supported  |
+| ---------- | --------------------------------------------------------- | ----------------- |
+| `env`      | Private key from environment variable or config (default) | EVM, Solana, Mina |
+| `aws-kms`  | AWS Key Management Service                                | EVM               |
+| `gcp-kms`  | Google Cloud Key Management                               | EVM               |
+| `azure-kv` | Azure Key Vault                                           | EVM               |
+| `hsm`      | Hardware Security Module                                  | EVM               |
+
+Solana uses Ed25519 keypairs. Mina uses o1js-compatible keys. Both currently support the `env` backend with cloud KMS integration planned.
+
+### 9.5 Transport Privacy (NIP-59)
+
+Optional claim encryption at the BTP transport layer:
+
+- **Sender anonymity** — Claims wrapped with ephemeral one-time keys; real sender identity encrypted inside the Seal layer
+- **Content privacy** — Double encryption (NIP-44 ChaCha20) hides claim amounts and channel identifiers from BTP relays
+- **Timing privacy** — Timestamps randomized at each wrapping layer to prevent correlation
+- **Deniability** — Inner Rumor is unsigned; sender can deny authorship if leaked
+- **Selective disclosure** — Seal layer proves authorship to the intended peer only
+
+### 9.6 On-Chain Privacy (Mina)
+
+The Mina provider offers settlement privacy not available on EVM or Solana:
+
+- **Private balance proofs** — Transferred amounts are private inputs to zk-SNARK proofs; only Poseidon hash commitments appear on-chain
+- **Commitment-based state** — On-chain observers see balance commitment updates but cannot determine actual balances
+- **Selective disclosure** — Participants can selectively reveal balances to auditors by sharing the commitment salt
+- **Conservation proofs** — zk-SNARKs prove total balance is conserved without revealing individual amounts
 
 ### 9.4 Deployment Mode Restrictions
 
@@ -475,9 +529,15 @@ packages/
 │   ├── src/
 │   │   ├── core/              ConnectorNode, PacketHandler
 │   │   ├── btp/               BTPServer, BTPClient, BTPClientManager, claim types
-│   │   ├── settlement/        PaymentChannelSDK, PerPacketClaimService, SettlementMonitor,
-│   │   │                      SettlementExecutor, AccountManager, InMemoryLedgerClient,
-│   │   │                      ChannelManager, ClaimSender, ClaimReceiver
+│   │   ├── settlement/        ChainProviderRegistry, PaymentChannelProvider interface,
+│   │   │                      PerPacketClaimService, SettlementMonitor, SettlementExecutor,
+│   │   │                      AccountManager, InMemoryLedgerClient, ChannelManager,
+│   │   │                      ClaimSender, ClaimReceiver
+│   │   │   ├── providers/
+│   │   │   │   ├── evm/       EVMPaymentChannelProvider (ethers.js, EIP-712)
+│   │   │   │   ├── solana/    SolanaPaymentChannelProvider (@solana/web3.js, Ed25519)
+│   │   │   │   └── mina/      MinaPaymentChannelProvider (o1js, zk-SNARKs)
+│   │   │   └── privacy/       NIP-59 Gift Wrap transport layer (all chains)
 │   │   ├── http/              AdminApi, AdminServer, HealthServer, IlpSendHandler
 │   │   ├── routing/           RoutingTable (longest-prefix match)
 │   │   ├── config/            ConfigLoader, types, validation (Zod)
@@ -490,11 +550,19 @@ packages/
 │   ├── test/                  Integration and acceptance tests
 │   └── dist/                  Compiled output (lib.js entry, cli/index.js binary)
 │
-├── contracts/                  Foundry smart contracts
+├── contracts/                  EVM Foundry smart contracts
 │   ├── src/                   TokenNetworkRegistry, TokenNetwork, PaymentChannel
 │   ├── test/                  Solidity tests
 │   ├── script/                Deployment scripts
 │   └── anvil-state.json       Pre-initialized Anvil state
+│
+├── solana-program/             Solana payment channel program
+│   ├── src/                   Rust/Pinocchio program (PDA channels, Ed25519 verification)
+│   └── tests/                 solana-program-test / Bankrun tests
+│
+├── mina-zkapp/                 Mina payment channel zkApp
+│   ├── src/                   TypeScript/o1js zkApp (zk-SNARK private balance proofs)
+│   └── tests/                 o1js local blockchain tests
 │
 ├── shared/                     @toon-protocol/shared — ILP types, OER encoding, type guards
 ├── dashboard/                  Dashboard package (deprecated)
@@ -527,9 +595,15 @@ These requirements describe the system as currently implemented.
 
 **FR5:** The connector tracks peer balances using double-entry accounting with an in-memory ledger (default) or TigerBeetle (optional) and enforces configurable credit limits per peer and per token.
 
-**FR6:** The connector settles to Base L2 (EVM) via on-chain payment channels supporting open, deposit, close, and settle operations through the TokenNetworkRegistry/TokenNetwork/PaymentChannel contract system.
+**FR6:** The connector settles across multiple blockchains via a pluggable `PaymentChannelProvider` interface: EVM (Base L2) via TokenNetwork contracts, Solana via a custom Rust program with Ed25519 verification, and Mina Protocol via a TypeScript zkApp with zk-SNARK private balance proofs. Per-peer chain selection allows different peers to settle on different chains simultaneously.
 
-**FR7:** The connector generates self-describing, EIP-712 signed per-packet balance proofs attached to BTP protocolData, enabling the receiver to verify payment channel state dynamically without prior negotiation.
+**FR7:** The connector generates self-describing, chain-specific per-packet balance proofs attached to BTP protocolData — EIP-712 for EVM, Ed25519 for Solana, Poseidon commitments for Mina — enabling the receiver to dispatch to the correct chain provider and verify payment channel state dynamically without prior negotiation.
+
+**FR17:** The connector supports optional NIP-59-inspired transport privacy for claim exchange. Claims are wrapped in three layers (Rumor → Seal → Gift Wrap) using ChaCha20 encryption and ephemeral keys, hiding sender identity, claim content, and timing from BTP intermediaries. This is chain-agnostic and configurable per peer.
+
+**FR18:** The Mina Protocol provider generates zk-SNARK proofs where transferred amounts are private inputs — only Poseidon hash commitments appear on-chain or in claims. This provides on-chain settlement privacy not available on EVM or Solana.
+
+**FR19:** The `ChainProviderRegistry` supports dynamic provider registration, allowing new chain providers to be added without modifying core settlement logic. Providers are initialized from configuration and looked up by chain type at runtime.
 
 **FR8:** The connector monitors peer balances against configurable thresholds (amount-based and time-based) and automatically triggers on-chain settlement when thresholds are exceeded.
 
@@ -579,9 +653,8 @@ These requirements describe the system as currently implemented.
 
 The following capabilities are **not** part of the current system:
 
-- **XRP Ledger settlement** — Removed in Epic 30. Previously supported XRP payment channels.
-- **Aptos settlement** — Removed in Epic 30. Previously supported Aptos Move-based payment channels.
-- **Multi-chain settlement** — The connector supports Base L2 (EVM) only. Tri-chain settlement was removed.
+- **XRP Ledger settlement** — Removed in Epic 30. Previously supported XRP payment channels. Not planned for re-addition.
+- **Aptos settlement** — Removed in Epic 30. Previously supported Aptos Move-based payment channels. Not planned for re-addition.
 - **SPSP/STREAM protocol** — Removed in Epic 31. Payment setup is handled externally.
 - **Standalone visualization dashboard** — The original React + Cytoscape.js dashboard (Epic 3) was replaced by the embedded Vue.js Explorer UI. No separate dashboard service exists.
 - **Complex topology orchestration** — Hub-spoke, mesh, 8-node, and 5-node Docker Compose configurations were removed. The system supports linear topologies and custom configurations.

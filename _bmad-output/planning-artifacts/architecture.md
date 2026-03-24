@@ -1,4 +1,4 @@
-# Crosstown Connector - Architecture Documentation
+# Town Connector - Architecture Documentation
 
 ## Table of Contents
 
@@ -21,16 +21,18 @@
 
 ## 1. Introduction
 
-**Crosstown Connector** (`@toon-protocol/connector` v1.6.2) is a production-ready
+**Town Connector** (`@toon-protocol/connector` v1.6.2) is a production-ready
 Interledger Protocol (ILP) connector for machine-to-machine payment routing with
-EVM settlement on Base L2.
+multi-chain settlement across EVM (Base L2), Solana, and Mina Protocol.
 
 ### Capabilities
 
 - **ILP packet routing** — Longest-prefix matching with static routing tables and BTP transport (RFC-0023, RFC-0027)
 - **Balance tracking** — Double-entry accounting via TigerBeetle or in-memory ledger with snapshot persistence
-- **EVM settlement** — Raiden-style payment channels on Base L2 with threshold-based on-chain settlement
-- **Per-packet self-describing claims** — Every forwarded packet carries an EIP-712 signed claim with full on-chain context (`chainId`, `tokenNetworkAddress`, `tokenAddress`), enabling permissionless channel verification
+- **Multi-chain settlement** — Pluggable chain-provider architecture supporting EVM (Base L2), Solana, and Mina Protocol payment channels, with per-peer chain selection
+- **Per-packet self-describing claims** — Every forwarded packet carries a chain-specific signed claim (EIP-712 for EVM, Ed25519 for Solana, zk-SNARK commitments for Mina) with full on-chain context, enabling permissionless channel verification
+- **Transport privacy (NIP-59)** — Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59, hiding sender identity, claim content, and timing from BTP intermediaries
+- **ZK-private settlement (Mina)** — Zero-knowledge balance proofs on Mina Protocol where transferred amounts are hidden on-chain via Poseidon commitments, verified by zk-SNARK proofs
 - **Multi-deployment modes** — Library (embedded), CLI (standalone), or Docker container
 
 ### How to Read This Document
@@ -55,7 +57,8 @@ CLI, or deployed as a Docker container.
 1. **Library-first** — The connector is designed to be embedded in application code via `new ConnectorNode(config, logger)`. Standalone mode is an opt-in deployment pattern.
 2. **Observability-first** — Every packet, balance change, settlement event, and claim is emitted as a structured telemetry event.
 3. **RFC-compliant** — Core protocols follow Interledger RFCs (ILPv4, BTP, OER encoding, ILP addressing).
-4. **EVM-only settlement** — Settlement is exclusively on EVM chains (Base L2). XRP and Aptos support were removed in Epic 30.
+4. **Multi-chain settlement** — Settlement uses a pluggable `PaymentChannelProvider` interface supporting EVM (Base L2), Solana, and Mina Protocol. New chains require only implementing the provider interface — no core settlement logic changes. Per-peer chain selection allows different peers to settle on different chains simultaneously.
+5. **Privacy-by-design** — Optional NIP-59-inspired transport privacy for claim exchange (all chains) and zk-SNARK private balance proofs on Mina Protocol where transferred amounts are hidden on-chain.
 
 ### System Diagram
 
@@ -66,22 +69,31 @@ graph TB
         BTPClientManager["BTP Client Manager<br/>(Outbound connections)"]
         PacketHandler["Packet Handler<br/>(Routing + Settlement)"]
         RoutingTable["Routing Table<br/>(Longest-prefix match)"]
-        PerPacketClaims["Per-Packet Claim Service<br/>(EIP-712 signing)"]
+        PerPacketClaims["Per-Packet Claim Service<br/>(Chain-agnostic signing)"]
+        NIP59["NIP-59 Transport Privacy<br/>(Optional Gift Wrap)"]
         TelemetryEmitter["Telemetry Emitter"]
     end
 
-    subgraph Settlement
+    subgraph Settlement["Settlement (Chain-Agnostic)"]
         ChannelManager["Channel Manager"]
-        PaymentChannelSDK["Payment Channel SDK<br/>(ethers.js)"]
+        ChainRegistry["Chain Provider Registry"]
         AccountManager["Account Manager<br/>(TigerBeetle / In-Memory)"]
-        SettlementMonitor["Settlement Monitor<br/>(Threshold polling)"]
+        SettlementMonitor["Settlement Monitor<br/>(Threshold-driven)"]
         SettlementExecutor["Settlement Executor<br/>(On-chain submission)"]
         SettlementCoordinator["Settlement Coordinator"]
+    end
+
+    subgraph Providers["Chain Providers (PaymentChannelProvider Interface)"]
+        EVMProvider["EVM Provider<br/>(ethers.js, EIP-712)"]
+        SolanaProvider["Solana Provider<br/>(@solana/web3.js, Ed25519)"]
+        MinaProvider["Mina Provider<br/>(o1js, zk-SNARKs)"]
     end
 
     subgraph External
         PeerConnectors["Peer Connectors"]
         BaseL2["Base L2<br/>(Anvil / Sepolia / Mainnet)"]
+        SolanaChain["Solana<br/>(Devnet / Mainnet)"]
+        MinaChain["Mina Protocol<br/>(Devnet / Mainnet)"]
         TigerBeetle["TigerBeetle<br/>(Optional)"]
     end
 
@@ -91,15 +103,21 @@ graph TB
     PacketHandler --> RoutingTable
     PacketHandler --> BTPClientManager
     PacketHandler --> PerPacketClaims
+    PerPacketClaims --> NIP59
     PacketHandler --> AccountManager
-    PerPacketClaims --> PaymentChannelSDK
+    PerPacketClaims --> ChainRegistry
     PerPacketClaims --> ChannelManager
     SettlementMonitor --> AccountManager
     SettlementMonitor --> SettlementExecutor
     SettlementCoordinator --> SettlementMonitor
     SettlementCoordinator --> SettlementExecutor
-    SettlementExecutor --> PaymentChannelSDK
-    PaymentChannelSDK --> BaseL2
+    SettlementExecutor --> ChainRegistry
+    ChainRegistry --> EVMProvider
+    ChainRegistry --> SolanaProvider
+    ChainRegistry --> MinaProvider
+    EVMProvider --> BaseL2
+    SolanaProvider --> SolanaChain
+    MinaProvider --> MinaChain
     AccountManager --> TigerBeetle
 ```
 
@@ -109,10 +127,11 @@ graph TB
 2. BTPServer deserializes and passes to PacketHandler
 3. PacketHandler queries RoutingTable for longest-prefix match
 4. AccountManager records double-entry transfer (debit sender, credit receiver)
-5. PerPacketClaimService signs an EIP-712 claim and attaches it to BTP protocolData
-6. PacketHandler forwards packet to next-hop peer via BTPClientManager
-7. On fulfillment, claim is persisted to SQLite; on reject, claim is voided
-8. SettlementMonitor polls balances and triggers on-chain settlement when thresholds are exceeded
+5. PerPacketClaimService delegates to the peer's chain provider for claim signing (EIP-712 for EVM, Ed25519 for Solana, Poseidon commitment for Mina)
+6. Optionally, the claim is wrapped via NIP-59 Gift Wrap for transport privacy
+7. PacketHandler forwards packet to next-hop peer via BTPClientManager
+8. On fulfillment, claim is persisted to SQLite; on reject, claim is voided
+9. SettlementMonitor polls balances and triggers on-chain settlement when thresholds are exceeded
 
 ---
 
@@ -123,7 +142,9 @@ connector/
 ├── packages/
 │   ├── connector/          # Core connector (main package)
 │   ├── shared/             # ILP types, OER encoding, telemetry types
-│   ├── contracts/          # Solidity smart contracts (Foundry)
+│   ├── contracts/          # EVM Solidity smart contracts (Foundry)
+│   ├── solana-program/     # Solana payment channel program (Rust/Pinocchio)
+│   ├── mina-zkapp/         # Mina payment channel zkApp (TypeScript/o1js)
 │   └── faucet/             # Token faucet for local Anvil development
 ├── tools/
 │   ├── send-packet/        # CLI tool for sending test packets
@@ -135,12 +156,14 @@ connector/
 
 ### Packages
 
-| Package                        | Path                 | Description                                                                                   |
-| ------------------------------ | -------------------- | --------------------------------------------------------------------------------------------- |
-| `@toon-protocol/connector`     | `packages/connector` | Core ILP connector with BTP, routing, settlement                                              |
-| `@toon-protocol/shared` v1.2.0 | `packages/shared`    | ILP packet types, OER encoding/decoding, telemetry event types, routing types                 |
-| `contracts`                    | `packages/contracts` | Solidity contracts: `TokenNetwork.sol`, `TokenNetworkRegistry.sol` (Foundry, Solidity 0.8.26) |
-| `@toon-protocol/faucet`        | `packages/faucet`    | Token faucet web service for local Anvil development (ETH + USDC distribution)                |
+| Package                        | Path                      | Description                                                                                       |
+| ------------------------------ | ------------------------- | ------------------------------------------------------------------------------------------------- |
+| `@toon-protocol/connector`     | `packages/connector`      | Core ILP connector with BTP, routing, settlement                                                  |
+| `@toon-protocol/shared` v1.2.0 | `packages/shared`         | ILP packet types, OER encoding/decoding, telemetry event types, routing types                     |
+| `contracts`                    | `packages/contracts`      | EVM Solidity contracts: `TokenNetwork.sol`, `TokenNetworkRegistry.sol` (Foundry, Solidity 0.8.26) |
+| `solana-program`               | `packages/solana-program` | Solana payment channel on-chain program (Rust/Pinocchio, Ed25519 claim verification)              |
+| `mina-zkapp`                   | `packages/mina-zkapp`     | Mina payment channel zkApp (TypeScript/o1js, zk-SNARK private balance proofs)                     |
+| `@toon-protocol/faucet`        | `packages/faucet`         | Token faucet web service for local Anvil development (ETH + USDC distribution)                    |
 
 ### Tools
 
@@ -172,24 +195,29 @@ On startup, Anvil deploys the `DeployLocal.s.sol` script which creates a USDC to
 
 ## 4. Tech Stack
 
-| Category                  | Technology                        | Version           |
-| ------------------------- | --------------------------------- | ----------------- |
-| Language                  | TypeScript                        | ^5.3.3            |
-| Runtime                   | Node.js                           | >=22.11.0         |
-| Transport                 | WebSocket (ws)                    | ^8.16.0           |
-| HTTP                      | Express                           | 4.18.x            |
-| EVM                       | ethers.js                         | ^6.16.0           |
-| Logging                   | pino                              | ^8.21.0           |
-| Config                    | js-yaml                           | ^4.1.0            |
-| Validation                | zod                               | ^3.25.76          |
-| Database (claims)         | better-sqlite3                    | ^11.8.1           |
-| Accounting (optional)     | TigerBeetle                       | 0.16.68           |
-| Smart Contracts           | Solidity 0.8.26 (Foundry)         | —                 |
-| AI (optional)             | @ai-sdk/anthropic, @ai-sdk/openai | ^1.2.12 / ^1.3.24 |
-| Observability (optional)  | OpenTelemetry, prom-client        | ^1.9.0 / ^15.1.0  |
-| Key Management (optional) | AWS KMS, GCP KMS, Azure Key Vault | —                 |
-| Testing                   | Jest + ts-jest                    | ^29.7.0 / ^29.1.2 |
-| Build                     | tsc, tsx, Vite                    | —                 |
+| Category                  | Technology                                      | Version           |
+| ------------------------- | ----------------------------------------------- | ----------------- |
+| Language                  | TypeScript                                      | ^5.3.3            |
+| Runtime                   | Node.js                                         | >=22.11.0         |
+| Transport                 | WebSocket (ws)                                  | ^8.16.0           |
+| HTTP                      | Express                                         | 4.18.x            |
+| EVM                       | ethers.js                                       | ^6.16.0           |
+| Logging                   | pino                                            | ^8.21.0           |
+| Config                    | js-yaml                                         | ^4.1.0            |
+| Validation                | zod                                             | ^3.25.76          |
+| Database (claims)         | better-sqlite3                                  | ^11.8.1           |
+| Accounting (optional)     | TigerBeetle                                     | 0.16.68           |
+| Smart Contracts (EVM)     | Solidity 0.8.26 (Foundry)                       | —                 |
+| Smart Contracts (Solana)  | Rust (Pinocchio / native)                       | —                 |
+| Smart Contracts (Mina)    | TypeScript (o1js zkApps)                        | —                 |
+| Solana SDK                | @solana/web3.js                                 | latest            |
+| Mina SDK                  | o1js                                            | latest            |
+| Transport Privacy         | @noble/ciphers, @noble/hashes, @noble/secp256k1 | latest            |
+| AI (optional)             | @ai-sdk/anthropic, @ai-sdk/openai               | ^1.2.12 / ^1.3.24 |
+| Observability (optional)  | OpenTelemetry, prom-client                      | ^1.9.0 / ^15.1.0  |
+| Key Management (optional) | AWS KMS, GCP KMS, Azure Key Vault               | —                 |
+| Testing                   | Jest + ts-jest                                  | ^29.7.0 / ^29.1.2 |
+| Build                     | tsc, tsx, Vite                                  | —                 |
 
 ---
 
@@ -423,45 +451,79 @@ sequenceDiagram
 
 ### Overview
 
-Settlement is exclusively EVM-based on Base L2. XRP and Aptos settlement support was removed in Epic 30. The system uses Raiden-style payment channels with EIP-712 typed signatures.
+Settlement uses a pluggable **chain-provider architecture** supporting multiple blockchains simultaneously. All chain-specific logic is encapsulated behind the `PaymentChannelProvider` interface, allowing per-peer chain selection. Currently supported chains:
+
+| Chain             | Provider                       | Signature Scheme            | On-Chain Program                      | Privacy                              |
+| ----------------- | ------------------------------ | --------------------------- | ------------------------------------- | ------------------------------------ |
+| **EVM (Base L2)** | `EVMPaymentChannelProvider`    | EIP-712 (secp256k1)         | `TokenNetwork.sol` (Solidity/Foundry) | Public amounts                       |
+| **Solana**        | `SolanaPaymentChannelProvider` | Ed25519 (native precompile) | Rust program (Pinocchio/native)       | Public amounts                       |
+| **Mina Protocol** | `MinaPaymentChannelProvider`   | Poseidon + zk-SNARK         | TypeScript zkApp (o1js)               | **Private amounts** (ZK commitments) |
+
+Adding a new chain requires only implementing the `PaymentChannelProvider` interface and registering it with the `ChainProviderRegistry`.
+
+### Chain Abstraction Layer (Epic 32)
+
+The settlement subsystem is chain-agnostic. Core services (`PerPacketClaimService`, `SettlementMonitor`, `SettlementExecutor`, `ClaimReceiver`) delegate chain-specific operations to the appropriate provider via the `ChainProviderRegistry`.
+
+```typescript
+interface PaymentChannelProvider {
+  readonly chainType: BlockchainType;
+  openChannel(params: OpenChannelParams): Promise<ChannelMetadata>;
+  deposit(channelId: string, amount: bigint): Promise<TxReceipt>;
+  claimFromChannel(channelId: string, proof: BalanceProof): Promise<TxReceipt>;
+  closeChannel(channelId: string): Promise<TxReceipt>;
+  settleChannel(channelId: string): Promise<TxReceipt>;
+  signBalanceProof(params: SignParams): Promise<BalanceProof>;
+  verifyBalanceProof(proof: BalanceProof): Promise<boolean>;
+  getChannelState(channelId: string): Promise<ChannelState>;
+  subscribeToEvents(callback: EventCallback): Unsubscribe;
+}
+```
 
 ### Components
 
-| Component                   | File                                        | Purpose                                                                            |
-| --------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `PaymentChannelSDK`         | `settlement/payment-channel-sdk.ts`         | Low-level EVM interaction (ethers.js provider, contract calls, signature creation) |
-| `ChannelManager`            | `settlement/channel-manager.ts`             | Channel lifecycle (create, deposit, close), peer-to-channel mapping                |
-| `PerPacketClaimService`     | `settlement/per-packet-claim-service.ts`    | Signs and attaches self-describing EIP-712 claims to every forwarded packet        |
-| `ClaimReceiver`             | `settlement/claim-receiver.ts`              | Validates and processes incoming claims from peers                                 |
-| `ClaimSender`               | `settlement/claim-sender.ts`                | Manages outbound claim delivery                                                    |
-| `ClaimRedemptionService`    | `settlement/claim-redemption-service.ts`    | Redeems accumulated claims on-chain                                                |
-| `EIP712Helper`              | `settlement/eip712-helper.ts`               | EIP-712 typed data construction and signature utilities                            |
-| `AccountManager`            | `settlement/account-manager.ts`             | Double-entry balance tracking (TigerBeetle or InMemoryLedger)                      |
-| `AccountIdGenerator`        | `settlement/account-id-generator.ts`        | Generates unique account IDs for ledger entries                                    |
-| `AccountMetadata`           | `settlement/account-metadata.ts`            | Account metadata management and storage                                            |
-| `LedgerClient`              | `settlement/ledger-client.ts`               | Abstract ledger client interface                                                   |
-| `SettlementMonitor`         | `settlement/settlement-monitor.ts`          | Polls balances, emits SETTLEMENT_REQUIRED when threshold exceeded                  |
-| `SettlementExecutor`        | `settlement/settlement-executor.ts`         | Executes on-chain settlement transactions                                          |
-| `SettlementCoordinator`     | `settlement/settlement-coordinator.ts`      | Coordinates settlement workflow across monitor and executor                        |
-| `SettlementApi`             | `settlement/settlement-api.ts`              | REST API endpoints for settlement operations                                       |
-| `UnifiedSettlementExecutor` | `settlement/unified-settlement-executor.ts` | Unified settlement orchestration                                                   |
-| `MetricsCollector`          | `settlement/metrics-collector.ts`           | Collects and exposes settlement metrics                                            |
-| `TigerBeetleClient`         | `settlement/tigerbeetle-client.ts`          | TigerBeetle connection and transfer operations                                     |
-| `TigerBeetleBatchWriter`    | `settlement/tigerbeetle-batch-writer.ts`    | Batched write operations for TigerBeetle                                           |
-| `TigerBeetleErrors`         | `settlement/tigerbeetle-errors.ts`          | TigerBeetle-specific error types and handling                                      |
-| `InMemoryLedgerClient`      | `settlement/in-memory-ledger-client.ts`     | In-memory ledger with JSON snapshot persistence (fallback)                         |
+| Component                      | File                                        | Purpose                                                                     |
+| ------------------------------ | ------------------------------------------- | --------------------------------------------------------------------------- |
+| `ChainProviderRegistry`        | `settlement/chain-provider-registry.ts`     | Manages chain provider instances by chain type; dynamic registration/lookup |
+| `PaymentChannelProvider`       | `settlement/payment-channel-provider.ts`    | Interface all chain providers implement                                     |
+| `EVMPaymentChannelProvider`    | `settlement/providers/evm/`                 | EVM provider: ethers.js, EIP-712 signing, TokenNetwork contract interaction |
+| `SolanaPaymentChannelProvider` | `settlement/providers/solana/`              | Solana provider: @solana/web3.js, Ed25519 signing, PDA-based channels       |
+| `MinaPaymentChannelProvider`   | `settlement/providers/mina/`                | Mina provider: o1js, zk-SNARK proof generation, Poseidon commitments        |
+| `NIP59TransportWrapper`        | `settlement/privacy/`                       | Optional NIP-59 Gift Wrap claim wrapping for transport privacy (all chains) |
+| `ChannelManager`               | `settlement/channel-manager.ts`             | Channel lifecycle (create, deposit, close), peer-to-channel mapping         |
+| `PerPacketClaimService`        | `settlement/per-packet-claim-service.ts`    | Chain-agnostic claim signing — delegates to provider via registry           |
+| `ClaimReceiver`                | `settlement/claim-receiver.ts`              | Validates incoming claims — dispatches to correct provider for verification |
+| `ClaimSender`                  | `settlement/claim-sender.ts`                | Manages outbound claim delivery with optional NIP-59 wrapping               |
+| `ClaimRedemptionService`       | `settlement/claim-redemption-service.ts`    | Redeems accumulated claims on-chain via provider                            |
+| `EIP712Helper`                 | `settlement/eip712-helper.ts`               | EIP-712 typed data construction and signature utilities (EVM-specific)      |
+| `AccountManager`               | `settlement/account-manager.ts`             | Double-entry balance tracking (TigerBeetle or InMemoryLedger)               |
+| `AccountIdGenerator`           | `settlement/account-id-generator.ts`        | Generates unique account IDs for ledger entries                             |
+| `AccountMetadata`              | `settlement/account-metadata.ts`            | Account metadata management and storage                                     |
+| `LedgerClient`                 | `settlement/ledger-client.ts`               | Abstract ledger client interface                                            |
+| `SettlementMonitor`            | `settlement/settlement-monitor.ts`          | Polls balances, emits SETTLEMENT_REQUIRED when threshold exceeded           |
+| `SettlementExecutor`           | `settlement/settlement-executor.ts`         | Executes on-chain settlement transactions                                   |
+| `SettlementCoordinator`        | `settlement/settlement-coordinator.ts`      | Coordinates settlement workflow across monitor and executor                 |
+| `SettlementApi`                | `settlement/settlement-api.ts`              | REST API endpoints for settlement operations                                |
+| `UnifiedSettlementExecutor`    | `settlement/unified-settlement-executor.ts` | Unified settlement orchestration                                            |
+| `MetricsCollector`             | `settlement/metrics-collector.ts`           | Collects and exposes settlement metrics                                     |
+| `TigerBeetleClient`            | `settlement/tigerbeetle-client.ts`          | TigerBeetle connection and transfer operations                              |
+| `TigerBeetleBatchWriter`       | `settlement/tigerbeetle-batch-writer.ts`    | Batched write operations for TigerBeetle                                    |
+| `TigerBeetleErrors`            | `settlement/tigerbeetle-errors.ts`          | TigerBeetle-specific error types and handling                               |
+| `InMemoryLedgerClient`         | `settlement/in-memory-ledger-client.ts`     | In-memory ledger with JSON snapshot persistence (fallback)                  |
 
 ### Channel Registration and Discovery
 
 Channels are discovered and registered through three methods, listed by expected frequency:
 
-1. **Dynamic verification (self-describing claims)** — The primary path. When a claim arrives for an unknown channel, the receiver uses the claim's `chainId`, `tokenNetworkAddress`, and `tokenAddress` to query the on-chain state, verify the channel exists and is open, confirm the signer is a participant, and validate the EIP-712 signature against the claimed domain. Once verified, the channel is cached in `ChannelManager` for fast-path lookups on subsequent claims.
+1. **Dynamic verification (self-describing claims)** — The primary path. When a claim arrives for an unknown channel, the receiver uses the claim's self-describing fields to query the on-chain state via the appropriate chain provider, verify the channel exists and is open, confirm the signer is a participant, and validate the signature. Once verified, the channel is cached in `ChannelManager` for fast-path lookups on subsequent claims.
 2. **At-connection** — Channels created automatically when BTP peers connect (if settlement infrastructure is enabled)
 3. **Admin API** — `POST /admin/channels` with explicit channel parameters (manual override)
 
-### Self-Describing Claims
+### Self-Describing Claims (Multi-Chain)
 
-All claims are self-describing. Every `EVMClaimMessage` includes the on-chain context necessary for permissionless verification:
+All claims are self-describing. The `blockchain` discriminator field determines which chain provider handles verification. Each chain type includes chain-specific self-describing fields:
+
+**EVM Claim:**
 
 ```json
 {
@@ -478,22 +540,84 @@ All claims are self-describing. Every `EVMClaimMessage` includes the on-chain co
 }
 ```
 
+**Solana Claim:**
+
+```json
+{
+  "version": "1.0",
+  "blockchain": "solana",
+  "channelPDA": "...",
+  "nonce": 42,
+  "transferredAmount": "1000000",
+  "signature": "...",
+  "signerPubkey": "...",
+  "programId": "...",
+  "tokenMint": "...",
+  "cluster": "mainnet-beta"
+}
+```
+
+**Mina Claim (ZK-Private):**
+
+```json
+{
+  "version": "1.0",
+  "blockchain": "mina",
+  "channelHash": "...",
+  "nonce": 42,
+  "balanceCommitment": "...",
+  "proof": "<serialized zk-SNARK>",
+  "zkAppAddress": "...",
+  "tokenId": "...",
+  "network": "mainnet"
+}
+```
+
+Note: Mina claims use `balanceCommitment` (a Poseidon hash) instead of `transferredAmount` — the actual amount is a private input to the zk-SNARK proof and never appears on-chain or in the claim.
+
 **Design invariants:**
 
-- `chainId`, `tokenNetworkAddress`, and `tokenAddress` are **always populated** by the sender
-- These fields are cryptographically bound to the EIP-712 signature via the domain separator (`chainId` and `tokenNetworkAddress` are part of the signing domain), preventing spoofing
-- The receiver verifies unknown channels on-chain using these fields, then caches the result (one-time RPC cost per channel)
-- Any integration test, mock, or fixture that creates claims **must include all three self-describing fields**
-- Legacy claims without self-describing fields are only accepted if the channel was pre-registered via admin API or at-connection
+- Self-describing fields are **always populated** by the sender for all chain types
+- These fields are cryptographically bound to the signature (EIP-712 domain for EVM, Ed25519 message for Solana, zk-SNARK public inputs for Mina), preventing spoofing
+- The receiver dispatches to the correct chain provider based on the `blockchain` discriminator
+- The provider verifies unknown channels on-chain using the self-describing fields, then caches the result
+- Any integration test, mock, or fixture that creates claims **must include all chain-specific self-describing fields**
 
-### Smart Contracts (Foundry)
+### NIP-59 Transport Privacy (Optional, All Chains)
 
-| Contract                   | Path                      | Purpose                                                   |
-| -------------------------- | ------------------------- | --------------------------------------------------------- |
-| `TokenNetwork.sol`         | `packages/contracts/src/` | Payment channel operations (open, deposit, close, settle) |
-| `TokenNetworkRegistry.sol` | `packages/contracts/src/` | Registry for TokenNetwork instances per ERC-20 token      |
+Claims can optionally be wrapped using a three-layer encryption scheme inspired by Nostr NIP-59 Gift Wrap. This is a **transport-layer concern** independent of the chain provider — it protects claim content on the BTP wire regardless of which chain is used for settlement.
 
-Contracts are compiled and tested with **Foundry** (`forge build`, `forge test`). Deployment scripts are in `packages/contracts/script/`.
+| Layer                     | Purpose                                                     | Key                       |
+| ------------------------- | ----------------------------------------------------------- | ------------------------- |
+| **Rumor**                 | Unsigned claim payload (provides deniability)               | None (unsigned)           |
+| **Seal** (kind 13)        | Encrypted to peer, signed by real sender                    | Sender's secp256k1 key    |
+| **Gift Wrap** (kind 1059) | Encrypted with ephemeral one-time key, randomized timestamp | Ephemeral key (discarded) |
+
+**What transport privacy hides:**
+
+| Data                      | Without NIP-59                 | With NIP-59                 |
+| ------------------------- | ------------------------------ | --------------------------- |
+| Claim amounts/commitments | Visible to BTP relay           | Encrypted                   |
+| Sender identity           | Visible (signerAddress/pubkey) | Hidden behind ephemeral key |
+| Timing correlation        | Real timestamps                | Randomized                  |
+
+**What transport privacy does NOT affect:**
+
+- ILP packet routing (amounts, destinations) — stays cleartext for fee deduction and routing
+- On-chain settlement — determined by the chain provider, not transport layer
+
+Configurable per-peer via `nip59Enabled: true` in peer configuration.
+
+### Smart Contracts & On-Chain Programs
+
+| Program                    | Language          | Path                       | Purpose                                                                       |
+| -------------------------- | ----------------- | -------------------------- | ----------------------------------------------------------------------------- |
+| `TokenNetwork.sol`         | Solidity 0.8.26   | `packages/contracts/src/`  | EVM payment channel operations (open, deposit, claim, close, settle)          |
+| `TokenNetworkRegistry.sol` | Solidity 0.8.26   | `packages/contracts/src/`  | Registry for TokenNetwork instances per ERC-20 token                          |
+| Solana Payment Channel     | Rust (Pinocchio)  | `packages/solana-program/` | Solana payment channel (PDA-based, Ed25519 claim verification via precompile) |
+| Mina Payment Channel       | TypeScript (o1js) | `packages/mina-zkapp/`     | Mina zkApp with zk-SNARK private balance proofs (Poseidon commitments)        |
+
+EVM contracts are compiled and tested with **Foundry** (`forge build`, `forge test`). Solana program tested with `solana-program-test` / Bankrun. Mina zkApp tested with o1js local blockchain simulation.
 
 ---
 
@@ -563,13 +687,14 @@ routes:
 - **IP allowlisting** — CIDR-based access control for admin API (checked before API key)
 - **Deployment mode restrictions** — Embedded mode disables external HTTP interfaces by default
 
-### Fraud Detection
+### Fraud Detection (Multi-Chain)
 
-- **Duplicate claim detection** — Claims with previously-seen messageIds are rejected
-- **Nonce validation** — Claim nonces must be monotonically increasing per channel
-- **Signature verification** — EIP-712 signatures verified against expected signer address
-- **Balance proof validation** — Transferred amounts must be non-decreasing (cumulative)
-- **Replay protection** — Channel ID + nonce + chain ID prevent cross-chain and within-chain replay
+- **Duplicate claim detection** — Claims with previously-seen messageIds are rejected (all chains)
+- **Nonce validation** — Claim nonces must be monotonically increasing per channel (all chains)
+- **Signature verification** — Dispatched to correct chain provider: EIP-712 `ecrecover` for EVM, Ed25519 precompile introspection for Solana, zk-SNARK proof verification for Mina
+- **Balance proof validation** — Transferred amounts must be non-decreasing (cumulative) for EVM/Solana; commitment consistency verified via zk proof for Mina
+- **Replay protection** — Channel ID + nonce + blockchain type prevent cross-chain and within-chain replay
+- **NIP-59 unwrapping validation** — If transport privacy is enabled, Gift Wrap must decrypt successfully with valid ephemeral key before claim is processed
 
 ### Additional Security
 
@@ -673,17 +798,19 @@ All tests that involve claims (unit and integration) **must assume self-describi
 
 ## 13. Key Design Decisions
 
-| Decision                              | Rationale                                                                                                                                                                                                                                                                                                                                       |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **EVM-only settlement**               | XRP/Aptos removed in Epic 30 to reduce complexity. Base L2 chosen for low fees and EVM compatibility.                                                                                                                                                                                                                                           |
-| **Per-packet self-describing claims** | Every forwarded packet carries a self-describing EIP-712 signed claim with `chainId`, `tokenNetworkAddress`, and `tokenAddress`. This enables permissionless peer connections with dynamic on-chain channel verification -- no pre-registration required. All claims, tests, and integrations assume self-describing fields are always present. |
-| **Foundry (not Hardhat)**             | Faster compilation, built-in fuzzing, Solidity-native tests, better developer experience.                                                                                                                                                                                                                                                       |
-| **TigerBeetle optional**              | In-memory ledger with JSON snapshot persistence provides a zero-dependency fallback. TigerBeetle is recommended for production.                                                                                                                                                                                                                 |
-| **Library-first**                     | `ConnectorNode` is a class you instantiate in your code. CLI and Docker are wrappers around this library API.                                                                                                                                                                                                                                   |
-| **better-sqlite3 for claims**         | Per-packet claim persistence needs synchronous, low-latency writes. SQLite is embedded and requires no external service.                                                                                                                                                                                                                        |
-| **In-memory ledger snapshots**        | JSON file snapshots every 30s (configurable) provide persistence across restarts without TigerBeetle.                                                                                                                                                                                                                                           |
-| **BTP over WebSocket**                | RFC-0023 compliant. WebSocket provides full-duplex, low-latency communication for bilateral transfers and claim exchange.                                                                                                                                                                                                                       |
-| **Anvil for integration tests**       | Integration tests run against a real local Anvil blockchain — never mocks. Anvil is deterministic, fast, and free, so there is no reason to mock EVM interactions in integration tests. This catches real contract bugs, signature issues, and gas problems that mocks would hide. Docker Compose orchestrates Anvil + contract deployment.     |
+| Decision                              | Rationale                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Multi-chain provider architecture** | XRP/Aptos removed in Epic 30. Replaced in Epic 32 with a pluggable `PaymentChannelProvider` interface. EVM (Base L2), Solana (Epic 33), and Mina Protocol (Epic 34) are supported. New chains require only implementing the provider interface and registering with `ChainProviderRegistry`. Per-peer chain selection allows heterogeneous settlement networks. |
+| **Per-packet self-describing claims** | Every forwarded packet carries a self-describing chain-specific signed claim. The `blockchain` discriminator field routes verification to the correct provider. EVM uses EIP-712, Solana uses Ed25519, Mina uses zk-SNARK commitments. All claims, tests, and integrations assume self-describing fields are always present.                                    |
+| **NIP-59 transport privacy**          | Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59. Hides sender identity, claim content, and timing from BTP intermediaries. Chain-agnostic — works with any provider. Does not affect ILP packet routing or fee deduction (those operate at a separate protocol layer).                                                  |
+| **ZK-private settlement (Mina)**      | Mina provider uses zk-SNARK proofs with Poseidon hash commitments so transferred amounts are never revealed on-chain. First payment channel implementation on Mina Protocol. Combined with NIP-59 transport wrapping, provides end-to-end privacy from BTP wire to on-chain settlement.                                                                         |
+| **Foundry (not Hardhat)**             | Faster compilation, built-in fuzzing, Solidity-native tests, better developer experience.                                                                                                                                                                                                                                                                       |
+| **TigerBeetle optional**              | In-memory ledger with JSON snapshot persistence provides a zero-dependency fallback. TigerBeetle is recommended for production.                                                                                                                                                                                                                                 |
+| **Library-first**                     | `ConnectorNode` is a class you instantiate in your code. CLI and Docker are wrappers around this library API.                                                                                                                                                                                                                                                   |
+| **better-sqlite3 for claims**         | Per-packet claim persistence needs synchronous, low-latency writes. SQLite is embedded and requires no external service.                                                                                                                                                                                                                                        |
+| **In-memory ledger snapshots**        | JSON file snapshots every 30s (configurable) provide persistence across restarts without TigerBeetle.                                                                                                                                                                                                                                                           |
+| **BTP over WebSocket**                | RFC-0023 compliant. WebSocket provides full-duplex, low-latency communication for bilateral transfers and claim exchange.                                                                                                                                                                                                                                       |
+| **Anvil for integration tests**       | Integration tests run against a real local Anvil blockchain — never mocks. Anvil is deterministic, fast, and free, so there is no reason to mock EVM interactions in integration tests. This catches real contract bugs, signature issues, and gas problems that mocks would hide. Docker Compose orchestrates Anvil + contract deployment.                     |
 
 ---
 
