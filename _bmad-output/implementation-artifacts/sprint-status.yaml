@@ -8,7 +8,7 @@ epics:
     stories:
       32.1:
         name: "Define PaymentChannelProvider Interface"
-        status: backlog
+        status: done
       32.2:
         name: "Create Chain Provider Registry"
         status: backlog

@@ -396,8 +396,8 @@ export class ClaimReceiver extends EventEmitter {
    */
   private _persistReceivedClaim(peerId: string, claim: BTPClaimMessage, verified: boolean): void {
     try {
-      // EVM claims use channelId
-      const channelId = claim.channelId;
+      // EVM claims use channelId; other chains are not yet supported at runtime
+      const channelId = isEVMClaim(claim) ? claim.channelId : '';
 
       // Insert into database
       const stmt = this.db.prepare(`

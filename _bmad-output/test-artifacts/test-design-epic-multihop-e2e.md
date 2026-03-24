@@ -631,9 +631,9 @@ function calculateExpectedBalancesAfterPacket(
 
 **Test Design Approved By:**
 
-- [ ] Product Manager: ****\_\_**** Date: ****\_\_****
-- [ ] Tech Lead: ****\_\_**** Date: ****\_\_****
-- [ ] QA Lead: ****\_\_**** Date: ****\_\_****
+- [ ] Product Manager: \***\*\_\_\*\*** Date: \***\*\_\_\*\***
+- [ ] Tech Lead: \***\*\_\_\*\*** Date: \***\*\_\_\*\***
+- [ ] QA Lead: \***\*\_\_\*\*** Date: \***\*\_\_\*\***
 
 **Comments:**
 

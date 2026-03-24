@@ -20,7 +20,8 @@ import type { ethers } from 'ethers';
 import type { PaymentChannelSDK } from './payment-channel-sdk';
 
 /** Helper to create a DB row as returned by the SELECT query */
-function makeDbRow(claim: Record<string, any>) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeDbRow(claim: Record<string, any>): Record<string, any> {
   return {
     message_id: claim.messageId,
     peer_id: claim.senderId,
@@ -86,7 +87,11 @@ describe('ClaimRedemptionService', () => {
   });
 
   /** Helper to set up DB mocks for a claim row */
-  function setupDbMocks(claimRows: any[]) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function setupDbMocks(claimRows: any[]): {
+    mockSelectStmt: { all: jest.Mock };
+    mockUpdateStmt: { run: jest.Mock };
+  } {
     const mockSelectStmt = {
       all: jest.fn().mockReturnValue(claimRows),
     };
