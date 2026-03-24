@@ -522,7 +522,7 @@ describe('Disaster Recovery Acceptance Tests', () => {
       const backupPath = storage.createBackup();
 
       // Modify data after backup
-      storage.createAccount('agent-2', BigInt(9999), BigInt(9999));
+      storage.createAccount('agent-2', BigInt(9999));
       storage.updateSettlementStatus('settlement-1', 'completed');
 
       // Verify modified state
@@ -565,7 +565,7 @@ describe('Disaster Recovery Acceptance Tests', () => {
       const backupPath = storage.createBackup();
 
       // Corrupt data
-      storage.createAccount('corrupt-agent', BigInt(999999), BigInt(999999));
+      storage.createAccount('corrupt-agent', BigInt(999999));
       for (let i = 0; i < 5; i++) {
         storage.updateSettlementStatus(`settlement-${i}`, 'failed');
       }
@@ -680,7 +680,7 @@ describe('Disaster Recovery Acceptance Tests', () => {
       expect(storage.verifyIntegrity(snapshot)).toBe(true);
 
       // Modify data (simulate corruption)
-      storage.createAccount('agent-1', BigInt(9999), BigInt(9999));
+      storage.createAccount('agent-1', BigInt(9999));
 
       // Verify integrity detects change
       expect(storage.verifyIntegrity(snapshot)).toBe(false);
@@ -689,7 +689,7 @@ describe('Disaster Recovery Acceptance Tests', () => {
     it('should reconstruct state from snapshots', () => {
       // Create initial state
       storage.createAccount('agent-1', BigInt(1000));
-      storage.createAccount('agent-2', BigInt(2000), BigInt(1000));
+      storage.createAccount('agent-2', BigInt(2000));
 
       const snapshot = storage.createSnapshot();
 
@@ -788,8 +788,8 @@ describe('Disaster Recovery Acceptance Tests', () => {
       const keyBackup = keyManager.exportKeys();
 
       // Step 3: Simulate disaster (data corruption)
-      storage.createAccount('agent-0', BigInt(0), BigInt(0)); // Corrupt balance
-      storage.createAccount('malicious', BigInt(9999999), BigInt(9999999));
+      storage.createAccount('agent-0', BigInt(0)); // Corrupt balance
+      storage.createAccount('malicious', BigInt(9999999));
       for (let i = 0; i < 5; i++) {
         storage.updateSettlementStatus(`settlement-${i}`, 'failed');
       }

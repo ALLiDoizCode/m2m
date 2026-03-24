@@ -79,7 +79,9 @@ Connectors handle three critical tasks:
 
 The connector handles the hard parts (routing, accounting, settlement) so applications can focus on business logic.
 
-## Install
+## Getting Started
+
+### Installation
 
 ```bash
 npm install @toon-protocol/connector

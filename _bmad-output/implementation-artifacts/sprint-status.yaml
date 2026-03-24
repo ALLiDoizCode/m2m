@@ -11,7 +11,7 @@ epics:
         status: done
       32.2:
         name: "Create Chain Provider Registry"
-        status: backlog
+        status: done
       32.3:
         name: "Migrate EVM Settlement to EVMPaymentChannelProvider"
         status: backlog
