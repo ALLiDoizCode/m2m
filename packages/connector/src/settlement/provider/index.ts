@@ -29,3 +29,8 @@ export {
   type RegistryPeerConfig,
   type ChainProviderFactory,
 } from './chain-provider-registry';
+
+export {
+  EVMPaymentChannelProvider,
+  createEVMProviderFactory,
+} from './evm-payment-channel-provider';

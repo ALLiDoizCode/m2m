@@ -14,7 +14,7 @@ epics:
         status: done
       32.3:
         name: "Migrate EVM Settlement to EVMPaymentChannelProvider"
-        status: backlog
+        status: done
       32.4:
         name: "Refactor PerPacketClaimService for Multi-Chain"
         status: backlog
