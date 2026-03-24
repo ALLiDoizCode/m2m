@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0](https://github.com/toon-protocol/connector/compare/v1.23.1...v2.0.0) (2026-03-24)
+
+### ⚠ BREAKING CHANGES
+
+- **connector:** ILPPreparePacket.executionCondition, ILPFulfillPacket.fulfillment,
+  LocalDeliveryRequest.executionCondition, LocalDeliveryResponse.fulfill.fulfillment,
+  SendPacketParams.executionCondition, IlpSendResponse.fulfillment/fulfilled removed.
+  computeFulfillmentFromData(), validateFulfillment(), computeConditionFromData()
+  deleted from public API.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
+### Features
+
+- **connector:** remove fulfillment/condition ceremony from ILP packets ([e7c7f3b](https://github.com/toon-protocol/connector/commit/e7c7f3bcafc990d9e7e85c9cf826cf2c6d077592))
+
 ## [1.23.1](https://github.com/toon-protocol/connector/compare/v1.23.0...v1.23.1) (2026-03-19)
 
 ### Bug Fixes
