@@ -66,3 +66,4 @@ packages/connector/data/*.db
 # .bmad-creative-writing/
 # .bmad-infrastructure-devops/
 # .claude/
+.auto-bmad-tmp/

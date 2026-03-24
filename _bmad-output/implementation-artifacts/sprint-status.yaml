@@ -1,0 +1,40 @@
+# Sprint Status Tracker
+# Tracks epic and story progress across the multi-chain settlement implementation
+
+epics:
+  epic-32:
+    name: "Chain Abstraction Layer & EVM Provider Migration"
+    status: in-progress
+    stories:
+      32.1:
+        name: "Define PaymentChannelProvider Interface"
+        status: backlog
+      32.2:
+        name: "Create Chain Provider Registry"
+        status: backlog
+      32.3:
+        name: "Migrate EVM Settlement to EVMPaymentChannelProvider"
+        status: backlog
+      32.4:
+        name: "Refactor PerPacketClaimService for Multi-Chain"
+        status: backlog
+      32.5:
+        name: "Refactor SettlementMonitor and SettlementExecutor for Multi-Chain"
+        status: backlog
+      32.6:
+        name: "Refactor ClaimReceiver for Multi-Chain Verification"
+        status: backlog
+      32.7:
+        name: "Update Configuration Schema"
+        status: backlog
+      32.8:
+        name: "Integration Tests — EVM Provider via Chain Abstraction"
+        status: backlog
+
+  epic-33:
+    name: "Solana Payment Channel Provider"
+    status: backlog
+
+  epic-34:
+    name: "Mina Protocol Payment Channel Provider"
+    status: backlog
