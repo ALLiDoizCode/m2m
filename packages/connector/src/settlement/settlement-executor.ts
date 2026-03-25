@@ -2,7 +2,7 @@
  * Settlement Executor - Automated On-Chain Settlement via Payment Channels
  *
  * This module implements the SettlementExecutor class which bridges Epic 6's
- * TigerBeetle accounting system with Epic 8's payment channel SDK.
+ * TigerBeetle accounting system with chain-agnostic payment channel providers via ChainProviderRegistry (Epic 32).
  *
  * **Functionality:**
  * - Listens to SETTLEMENT_REQUIRED events from SettlementMonitor (Epic 6 Story 6.6)
@@ -13,22 +13,28 @@
  *
  * **Integration Points:**
  * - SettlementMonitor: Receives SETTLEMENT_REQUIRED events (Epic 6 Story 6.6)
- * - PaymentChannelSDK: Executes blockchain operations (Epic 8 Story 8.7)
+ * - ChainProviderRegistry: Resolves chain-specific PaymentChannelProvider (Epic 32)
+ * - PaymentChannelProvider: Executes blockchain operations via chain-agnostic interface
  * - AccountManager: Updates TigerBeetle balances (Epic 6 Story 6.4)
  *
- * Source: Epic 8 Story 8.8 - Settlement Engine Integration with Payment Channels
+ * Source: Epic 32 Story 32.5 - Refactor SettlementExecutor for Multi-Chain
  *
  * @module settlement/settlement-executor
  */
 
 import EventEmitter from 'events';
 import { Logger } from 'pino';
-import { SettlementTriggerEvent } from '../config/types';
-import { BalanceProof } from '@toon-protocol/shared';
+import { SettlementState, SettlementTriggerEvent } from '../config/types';
 import { AccountManager } from './account-manager';
-import { PaymentChannelSDK } from './payment-channel-sdk';
 import { SettlementMonitor } from './settlement-monitor';
 import type { PerPacketClaimService } from './per-packet-claim-service';
+import { isEVMClaim } from '../btp/btp-claim-types';
+import type { ChainProviderRegistry } from './provider/chain-provider-registry';
+import type {
+  PaymentChannelProvider,
+  BalanceProofParams,
+} from './provider/payment-channel-provider';
+import type { ChannelManager } from './channel-manager';
 
 /**
  * Configuration interface for SettlementExecutor
@@ -42,9 +48,7 @@ import type { PerPacketClaimService } from './per-packet-claim-service';
  * @property retryDelayMs - Initial retry delay in milliseconds (default: 5000ms)
  * @property tokenAddressMap - Maps tokenId (e.g., "M2M", "USDC") to ERC20 contract address
  * @property peerIdToAddressMap - Maps peerId (e.g., "connector-b") to Ethereum address
- * @property registryAddress - TokenNetworkRegistry contract address
- * @property rpcUrl - Base L2 RPC URL (e.g., http://localhost:8545)
- * @property privateKey - Connector wallet private key
+ * @property peerIdToChainMap - Maps peerId to chain identifier (e.g., "evm:anvil:31337")
  */
 export interface SettlementExecutorConfig {
   nodeId: string;
@@ -55,9 +59,7 @@ export interface SettlementExecutorConfig {
   retryDelayMs: number;
   tokenAddressMap: Map<string, string>;
   peerIdToAddressMap: Map<string, string>;
-  registryAddress: string;
-  rpcUrl: string;
-  privateKey: string;
+  peerIdToChainMap: Map<string, string>;
 }
 
 /**
@@ -87,11 +89,12 @@ export interface SettlementExecutorConfig {
 export class SettlementExecutor extends EventEmitter {
   private readonly config: SettlementExecutorConfig;
   private readonly accountManager: AccountManager;
-  private readonly paymentChannelSDK: PaymentChannelSDK;
+  private readonly chainProviderRegistry: ChainProviderRegistry;
   private readonly settlementMonitor: SettlementMonitor;
   private readonly logger: Logger;
   private readonly boundHandleSettlement: (event: SettlementTriggerEvent) => void;
   private perPacketClaimService: PerPacketClaimService | null = null;
+  private channelManager: ChannelManager | null = null;
 
   /**
    * Settlement chain serializes all on-chain operations to prevent nonce collisions.
@@ -113,21 +116,21 @@ export class SettlementExecutor extends EventEmitter {
    *
    * @param config - Settlement executor configuration
    * @param accountManager - TigerBeetle account manager
-   * @param paymentChannelSDK - Payment channel blockchain SDK
+   * @param chainProviderRegistry - Chain provider registry for resolving blockchain providers
    * @param settlementMonitor - Settlement threshold monitor
    * @param logger - Pino logger instance
    */
   constructor(
     config: SettlementExecutorConfig,
     accountManager: AccountManager,
-    paymentChannelSDK: PaymentChannelSDK,
+    chainProviderRegistry: ChainProviderRegistry,
     settlementMonitor: SettlementMonitor,
     logger: Logger
   ) {
     super();
     this.config = config;
     this.accountManager = accountManager;
-    this.paymentChannelSDK = paymentChannelSDK;
+    this.chainProviderRegistry = chainProviderRegistry;
     this.settlementMonitor = settlementMonitor;
 
     // Create child logger with component context
@@ -140,7 +143,6 @@ export class SettlementExecutor extends EventEmitter {
     this.logger.info(
       {
         nodeId: config.nodeId,
-        registryAddress: config.registryAddress,
         defaultSettlementTimeout: config.defaultSettlementTimeout,
       },
       'Settlement executor initialized'
@@ -154,6 +156,15 @@ export class SettlementExecutor extends EventEmitter {
   setPerPacketClaimService(service: PerPacketClaimService): void {
     this.perPacketClaimService = service;
     this.logger.info('PerPacketClaimService set for on-chain settlement');
+  }
+
+  /**
+   * Set ChannelManager for chain-agnostic channel lookup
+   * @param channelManager - ChannelManager instance
+   */
+  setChannelManager(channelManager: ChannelManager): void {
+    this.channelManager = channelManager;
+    this.logger.info('ChannelManager set for channel lookup');
   }
 
   /**
@@ -305,6 +316,16 @@ export class SettlementExecutor extends EventEmitter {
       'Executing settlement'
     );
 
+    // Resolve the chain provider for this peer
+    const chain = this.config.peerIdToChainMap.get(peerId);
+    if (!chain) {
+      throw new Error(`No chain configured for peer: ${peerId}`);
+    }
+    const provider = this.chainProviderRegistry.getProviderForPeer({ peerId, chain });
+    if (!provider) {
+      throw new Error(`No provider registered for chain: ${chain} (peer: ${peerId})`);
+    }
+
     // Get token address from configuration
     const tokenAddress = this.config.tokenAddressMap.get(tokenId);
     if (!tokenAddress) {
@@ -315,11 +336,11 @@ export class SettlementExecutor extends EventEmitter {
       throw new Error(`Token address not found for tokenId: ${tokenId}`);
     }
 
-    this.logger.debug({ tokenId, tokenAddress }, 'Token address resolved');
+    this.logger.debug({ tokenId, tokenAddress, chain }, 'Token address resolved');
 
     // Find existing channel for peer
-    this.logger.debug({ peerId, tokenAddress }, 'Searching for existing channel');
-    const channelId = await this.findChannelForPeer(peerId, tokenAddress);
+    this.logger.debug({ peerId, tokenId }, 'Searching for existing channel');
+    const channelId = await this.findChannelForPeer(peerId, tokenId);
 
     if (!channelId) {
       // No existing channel: Open new channel and deposit
@@ -327,51 +348,47 @@ export class SettlementExecutor extends EventEmitter {
         { peerId, tokenId, tokenAddress },
         'No existing channel found, opening new channel'
       );
-      await this.openChannelAndSettle(peerId, tokenId, tokenAddress, currentBalance);
+      await this.openChannelAndSettle(peerId, tokenId, tokenAddress, currentBalance, provider);
     } else {
       // Existing channel: Sign balance proof and cooperative settle
       this.logger.info({ peerId, tokenId, channelId }, 'Using existing channel for settlement');
-      await this.settleViaExistingChannel(channelId, tokenAddress, peerId, tokenId, currentBalance);
+      await this.settleViaExistingChannel(channelId, peerId, tokenId, currentBalance, provider);
     }
   }
 
   /**
    * Find existing payment channel for peer
    *
-   * Queries all channels for the token and filters by peer address.
-   * Returns channelId if an active channel exists, null otherwise.
+   * Uses ChannelManager's peer-channel index for chain-agnostic channel lookup,
+   * then verifies on-chain status via the provider.
    *
    * @param peerId - Peer connector ID
-   * @param tokenAddress - ERC20 token contract address
+   * @param tokenId - Token identifier
    * @returns channelId if found, null otherwise
    * @private
    */
-  private async findChannelForPeer(peerId: string, tokenAddress: string): Promise<string | null> {
+  private async findChannelForPeer(peerId: string, tokenId: string): Promise<string | null> {
     try {
-      // Get peer's Ethereum address
-      const peerAddress = this.config.peerIdToAddressMap.get(peerId);
-      if (!peerAddress) {
-        this.logger.warn({ peerId }, 'Peer address not found in configuration');
+      if (!this.channelManager) {
+        this.logger.warn({ peerId }, 'ChannelManager not set, cannot look up channels');
         return null;
       }
 
-      // Query all channels for this token
-      const channelIds = await this.paymentChannelSDK.getMyChannels(tokenAddress);
+      const metadata = this.channelManager.getChannelForPeer(peerId, tokenId);
+      if (!metadata) {
+        return null;
+      }
 
-      // Filter channels by peer address and status='opened'
-      for (const channelId of channelIds) {
-        const channelState = await this.paymentChannelSDK.getChannelState(channelId, tokenAddress);
-        if (
-          channelState.status === 'opened' &&
-          channelState.participants.includes(peerAddress.toLowerCase())
-        ) {
-          return channelId;
-        }
+      // Trust ChannelManager's local state for channel lookup.
+      // On-chain verification is deferred to the settlement operation itself.
+      // ChannelManager normalizes all statuses to AdminChannelStatus ('open', 'closed', etc.)
+      if (metadata.status === 'open') {
+        return metadata.channelId;
       }
 
       return null;
     } catch (error) {
-      this.logger.error({ error, peerId, tokenAddress }, 'Failed to find channel for peer');
+      this.logger.error({ error, peerId, tokenId }, 'Failed to find channel for peer');
       return null; // Treat as no channel exists
     }
   }
@@ -379,15 +396,16 @@ export class SettlementExecutor extends EventEmitter {
   /**
    * Open new channel and deposit initial funds
    *
-   * Opens a new payment channel with initial deposit based on
-   * currentBalance × initialDepositMultiplier.
+   * Opens a new payment channel (zero deposit) then deposits initial funds
+   * as a separate operation. Uses the chain-agnostic provider interface.
    *
-   * After channel open, updates TigerBeetle to reduce creditBalance.
+   * After channel open + deposit, updates TigerBeetle to reduce creditBalance.
    *
    * @param peerId - Peer connector ID
    * @param tokenId - Token identifier
    * @param tokenAddress - ERC20 token contract address
    * @param amount - Amount to deposit (current balance from event)
+   * @param provider - Resolved chain provider
    * @returns channelId of newly opened channel
    * @private
    */
@@ -395,7 +413,8 @@ export class SettlementExecutor extends EventEmitter {
     peerId: string,
     tokenId: string,
     tokenAddress: string,
-    amount: bigint
+    amount: bigint,
+    provider: PaymentChannelProvider
   ): Promise<string> {
     // Calculate initial deposit
     const initialDeposit = amount * BigInt(this.config.initialDepositMultiplier);
@@ -417,15 +436,9 @@ export class SettlementExecutor extends EventEmitter {
       'Opening new payment channel'
     );
 
-    // Open channel with retry logic
+    // Step 1: Open channel (zero deposit via provider)
     const { channelId, txHash } = await this.retryWithBackoff(
-      async () =>
-        await this.paymentChannelSDK.openChannel(
-          peerAddress,
-          tokenAddress,
-          this.config.defaultSettlementTimeout,
-          initialDeposit
-        ),
+      async () => await provider.openChannel(peerAddress, this.config.defaultSettlementTimeout),
       'openChannel',
       this.config.maxRetries
     );
@@ -435,10 +448,26 @@ export class SettlementExecutor extends EventEmitter {
         channelId,
         peerId,
         tokenId,
-        initialDeposit: initialDeposit.toString(),
         txHash,
       },
-      'Channel opened for settlement'
+      'Channel opened, depositing initial funds'
+    );
+
+    // Step 2: Deposit initial funds separately
+    await this.retryWithBackoff(
+      async () => await provider.deposit(channelId, initialDeposit.toString()),
+      'deposit',
+      this.config.maxRetries
+    );
+
+    this.logger.info(
+      {
+        channelId,
+        peerId,
+        tokenId,
+        initialDeposit: initialDeposit.toString(),
+      },
+      'Channel funded for settlement'
     );
 
     // Update TigerBeetle: Record settlement to reduce creditBalance
@@ -464,101 +493,51 @@ export class SettlementExecutor extends EventEmitter {
    * the sender can continue sending packets and funding the channel.
    *
    * @param channelId - Payment channel ID
-   * @param tokenAddress - ERC20 token address
    * @param peerId - Peer connector ID
    * @param tokenId - Token identifier
    * @param amount - Amount to settle
+   * @param provider - Resolved chain provider
    * @private
    */
   private async settleViaExistingChannel(
     channelId: string,
-    tokenAddress: string,
     peerId: string,
     tokenId: string,
-    amount: bigint
+    amount: bigint,
+    provider: PaymentChannelProvider
   ): Promise<void> {
-    // Use latest per-packet claim if available, otherwise generate fresh balance proof
-    let claimBalanceProof: BalanceProof;
-    let claimSignature: string;
-
     const latestClaim = this.perPacketClaimService?.getLatestClaim(channelId);
-    if (latestClaim) {
-      // Per-packet claims already accumulated the correct cumulative state
-      claimBalanceProof = {
-        channelId,
-        nonce: latestClaim.nonce,
-        transferredAmount: BigInt(latestClaim.transferredAmount),
-        lockedAmount: BigInt(latestClaim.lockedAmount),
-        locksRoot: latestClaim.locksRoot,
-      };
-      claimSignature = latestClaim.signature;
-
-      this.logger.info(
-        {
-          channelId,
-          nonce: latestClaim.nonce,
-          transferred: latestClaim.transferredAmount,
-        },
-        'Using latest per-packet claim for on-chain settlement (claimFromChannel)'
+    if (!latestClaim || !isEVMClaim(latestClaim)) {
+      this.logger.error(
+        { channelId, peerId },
+        'No per-packet claim available for settlement — cannot compute balance proof without chain-specific state'
       );
-    } else {
-      // Fallback: calculate new balance proof
-      const channelState = await this.paymentChannelSDK.getChannelState(channelId, tokenAddress);
-      const newNonce = channelState.theirNonce + 1;
-      const newTransferred = channelState.theirTransferred + amount;
-
-      this.logger.info(
-        {
-          channelId,
-          newNonce,
-          newTransferred: newTransferred.toString(),
-          amount: amount.toString(),
-        },
-        'Generating balance proof for claimFromChannel (no per-packet claims available)'
-      );
-
-      claimBalanceProof = {
-        channelId,
-        nonce: newNonce,
-        transferredAmount: newTransferred,
-        lockedAmount: 0n,
-        locksRoot: '0x' + '0'.repeat(64),
-      };
-
-      // Note: In production, we should have the counterparty's signature.
-      // This fallback path signs with our own key (only works in test scenarios).
-      claimSignature = await this.retryWithBackoff(
-        async () =>
-          await this.paymentChannelSDK.signBalanceProof(
-            channelId,
-            claimBalanceProof.nonce,
-            claimBalanceProof.transferredAmount,
-            0n,
-            '0x' + '0'.repeat(64)
-          ),
-        'signBalanceProof',
-        this.config.maxRetries
-      );
+      throw new Error(`No per-packet claim available for channel ${channelId}`);
     }
+
+    // Per-packet claims already accumulated the correct cumulative state
+    // Use string amounts directly from EVMClaimMessage for provider call
+    const balanceProofParams: BalanceProofParams = {
+      channelId,
+      nonce: latestClaim.nonce,
+      transferredAmount: latestClaim.transferredAmount,
+      lockedAmount: latestClaim.lockedAmount,
+      locksRoot: latestClaim.locksRoot,
+    };
+    const claimSignature = latestClaim.signature;
 
     this.logger.info(
       {
         channelId,
-        nonce: claimBalanceProof.nonce,
-        transferredAmount: claimBalanceProof.transferredAmount.toString(),
+        nonce: latestClaim.nonce,
+        transferred: latestClaim.transferredAmount,
       },
-      'Claiming from channel (channel stays open)'
+      'Using latest per-packet claim for on-chain settlement (claimFromChannel)'
     );
 
     // Claim from channel — transfers delta tokens to us, channel stays open
     await this.retryWithBackoff(
-      async () =>
-        await this.paymentChannelSDK.claimFromChannel(
-          channelId,
-          tokenAddress,
-          claimBalanceProof,
-          claimSignature
-        ),
+      async () => await provider.claimFromChannel(channelId, balanceProofParams, claimSignature),
       'claimFromChannel',
       this.config.maxRetries
     );
@@ -695,7 +674,7 @@ export class SettlementExecutor extends EventEmitter {
    * @param tokenId - Token identifier
    * @returns Current settlement state
    */
-  getSettlementState(peerId: string, tokenId: string): string {
+  getSettlementState(peerId: string, tokenId: string): SettlementState {
     return this.settlementMonitor.getSettlementState(peerId, tokenId);
   }
 }

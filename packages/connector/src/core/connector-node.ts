@@ -30,6 +30,7 @@ import {
   RouteInfo,
   RemovePeerResult,
   DeploymentMode,
+  validateChainProviders,
 } from '../config/types';
 import { PaymentHandler, createPaymentHandlerAdapter } from './payment-handler';
 import {
@@ -58,6 +59,8 @@ import { requireOptional } from '../utils/optional-require';
 import { TigerBeetleClient } from '../settlement/tigerbeetle-client';
 import { InMemoryLedgerClient } from '../settlement/in-memory-ledger-client';
 import { PerPacketClaimService } from '../settlement/per-packet-claim-service';
+import { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
+import { EVMPaymentChannelProvider } from '../settlement/provider/evm-payment-channel-provider';
 import {
   SENT_CLAIMS_TABLE_SCHEMA,
   SENT_CLAIMS_INDEXES,
@@ -426,6 +429,10 @@ export class ConnectorNode implements HealthStatusProvider {
     );
 
     try {
+      // Validate chain provider configuration (checks chainType, duplicate chainIds,
+      // required fields, and peer chain references)
+      validateChainProviders(this._config, this._logger);
+
       // Initialize Base L2 Payment Channel infrastructure if enabled
       // Config-first pattern: settlementInfra config takes precedence, env var fallback
       const settlementEnabled =
@@ -733,6 +740,38 @@ export class ConnectorNode implements HealthStatusProvider {
           );
           this._settlementMonitor = settlementMonitor;
 
+          // Create a shared ChainProviderRegistry wrapping the primary SDK
+          // in an EVMPaymentChannelProvider. Both SettlementExecutor and
+          // PerPacketClaimService share this registry instance.
+          const primaryChainIdStr = primaryChainId ? `evm:${primaryChainId}` : 'evm:unknown';
+          const chainRegistry = new ChainProviderRegistry();
+          const evmProvider = new EVMPaymentChannelProvider(
+            this._paymentChannelSDK,
+            primaryChainIdStr,
+            m2mTokenAddress,
+            this._logger
+          );
+          chainRegistry.register(evmProvider);
+
+          // Build peerIdToChainMap — config-driven when peers have `chain` fields,
+          // otherwise all peers default to the primary EVM chain.
+          const peerIdToChainMap = new Map<string, string>();
+          for (const peer of this._config.peers) {
+            if (peer.chain) {
+              // Config-driven: peer explicitly references a chain provider
+              peerIdToChainMap.set(peer.id, peer.chain);
+            } else if (peerIdToAddressMap.has(peer.id)) {
+              // Legacy: peer defaults to primary EVM chain
+              peerIdToChainMap.set(peer.id, primaryChainIdStr);
+            }
+          }
+          // Also map env-var-discovered peers (legacy PEER{N} pattern) to primary chain
+          for (const peerId of peerIdToAddressMap.keys()) {
+            if (!peerIdToChainMap.has(peerId)) {
+              peerIdToChainMap.set(peerId, primaryChainIdStr);
+            }
+          }
+
           this._settlementExecutor = new SettlementExecutor(
             {
               nodeId: this._config.nodeId,
@@ -743,12 +782,10 @@ export class ConnectorNode implements HealthStatusProvider {
               retryDelayMs: 5000,
               tokenAddressMap,
               peerIdToAddressMap,
-              registryAddress,
-              rpcUrl: baseRpcUrl,
-              privateKey: treasuryPrivateKey,
+              peerIdToChainMap,
             },
             accountManager,
-            this._paymentChannelSDK,
+            chainRegistry,
             settlementMonitor,
             this._logger
           );
@@ -791,6 +828,9 @@ export class ConnectorNode implements HealthStatusProvider {
             this._logger
           );
 
+          // Wire ChannelManager to SettlementExecutor for chain-agnostic channel lookup
+          this._settlementExecutor.setChannelManager(this._channelManager);
+
           this._logger.info(
             {
               event: 'payment_channel_sdk_initialized',
@@ -816,8 +856,9 @@ export class ConnectorNode implements HealthStatusProvider {
                 claimDb.exec(indexSql);
               }
 
+              // Reuse the shared chainRegistry hoisted before SettlementExecutor construction
               const perPacketClaimService = new PerPacketClaimService(
-                this._paymentChannelSDK,
+                chainRegistry,
                 this._channelManager,
                 claimDb,
                 this._logger,
@@ -873,7 +914,7 @@ export class ConnectorNode implements HealthStatusProvider {
 
               const claimReceiver = new ClaimReceiver(
                 receivedClaimDb,
-                this._paymentChannelSDK,
+                chainRegistry,
                 this._logger,
                 this._channelManager ?? undefined,
                 peerIdToAddressMap

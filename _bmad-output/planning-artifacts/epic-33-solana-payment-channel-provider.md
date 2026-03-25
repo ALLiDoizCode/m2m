@@ -15,7 +15,7 @@ Implement a complete Solana payment channel system — an on-chain Rust program 
 ### Existing System Context
 
 - **Current functionality:** The connector settles on EVM (Base L2) via Raiden-style payment channels. Epic 31 added self-describing BTP claims with chain/contract coordinates. Epic 32 (dependency) extracts a chain-agnostic `PaymentChannelProvider` interface and `SettlementMonitor` abstraction from the existing EVM-specific settlement code.
-- **Technology stack:** TypeScript 5.3.3, Node.js 22+, Rust (for on-chain program), `@solana/web3.js`, `tweetnacl` (Ed25519), ethers ^6.16.0 (EVM side), Jest 29.7.x
+- **Technology stack:** TypeScript 5.3.3, Node.js 22+, Rust (for on-chain program), `@solana/kit`, `tweetnacl` (Ed25519), ethers ^6.16.0 (EVM side), Jest 29.7.x
 - **Integration points:**
   - `PaymentChannelProvider` interface (Epic 32) — the contract this epic implements
   - `BaseClaimMessage` / `BlockchainType` in `packages/connector/src/btp/btp-claim-types.ts` — extended with Solana variant
@@ -27,7 +27,7 @@ Implement a complete Solana payment channel system — an on-chain Rust program 
 
 - **What's being added:**
   1. A Solana on-chain program (Pinocchio or native Rust, ~30-60KB binary) implementing payment channel lifecycle: open, deposit, claim, close, settle
-  2. A `SolanaPaymentChannelSDK` TypeScript class wrapping program instructions via `@solana/web3.js`
+  2. A `SolanaPaymentChannelSDK` TypeScript class wrapping program instructions via `@solana/kit`
   3. A `SolanaPaymentChannelProvider` implementing the `PaymentChannelProvider` interface from Epic 32
   4. `SolanaClaimMessage` type extending `BaseClaimMessage` with Solana-specific self-describing fields
   5. Integration and E2E tests using `solana-program-test` / Bankrun and local validator
@@ -230,7 +230,7 @@ So that the connector can interact with payment channels programmatically.
 
 **Scope:**
 
-Create `SolanaPaymentChannelSDK` class in `packages/connector/src/settlement/solana-payment-channel-sdk.ts` using `@solana/web3.js`.
+Create `SolanaPaymentChannelSDK` class in `packages/connector/src/settlement/solana-payment-channel-sdk.ts` using `@solana/kit`.
 
 **Methods:**
 
@@ -244,7 +244,7 @@ Create `SolanaPaymentChannelSDK` class in `packages/connector/src/settlement/sol
 | `getChannelState(channelPDA)`                                           | Fetch and deserialize channel account data                                          |
 | `deriveChannelPDA(participantA, participantB, tokenMint)`               | Derive PDA address (static utility)                                                 |
 | `subscribeToChannel(channelPDA, callback)`                              | Subscribe to account changes via `onAccountChange`                                  |
-| `signBalanceProof(channelPDA, nonce, transferredAmount, keypair)`       | Sign the balance proof message using Ed25519 (`tweetnacl` or `@solana/web3.js`)     |
+| `signBalanceProof(channelPDA, nonce, transferredAmount, keypair)`       | Sign the balance proof message using Ed25519 (`tweetnacl` or `@solana/kit`)         |
 
 **Acceptance Criteria:**
 
@@ -383,7 +383,7 @@ So that the full lifecycle is verified from channel open through claim settlemen
 
 **Scope:**
 
-Integration tests using a local Solana validator (solana-test-validator) or Bankrun, exercising the complete flow through the `SolanaPaymentChannelProvider` and BTP claim exchange.
+Integration tests using local Solana infrastructure (see Architecture doc → Local Blockchain Infrastructure → Solana Test Validator). Use `solana-bankrun` for fast in-process TS integration tests and Docker-based `solana-test-validator` (`make solana-up`) for E2E tests requiring real RPC, account subscriptions, and deployed programs. Rust-level tests use `solana-program-test` BanksClient (`cargo test-sbf`). Docker image: `ghcr.io/beeman/solana-test-validator:latest` (multi-arch amd64 + arm64).
 
 **Test Scenarios:**
 

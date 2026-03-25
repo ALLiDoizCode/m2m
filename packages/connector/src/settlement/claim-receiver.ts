@@ -2,12 +2,13 @@
  * Claim Receiver Module
  *
  * Receives and verifies payment channel claims from peers via BTP protocol.
- * Implements verification for EVM blockchains with signature
- * validation and monotonicity checks.
+ * Dispatches claim verification to the correct PaymentChannelProvider via
+ * the ChainProviderRegistry based on the blockchain discriminator field.
  *
  * @module claim-receiver
  * @see RFC-0023 - Bilateral Transfer Protocol (BTP)
  * @see Epic 17 - BTP Off-Chain Claim Exchange Protocol
+ * @see Epic 32 Story 32.6 - Refactor ClaimReceiver for multi-chain verification
  */
 
 import { EventEmitter } from 'events';
@@ -16,7 +17,12 @@ import type { Logger } from 'pino';
 import type { BTPServer } from '../btp/btp-server';
 import type { BTPProtocolData, BTPMessage } from '../btp/btp-types';
 import { isBTPData } from '../btp/btp-types';
-import type { PaymentChannelSDK } from './payment-channel-sdk';
+import type { ChainProviderRegistry } from './provider/chain-provider-registry';
+import type {
+  PaymentChannelProvider,
+  VerifyBalanceProofParams,
+  ProviderChannelState,
+} from './provider/payment-channel-provider';
 import type { ChannelManager } from './channel-manager';
 import {
   type BTPClaimMessage,
@@ -50,6 +56,8 @@ export const ERRORS = {
   CHANNEL_NOT_OPENED: 'Channel not in opened state',
   SIGNER_NOT_PARTICIPANT: 'Signer is not a channel participant',
   ON_CHAIN_VERIFICATION_FAILED: 'On-chain channel verification failed',
+  INVALID_SIGNATURE: 'Invalid balance proof signature',
+  NO_PROVIDER_REGISTERED: 'No provider registered for blockchain:',
 } as const;
 
 /**
@@ -70,7 +78,7 @@ export interface ClaimVerificationResult {
  * Responsibilities:
  * - Register BTP protocol data handler for "payment-channel-claim" protocol
  * - Parse and validate incoming claim messages
- * - Verify EVM payment channel claims with signature validation
+ * - Dispatch claim verification to the correct PaymentChannelProvider via ChainProviderRegistry
  * - Enforce monotonicity checks (nonce/amount must increase)
  * - Persist verified claims to database for later redemption
  *
@@ -78,7 +86,7 @@ export interface ClaimVerificationResult {
  * ```typescript
  * const claimReceiver = new ClaimReceiver(
  *   db,
- *   evmChannelSDK,
+ *   chainProviderRegistry,
  *   logger
  * );
  *
@@ -88,7 +96,7 @@ export interface ClaimVerificationResult {
 export class ClaimReceiver extends EventEmitter {
   constructor(
     private readonly db: Database,
-    private readonly evmChannelSDK: PaymentChannelSDK,
+    private readonly chainProviderRegistry: ChainProviderRegistry,
     private readonly logger: Logger,
     private readonly channelManager?: ChannelManager,
     private readonly peerIdToAddressMap?: Map<string, string>
@@ -147,12 +155,18 @@ export class ClaimReceiver extends EventEmitter {
 
       childLogger.info({ messageId, blockchain }, 'Received claim message');
 
-      // Verify EVM claim
-      if (!isEVMClaim(claimMessage)) {
-        throw new Error(`Unsupported blockchain type: ${blockchain}. Only EVM is supported.`);
+      // Resolve the appropriate provider for this claim's blockchain type
+      const provider = this.resolveProvider(claimMessage);
+
+      if (!provider) {
+        // No provider registered for this blockchain type — reject
+        const errorMsg = `${ERRORS.NO_PROVIDER_REGISTERED} ${blockchain}`;
+        childLogger.warn({ messageId, blockchain }, errorMsg);
+        this._persistReceivedClaim(peerId, claimMessage, false);
+        return;
       }
 
-      const verificationResult = await this.verifyEVMClaim(claimMessage, peerId);
+      const verificationResult = await this.verifyClaim(claimMessage, peerId, provider);
 
       // Persist verified claim
       if (verificationResult.valid) {
@@ -160,6 +174,7 @@ export class ClaimReceiver extends EventEmitter {
         childLogger.info({ messageId }, 'Claim verified and stored');
 
         // Emit event for event-driven settlement monitoring
+        // Any claim type with channelId and transferredAmount should emit the event
         if (isEVMClaim(claimMessage)) {
           const event: ClaimReceivedEvent = {
             peerId,
@@ -185,27 +200,56 @@ export class ClaimReceiver extends EventEmitter {
   }
 
   /**
-   * Verify EVM claim signature and nonce monotonicity
+   * Resolve the appropriate PaymentChannelProvider for a claim message.
    *
-   * @param claim - EVM claim message
+   * For known channels, uses the channel's chain metadata to look up the provider.
+   * For unknown channels (dynamic verification), constructs a chain key from the
+   * claim's self-describing fields.
+   *
+   * @param claim - The claim message (narrowed to EVMClaimMessage after validation)
+   * @returns The matching provider, or undefined if none found
+   * @private
+   */
+  private resolveProvider(claim: EVMClaimMessage): PaymentChannelProvider | undefined {
+    // Try known channel first (uses channel's chain metadata for provider lookup)
+    if (this.channelManager) {
+      const knownChannel = this.channelManager.getChannelById(claim.channelId);
+      if (knownChannel && knownChannel.chain) {
+        // Use the known channel's chain metadata to resolve the provider
+        return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
+      }
+    }
+
+    // For unknown channels or when channelManager is not available,
+    // construct chain key from self-describing fields
+    if (claim.chainId !== undefined) {
+      const chainKey = `${claim.blockchain}:${claim.chainId}`;
+      return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
+    }
+
+    // Fallback: try the first registered provider for this blockchain type
+    const allProviders = this.chainProviderRegistry.getAllProviders();
+    return allProviders.find((p) => p.chainType === claim.blockchain);
+  }
+
+  /**
+   * Verify a claim using the resolved PaymentChannelProvider.
+   *
+   * Delegates signature verification and on-chain state checks to the provider.
+   * Maintains chain-agnostic nonce monotonicity checking.
+   *
+   * @param claim - Claim message (currently EVMClaimMessage after validation narrowing)
    * @param peerId - Peer ID of sender
+   * @param provider - The resolved PaymentChannelProvider
    * @returns Verification result
    * @private
    */
-  private async verifyEVMClaim(
+  private async verifyClaim(
     claim: EVMClaimMessage,
-    peerId: string
+    peerId: string,
+    provider: PaymentChannelProvider
   ): Promise<ClaimVerificationResult> {
     try {
-      // Create balance proof object with bigint conversion
-      const balanceProof = {
-        channelId: claim.channelId,
-        nonce: claim.nonce,
-        transferredAmount: BigInt(claim.transferredAmount),
-        lockedAmount: BigInt(claim.lockedAmount),
-        locksRoot: claim.locksRoot,
-      };
-
       this.logger.debug({ channelId: claim.channelId }, 'Checking channel existence in metadata');
 
       // Check if channel is known (pre-registered or previously verified)
@@ -231,19 +275,10 @@ export class ClaimReceiver extends EventEmitter {
           };
         }
 
-        // Query on-chain state
-        let channelState: {
-          exists: boolean;
-          state: number;
-          participant1: string;
-          participant2: string;
-          settlementTimeout: number;
-        };
+        // Query on-chain state via provider
+        let channelState: ProviderChannelState;
         try {
-          channelState = await this.evmChannelSDK.getChannelStateByNetwork(
-            claim.channelId,
-            claim.tokenNetworkAddress
-          );
+          channelState = await provider.getChannelState(claim.channelId);
         } catch (error) {
           this.logger.warn(
             { channelId: claim.channelId, signerAddress: claim.signerAddress, error },
@@ -256,38 +291,26 @@ export class ClaimReceiver extends EventEmitter {
           };
         }
 
-        // Verify channel exists (state !== 0)
-        if (!channelState.exists) {
+        // Verify channel is opened
+        if (channelState.status !== 'opened') {
+          const errorMsg =
+            channelState.status === 'settled' || channelState.status === 'closed'
+              ? ERRORS.CHANNEL_NOT_OPENED
+              : ERRORS.CHANNEL_NOT_FOUND;
           this.logger.warn(
             { channelId: claim.channelId, signerAddress: claim.signerAddress },
-            ERRORS.CHANNEL_NOT_FOUND
+            errorMsg
           );
           return {
             valid: false,
             messageId: claim.messageId,
-            error: ERRORS.CHANNEL_NOT_FOUND,
+            error: errorMsg,
           };
         }
 
-        // Verify channel is opened (state === 1)
-        if (channelState.state !== 1) {
-          this.logger.warn(
-            { channelId: claim.channelId, signerAddress: claim.signerAddress },
-            ERRORS.CHANNEL_NOT_OPENED
-          );
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: ERRORS.CHANNEL_NOT_OPENED,
-          };
-        }
-
-        // Verify signerAddress matches participant1 or participant2
+        // Verify signerAddress is a channel participant
         const signerLower = claim.signerAddress.toLowerCase();
-        if (
-          signerLower !== channelState.participant1.toLowerCase() &&
-          signerLower !== channelState.participant2.toLowerCase()
-        ) {
+        if (!channelState.participants.some((p) => p.toLowerCase() === signerLower)) {
           this.logger.warn(
             { channelId: claim.channelId, signerAddress: claim.signerAddress },
             ERRORS.SIGNER_NOT_PARTICIPANT
@@ -302,27 +325,21 @@ export class ClaimReceiver extends EventEmitter {
         this.logger.info(
           {
             channelId: claim.channelId,
-            participant1: channelState.participant1,
-            participant2: channelState.participant2,
-            state: channelState.state,
+            participants: channelState.participants,
+            status: channelState.status,
           },
           'On-chain channel verified successfully'
         );
 
-        // Verify EIP-712 signature using explicit domain from claim fields
-        const sigValid = await this.evmChannelSDK.verifyBalanceProofWithDomain(
-          balanceProof,
-          claim.signature,
-          claim.signerAddress,
-          claim.chainId,
-          claim.tokenNetworkAddress
-        );
+        // Verify signature via provider (provider handles domain context internally)
+        const verifyParams = this.buildVerifyParams(claim);
+        const sigValid = await provider.verifyBalanceProof(verifyParams);
 
         if (!sigValid) {
           return {
             valid: false,
             messageId: claim.messageId,
-            error: 'Invalid EIP-712 signature',
+            error: ERRORS.INVALID_SIGNATURE,
           };
         }
 
@@ -347,24 +364,25 @@ export class ClaimReceiver extends EventEmitter {
           );
         }
       } else {
-        // Known channel (pre-registered or previously verified) -- use existing verification
-        const isValid = await this.evmChannelSDK.verifyBalanceProof(
-          balanceProof,
-          claim.signature,
-          claim.signerAddress
-        );
+        // Known channel (pre-registered or previously verified) -- use provider verification
+        const verifyParams = this.buildVerifyParams(claim);
+        const isValid = await provider.verifyBalanceProof(verifyParams);
 
         if (!isValid) {
           return {
             valid: false,
             messageId: claim.messageId,
-            error: 'Invalid EIP-712 signature',
+            error: ERRORS.INVALID_SIGNATURE,
           };
         }
       }
 
       // Check nonce monotonicity - nonce must strictly increase
-      const latestClaim = await this.getLatestVerifiedClaim(peerId, 'evm', claim.channelId);
+      const latestClaim = await this.getLatestVerifiedClaim(
+        peerId,
+        claim.blockchain,
+        claim.channelId
+      );
 
       if (latestClaim && isEVMClaim(latestClaim)) {
         if (claim.nonce <= latestClaim.nonce) {
@@ -387,6 +405,28 @@ export class ClaimReceiver extends EventEmitter {
   }
 
   /**
+   * Build VerifyBalanceProofParams from an EVM claim message.
+   *
+   * Extracted to avoid duplicating the parameter construction in both the
+   * known-channel and unknown-channel verification paths.
+   *
+   * @param claim - The EVM claim message
+   * @returns Parameters for provider.verifyBalanceProof()
+   * @private
+   */
+  private buildVerifyParams(claim: EVMClaimMessage): VerifyBalanceProofParams {
+    return {
+      channelId: claim.channelId,
+      nonce: claim.nonce,
+      transferredAmount: claim.transferredAmount,
+      lockedAmount: claim.lockedAmount,
+      locksRoot: claim.locksRoot,
+      signature: claim.signature,
+      signerAddress: claim.signerAddress,
+    };
+  }
+
+  /**
    * Persist received claim to database
    *
    * @param peerId - Peer ID of sender
@@ -396,8 +436,8 @@ export class ClaimReceiver extends EventEmitter {
    */
   private _persistReceivedClaim(peerId: string, claim: BTPClaimMessage, verified: boolean): void {
     try {
-      // EVM claims use channelId
-      const channelId = claim.channelId;
+      // EVM claims use channelId; other chains are not yet supported at runtime
+      const channelId = isEVMClaim(claim) ? claim.channelId : '';
 
       // Insert into database
       const stmt = this.db.prepare(`

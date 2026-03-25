@@ -27,15 +27,15 @@ Connectors handle three critical tasks:
 2. **Accounting** — Track balances with each peer off-chain (thousands of transactions)
 3. **Settlement** — Periodically settle net balances on-chain (one transaction)
 
-### How Connectors Fit in the Crosstown Stack
+### How Connectors Fit in the Town Stack
 
-**Connector is the foundation. Crosstown is the application.**
+**Connector is the foundation. Town is the application.**
 
 ```
 ┌─────────────────────────────────────────────────┐
 │  Applications (built on connector)               │
 │  ┌──────────────────────────────────────────┐   │
-│  │  Crosstown                                │   │  Nostr relay with ILP payments
+│  │  Town                                │   │  Nostr relay with ILP payments
 │  │  • Pay-to-write relay                     │   │  "Free to read, pay to write"
 │  │  • Uses connector for payments            │   │
 │  │  • Discovers peers via Nostr events       │   │
@@ -74,12 +74,14 @@ Connectors handle three critical tasks:
 **Mental Model:**
 
 - **Connector** = Payment infrastructure (like TCP/IP for the internet)
-- **Crosstown** = Application (like HTTP/HTTPS built on TCP/IP)
+- **Town** = Application (like HTTP/HTTPS built on TCP/IP)
 - **Your Agent** = Custom application (like a web browser)
 
 The connector handles the hard parts (routing, accounting, settlement) so applications can focus on business logic.
 
-## Install
+## Getting Started
+
+### Installation
 
 ```bash
 npm install @toon-protocol/connector
@@ -363,7 +365,7 @@ The connector supports two deployment modes via the `deploymentMode` configurati
 **When to use:**
 
 - Building an AI agent with embedded connector
-- Running Crosstown relay with integrated payments
+- Running Town relay with integrated payments
 - Single-process deployment
 
 **Behavior:**
@@ -373,7 +375,7 @@ The connector supports two deployment modes via the `deploymentMode` configurati
 - No HTTP overhead
 - Fastest performance
 
-**Example:** [Crosstown relay](https://github.com/ALLiDoizCode/crosstown) uses `embedded` mode to integrate ILP payments directly into the Nostr relay.
+**Example:** [Town relay](https://github.com/ALLiDoizCode/crosstown) uses `embedded` mode to integrate ILP payments directly into the Nostr relay.
 
 ### `standalone` Mode
 
@@ -421,17 +423,17 @@ Open `http://localhost:3001` to:
 
 Perfect for development and debugging. Disable in production.
 
-## Example: Crosstown Integration
+## Example: Town Integration
 
-[Crosstown](https://github.com/ALLiDoizCode/crosstown) is a Nostr relay that uses connector as its payment layer. Crosstown is a separate project — see its repository for full integration details.
+[Town](https://github.com/ALLiDoizCode/crosstown) is a Nostr relay that uses connector as its payment layer. Town is a separate project — see its repository for full integration details.
 
 **How it works conceptually:**
 
-1. Crosstown creates a `ConnectorNode` (payment infrastructure)
+1. Town creates a `ConnectorNode` (payment infrastructure)
 2. The relay wraps the connector with Nostr-specific logic (event storage, subscriptions, TOON encoding)
 3. Events flow as ILP packets with payment attached — free to read, pay to write
 
-**Key insight:** Crosstown doesn't implement payment routing — it delegates to connector. Connector handles routing, accounting, and settlement so applications can focus on business logic.
+**Key insight:** Town doesn't implement payment routing — it delegates to connector. Connector handles routing, accounting, and settlement so applications can focus on business logic.
 
 ## Architecture: Two Modes
 
@@ -608,6 +610,6 @@ MIT — see [LICENSE](LICENSE).
 ## Links
 
 - **GitHub:** [github.com/ALLiDoizCode/connector](https://github.com/ALLiDoizCode/connector)
-- **Crosstown:** [github.com/ALLiDoizCode/crosstown](https://github.com/ALLiDoizCode/crosstown)
+- **Town:** [github.com/ALLiDoizCode/crosstown](https://github.com/ALLiDoizCode/crosstown)
 - **Interledger:** [interledger.org](https://interledger.org)
 - **TigerBeetle:** [tigerbeetle.com](https://tigerbeetle.com)

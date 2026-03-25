@@ -5,7 +5,8 @@
  * claims over the Bilateral Transfer Protocol (BTP). Claims are sent via BTP's
  * protocolData field with protocol name "payment-channel-claim" and content type 1 (JSON).
  *
- * Supports EVM-compatible chains (Raiden-style payment channels).
+ * Supports EVM-compatible chains (Raiden-style payment channels), with stub types
+ * for Solana and Mina chains (Epic 32 chain abstraction).
  *
  * Reference: RFC-0023 (Bilateral Transfer Protocol), Epic 17 PRD
  *
@@ -15,7 +16,7 @@
 /**
  * Supported blockchain types for payment channel claims.
  */
-export type BlockchainType = 'evm';
+export type BlockchainType = 'evm' | 'solana' | 'mina';
 
 /**
  * Base claim message structure shared across all blockchain types.
@@ -90,10 +91,40 @@ export interface EVMClaimMessage extends BaseClaimMessage {
 }
 
 /**
- * Union type representing any valid BTP claim message.
- * Currently only EVM is supported.
+ * Solana-compatible blockchain claim message stub.
+ *
+ * Placeholder for future Solana payment channel integration.
+ * No runtime Solana SDK dependencies — types only.
  */
-export type BTPClaimMessage = EVMClaimMessage;
+export interface SolanaClaimMessage extends BaseClaimMessage {
+  blockchain: 'solana';
+  /** Solana program ID for the payment channel program */
+  programId: string;
+  /** On-chain account address for the payment channel */
+  channelAccount: string;
+  /** Ed25519 signature over the claim data */
+  signature: string;
+}
+
+/**
+ * Mina-compatible blockchain claim message stub.
+ *
+ * Placeholder for future Mina zkApp payment channel integration.
+ * No runtime Mina SDK dependencies — types only.
+ */
+export interface MinaClaimMessage extends BaseClaimMessage {
+  blockchain: 'mina';
+  /** zkApp address for the payment channel contract */
+  zkAppAddress: string;
+  /** Zero-knowledge proof for the balance update */
+  proof: string;
+}
+
+/**
+ * Union type representing any valid BTP claim message.
+ * Discriminated on the `blockchain` field.
+ */
+export type BTPClaimMessage = EVMClaimMessage | SolanaClaimMessage | MinaClaimMessage;
 
 /**
  * BTP Claim Protocol Constants
@@ -122,6 +153,36 @@ export const BTP_CLAIM_PROTOCOL = {
  */
 export function isEVMClaim(msg: BTPClaimMessage): msg is EVMClaimMessage {
   return msg.blockchain === 'evm';
+}
+
+/**
+ * Type guard to check if a claim message is a Solana claim.
+ *
+ * Usage:
+ * ```typescript
+ * if (isSolanaClaim(msg)) {
+ *   // TypeScript knows msg is SolanaClaimMessage here
+ *   console.log(msg.programId);
+ * }
+ * ```
+ */
+export function isSolanaClaim(msg: BTPClaimMessage): msg is SolanaClaimMessage {
+  return msg.blockchain === 'solana';
+}
+
+/**
+ * Type guard to check if a claim message is a Mina claim.
+ *
+ * Usage:
+ * ```typescript
+ * if (isMinaClaim(msg)) {
+ *   // TypeScript knows msg is MinaClaimMessage here
+ *   console.log(msg.zkAppAddress);
+ * }
+ * ```
+ */
+export function isMinaClaim(msg: BTPClaimMessage): msg is MinaClaimMessage {
+  return msg.blockchain === 'mina';
 }
 
 /**
@@ -213,6 +274,11 @@ function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
  * - Validates blockchain-specific fields based on the `blockchain` discriminator
  * - Throws descriptive errors if validation fails
  *
+ * NOTE: The assertion type is `EVMClaimMessage` because only EVM claims currently pass
+ * validation (Solana/Mina throw "not yet supported"). When chain-specific validators are
+ * added for Solana/Mina, the return type should be widened to `asserts msg is BTPClaimMessage`
+ * and callers should use type guards (`isEVMClaim`, `isSolanaClaim`, `isMinaClaim`) to narrow.
+ *
  * @param msg - Unknown value to validate as BTPClaimMessage
  * @throws Error if validation fails
  *
@@ -226,7 +292,7 @@ function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
  * }
  * ```
  */
-export function validateClaimMessage(msg: unknown): asserts msg is BTPClaimMessage {
+export function validateClaimMessage(msg: unknown): asserts msg is EVMClaimMessage {
   // Type check
   if (typeof msg !== 'object' || msg === null) {
     throw new Error('Claim message must be an object');
@@ -241,10 +307,6 @@ export function validateClaimMessage(msg: unknown): asserts msg is BTPClaimMessa
 
   if (!claim.blockchain) {
     throw new Error('Missing blockchain field');
-  }
-
-  if (claim.blockchain !== 'evm') {
-    throw new Error(`Unsupported blockchain type: ${claim.blockchain}`);
   }
 
   if (!claim.messageId || typeof claim.messageId !== 'string') {
@@ -265,5 +327,15 @@ export function validateClaimMessage(msg: unknown): asserts msg is BTPClaimMessa
   }
 
   // Validate blockchain-specific fields
-  validateEVMClaim(claim as Partial<EVMClaimMessage>);
+  switch (claim.blockchain) {
+    case 'evm':
+      validateEVMClaim(claim as Partial<EVMClaimMessage>);
+      break;
+    case 'solana':
+      throw new Error("Blockchain type 'solana' validation not yet supported");
+    case 'mina':
+      throw new Error("Blockchain type 'mina' validation not yet supported");
+    default:
+      throw new Error(`Unsupported blockchain type: ${claim.blockchain}`);
+  }
 }

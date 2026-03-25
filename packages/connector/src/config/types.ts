@@ -38,6 +38,35 @@
  * @packageDocumentation
  */
 
+import type { ProviderConfig } from '../settlement/provider/payment-channel-provider';
+
+/**
+ * Configuration entry for a chain provider.
+ * Extends ProviderConfig with an explicit chainId for registry keying.
+ *
+ * The discriminated union preserves per-chain-type required fields:
+ * - EVM: rpcUrl (required), registryAddress (required), keyId (required)
+ * - Solana: rpcUrl (required), programId (required)
+ * - Mina: graphqlUrl (required), zkAppAddress (required)
+ *
+ * @example
+ * ```yaml
+ * # Multi-chain configuration
+ * chainProviders:
+ *   - chainType: evm
+ *     chainId: evm:8453
+ *     rpcUrl: https://mainnet.base.org
+ *     registryAddress: '0x1234...'
+ *     keyId: 'evm-treasury-key'
+ *   - chainType: evm
+ *     chainId: evm:42161
+ *     rpcUrl: https://arb1.arbitrum.io/rpc
+ *     registryAddress: '0x5678...'
+ *     keyId: 'evm-arb-key'
+ * ```
+ */
+export type ChainProviderConfigEntry = ProviderConfig & { chainId: string };
+
 /**
  * Peer Configuration Interface
  *
@@ -88,6 +117,12 @@ export interface PeerConfig {
    * Supports arbitrary peer counts (not limited to 5)
    */
   evmAddress?: string;
+
+  /**
+   * Chain reference linking peer to a registered provider's chainId (e.g., 'evm:8453').
+   * When absent, defaults to auto-created EVM provider from settlementInfra.
+   */
+  chain?: string;
 }
 
 /**
@@ -234,8 +269,33 @@ export interface ConnectorConfig {
    * Configures private key, RPC URL, contract addresses, deposit params, and ledger persistence
    * Distinct from `settlement` which configures TigerBeetle accounting parameters
    * When absent, consuming code falls back to process.env values
+   *
+   * @deprecated Use `chainProviders` for multi-chain configuration.
+   * When `chainProviders` is present, this field is ignored.
    */
   settlementInfra?: SettlementInfraConfig;
+
+  /**
+   * Optional multi-chain provider configuration.
+   * When present, replaces `settlementInfra` for provider initialization.
+   * Each entry configures a chain-specific payment channel provider.
+   *
+   * @example
+   * ```yaml
+   * chainProviders:
+   *   - chainType: evm
+   *     chainId: evm:8453
+   *     rpcUrl: https://mainnet.base.org
+   *     registryAddress: '0x1234...'
+   *     keyId: 'evm-treasury-key'
+   *   - chainType: evm
+   *     chainId: evm:42161
+   *     rpcUrl: https://arb1.arbitrum.io/rpc
+   *     registryAddress: '0x5678...'
+   *     keyId: 'evm-arb-key'
+   * ```
+   */
+  chainProviders?: ChainProviderConfigEntry[];
 
   /**
    * Deployment environment for the connector
@@ -1652,4 +1712,103 @@ export interface AdminApiConfig {
    * @see allowedIPs
    */
   trustProxy?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Chain Provider Configuration Validation
+// ---------------------------------------------------------------------------
+
+/** Known chain types for validation. */
+const KNOWN_CHAIN_TYPES: ReadonlySet<string> = new Set<string>(['evm', 'solana', 'mina']);
+
+/** Required fields per chain type for runtime validation of YAML-loaded configs. */
+const REQUIRED_FIELDS_BY_CHAIN_TYPE: Record<string, readonly string[]> = {
+  evm: ['rpcUrl', 'registryAddress', 'keyId'],
+  solana: ['rpcUrl', 'programId'],
+  mina: ['graphqlUrl', 'zkAppAddress'],
+};
+
+/**
+ * Minimal logger interface accepted by validateChainProviders.
+ * Avoids coupling to the full pino Logger type.
+ */
+interface ValidationLogger {
+  warn(obj: Record<string, unknown>, msg: string): void;
+}
+
+/**
+ * Validate the `chainProviders` and peer `chain` fields in a ConnectorConfig.
+ *
+ * Checks performed:
+ * 1. Each entry's `chainType` is a known BlockchainType ('evm' | 'solana' | 'mina').
+ * 2. No duplicate `chainId` values across entries.
+ * 3. Per-chain-type required fields are present (runtime check for YAML-loaded configs).
+ * 4. Each peer's `chain` field (if present) references a `chainId` in `chainProviders`
+ *    or is covered by legacy `settlementInfra`.
+ * 5. Logs a deprecation warning when `settlementInfra` is used without `chainProviders`.
+ *
+ * When `chainProviders` is absent or empty, validation passes (legacy mode).
+ *
+ * @param config - The ConnectorConfig to validate
+ * @param logger - Optional logger for deprecation warnings
+ * @throws {Error} If validation fails
+ */
+export function validateChainProviders(config: ConnectorConfig, logger?: ValidationLogger): void {
+  const entries = config.chainProviders;
+
+  // If chainProviders is absent/empty, check for legacy deprecation warning
+  if (!entries || entries.length === 0) {
+    if (config.settlementInfra && logger) {
+      logger.warn(
+        { event: 'config_deprecation' },
+        'settlementInfra is deprecated. Migrate to chainProviders configuration.'
+      );
+    }
+    // Legacy mode — no further validation needed for chainProviders
+    return;
+  }
+
+  const seenChainIds = new Set<string>();
+
+  for (const entry of entries) {
+    // Validate chainType
+    // Cast to Record for runtime field access (YAML configs may not match TS types)
+    const rec = entry as unknown as Record<string, unknown>;
+    const chainType = rec.chainType as string;
+
+    if (!KNOWN_CHAIN_TYPES.has(chainType)) {
+      throw new Error(`Unknown chain type: ${chainType}`);
+    }
+
+    // Validate chainId presence
+    const chainId = rec.chainId as string | undefined;
+    if (!chainId) {
+      throw new Error(`Missing required field 'chainId' for chain type '${chainType}'`);
+    }
+
+    // Validate chainId uniqueness
+    if (seenChainIds.has(chainId)) {
+      throw new Error(`Duplicate chainId: ${chainId}`);
+    }
+    seenChainIds.add(chainId);
+
+    // Validate required fields for chain type
+    const requiredFields = REQUIRED_FIELDS_BY_CHAIN_TYPE[chainType];
+    if (requiredFields) {
+      for (const field of requiredFields) {
+        if (!rec[field]) {
+          throw new Error(
+            `Missing required field '${field}' for chain type '${chainType}' (chainId: ${chainId})`
+          );
+        }
+      }
+    }
+  }
+
+  // Validate peer chain references
+  for (const peer of config.peers) {
+    if (peer.chain && !seenChainIds.has(peer.chain)) {
+      throw new Error(`Peer '${peer.id}' references unregistered chain: ${peer.chain}`);
+    }
+  }
 }

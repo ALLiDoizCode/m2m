@@ -2,51 +2,119 @@
  * Settlement Executor Unit Tests
  *
  * Tests for automated on-chain settlement via payment channels.
- * Uses mocked dependencies (PaymentChannelSDK, AccountManager, SettlementMonitor).
+ * Uses mocked dependencies (ChainProviderRegistry, PaymentChannelProvider,
+ * AccountManager, SettlementMonitor).
  *
  * **Test Coverage:**
  * 1. Event listener registration and cleanup
- * 2. New channel opening and settlement
- * 3. Settlement via existing channel
- * 4. Channel deposit management
+ * 2. New channel opening and settlement (two-step: open + deposit)
+ * 3. Settlement via existing channel using per-packet claims
+ * 4. Provider resolution via ChainProviderRegistry
  * 5. Retry logic with exponential backoff
- * 6. Error handling
+ * 6. Error handling (no provider, no claim, permanent failures)
  * 7. Settlement monitor state transitions
+ * 8. Settlement serialization and graceful shutdown
  *
- * Source: Epic 8 Story 8.8 - Settlement Engine Integration Tests
+ * Source: Epic 32 Story 32.5 - SettlementExecutor Multi-Chain Refactor
  */
 
 import { SettlementExecutor, SettlementExecutorConfig } from './settlement-executor';
 import { AccountManager } from './account-manager';
-import { PaymentChannelSDK } from './payment-channel-sdk';
 import { SettlementMonitor } from './settlement-monitor';
 import { SettlementTriggerEvent, SettlementState } from '../config/types';
-import { ChannelState } from '../../../shared/src/types/payment-channel';
+import type {
+  PaymentChannelProvider,
+  BalanceProofParams,
+} from './provider/payment-channel-provider';
+import type { ChainProviderRegistry } from './provider/chain-provider-registry';
+import type { ChannelManager, ChannelMetadata } from './channel-manager';
 import pino from 'pino';
 
 // Mock dependencies
 jest.mock('./account-manager');
-jest.mock('./payment-channel-sdk');
 jest.mock('./settlement-monitor');
+
+// Test data
+const testPeerId = 'connector-a';
+const testTokenId = 'M2M';
+const testTokenAddress = '0x1234567890123456789012345678901234567890';
+const testPeerAddress = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+const testChannelId = '0xaaaa111122223333444455556666777788889999aaaabbbbccccddddeeeeffff';
+const testCurrentBalance = 1200n;
+const testThreshold = 1000n;
+const testChainId = 'evm:anvil:31337';
+
+/**
+ * Create a mock PaymentChannelProvider
+ */
+function createMockProvider(): jest.Mocked<PaymentChannelProvider> {
+  return {
+    openChannel: jest.fn().mockResolvedValue({ channelId: testChannelId, txHash: '0xMockTxHash' }),
+    deposit: jest.fn().mockResolvedValue({ txHash: '0xDepositTxHash' }),
+    claimFromChannel: jest.fn().mockResolvedValue({ txHash: '0xClaimTxHash' }),
+    closeChannel: jest.fn().mockResolvedValue({ txHash: '0xCloseTxHash' }),
+    settleChannel: jest.fn().mockResolvedValue({ txHash: '0xSettleTxHash' }),
+    signBalanceProof: jest.fn().mockResolvedValue('0xsignature'),
+    verifyBalanceProof: jest.fn().mockResolvedValue(true),
+    getChannelState: jest.fn().mockResolvedValue({
+      channelId: testChannelId,
+      status: 'opened' as const,
+      participants: [testPeerAddress.toLowerCase(), '0x9876543210987654321098765432109876543210'],
+      deposit: 10000n,
+    }),
+    subscribeToEvents: jest.fn().mockReturnValue({ unsubscribe: jest.fn() }),
+    chainType: 'evm' as const,
+    chainId: testChainId,
+  };
+}
+
+/**
+ * Create a mock ChainProviderRegistry
+ */
+function createMockRegistry(
+  provider: jest.Mocked<PaymentChannelProvider>
+): jest.Mocked<
+  Pick<ChainProviderRegistry, 'getProviderForPeer' | 'getProvider' | 'getAllProviders'>
+> {
+  return {
+    getProviderForPeer: jest
+      .fn()
+      .mockImplementation((peerConfig: { peerId: string; chain?: string }) => {
+        if (peerConfig.chain === testChainId) return provider;
+        return undefined;
+      }),
+    getProvider: jest.fn().mockReturnValue(provider),
+    getAllProviders: jest.fn().mockReturnValue([provider]),
+  };
+}
+
+/**
+ * Create a mock ChannelManager
+ */
+function createMockChannelManager(): jest.Mocked<
+  Pick<ChannelManager, 'getChannelForPeer' | 'getChannelById'>
+> {
+  return {
+    getChannelForPeer: jest.fn().mockReturnValue(null),
+    getChannelById: jest.fn().mockReturnValue(null),
+  };
+}
 
 describe('SettlementExecutor', () => {
   let executor: SettlementExecutor;
   let mockAccountManager: jest.Mocked<AccountManager>;
-  let mockPaymentChannelSDK: jest.Mocked<PaymentChannelSDK>;
   let mockSettlementMonitor: jest.Mocked<SettlementMonitor>;
+  let mockProvider: jest.Mocked<PaymentChannelProvider>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockRegistry: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockChannelManager: any;
   let logger: pino.Logger;
   let config: SettlementExecutorConfig;
 
-  // Test data
-  const testPeerId = 'connector-a';
-  const testTokenId = 'M2M';
-  const testTokenAddress = '0x1234567890123456789012345678901234567890';
-  const testPeerAddress = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
-  const testChannelId = '0xaaaa111122223333444455556666777788889999aaaabbbbccccddddeeeeffff';
-  const testCurrentBalance = 1200n;
-  const testThreshold = 1000n;
-
   beforeEach(() => {
+    jest.clearAllMocks();
+
     // Create fresh mock instances
     /* eslint-disable @typescript-eslint/no-explicit-any */
     mockAccountManager = new AccountManager(
@@ -54,13 +122,6 @@ describe('SettlementExecutor', () => {
       {} as any,
       {} as any
     ) as jest.Mocked<AccountManager>;
-    mockPaymentChannelSDK = new PaymentChannelSDK(
-      {} as any,
-      {} as any,
-      '0x1234',
-      {} as any,
-      {} as any
-    ) as jest.Mocked<PaymentChannelSDK>;
     mockSettlementMonitor = new SettlementMonitor(
       {} as any,
       {} as any
@@ -69,31 +130,16 @@ describe('SettlementExecutor', () => {
 
     // Setup mock implementations
     mockAccountManager.recordSettlement = jest.fn().mockResolvedValue(undefined);
-    mockPaymentChannelSDK.getMyChannels = jest.fn().mockResolvedValue([]);
-    mockPaymentChannelSDK.getChannelState = jest.fn().mockResolvedValue({
-      channelId: testChannelId,
-      participants: [testPeerAddress.toLowerCase(), '0x9876543210987654321098765432109876543210'],
-      myDeposit: 10000n,
-      theirDeposit: 10000n,
-      myNonce: 1,
-      theirNonce: 1,
-      myTransferred: 0n,
-      theirTransferred: 0n,
-      status: 'opened' as const,
-      settlementTimeout: 86400,
-      openedAt: Math.floor(Date.now() / 1000),
-    } as ChannelState);
-    mockPaymentChannelSDK.openChannel = jest
-      .fn()
-      .mockResolvedValue({ channelId: testChannelId, txHash: '0xMockTxHash' });
-    mockPaymentChannelSDK.deposit = jest.fn().mockResolvedValue(undefined);
-    mockPaymentChannelSDK.signBalanceProof = jest.fn().mockResolvedValue('0xsignature');
-    mockPaymentChannelSDK.claimFromChannel = jest.fn().mockResolvedValue(undefined);
     mockSettlementMonitor.markSettlementInProgress = jest.fn();
     mockSettlementMonitor.markSettlementCompleted = jest.fn();
     mockSettlementMonitor.getSettlementState = jest.fn().mockReturnValue(SettlementState.IDLE);
     mockSettlementMonitor.on = jest.fn();
     mockSettlementMonitor.off = jest.fn();
+
+    // Create provider and registry mocks
+    mockProvider = createMockProvider();
+    mockRegistry = createMockRegistry(mockProvider);
+    mockChannelManager = createMockChannelManager();
 
     // Create logger
     logger = pino({ level: 'silent' }); // Silent logger for tests
@@ -108,19 +154,18 @@ describe('SettlementExecutor', () => {
       retryDelayMs: 5000,
       tokenAddressMap: new Map([[testTokenId, testTokenAddress]]),
       peerIdToAddressMap: new Map([[testPeerId, testPeerAddress]]),
-      registryAddress: '0xregistry1234567890123456789012345678901234',
-      rpcUrl: 'http://localhost:8545',
-      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      peerIdToChainMap: new Map([[testPeerId, testChainId]]),
     };
 
     // Create executor instance
     executor = new SettlementExecutor(
       config,
       mockAccountManager,
-      mockPaymentChannelSDK,
+      mockRegistry,
       mockSettlementMonitor,
       logger
     );
+    executor.setChannelManager(mockChannelManager);
   });
 
   afterEach(async () => {
@@ -163,9 +208,9 @@ describe('SettlementExecutor', () => {
   });
 
   describe('Settlement via New Channel', () => {
-    it('should open new channel and settle when no existing channel', async () => {
-      // Mock: No existing channel
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+    it('should open new channel then deposit when no existing channel', async () => {
+      // Mock: No existing channel via ChannelManager
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       // Create settlement event
       const event: SettlementTriggerEvent = {
@@ -187,15 +232,25 @@ describe('SettlementExecutor', () => {
       // Drain the settlement chain by stopping the executor
       await executor.stop();
 
-      // Verify: openChannel called with correct parameters
-      expect(mockPaymentChannelSDK.openChannel).toHaveBeenCalledWith(
+      // Verify: provider resolved from registry
+      expect(mockRegistry.getProviderForPeer).toHaveBeenCalledWith({
+        peerId: testPeerId,
+        chain: testChainId,
+      });
+
+      // Verify: openChannel called with correct parameters (no tokenAddress, no deposit)
+      expect(mockProvider.openChannel).toHaveBeenCalledWith(
         testPeerAddress,
-        testTokenAddress,
-        config.defaultSettlementTimeout,
-        testCurrentBalance * BigInt(config.initialDepositMultiplier)
+        config.defaultSettlementTimeout
       );
 
-      // Verify: recordSettlement called after channel open
+      // Verify: deposit called separately after openChannel
+      expect(mockProvider.deposit).toHaveBeenCalledWith(
+        testChannelId,
+        (testCurrentBalance * BigInt(config.initialDepositMultiplier)).toString()
+      );
+
+      // Verify: recordSettlement called after channel open + deposit
       expect(mockAccountManager.recordSettlement).toHaveBeenCalledWith(
         testPeerId,
         testTokenId,
@@ -217,9 +272,37 @@ describe('SettlementExecutor', () => {
   });
 
   describe('Settlement via Existing Channel', () => {
-    it('should use claimFromChannel when channel exists (channel stays open)', async () => {
-      // Mock: Existing channel found
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([testChannelId]);
+    it('should use provider.claimFromChannel with BalanceProofParams when channel exists', async () => {
+      // Mock: Existing channel found via ChannelManager
+      mockChannelManager.getChannelForPeer.mockReturnValue({
+        channelId: testChannelId,
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        tokenAddress: testTokenAddress,
+        chain: testChainId,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      } as ChannelMetadata);
+
+      // Create executor with per-packet claim service
+      const mockPerPacketClaimService = {
+        getLatestClaim: jest.fn().mockReturnValue({
+          blockchain: 'evm',
+          channelId: testChannelId,
+          nonce: 5,
+          transferredAmount: '5000',
+          lockedAmount: '0',
+          locksRoot: '0x' + '0'.repeat(64),
+          signature: '0xperpacketsignature',
+        }),
+        resetChannel: jest.fn(),
+        start: jest.fn(),
+        stop: jest.fn(),
+      };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      executor.setPerPacketClaimService(mockPerPacketClaimService as any);
 
       // Create settlement event
       const event: SettlementTriggerEvent = {
@@ -241,14 +324,17 @@ describe('SettlementExecutor', () => {
       // Drain the settlement chain by stopping the executor
       await executor.stop();
 
-      // Verify: claimFromChannel called
-      expect(mockPaymentChannelSDK.claimFromChannel).toHaveBeenCalledWith(
+      // Verify: claimFromChannel called with BalanceProofParams (string amounts)
+      expect(mockProvider.claimFromChannel).toHaveBeenCalledWith(
         testChannelId,
-        testTokenAddress,
         expect.objectContaining({
           channelId: testChannelId,
-        }),
-        expect.any(String)
+          nonce: 5,
+          transferredAmount: '5000',
+          lockedAmount: '0',
+          locksRoot: '0x' + '0'.repeat(64),
+        } as BalanceProofParams),
+        '0xperpacketsignature'
       );
 
       // Verify: markSettlementCompleted called
@@ -260,13 +346,23 @@ describe('SettlementExecutor', () => {
   });
 
   describe('Per-Packet Claim Integration', () => {
-    it('should use latest per-packet claim for claimFromChannel when available', async () => {
-      // Mock: Existing channel found
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([testChannelId]);
+    it('should reset per-packet claim tracking after successful claim', async () => {
+      // Mock: Existing channel found via ChannelManager
+      mockChannelManager.getChannelForPeer.mockReturnValue({
+        channelId: testChannelId,
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        tokenAddress: testTokenAddress,
+        chain: testChainId,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      } as ChannelMetadata);
 
       // Create executor with per-packet claim service
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          blockchain: 'evm',
           channelId: testChannelId,
           nonce: 5,
           transferredAmount: '5000',
@@ -279,16 +375,8 @@ describe('SettlementExecutor', () => {
         stop: jest.fn(),
       };
 
-      // Create executor and set perPacketClaimService
-      const executorWithClaims = new SettlementExecutor(
-        config,
-        mockAccountManager,
-        mockPaymentChannelSDK,
-        mockSettlementMonitor,
-        logger
-      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      executorWithClaims.setPerPacketClaimService(mockPerPacketClaimService as any);
+      executor.setPerPacketClaimService(mockPerPacketClaimService as any);
 
       // Create settlement event
       const event: SettlementTriggerEvent = {
@@ -301,32 +389,282 @@ describe('SettlementExecutor', () => {
       };
 
       // Start executor
-      executorWithClaims.start();
+      executor.start();
 
       // Simulate settlement event — handler enqueues onto settlement chain
       const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
       handler(event);
 
       // Drain the settlement chain by stopping the executor
-      await executorWithClaims.stop();
-
-      // Verify: claimFromChannel used per-packet claim data
-      expect(mockPaymentChannelSDK.claimFromChannel).toHaveBeenCalledWith(
-        testChannelId,
-        testTokenAddress,
-        expect.objectContaining({
-          channelId: testChannelId,
-          nonce: 5,
-          transferredAmount: 5000n,
-        }),
-        '0xperpacketsignature'
-      );
-
-      // Verify: signBalanceProof NOT called (used existing claim)
-      expect(mockPaymentChannelSDK.signBalanceProof).not.toHaveBeenCalled();
+      await executor.stop();
 
       // Verify: per-packet claim tracking reset after successful claim
       expect(mockPerPacketClaimService.resetChannel).toHaveBeenCalledWith(testChannelId);
+
+      // Verify: resetChannel called AFTER claimFromChannel (correct ordering)
+      const claimOrder =
+        (mockProvider.claimFromChannel as jest.Mock).mock.invocationCallOrder[0] || 0;
+      const resetOrder =
+        (mockPerPacketClaimService.resetChannel as jest.Mock).mock.invocationCallOrder[0] || 0;
+      expect(claimOrder).toBeLessThan(resetOrder);
+    });
+
+    it('should fail when no per-packet claim available (fallback path deprecated)', async () => {
+      // Mock: Existing channel found via ChannelManager
+      mockChannelManager.getChannelForPeer.mockReturnValue({
+        channelId: testChannelId,
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        tokenAddress: testTokenAddress,
+        chain: testChainId,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      } as ChannelMetadata);
+
+      // No per-packet claim service set — latestClaim will be null
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+
+      await executor.stop();
+
+      // Verify: settlement fails — markSettlementCompleted NOT called
+      expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
+
+      // Verify: claimFromChannel NOT called (no claim to submit)
+      expect(mockProvider.claimFromChannel).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Channel Lookup with Non-Open Status', () => {
+    it('should open new channel when existing channel has closed status', async () => {
+      // Mock: Channel exists but is closed
+      mockChannelManager.getChannelForPeer.mockReturnValue({
+        channelId: testChannelId,
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        tokenAddress: testTokenAddress,
+        chain: testChainId,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'closed',
+      } as ChannelMetadata);
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await executor.stop();
+
+      // Verify: falls through to openChannel because channel status is not 'open'/'opened'
+      expect(mockProvider.openChannel).toHaveBeenCalledWith(
+        testPeerAddress,
+        config.defaultSettlementTimeout
+      );
+      expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
+        testPeerId,
+        testTokenId
+      );
+    });
+  });
+
+  describe('Deposit Failure After Successful Open', () => {
+    it('should fail settlement when deposit fails after successful openChannel', async () => {
+      // Mock: No existing channel
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
+
+      // Mock: openChannel succeeds but deposit fails permanently
+      mockProvider.openChannel.mockResolvedValue({
+        channelId: testChannelId,
+        txHash: '0xOpenTxHash',
+      });
+      mockProvider.deposit.mockRejectedValue(new Error('insufficient funds for gas'));
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await executor.stop();
+
+      // Verify: openChannel was called and succeeded
+      expect(mockProvider.openChannel).toHaveBeenCalledTimes(1);
+
+      // Verify: deposit was attempted
+      expect(mockProvider.deposit).toHaveBeenCalledTimes(1);
+
+      // Verify: settlement fails (channel exists but unfunded)
+      expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
+
+      // Verify: TigerBeetle NOT updated (settlement incomplete)
+      expect(mockAccountManager.recordSettlement).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('CHANNEL_ACTIVITY Event Emission', () => {
+    it('should emit CHANNEL_ACTIVITY after successful new channel settlement', async () => {
+      // Mock: No existing channel
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
+
+      const channelActivityEvents: { channelId: string }[] = [];
+      executor.on('CHANNEL_ACTIVITY', (data) => channelActivityEvents.push(data));
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await executor.stop();
+
+      // Verify: CHANNEL_ACTIVITY emitted with channelId
+      expect(channelActivityEvents).toHaveLength(1);
+      expect(channelActivityEvents[0]).toEqual({ channelId: testChannelId });
+    });
+
+    it('should emit CHANNEL_ACTIVITY after successful existing channel settlement', async () => {
+      // Mock: Existing channel found
+      mockChannelManager.getChannelForPeer.mockReturnValue({
+        channelId: testChannelId,
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        tokenAddress: testTokenAddress,
+        chain: testChainId,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      } as ChannelMetadata);
+
+      const mockPerPacketClaimService = {
+        getLatestClaim: jest.fn().mockReturnValue({
+          blockchain: 'evm',
+          channelId: testChannelId,
+          nonce: 5,
+          transferredAmount: '5000',
+          lockedAmount: '0',
+          locksRoot: '0x' + '0'.repeat(64),
+          signature: '0xsig',
+        }),
+        resetChannel: jest.fn(),
+        start: jest.fn(),
+        stop: jest.fn(),
+      };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      executor.setPerPacketClaimService(mockPerPacketClaimService as any);
+
+      const channelActivityEvents: { channelId: string }[] = [];
+      executor.on('CHANNEL_ACTIVITY', (data) => channelActivityEvents.push(data));
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await executor.stop();
+
+      // Verify: CHANNEL_ACTIVITY emitted with channelId
+      expect(channelActivityEvents).toHaveLength(1);
+      expect(channelActivityEvents[0]).toEqual({ channelId: testChannelId });
+    });
+  });
+
+  describe('Provider Resolution', () => {
+    it('should fail with descriptive error when no chain configured for peer', async () => {
+      // Config with empty peerIdToChainMap
+      const noChainConfig = {
+        ...config,
+        peerIdToChainMap: new Map<string, string>(),
+      };
+
+      const noChainExecutor = new SettlementExecutor(
+        noChainConfig,
+        mockAccountManager,
+        mockRegistry,
+        mockSettlementMonitor,
+        logger
+      );
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      noChainExecutor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await noChainExecutor.stop();
+
+      // Verify: settlement fails — markSettlementCompleted NOT called
+      expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
+      expect(mockProvider.openChannel).not.toHaveBeenCalled();
+    });
+
+    it('should fail with descriptive error when no provider registered for chain', async () => {
+      // Mock registry returns undefined for this peer's chain
+      mockRegistry.getProviderForPeer.mockReturnValue(undefined);
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await executor.stop();
+
+      // Verify: settlement fails — markSettlementCompleted NOT called
+      expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
+      expect(mockProvider.openChannel).not.toHaveBeenCalled();
     });
   });
 
@@ -342,19 +680,20 @@ describe('SettlementExecutor', () => {
       const fastRetryExecutor = new SettlementExecutor(
         fastRetryConfig,
         mockAccountManager,
-        mockPaymentChannelSDK,
+        mockRegistry,
         mockSettlementMonitor,
         logger
       );
+      fastRetryExecutor.setChannelManager(mockChannelManager);
 
       // Mock: First 2 calls fail with retryable error, 3rd succeeds
-      mockPaymentChannelSDK.openChannel
+      mockProvider.openChannel
         .mockRejectedValueOnce(new Error('Network timeout'))
         .mockRejectedValueOnce(new Error('Network timeout'))
         .mockResolvedValueOnce({ channelId: testChannelId, txHash: '0xMockTxHash' });
 
       // Mock: No existing channel
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       // Create settlement event
       const event: SettlementTriggerEvent = {
@@ -377,7 +716,7 @@ describe('SettlementExecutor', () => {
       await fastRetryExecutor.stop();
 
       // Verify: openChannel called 3 times (2 failures + 1 success)
-      expect(mockPaymentChannelSDK.openChannel).toHaveBeenCalledTimes(3);
+      expect(mockProvider.openChannel).toHaveBeenCalledTimes(3);
 
       // Verify: Settlement eventually succeeds
       expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
@@ -390,10 +729,10 @@ describe('SettlementExecutor', () => {
   describe('Error Handling', () => {
     it('should NOT mark completed on permanent failure', async () => {
       // Mock: Permanent failure (insufficient funds)
-      mockPaymentChannelSDK.openChannel.mockRejectedValue(new Error('Insufficient funds'));
+      mockProvider.openChannel.mockRejectedValue(new Error('Insufficient funds'));
 
       // Mock: No existing channel
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       // Create settlement event
       const event: SettlementTriggerEvent = {
@@ -418,12 +757,142 @@ describe('SettlementExecutor', () => {
       // Verify: markSettlementCompleted NOT called
       expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
     });
+
+    it('should classify "nonce too low" as retryable and retry the operation', async () => {
+      // Create config with fast retries for testing
+      const fastRetryConfig = {
+        ...config,
+        retryDelayMs: 10,
+        maxRetries: 3,
+      };
+
+      const retryExecutor = new SettlementExecutor(
+        fastRetryConfig,
+        mockAccountManager,
+        mockRegistry,
+        mockSettlementMonitor,
+        logger
+      );
+      retryExecutor.setChannelManager(mockChannelManager);
+
+      // Mock: No existing channel
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
+
+      // Mock: First call fails with "nonce too low" (retryable), second succeeds
+      mockProvider.openChannel
+        .mockRejectedValueOnce(new Error('nonce too low'))
+        .mockResolvedValueOnce({ channelId: testChannelId, txHash: '0xMockTxHash' });
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      retryExecutor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await retryExecutor.stop();
+
+      // Verify: openChannel called twice (1 retry + 1 success)
+      expect(mockProvider.openChannel).toHaveBeenCalledTimes(2);
+      // Verify: settlement succeeded after retry
+      expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
+        testPeerId,
+        testTokenId
+      );
+    });
+
+    it('should classify "insufficient funds" as non-retryable and fail immediately', async () => {
+      // Create config with fast retries
+      const fastRetryConfig = {
+        ...config,
+        retryDelayMs: 10,
+        maxRetries: 3,
+      };
+
+      const retryExecutor = new SettlementExecutor(
+        fastRetryConfig,
+        mockAccountManager,
+        mockRegistry,
+        mockSettlementMonitor,
+        logger
+      );
+      retryExecutor.setChannelManager(mockChannelManager);
+
+      // Mock: No existing channel
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
+
+      // Mock: Fails with non-retryable error
+      mockProvider.openChannel.mockRejectedValue(new Error('insufficient funds for gas'));
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      retryExecutor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await retryExecutor.stop();
+
+      // Verify: openChannel called only once (no retries for non-retryable errors)
+      expect(mockProvider.openChannel).toHaveBeenCalledTimes(1);
+      // Verify: settlement failed
+      expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Channel Lookup without ChannelManager', () => {
+    it('should open new channel when ChannelManager is not set', async () => {
+      // Create executor WITHOUT setting ChannelManager
+      const noChannelMgrExecutor = new SettlementExecutor(
+        config,
+        mockAccountManager,
+        mockRegistry,
+        mockSettlementMonitor,
+        logger
+      );
+      // Intentionally NOT calling setChannelManager()
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      noChannelMgrExecutor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await noChannelMgrExecutor.stop();
+
+      // Verify: falls through to openChannel because findChannelForPeer returns null
+      expect(mockProvider.openChannel).toHaveBeenCalledWith(
+        testPeerAddress,
+        config.defaultSettlementTimeout
+      );
+      // Verify: settlement completed successfully via new channel
+      expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
+        testPeerId,
+        testTokenId
+      );
+    });
   });
 
   describe('Settlement Monitor State Transitions', () => {
     it('should call markSettlementInProgress immediately and markSettlementCompleted after success', async () => {
       // Mock: No existing channel
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       // Create settlement event
       const event: SettlementTriggerEvent = {
@@ -469,8 +938,8 @@ describe('SettlementExecutor', () => {
 
     it('should NOT call markSettlementCompleted when error occurs', async () => {
       // Mock: Permanent failure
-      mockPaymentChannelSDK.openChannel.mockRejectedValue(new Error('Insufficient funds'));
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+      mockProvider.openChannel.mockRejectedValue(new Error('Insufficient funds'));
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       // Create settlement event
       const event: SettlementTriggerEvent = {
@@ -509,10 +978,10 @@ describe('SettlementExecutor', () => {
       const executionOrder: string[] = [];
 
       // Mock: No existing channels
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       // Mock: openChannel records execution order with a delay
-      mockPaymentChannelSDK.openChannel.mockImplementation(async (participant2: string) => {
+      mockProvider.openChannel.mockImplementation(async (participant2: string) => {
         const peerId = participant2 === testPeerAddress ? 'peer-a' : 'peer-b';
         executionOrder.push(`start-${peerId}`);
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -523,15 +992,17 @@ describe('SettlementExecutor', () => {
       // Setup second peer
       const secondPeerAddress = '0x1111111111111111111111111111111111111111';
       config.peerIdToAddressMap.set('connector-b', secondPeerAddress);
+      config.peerIdToChainMap.set('connector-b', testChainId);
 
       // Recreate executor with updated config
       const serialExecutor = new SettlementExecutor(
         config,
         mockAccountManager,
-        mockPaymentChannelSDK,
+        mockRegistry,
         mockSettlementMonitor,
         logger
       );
+      serialExecutor.setChannelManager(mockChannelManager);
 
       serialExecutor.start();
 
@@ -589,15 +1060,15 @@ describe('SettlementExecutor', () => {
 
       // Verify: No settlement operations were attempted
       expect(mockSettlementMonitor.markSettlementInProgress).not.toHaveBeenCalled();
-      expect(mockPaymentChannelSDK.openChannel).not.toHaveBeenCalled();
+      expect(mockProvider.openChannel).not.toHaveBeenCalled();
     });
 
     it('should await in-flight settlement before stop() resolves', async () => {
       let settlementResolved = false;
 
       // Mock: openChannel with a delay to simulate in-flight settlement
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
-      mockPaymentChannelSDK.openChannel.mockImplementation(async () => {
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
+      mockProvider.openChannel.mockImplementation(async () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         settlementResolved = true;
         return { channelId: testChannelId, txHash: '0xMockTxHash' };
@@ -638,12 +1109,13 @@ describe('SettlementExecutor', () => {
       const emptyMapExecutor = new SettlementExecutor(
         emptyMapConfig,
         mockAccountManager,
-        mockPaymentChannelSDK,
+        mockRegistry,
         mockSettlementMonitor,
         logger
       );
+      emptyMapExecutor.setChannelManager(mockChannelManager);
 
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       const event: SettlementTriggerEvent = {
         peerId: testPeerId,
@@ -661,7 +1133,7 @@ describe('SettlementExecutor', () => {
 
       // Settlement should fail because peer address is not in the map
       expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
-      expect(mockPaymentChannelSDK.openChannel).not.toHaveBeenCalled();
+      expect(mockProvider.openChannel).not.toHaveBeenCalled();
     });
 
     it('should succeed after peer address is dynamically added to shared peerIdToAddressMap', async () => {
@@ -675,15 +1147,16 @@ describe('SettlementExecutor', () => {
       // Simulate ClaimReceiver dynamically registering the peer address
       sharedMap.set(testPeerId, testPeerAddress);
 
-      mockPaymentChannelSDK.getMyChannels.mockResolvedValue([]);
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
 
       const dynamicExecutor = new SettlementExecutor(
         dynamicConfig,
         mockAccountManager,
-        mockPaymentChannelSDK,
+        mockRegistry,
         mockSettlementMonitor,
         logger
       );
+      dynamicExecutor.setChannelManager(mockChannelManager);
 
       const event: SettlementTriggerEvent = {
         peerId: testPeerId,
@@ -700,11 +1173,9 @@ describe('SettlementExecutor', () => {
       await dynamicExecutor.stop();
 
       // Settlement should succeed with the dynamically added address
-      expect(mockPaymentChannelSDK.openChannel).toHaveBeenCalledWith(
+      expect(mockProvider.openChannel).toHaveBeenCalledWith(
         testPeerAddress,
-        testTokenAddress,
-        dynamicConfig.defaultSettlementTimeout,
-        testCurrentBalance * BigInt(dynamicConfig.initialDepositMultiplier)
+        dynamicConfig.defaultSettlementTimeout
       );
       expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
         testPeerId,

@@ -1,10 +1,11 @@
 /**
  * Unit tests for ClaimReceiver
  *
- * Tests claim reception, validation, EVM signature verification,
+ * Tests claim reception, validation, provider-based signature verification,
  * monotonicity checks, and database persistence.
  *
  * Epic 30 Story 30.4: Removed XRP/Aptos claim handling tests (EVM-only settlement).
+ * Epic 32 Story 32.6: Refactored from PaymentChannelSDK to ChainProviderRegistry.
  */
 
 import { ClaimReceiver, ClaimReceivedEvent, ERRORS } from './claim-receiver';
@@ -12,16 +13,64 @@ import type { Database, Statement } from 'better-sqlite3';
 import type { Logger } from 'pino';
 import type { BTPServer } from '../btp/btp-server';
 import type { BTPProtocolData, BTPMessage, BTPData } from '../btp/btp-types';
-import type { PaymentChannelSDK } from './payment-channel-sdk';
+import type { ChainProviderRegistry } from './provider/chain-provider-registry';
+import type { PaymentChannelProvider } from './provider/payment-channel-provider';
 import type { ChannelManager } from './channel-manager';
 import type { EVMClaimMessage } from '../btp/btp-claim-types';
+import * as fs from 'fs';
+import * as path from 'path';
+
+/**
+ * Create a mock PaymentChannelProvider for EVM.
+ */
+function createMockProvider(): jest.Mocked<PaymentChannelProvider> {
+  return {
+    verifyBalanceProof: jest.fn().mockResolvedValue(true),
+    getChannelState: jest.fn().mockResolvedValue({
+      channelId: '0x' + 'a'.repeat(64),
+      status: 'opened' as const,
+      participants: ['0x' + 'c'.repeat(40), '0x' + 'd'.repeat(40)],
+      deposit: 10000n,
+    }),
+    openChannel: jest.fn(),
+    deposit: jest.fn(),
+    claimFromChannel: jest.fn(),
+    closeChannel: jest.fn(),
+    settleChannel: jest.fn(),
+    signBalanceProof: jest.fn(),
+    subscribeToEvents: jest.fn(),
+    chainType: 'evm' as const,
+    chainId: 'evm:31337',
+  } as unknown as jest.Mocked<PaymentChannelProvider>;
+}
+
+/**
+ * Create a mock ChainProviderRegistry.
+ */
+function createMockRegistry(
+  provider: jest.Mocked<PaymentChannelProvider>
+): jest.Mocked<
+  Pick<ChainProviderRegistry, 'getProvider' | 'getProviderForPeer' | 'getAllProviders'>
+> {
+  return {
+    getProvider: jest.fn().mockImplementation((_chainType: string, chainId: string) => {
+      if (chainId === 'evm:31337') return provider;
+      return undefined;
+    }),
+    getProviderForPeer: jest.fn().mockReturnValue(provider),
+    getAllProviders: jest.fn().mockReturnValue([provider]),
+  };
+}
 
 describe('ClaimReceiver', () => {
   let claimReceiver: ClaimReceiver;
   let mockDb: jest.Mocked<Database>;
   let mockLogger: jest.Mocked<Logger>;
   let mockBTPServer: jest.Mocked<BTPServer>;
-  let mockPaymentChannelSDK: jest.Mocked<PaymentChannelSDK>;
+  let mockProvider: jest.Mocked<PaymentChannelProvider>;
+  let mockRegistry: jest.Mocked<
+    Pick<ChainProviderRegistry, 'getProvider' | 'getProviderForPeer' | 'getAllProviders'>
+  >;
   let mockStatement: jest.Mocked<Statement>;
   let btpMessageHandler: ((peerId: string, message: BTPMessage) => void) | null;
 
@@ -56,13 +105,16 @@ describe('ClaimReceiver', () => {
       }),
     } as unknown as jest.Mocked<BTPServer>;
 
-    // Mock PaymentChannelSDK
-    mockPaymentChannelSDK = {
-      verifyBalanceProof: jest.fn(),
-    } as unknown as jest.Mocked<PaymentChannelSDK>;
+    // Mock Provider and Registry
+    mockProvider = createMockProvider();
+    mockRegistry = createMockRegistry(mockProvider);
 
-    // Create ClaimReceiver instance (EVM-only)
-    claimReceiver = new ClaimReceiver(mockDb, mockPaymentChannelSDK, mockLogger);
+    // Create ClaimReceiver instance with ChainProviderRegistry
+    claimReceiver = new ClaimReceiver(
+      mockDb,
+      mockRegistry as unknown as ChainProviderRegistry,
+      mockLogger
+    );
   });
 
   describe('registerWithBTPServer', () => {
@@ -118,25 +170,23 @@ describe('ClaimReceiver', () => {
     });
 
     it('should verify valid EVM claim and store with verified=true', async () => {
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
       mockStatement.get.mockReturnValue(undefined); // No previous claim
 
       claimReceiver.registerWithBTPServer(mockBTPServer);
       await btpMessageHandler!('peer-bob', btpMessage);
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Verify balance proof verification
-      expect(mockPaymentChannelSDK.verifyBalanceProof).toHaveBeenCalledWith(
-        {
-          channelId: validEVMClaim.channelId,
-          nonce: validEVMClaim.nonce,
-          transferredAmount: BigInt(validEVMClaim.transferredAmount),
-          lockedAmount: BigInt(validEVMClaim.lockedAmount),
-          locksRoot: validEVMClaim.locksRoot,
-        },
-        validEVMClaim.signature,
-        validEVMClaim.signerAddress
-      );
+      // Verify balance proof verification via provider (single object with string amounts)
+      expect(mockProvider.verifyBalanceProof).toHaveBeenCalledWith({
+        channelId: validEVMClaim.channelId,
+        nonce: validEVMClaim.nonce,
+        transferredAmount: validEVMClaim.transferredAmount,
+        lockedAmount: validEVMClaim.lockedAmount,
+        locksRoot: validEVMClaim.locksRoot,
+        signature: validEVMClaim.signature,
+        signerAddress: validEVMClaim.signerAddress,
+      });
 
       // Verify database insert with verified=true
       expect(mockStatement.run).toHaveBeenCalledWith(
@@ -153,7 +203,7 @@ describe('ClaimReceiver', () => {
     });
 
     it('should emit CLAIM_RECEIVED event after successful verification', async () => {
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
       mockStatement.get.mockReturnValue(undefined); // No previous claim
 
       const claimReceivedListener = jest.fn();
@@ -172,7 +222,7 @@ describe('ClaimReceiver', () => {
     });
 
     it('should NOT emit CLAIM_RECEIVED event when verification fails', async () => {
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(false);
+      mockProvider.verifyBalanceProof.mockResolvedValue(false);
 
       const claimReceivedListener = jest.fn();
       claimReceiver.on('CLAIM_RECEIVED', claimReceivedListener);
@@ -186,7 +236,7 @@ describe('ClaimReceiver', () => {
     });
 
     it('should reject EVM claim with invalid EIP-712 signature', async () => {
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(false);
+      mockProvider.verifyBalanceProof.mockResolvedValue(false);
 
       claimReceiver.registerWithBTPServer(mockBTPServer);
       await btpMessageHandler!('peer-bob', btpMessage);
@@ -207,7 +257,7 @@ describe('ClaimReceiver', () => {
     });
 
     it('should reject EVM claim with non-increasing nonce (monotonicity check)', async () => {
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
 
       // Mock previous claim with same nonce
       const previousClaim: EVMClaimMessage = {
@@ -235,6 +285,50 @@ describe('ClaimReceiver', () => {
         null,
         null
       );
+    });
+
+    it('should reject claim with unsupported blockchain type during validation', async () => {
+      // Solana claims fail validateClaimMessage() ("not yet supported"),
+      // so the error is caught in handleClaimMessage's catch block
+      const solanaClaim = {
+        version: '1.0',
+        blockchain: 'solana',
+        messageId: 'solana-test-1',
+        timestamp: '2026-02-02T12:00:00.000Z',
+        senderId: 'peer-bob',
+      };
+
+      const solanaProtocolData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(solanaClaim), 'utf8'),
+      };
+
+      const solanaBtpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [solanaProtocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      claimReceiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-bob', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // validateClaimMessage throws for 'solana', caught in the outer catch
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        { error: expect.any(Error) },
+        'Failed to parse claim message'
+      );
+
+      // Provider should NOT be consulted since validation fails first
+      expect(mockProvider.verifyBalanceProof).not.toHaveBeenCalled();
+      expect(mockStatement.run).not.toHaveBeenCalled();
     });
   });
 
@@ -308,7 +402,7 @@ describe('ClaimReceiver', () => {
         } as BTPData,
       };
 
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
       mockStatement.get.mockReturnValue(undefined);
       mockStatement.run.mockImplementation(() => {
         throw new Error('Database error');
@@ -359,7 +453,7 @@ describe('ClaimReceiver', () => {
         } as BTPData,
       };
 
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
       mockStatement.get.mockReturnValue(undefined);
       mockStatement.run.mockImplementation(() => {
         const error = new Error('UNIQUE constraint failed: received_claims.message_id');
@@ -451,15 +545,14 @@ describe('ClaimReceiver', () => {
         }),
       } as unknown as jest.Mocked<ChannelManager>;
 
-      // Add new SDK methods to mock
-      mockPaymentChannelSDK.getChannelStateByNetwork = jest.fn().mockResolvedValue({
-        exists: true,
-        state: 1,
-        participant1: mockParticipant1,
-        participant2: mockParticipant2,
-        settlementTimeout: 3600,
+      // Reset provider mocks for dynamic verification
+      mockProvider.getChannelState.mockResolvedValue({
+        channelId: mockChannelId,
+        status: 'opened' as const,
+        participants: [mockParticipant1, mockParticipant2],
+        deposit: 10000n,
       });
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain = jest.fn().mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
 
       dynamicBTPServer = {
         onMessage: jest.fn((handler) => {
@@ -469,7 +562,7 @@ describe('ClaimReceiver', () => {
 
       dynamicReceiver = new ClaimReceiver(
         mockDb,
-        mockPaymentChannelSDK,
+        mockRegistry as unknown as ChainProviderRegistry,
         mockLogger,
         mockChannelManager
       );
@@ -484,20 +577,19 @@ describe('ClaimReceiver', () => {
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Verify on-chain query
-      expect(mockPaymentChannelSDK.getChannelStateByNetwork).toHaveBeenCalledWith(
-        mockChannelId,
-        mockTokenNetworkAddress
-      );
+      // Verify on-chain query via provider
+      expect(mockProvider.getChannelState).toHaveBeenCalledWith(mockChannelId);
 
-      // Verify signature with explicit domain
-      expect(mockPaymentChannelSDK.verifyBalanceProofWithDomain).toHaveBeenCalledWith(
-        expect.objectContaining({ channelId: mockChannelId }),
-        claim.signature,
-        claim.signerAddress,
-        31337,
-        mockTokenNetworkAddress
-      );
+      // Verify signature via provider (single object with string amounts)
+      expect(mockProvider.verifyBalanceProof).toHaveBeenCalledWith({
+        channelId: mockChannelId,
+        nonce: claim.nonce,
+        transferredAmount: claim.transferredAmount,
+        lockedAmount: claim.lockedAmount,
+        locksRoot: claim.locksRoot,
+        signature: claim.signature,
+        signerAddress: claim.signerAddress,
+      });
 
       // Verify channel registered
       expect(mockChannelManager.registerExternalChannel).toHaveBeenCalledWith({
@@ -523,14 +615,8 @@ describe('ClaimReceiver', () => {
       );
     });
 
-    it('should reject unknown channel with non-existent channel (state 0)', async () => {
-      mockPaymentChannelSDK.getChannelStateByNetwork.mockResolvedValueOnce({
-        exists: false,
-        state: 0,
-        participant1: '0x' + '0'.repeat(40),
-        participant2: '0x' + '0'.repeat(40),
-        settlementTimeout: 0,
-      });
+    it('should reject unknown channel with non-existent channel (provider throws)', async () => {
+      mockProvider.getChannelState.mockRejectedValueOnce(new Error('Channel not found'));
 
       const claim = makeClaimWithSelfDescribing();
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
@@ -540,17 +626,16 @@ describe('ClaimReceiver', () => {
         expect.objectContaining({
           channelId: mockChannelId,
         }),
-        ERRORS.CHANNEL_NOT_FOUND
+        ERRORS.ON_CHAIN_VERIFICATION_FAILED
       );
     });
 
-    it('should reject unknown channel with closed channel (state 2)', async () => {
-      mockPaymentChannelSDK.getChannelStateByNetwork.mockResolvedValueOnce({
-        exists: true,
-        state: 2, // Closed
-        participant1: mockParticipant1,
-        participant2: mockParticipant2,
-        settlementTimeout: 3600,
+    it('should reject unknown channel with closed channel', async () => {
+      mockProvider.getChannelState.mockResolvedValueOnce({
+        channelId: mockChannelId,
+        status: 'closed' as const,
+        participants: [mockParticipant1, mockParticipant2],
+        deposit: 10000n,
       });
 
       const claim = makeClaimWithSelfDescribing();
@@ -566,12 +651,11 @@ describe('ClaimReceiver', () => {
     });
 
     it('should reject unknown channel where signerAddress is not participant', async () => {
-      mockPaymentChannelSDK.getChannelStateByNetwork.mockResolvedValueOnce({
-        exists: true,
-        state: 1,
-        participant1: '0x' + '1'.repeat(40),
-        participant2: '0x' + '2'.repeat(40),
-        settlementTimeout: 3600,
+      mockProvider.getChannelState.mockResolvedValueOnce({
+        channelId: mockChannelId,
+        status: 'opened' as const,
+        participants: ['0x' + '1'.repeat(40), '0x' + '2'.repeat(40)],
+        deposit: 10000n,
       });
 
       const claim = makeClaimWithSelfDescribing();
@@ -587,16 +671,16 @@ describe('ClaimReceiver', () => {
     });
 
     it('should skip RPC for second claim on same channel (caching)', async () => {
-      // First claim: unknown channel → RPC
+      // First claim: unknown channel -> RPC
       mockStatement.get.mockReturnValue(undefined);
 
       const claim1 = makeClaimWithSelfDescribing({ nonce: 1 });
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim1));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      expect(mockPaymentChannelSDK.getChannelStateByNetwork).toHaveBeenCalledTimes(1);
+      expect(mockProvider.getChannelState).toHaveBeenCalledTimes(1);
 
-      // Second claim: channel now known → no RPC
+      // Second claim: channel now known -> no RPC
       mockChannelManager.getChannelById.mockReturnValue({
         channelId: mockChannelId,
         peerId: 'peer-new',
@@ -607,7 +691,7 @@ describe('ClaimReceiver', () => {
         lastActivityAt: new Date(),
         status: 'open',
       });
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
 
       const claim2 = makeClaimWithSelfDescribing({
         nonce: 2,
@@ -620,10 +704,10 @@ describe('ClaimReceiver', () => {
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim2));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // getChannelStateByNetwork should NOT have been called again
-      expect(mockPaymentChannelSDK.getChannelStateByNetwork).toHaveBeenCalledTimes(1);
-      // verifyBalanceProof (not WithDomain) used for known channel
-      expect(mockPaymentChannelSDK.verifyBalanceProof).toHaveBeenCalled();
+      // getChannelState should NOT have been called again
+      expect(mockProvider.getChannelState).toHaveBeenCalledTimes(1);
+      // verifyBalanceProof used for known channel
+      expect(mockProvider.verifyBalanceProof).toHaveBeenCalled();
     });
 
     it('should reject unknown channel missing self-describing fields', async () => {
@@ -642,6 +726,19 @@ describe('ClaimReceiver', () => {
       // Missing tokenNetworkAddress
       jest.clearAllMocks();
       mockChannelManager.getChannelById.mockReturnValue(null);
+      // Reset provider mocks after clearAllMocks
+      mockProvider.getChannelState.mockResolvedValue({
+        channelId: mockChannelId,
+        status: 'opened' as const,
+        participants: [mockParticipant1, mockParticipant2],
+        deposit: 10000n,
+      });
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
+      mockRegistry.getProvider.mockImplementation((_chainType: string, chainId: string) => {
+        if (chainId === 'evm:31337') return mockProvider;
+        return undefined;
+      });
+      mockRegistry.getAllProviders.mockReturnValue([mockProvider]);
       const claim2 = makeClaimWithSelfDescribing({ tokenNetworkAddress: undefined });
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim2));
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -656,6 +753,19 @@ describe('ClaimReceiver', () => {
       // Missing tokenAddress
       jest.clearAllMocks();
       mockChannelManager.getChannelById.mockReturnValue(null);
+      // Reset provider mocks after clearAllMocks
+      mockProvider.getChannelState.mockResolvedValue({
+        channelId: mockChannelId,
+        status: 'opened' as const,
+        participants: [mockParticipant1, mockParticipant2],
+        deposit: 10000n,
+      });
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
+      mockRegistry.getProvider.mockImplementation((_chainType: string, chainId: string) => {
+        if (chainId === 'evm:31337') return mockProvider;
+        return undefined;
+      });
+      mockRegistry.getAllProviders.mockReturnValue([mockProvider]);
       const claim3 = makeClaimWithSelfDescribing({ tokenAddress: undefined });
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim3));
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -669,9 +779,7 @@ describe('ClaimReceiver', () => {
     });
 
     it('should reject on RPC failure during verification', async () => {
-      mockPaymentChannelSDK.getChannelStateByNetwork.mockRejectedValueOnce(
-        new Error('network timeout')
-      );
+      mockProvider.getChannelState.mockRejectedValueOnce(new Error('network timeout'));
 
       const claim = makeClaimWithSelfDescribing();
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
@@ -685,8 +793,32 @@ describe('ClaimReceiver', () => {
       );
     });
 
+    it('should reject when provider.verifyBalanceProof throws an error', async () => {
+      mockProvider.verifyBalanceProof.mockRejectedValueOnce(new Error('Provider internal error'));
+
+      const claim = makeClaimWithSelfDescribing();
+      await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Claim should be stored as unverified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        claim.messageId,
+        'peer-new',
+        'evm',
+        mockChannelId,
+        expect.any(String),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+
+      // Channel should NOT be registered
+      expect(mockChannelManager.registerExternalChannel).not.toHaveBeenCalled();
+    });
+
     it('should reject when EIP-712 signature verification fails for unknown channel', async () => {
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockResolvedValueOnce(false);
+      mockProvider.verifyBalanceProof.mockResolvedValueOnce(false);
 
       const claim = makeClaimWithSelfDescribing();
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
@@ -713,7 +845,7 @@ describe('ClaimReceiver', () => {
       const peerIdToAddressMap = new Map<string, string>();
       const receiverWithMap = new ClaimReceiver(
         mockDb,
-        mockPaymentChannelSDK,
+        mockRegistry as unknown as ChainProviderRegistry,
         mockLogger,
         mockChannelManager,
         peerIdToAddressMap
@@ -741,7 +873,7 @@ describe('ClaimReceiver', () => {
       const peerIdToAddressMap = new Map<string, string>([['peer-new', existingAddress]]);
       const receiverWithMap = new ClaimReceiver(
         mockDb,
-        mockPaymentChannelSDK,
+        mockRegistry as unknown as ChainProviderRegistry,
         mockLogger,
         mockChannelManager,
         peerIdToAddressMap
@@ -798,7 +930,7 @@ describe('ClaimReceiver', () => {
         lastActivityAt: new Date(),
         status: 'open',
       });
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
       mockStatement.get.mockReturnValue(undefined);
 
       // Claim WITHOUT self-describing fields
@@ -811,9 +943,9 @@ describe('ClaimReceiver', () => {
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Should use existing verifyBalanceProof, not the dynamic path
-      expect(mockPaymentChannelSDK.verifyBalanceProof).toHaveBeenCalled();
-      expect(mockPaymentChannelSDK.getChannelStateByNetwork).not.toHaveBeenCalled();
+      // Should use provider.verifyBalanceProof, not the dynamic path
+      expect(mockProvider.verifyBalanceProof).toHaveBeenCalled();
+      expect(mockProvider.getChannelState).not.toHaveBeenCalled();
 
       // Should store as verified
       expect(mockStatement.run).toHaveBeenCalledWith(
@@ -823,6 +955,375 @@ describe('ClaimReceiver', () => {
         mockChannelId,
         expect.any(String),
         1, // verified
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+  });
+
+  describe('AC-2: No provider registered rejection (T-32.6-02)', () => {
+    let registeredReceiver: ClaimReceiver;
+    let noProviderBtpHandler: ((peerId: string, message: BTPMessage) => void) | null;
+
+    beforeEach(() => {
+      noProviderBtpHandler = null;
+
+      // Create a registry that returns NO provider for any chain
+      const emptyRegistry = {
+        getProvider: jest.fn().mockReturnValue(undefined),
+        getProviderForPeer: jest.fn().mockReturnValue(undefined),
+        getAllProviders: jest.fn().mockReturnValue([]),
+      };
+
+      registeredReceiver = new ClaimReceiver(
+        mockDb,
+        emptyRegistry as unknown as ChainProviderRegistry,
+        mockLogger
+      );
+
+      const noProviderBTPServer = {
+        onMessage: jest.fn((handler) => {
+          noProviderBtpHandler = handler;
+        }),
+      } as unknown as jest.Mocked<BTPServer>;
+
+      registeredReceiver.registerWithBTPServer(noProviderBTPServer);
+    });
+
+    it('should reject EVM claim with NO_PROVIDER_REGISTERED error when registry has no provider', async () => {
+      const evmClaim: EVMClaimMessage = {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId: 'evm-no-provider-1',
+        timestamp: '2026-02-02T12:00:00.000Z',
+        senderId: 'peer-bob',
+        channelId: '0x' + 'a'.repeat(64),
+        nonce: 1,
+        transferredAmount: '1000000000000000000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0x' + 'b'.repeat(130),
+        signerAddress: '0x' + 'c'.repeat(40),
+      };
+
+      const protocolData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(evmClaim), 'utf8'),
+      };
+
+      const btpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [protocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      await noProviderBtpHandler!('peer-bob', btpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify warning logged with NO_PROVIDER_REGISTERED error
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: evmClaim.messageId,
+          blockchain: 'evm',
+        }),
+        `${ERRORS.NO_PROVIDER_REGISTERED} evm`
+      );
+
+      // Verify claim persisted with verified: false
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        evmClaim.messageId,
+        'peer-bob',
+        'evm',
+        evmClaim.channelId,
+        JSON.stringify(evmClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('should not emit CLAIM_RECEIVED event when no provider is registered', async () => {
+      const evmClaim: EVMClaimMessage = {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId: 'evm-no-provider-2',
+        timestamp: '2026-02-02T12:00:00.000Z',
+        senderId: 'peer-bob',
+        channelId: '0x' + 'a'.repeat(64),
+        nonce: 1,
+        transferredAmount: '1000000000000000000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0x' + 'b'.repeat(130),
+        signerAddress: '0x' + 'c'.repeat(40),
+      };
+
+      const protocolData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(evmClaim), 'utf8'),
+      };
+
+      const btpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [protocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      const claimReceivedListener = jest.fn();
+      registeredReceiver.on('CLAIM_RECEIVED', claimReceivedListener);
+
+      await noProviderBtpHandler!('peer-bob', btpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(claimReceivedListener).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('AC-5: No direct PaymentChannelSDK dependency (T-32.6-06)', () => {
+    it('should not import PaymentChannelSDK in claim-receiver.ts source', () => {
+      const sourceFile = path.join(__dirname, 'claim-receiver.ts');
+      const sourceCode = fs.readFileSync(sourceFile, 'utf8');
+
+      // The source file should not contain any import of PaymentChannelSDK
+      expect(sourceCode).not.toContain('PaymentChannelSDK');
+    });
+
+    it('should accept ChainProviderRegistry in constructor (not PaymentChannelSDK)', () => {
+      // Verify ClaimReceiver can be constructed with a mock registry
+      const receiver = new ClaimReceiver(
+        mockDb,
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockLogger
+      );
+      expect(receiver).toBeInstanceOf(ClaimReceiver);
+    });
+  });
+
+  describe('dynamic verification: settled channel status (T-32.6-09 extended)', () => {
+    let dynamicReceiver: ClaimReceiver;
+    let mockChannelManager: jest.Mocked<ChannelManager>;
+    let dynamicBtpHandler: ((peerId: string, message: BTPMessage) => void) | null;
+
+    const mockChannelId = '0x' + 'a'.repeat(64);
+    const mockSignerAddress = '0x' + 'c'.repeat(40);
+    const mockTokenNetworkAddress = '0x' + 'e'.repeat(40);
+    const mockTokenAddress = '0x' + 'f'.repeat(40);
+
+    beforeEach(() => {
+      dynamicBtpHandler = null;
+
+      mockChannelManager = {
+        getChannelById: jest.fn().mockReturnValue(null),
+        registerExternalChannel: jest.fn(),
+      } as unknown as jest.Mocked<ChannelManager>;
+
+      dynamicReceiver = new ClaimReceiver(
+        mockDb,
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        mockChannelManager
+      );
+
+      const btpServer = {
+        onMessage: jest.fn((handler) => {
+          dynamicBtpHandler = handler;
+        }),
+      } as unknown as jest.Mocked<BTPServer>;
+
+      dynamicReceiver.registerWithBTPServer(btpServer);
+    });
+
+    it('should reject unknown channel with settled status', async () => {
+      mockProvider.getChannelState.mockResolvedValueOnce({
+        channelId: mockChannelId,
+        status: 'settled' as const,
+        participants: [mockSignerAddress, '0x' + 'd'.repeat(40)],
+        deposit: 10000n,
+      });
+
+      const claim: EVMClaimMessage = {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId: 'evm-settled-test-1',
+        timestamp: '2026-03-07T12:00:00.000Z',
+        senderId: 'peer-new',
+        channelId: mockChannelId,
+        nonce: 1,
+        transferredAmount: '1000000000000000000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0x' + 'b'.repeat(130),
+        signerAddress: mockSignerAddress,
+        chainId: 31337,
+        tokenNetworkAddress: mockTokenNetworkAddress,
+        tokenAddress: mockTokenAddress,
+      };
+
+      const btpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [
+            {
+              protocolName: 'payment-channel-claim',
+              contentType: 1,
+              data: Buffer.from(JSON.stringify(claim), 'utf8'),
+            },
+          ],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      await dynamicBtpHandler!('peer-new', btpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Settled channels should be rejected with CHANNEL_NOT_OPENED
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: mockChannelId,
+        }),
+        ERRORS.CHANNEL_NOT_OPENED
+      );
+
+      // Claim should be stored as unverified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        claim.messageId,
+        'peer-new',
+        'evm',
+        mockChannelId,
+        expect.any(String),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+  });
+
+  describe('known channel provider resolution via chain metadata (T-32.6-11)', () => {
+    let knownChannelReceiver: ClaimReceiver;
+    let mockChannelManager: jest.Mocked<ChannelManager>;
+    let knownBtpHandler: ((peerId: string, message: BTPMessage) => void) | null;
+
+    const mockChannelId = '0x' + 'a'.repeat(64);
+
+    beforeEach(() => {
+      knownBtpHandler = null;
+
+      mockChannelManager = {
+        getChannelById: jest.fn().mockReturnValue({
+          channelId: mockChannelId,
+          peerId: 'peer-bob',
+          tokenId: 'TEST_TOKEN',
+          tokenAddress: '0x' + 'f'.repeat(40),
+          chain: 'evm:31337',
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          status: 'open',
+        }),
+        registerExternalChannel: jest.fn(),
+      } as unknown as jest.Mocked<ChannelManager>;
+
+      knownChannelReceiver = new ClaimReceiver(
+        mockDb,
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        mockChannelManager
+      );
+
+      const btpServer = {
+        onMessage: jest.fn((handler) => {
+          knownBtpHandler = handler;
+        }),
+      } as unknown as jest.Mocked<BTPServer>;
+
+      knownChannelReceiver.registerWithBTPServer(btpServer);
+    });
+
+    it('should resolve provider using channel chain metadata for known channels', async () => {
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
+      mockStatement.get.mockReturnValue(undefined);
+
+      const claim: EVMClaimMessage = {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId: 'evm-known-chain-1',
+        timestamp: '2026-03-07T12:00:00.000Z',
+        senderId: 'peer-bob',
+        channelId: mockChannelId,
+        nonce: 1,
+        transferredAmount: '1000000000000000000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0x' + 'b'.repeat(130),
+        signerAddress: '0x' + 'c'.repeat(40),
+      };
+
+      const btpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [
+            {
+              protocolName: 'payment-channel-claim',
+              contentType: 1,
+              data: Buffer.from(JSON.stringify(claim), 'utf8'),
+            },
+          ],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      await knownBtpHandler!('peer-bob', btpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify registry.getProvider was called with the channel's chain metadata
+      expect(mockRegistry.getProvider).toHaveBeenCalledWith('evm', 'evm:31337');
+
+      // Verify provider.verifyBalanceProof was called (known channel path)
+      expect(mockProvider.verifyBalanceProof).toHaveBeenCalledWith({
+        channelId: mockChannelId,
+        nonce: claim.nonce,
+        transferredAmount: claim.transferredAmount,
+        lockedAmount: claim.lockedAmount,
+        locksRoot: claim.locksRoot,
+        signature: claim.signature,
+        signerAddress: claim.signerAddress,
+      });
+
+      // Verify getChannelState was NOT called (known channel skips on-chain check)
+      expect(mockProvider.getChannelState).not.toHaveBeenCalled();
+
+      // Verified claim stored
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        claim.messageId,
+        'peer-bob',
+        'evm',
+        mockChannelId,
+        expect.any(String),
+        1, // verified=true
         expect.any(Number),
         null,
         null

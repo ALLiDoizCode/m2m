@@ -85,7 +85,7 @@ graph TB
 
     subgraph Providers["Chain Providers (PaymentChannelProvider Interface)"]
         EVMProvider["EVM Provider<br/>(ethers.js, EIP-712)"]
-        SolanaProvider["Solana Provider<br/>(@solana/web3.js, Ed25519)"]
+        SolanaProvider["Solana Provider<br/>(@solana/kit, Ed25519)"]
         MinaProvider["Mina Provider<br/>(o1js, zk-SNARKs)"]
     end
 
@@ -148,10 +148,12 @@ connector/
 │   └── faucet/             # Token faucet for local Anvil development
 ├── tools/
 │   ├── send-packet/        # CLI tool for sending test packets
-│   └── fund-peers/         # CLI tool for funding peer accounts
-├── docker-compose.yml      # Anvil + Faucet local blockchain infrastructure
+│   ├── fund-peers/         # CLI tool for funding peer accounts
+│   ├── solana/             # Solana validator init scripts, keypairs, program deploy
+│   └── mina/               # Mina lightnet init scripts, zkApp deploy
+├── docker-compose.yml      # Multi-chain local blockchain infrastructure (Anvil, Solana, Mina)
 ├── Dockerfile              # Multi-stage build (builder → runtime)
-└── Makefile                # Dev workflow (build, test, anvil-up/down)
+└── Makefile                # Dev workflow (build, test, anvil-up/down, solana-up/down, mina-up/down)
 ```
 
 ### Packages
@@ -167,57 +169,133 @@ connector/
 
 ### Tools
 
-| Tool          | Path                | Description                                         |
-| ------------- | ------------------- | --------------------------------------------------- |
-| `send-packet` | `tools/send-packet` | Send ILP Prepare packets to a connector for testing |
-| `fund-peers`  | `tools/fund-peers`  | Fund peer EVM accounts with test tokens             |
+| Tool          | Path                | Description                                                       |
+| ------------- | ------------------- | ----------------------------------------------------------------- |
+| `send-packet` | `tools/send-packet` | Send ILP Prepare packets to a connector for testing               |
+| `fund-peers`  | `tools/fund-peers`  | Fund peer EVM accounts with test tokens                           |
+| `solana`      | `tools/solana`      | Solana validator init scripts, keypair generation, program deploy |
+| `mina`        | `tools/mina`        | Mina lightnet init scripts, zkApp deploy, account management      |
 
 ### Local Blockchain Infrastructure
 
-The project includes self-contained Docker infrastructure for local EVM development and integration testing:
+The project includes self-contained Docker infrastructure for local multi-chain development and integration testing. Each chain runs in its own Docker Compose profile, allowing selective startup per-epic or all-at-once.
 
-| Service    | Image / Build                       | Port | Purpose                                                  |
-| ---------- | ----------------------------------- | ---- | -------------------------------------------------------- |
-| **anvil**  | `ghcr.io/foundry-rs/foundry:latest` | 8545 | Local Ethereum node (Anvil) with auto-deployed contracts |
-| **faucet** | `packages/faucet/Dockerfile`        | 3500 | Web UI + API for distributing test ETH and USDC tokens   |
+| Service                | Image                                         | Ports            | Profile  | Purpose                                                          |
+| ---------------------- | --------------------------------------------- | ---------------- | -------- | ---------------------------------------------------------------- |
+| **anvil**              | `ghcr.io/foundry-rs/foundry:latest`           | 8545             | `evm`    | Local Ethereum node (Anvil) with auto-deployed contracts         |
+| **faucet**             | `packages/faucet/Dockerfile`                  | 3500             | `evm`    | Web UI + API for distributing test ETH and USDC tokens           |
+| **solana**             | `ghcr.io/beeman/solana-test-validator:latest` | 8899, 8900, 9900 | `solana` | Local Solana validator with auto-deployed programs               |
+| **mina-local-network** | `o1labs/mina-local-network:o1js-main`         | 3085, 8181, 8282 | `mina`   | Local Mina network (lightnet) with accounts manager and explorer |
 
-Managed via `docker-compose.yml` at the project root:
+Managed via `docker-compose.yml` at the project root with Docker Compose profiles:
 
 ```bash
+# EVM (existing)
 make anvil-up      # Start Anvil + Faucet (contracts auto-deploy)
-make anvil-down    # Stop all services
-make anvil-logs    # Follow logs
+make anvil-down    # Stop EVM services
+make anvil-logs    # Follow EVM logs
+
+# Solana (Epic 33)
+make solana-up     # Start Solana test validator (program auto-deploy)
+make solana-down   # Stop Solana validator
+make solana-logs   # Follow Solana logs
+
+# Mina (Epic 34)
+make mina-up       # Start Mina lightnet (wait for SYNCED)
+make mina-down     # Stop Mina network
+make mina-logs     # Follow Mina logs
+
+# All chains
+make infra-up      # Start all blockchain services
+make infra-down    # Stop all blockchain services
 ```
 
+**Important constraints:**
+
+- **Solana** requires `security_opt: seccomp=unconfined` in Docker (Agave v2+ uses `io_uring`)
+- **Mina** requires 4-8 GB RAM and ~120s startup time (`start_period: 120s`); port 5432 (archive PostgreSQL) should be remapped to 5433 to avoid conflicts with local Postgres
+- **Selective startup** is recommended during development — a developer working on Epic 33 should not need Mina running and vice versa
+
+#### EVM (Anvil)
+
 On startup, Anvil deploys the `DeployLocal.s.sol` script which creates a USDC token at the deterministic address `0x5FbDB2315678afecb367f032d93F642f64180aa3` and a TokenNetwork registry. The faucet distributes 100 ETH + 10,000 USDC per request from Anvil's well-known accounts.
+
+#### Solana Test Validator
+
+The Solana service uses `ghcr.io/beeman/solana-test-validator:latest` (nightly Agave builds, multi-arch amd64 + arm64 for Apple Silicon). On startup, the init script:
+
+1. Starts `solana-test-validator --reset` with `--limit-ledger-size 50000000`
+2. Waits for validator readiness (`solana cluster-version`)
+3. Airdrops 1000 SOL to the default keypair
+4. Deploys any `.so` program files from `target/deploy/` (mounted as `/programs`)
+
+SPL Token and Token-2022 programs are built-in to the validator (Solana v1.17+) — no clone required.
+
+| Resource           | Value                   | Source                     |
+| ------------------ | ----------------------- | -------------------------- |
+| JSON-RPC           | `http://localhost:8899` | Solana validator           |
+| WebSocket          | `ws://localhost:8900`   | Solana validator           |
+| Faucet             | Port 9900               | Solana validator built-in  |
+| Program deploy dir | `target/deploy/`        | Volume mount → `/programs` |
+
+#### Mina Lightnet
+
+The Mina service uses `o1labs/mina-local-network:o1js-main` running a single-node Mina network with archive node and GraphQL API. On startup, the network takes 1-3 minutes to reach `SYNCED` status.
+
+Pre-funded test accounts are acquired via the accounts manager HTTP API:
+
+```bash
+curl -s http://localhost:8181/acquire-account | jq
+# Returns: { "pk": "B62q...", "sk": "EKE...", "balance": "1000" }
+```
+
+| Resource           | Value                           | Source                |
+| ------------------ | ------------------------------- | --------------------- |
+| GraphQL endpoint   | `http://localhost:3085/graphql` | Mina daemon           |
+| Accounts manager   | `http://localhost:8181`         | Lightnet accounts API |
+| Explorer UI        | `http://localhost:8282`         | Mina explorer         |
+| Archive PostgreSQL | `localhost:5433` (remapped)     | Archive node          |
+
+#### Public Testnets
+
+For integration testing beyond local development:
+
+| Chain      | Testnet      | Endpoint                                         | Faucet                                            |
+| ---------- | ------------ | ------------------------------------------------ | ------------------------------------------------- |
+| **EVM**    | Base Sepolia | `https://sepolia.base.org`                       | Bridge from Sepolia                               |
+| **Solana** | Devnet       | `https://api.devnet.solana.com`                  | `solana airdrop 2` (rate-limited ~5 SOL/hr)       |
+| **Mina**   | Devnet       | `https://api.minascan.io/node/devnet/v1/graphql` | `https://faucet.minaprotocol.com/?network=devnet` |
 
 ---
 
 ## 4. Tech Stack
 
-| Category                  | Technology                                      | Version           |
-| ------------------------- | ----------------------------------------------- | ----------------- |
-| Language                  | TypeScript                                      | ^5.3.3            |
-| Runtime                   | Node.js                                         | >=22.11.0         |
-| Transport                 | WebSocket (ws)                                  | ^8.16.0           |
-| HTTP                      | Express                                         | 4.18.x            |
-| EVM                       | ethers.js                                       | ^6.16.0           |
-| Logging                   | pino                                            | ^8.21.0           |
-| Config                    | js-yaml                                         | ^4.1.0            |
-| Validation                | zod                                             | ^3.25.76          |
-| Database (claims)         | better-sqlite3                                  | ^11.8.1           |
-| Accounting (optional)     | TigerBeetle                                     | 0.16.68           |
-| Smart Contracts (EVM)     | Solidity 0.8.26 (Foundry)                       | —                 |
-| Smart Contracts (Solana)  | Rust (Pinocchio / native)                       | —                 |
-| Smart Contracts (Mina)    | TypeScript (o1js zkApps)                        | —                 |
-| Solana SDK                | @solana/web3.js                                 | latest            |
-| Mina SDK                  | o1js                                            | latest            |
-| Transport Privacy         | @noble/ciphers, @noble/hashes, @noble/secp256k1 | latest            |
-| AI (optional)             | @ai-sdk/anthropic, @ai-sdk/openai               | ^1.2.12 / ^1.3.24 |
-| Observability (optional)  | OpenTelemetry, prom-client                      | ^1.9.0 / ^15.1.0  |
-| Key Management (optional) | AWS KMS, GCP KMS, Azure Key Vault               | —                 |
-| Testing                   | Jest + ts-jest                                  | ^29.7.0 / ^29.1.2 |
-| Build                     | tsc, tsx, Vite                                  | —                 |
+| Category                  | Technology                                        | Version           |
+| ------------------------- | ------------------------------------------------- | ----------------- |
+| Language                  | TypeScript                                        | ^5.3.3            |
+| Runtime                   | Node.js                                           | >=22.11.0         |
+| Transport                 | WebSocket (ws)                                    | ^8.16.0           |
+| HTTP                      | Express                                           | 4.18.x            |
+| EVM                       | ethers.js                                         | ^6.16.0           |
+| Logging                   | pino                                              | ^8.21.0           |
+| Config                    | js-yaml                                           | ^4.1.0            |
+| Validation                | zod                                               | ^3.25.76          |
+| Database (claims)         | better-sqlite3                                    | ^11.8.1           |
+| Accounting (optional)     | TigerBeetle                                       | 0.16.68           |
+| Smart Contracts (EVM)     | Solidity 0.8.26 (Foundry)                         | —                 |
+| Smart Contracts (Solana)  | Rust (Pinocchio / native)                         | —                 |
+| Smart Contracts (Mina)    | TypeScript (o1js zkApps)                          | —                 |
+| Solana SDK                | @solana/kit (renamed from @solana/web3.js v2)     | ^3.0.3            |
+| Solana Token SDK          | @solana-program/token, @solana-program/token-2022 | latest            |
+| Solana Test (TS)          | solana-bankrun (in-process BanksClient for Node)  | latest            |
+| Solana Test (Rust)        | solana-program-test (BanksClient)                 | ^3.1              |
+| Mina SDK                  | o1js                                              | latest            |
+| Transport Privacy         | @noble/ciphers, @noble/hashes, @noble/secp256k1   | latest            |
+| AI (optional)             | @ai-sdk/anthropic, @ai-sdk/openai                 | ^1.2.12 / ^1.3.24 |
+| Observability (optional)  | OpenTelemetry, prom-client                        | ^1.9.0 / ^15.1.0  |
+| Key Management (optional) | AWS KMS, GCP KMS, Azure Key Vault                 | —                 |
+| Testing                   | Jest + ts-jest                                    | ^29.7.0 / ^29.1.2 |
+| Build                     | tsc, tsx, Vite                                    | —                 |
 
 ---
 
@@ -487,7 +565,7 @@ interface PaymentChannelProvider {
 | `ChainProviderRegistry`        | `settlement/chain-provider-registry.ts`     | Manages chain provider instances by chain type; dynamic registration/lookup |
 | `PaymentChannelProvider`       | `settlement/payment-channel-provider.ts`    | Interface all chain providers implement                                     |
 | `EVMPaymentChannelProvider`    | `settlement/providers/evm/`                 | EVM provider: ethers.js, EIP-712 signing, TokenNetwork contract interaction |
-| `SolanaPaymentChannelProvider` | `settlement/providers/solana/`              | Solana provider: @solana/web3.js, Ed25519 signing, PDA-based channels       |
+| `SolanaPaymentChannelProvider` | `settlement/providers/solana/`              | Solana provider: @solana/kit v3, Ed25519 signing, PDA-based channels        |
 | `MinaPaymentChannelProvider`   | `settlement/providers/mina/`                | Mina provider: o1js, zk-SNARK proof generation, Poseidon commitments        |
 | `NIP59TransportWrapper`        | `settlement/privacy/`                       | Optional NIP-59 Gift Wrap claim wrapping for transport privacy (all chains) |
 | `ChannelManager`               | `settlement/channel-manager.ts`             | Channel lifecycle (create, deposit, close), peer-to-channel mapping         |
@@ -617,7 +695,7 @@ Configurable per-peer via `nip59Enabled: true` in peer configuration.
 | Solana Payment Channel     | Rust (Pinocchio)  | `packages/solana-program/` | Solana payment channel (PDA-based, Ed25519 claim verification via precompile) |
 | Mina Payment Channel       | TypeScript (o1js) | `packages/mina-zkapp/`     | Mina zkApp with zk-SNARK private balance proofs (Poseidon commitments)        |
 
-EVM contracts are compiled and tested with **Foundry** (`forge build`, `forge test`). Solana program tested with `solana-program-test` / Bankrun. Mina zkApp tested with o1js local blockchain simulation.
+EVM contracts are compiled and tested with **Foundry** (`forge build`, `forge test`). Solana programs are compiled with `cargo build-sbf` and tested with `solana-program-test` BanksClient (Rust) and `solana-bankrun` (TypeScript). Mina zkApps are tested with `Mina.LocalBlockchain()` (o1js in-process simulation) and `mina-local-network` (Docker lightnet for E2E).
 
 ---
 
@@ -735,26 +813,59 @@ Jest + ts-jest with co-located test files (`*.test.ts` next to source).
 
 ### Test Types
 
-| Type        | Command                    | Scope                                                | Mocks Allowed |
-| ----------- | -------------------------- | ---------------------------------------------------- | ------------- |
-| Unit        | `npm test`                 | Individual modules, isolated logic                   | Yes           |
-| Integration | `npm run test:integration` | Multi-module workflows against real Anvil blockchain | **No**        |
+| Type        | Command                    | Scope                                                      | Mocks Allowed |
+| ----------- | -------------------------- | ---------------------------------------------------------- | ------------- |
+| Unit        | `npm test`                 | Individual modules, isolated logic                         | Yes           |
+| Integration | `npm run test:integration` | Multi-module workflows against real local blockchain infra | **No**        |
 
 ### Key Rule: Integration Tests Never Use Mocks
 
-**Integration tests run against real infrastructure — never mocks.** The local Anvil blockchain (`make anvil-up`) provides a deterministic, fast, cost-free EVM environment that eliminates the need for mocked EVM interactions in integration tests.
+**Integration tests run against real infrastructure — never mocks.** Local blockchain infrastructure provides deterministic, fast, cost-free environments that eliminate the need for mocked chain interactions in integration tests.
 
-This means:
+This applies to **all three chains**:
 
-- **Real smart contracts** — `DeployLocal.s.sol` deploys real `TokenNetwork`, `TokenNetworkRegistry`, and `MockERC20` contracts to Anvil
-- **Real transactions** — Channel open, deposit, close, and settlement operations execute against real Solidity code
-- **Real signatures** — EIP-712 signing and on-chain verification use actual ethers.js + Anvil RPC
-- **Real balances** — Token transfers, ETH funding, and balance queries hit the Anvil state
-- **Real claim flow** — Self-describing claims are verified against on-chain channel state via RPC
+- **EVM** — Real Anvil blockchain with deployed Solidity contracts
+- **Solana** — Real `solana-test-validator` with deployed Rust programs (or `solana-bankrun` for fast in-process tests)
+- **Mina** — Real `o1js` local blockchain simulation (or lightnet for full E2E)
 
-If a test needs a running blockchain, it is an integration test and uses Anvil. If a test does not need a blockchain, it is a unit test and may use mocks for non-EVM dependencies (e.g., BTP transport, TigerBeetle client).
+For each chain, integration tests use:
 
-### Anvil Infrastructure for Integration Tests
+- **Real smart contracts / programs / zkApps** — deployed to local infrastructure
+- **Real transactions** — channel operations execute against real on-chain code
+- **Real signatures** — EIP-712 (EVM), Ed25519 (Solana), zk-SNARK proofs (Mina)
+- **Real balances** — token transfers and balance queries hit real chain state
+- **Real claim flow** — self-describing claims verified against on-chain channel state
+
+If a test needs a running blockchain, it is an integration test. If it does not, it is a unit test.
+
+### Multi-Chain Test Pyramid
+
+Each chain has three test tiers. The key principle: **use the fastest harness that validates the behavior you need**.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    E2E (Docker Compose)                       │
+│  EVM: Anvil          Solana: solana-test-validator            │
+│  Mina: lightnet      → Full network, real RPC, real blocks   │
+│  Run: Pre-release / nightly                                  │
+├─────────────────────────────────────────────────────────────┤
+│               Integration (In-Process Harness)               │
+│  EVM: forge test     Solana: BanksClient / solana-bankrun    │
+│  Mina: LocalBlockchain(proofsEnabled: true)                  │
+│  Run: Merge to main (Mina proof tests are slow: 30-120s/tx) │
+├─────────────────────────────────────────────────────────────┤
+│                   Unit (Fast, No Infra)                       │
+│  EVM: forge test     Solana: BanksClient                     │
+│  Mina: LocalBlockchain(proofsEnabled: false)                 │
+│  Run: Every PR — milliseconds per test                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Mina-specific constraint:** Proof-generation tests (`proofsEnabled: true`) require 30-120 seconds per `transaction.prove()` call and 5-minute Jest timeouts. These MUST be separated into their own test suite and should never block PR checks. Run them on merge/nightly only. Unit tests with `proofsEnabled: false` validate logic correctness without generating proofs and run in milliseconds.
+
+**Solana-specific note:** `solana-bankrun` provides an in-process BanksClient in Node.js — orders of magnitude faster than running against `solana-test-validator`. Use it for fast integration tests. Reserve Docker-based `solana-test-validator` for E2E tests that need real RPC behavior and account subscriptions.
+
+### EVM Infrastructure for Integration Tests (Anvil)
 
 Integration tests require the Anvil Docker infrastructure to be running:
 
@@ -777,6 +888,55 @@ The Anvil environment provides:
 | ETH Funder (Account 1) | Private key `0x59c699...`                    | Anvil well-known     |
 | Peer accounts (2, 3)   | Pre-funded with 10k USDC each                | `DeployLocal.s.sol`  |
 
+### Solana Infrastructure for Integration Tests
+
+```bash
+make solana-up                   # Start Solana validator with deployed programs
+npm run test:integration:solana  # Run Solana integration tests
+make solana-down                 # Tear down
+```
+
+**Rust-level tests** use `solana-program-test` BanksClient (in-process, no Docker needed):
+
+```bash
+cd packages/solana-program
+cargo test-sbf                   # Runs Rust integration tests with BanksClient
+```
+
+**TypeScript-level tests** use `solana-bankrun` for fast in-process testing or the Docker-based validator for E2E:
+
+| Harness                 | Speed        | Docker Required | Use For                                        |
+| ----------------------- | ------------ | --------------- | ---------------------------------------------- |
+| `solana-bankrun`        | Milliseconds | No              | TS integration tests, account state testing    |
+| `solana-test-validator` | Seconds      | Yes             | E2E tests, RPC behavior, account subscriptions |
+
+### Mina Infrastructure for Integration Tests
+
+```bash
+make mina-up                     # Start Mina lightnet (wait ~2 min for SYNCED)
+npm run test:integration:mina    # Run Mina integration tests
+make mina-down                   # Tear down
+```
+
+**o1js local blockchain** (in-process, no Docker needed):
+
+```typescript
+// Fast unit tests — no proofs, no Docker
+const Local = await Mina.LocalBlockchain({ proofsEnabled: false });
+Mina.setActiveInstance(Local);
+
+// Slow integration tests — real proofs, no Docker
+await MyContract.compile(); // 30-60s one-time
+const Local = await Mina.LocalBlockchain({ proofsEnabled: true });
+// Each transaction.prove() takes 30-120s
+```
+
+| Harness                          | Speed          | Docker Required | Use For                                  |
+| -------------------------------- | -------------- | --------------- | ---------------------------------------- |
+| `LocalBlockchain(proofs: false)` | Milliseconds   | No              | Unit tests, logic verification           |
+| `LocalBlockchain(proofs: true)`  | 30-120s per tx | No              | Constraint validation, proof correctness |
+| Lightnet (`mina-local-network`)  | 3-min blocks   | Yes             | E2E tests, GraphQL, archive node queries |
+
 ### Unit Test Conventions
 
 Unit tests may mock dependencies to isolate the module under test. Common mocks:
@@ -798,19 +958,21 @@ All tests that involve claims (unit and integration) **must assume self-describi
 
 ## 13. Key Design Decisions
 
-| Decision                              | Rationale                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Multi-chain provider architecture** | XRP/Aptos removed in Epic 30. Replaced in Epic 32 with a pluggable `PaymentChannelProvider` interface. EVM (Base L2), Solana (Epic 33), and Mina Protocol (Epic 34) are supported. New chains require only implementing the provider interface and registering with `ChainProviderRegistry`. Per-peer chain selection allows heterogeneous settlement networks. |
-| **Per-packet self-describing claims** | Every forwarded packet carries a self-describing chain-specific signed claim. The `blockchain` discriminator field routes verification to the correct provider. EVM uses EIP-712, Solana uses Ed25519, Mina uses zk-SNARK commitments. All claims, tests, and integrations assume self-describing fields are always present.                                    |
-| **NIP-59 transport privacy**          | Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59. Hides sender identity, claim content, and timing from BTP intermediaries. Chain-agnostic — works with any provider. Does not affect ILP packet routing or fee deduction (those operate at a separate protocol layer).                                                  |
-| **ZK-private settlement (Mina)**      | Mina provider uses zk-SNARK proofs with Poseidon hash commitments so transferred amounts are never revealed on-chain. First payment channel implementation on Mina Protocol. Combined with NIP-59 transport wrapping, provides end-to-end privacy from BTP wire to on-chain settlement.                                                                         |
-| **Foundry (not Hardhat)**             | Faster compilation, built-in fuzzing, Solidity-native tests, better developer experience.                                                                                                                                                                                                                                                                       |
-| **TigerBeetle optional**              | In-memory ledger with JSON snapshot persistence provides a zero-dependency fallback. TigerBeetle is recommended for production.                                                                                                                                                                                                                                 |
-| **Library-first**                     | `ConnectorNode` is a class you instantiate in your code. CLI and Docker are wrappers around this library API.                                                                                                                                                                                                                                                   |
-| **better-sqlite3 for claims**         | Per-packet claim persistence needs synchronous, low-latency writes. SQLite is embedded and requires no external service.                                                                                                                                                                                                                                        |
-| **In-memory ledger snapshots**        | JSON file snapshots every 30s (configurable) provide persistence across restarts without TigerBeetle.                                                                                                                                                                                                                                                           |
-| **BTP over WebSocket**                | RFC-0023 compliant. WebSocket provides full-duplex, low-latency communication for bilateral transfers and claim exchange.                                                                                                                                                                                                                                       |
-| **Anvil for integration tests**       | Integration tests run against a real local Anvil blockchain — never mocks. Anvil is deterministic, fast, and free, so there is no reason to mock EVM interactions in integration tests. This catches real contract bugs, signature issues, and gas problems that mocks would hide. Docker Compose orchestrates Anvil + contract deployment.                     |
+| Decision                              | Rationale                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Multi-chain provider architecture** | XRP/Aptos removed in Epic 30. Replaced in Epic 32 with a pluggable `PaymentChannelProvider` interface. EVM (Base L2), Solana (Epic 33), and Mina Protocol (Epic 34) are supported. New chains require only implementing the provider interface and registering with `ChainProviderRegistry`. Per-peer chain selection allows heterogeneous settlement networks.                                                                                                                                                   |
+| **Per-packet self-describing claims** | Every forwarded packet carries a self-describing chain-specific signed claim. The `blockchain` discriminator field routes verification to the correct provider. EVM uses EIP-712, Solana uses Ed25519, Mina uses zk-SNARK commitments. All claims, tests, and integrations assume self-describing fields are always present.                                                                                                                                                                                      |
+| **NIP-59 transport privacy**          | Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59. Hides sender identity, claim content, and timing from BTP intermediaries. Chain-agnostic — works with any provider. Does not affect ILP packet routing or fee deduction (those operate at a separate protocol layer).                                                                                                                                                                                                    |
+| **ZK-private settlement (Mina)**      | Mina provider uses zk-SNARK proofs with Poseidon hash commitments so transferred amounts are never revealed on-chain. First payment channel implementation on Mina Protocol. Combined with NIP-59 transport wrapping, provides end-to-end privacy from BTP wire to on-chain settlement.                                                                                                                                                                                                                           |
+| **Foundry (not Hardhat)**             | Faster compilation, built-in fuzzing, Solidity-native tests, better developer experience.                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **TigerBeetle optional**              | In-memory ledger with JSON snapshot persistence provides a zero-dependency fallback. TigerBeetle is recommended for production.                                                                                                                                                                                                                                                                                                                                                                                   |
+| **Library-first**                     | `ConnectorNode` is a class you instantiate in your code. CLI and Docker are wrappers around this library API.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **better-sqlite3 for claims**         | Per-packet claim persistence needs synchronous, low-latency writes. SQLite is embedded and requires no external service.                                                                                                                                                                                                                                                                                                                                                                                          |
+| **In-memory ledger snapshots**        | JSON file snapshots every 30s (configurable) provide persistence across restarts without TigerBeetle.                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **BTP over WebSocket**                | RFC-0023 compliant. WebSocket provides full-duplex, low-latency communication for bilateral transfers and claim exchange.                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Local infra per chain, not mocks**  | Integration tests run against real local blockchain infrastructure — never mocks. Each chain has a Docker Compose service (Anvil for EVM, `solana-test-validator` for Solana, `mina-local-network` for Mina) plus fast in-process harnesses for unit/integration tests (`solana-bankrun`, `Mina.LocalBlockchain`). Docker Compose profiles enable selective startup (`make solana-up` / `make mina-up`). This catches real contract bugs, signature issues, and chain-specific constraints that mocks would hide. |
+| **@solana/kit over @solana/web3.js**  | `@solana/kit` v3 is the renamed `@solana/web3.js` v2 — a complete rewrite with a functional API (no classes). The old `@solana/web3.js@1.x` is in maintenance mode. Epic 33 must use `@solana/kit`. `solana-bankrun` still uses v1 types internally but this is an implementation detail of the test harness.                                                                                                                                                                                                     |
+| **Mina proof tests separated**        | Mina zk-SNARK proof generation takes 30-120 seconds per transaction. Proof-enabled tests (`proofsEnabled: true`) are separated into their own suite with 5-minute Jest timeouts and run only on merge/nightly — never on PR checks. Unit tests use `proofsEnabled: false` for millisecond-speed logic validation.                                                                                                                                                                                                 |
 
 ---
 
