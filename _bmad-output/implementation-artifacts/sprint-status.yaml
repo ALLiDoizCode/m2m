@@ -31,6 +31,10 @@ epics:
         name: "Integration Tests — EVM Provider via Chain Abstraction"
         status: done
 
+  epic-32-retrospective:
+    name: "Epic 32 Retrospective"
+    status: done
+
   epic-33:
     name: "Solana Payment Channel Provider"
     status: backlog
