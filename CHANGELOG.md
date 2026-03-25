@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0](https://github.com/toon-protocol/connector/compare/v2.0.0...v2.1.0) (2026-03-25)
+
+### Features
+
+- **32-1:** define PaymentChannelProvider interface and extend BlockchainType ([5dfc01d](https://github.com/toon-protocol/connector/commit/5dfc01dde39c107aacceb82364978a0d5bb5bb1e))
+- **32-2:** implement ChainProviderRegistry with register/retrieve, peer lookup, and config-driven factory initialization ([ef6c29c](https://github.com/toon-protocol/connector/commit/ef6c29cfbc86e41dd4f4ef292174d9a2ab2c8107))
+- **32-3:** implement EVMPaymentChannelProvider with SDK delegation ([d027c19](https://github.com/toon-protocol/connector/commit/d027c194e5e88d7317407aae6b08692f51d925cb))
+- **32-4:** refactor PerPacketClaimService for multi-chain claim generation ([6cd4621](https://github.com/toon-protocol/connector/commit/6cd46216ffe2c15371e2cb74e88d9c597c8c9c45))
+- **32-5:** refactor SettlementExecutor for multi-chain claim generation ([bc75498](https://github.com/toon-protocol/connector/commit/bc754986d1eaa8883972fd1d21c9c626dfb4aef4))
+- **32-6:** refactor ClaimReceiver for multi-chain verification via ChainProviderRegistry ([82dafc1](https://github.com/toon-protocol/connector/commit/82dafc156f53e8ae50ea4a631621a9bf5e65029f))
+- **32-7:** update configuration schema for multi-chain provider support ([6bac94c](https://github.com/toon-protocol/connector/commit/6bac94ceaf0bcdfc0f1ed046143c8c64ec615e8e))
+
 ## [2.0.0](https://github.com/toon-protocol/connector/compare/v1.23.1...v2.0.0) (2026-03-24)
 
 ### ⚠ BREAKING CHANGES
