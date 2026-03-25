@@ -92,6 +92,7 @@ connector/                          # Monorepo root
 Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain payment channel support. Key components in `packages/connector/src/settlement/provider/`:
 
 ### PaymentChannelProvider Interface (`payment-channel-provider.ts`)
+
 - Chain-agnostic interface that all blockchain-specific providers must implement
 - Defines `chainType` (`'evm'`, `'solana'`, `'mina'`) and `chainId` (e.g., `'evm:8453'`)
 - Unified API for: `openChannel`, `deposit`, `claimFromChannel`, `closeChannel`, `settleChannel`, `signBalanceProof`, `verifyBalanceProof`, `getChannelState`, `subscribeToEvents`
@@ -99,6 +100,7 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - Chain-agnostic types: `ProviderChannelState`, `ProviderEvent`, `ProviderEventSubscription`, `BalanceProofParams`, `VerifyBalanceProofParams`
 
 ### ChainProviderRegistry (`chain-provider-registry.ts`)
+
 - Manages `PaymentChannelProvider` instances keyed by `chainId`
 - Dynamic registration/deregistration of providers
 - Peer-based lookup via `getProviderForPeer(peerConfig)` using the peer's `chain` field
@@ -106,6 +108,7 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - Custom error: `ChainProviderAlreadyRegisteredError`
 
 ### EVMPaymentChannelProvider (`evm-payment-channel-provider.ts`)
+
 - Concrete EVM implementation wrapping the existing `PaymentChannelSDK`
 - Adapts provider-level params (string amounts) to SDK-level params (bigint amounts)
 - EVM-specific `getSigningContext()` method (not on interface — use `instanceof` to access)
@@ -113,11 +116,13 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - Handles EIP-712 signing context, event forwarding with channel filtering
 
 ### Refactored Settlement Services (Stories 32.4–32.6)
+
 - **PerPacketClaimService** — delegates signing to chain-appropriate provider via `ChainProviderRegistry`
 - **SettlementExecutor** — resolves chain-specific provider for each peer via registry
 - **ClaimReceiver** — dispatches claim verification to correct provider based on blockchain discriminator field
 
 ### Configuration (Story 32.7)
+
 - New `chainProviders` array in `ConnectorConfig` for multi-chain provider configuration
 - `ChainProviderConfigEntry` = `ProviderConfig & { chainId: string }`
 - Per-peer `chain` field on `PeerConfig` references a registered provider's `chainId`
@@ -125,6 +130,7 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - Zod-based validation: rejects unknown chainType, duplicate chainId, peer referencing unregistered chain
 
 ### Integration Tests (Story 32.8)
+
 - `provider/integration.test.ts` (1120 lines) — full chain abstraction layer integration tests
 - `config/chain-provider-config.test.ts` — configuration schema validation tests
 - Tests cover: multi-chain registration, peer lookup, factory initialization, EVM provider adapter, event forwarding

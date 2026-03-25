@@ -92,15 +92,15 @@ Of the 36 total issues, the distribution across passes was roughly: Pass 1 found
 
 ## Action Items for Epic 33
 
-| # | Action Item | Priority | Owner | Notes |
-|---|-------------|----------|-------|-------|
-| 1 | Widen `validateClaimMessage` return type from `asserts msg is EVMClaimMessage` to `asserts msg is BTPClaimMessage` | High | Dev | Required before Solana claims can be validated. Documented via JSDoc NOTE in `btp-claim-types.ts`. Story 33.x should include this as a prerequisite task. |
-| 2 | Replace placeholder `txHash` values in EVMPaymentChannelProvider | Medium | Dev | Currently returns `'evm-tx-pending'` for void SDK methods. Investigate whether PaymentChannelSDK can be extended to expose real tx hashes, or document the limitation formally. |
-| 3 | Resolve dual config path: legacy `settlementInfra` vs new `chainProviders` | Medium | Dev | Both paths exist in `connector-node.ts`. Epic 33 should either deprecate `settlementInfra` with a migration path or document the coexistence strategy. |
-| 4 | Address `peerIdToChainMap` single-chain MVP limitation | High | Dev | Currently maps all peers to the same chain ID. Must support per-peer chain resolution for mixed EVM+Solana deployments. Story 33.x should refactor this. |
-| 5 | Address pre-existing npm audit vulnerabilities | Low | Dev | 1 critical (`fast-xml-parser` via `@aws-sdk/xml-builder`), 17 high in transitive dependencies. Not introduced by Epic 32 but flagged in every NFR assessment. |
-| 6 | Improve story create step to reduce validation churn | Medium | Process | Every story required 4-12 validation fixes. Consider adding a checklist or template enforcement to the story create step. |
-| 7 | Add `.prettierignore` for BMAD output markdown files | Low | Dev | Repeated Prettier formatting fixes on `_bmad-output/` markdown files added noise. These files are machine-generated and could be excluded. |
+| #   | Action Item                                                                                                        | Priority | Owner   | Notes                                                                                                                                                                           |
+| --- | ------------------------------------------------------------------------------------------------------------------ | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Widen `validateClaimMessage` return type from `asserts msg is EVMClaimMessage` to `asserts msg is BTPClaimMessage` | High     | Dev     | Required before Solana claims can be validated. Documented via JSDoc NOTE in `btp-claim-types.ts`. Story 33.x should include this as a prerequisite task.                       |
+| 2   | Replace placeholder `txHash` values in EVMPaymentChannelProvider                                                   | Medium   | Dev     | Currently returns `'evm-tx-pending'` for void SDK methods. Investigate whether PaymentChannelSDK can be extended to expose real tx hashes, or document the limitation formally. |
+| 3   | Resolve dual config path: legacy `settlementInfra` vs new `chainProviders`                                         | Medium   | Dev     | Both paths exist in `connector-node.ts`. Epic 33 should either deprecate `settlementInfra` with a migration path or document the coexistence strategy.                          |
+| 4   | Address `peerIdToChainMap` single-chain MVP limitation                                                             | High     | Dev     | Currently maps all peers to the same chain ID. Must support per-peer chain resolution for mixed EVM+Solana deployments. Story 33.x should refactor this.                        |
+| 5   | Address pre-existing npm audit vulnerabilities                                                                     | Low      | Dev     | 1 critical (`fast-xml-parser` via `@aws-sdk/xml-builder`), 17 high in transitive dependencies. Not introduced by Epic 32 but flagged in every NFR assessment.                   |
+| 6   | Improve story create step to reduce validation churn                                                               | Medium   | Process | Every story required 4-12 validation fixes. Consider adding a checklist or template enforcement to the story create step.                                                       |
+| 7   | Add `.prettierignore` for BMAD output markdown files                                                               | Low      | Dev     | Repeated Prettier formatting fixes on `_bmad-output/` markdown files added noise. These files are machine-generated and could be excluded.                                      |
 
 ---
 
@@ -145,24 +145,24 @@ Of the 36 total issues, the distribution across passes was roughly: Pass 1 found
 
 ## Metrics Summary
 
-| Metric | Value |
-|--------|-------|
-| Stories completed | 8/8 |
-| Total acceptance criteria | 52 |
-| AC coverage | 100% |
-| Baseline test count | 1,965 |
-| Final test count | 2,262 |
-| Net new tests | +297 |
-| Test failures at completion | 0 |
-| Code review passes | 24 (3 per story) |
-| Issues found | 36 (0 critical, 0 high, 14 medium, 22 low) |
-| Issues remaining | 0 |
-| Security findings fixed | 4 |
-| NFR assessments | 8/8 passed |
-| Traceability gates | 8/8 passed |
-| Database migrations | 0 |
-| Pipeline failures | 0 |
+| Metric                      | Value                                      |
+| --------------------------- | ------------------------------------------ |
+| Stories completed           | 8/8                                        |
+| Total acceptance criteria   | 52                                         |
+| AC coverage                 | 100%                                       |
+| Baseline test count         | 1,965                                      |
+| Final test count            | 2,262                                      |
+| Net new tests               | +297                                       |
+| Test failures at completion | 0                                          |
+| Code review passes          | 24 (3 per story)                           |
+| Issues found                | 36 (0 critical, 0 high, 14 medium, 22 low) |
+| Issues remaining            | 0                                          |
+| Security findings fixed     | 4                                          |
+| NFR assessments             | 8/8 passed                                 |
+| Traceability gates          | 8/8 passed                                 |
+| Database migrations         | 0                                          |
+| Pipeline failures           | 0                                          |
 
 ---
 
-*Generated: 2026-03-25*
+_Generated: 2026-03-25_

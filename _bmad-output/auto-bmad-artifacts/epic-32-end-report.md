@@ -15,30 +15,30 @@ Epic 32 introduced a chain-agnostic abstraction layer for multi-chain settlement
 
 ## Stories Delivered
 
-| Story | Title | Status |
-|-------|-------|--------|
-| 32-1 | Define PaymentChannelProvider Interface | done |
-| 32-2 | Create Chain Provider Registry | done |
-| 32-3 | Migrate EVM Settlement to EVMPaymentChannelProvider | done |
-| 32-4 | Refactor PerPacketClaimService for Multi-Chain | done |
-| 32-5 | Refactor SettlementMonitor and SettlementExecutor for Multi-Chain | done |
-| 32-6 | Refactor ClaimReceiver for Multi-Chain Verification | done |
-| 32-7 | Update Configuration Schema | done |
-| 32-8 | Integration Tests -- EVM Provider via Chain Abstraction | done |
+| Story | Title                                                             | Status |
+| ----- | ----------------------------------------------------------------- | ------ |
+| 32-1  | Define PaymentChannelProvider Interface                           | done   |
+| 32-2  | Create Chain Provider Registry                                    | done   |
+| 32-3  | Migrate EVM Settlement to EVMPaymentChannelProvider               | done   |
+| 32-4  | Refactor PerPacketClaimService for Multi-Chain                    | done   |
+| 32-5  | Refactor SettlementMonitor and SettlementExecutor for Multi-Chain | done   |
+| 32-6  | Refactor ClaimReceiver for Multi-Chain Verification               | done   |
+| 32-7  | Update Configuration Schema                                       | done   |
+| 32-8  | Integration Tests -- EVM Provider via Chain Abstraction           | done   |
 
 ## Aggregate Code Review Findings
 
 Combined across all story code reviews:
 
-| Metric | Value |
-|--------|-------|
-| Total issues found | 36 |
-| Total issues fixed | 36 |
-| Critical | 0 |
-| High | 0 |
-| Medium | 14 |
-| Low | 22 |
-| Remaining unfixed | 0 |
+| Metric             | Value |
+| ------------------ | ----- |
+| Total issues found | 36    |
+| Total issues fixed | 36    |
+| Critical           | 0     |
+| High               | 0     |
+| Medium             | 14    |
+| Low                | 22    |
+| Remaining unfixed  | 0     |
 
 ## Test Coverage
 

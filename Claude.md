@@ -19,14 +19,14 @@ shadcn-ui v4 is the **only** UI component library for this project. Do not use M
 
 ### Available shadcn-ui MCP Tools
 
-| Tool | Purpose |
-|------|---------|
-| `list_components` | List all available v4 components |
-| `get_component_demo` | **Use first** -- demo code showing usage patterns |
-| `get_component` | Component source code |
-| `get_component_metadata` | Dependencies, props, requirements |
-| `list_blocks` | Pre-built UI blocks (dashboards, forms, etc.) |
-| `get_block` | Source code for a specific block |
+| Tool                     | Purpose                                           |
+| ------------------------ | ------------------------------------------------- |
+| `list_components`        | List all available v4 components                  |
+| `get_component_demo`     | **Use first** -- demo code showing usage patterns |
+| `get_component`          | Component source code                             |
+| `get_component_metadata` | Dependencies, props, requirements                 |
+| `list_blocks`            | Pre-built UI blocks (dashboards, forms, etc.)     |
+| `get_block`              | Source code for a specific block                  |
 
 ## Playwright MCP -- Browser Verification
 
@@ -50,8 +50,8 @@ When the user asks about Interledger protocols or RFCs:
 
 Examples:
 
-| User question | Skills to activate |
-|---------------|-------------------|
-| "How does STREAM work with ILPv4?" | `rfc-0029-stream`, `rfc-0027-interledger-protocol-4` |
-| "What's the payment pointer format?" | `rfc-0026-payment-pointers` |
-| "Explain the Interledger architecture" | `rfc-0001-interledger-architecture` |
+| User question                          | Skills to activate                                   |
+| -------------------------------------- | ---------------------------------------------------- |
+| "How does STREAM work with ILPv4?"     | `rfc-0029-stream`, `rfc-0027-interledger-protocol-4` |
+| "What's the payment pointer format?"   | `rfc-0026-payment-pointers`                          |
+| "Explain the Interledger architecture" | `rfc-0001-interledger-architecture`                  |
