@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0](https://github.com/toon-protocol/connector/compare/v2.1.0...v2.2.0) (2026-03-25)
+
+### Features
+
+- **32-8:** add integration tests for chain abstraction layer ([b0269e1](https://github.com/toon-protocol/connector/commit/b0269e13257536bdf11372ab8032e8ba6a5b82ca))
+
+### Bug Fixes
+
+- correct sprint-status.yaml structure — nest retro under epic-32, add stories for epics 33/34 ([a33bbce](https://github.com/toon-protocol/connector/commit/a33bbce1ecec70242ed3f26cd8112a84ed39d774))
+
 ## [2.1.0](https://github.com/toon-protocol/connector/compare/v2.0.0...v2.1.0) (2026-03-25)
 
 ### Features
