@@ -30,6 +30,7 @@ import {
   RouteInfo,
   RemovePeerResult,
   DeploymentMode,
+  validateChainProviders,
 } from '../config/types';
 import { PaymentHandler, createPaymentHandlerAdapter } from './payment-handler';
 import {
@@ -428,6 +429,10 @@ export class ConnectorNode implements HealthStatusProvider {
     );
 
     try {
+      // Validate chain provider configuration (checks chainType, duplicate chainIds,
+      // required fields, and peer chain references)
+      validateChainProviders(this._config, this._logger);
+
       // Initialize Base L2 Payment Channel infrastructure if enabled
       // Config-first pattern: settlementInfra config takes precedence, env var fallback
       const settlementEnabled =
@@ -748,13 +753,23 @@ export class ConnectorNode implements HealthStatusProvider {
           );
           chainRegistry.register(evmProvider);
 
-          // Build peerIdToChainMap — all peers map to the single EVM chain for MVP.
-          // NOTE: Dynamically discovered peers (via ClaimReceiver adding to peerIdToAddressMap)
-          // will NOT have a chain mapping here. Story 32.6/32.7 will address this gap by
-          // having ClaimReceiver update peerIdToChainMap alongside peerIdToAddressMap.
+          // Build peerIdToChainMap — config-driven when peers have `chain` fields,
+          // otherwise all peers default to the primary EVM chain.
           const peerIdToChainMap = new Map<string, string>();
+          for (const peer of this._config.peers) {
+            if (peer.chain) {
+              // Config-driven: peer explicitly references a chain provider
+              peerIdToChainMap.set(peer.id, peer.chain);
+            } else if (peerIdToAddressMap.has(peer.id)) {
+              // Legacy: peer defaults to primary EVM chain
+              peerIdToChainMap.set(peer.id, primaryChainIdStr);
+            }
+          }
+          // Also map env-var-discovered peers (legacy PEER{N} pattern) to primary chain
           for (const peerId of peerIdToAddressMap.keys()) {
-            peerIdToChainMap.set(peerId, primaryChainIdStr);
+            if (!peerIdToChainMap.has(peerId)) {
+              peerIdToChainMap.set(peerId, primaryChainIdStr);
+            }
           }
 
           this._settlementExecutor = new SettlementExecutor(

@@ -260,12 +260,13 @@ export interface PeerConfig {
 
   /**
    * Settlement preference for this peer
-   * - 'evm': Only settle via EVM payment channels (Epic 8)
-   * - 'any': Support all methods (currently EVM-only)
-   *
-   * Note: 'both' is deprecated in favor of 'any'
+   * - 'evm': Only settle via EVM payment channels
+   * - 'solana': Only settle via Solana payment channels
+   * - 'mina': Only settle via Mina payment channels
+   * - 'any': Support all registered chain providers
+   * - 'both': Deprecated alias for 'any'
    */
-  settlementPreference: 'evm' | 'any' | 'both';
+  settlementPreference: 'evm' | 'solana' | 'mina' | 'any' | 'both';
 
   /**
    * Supported settlement tokens

@@ -26,7 +26,7 @@ epics:
         status: done
       32.7:
         name: "Update Configuration Schema"
-        status: backlog
+        status: done
       32.8:
         name: "Integration Tests — EVM Provider via Chain Abstraction"
         status: backlog
