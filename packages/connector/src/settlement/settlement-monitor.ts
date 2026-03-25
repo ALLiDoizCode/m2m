@@ -66,6 +66,8 @@ export interface SettlementMonitorConfig {
 /**
  * Settlement Monitor
  *
+ * Chain-agnostic: operates on cumulative amounts only, no blockchain-specific logic.
+ *
  * Event-driven monitor that subscribes to ClaimReceiver events and emits
  * settlement trigger events when cumulative claim amounts exceed thresholds.
  * Implements state machine to prevent duplicate triggers and coordinates

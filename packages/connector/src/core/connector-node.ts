@@ -735,6 +735,28 @@ export class ConnectorNode implements HealthStatusProvider {
           );
           this._settlementMonitor = settlementMonitor;
 
+          // Create a shared ChainProviderRegistry wrapping the primary SDK
+          // in an EVMPaymentChannelProvider. Both SettlementExecutor and
+          // PerPacketClaimService share this registry instance.
+          const primaryChainIdStr = primaryChainId ? `evm:${primaryChainId}` : 'evm:unknown';
+          const chainRegistry = new ChainProviderRegistry();
+          const evmProvider = new EVMPaymentChannelProvider(
+            this._paymentChannelSDK,
+            primaryChainIdStr,
+            m2mTokenAddress,
+            this._logger
+          );
+          chainRegistry.register(evmProvider);
+
+          // Build peerIdToChainMap — all peers map to the single EVM chain for MVP.
+          // NOTE: Dynamically discovered peers (via ClaimReceiver adding to peerIdToAddressMap)
+          // will NOT have a chain mapping here. Story 32.6/32.7 will address this gap by
+          // having ClaimReceiver update peerIdToChainMap alongside peerIdToAddressMap.
+          const peerIdToChainMap = new Map<string, string>();
+          for (const peerId of peerIdToAddressMap.keys()) {
+            peerIdToChainMap.set(peerId, primaryChainIdStr);
+          }
+
           this._settlementExecutor = new SettlementExecutor(
             {
               nodeId: this._config.nodeId,
@@ -745,12 +767,10 @@ export class ConnectorNode implements HealthStatusProvider {
               retryDelayMs: 5000,
               tokenAddressMap,
               peerIdToAddressMap,
-              registryAddress,
-              rpcUrl: baseRpcUrl,
-              privateKey: treasuryPrivateKey,
+              peerIdToChainMap,
             },
             accountManager,
-            this._paymentChannelSDK,
+            chainRegistry,
             settlementMonitor,
             this._logger
           );
@@ -793,6 +813,9 @@ export class ConnectorNode implements HealthStatusProvider {
             this._logger
           );
 
+          // Wire ChannelManager to SettlementExecutor for chain-agnostic channel lookup
+          this._settlementExecutor.setChannelManager(this._channelManager);
+
           this._logger.info(
             {
               event: 'payment_channel_sdk_initialized',
@@ -818,21 +841,9 @@ export class ConnectorNode implements HealthStatusProvider {
                 claimDb.exec(indexSql);
               }
 
-              // Create a ChainProviderRegistry wrapping the primary SDK
-              // in an EVMPaymentChannelProvider for the per-packet claim service.
-              // Full config-driven registry wiring is deferred to Story 32.7/32.8.
-              const claimRegistry = new ChainProviderRegistry();
-              const primaryChainIdStr = primaryChainId ? `evm:${primaryChainId}` : 'evm:unknown';
-              const evmProvider = new EVMPaymentChannelProvider(
-                this._paymentChannelSDK,
-                primaryChainIdStr,
-                m2mTokenAddress,
-                this._logger
-              );
-              claimRegistry.register(evmProvider);
-
+              // Reuse the shared chainRegistry hoisted before SettlementExecutor construction
               const perPacketClaimService = new PerPacketClaimService(
-                claimRegistry,
+                chainRegistry,
                 this._channelManager,
                 claimDb,
                 this._logger,
