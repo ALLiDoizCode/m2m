@@ -7,6 +7,7 @@ dist/
 *.js.map
 *.d.ts.map
 packages/contracts-aptos/build/
+target/
 
 # Test coverage
 coverage/

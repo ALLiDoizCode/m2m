@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test
 
 # Default target - show help
 help:
@@ -20,6 +20,10 @@ help:
 	@echo "  make anvil-up             Start Anvil + Faucet (docker compose)"
 	@echo "  make anvil-down           Stop Anvil + Faucet"
 	@echo "  make anvil-logs           Follow docker compose logs"
+	@echo ""
+	@echo "Solana Program:"
+	@echo "  make solana-build         Build Solana payment channel program"
+	@echo "  make solana-test          Run Solana program tests"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean                Remove build artifacts"
@@ -53,3 +57,10 @@ anvil-down:
 
 anvil-logs:
 	docker compose logs -f
+
+# Solana Payment Channel Program
+solana-build:
+	cd packages/solana-program && cargo build-sbf
+
+solana-test:
+	cd packages/solana-program && cargo test-sbf

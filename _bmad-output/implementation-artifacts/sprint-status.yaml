@@ -39,7 +39,7 @@ epics:
     stories:
       33.1:
         name: "Solana Payment Channel Program — Channel Lifecycle"
-        status: backlog
+        status: done
       33.2:
         name: "Solana Payment Channel Program — Claim Verification"
         status: backlog
