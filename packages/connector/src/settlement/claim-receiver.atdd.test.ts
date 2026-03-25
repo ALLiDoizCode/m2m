@@ -1,8 +1,8 @@
 /**
  * ATDD Acceptance Tests for Story 32.6: Refactor ClaimReceiver for Multi-Chain Verification
  *
- * TDD RED PHASE: All tests are skipped (test.skip) because the feature
- * is not yet implemented. ClaimReceiver still uses PaymentChannelSDK directly.
+ * TDD GREEN PHASE: All tests are enabled. ClaimReceiver has been refactored
+ * to use ChainProviderRegistry instead of PaymentChannelSDK.
  *
  * These tests validate:
  * - AC1: EVM claims verified via EVM provider (registry lookup + provider.verifyBalanceProof)
@@ -202,7 +202,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
   // ---------------------------------------------------------------------------
 
   describe('AC5: Constructor accepts ChainProviderRegistry', () => {
-    it.skip('[P1] should accept ChainProviderRegistry instead of PaymentChannelSDK', () => {
+    it('[P1] should accept ChainProviderRegistry instead of PaymentChannelSDK', () => {
       // Given: A ChainProviderRegistry mock (not PaymentChannelSDK)
       // When: ClaimReceiver is instantiated with registry
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
@@ -211,7 +211,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       expect(receiver).toBeInstanceOf(ClaimReceiver);
     });
 
-    it.skip('[P1] should accept registry with channelManager and peerIdToAddressMap', () => {
+    it('[P1] should accept registry with channelManager and peerIdToAddressMap', () => {
       // Given: A registry and optional dependencies
       const mockChannelManager = {
         getChannelById: jest.fn(),
@@ -238,7 +238,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
   // ---------------------------------------------------------------------------
 
   describe('AC1: EVM claims verified via provider', () => {
-    it.skip('[P0] should verify valid EVM claim via provider.verifyBalanceProof and store verified=true', async () => {
+    it('[P0] should verify valid EVM claim via provider.verifyBalanceProof and store verified=true', async () => {
       // Given: A ClaimReceiver with registry containing EVM provider
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -277,7 +277,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P0] should emit CLAIM_RECEIVED event after successful provider verification', async () => {
+    it('[P0] should emit CLAIM_RECEIVED event after successful provider verification', async () => {
       // Given: A ClaimReceiver with registry
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -302,7 +302,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       expect(emittedEvent.cumulativeAmount).toBe(BigInt(claim.transferredAmount));
     });
 
-    it.skip('[P0] should persist claim with verified=false when provider rejects signature', async () => {
+    it('[P0] should persist claim with verified=false when provider rejects signature', async () => {
       // Given: Provider rejects the balance proof
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -329,7 +329,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P0] should NOT emit CLAIM_RECEIVED event when provider rejects signature', async () => {
+    it('[P0] should NOT emit CLAIM_RECEIVED event when provider rejects signature', async () => {
       // Given: Provider rejects the balance proof
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -349,7 +349,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       expect(claimReceivedListener).not.toHaveBeenCalled();
     });
 
-    it.skip('[P0] should use VerifyBalanceProofParams with string amounts (not bigint)', async () => {
+    it('[P0] should use VerifyBalanceProofParams with string amounts (not bigint)', async () => {
       // Given: A ClaimReceiver with registry
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -381,7 +381,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
   // ---------------------------------------------------------------------------
 
   describe('AC2: Unknown blockchain type rejected', () => {
-    it.skip('[P0] should reject claim with unregistered blockchain type', async () => {
+    it('[P0] should reject claim with unregistered blockchain type', async () => {
       // Given: Registry has no Solana provider
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -412,7 +412,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P0] should include blockchain name in rejection error message', async () => {
+    it('[P0] should include blockchain name in rejection error message', async () => {
       // Given: A claim that expects ERRORS.NO_PROVIDER_REGISTERED constant to exist
       // Then: The ERRORS object contains the NO_PROVIDER_REGISTERED key
       // Note: This property will be added as part of the Story 32.6 implementation
@@ -427,7 +427,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
   // ---------------------------------------------------------------------------
 
   describe('AC4: Nonce monotonicity remains chain-agnostic', () => {
-    it.skip('[P0] should reject EVM claim with non-increasing nonce', async () => {
+    it('[P0] should reject EVM claim with non-increasing nonce', async () => {
       // Given: A previous claim exists with nonce=5
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -500,7 +500,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       receiver.registerWithBTPServer(dynamicBTPServer);
     });
 
-    it.skip('[P1] should delegate on-chain state check to provider.getChannelState', async () => {
+    it('[P1] should delegate on-chain state check to provider.getChannelState', async () => {
       // Given: An unknown channel with self-describing fields
       const claim = createSelfDescribingClaim();
       mockStatement.get.mockReturnValue(undefined);
@@ -513,7 +513,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       expect(mockProvider.getChannelState).toHaveBeenCalledWith(claim.channelId);
     });
 
-    it.skip('[P1] should reject when provider.getChannelState throws (channel non-existent)', async () => {
+    it('[P1] should reject when provider.getChannelState throws (channel non-existent)', async () => {
       // Given: Provider throws when channel doesn't exist on-chain
       mockProvider.getChannelState.mockRejectedValueOnce(new Error('Channel not found'));
 
@@ -537,7 +537,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P1] should reject when channel status is not opened', async () => {
+    it('[P1] should reject when channel status is not opened', async () => {
       // Given: Provider returns channel with 'closed' status
       mockProvider.getChannelState.mockResolvedValueOnce({
         channelId: TEST_CHANNEL_ID,
@@ -559,7 +559,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P1] should reject when signer is not in participants array', async () => {
+    it('[P1] should reject when signer is not in participants array', async () => {
       // Given: Provider returns channel with different participants
       mockProvider.getChannelState.mockResolvedValueOnce({
         channelId: TEST_CHANNEL_ID,
@@ -581,7 +581,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P1] should use provider.verifyBalanceProof for dynamic verification (not verifyBalanceProofWithDomain)', async () => {
+    it('[P1] should use provider.verifyBalanceProof for dynamic verification (not verifyBalanceProofWithDomain)', async () => {
       // Given: A valid unknown channel with self-describing fields
       const claim = createSelfDescribingClaim();
       mockStatement.get.mockReturnValue(undefined);
@@ -604,7 +604,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P1] should register external channel on successful dynamic verification', async () => {
+    it('[P1] should register external channel on successful dynamic verification', async () => {
       // Given: A valid unknown channel
       const claim = createSelfDescribingClaim();
       mockStatement.get.mockReturnValue(undefined);
@@ -622,7 +622,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P1] should resolve provider using claim chainId for dynamic verification', async () => {
+    it('[P1] should resolve provider using claim chainId for dynamic verification', async () => {
       // Given: A claim with chainId=31337
       const claim = createSelfDescribingClaim({ chainId: 31337 });
       mockStatement.get.mockReturnValue(undefined);
@@ -641,7 +641,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
   // ---------------------------------------------------------------------------
 
   describe('AC4: Backward compatibility', () => {
-    it.skip('[P0] should handle known channel with pre-registered metadata (no dynamic verification)', async () => {
+    it('[P0] should handle known channel with pre-registered metadata (no dynamic verification)', async () => {
       // Given: Channel is already known in channelManager
       const mockChannelManager = {
         getChannelById: jest.fn().mockReturnValue({
@@ -698,7 +698,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P0] should handle duplicate message IDs gracefully (idempotency)', async () => {
+    it('[P0] should handle duplicate message IDs gracefully (idempotency)', async () => {
       // Given: ClaimReceiver with registry
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -723,7 +723,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       );
     });
 
-    it.skip('[P0] should handle invalid JSON parsing gracefully', async () => {
+    it('[P0] should handle invalid JSON parsing gracefully', async () => {
       // Given: ClaimReceiver with registry
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
       receiver.registerWithBTPServer(mockBTPServer);
@@ -764,7 +764,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
   // ---------------------------------------------------------------------------
 
   describe('peerIdToAddressMap with registry', () => {
-    it.skip('[P1] should register peer address from self-describing claim', async () => {
+    it('[P1] should register peer address from self-describing claim', async () => {
       // Given: peerIdToAddressMap is provided
       const peerIdToAddressMap = new Map<string, string>();
       const mockChannelManager = {
@@ -807,7 +807,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       expect(peerIdToAddressMap.get('peer-new')).toBe(TEST_SIGNER_ADDRESS);
     });
 
-    it.skip('[P1] should NOT overwrite existing peer address in peerIdToAddressMap', async () => {
+    it('[P1] should NOT overwrite existing peer address in peerIdToAddressMap', async () => {
       // Given: peerIdToAddressMap already has an entry for this peer
       const existingAddress = '0x' + '9'.repeat(40);
       const peerIdToAddressMap = new Map<string, string>([['peer-new', existingAddress]]);
@@ -857,7 +857,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
   // ---------------------------------------------------------------------------
 
   describe('getLatestVerifiedClaim with registry-based receiver', () => {
-    it.skip('[P0] should return latest verified claim', async () => {
+    it('[P0] should return latest verified claim', async () => {
       // Given: A ClaimReceiver with registry
       const receiver = createReceiverWithRegistry(mockDb, mockRegistry, mockLogger);
 

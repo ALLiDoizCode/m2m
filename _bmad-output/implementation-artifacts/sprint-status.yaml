@@ -4,7 +4,7 @@
 epics:
   epic-32:
     name: "Chain Abstraction Layer & EVM Provider Migration"
-    status: in-progress
+    status: done
     stories:
       32.1:
         name: "Define PaymentChannelProvider Interface"
@@ -29,7 +29,7 @@ epics:
         status: done
       32.8:
         name: "Integration Tests — EVM Provider via Chain Abstraction"
-        status: backlog
+        status: done
 
   epic-33:
     name: "Solana Payment Channel Provider"
