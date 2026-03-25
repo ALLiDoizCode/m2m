@@ -34,7 +34,7 @@ import type {
   PaymentChannelProvider,
   BalanceProofParams,
 } from '../../src/settlement/provider/payment-channel-provider';
-import type { ChannelManager, ChannelMetadata } from '../../src/settlement/channel-manager';
+import type { ChannelMetadata } from '../../src/settlement/channel-manager';
 import type { Logger } from 'pino';
 
 // Mock only the dependencies that need constructor mocking, not the SUT
@@ -117,7 +117,8 @@ const createMockRegistry = (
  */
 const createMockChannelManager = (
   channelMap?: Record<string, { channelId: string; tokenId: string }>
-): jest.Mocked<Pick<ChannelManager, 'getChannelForPeer'>> => ({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): any => ({
   getChannelForPeer: jest.fn().mockImplementation((peerId: string, tokenId: string) => {
     const key = `${peerId}:${tokenId}`;
     const channel = channelMap?.[key];

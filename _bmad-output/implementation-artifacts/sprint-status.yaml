@@ -23,7 +23,7 @@ epics:
         status: done
       32.6:
         name: "Refactor ClaimReceiver for Multi-Chain Verification"
-        status: backlog
+        status: done
       32.7:
         name: "Update Configuration Schema"
         status: backlog

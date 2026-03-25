@@ -899,7 +899,7 @@ export class ConnectorNode implements HealthStatusProvider {
 
               const claimReceiver = new ClaimReceiver(
                 receivedClaimDb,
-                this._paymentChannelSDK,
+                chainRegistry,
                 this._logger,
                 this._channelManager ?? undefined,
                 peerIdToAddressMap
