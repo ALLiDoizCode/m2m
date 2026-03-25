@@ -245,17 +245,32 @@ export interface EVMProviderConfig {
 }
 
 /**
- * Solana provider configuration stub.
+ * Solana provider configuration.
  *
- * Placeholder for future Solana integration — no runtime Solana SDK dependencies.
+ * Configures a Solana payment channel provider for the chain abstraction layer.
+ * Uses `@solana/kit` for RPC communication and Ed25519 signing.
+ *
+ * **Interface compatibility notes for PaymentChannelProvider:**
+ * - `channelId` maps to PDA (program-derived address) of the channel state account
+ * - `signBalanceProof` uses Ed25519 signatures (not EIP-712)
+ * - `subscribeToEvents` maps to `onAccountChange` WebSocket subscriptions
+ * - `getChannelState` deserializes Anchor/Borsh-encoded PDA account data
+ * - `verifyBalanceProof` uses `@solana/kit` Ed25519 signature verification
+ * - Amounts are in lamports (u64), serialized as string for bigint precision
  */
 export interface SolanaProviderConfig {
   /** Discriminator */
   chainType: 'solana';
-  /** Solana cluster RPC endpoint */
+  /** Solana cluster RPC endpoint (HTTP) */
   rpcUrl: string;
-  /** Payment channel program ID */
+  /** Solana WebSocket endpoint for account subscriptions (derived from rpcUrl if absent) */
+  wsUrl?: string;
+  /** Payment channel program ID (base58-encoded) */
   programId: string;
+  /** Key identifier for Ed25519 signing operations */
+  keyId: string;
+  /** Solana cluster name for chain ID namespacing (e.g., 'mainnet-beta', 'devnet') */
+  cluster?: string;
 }
 
 /**

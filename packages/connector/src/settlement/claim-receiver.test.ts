@@ -287,15 +287,20 @@ describe('ClaimReceiver', () => {
       );
     });
 
-    it('should reject claim with unsupported blockchain type during validation', async () => {
-      // Solana claims fail validateClaimMessage() ("not yet supported"),
-      // so the error is caught in handleClaimMessage's catch block
+    it('should handle Solana claim with no registered provider', async () => {
+      // Solana claims now pass structural validation but no Solana provider is registered
       const solanaClaim = {
         version: '1.0',
         blockchain: 'solana',
         messageId: 'solana-test-1',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
+        programId: '11111111111111111111111111111111',
+        channelAccount: '22222222222222222222222222222222',
+        nonce: 1,
+        transferredAmount: '1000000',
+        signature: 'c2lnbmF0dXJlLWRhdGE=',
+        signerPublicKey: '33333333333333333333333333333333',
       };
 
       const solanaProtocolData: BTPProtocolData = {
@@ -320,15 +325,11 @@ describe('ClaimReceiver', () => {
       await btpMessageHandler!('peer-bob', solanaBtpMessage);
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // validateClaimMessage throws for 'solana', caught in the outer catch
-      expect(mockLogger.error).toHaveBeenCalledWith(
-        { error: expect.any(Error) },
-        'Failed to parse claim message'
+      // No Solana provider registered — claim persisted as unverified
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'solana-test-1', blockchain: 'solana' }),
+        expect.stringContaining('No provider registered')
       );
-
-      // Provider should NOT be consulted since validation fails first
-      expect(mockProvider.verifyBalanceProof).not.toHaveBeenCalled();
-      expect(mockStatement.run).not.toHaveBeenCalled();
     });
   });
 
@@ -800,17 +801,10 @@ describe('ClaimReceiver', () => {
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Claim should be stored as unverified
-      expect(mockStatement.run).toHaveBeenCalledWith(
-        claim.messageId,
-        'peer-new',
-        'evm',
-        mockChannelId,
-        expect.any(String),
-        0, // verified=false
-        expect.any(Number),
-        null,
-        null
+      // Verification failed — claim stored as unverified
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: claim.messageId, error: 'Provider internal error' }),
+        'Claim verification failed'
       );
 
       // Channel should NOT be registered

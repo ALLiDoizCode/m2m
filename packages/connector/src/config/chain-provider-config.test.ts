@@ -96,6 +96,7 @@ describe('chainProviders configuration (T-32.7-01)', () => {
           chainId: 'solana:mainnet',
           rpcUrl: 'https://api.mainnet-beta.solana.com',
           programId: 'PaymentChannel111111111111111111111111111',
+          keyId: 'solana-treasury-key',
         },
         {
           chainType: 'mina',
@@ -597,6 +598,7 @@ describe('ChainProviderConfigEntry type compilation (T-32.7-10)', () => {
       chainId: 'solana:mainnet',
       rpcUrl: 'https://api.mainnet-beta.solana.com',
       programId: 'PaymentChannel111111111111111111111111111',
+      keyId: 'solana-treasury-key',
     };
 
     // Then it should satisfy ChainProviderConfigEntry constraints
@@ -664,6 +666,7 @@ describe('AC 1: validateChainProviders passes for valid multi-provider configs',
           chainId: 'solana:mainnet',
           rpcUrl: 'https://api.mainnet-beta.solana.com',
           programId: 'PaymentChannel111111111111111111111111111',
+          keyId: 'solana-treasury-key',
         },
         {
           chainType: 'mina',
@@ -686,6 +689,7 @@ describe('AC 1: validateChainProviders passes for valid multi-provider configs',
           chainId: 'solana:mainnet',
           rpcUrl: 'https://api.mainnet-beta.solana.com',
           programId: 'PaymentChannel111111111111111111111111111',
+          keyId: 'solana-treasury-key',
         },
       ],
     };
@@ -899,6 +903,7 @@ describe('AC 5/6: additional validation edge cases', () => {
           chainId: 'chain:1', // DUPLICATE despite different chainType
           rpcUrl: 'https://api.solana.com',
           programId: 'Program111111111111111111111111111111111',
+          keyId: 'sol-key',
         },
       ],
     } as unknown as ConnectorConfig;
@@ -1023,6 +1028,7 @@ describe('ChainProviderConfigEntry type assignability', () => {
       chainId: 'solana:mainnet',
       rpcUrl: 'https://api.mainnet-beta.solana.com',
       programId: 'PaymentChannel111111111111111111111111111',
+      keyId: 'solana-treasury-key',
     };
     expect(entry.chainId).toBe('solana:mainnet');
     expect(entry.chainType).toBe('solana');

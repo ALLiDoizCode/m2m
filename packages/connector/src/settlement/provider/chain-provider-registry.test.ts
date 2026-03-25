@@ -246,6 +246,7 @@ describe('fromConfig factory (T-32.2-06)', () => {
         chainType: 'solana',
         rpcUrl: 'https://api.mainnet-beta.solana.com',
         programId: 'prog1',
+        keyId: 'sol-key',
       },
     ];
 
@@ -380,6 +381,7 @@ describe('fromConfig with missing factory (T-32.2-11)', () => {
         chainType: 'solana',
         rpcUrl: 'https://api.mainnet-beta.solana.com',
         programId: 'prog1',
+        keyId: 'sol-key',
       },
     ];
 

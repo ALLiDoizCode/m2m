@@ -91,19 +91,36 @@ export interface EVMClaimMessage extends BaseClaimMessage {
 }
 
 /**
- * Solana-compatible blockchain claim message stub.
+ * Solana-compatible blockchain claim message.
  *
- * Placeholder for future Solana payment channel integration.
- * No runtime Solana SDK dependencies — types only.
+ * Supports Solana payment channel claims using Ed25519 signatures
+ * and PDA-based channel accounts. No runtime Solana SDK dependencies — types only.
+ *
+ * Fields:
+ * - `programId`: Base58-encoded Solana program address for the payment channel program
+ * - `channelAccount`: Base58-encoded PDA (program-derived address) for the channel state account
+ * - `nonce`: Monotonically increasing balance proof nonce (prevents replay attacks)
+ * - `transferredAmount`: Cumulative transferred amount in lamports (string for bigint precision)
+ * - `signature`: Base64-encoded Ed25519 signature over the claim data
+ * - `signerPublicKey`: Base58-encoded Ed25519 public key of the signer
+ * - `cluster`: (Optional) Solana cluster identifier (e.g., 'mainnet-beta', 'devnet')
  */
 export interface SolanaClaimMessage extends BaseClaimMessage {
   blockchain: 'solana';
-  /** Solana program ID for the payment channel program */
+  /** Solana program ID for the payment channel program (base58) */
   programId: string;
-  /** On-chain account address for the payment channel */
+  /** On-chain PDA account address for the payment channel (base58) */
   channelAccount: string;
-  /** Ed25519 signature over the claim data */
+  /** Monotonically increasing balance proof nonce */
+  nonce: number;
+  /** Cumulative transferred amount in lamports (string for bigint precision) */
+  transferredAmount: string;
+  /** Ed25519 signature over the claim data (base64) */
   signature: string;
+  /** Base58-encoded Ed25519 public key of the signer */
+  signerPublicKey: string;
+  /** Optional Solana cluster identifier */
+  cluster?: string;
 }
 
 /**
@@ -183,6 +200,61 @@ export function isSolanaClaim(msg: BTPClaimMessage): msg is SolanaClaimMessage {
  */
 export function isMinaClaim(msg: BTPClaimMessage): msg is MinaClaimMessage {
   return msg.blockchain === 'mina';
+}
+
+/**
+ * Validate Solana claim structure
+ * @throws Error if claim is invalid
+ */
+function validateSolanaClaim(claim: Partial<SolanaClaimMessage>): void {
+  // Required fields
+  if (!claim.programId || typeof claim.programId !== 'string') {
+    throw new Error('Missing or invalid programId (expected non-empty string)');
+  }
+  if (!claim.channelAccount || typeof claim.channelAccount !== 'string') {
+    throw new Error('Missing or invalid channelAccount (expected non-empty string)');
+  }
+  if (claim.nonce === undefined || typeof claim.nonce !== 'number' || claim.nonce < 0) {
+    throw new Error('Missing or invalid nonce (expected non-negative number)');
+  }
+  if (!claim.transferredAmount || typeof claim.transferredAmount !== 'string') {
+    throw new Error('Missing or invalid transferredAmount (expected non-empty string)');
+  }
+  if (!claim.signature || typeof claim.signature !== 'string') {
+    throw new Error('Missing or invalid signature (expected non-empty string)');
+  }
+  if (!claim.signerPublicKey || typeof claim.signerPublicKey !== 'string') {
+    throw new Error('Missing or invalid signerPublicKey (expected non-empty string)');
+  }
+
+  // Base58 format validation for Solana addresses (32-44 chars, no 0/O/I/l)
+  const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+  if (!base58Regex.test(claim.programId)) {
+    throw new Error('Invalid programId format (expected base58-encoded Solana address)');
+  }
+  if (!base58Regex.test(claim.channelAccount)) {
+    throw new Error('Invalid channelAccount format (expected base58-encoded Solana address)');
+  }
+  if (!base58Regex.test(claim.signerPublicKey)) {
+    throw new Error('Invalid signerPublicKey format (expected base58-encoded Solana public key)');
+  }
+
+  // Amount validation (non-negative integers as strings)
+  if (!/^\d+$/.test(claim.transferredAmount)) {
+    throw new Error('Invalid transferredAmount (expected non-negative integer string)');
+  }
+
+  // Optional cluster validation
+  if (claim.cluster !== undefined) {
+    if (typeof claim.cluster !== 'string') {
+      throw new Error('Invalid cluster (expected string)');
+    }
+    const validClusters = ['mainnet-beta', 'devnet', 'testnet', 'localnet'];
+    if (!validClusters.includes(claim.cluster)) {
+      throw new Error(`Invalid cluster (expected one of: ${validClusters.join(', ')})`);
+    }
+  }
 }
 
 /**
@@ -274,10 +346,9 @@ function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
  * - Validates blockchain-specific fields based on the `blockchain` discriminator
  * - Throws descriptive errors if validation fails
  *
- * NOTE: The assertion type is `EVMClaimMessage` because only EVM claims currently pass
- * validation (Solana/Mina throw "not yet supported"). When chain-specific validators are
- * added for Solana/Mina, the return type should be widened to `asserts msg is BTPClaimMessage`
- * and callers should use type guards (`isEVMClaim`, `isSolanaClaim`, `isMinaClaim`) to narrow.
+ * Validates base fields and dispatches to chain-specific validators based on the
+ * `blockchain` discriminator. After validation, callers should use type guards
+ * (`isEVMClaim`, `isSolanaClaim`, `isMinaClaim`) to narrow to chain-specific types.
  *
  * @param msg - Unknown value to validate as BTPClaimMessage
  * @throws Error if validation fails
@@ -287,12 +358,14 @@ function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
  * try {
  *   validateClaimMessage(receivedData);
  *   // receivedData is now guaranteed to be BTPClaimMessage
+ *   if (isEVMClaim(receivedData)) { ... }
+ *   if (isSolanaClaim(receivedData)) { ... }
  * } catch (error) {
  *   logger.error({ error }, 'Invalid claim message received');
  * }
  * ```
  */
-export function validateClaimMessage(msg: unknown): asserts msg is EVMClaimMessage {
+export function validateClaimMessage(msg: unknown): asserts msg is BTPClaimMessage {
   // Type check
   if (typeof msg !== 'object' || msg === null) {
     throw new Error('Claim message must be an object');
@@ -332,7 +405,8 @@ export function validateClaimMessage(msg: unknown): asserts msg is EVMClaimMessa
       validateEVMClaim(claim as Partial<EVMClaimMessage>);
       break;
     case 'solana':
-      throw new Error("Blockchain type 'solana' validation not yet supported");
+      validateSolanaClaim(claim as Partial<SolanaClaimMessage>);
+      break;
     case 'mina':
       throw new Error("Blockchain type 'mina' validation not yet supported");
     default:

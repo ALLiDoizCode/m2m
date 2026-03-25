@@ -138,7 +138,10 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
 
     await this._sdk.deposit(channelId, this._tokenAddress, safeBigInt(amount, 'deposit amount'));
 
-    return { txHash: 'evm-tx-pending' };
+    // PaymentChannelSDK methods return void — transaction hash is not yet
+    // propagated from the underlying ethers.js ContractTransactionResponse.
+    // Tracked as tech debt: SDK should return tx receipt with hash.
+    return { txHash: '' };
   }
 
   /**
@@ -166,7 +169,10 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
     const sdkProof = this.toSdkBalanceProof(balanceProof);
     await this._sdk.claimFromChannel(channelId, this._tokenAddress, sdkProof, signature);
 
-    return { txHash: 'evm-tx-pending' };
+    // PaymentChannelSDK methods return void — transaction hash is not yet
+    // propagated from the underlying ethers.js ContractTransactionResponse.
+    // Tracked as tech debt: SDK should return tx receipt with hash.
+    return { txHash: '' };
   }
 
   /**
@@ -183,7 +189,10 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
 
     await this._sdk.closeChannel(channelId, this._tokenAddress);
 
-    return { txHash: 'evm-tx-pending' };
+    // PaymentChannelSDK methods return void — transaction hash is not yet
+    // propagated from the underlying ethers.js ContractTransactionResponse.
+    // Tracked as tech debt: SDK should return tx receipt with hash.
+    return { txHash: '' };
   }
 
   /**
@@ -200,7 +209,10 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
 
     await this._sdk.settleChannel(channelId, this._tokenAddress);
 
-    return { txHash: 'evm-tx-pending' };
+    // PaymentChannelSDK methods return void — transaction hash is not yet
+    // propagated from the underlying ethers.js ContractTransactionResponse.
+    // Tracked as tech debt: SDK should return tx receipt with hash.
+    return { txHash: '' };
   }
 
   /**

@@ -10,8 +10,10 @@
 import {
   BTPClaimMessage,
   EVMClaimMessage,
+  SolanaClaimMessage,
   validateClaimMessage,
   isEVMClaim,
+  isSolanaClaim,
   BTP_CLAIM_PROTOCOL,
 } from './btp-claim-types';
 
@@ -735,8 +737,128 @@ describe('JSON Serialization Round-Trip', () => {
     // Assert
     expect(deserialized).toEqual(originalClaimWithFields);
     expect(isEVMClaim(deserialized)).toBe(true);
-    expect(deserialized.chainId).toBe(8453);
-    expect(deserialized.tokenNetworkAddress).toBe('0x9876543210987654321098765432109876543210');
-    expect(deserialized.tokenAddress).toBe('0x1111222233334444555566667777888899990000');
+    if (isEVMClaim(deserialized)) {
+      expect(deserialized.chainId).toBe(8453);
+      expect(deserialized.tokenNetworkAddress).toBe('0x9876543210987654321098765432109876543210');
+      expect(deserialized.tokenAddress).toBe('0x1111222233334444555566667777888899990000');
+    }
+  });
+});
+
+describe('validateClaimMessage - Solana Claim Validation (Epic 33 Prep)', () => {
+  const validSolanaClaim: SolanaClaimMessage = {
+    version: '1.0',
+    blockchain: 'solana',
+    messageId: 'claim-sol-001',
+    timestamp: '2026-03-25T12:00:00.000Z',
+    senderId: 'peer-alice',
+    programId: '11111111111111111111111111111111',
+    channelAccount: '22222222222222222222222222222222',
+    nonce: 1,
+    transferredAmount: '1000000000',
+    signature: 'c2lnbmF0dXJlLWRhdGE=',
+    signerPublicKey: '33333333333333333333333333333333',
+  };
+
+  it('should accept valid Solana claim message', () => {
+    expect(() => validateClaimMessage(validSolanaClaim)).not.toThrow();
+  });
+
+  it('should accept valid Solana claim with cluster field', () => {
+    const claimWithCluster: SolanaClaimMessage = {
+      ...validSolanaClaim,
+      messageId: 'claim-sol-002',
+      cluster: 'devnet',
+    };
+    expect(() => validateClaimMessage(claimWithCluster)).not.toThrow();
+  });
+
+  it('should narrow type via isSolanaClaim guard', () => {
+    const claim: BTPClaimMessage = validSolanaClaim;
+    expect(isSolanaClaim(claim)).toBe(true);
+    if (isSolanaClaim(claim)) {
+      expect(claim.programId).toBeDefined();
+      expect(claim.channelAccount).toBeDefined();
+      expect(claim.signerPublicKey).toBeDefined();
+    }
+  });
+
+  it('should reject missing programId', () => {
+    const invalid = { ...validSolanaClaim, programId: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid programId (expected non-empty string)'
+    );
+  });
+
+  it('should reject invalid programId format (not base58)', () => {
+    const invalid = { ...validSolanaClaim, programId: '0xINVALID' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid programId format (expected base58-encoded Solana address)'
+    );
+  });
+
+  it('should reject missing channelAccount', () => {
+    const invalid = { ...validSolanaClaim, channelAccount: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid channelAccount (expected non-empty string)'
+    );
+  });
+
+  it('should reject invalid channelAccount format', () => {
+    const invalid = { ...validSolanaClaim, channelAccount: 'short' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid channelAccount format (expected base58-encoded Solana address)'
+    );
+  });
+
+  it('should reject negative nonce', () => {
+    const invalid = { ...validSolanaClaim, nonce: -1 };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid nonce (expected non-negative number)'
+    );
+  });
+
+  it('should reject non-numeric transferredAmount', () => {
+    const invalid = { ...validSolanaClaim, transferredAmount: 'abc' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid transferredAmount (expected non-negative integer string)'
+    );
+  });
+
+  it('should reject missing signature', () => {
+    const invalid = { ...validSolanaClaim, signature: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid signature (expected non-empty string)'
+    );
+  });
+
+  it('should reject missing signerPublicKey', () => {
+    const invalid = { ...validSolanaClaim, signerPublicKey: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid signerPublicKey (expected non-empty string)'
+    );
+  });
+
+  it('should reject invalid signerPublicKey format', () => {
+    const invalid = { ...validSolanaClaim, signerPublicKey: '0xNotBase58' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid signerPublicKey format (expected base58-encoded Solana public key)'
+    );
+  });
+
+  it('should reject invalid cluster value', () => {
+    const invalid = { ...validSolanaClaim, cluster: 'invalid-cluster' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid cluster (expected one of: mainnet-beta, devnet, testnet, localnet)'
+    );
+  });
+
+  it('should serialize and deserialize Solana claim correctly', () => {
+    const serialized = JSON.stringify(validSolanaClaim);
+    const deserialized = JSON.parse(serialized);
+    validateClaimMessage(deserialized);
+
+    expect(deserialized).toEqual(validSolanaClaim);
+    expect(isSolanaClaim(deserialized)).toBe(true);
   });
 });

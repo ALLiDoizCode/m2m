@@ -246,8 +246,11 @@ describe('EVMClaimMessage backward compatibility (T-32.1-03)', () => {
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-charlie',
       programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-      channelAccount: 'ChannelAcc123',
+      channelAccount: 'ChannelAcct1234567890123456789012',
+      nonce: 1,
+      transferredAmount: '1000000',
       signature: 'solana-sig-abc',
+      signerPublicKey: '33333333333333333333333333333333',
     };
 
     expect(isEVMClaim(solanaClaim)).toBe(false);
@@ -283,14 +286,20 @@ describe('SolanaClaimMessage and MinaClaimMessage stubs (T-32.1-05)', () => {
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-alice',
       programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-      channelAccount: 'ChannelAcc123',
+      channelAccount: 'ChannelAcct1234567890123456789012',
+      nonce: 1,
+      transferredAmount: '1000000',
       signature: 'ed25519-sig-xyz',
+      signerPublicKey: '33333333333333333333333333333333',
     };
 
     expect(solanaClaim.blockchain).toBe('solana');
     expect(solanaClaim.programId).toBeDefined();
     expect(solanaClaim.channelAccount).toBeDefined();
+    expect(solanaClaim.nonce).toBe(1);
+    expect(solanaClaim.transferredAmount).toBe('1000000');
     expect(solanaClaim.signature).toBeDefined();
+    expect(solanaClaim.signerPublicKey).toBeDefined();
   });
 
   it('should create MinaClaimMessage with required fields', () => {
@@ -329,16 +338,18 @@ describe('ProviderConfig discriminated union (T-32.1-06)', () => {
     expect(config.keyId).toBeDefined();
   });
 
-  it('should create SolanaProviderConfig stub', () => {
+  it('should create SolanaProviderConfig', () => {
     const config: SolanaProviderConfig = {
       chainType: 'solana',
       rpcUrl: 'https://api.mainnet-beta.solana.com',
       programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+      keyId: 'solana-treasury-key',
     };
 
     expect(config.chainType).toBe('solana');
     expect(config.rpcUrl).toBeDefined();
     expect(config.programId).toBeDefined();
+    expect(config.keyId).toBeDefined();
   });
 
   it('should create MinaProviderConfig stub', () => {
@@ -356,7 +367,7 @@ describe('ProviderConfig discriminated union (T-32.1-06)', () => {
   it('should narrow ProviderConfig via chainType discriminator', () => {
     const configs: ProviderConfig[] = [
       { chainType: 'evm', rpcUrl: 'https://rpc.example.com', registryAddress: '0x123', keyId: 'k' },
-      { chainType: 'solana', rpcUrl: 'https://sol.example.com', programId: 'prog1' },
+      { chainType: 'solana', rpcUrl: 'https://sol.example.com', programId: 'prog1', keyId: 'k' },
       { chainType: 'mina', graphqlUrl: 'https://mina.example.com', zkAppAddress: 'zkApp1' },
     ];
 
@@ -406,9 +417,12 @@ describe('BTPClaimMessage union (T-32.1-07)', () => {
       messageId: 'msg-2',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-2',
-      programId: 'prog1',
-      channelAccount: 'acc1',
+      programId: '11111111111111111111111111111111',
+      channelAccount: '22222222222222222222222222222222',
+      nonce: 1,
+      transferredAmount: '100',
       signature: 'sig1',
+      signerPublicKey: '33333333333333333333333333333333',
     };
     expect(msg.blockchain).toBe('solana');
   });
@@ -451,21 +465,22 @@ describe('validateClaimMessage() (T-32.1-08)', () => {
     expect(() => validateClaimMessage(validEVMClaim)).not.toThrow();
   });
 
-  it('should throw "not yet supported" for solana claims', () => {
+  it('should accept valid solana claims', () => {
     const solanaClaim = {
       version: '1.0',
       blockchain: 'solana',
       messageId: 'claim-sol-001',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-alice',
-      programId: 'prog1',
-      channelAccount: 'acc1',
+      programId: '11111111111111111111111111111111',
+      channelAccount: '22222222222222222222222222222222',
+      nonce: 1,
+      transferredAmount: '1000000',
       signature: 'sig1',
+      signerPublicKey: '33333333333333333333333333333333',
     };
 
-    expect(() => validateClaimMessage(solanaClaim)).toThrow(
-      "Blockchain type 'solana' validation not yet supported"
-    );
+    expect(() => validateClaimMessage(solanaClaim)).not.toThrow();
   });
 
   it('should throw "not yet supported" for mina claims', () => {
@@ -511,9 +526,12 @@ describe('isSolanaClaim() type guard', () => {
       messageId: 'msg-sol-1',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-1',
-      programId: 'prog1',
-      channelAccount: 'acc1',
+      programId: '11111111111111111111111111111111',
+      channelAccount: '22222222222222222222222222222222',
+      nonce: 1,
+      transferredAmount: '100',
       signature: 'sig1',
+      signerPublicKey: '33333333333333333333333333333333',
     };
     expect(isSolanaClaim(msg)).toBe(true);
   });
@@ -556,14 +574,17 @@ describe('isSolanaClaim() type guard', () => {
       messageId: 'msg-sol-2',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-2',
-      programId: 'prog1',
-      channelAccount: 'acc1',
+      programId: '11111111111111111111111111111111',
+      channelAccount: '22222222222222222222222222222222',
+      nonce: 1,
+      transferredAmount: '100',
       signature: 'sig1',
+      signerPublicKey: '33333333333333333333333333333333',
     };
 
     if (isSolanaClaim(msg)) {
-      expect(msg.programId).toBe('prog1');
-      expect(msg.channelAccount).toBe('acc1');
+      expect(msg.programId).toBe('11111111111111111111111111111111');
+      expect(msg.channelAccount).toBe('22222222222222222222222222222222');
     }
   });
 });
@@ -607,9 +628,12 @@ describe('isMinaClaim() type guard', () => {
       messageId: 'msg-sol-cross-1',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-1',
-      programId: 'prog1',
-      channelAccount: 'acc1',
+      programId: '11111111111111111111111111111111',
+      channelAccount: '22222222222222222222222222222222',
+      nonce: 1,
+      transferredAmount: '100',
       signature: 'sig1',
+      signerPublicKey: '33333333333333333333333333333333',
     };
     expect(isMinaClaim(msg)).toBe(false);
   });
