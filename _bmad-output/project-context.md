@@ -1,7 +1,7 @@
 ---
 project_name: 'connector'
 user_name: 'Jonathan'
-date: '2026-03-09'
+date: '2026-03-25'
 sections_completed:
   [
     'technology_stack',
@@ -13,7 +13,7 @@ sections_completed:
     'critical_rules',
   ]
 status: 'complete'
-rule_count: 67
+rule_count: 72
 optimized_for_llm: true
 ---
 
@@ -27,8 +27,8 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 - **Language:** TypeScript 5.3.3 (strict mode enabled, ES2022 target, CommonJS modules)
 - **Runtime:** Node.js >= 22.11.0
-- **Monorepo:** npm workspaces (`packages/connector`, `packages/shared`, `packages/contracts`)
-- **Blockchain:** ethers 6.16.0 (EVM/Base L2 settlement)
+- **Monorepo:** npm workspaces (`packages/connector`, `packages/shared`, `packages/contracts`, `packages/faucet`)
+- **Blockchain:** ethers 6.16.0 (EVM settlement via chain-agnostic provider abstraction)
 - **Transport:** ws 8.16.0 (BTP over WebSocket, RFC-0023)
 - **HTTP:** Express 4.18.x (admin API, health checks, explorer)
 - **Logging:** Pino 8.21.0 (structured JSON)
@@ -39,7 +39,101 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Formatting:** Prettier 3.2.5 (single quotes, trailing commas, 100 char width, LF endings)
 - **Git Hooks:** Husky 9.1.7 + lint-staged (pre-commit: eslint --fix + prettier)
 - **Releases:** semantic-release 24.2.0 (conventional commits)
-- **Contracts:** Solidity (Foundry/Anvil)
+- **Contracts:** Solidity (Foundry/Anvil — TokenNetwork.sol, TokenNetworkRegistry.sol)
+- **Local Dev Infra:** Docker Compose (Anvil local Ethereum node + Token Faucet)
+- **Optional AI:** @ai-sdk/anthropic, @ai-sdk/openai, ai (optional dependencies for agent features)
+
+## Project Structure
+
+```
+connector/                          # Monorepo root
+├── packages/
+│   ├── connector/                  # Main ILP connector package (@toon-protocol/connector)
+│   │   ├── src/
+│   │   │   ├── btp/                # BTP transport (client, server, message parser, claim types)
+│   │   │   ├── cli/                # CLI onboarding wizard (commander + inquirer)
+│   │   │   ├── config/             # YAML config loading, Zod validation, environment validation
+│   │   │   ├── core/               # ConnectorNode, PacketHandler, PaymentHandler, LocalDeliveryClient
+│   │   │   ├── discovery/          # Peer discovery service
+│   │   │   ├── encoding/           # OER parser for ILP packets
+│   │   │   ├── facilitator/        # SPSP client
+│   │   │   ├── http/               # Admin API, health server, ILP send handler
+│   │   │   ├── routing/            # Routing table, packet processor, worker pool
+│   │   │   ├── security/           # Key management (HSM/KMS), rate limiting, audit, fraud detection
+│   │   │   ├── settlement/         # Settlement layer (accounts, claims, channels, providers)
+│   │   │   │   └── provider/       # Chain abstraction layer (Epic 32)
+│   │   │   ├── test-utils/         # Mock factories, isolated test environment
+│   │   │   ├── utils/              # Logger, connection pool, EVM RPC pool, optional-require
+│   │   │   └── wallet/             # Treasury wallet, seed management, wallet security
+│   │   └── test/
+│   │       ├── acceptance/         # Acceptance tests (run separately)
+│   │       ├── fixtures/           # Test fixtures
+│   │       ├── helpers/            # Test helpers
+│   │       ├── integration/        # Integration tests (multi-hop, claim validation)
+│   │       ├── stability/          # Stability tests
+│   │       └── unit/               # Unit tests
+│   ├── shared/                     # Shared types package (@toon-protocol/shared)
+│   │   └── src/
+│   │       ├── encoding/           # Shared encoding utilities
+│   │       └── types/              # ILP types, payment channel types, routing types
+│   ├── contracts/                  # Solidity smart contracts (Foundry)
+│   │   └── src/                    # TokenNetwork.sol, TokenNetworkRegistry.sol
+│   └── faucet/                     # Token faucet service (Docker)
+├── tools/
+│   ├── send-packet/                # ILP packet sending utility
+│   └── fund-peers/                 # Peer funding utility
+├── docker-compose.yml              # Anvil + Faucet local dev infrastructure
+├── Dockerfile                      # Multi-stage Docker build (node:22-alpine)
+└── Makefile                        # Development workflow commands
+```
+
+## Chain Abstraction Layer (Epic 32)
+
+Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain payment channel support. Key components in `packages/connector/src/settlement/provider/`:
+
+### PaymentChannelProvider Interface (`payment-channel-provider.ts`)
+
+- Chain-agnostic interface that all blockchain-specific providers must implement
+- Defines `chainType` (`'evm'`, `'solana'`, `'mina'`) and `chainId` (e.g., `'evm:8453'`)
+- Unified API for: `openChannel`, `deposit`, `claimFromChannel`, `closeChannel`, `settleChannel`, `signBalanceProof`, `verifyBalanceProof`, `getChannelState`, `subscribeToEvents`
+- Discriminated union `ProviderConfig` with per-chain config subtypes (`EVMProviderConfig`, `SolanaProviderConfig`, `MinaProviderConfig`)
+- Chain-agnostic types: `ProviderChannelState`, `ProviderEvent`, `ProviderEventSubscription`, `BalanceProofParams`, `VerifyBalanceProofParams`
+
+### ChainProviderRegistry (`chain-provider-registry.ts`)
+
+- Manages `PaymentChannelProvider` instances keyed by `chainId`
+- Dynamic registration/deregistration of providers
+- Peer-based lookup via `getProviderForPeer(peerConfig)` using the peer's `chain` field
+- Factory-based initialization via `ChainProviderRegistry.fromConfig(configs, factories)`
+- Custom error: `ChainProviderAlreadyRegisteredError`
+
+### EVMPaymentChannelProvider (`evm-payment-channel-provider.ts`)
+
+- Concrete EVM implementation wrapping the existing `PaymentChannelSDK`
+- Adapts provider-level params (string amounts) to SDK-level params (bigint amounts)
+- EVM-specific `getSigningContext()` method (not on interface — use `instanceof` to access)
+- Factory function `createEVMProviderFactory(sdk, logger)` for registry integration
+- Handles EIP-712 signing context, event forwarding with channel filtering
+
+### Refactored Settlement Services (Stories 32.4–32.6)
+
+- **PerPacketClaimService** — delegates signing to chain-appropriate provider via `ChainProviderRegistry`
+- **SettlementExecutor** — resolves chain-specific provider for each peer via registry
+- **ClaimReceiver** — dispatches claim verification to correct provider based on blockchain discriminator field
+
+### Configuration (Story 32.7)
+
+- New `chainProviders` array in `ConnectorConfig` for multi-chain provider configuration
+- `ChainProviderConfigEntry` = `ProviderConfig & { chainId: string }`
+- Per-peer `chain` field on `PeerConfig` references a registered provider's `chainId`
+- Legacy `settlementInfra` field deprecated; auto-creates EVM provider for backward compatibility
+- Zod-based validation: rejects unknown chainType, duplicate chainId, peer referencing unregistered chain
+
+### Integration Tests (Story 32.8)
+
+- `provider/integration.test.ts` (1120 lines) — full chain abstraction layer integration tests
+- `config/chain-provider-config.test.ts` — configuration schema validation tests
+- Tests cover: multi-chain registration, peer lookup, factory initialization, EVM provider adapter, event forwarding
 
 ## Critical Implementation Rules
 
@@ -67,9 +161,10 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Config loading:** YAML config files validated with Zod schemas at startup; use `ConfigLoader` class pattern
 - **BTP transport:** class-based with Node.js `EventEmitter` for lifecycle events (connected/disconnected/error); WebSocket-based (ws library)
 - **Express usage:** minimal — only for health checks (`GET /health`), admin API, and explorer static serving; NOT the primary transport layer
-- **ethers.js:** all blockchain calls are async; use `PaymentChannelSDK` abstraction — never call contract methods directly from business logic
+- **ethers.js:** all blockchain calls are async; use `PaymentChannelProvider` abstraction (via `ChainProviderRegistry`) — never call contract methods directly from business logic
 - **Class-based architecture:** major components are classes with constructor-based dependency injection; private fields use `private readonly` pattern
 - **EventEmitter pattern:** BTP clients and services extend or compose EventEmitter for lifecycle and state change notifications
+- **Chain provider pattern:** settlement services resolve providers via `ChainProviderRegistry.getProviderForPeer(peerConfig)` — never hardcode chain-specific logic in service classes
 
 ### Testing Rules
 
@@ -87,6 +182,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Coverage thresholds:** branches 60%, functions 75%, lines 70%, statements 70%
 - **Default timeout:** 30s for most tests; specific overrides for integration (60s for security)
 - **Cross-package mapping:** `@toon-protocol/shared` mapped to source via `moduleNameMapper` in jest config
+- **Specialized test scripts:** `test:settlement`, `test:btp`, `test:evm`, `test:embedded`, `test:integration`, `test:acceptance`, `test:performance`, `test:domain`, `test:epic`
 
 ### Code Quality & Style Rules
 
@@ -96,11 +192,12 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Private fields:** `private readonly _fieldName` pattern
 - **Constants:** `UPPER_SNAKE_CASE` for module-level constants (e.g., `DEFAULT_LOG_LEVEL`)
 - **Prettier enforced:** single quotes, trailing commas (es5), 100 char width, 2-space indent, LF endings
-- **Source organization by domain:** `btp/`, `core/`, `settlement/`, `routing/`, `config/`, `security/`, `telemetry/`, `utils/`, etc.
+- **Source organization by domain:** `btp/`, `core/`, `settlement/`, `routing/`, `config/`, `security/`, `utils/`, etc.
 - **Public API in `lib.ts`:** all public exports consolidated in `packages/connector/src/lib.ts`; `index.ts` re-exports from `lib.ts`
 - **JSDoc on public APIs:** use `@remarks`, `@example`, `@param`, `@returns` tags; include `@packageDocumentation` on module entry points
 - **Test file doc comments:** describe test scope and what is being tested at the top of each test file
 - **lint-staged pre-commit:** ESLint fix + Prettier on `.ts/.tsx`; Prettier only on `.js/.json/.md`
+- **Barrel exports:** provider module uses `index.ts` barrel with explicit `export type` separation
 
 ### Development Workflow Rules
 
@@ -109,11 +206,12 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Pre-commit hook:** lint-staged runs `eslint --fix` + `prettier --write` on staged `.ts/.tsx` files
 - **Pre-push hook:** optimized — runs lint/format/related unit tests only for changed source files; auto-skips for docs-only or config-only changes
 - **Build order matters:** `packages/shared` MUST build before `packages/connector` (shared provides type definitions); use `npm run build --workspace=packages/shared` first
-- **CI gates (required to pass):** lint, format, tests (Node 22.11.0 + 22.x), TypeScript type check, build, EVM contract tests, Aptos Move tests
+- **CI gates (required to pass):** lint, format, tests (Node 22.11.0 + 22.x), TypeScript type check, build, EVM contract tests
 - **CI gates (advisory):** security audit (npm audit + Snyk), container scan (Trivy), performance benchmark
-- **Docker deployment:** images pushed to GHCR on merge to main; multi-platform (amd64 + arm64)
-- **Config via YAML:** connector topology defined in YAML config files (see `examples/` for patterns); validated by Zod at startup
+- **Docker deployment:** images pushed to GHCR on merge to main; multi-platform (amd64 + arm64); multi-stage build with node:22-alpine
+- **Config via YAML:** connector topology defined in YAML config files; validated by Zod at startup
 - **semantic-release:** version bumps and changelogs auto-generated from conventional commit messages
+- **Makefile shortcuts:** `make build`, `make test`, `make test-unit`, `make lint`, `make clean`, `make anvil-up`, `make anvil-down`, `make anvil-logs`
 
 ### Critical Don't-Miss Rules
 
@@ -123,12 +221,15 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **ILP packet expiry decrement** — per RFC-0027, connectors MUST reduce packet expiry by safety margin (1s) before forwarding to prevent timeout cascades
 - **Settlement is threshold-based** — on-chain settlement triggers on balance or time thresholds, NOT per-packet; per-packet claims are signed and sent via BTP but accumulated off-chain
 - **Self-describing claims (Epic 31)** — claims carry chain/contract coordinates in BTP protocolData; receivers verify dynamically on-chain without pre-registration
+- **Chain abstraction (Epic 32)** — settlement services use `ChainProviderRegistry` to resolve the correct `PaymentChannelProvider` per peer; never import chain-specific code in service classes
+- **Provider string amounts** — `PaymentChannelProvider` interface uses string amounts for bigint precision; `EVMPaymentChannelProvider` converts to bigint via `safeBigInt()` internally
 - **`@toon-protocol/shared` import path** — always `import { Type } from '@toon-protocol/shared'`; never import from dist or relative paths across packages
 - **Buffer usage for binary data** — ILP packets use `Buffer` (not `Uint8Array`) for `data`, `executionCondition`, `fulfillment` fields
 - **PacketType enum values matter** — `PREPARE=12`, `FULFILL=13`, `REJECT=14` per RFC-0027; don't use arbitrary values
 - **Optional dependencies pattern** — many packages are `optionalDependencies`; use dynamic `require()` with try-catch or the project's `optional-require` utility
-- **YAML config is the source of truth** — network topology, peers, routes, and settlement config all come from YAML; never hardcode topology
+- **YAML config is the source of truth** — network topology, peers, routes, chain providers, and settlement config all come from YAML; never hardcode topology
 - **ILP addresses are hierarchical** — dot-separated format (e.g., `g.alice.wallet.USD`); validate with `isValidILPAddress()` from shared package
+- **Backward compatibility** — legacy `settlementInfra` config auto-creates EVM provider; per-peer `chain` field is optional (defaults to legacy behavior when absent)
 
 ---
 
@@ -148,4 +249,4 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-03-09
+Last Updated: 2026-03-25

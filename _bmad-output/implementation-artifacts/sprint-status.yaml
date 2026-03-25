@@ -4,7 +4,7 @@
 epics:
   epic-32:
     name: "Chain Abstraction Layer & EVM Provider Migration"
-    status: in-progress
+    status: done
     stories:
       32.1:
         name: "Define PaymentChannelProvider Interface"
@@ -29,12 +29,67 @@ epics:
         status: done
       32.8:
         name: "Integration Tests — EVM Provider via Chain Abstraction"
-        status: backlog
+        status: done
+    retrospective:
+      status: done
 
   epic-33:
     name: "Solana Payment Channel Provider"
     status: backlog
+    stories:
+      33.1:
+        name: "Solana Payment Channel Program — Channel Lifecycle"
+        status: backlog
+      33.2:
+        name: "Solana Payment Channel Program — Claim Verification"
+        status: backlog
+      33.3:
+        name: "Solana Payment Channel Program — Tests & Deployment"
+        status: backlog
+      33.4:
+        name: "SolanaPaymentChannelSDK — TypeScript Integration"
+        status: backlog
+      33.5:
+        name: "Implement SolanaPaymentChannelProvider"
+        status: backlog
+      33.6:
+        name: "Solana Claim Message Types & Serialization"
+        status: backlog
+      33.7:
+        name: "Integration Tests — Solana Provider E2E"
+        status: backlog
+      33.8:
+        name: "Solana Devnet Deployment & Documentation"
+        status: backlog
 
   epic-34:
     name: "Mina Protocol Payment Channel Provider"
     status: backlog
+    stories:
+      34.1:
+        name: "Mina Payment Channel zkApp — Channel Lifecycle"
+        status: backlog
+      34.2:
+        name: "Mina Payment Channel zkApp — ZK-Private Claims"
+        status: backlog
+      34.3:
+        name: "Mina Payment Channel zkApp — Tests & Deployment"
+        status: backlog
+      34.4:
+        name: "MinaPaymentChannelSDK — TypeScript Integration"
+        status: backlog
+      34.5:
+        name: "Implement MinaPaymentChannelProvider"
+        status: backlog
+      34.6:
+        name: "NIP-59-Inspired Claim Wrapping for Transport Privacy"
+        status: backlog
+      34.7:
+        name: "Mina Claim Message Types & Serialization"
+        status: backlog
+      34.8:
+        name: "Integration Tests — Mina Provider E2E"
+        status: backlog
+      34.9:
+        name: "Mina Devnet Deployment & Documentation"
+        status: backlog
