@@ -58,6 +58,8 @@ import { requireOptional } from '../utils/optional-require';
 import { TigerBeetleClient } from '../settlement/tigerbeetle-client';
 import { InMemoryLedgerClient } from '../settlement/in-memory-ledger-client';
 import { PerPacketClaimService } from '../settlement/per-packet-claim-service';
+import { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
+import { EVMPaymentChannelProvider } from '../settlement/provider/evm-payment-channel-provider';
 import {
   SENT_CLAIMS_TABLE_SCHEMA,
   SENT_CLAIMS_INDEXES,
@@ -816,8 +818,21 @@ export class ConnectorNode implements HealthStatusProvider {
                 claimDb.exec(indexSql);
               }
 
-              const perPacketClaimService = new PerPacketClaimService(
+              // Create a ChainProviderRegistry wrapping the primary SDK
+              // in an EVMPaymentChannelProvider for the per-packet claim service.
+              // Full config-driven registry wiring is deferred to Story 32.7/32.8.
+              const claimRegistry = new ChainProviderRegistry();
+              const primaryChainIdStr = primaryChainId ? `evm:${primaryChainId}` : 'evm:unknown';
+              const evmProvider = new EVMPaymentChannelProvider(
                 this._paymentChannelSDK,
+                primaryChainIdStr,
+                m2mTokenAddress,
+                this._logger
+              );
+              claimRegistry.register(evmProvider);
+
+              const perPacketClaimService = new PerPacketClaimService(
+                claimRegistry,
                 this._channelManager,
                 claimDb,
                 this._logger,

@@ -17,7 +17,7 @@ epics:
         status: done
       32.4:
         name: "Refactor PerPacketClaimService for Multi-Chain"
-        status: backlog
+        status: done
       32.5:
         name: "Refactor SettlementMonitor and SettlementExecutor for Multi-Chain"
         status: backlog

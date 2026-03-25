@@ -3,14 +3,19 @@
  *
  * Tests claim generation, nonce tracking, cumulative amounts,
  * startup recovery, and graceful degradation.
+ *
+ * Refactored for Story 32.4: uses ChainProviderRegistry + EVMPaymentChannelProvider
+ * instead of direct PaymentChannelSDK dependency.
  */
 
 import { PerPacketClaimService } from './per-packet-claim-service';
-import { BTP_CLAIM_PROTOCOL } from '../btp/btp-claim-types';
-import type { PaymentChannelSDK } from './payment-channel-sdk';
+import { BTP_CLAIM_PROTOCOL, type EVMClaimMessage, isEVMClaim } from '../btp/btp-claim-types';
+import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 import type { ChannelManager } from './channel-manager';
 import type { Database } from 'better-sqlite3';
 import type { Logger } from 'pino';
+import type { PaymentChannelSDK } from './payment-channel-sdk';
+import { EVMPaymentChannelProvider } from './provider/evm-payment-channel-provider';
 
 // Mock logger
 const createMockLogger = (): Logger =>
@@ -24,23 +29,75 @@ const createMockLogger = (): Logger =>
     fatal: jest.fn(),
   }) as unknown as Logger;
 
-// Mock PaymentChannelSDK
+// Mock PaymentChannelSDK (used to construct a real EVMPaymentChannelProvider)
 const createMockSDK = (): jest.Mocked<
   Pick<
     PaymentChannelSDK,
-    'signBalanceProof' | 'getChainId' | 'getTokenNetworkAddress' | 'getSignerAddress'
+    | 'signBalanceProof'
+    | 'getChainId'
+    | 'getTokenNetworkAddress'
+    | 'getSignerAddress'
+    | 'openChannel'
+    | 'deposit'
+    | 'claimFromChannel'
+    | 'closeChannel'
+    | 'settleChannel'
+    | 'verifyBalanceProof'
+    | 'getChannelState'
+    | 'onChannelOpened'
+    | 'onChannelClosed'
+    | 'onChannelSettled'
+    | 'onChannelCooperativeSettled'
+    | 'removeAllListeners'
   >
 > => ({
   signBalanceProof: jest.fn().mockResolvedValue('0xmocksignature'),
   getChainId: jest.fn().mockResolvedValue(31337),
   getTokenNetworkAddress: jest.fn().mockResolvedValue('0xTokenNetworkAddress1234567890abcdef'),
   getSignerAddress: jest.fn().mockResolvedValue('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1'),
+  openChannel: jest.fn(),
+  deposit: jest.fn(),
+  claimFromChannel: jest.fn(),
+  closeChannel: jest.fn(),
+  settleChannel: jest.fn(),
+  verifyBalanceProof: jest.fn(),
+  getChannelState: jest.fn(),
+  onChannelOpened: jest.fn(),
+  onChannelClosed: jest.fn(),
+  onChannelSettled: jest.fn(),
+  onChannelCooperativeSettled: jest.fn(),
+  removeAllListeners: jest.fn(),
+});
+
+// Create a real EVMPaymentChannelProvider with a mocked SDK
+const createMockEVMProvider = (
+  sdk: ReturnType<typeof createMockSDK>
+): EVMPaymentChannelProvider => {
+  const providerLogger = createMockLogger() as unknown as import('../utils/logger').Logger;
+  return new EVMPaymentChannelProvider(
+    sdk as unknown as PaymentChannelSDK,
+    'evm:anvil:31337',
+    '0xTokenAddress',
+    providerLogger
+  );
+};
+
+// Mock ChainProviderRegistry
+const createMockRegistry = (
+  provider: EVMPaymentChannelProvider
+): jest.Mocked<Pick<ChainProviderRegistry, 'getProviderForPeer'>> => ({
+  getProviderForPeer: jest
+    .fn()
+    .mockImplementation((peerConfig: { peerId: string; chain?: string }) => {
+      if (peerConfig.chain === 'evm:anvil:31337') return provider;
+      return undefined;
+    }),
 });
 
 // Mock ChannelManager
 const createMockChannelManager = (
   channelMap?: Record<string, { channelId: string; tokenAddress: string }>
-): jest.Mocked<Pick<ChannelManager, 'getChannelForPeer'>> => ({
+): jest.Mocked<Pick<ChannelManager, 'getChannelForPeer' | 'ensureChannelExists'>> => ({
   getChannelForPeer: jest.fn().mockImplementation((peerId: string, tokenId: string) => {
     const key = `${peerId}:${tokenId}`;
     const channel = channelMap?.[key];
@@ -53,9 +110,10 @@ const createMockChannelManager = (
       chain: 'evm:anvil:31337',
       createdAt: new Date(),
       lastActivityAt: new Date(),
-      status: 'opened',
+      status: 'open',
     };
   }),
+  ensureChannelExists: jest.fn().mockResolvedValue(undefined),
 });
 
 // Mock SQLite Database
@@ -73,6 +131,8 @@ const createMockDb = (
 describe('PerPacketClaimService', () => {
   let service: PerPacketClaimService;
   let mockSDK: ReturnType<typeof createMockSDK>;
+  let mockProvider: EVMPaymentChannelProvider;
+  let mockRegistry: ReturnType<typeof createMockRegistry>;
   let mockChannelManager: ReturnType<typeof createMockChannelManager>;
   let mockDb: ReturnType<typeof createMockDb>;
   let mockLogger: Logger;
@@ -83,7 +143,11 @@ describe('PerPacketClaimService', () => {
   const TEST_NODE_ID = 'connector-a';
 
   beforeEach(() => {
+    jest.clearAllMocks();
+
     mockSDK = createMockSDK();
+    mockProvider = createMockEVMProvider(mockSDK);
+    mockRegistry = createMockRegistry(mockProvider);
     mockChannelManager = createMockChannelManager({
       [`${TEST_PEER_ID}:M2M`]: {
         channelId: TEST_CHANNEL_ID,
@@ -94,7 +158,7 @@ describe('PerPacketClaimService', () => {
     mockLogger = createMockLogger();
 
     service = new PerPacketClaimService(
-      mockSDK as unknown as PaymentChannelSDK,
+      mockRegistry as unknown as ChainProviderRegistry,
       mockChannelManager as unknown as ChannelManager,
       mockDb as unknown as Database,
       mockLogger,
@@ -111,16 +175,18 @@ describe('PerPacketClaimService', () => {
       expect(result!.protocolData.contentType).toBe(BTP_CLAIM_PROTOCOL.CONTENT_TYPE);
 
       const claim = result!.claimMessage;
-      expect(claim.version).toBe('1.0');
-      expect(claim.blockchain).toBe('evm');
-      expect(claim.channelId).toBe(TEST_CHANNEL_ID);
-      expect(claim.nonce).toBe(1);
-      expect(claim.transferredAmount).toBe('1000');
-      expect(claim.lockedAmount).toBe('0');
-      expect(claim.signature).toBe('0xmocksignature');
-      expect(claim.senderId).toBe(TEST_NODE_ID);
-      expect(claim.chainId).toBe(31337);
-      expect(claim.tokenAddress).toBe(TEST_TOKEN_ADDRESS);
+      expect(isEVMClaim(claim)).toBe(true);
+      const evmClaim = claim as EVMClaimMessage;
+      expect(evmClaim.version).toBe('1.0');
+      expect(evmClaim.blockchain).toBe('evm');
+      expect(evmClaim.channelId).toBe(TEST_CHANNEL_ID);
+      expect(evmClaim.nonce).toBe(1);
+      expect(evmClaim.transferredAmount).toBe('1000');
+      expect(evmClaim.lockedAmount).toBe('0');
+      expect(evmClaim.signature).toBe('0xmocksignature');
+      expect(evmClaim.senderId).toBe(TEST_NODE_ID);
+      expect(evmClaim.chainId).toBe(31337);
+      expect(evmClaim.tokenAddress).toBe(TEST_TOKEN_ADDRESS);
     });
 
     it('should increment nonce for sequential packets', async () => {
@@ -128,9 +194,9 @@ describe('PerPacketClaimService', () => {
       const result2 = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 200n);
       const result3 = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 300n);
 
-      expect(result1!.claimMessage.nonce).toBe(1);
-      expect(result2!.claimMessage.nonce).toBe(2);
-      expect(result3!.claimMessage.nonce).toBe(3);
+      expect((result1!.claimMessage as EVMClaimMessage).nonce).toBe(1);
+      expect((result2!.claimMessage as EVMClaimMessage).nonce).toBe(2);
+      expect((result3!.claimMessage as EVMClaimMessage).nonce).toBe(3);
     });
 
     it('should accumulate cumulative transferred amounts', async () => {
@@ -138,9 +204,9 @@ describe('PerPacketClaimService', () => {
       const result2 = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 200n);
       const result3 = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 300n);
 
-      expect(result1!.claimMessage.transferredAmount).toBe('100');
-      expect(result2!.claimMessage.transferredAmount).toBe('300'); // 100 + 200
-      expect(result3!.claimMessage.transferredAmount).toBe('600'); // 100 + 200 + 300
+      expect((result1!.claimMessage as EVMClaimMessage).transferredAmount).toBe('100');
+      expect((result2!.claimMessage as EVMClaimMessage).transferredAmount).toBe('300'); // 100 + 200
+      expect((result3!.claimMessage as EVMClaimMessage).transferredAmount).toBe('600'); // 100 + 200 + 300
     });
 
     it('should return null when no channel exists for peer', async () => {
@@ -156,16 +222,18 @@ describe('PerPacketClaimService', () => {
       expect(mockChannelManager.getChannelForPeer).toHaveBeenCalledTimes(1);
     });
 
-    it('should call signBalanceProof with correct parameters', async () => {
+    it('should call provider.signBalanceProof with correct parameters', async () => {
+      const signSpy = jest.spyOn(mockProvider, 'signBalanceProof');
+
       await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 500n);
 
-      expect(mockSDK.signBalanceProof).toHaveBeenCalledWith(
-        TEST_CHANNEL_ID,
-        1,
-        500n,
-        0n,
-        '0x0000000000000000000000000000000000000000000000000000000000000000'
-      );
+      expect(signSpy).toHaveBeenCalledWith({
+        channelId: TEST_CHANNEL_ID,
+        nonce: 1,
+        transferredAmount: '500',
+        lockedAmount: '0',
+        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      });
     });
 
     it('should persist claim to database', async () => {
@@ -183,6 +251,75 @@ describe('PerPacketClaimService', () => {
       expect(parsed.nonce).toBe(1);
       expect(parsed.transferredAmount).toBe('1000');
     });
+
+    it('should return null when no provider found for peer (T-32.4-04)', async () => {
+      // Peer has a channel but chain doesn't match any registered provider
+      const noProviderChannelManager = createMockChannelManager({
+        [`unknown-chain-peer:M2M`]: {
+          channelId: TEST_CHANNEL_ID,
+          tokenAddress: TEST_TOKEN_ADDRESS,
+        },
+      });
+      // Override to return a different chain that has no provider
+      noProviderChannelManager.getChannelForPeer.mockImplementation(
+        (peerId: string, _tokenId: string) => {
+          if (peerId === 'unknown-chain-peer') {
+            return {
+              channelId: TEST_CHANNEL_ID,
+              tokenAddress: TEST_TOKEN_ADDRESS,
+              peerId,
+              tokenId: 'M2M',
+              chain: 'solana:mainnet',
+              createdAt: new Date(),
+              lastActivityAt: new Date(),
+              status: 'open' as const,
+            };
+          }
+          return null;
+        }
+      );
+
+      const svc = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        noProviderChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket('unknown-chain-peer', 'M2M', 1000n);
+      expect(result).toBeNull();
+    });
+
+    it('should set blockchain discriminator matching peer chain type (T-32.4-02)', async () => {
+      const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(result!.claimMessage.blockchain).toBe('evm');
+    });
+
+    it('should include tokenNetworkAddress, signerAddress, and chainId in EVM claim (T-32.4-03)', async () => {
+      const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      const evmClaim = result!.claimMessage as EVMClaimMessage;
+      expect(evmClaim.tokenNetworkAddress).toBe('0xTokenNetworkAddress1234567890abcdef');
+      expect(evmClaim.signerAddress).toBe('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1');
+      expect(evmClaim.chainId).toBe(31337);
+      expect(evmClaim.tokenAddress).toBe(TEST_TOKEN_ADDRESS);
+    });
+
+    it('should include blockchain discriminator in serialized JSON (AC3)', async () => {
+      const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.protocolData.data.toString('utf8'));
+      expect(parsed.blockchain).toBe('evm');
+      expect(parsed.chainId).toBe(31337);
+      expect(parsed.tokenNetworkAddress).toBe('0xTokenNetworkAddress1234567890abcdef');
+      expect(parsed.tokenAddress).toBe(TEST_TOKEN_ADDRESS);
+      expect(parsed.signerAddress).toBe('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1');
+    });
   });
 
   describe('getLatestClaim', () => {
@@ -196,8 +333,10 @@ describe('PerPacketClaimService', () => {
 
       const latest = service.getLatestClaim(TEST_CHANNEL_ID);
       expect(latest).not.toBeNull();
-      expect(latest!.nonce).toBe(2);
-      expect(latest!.transferredAmount).toBe('300');
+      expect(isEVMClaim(latest!)).toBe(true);
+      const evmLatest = latest as EVMClaimMessage;
+      expect(evmLatest.nonce).toBe(2);
+      expect(evmLatest.transferredAmount).toBe('300');
     });
   });
 
@@ -219,8 +358,8 @@ describe('PerPacketClaimService', () => {
 
       // Need to clear cache so context is re-fetched
       const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 50n);
-      expect(result!.claimMessage.nonce).toBe(1);
-      expect(result!.claimMessage.transferredAmount).toBe('50');
+      expect((result!.claimMessage as EVMClaimMessage).nonce).toBe(1);
+      expect((result!.claimMessage as EVMClaimMessage).transferredAmount).toBe('50');
     });
   });
 
@@ -240,7 +379,7 @@ describe('PerPacketClaimService', () => {
       const recoveryDb = createMockDb(existingClaims);
 
       const recoveredService = new PerPacketClaimService(
-        mockSDK as unknown as PaymentChannelSDK,
+        mockRegistry as unknown as ChainProviderRegistry,
         mockChannelManager as unknown as ChannelManager,
         recoveryDb as unknown as Database,
         mockLogger,
@@ -250,7 +389,7 @@ describe('PerPacketClaimService', () => {
       // Latest claim should be restored
       const latest = recoveredService.getLatestClaim(TEST_CHANNEL_ID);
       expect(latest).not.toBeNull();
-      expect(latest!.nonce).toBe(5);
+      expect((latest as EVMClaimMessage).nonce).toBe(5);
     });
 
     it('should continue from recovered nonce', async () => {
@@ -268,7 +407,7 @@ describe('PerPacketClaimService', () => {
       const recoveryDb = createMockDb(existingClaims);
 
       const recoveredService = new PerPacketClaimService(
-        mockSDK as unknown as PaymentChannelSDK,
+        mockRegistry as unknown as ChainProviderRegistry,
         mockChannelManager as unknown as ChannelManager,
         recoveryDb as unknown as Database,
         mockLogger,
@@ -276,8 +415,8 @@ describe('PerPacketClaimService', () => {
       );
 
       const result = await recoveredService.generateClaimForPacket(TEST_PEER_ID, 'M2M', 500n);
-      expect(result!.claimMessage.nonce).toBe(11); // continues from 10
-      expect(result!.claimMessage.transferredAmount).toBe('10500'); // 10000 + 500
+      expect((result!.claimMessage as EVMClaimMessage).nonce).toBe(11); // continues from 10
+      expect((result!.claimMessage as EVMClaimMessage).transferredAmount).toBe('10500'); // 10000 + 500
     });
 
     it('should handle malformed DB data gracefully', () => {
@@ -288,7 +427,7 @@ describe('PerPacketClaimService', () => {
       expect(
         () =>
           new PerPacketClaimService(
-            mockSDK as unknown as PaymentChannelSDK,
+            mockRegistry as unknown as ChainProviderRegistry,
             mockChannelManager as unknown as ChannelManager,
             recoveryDb as unknown as Database,
             mockLogger,
@@ -310,13 +449,53 @@ describe('PerPacketClaimService', () => {
       expect(
         () =>
           new PerPacketClaimService(
-            mockSDK as unknown as PaymentChannelSDK,
+            mockRegistry as unknown as ChainProviderRegistry,
             mockChannelManager as unknown as ChannelManager,
             failingDb,
             mockLogger,
             TEST_NODE_ID
           )
       ).not.toThrow();
+    });
+
+    it('should recover claims without blockchain=evm filter (T-32.4-07)', () => {
+      // Verify that claims of any blockchain type are recovered from DB
+      const existingClaims = [
+        {
+          claim_data: JSON.stringify({
+            channelId: TEST_CHANNEL_ID,
+            nonce: 3,
+            transferredAmount: '3000',
+            blockchain: 'evm',
+          }),
+        },
+        {
+          // Non-EVM claim — should not crash recovery but won't populate nonce/cumulative
+          claim_data: JSON.stringify({
+            blockchain: 'solana',
+            messageId: 'solana-claim-1',
+            programId: 'SolanaProgram123',
+            channelAccount: 'SolanaAccount123',
+            signature: 'solana-sig',
+          }),
+        },
+      ];
+
+      const recoveryDb = createMockDb(existingClaims);
+
+      // Should not throw even with non-EVM claims
+      const recoveredService = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockChannelManager as unknown as ChannelManager,
+        recoveryDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      // EVM claim should be recovered
+      const latest = recoveredService.getLatestClaim(TEST_CHANNEL_ID);
+      expect(latest).not.toBeNull();
+      expect((latest as EVMClaimMessage).nonce).toBe(3);
     });
   });
 
@@ -339,6 +518,161 @@ describe('PerPacketClaimService', () => {
       await expect(service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 200n)).rejects.toThrow(
         'Signing failed'
       );
+    });
+  });
+
+  describe('on-demand channel creation', () => {
+    it('should attempt ensureChannelExists when getChannelForPeer returns null initially', async () => {
+      const onDemandChannelManager = createMockChannelManager();
+      // First call returns null, second call (after ensureChannelExists) returns the channel
+      let callCount = 0;
+      onDemandChannelManager.getChannelForPeer.mockImplementation(
+        (peerId: string, tokenId: string) => {
+          callCount++;
+          if (callCount === 1) return null;
+          return {
+            channelId: TEST_CHANNEL_ID,
+            tokenAddress: TEST_TOKEN_ADDRESS,
+            peerId,
+            tokenId,
+            chain: 'evm:anvil:31337',
+            createdAt: new Date(),
+            lastActivityAt: new Date(),
+            status: 'open' as const,
+          };
+        }
+      );
+
+      const svc = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        onDemandChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+      expect(result).not.toBeNull();
+      expect(onDemandChannelManager.ensureChannelExists).toHaveBeenCalledWith(TEST_PEER_ID, 'M2M');
+    });
+
+    it('should return null when ensureChannelExists fails and no channel available', async () => {
+      const failingChannelManager = createMockChannelManager();
+      failingChannelManager.getChannelForPeer.mockReturnValue(null);
+      failingChannelManager.ensureChannelExists.mockRejectedValue(
+        new Error('Channel creation failed')
+      );
+
+      const svc = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        failingChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('multi-peer isolation', () => {
+    it('should track nonces and cumulative amounts independently per peer-channel', async () => {
+      const PEER_B_CHANNEL_ID =
+        '0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321';
+      const multiPeerChannelManager = createMockChannelManager({
+        [`${TEST_PEER_ID}:M2M`]: {
+          channelId: TEST_CHANNEL_ID,
+          tokenAddress: TEST_TOKEN_ADDRESS,
+        },
+        ['connector-c:M2M']: {
+          channelId: PEER_B_CHANNEL_ID,
+          tokenAddress: TEST_TOKEN_ADDRESS,
+        },
+      });
+
+      const svc = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        multiPeerChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      // Generate claims for two different peers
+      const resultA1 = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 100n);
+      const resultB1 = await svc.generateClaimForPacket('connector-c', 'M2M', 500n);
+      const resultA2 = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 200n);
+
+      // Peer A: nonce 1 (100), nonce 2 (300 cumulative)
+      expect((resultA1!.claimMessage as EVMClaimMessage).nonce).toBe(1);
+      expect((resultA1!.claimMessage as EVMClaimMessage).transferredAmount).toBe('100');
+      expect((resultA2!.claimMessage as EVMClaimMessage).nonce).toBe(2);
+      expect((resultA2!.claimMessage as EVMClaimMessage).transferredAmount).toBe('300');
+
+      // Peer B: nonce 1 (500) — independent from Peer A
+      expect((resultB1!.claimMessage as EVMClaimMessage).nonce).toBe(1);
+      expect((resultB1!.claimMessage as EVMClaimMessage).transferredAmount).toBe('500');
+    });
+  });
+
+  describe('persistClaim error handling', () => {
+    it('should handle duplicate claim message ID gracefully', async () => {
+      // Set up DB to throw UNIQUE constraint error on INSERT
+      const dupDb = {
+        prepare: jest.fn().mockImplementation((sql: string) => {
+          if (sql.includes('INSERT')) {
+            return {
+              run: jest.fn().mockImplementation(() => {
+                throw new Error('UNIQUE constraint failed: sent_claims.message_id');
+              }),
+            };
+          }
+          // SELECT for recovery
+          return { all: jest.fn().mockReturnValue([]), run: jest.fn() };
+        }),
+      } as unknown as Database;
+
+      const svc = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockChannelManager as unknown as ChannelManager,
+        dupDb,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      // Should not throw — duplicate is logged as warning, not an error
+      const result = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+      expect(result).not.toBeNull();
+    });
+
+    it('should log error for non-duplicate DB failures on persist', async () => {
+      const failDb = {
+        prepare: jest.fn().mockImplementation((sql: string) => {
+          if (sql.includes('INSERT')) {
+            return {
+              run: jest.fn().mockImplementation(() => {
+                throw new Error('disk I/O error');
+              }),
+            };
+          }
+          return { all: jest.fn().mockReturnValue([]), run: jest.fn() };
+        }),
+      } as unknown as Database;
+
+      const svc = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockChannelManager as unknown as ChannelManager,
+        failDb,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      // Should not throw — persist errors are logged, not propagated
+      const result = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+      expect(result).not.toBeNull();
+      // Logger.error should have been called
+      expect(mockLogger.error).toHaveBeenCalled();
     });
   });
 });

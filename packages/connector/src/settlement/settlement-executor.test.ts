@@ -267,6 +267,7 @@ describe('SettlementExecutor', () => {
       // Create executor with per-packet claim service
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          blockchain: 'evm',
           channelId: testChannelId,
           nonce: 5,
           transferredAmount: '5000',

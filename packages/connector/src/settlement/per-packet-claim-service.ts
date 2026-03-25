@@ -14,15 +14,24 @@
  * - Claims are mandatory for peer-forwarded packets (PacketHandler rejects without them)
  * - Claims only generated for PREPARE direction (outgoing)
  * - Returns null if no channel exists for a peer (caller must handle as rejection)
+ * - Delegates signing to chain-appropriate PaymentChannelProvider via ChainProviderRegistry
  *
  * @module settlement/per-packet-claim-service
  */
 
 import type { Database } from 'better-sqlite3';
 import type { Logger } from 'pino';
-import type { PaymentChannelSDK } from './payment-channel-sdk';
+import type { ChainProviderRegistry } from './provider/chain-provider-registry';
+import type { PaymentChannelProvider } from './provider/payment-channel-provider';
+import type { BlockchainType } from '../btp/btp-claim-types';
 import type { ChannelManager } from './channel-manager';
-import { BTP_CLAIM_PROTOCOL, EVMClaimMessage } from '../btp/btp-claim-types';
+import {
+  BTP_CLAIM_PROTOCOL,
+  type BTPClaimMessage,
+  type EVMClaimMessage,
+  isEVMClaim,
+} from '../btp/btp-claim-types';
+import { EVMPaymentChannelProvider } from './provider/evm-payment-channel-provider';
 
 /**
  * BTP protocol data entry for claim attachment
@@ -38,10 +47,13 @@ export interface BTPProtocolData {
  */
 interface ChannelClaimContext {
   channelId: string;
-  tokenNetworkAddress: string;
-  chainId: number;
+  provider: PaymentChannelProvider;
+  blockchain: BlockchainType;
   tokenAddress: string;
-  signerAddress: string;
+  // EVM-specific fields (populated only when blockchain === 'evm')
+  chainId?: number;
+  tokenNetworkAddress?: string;
+  signerAddress?: string;
 }
 
 /**
@@ -49,7 +61,7 @@ interface ChannelClaimContext {
  */
 export interface PerPacketClaimResult {
   protocolData: BTPProtocolData;
-  claimMessage: EVMClaimMessage;
+  claimMessage: BTPClaimMessage;
 }
 
 /**
@@ -64,10 +76,10 @@ export class PerPacketClaimService {
   private readonly cumulativeTransferred: Map<string, bigint> = new Map();
   private readonly currentNonce: Map<string, number> = new Map();
   private readonly channelClaimCache: Map<string, ChannelClaimContext> = new Map();
-  private readonly latestClaim: Map<string, EVMClaimMessage> = new Map();
+  private readonly latestClaim: Map<string, BTPClaimMessage> = new Map();
 
   constructor(
-    private readonly paymentChannelSDK: PaymentChannelSDK,
+    private readonly _registry: ChainProviderRegistry,
     private readonly channelManager: ChannelManager,
     private readonly db: Database,
     logger: Logger,
@@ -117,37 +129,52 @@ export class PerPacketClaimService {
     const newNonce = prevNonce + 1;
     this.currentNonce.set(channelId, newNonce);
 
-    // Sign balance proof (async — but nonce/cumulative are already committed)
+    // Sign balance proof via the chain-appropriate provider
     const locksRoot = '0x0000000000000000000000000000000000000000000000000000000000000000';
-    const signature = await this.paymentChannelSDK.signBalanceProof(
-      channelId,
-      newNonce,
-      newCumulative,
-      0n,
-      locksRoot
-    );
-
-    // Construct self-describing claim message
-    const messageId = `evm-${channelId.substring(0, 8)}-${newNonce}-${Date.now()}`;
-    const timestamp = new Date().toISOString();
-
-    const claimMessage: EVMClaimMessage = {
-      version: '1.0',
-      blockchain: 'evm',
-      messageId,
-      timestamp,
-      senderId: this.nodeId,
+    const signature = await ctx.provider.signBalanceProof({
       channelId,
       nonce: newNonce,
       transferredAmount: newCumulative.toString(),
       lockedAmount: '0',
       locksRoot,
-      signature,
-      signerAddress: ctx.signerAddress,
-      chainId: ctx.chainId,
-      tokenNetworkAddress: ctx.tokenNetworkAddress,
-      tokenAddress: ctx.tokenAddress,
-    };
+    });
+
+    // Construct self-describing claim message
+    const messageId = `${ctx.blockchain}-${channelId.substring(0, 8)}-${newNonce}-${Date.now()}`;
+    const timestamp = new Date().toISOString();
+
+    let claimMessage: BTPClaimMessage;
+
+    if (ctx.blockchain === 'evm') {
+      // EVM claim construction (backward compatible)
+      if (!ctx.signerAddress) {
+        throw new Error(
+          `EVM claim construction requires signerAddress but it was not populated for channel ${channelId}`
+        );
+      }
+      const evmClaim: EVMClaimMessage = {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId,
+        timestamp,
+        senderId: this.nodeId,
+        channelId,
+        nonce: newNonce,
+        transferredAmount: newCumulative.toString(),
+        lockedAmount: '0',
+        locksRoot,
+        signature,
+        signerAddress: ctx.signerAddress,
+        chainId: ctx.chainId,
+        tokenNetworkAddress: ctx.tokenNetworkAddress,
+        tokenAddress: ctx.tokenAddress,
+      };
+      claimMessage = evmClaim;
+    } else {
+      // Future chain claim types will be constructed here based on blockchain discriminator
+      // For now, this path is unreachable since only EVM providers are implemented
+      throw new Error(`Claim construction not implemented for blockchain: ${ctx.blockchain}`);
+    }
 
     // Store as latest claim for SettlementExecutor
     this.latestClaim.set(channelId, claimMessage);
@@ -169,6 +196,7 @@ export class PerPacketClaimService {
         nonce: newNonce,
         cumulative: newCumulative.toString(),
         peerId: toPeerId,
+        blockchain: ctx.blockchain,
       },
       'Generated per-packet claim'
     );
@@ -181,9 +209,9 @@ export class PerPacketClaimService {
    * Used by SettlementExecutor for on-chain settlement submission.
    *
    * @param channelId - Payment channel ID
-   * @returns Latest EVMClaimMessage or null if no claims generated
+   * @returns Latest BTPClaimMessage or null if no claims generated
    */
-  getLatestClaim(channelId: string): EVMClaimMessage | null {
+  getLatestClaim(channelId: string): BTPClaimMessage | null {
     return this.latestClaim.get(channelId) ?? null;
   }
 
@@ -209,8 +237,9 @@ export class PerPacketClaimService {
   }
 
   /**
-   * Build channel claim context by looking up channel metadata and SDK state.
-   * Returns null if no channel exists for the peer.
+   * Build channel claim context by looking up channel metadata and resolving
+   * the chain-appropriate provider via the registry.
+   * Returns null if no channel or no provider exists for the peer.
    */
   private async buildChannelContext(
     peerId: string,
@@ -233,19 +262,39 @@ export class PerPacketClaimService {
       }
     }
 
+    // Resolve the chain-appropriate provider from the registry
+    const provider = this._registry.getProviderForPeer({
+      peerId,
+      chain: metadata.chain,
+    });
+
+    if (!provider) {
+      this.logger.warn(
+        { peerId, tokenId, chain: metadata.chain },
+        'No provider found for peer chain'
+      );
+      return null;
+    }
+
     try {
-      const [chainId, tokenNetworkAddress, signerAddress] = await Promise.all([
-        this.paymentChannelSDK.getChainId(),
-        this.paymentChannelSDK.getTokenNetworkAddress(metadata.tokenAddress),
-        this.paymentChannelSDK.getSignerAddress(),
-      ]);
+      // For EVM providers: get signing context for self-describing claim fields
+      let evmContext:
+        | { chainId: number; tokenNetworkAddress: string; signerAddress: string }
+        | undefined;
+      if (provider instanceof EVMPaymentChannelProvider) {
+        evmContext = await provider.getSigningContext();
+      }
 
       return {
         channelId: metadata.channelId,
-        tokenNetworkAddress,
-        chainId,
+        provider,
+        blockchain: provider.chainType,
         tokenAddress: metadata.tokenAddress,
-        signerAddress,
+        ...(evmContext && {
+          chainId: evmContext.chainId,
+          tokenNetworkAddress: evmContext.tokenNetworkAddress,
+          signerAddress: evmContext.signerAddress,
+        }),
       };
     } catch (error) {
       this.logger.error(
@@ -262,13 +311,16 @@ export class PerPacketClaimService {
    */
   private recoverFromDb(): void {
     try {
-      // Query the latest claim per channel from sent_claims
+      // Query recent claims from sent_claims (all blockchain types), ordered newest first.
+      // We only need the latest claim per channel for state recovery. The LIMIT caps memory
+      // usage on startup — with few active channels, the latest claim per channel appears
+      // within the first few hundred rows even under heavy traffic.
       const rows = this.db
         .prepare(
           `
           SELECT claim_data FROM sent_claims
-          WHERE blockchain = 'evm'
           ORDER BY sent_at DESC
+          LIMIT 1000
         `
         )
         .all() as Array<{ claim_data: string }>;
@@ -277,14 +329,28 @@ export class PerPacketClaimService {
 
       for (const row of rows) {
         try {
-          const claim = JSON.parse(row.claim_data) as EVMClaimMessage;
-          // Only recover the latest per channel (first seen since ordered DESC)
-          if (!recoveredChannels.has(claim.channelId)) {
-            recoveredChannels.add(claim.channelId);
-            this.currentNonce.set(claim.channelId, claim.nonce);
-            this.cumulativeTransferred.set(claim.channelId, BigInt(claim.transferredAmount));
-            this.latestClaim.set(claim.channelId, claim);
+          const claim = JSON.parse(row.claim_data) as BTPClaimMessage;
+
+          // EVM claims have channelId, nonce, transferredAmount for state recovery
+          if (isEVMClaim(claim)) {
+            // Validate required recovery fields exist before using them
+            if (
+              typeof claim.channelId !== 'string' ||
+              typeof claim.nonce !== 'number' ||
+              typeof claim.transferredAmount !== 'string'
+            ) {
+              continue; // Skip structurally invalid claims
+            }
+            // Only recover the latest per channel (first seen since ordered DESC)
+            if (!recoveredChannels.has(claim.channelId)) {
+              recoveredChannels.add(claim.channelId);
+              this.currentNonce.set(claim.channelId, claim.nonce);
+              this.cumulativeTransferred.set(claim.channelId, BigInt(claim.transferredAmount));
+              this.latestClaim.set(claim.channelId, claim);
+            }
           }
+          // Non-EVM claims: nonce/cumulative recovery is chain-specific and
+          // deferred to future implementations (no storage in latestClaim until then)
         } catch {
           // Skip malformed claim data
         }
@@ -308,7 +374,7 @@ export class PerPacketClaimService {
   /**
    * Persist a sent claim to the database (non-blocking).
    */
-  private persistClaim(peerId: string, claim: EVMClaimMessage): void {
+  private persistClaim(peerId: string, claim: BTPClaimMessage): void {
     try {
       this.db
         .prepare(

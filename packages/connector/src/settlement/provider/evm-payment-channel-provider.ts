@@ -362,6 +362,33 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
   }
 
   // ---------------------------------------------------------------------------
+  // EVM-Specific Public Methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Get the EVM-specific signing context needed for constructing self-describing
+   * claim messages (chainId, tokenNetworkAddress, signerAddress).
+   *
+   * This method is NOT part of the `PaymentChannelProvider` interface — it is an
+   * EVM-specific concrete method. Callers should use `instanceof EVMPaymentChannelProvider`
+   * to narrow the type before calling.
+   *
+   * @returns Signing context with chainId (number), tokenNetworkAddress (hex), and signerAddress (hex)
+   */
+  async getSigningContext(): Promise<{
+    chainId: number;
+    tokenNetworkAddress: string;
+    signerAddress: string;
+  }> {
+    const [chainId, tokenNetworkAddress, signerAddress] = await Promise.all([
+      this._sdk.getChainId(),
+      this._sdk.getTokenNetworkAddress(this._tokenAddress),
+      this._sdk.getSignerAddress(),
+    ]);
+    return { chainId, tokenNetworkAddress, signerAddress };
+  }
+
+  // ---------------------------------------------------------------------------
   // Private Helpers
   // ---------------------------------------------------------------------------
 

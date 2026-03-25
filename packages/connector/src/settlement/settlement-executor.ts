@@ -29,6 +29,7 @@ import { AccountManager } from './account-manager';
 import { PaymentChannelSDK } from './payment-channel-sdk';
 import { SettlementMonitor } from './settlement-monitor';
 import type { PerPacketClaimService } from './per-packet-claim-service';
+import { isEVMClaim } from '../btp/btp-claim-types';
 
 /**
  * Configuration interface for SettlementExecutor
@@ -482,7 +483,7 @@ export class SettlementExecutor extends EventEmitter {
     let claimSignature: string;
 
     const latestClaim = this.perPacketClaimService?.getLatestClaim(channelId);
-    if (latestClaim) {
+    if (latestClaim && isEVMClaim(latestClaim)) {
       // Per-packet claims already accumulated the correct cumulative state
       claimBalanceProof = {
         channelId,

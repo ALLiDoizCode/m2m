@@ -86,6 +86,9 @@ function createMockSDK(): jest.Mocked<
     | 'onChannelSettled'
     | 'onChannelCooperativeSettled'
     | 'removeAllListeners'
+    | 'getChainId'
+    | 'getTokenNetworkAddress'
+    | 'getSignerAddress'
   >
 > {
   return {
@@ -102,6 +105,9 @@ function createMockSDK(): jest.Mocked<
     onChannelSettled: jest.fn(),
     onChannelCooperativeSettled: jest.fn(),
     removeAllListeners: jest.fn(),
+    getChainId: jest.fn().mockResolvedValue(31337),
+    getTokenNetworkAddress: jest.fn().mockResolvedValue('0xTokenNetworkAddress1234567890abcdef'),
+    getSignerAddress: jest.fn().mockResolvedValue('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1'),
   };
 }
 
@@ -791,6 +797,45 @@ describe('deposit delegation (T-32.3-11)', () => {
     );
     expect(result).toHaveProperty('txHash');
     expect(typeof result.txHash).toBe('string');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-32.4-11: getSigningContext
+// ---------------------------------------------------------------------------
+
+describe('getSigningContext (T-32.4-11)', () => {
+  it('should return SDK values for chainId, tokenNetworkAddress, and signerAddress', async () => {
+    const sdk = createMockSDK();
+    sdk.getChainId = jest.fn().mockResolvedValue(31337);
+    sdk.getTokenNetworkAddress = jest
+      .fn()
+      .mockResolvedValue('0xTokenNetworkAddress1234567890abcdef');
+    sdk.getSignerAddress = jest
+      .fn()
+      .mockResolvedValue('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1');
+
+    const provider = createProvider(sdk);
+    const ctx = await provider.getSigningContext();
+
+    expect(ctx).toEqual({
+      chainId: 31337,
+      tokenNetworkAddress: '0xTokenNetworkAddress1234567890abcdef',
+      signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    });
+
+    expect(sdk.getChainId).toHaveBeenCalledTimes(1);
+    expect(sdk.getTokenNetworkAddress).toHaveBeenCalledWith(TOKEN_ADDRESS);
+    expect(sdk.getSignerAddress).toHaveBeenCalledTimes(1);
+  });
+
+  it('should propagate SDK errors', async () => {
+    const sdk = createMockSDK();
+    sdk.getChainId = jest.fn().mockRejectedValue(new Error('RPC failure'));
+
+    const provider = createProvider(sdk);
+
+    await expect(provider.getSigningContext()).rejects.toThrow('RPC failure');
   });
 });
 
