@@ -35,7 +35,7 @@ epics:
 
   epic-33:
     name: "Solana Payment Channel Provider"
-    status: in-progress
+    status: done
     stories:
       33.1:
         name: "Solana Payment Channel Program — Channel Lifecycle"
@@ -60,7 +60,7 @@ epics:
         status: done
       33.8:
         name: "Solana Devnet Deployment & Documentation"
-        status: backlog
+        status: done
 
   epic-34:
     name: "Mina Protocol Payment Channel Provider"
