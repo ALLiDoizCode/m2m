@@ -54,7 +54,7 @@ epics:
         status: done
       33.6:
         name: "Solana Claim Message Types & Serialization"
-        status: backlog
+        status: done
       33.7:
         name: "Integration Tests — Solana Provider E2E"
         status: backlog

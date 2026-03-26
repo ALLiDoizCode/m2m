@@ -148,13 +148,28 @@ export class InboundClaimValidator {
     peerId: string
   ): Promise<ILPRejectPacket | null> {
     // Verify EIP-712 signature
-    const balanceProof: BalanceProof = {
-      channelId: claim.channelId,
-      nonce: claim.nonce,
-      transferredAmount: BigInt(claim.transferredAmount),
-      lockedAmount: BigInt(claim.lockedAmount),
-      locksRoot: claim.locksRoot,
-    };
+    // BigInt() can throw on non-numeric strings; wrap in try/catch for defense-in-depth
+    // even though validateClaimMessage() already validates the format.
+    let balanceProof: BalanceProof;
+    try {
+      balanceProof = {
+        channelId: claim.channelId,
+        nonce: claim.nonce,
+        transferredAmount: BigInt(claim.transferredAmount),
+        lockedAmount: BigInt(claim.lockedAmount),
+        locksRoot: claim.locksRoot,
+      };
+    } catch {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_invalid_amount',
+          peerId,
+          channelId: claim.channelId,
+        },
+        'Rejecting ILP PREPARE: invalid transferredAmount or lockedAmount for BigInt conversion'
+      );
+      return this.createReject('Invalid claim amounts');
+    }
 
     let signatureValid: boolean;
     try {

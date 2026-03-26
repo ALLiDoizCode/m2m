@@ -544,4 +544,94 @@ describe('ClaimSender', () => {
       expect(claimData).not.toHaveProperty('tokenAddress');
     }, 50);
   });
+
+  /**
+   * Acceptance Tests for Story 33.6: sendSolanaClaim in ClaimSender
+   *
+   * Tests Solana claim construction, serialization, message ID generation,
+   * and BTP transport for Solana claims.
+   */
+  describe('sendSolanaClaim (Story 33.6)', () => {
+    const SOLANA_PROGRAM_ID = 'PayChan11111111111111111111111111111111111';
+    const SOLANA_CHANNEL_ACCOUNT = 'AbCdEfGh11111111111111111111111111111111111';
+    const SOLANA_SIGNER_PUBKEY = 'SiGnEr111111111111111111111111111111111111';
+    const SOLANA_SIGNATURE = 'c29sYW5hLXNpZ25hdHVyZS1kYXRh';
+
+    it('[P1] should send Solana claim successfully (T-33.6-17)', async () => {
+      const result = await claimSender.sendSolanaClaim(
+        'peer-solana',
+        mockBtpClient as unknown as BTPClient,
+        SOLANA_PROGRAM_ID,
+        SOLANA_CHANNEL_ACCOUNT,
+        42,
+        '5000000',
+        SOLANA_SIGNATURE,
+        SOLANA_SIGNER_PUBKEY,
+        'devnet'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.messageId).toMatch(/^solana-AbCdEfGh-42-\d+$/);
+
+      // Verify JSON payload includes Solana-specific fields
+      const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
+      const claimData = JSON.parse(dataBuffer.toString('utf8'));
+      expect(claimData).toMatchObject({
+        version: '1.0',
+        blockchain: 'solana',
+        programId: SOLANA_PROGRAM_ID,
+        channelAccount: SOLANA_CHANNEL_ACCOUNT,
+        nonce: 42,
+        transferredAmount: '5000000',
+        signature: SOLANA_SIGNATURE,
+        signerPublicKey: SOLANA_SIGNER_PUBKEY,
+        cluster: 'devnet',
+      });
+
+      // Verify database insert with blockchain='solana'
+      expect(mockPreparedStatement.run).toHaveBeenCalledWith(
+        result.messageId,
+        'peer-solana',
+        'solana',
+        expect.any(String),
+        expect.any(Number)
+      );
+    }, 50);
+
+    it('[P1] should generate message ID with Solana base58 channel prefix (T-33.6-18)', async () => {
+      const result = await claimSender.sendSolanaClaim(
+        'peer-solana',
+        mockBtpClient as unknown as BTPClient,
+        SOLANA_PROGRAM_ID,
+        SOLANA_CHANNEL_ACCOUNT,
+        999,
+        '1000000',
+        SOLANA_SIGNATURE,
+        SOLANA_SIGNER_PUBKEY
+      );
+
+      // Message ID should use first 8 chars of base58 channelAccount
+      expect(result.messageId).toMatch(/^solana-AbCdEfGh-999-\d{13}$/);
+    }, 50);
+
+    it('[P1] should omit cluster when not provided', async () => {
+      const result = await claimSender.sendSolanaClaim(
+        'peer-solana',
+        mockBtpClient as unknown as BTPClient,
+        SOLANA_PROGRAM_ID,
+        SOLANA_CHANNEL_ACCOUNT,
+        1,
+        '100',
+        SOLANA_SIGNATURE,
+        SOLANA_SIGNER_PUBKEY
+        // cluster omitted
+      );
+
+      expect(result.success).toBe(true);
+
+      const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
+      const claimData = JSON.parse(dataBuffer.toString('utf8'));
+      expect(claimData).not.toHaveProperty('cluster');
+    }, 50);
+  });
 });

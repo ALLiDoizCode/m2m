@@ -29,9 +29,12 @@ import {
   BTP_CLAIM_PROTOCOL,
   type BTPClaimMessage,
   type EVMClaimMessage,
+  type SolanaClaimMessage,
   isEVMClaim,
+  isSolanaClaim,
 } from '../btp/btp-claim-types';
 import { EVMPaymentChannelProvider } from './provider/evm-payment-channel-provider';
+import { SolanaPaymentChannelProvider } from './provider/solana-payment-channel-provider';
 
 /**
  * BTP protocol data entry for claim attachment
@@ -54,6 +57,12 @@ interface ChannelClaimContext {
   chainId?: number;
   tokenNetworkAddress?: string;
   signerAddress?: string;
+  // Solana-specific fields (populated only when blockchain === 'solana')
+  programId?: string;
+  channelAccount?: string; // PDA address (same as channelId for Solana)
+  signerPublicKey?: string;
+  cluster?: string;
+  tokenMint?: string;
 }
 
 /**
@@ -127,9 +136,23 @@ export class PerPacketClaimService {
 
     const prevNonce = this.currentNonce.get(channelId) ?? 0;
     const newNonce = prevNonce + 1;
+
+    // Guard against nonce exceeding Number.MAX_SAFE_INTEGER (2^53 - 1).
+    // Beyond this threshold, integer arithmetic loses precision, which could
+    // allow signature replay or nonce reuse in payment channel claims.
+    if (!Number.isSafeInteger(newNonce)) {
+      this.logger.error(
+        { channelId, prevNonce },
+        'Nonce overflow: channel nonce exceeded MAX_SAFE_INTEGER, refusing to generate claim'
+      );
+      return null;
+    }
+
     this.currentNonce.set(channelId, newNonce);
 
-    // Sign balance proof via the chain-appropriate provider
+    // Sign balance proof via the chain-appropriate provider.
+    // lockedAmount and locksRoot are EVM-specific concepts; Solana providers ignore them
+    // but the chain-agnostic SignBalanceProofParams interface requires them.
     const locksRoot = '0x0000000000000000000000000000000000000000000000000000000000000000';
     const signature = await ctx.provider.signBalanceProof({
       channelId,
@@ -170,9 +193,31 @@ export class PerPacketClaimService {
         tokenAddress: ctx.tokenAddress,
       };
       claimMessage = evmClaim;
+    } else if (ctx.blockchain === 'solana') {
+      // Solana claim construction (Story 33.6)
+      if (!ctx.programId || !ctx.channelAccount || !ctx.signerPublicKey) {
+        throw new Error(
+          `Solana claim construction requires programId, channelAccount, and signerPublicKey ` +
+            `but they were not populated for channel ${channelId}`
+        );
+      }
+      const solanaClaim: SolanaClaimMessage = {
+        version: '1.0',
+        blockchain: 'solana',
+        messageId,
+        timestamp,
+        senderId: this.nodeId,
+        programId: ctx.programId,
+        channelAccount: ctx.channelAccount,
+        nonce: newNonce,
+        transferredAmount: newCumulative.toString(),
+        signature,
+        signerPublicKey: ctx.signerPublicKey,
+        ...(ctx.cluster !== undefined && { cluster: ctx.cluster }),
+      };
+      claimMessage = solanaClaim;
     } else {
       // Future chain claim types will be constructed here based on blockchain discriminator
-      // For now, this path is unreachable since only EVM providers are implemented
       throw new Error(`Claim construction not implemented for blockchain: ${ctx.blockchain}`);
     }
 
@@ -285,6 +330,14 @@ export class PerPacketClaimService {
         evmContext = await provider.getSigningContext();
       }
 
+      // For Solana providers: get Solana-specific context (Story 33.6)
+      let solanaContext:
+        | { programId: string; tokenMint: string; cluster: string; signerAddress: string }
+        | undefined;
+      if (provider instanceof SolanaPaymentChannelProvider) {
+        solanaContext = provider.getSolanaContext();
+      }
+
       return {
         channelId: metadata.channelId,
         provider,
@@ -294,6 +347,13 @@ export class PerPacketClaimService {
           chainId: evmContext.chainId,
           tokenNetworkAddress: evmContext.tokenNetworkAddress,
           signerAddress: evmContext.signerAddress,
+        }),
+        ...(solanaContext && {
+          programId: solanaContext.programId,
+          channelAccount: metadata.channelId, // channelId IS the PDA for Solana
+          signerPublicKey: solanaContext.signerAddress,
+          cluster: solanaContext.cluster,
+          tokenMint: solanaContext.tokenMint,
         }),
       };
     } catch (error) {
@@ -349,7 +409,23 @@ export class PerPacketClaimService {
               this.latestClaim.set(claim.channelId, claim);
             }
           }
-          // Non-EVM claims: nonce/cumulative recovery is chain-specific and
+          // Solana claims: recover nonce and cumulative state (Story 33.6)
+          else if (isSolanaClaim(claim)) {
+            if (
+              typeof claim.channelAccount !== 'string' ||
+              typeof claim.nonce !== 'number' ||
+              typeof claim.transferredAmount !== 'string'
+            ) {
+              continue; // Skip structurally invalid claims
+            }
+            if (!recoveredChannels.has(claim.channelAccount)) {
+              recoveredChannels.add(claim.channelAccount);
+              this.currentNonce.set(claim.channelAccount, claim.nonce);
+              this.cumulativeTransferred.set(claim.channelAccount, BigInt(claim.transferredAmount));
+              this.latestClaim.set(claim.channelAccount, claim);
+            }
+          }
+          // Non-EVM/Solana claims: nonce/cumulative recovery is chain-specific and
           // deferred to future implementations (no storage in latestClaim until then)
         } catch {
           // Skip malformed claim data

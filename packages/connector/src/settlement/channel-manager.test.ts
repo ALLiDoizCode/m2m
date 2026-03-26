@@ -375,4 +375,137 @@ describe('ChannelManager', () => {
       );
     });
   });
+
+  /**
+   * ATDD Acceptance Tests for Story 33.6: registerExternalChannel Solana Support
+   *
+   * TDD RED PHASE: All tests use it.skip() because registerExternalChannel()
+   * currently requires EVM-specific params (chainId: number, tokenNetworkAddress: string)
+   * and hardcodes `evm:${chainId}` for the chain field. Solana channels need:
+   * - Optional tokenNetworkAddress and chainId (they are EVM-only)
+   * - A `chain` string parameter (e.g., 'solana:devnet')
+   * - Case-sensitive token address comparison for base58 addresses
+   *
+   * To move to GREEN phase:
+   * 1. Extend registerExternalChannel to accept optional chain string
+   * 2. Make tokenNetworkAddress and chainId optional
+   * 3. Add case-sensitive comparison path for non-EVM chains
+   * 4. Remove .skip from all tests
+   * 5. Run: npx jest packages/connector/src/settlement/channel-manager.test.ts
+   */
+  describe('registerExternalChannel Solana support (Story 33.6)', () => {
+    it('[P0] should register Solana channel with chain: solana:devnet (T-33.6-22)', () => {
+      const solanaParams = {
+        channelId: 'AbCdEfGh11111111111111111111111111111111111',
+        peerId: 'peer-solana',
+        tokenAddress: 'SoLtOkEn1111111111111111111111111111111111',
+        chain: 'solana:devnet',
+        status: 'open' as const,
+      };
+
+      const metadata = channelManager.registerExternalChannel(solanaParams);
+
+      expect(metadata.channelId).toBe(solanaParams.channelId);
+      expect(metadata.peerId).toBe(solanaParams.peerId);
+      expect(metadata.tokenAddress).toBe(solanaParams.tokenAddress);
+      expect(metadata.chain).toBe('solana:devnet');
+      expect(metadata.status).toBe('open');
+
+      // Verify accessible via getChannelById
+      const byId = channelManager.getChannelById(solanaParams.channelId);
+      expect(byId).toBe(metadata);
+    });
+
+    it('[P0] should remain backward compatible -- EVM channels still use evm: prefix (T-33.6-23)', () => {
+      const evmParams = {
+        channelId: '0xExternalChannel456',
+        peerId: 'peer-evm',
+        tokenAddress: '0xTokenAddress',
+        tokenNetworkAddress: '0xTokenNetworkAddress',
+        chainId: 31337,
+        status: 'open' as const,
+      };
+
+      const metadata = channelManager.registerExternalChannel(evmParams);
+
+      // EVM channels should still use the legacy evm: prefix format
+      expect(metadata.chain).toBe('evm:31337');
+      expect(metadata.tokenAddress).toBe(evmParams.tokenAddress);
+    });
+
+    it('[P1] should use case-sensitive comparison for Solana token mint reverse-lookup (T-33.6-24)', () => {
+      // Add a Solana token mint to the config map (case-sensitive base58)
+      config.tokenAddressMap.set('SOL_TOKEN', 'SoLtOkEn1111111111111111111111111111111111');
+
+      // Recreate channel manager with updated config
+      const cmWithSolana = new ChannelManager(
+        config,
+        mockPaymentChannelSDK,
+        mockSettlementExecutor,
+        mockLogger
+      );
+
+      const solanaParams = {
+        channelId: 'SolChannel111111111111111111111111111111111',
+        peerId: 'peer-solana-token',
+        tokenAddress: 'SoLtOkEn1111111111111111111111111111111111', // Exact case match
+        chain: 'solana:devnet',
+        status: 'open' as const,
+      };
+
+      const metadata = cmWithSolana.registerExternalChannel(solanaParams);
+
+      // Should match by case-sensitive comparison (not toLowerCase)
+      expect(metadata.tokenId).toBe('SOL_TOKEN');
+
+      cmWithSolana.stop();
+    });
+
+    it('[P1] should NOT match Solana token with different case (case-sensitive base58)', () => {
+      config.tokenAddressMap.set('SOL_TOKEN', 'SoLtOkEn1111111111111111111111111111111111');
+
+      const cmWithSolana = new ChannelManager(
+        config,
+        mockPaymentChannelSDK,
+        mockSettlementExecutor,
+        mockLogger
+      );
+
+      const solanaParams = {
+        channelId: 'SolChannel222222222222222222222222222222222',
+        peerId: 'peer-solana-case',
+        tokenAddress: 'soltoken1111111111111111111111111111111111', // Wrong case!
+        chain: 'solana:devnet',
+        status: 'open' as const,
+      };
+
+      const metadata = cmWithSolana.registerExternalChannel(solanaParams);
+
+      // Should NOT match -- falls back to raw token address as tokenId
+      expect(metadata.tokenId).toBe('soltoken1111111111111111111111111111111111');
+
+      cmWithSolana.stop();
+    });
+
+    it('[P0] should not require tokenNetworkAddress for Solana channels', () => {
+      const solanaParams = {
+        channelId: 'SolChannel333333333333333333333333333333333',
+        peerId: 'peer-solana-no-tn',
+        tokenAddress: 'SoLtOkEn1111111111111111111111111111111111',
+        chain: 'solana:devnet',
+        status: 'open' as const,
+        // tokenNetworkAddress intentionally omitted (EVM-only field)
+        // chainId intentionally omitted (EVM-only field)
+      };
+
+      // Should not throw when tokenNetworkAddress and chainId are omitted
+      expect(() => {
+        channelManager.registerExternalChannel(solanaParams);
+      }).not.toThrow();
+
+      const metadata = channelManager.getChannelById(solanaParams.channelId);
+      expect(metadata).not.toBeNull();
+      expect(metadata!.chain).toBe('solana:devnet');
+    });
+  });
 });
