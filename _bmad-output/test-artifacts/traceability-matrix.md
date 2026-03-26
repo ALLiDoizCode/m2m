@@ -1,26 +1,17 @@
 ---
-stepsCompleted:
-  - step-01-load-context
-  - step-02-discover-tests
-  - step-03-map-criteria
-  - step-04-analyze-gaps
-  - step-05-gate-decision
-lastStep: 'step-05-gate-decision'
-lastSaved: '2026-03-25'
+stepsCompleted: ['step-01-load-context', 'step-02-discover-tests', 'step-03-map-criteria', 'step-04-classify-coverage', 'step-05-gap-analysis', 'step-06-gate-decision']
+lastStep: 'step-06-gate-decision'
+lastSaved: '2026-03-26'
 workflowType: 'testarch-trace'
 inputDocuments:
-  - _bmad-output/implementation-artifacts/33-3-solana-payment-channel-program-tests-deployment.md
-  - packages/solana-program/tests/integration.rs
-  - packages/solana-program/tests/security.rs
-  - packages/solana-program/tests/performance.rs
-  - tools/solana/deploy.sh
-  - Makefile
+  - '_bmad-output/implementation-artifacts/33-4-solana-payment-channel-sdk-typescript-integration.md'
+  - 'packages/connector/src/settlement/solana-payment-channel-sdk.test.ts'
 ---
 
-# Traceability Matrix & Gate Decision - Story 33.3
+# Traceability Matrix & Gate Decision - Story 33.4
 
-**Story:** 33.3 -- Solana Payment Channel Program -- Tests & Deployment
-**Date:** 2026-03-25
+**Story:** SolanaPaymentChannelSDK -- TypeScript Integration
+**Date:** 2026-03-26
 **Evaluator:** TEA Agent (Claude Opus 4.6)
 
 ---
@@ -31,226 +22,287 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 ### Coverage Summary
 
-| Priority  | Total Criteria | FULL Coverage | Coverage % | Status   |
-| --------- | -------------- | ------------- | ---------- | -------- |
-| P0        | 6              | 6             | 100%       | PASS     |
-| P1        | 6              | 4             | 67%        | WARN     |
-| P2        | 0              | 0             | N/A        | N/A      |
-| P3        | 0              | 0             | N/A        | N/A      |
-| **Total** | **12**         | **10**        | **83%**    | **WARN** |
+| Priority  | Total Criteria | FULL Coverage | Coverage % | Status       |
+| --------- | -------------- | ------------- | ---------- | ------------ |
+| P0        | 7              | 2             | 29%        | FAIL         |
+| P1        | 3              | 0             | 0%         | FAIL         |
+| P2        | 0              | 0             | N/A        | N/A          |
+| P3        | 0              | 0             | N/A        | N/A          |
+| **Total** | **10**         | **2**         | **20%**    | **FAIL**     |
 
 **Legend:**
 
-- PASS - Coverage meets quality gate threshold
-- WARN - Coverage below threshold but not critical
-- FAIL - Coverage below minimum threshold (blocker)
+- FULL - All scenarios validated at appropriate level(s)
+- PARTIAL - Some coverage but missing edge cases or levels
+- UNIT-ONLY - Only unit tests (missing integration/E2E validation)
+- NONE - No test coverage at any level
 
 ---
 
 ### Detailed Mapping
 
-#### AC 1: Full Lifecycle Integration Test (P0)
+#### AC 1: Open Channel Transaction (P0)
 
-- **Coverage:** FULL PASS
+- **Coverage:** NONE
+
 - **Tests:**
-  - `T-33.3-01` - tests/integration.rs:500
-    - **Given:** The complete on-chain program
-    - **When:** The test suite executes the full lifecycle: open -> deposit A -> deposit B -> claim A -> claim B -> close -> settle
-    - **Then:** All lifecycle steps pass and final balances match cumulative transferred amounts
-  - `T-33.3-01b` - tests/integration.rs:643
-    - **Given:** The complete on-chain program
-    - **When:** The alternate force_close_expired settlement path is exercised
-    - **Then:** The lifecycle completes via the force_close_expired path with correct fund distribution
-
-- **Gaps:** None
-- **Recommendation:** None needed. Both happy path and alternate settlement path are covered.
-
----
-
-#### AC 2: Balance Conservation -- Vault Invariant (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-02` - tests/integration.rs:734
-    - **Given:** An open channel with deposits from both participants
-    - **When:** Deposits and claims are applied in sequence
-    - **Then:** vault_balance == deposit_a + deposit_b holds at every state transition until settle
-
-- **Gaps:** None
-- **Recommendation:** None needed. Vault invariant verified at each state transition point.
-
----
-
-#### AC 3: Balance Conservation -- Post-Settlement (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-03` - tests/integration.rs:876
-    - **Given:** A channel that has been deposited into, claimed against, and settled
-    - **When:** Final token balances are summed
-    - **Then:** token_balance_a + token_balance_b == initial_deposit_a + initial_deposit_b
-  - `T-33.3-03b` - tests/integration.rs:979
-    - **Given:** A channel that has been deposited into and settled with no claims
-    - **When:** Final token balances are summed
-    - **Then:** Conservation invariant holds even with zero transferred amounts
-
-- **Gaps:** None
-- **Recommendation:** None needed. Both with-claims and no-claims conservation paths verified.
-
----
-
-#### AC 4: Nonce Replay Attack Across Multiple Claims (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-04` - tests/security.rs:453
-    - **Given:** An open channel with multiple claims already submitted (nonces 1, 2, 3)
-    - **When:** An attacker replays a claim with nonce 2
-    - **Then:** The instruction fails with NonceNotMonotonic error (custom error code 6)
-
-- **Gaps:** None
-- **Recommendation:** None needed. Nonce replay with multi-claim sequence verified.
-
----
-
-#### AC 5: Challenge Period Timing Enforcement (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-05` - tests/security.rs:525
-    - **Given:** A closed channel with challenge_duration = 60 seconds
-    - **When:** Settle is attempted at exactly close_timestamp + 59 seconds
-    - **Then:** The instruction fails with ChannelChallengeNotExpired error
-    - **And When:** Settle is attempted at exactly close_timestamp + 60 seconds
-    - **And Then:** The settlement succeeds
-
-- **Gaps:** None
-- **Recommendation:** None needed. Both boundary conditions (too early / exactly on time) tested.
-
----
-
-#### AC 6: PDA Derivation With Swapped Participants (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-06` - tests/security.rs:654
-    - **Given:** Participants (A, B) and (B, A)
-    - **When:** PDA is derived for both orderings
-    - **Then:** Both produce the same PDA address (lexicographic sorting verified)
-  - `T-33.3-06b` - tests/security.rs:704
-    - **Given:** Same participants with different token mints
-    - **When:** PDA is derived for each mint
-    - **Then:** Different mints produce different PDA addresses (isolation verified)
-
-- **Gaps:** None
-- **Recommendation:** None needed. Order-independence and mint-isolation both verified.
-
----
-
-#### AC 7: Compute Unit Profiling (P1)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-07` - tests/performance.rs:359
-    - **Given:** An open channel with a valid claim transaction
-    - **When:** The transaction is simulated
-    - **Then:** Compute units consumed is under 50,000 CU
-  - `T-33.3-07b` - tests/performance.rs:417
-    - **Given:** An initialize_channel transaction
-    - **When:** The transaction is simulated
-    - **Then:** CU consumption baseline recorded (under 200,000)
-  - `T-33.3-07c` - tests/performance.rs:474
-    - **Given:** A deposit transaction
-    - **When:** The transaction is simulated
-    - **Then:** CU consumption baseline recorded (under 50,000)
-
-- **Gaps:** None
-- **Recommendation:** None needed. claim_from_channel plus baselines for initialize and deposit all profiled.
-
----
-
-#### AC 8: Rent Economics (P1)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-08` - tests/performance.rs:558
-    - **Given:** A newly initialized channel
-    - **When:** The channel PDA and vault accounts are inspected
-    - **Then:** Both accounts have lamport balances >= rent-exempt minimum for their data sizes
-
-- **Gaps:** None
-- **Recommendation:** None needed. Both channel PDA (178 bytes) and vault token account verified rent-exempt.
-
----
-
-#### AC 9: Overflow Protection (P1)
-
-- **Coverage:** PARTIAL WARN
-- **Tests:**
-  - `T-33.3-09` - tests/security.rs:741
-    - **Given:** An open channel
-    - **When:** Two large deposits are made that accumulate correctly
-    - **Then:** The deposits succeed when within u64 range
+  - `T-33.4-01` - solana-payment-channel-sdk.test.ts:1083 **(SKIPPED)**
+    - **Given:** a configured SolanaPaymentChannelSDK with bankrun RPC endpoint and program ID
+    - **When:** openChannel() is called with valid participantA, participantB, tokenMint, and challengeDuration
+    - **Then:** a transaction is built, signed, and submitted that creates the channel PDA on-chain
+    - **Status:** `it.skip` -- deferred to Story 33.7
 
 - **Gaps:**
-  - Missing: Explicit test of u64::MAX deposit that triggers ArithmeticOverflow error code 10
-  - Note: The test (`test_large_deposits_accumulate_correctly`) verifies defense-in-depth with large values but does not explicitly trigger the ArithmeticOverflow error path. The AC specifies the instruction "fails with ArithmeticOverflow error (custom error code 10)" but the test verifies accumulation succeeds for large-but-valid values. The negative overflow case (two deposits summing past u64::MAX returning error code 10) is not explicitly asserted.
+  - Missing: No active test verifies openChannel() builds and submits initialize_channel transaction
+  - Missing: No active test verifies the returned channel PDA address and transaction signature
 
-- **Recommendation:** Add a test `T-33.3-09b` in `security.rs` that deposits u64::MAX - 1, then attempts a second deposit of 2 and asserts failure with custom error code 10 (ArithmeticOverflow). The story dev notes acknowledge this is a "defense-in-depth" test, but the AC explicitly requires the error to be triggered and verified.
-
----
-
-#### AC 10: Security Edge Cases -- All Rejected (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-33.3-10a` - tests/security.rs:821
-    - **Given:** A valid claim with tampered Ed25519 signature
-    - **When:** The claim is submitted
-    - **Then:** Fails with InvalidSignature (error code 8)
-  - `T-33.3-10b` - tests/security.rs:867
-    - **Given:** A claim signed by a non-participant
-    - **When:** The claim is submitted
-    - **Then:** Fails with UnauthorizedSigner (error code 9)
-  - `T-33.3-10c` - tests/security.rs:912
-    - **Given:** A claim with lower transferred_amount than previously recorded
-    - **When:** The claim is submitted
-    - **Then:** Fails with TransferredAmountDecreased (error code 7)
-  - `T-33.3-04` - tests/security.rs:453 (also covers NonceNotMonotonic, error code 6)
-
-- **Gaps:** None
-- **Recommendation:** None needed. All four error codes (6, 7, 8, 9) verified with explicit assertions.
+- **Recommendation:** Implement T-33.4-01 integration test with solana-bankrun. This is a P0 gap -- openChannel is the entry point for the entire channel lifecycle. Without this test, there is no verification that the SDK correctly constructs the 9-account initialize_channel instruction or that the on-chain program accepts it.
 
 ---
 
-#### AC 11: Deployment Script Deploys to Devnet (P1)
+#### AC 2: Deposit Transaction (P0)
 
-- **Coverage:** PARTIAL WARN
+- **Coverage:** NONE
+
 - **Tests:**
-  - Manual verification only -- `tools/solana/deploy.sh` exists with `--network devnet` support
-  - `Makefile` target `solana-deploy-devnet` exists with `DEPLOYER_KEYPAIR` guard
+  - `T-33.4-02` - solana-payment-channel-sdk.test.ts:1098 **(SKIPPED)**
+    - **Given:** an open channel PDA and a funded depositor token account
+    - **When:** deposit() is called with an amount and depositor signer
+    - **Then:** SPL tokens are transferred to the vault PDA
+    - **Status:** `it.skip` -- deferred to Story 33.7
 
 - **Gaps:**
-  - Missing: No automated test verifying deployment script execution. This is acknowledged as a manual/CI gate test (T-33.3-10 in the test plan).
-  - The deployment script cannot be tested in the Rust test framework (requires live Solana cluster).
+  - Missing: No active test verifies deposit() transfers SPL tokens to vault
+  - Missing: No active test verifies the deposit field is updated on-chain
 
-- **Recommendation:** This gap is expected per the story design -- the script is created here but executed in Story 33.8. The script has been code-reviewed (3 rounds). Mark as accepted risk for automated coverage.
+- **Recommendation:** Implement T-33.4-02 integration test with solana-bankrun. P0 gap -- deposit is essential for funding channels. Without testing, there is no verification the 5-account deposit instruction or token transfer works correctly.
 
 ---
 
-#### AC 12: Upgrade Authority Configuration (P1)
+#### AC 3: Sign Balance Proof (P0)
 
-- **Coverage:** PARTIAL WARN
+- **Coverage:** UNIT-ONLY
+
 - **Tests:**
-  - Manual verification only -- `deploy.sh` supports `--upgrade-authority` flag
-  - Script includes `solana program set-upgrade-authority` call
-  - Upgrade process documented in script comments (lines 21-40)
+  - `T-33.4-03` - solana-payment-channel-sdk.test.ts:328
+    - **Given:** a channel PDA, nonce, transferred_amount, and a valid Ed25519 keypair
+    - **When:** signBalanceProof is called
+    - **Then:** a 64-byte Uint8Array signature is returned
+  - `T-33.4-03b` - solana-payment-channel-sdk.test.ts:349
+    - **Given:** same keypair, different nonces
+    - **When:** signBalanceProof is called twice
+    - **Then:** the signatures are different
+  - `T-33.4-03c` - solana-payment-channel-sdk.test.ts:758
+    - **Given:** same keypair and inputs
+    - **When:** signBalanceProof is called twice
+    - **Then:** both signatures are identical (Ed25519 determinism)
+  - `T-33.4-03d` - solana-payment-channel-sdk.test.ts:784
+    - **Given:** same keypair, different transferred amounts
+    - **When:** signBalanceProof is called
+    - **Then:** signatures differ
+  - `T-33.4-03e` - solana-payment-channel-sdk.test.ts:808
+    - **Given:** two different keypairs, same inputs
+    - **When:** signBalanceProof is called
+    - **Then:** signatures differ
+  - `T-33.4-04` - solana-payment-channel-sdk.test.ts:1111 **(SKIPPED)**
+    - **Given:** TS-signed balance proof
+    - **When:** submitted to on-chain claim_from_channel
+    - **Then:** Rust program accepts the Ed25519 signature
+    - **Status:** `it.skip` -- deferred to Story 33.7
 
 - **Gaps:**
-  - Missing: No automated test verifying upgrade authority is set correctly after deployment.
-  - The upgrade authority transfer is a deployment-time operation requiring a live Solana cluster.
+  - Missing: Cross-language verification that TS-signed proof is accepted by Rust on-chain program (T-33.4-04 is skipped)
 
-- **Recommendation:** Same as AC 11 -- this is a deployment-time verification that belongs in Story 33.8. The script and Makefile support the `--upgrade-authority` flag with proper passthrough. Mark as accepted risk.
+- **Recommendation:** The AC specifically requires "Ed25519 signature is produced over the canonical message format." Unit tests verify the signature is 64 bytes and deterministic, but do not verify the signature is cryptographically valid against the expected message. The cross-language test (T-33.4-04) is critical for proving interoperability with the Rust program. Implement with solana-bankrun.
+
+---
+
+#### AC 4: Claim Transaction With Ed25519 Precompile (P0)
+
+- **Coverage:** UNIT-ONLY
+
+- **Tests:**
+  - `T-33.4-14` - solana-payment-channel-sdk.test.ts:551
+    - **Given:** known signature, pubkey, and message bytes
+    - **When:** buildEd25519PrecompileInstruction is called
+    - **Then:** the layout matches the Solana Ed25519 precompile specification (offsets, indices = 0xFFFF)
+  - `T-33.4-14b` - solana-payment-channel-sdk.test.ts:966
+    - **Given:** known input bytes
+    - **When:** instruction is built
+    - **Then:** inline data at correct offsets exactly matches inputs
+  - `T-33.4-14c` - solana-payment-channel-sdk.test.ts:989
+    - **Then:** accounts array is empty (precompile takes no account metas)
+  - `T-33.4-14d` - solana-payment-channel-sdk.test.ts:1000
+    - **Then:** rejects wrong-length signature
+  - `T-33.4-14e` - solana-payment-channel-sdk.test.ts:1013
+    - **Then:** rejects wrong-length pubkey
+  - `T-33.4-14f` - solana-payment-channel-sdk.test.ts:1026
+    - **Then:** rejects empty message
+  - `T-33.4-05` - solana-payment-channel-sdk.test.ts:1124 **(SKIPPED)**
+    - **Given:** valid balance proof signature
+    - **When:** claimFromChannel() is called
+    - **Then:** transaction includes Ed25519 precompile (index 0) and claim (index 1), succeeds on-chain
+    - **Status:** `it.skip` -- deferred to Story 33.7
+
+- **Gaps:**
+  - Missing: No active test verifies claimFromChannel() builds a 2-instruction transaction that succeeds on-chain
+  - Missing: No active test verifies the Ed25519 precompile at index 0 + claim_from_channel at index 1 pattern works end-to-end
+
+- **Recommendation:** Implement T-33.4-05 integration test with solana-bankrun. The unit tests verify the instruction layout is correct, but do not verify the Solana runtime actually accepts this 2-instruction transaction pattern. This is the most complex instruction in the SDK and a P0 gap.
+
+---
+
+#### AC 5: Channel State Deserialization (P0)
+
+- **Coverage:** UNIT-ONLY
+
+- **Tests:**
+  - `T-33.4-08-unit` - solana-payment-channel-sdk.test.ts:379
+    - **Given:** a 178-byte Uint8Array with known field values (golden test)
+    - **When:** deserializeChannelState is called
+    - **Then:** each field is parsed at the correct offset with correct value
+  - `T-33.4-08-unit-b` - solana-payment-channel-sdk.test.ts:405
+    - **Then:** throws on invalid discriminator
+  - `T-33.4-08-unit-c` - solana-payment-channel-sdk.test.ts:416
+    - **Then:** throws on buffer too short
+  - Additional edge cases: state byte 0/2/255 mapping, buffer > 178 bytes accepted
+  - `T-33.4-08` - solana-payment-channel-sdk.test.ts:1137 **(SKIPPED)**
+    - **Given:** channel PDA with on-chain state
+    - **When:** getChannelState() is called via RPC
+    - **Then:** deserialized state matches on-chain data
+    - **Status:** `it.skip` -- deferred to Story 33.7
+
+- **Gaps:**
+  - Missing: Integration test verifying getChannelState() fetches and deserializes real on-chain data via RPC
+
+- **Recommendation:** The golden test is strong for verifying byte-level deserialization logic. However, it does not test getChannelState() which includes the RPC fetch + deserialization pipeline. The AC says "When getChannelState() is called, Then the returned SolanaChannelState matches the on-chain data" -- this requires an integration test. Implement T-33.4-08 with solana-bankrun.
+
+---
+
+#### AC 6: PDA Derivation -- Order-Independent (P0)
+
+- **Coverage:** FULL
+
+- **Tests:**
+  - `T-33.4-07` - solana-payment-channel-sdk.test.ts:209
+    - **Given:** two pubkeys in different orders
+    - **When:** deriveChannelPDA is called with (A,B) and (B,A)
+    - **Then:** both calls return the same PDA address
+  - `T-33.4-06` - solana-payment-channel-sdk.test.ts:233
+    - **Given:** known pubkeys
+    - **When:** deriveChannelPDA is called twice with same inputs
+    - **Then:** PDA is identical (deterministic)
+  - `T-33.4-06b` - solana-payment-channel-sdk.test.ts:257
+    - **Given:** a known channel PDA
+    - **When:** deriveVaultPDA is called
+    - **Then:** deterministic vault PDA using seeds [b"vault", channel_pda]
+  - `T-33.4-06c` - solana-payment-channel-sdk.test.ts:918
+    - **Then:** different token mints produce different PDAs
+  - `T-33.4-06d` - solana-payment-channel-sdk.test.ts:939
+    - **Then:** different participant pairs produce different PDAs
+
+- **Gaps:** None for unit-level coverage. The AC says "the result matches the Rust-side PDA derivation for identical inputs" which would ideally be verified by an integration test, but the SHA-256 + Ed25519 curve check algorithm is deterministic and portable. The unit tests comprehensively cover order-independence, determinism, and seed sensitivity.
+
+- **Recommendation:** Coverage is FULL for this AC. The pure-function nature of PDA derivation (SHA-256 hash) makes unit tests sufficient. Cross-language verification will be implicitly validated by integration tests for AC 1 (openChannel uses the derived PDA).
+
+---
+
+#### AC 7: Balance Proof Message Format (P0)
+
+- **Coverage:** FULL
+
+- **Tests:**
+  - `T-33.4-11` - solana-payment-channel-sdk.test.ts:293
+    - **Given:** channel PDA, nonce=42, transferredAmount=1000000
+    - **When:** balance proof message is constructed
+    - **Then:** exactly 48 bytes: channel_pda(32) || nonce(8 LE) || transferred_amount(8 LE)
+  - `T-33.4-11b` - solana-payment-channel-sdk.test.ts:839
+    - **Then:** nonce=0 and transferredAmount=0 encode correctly (zero bytes)
+  - `T-33.4-11c` - solana-payment-channel-sdk.test.ts:857
+    - **Then:** max u64 values encode correctly (all 0xFF bytes)
+  - `T-33.4-11d` - solana-payment-channel-sdk.test.ts:880
+    - **Then:** different channel PDAs produce different first 32 bytes
+  - `T-33.4-11e` - solana-payment-channel-sdk.test.ts:894
+    - **Then:** rejects negative nonce value
+  - `T-33.4-11f` - solana-payment-channel-sdk.test.ts:903
+    - **Then:** rejects nonce exceeding u64 max
+
+- **Gaps:** None. The pure-function `_buildBalanceProofMessage` is comprehensively tested with boundary values, encoding verification, and input validation.
+
+- **Recommendation:** Coverage is FULL. No action needed.
+
+---
+
+#### AC 8: Account Subscription (P1)
+
+- **Coverage:** PARTIAL
+
+- **Tests:**
+  - `T-33.4-10` - solana-payment-channel-sdk.test.ts:609
+    - **Given:** a mock RPC subscriptions client that yields account notifications
+    - **When:** subscribeToChannel is called with a callback
+    - **Then:** the callback fires with deserialized SolanaChannelState
+    - **And:** unsubscribe stops the iteration (abortSignal.aborted === true)
+
+- **Gaps:**
+  - Missing: Real RPC subscription test (mock-only does not validate actual WebSocket behavior)
+  - Missing: Error handling when subscription connection drops
+  - Missing: Multiple notification handling (only one notification tested)
+
+- **Recommendation:** The mock-based test validates the core pattern (async iterable consumption, AbortController-based unsubscribe, deserialization). Real WebSocket subscription testing is deferred to Story 33.7. As a P1 criterion, mock coverage is acceptable for story-level gate but should be enhanced before epic-level gate.
+
+---
+
+#### AC 9: Close, Settle, and Force-Close Delegation (P1)
+
+- **Coverage:** NONE
+
+- **Tests:**
+  - `T-33.4-09a` - solana-payment-channel-sdk.test.ts:1149 **(SKIPPED)**
+    - **Given:** an open channel
+    - **When:** closeChannel() is called
+    - **Then:** state becomes 'closed'
+  - `T-33.4-09b` - solana-payment-channel-sdk.test.ts:1155 **(SKIPPED)**
+    - **Given:** a closed channel past challenge period
+    - **When:** settleChannel() is called
+    - **Then:** state becomes 'settled', funds distributed
+  - `T-33.4-09c` - solana-payment-channel-sdk.test.ts:1161 **(SKIPPED)**
+    - **Given:** a closed channel past challenge period
+    - **When:** forceCloseExpired() is called
+    - **Then:** funds distributed, accounts closed
+
+- **Gaps:**
+  - Missing: No active test for closeChannel(), settleChannel(), or forceCloseExpired()
+  - Missing: No unit test verifying instruction discriminators and account lists for these 3 methods
+
+- **Recommendation:** Add unit tests for the instruction builders (verify discriminator bytes, account list length and roles). The full on-chain integration tests (T-33.4-09) require bankrun with clock manipulation and can be deferred to Story 33.7, but unit tests for instruction construction should be added now.
+
+---
+
+#### AC 10: Error Mapping (P1)
+
+- **Coverage:** UNIT-ONLY
+
+- **Tests:**
+  - `T-33.4-12-unit` - solana-payment-channel-sdk.test.ts:433
+    - **Given:** error codes 0-12
+    - **When:** mapProgramError is called
+    - **Then:** correct errorName, code, and SolanaChannelError instance
+  - `T-33.4-12-unit-b` - solana-payment-channel-sdk.test.ts:450
+    - **Then:** SolanaChannelError extends Error with stack trace
+  - `T-33.4-12-unit-c` through `T-33.4-12-unit-h` - solana-payment-channel-sdk.test.ts:471-543
+    - Regex pattern extraction tests: hex pattern, decimal pattern, InstructionError pattern, unknown error re-throw, non-Error re-throw, out-of-range code
+  - Edge cases: unknown code 13 maps to UnknownError(13), negative code -1 maps to UnknownError(-1)
+  - `T-33.4-12` - solana-payment-channel-sdk.test.ts:1173 **(SKIPPED)**
+    - **Given:** bankrun SDK instance
+    - **When:** operation triggers known program error
+    - **Then:** SolanaChannelError thrown with correct code and errorName
+    - **Status:** `it.skip` -- deferred to Story 33.7
+
+- **Gaps:**
+  - Missing: Integration test proving real Solana transaction errors are parsed and mapped correctly
+
+- **Recommendation:** Unit coverage is comprehensive (all 13 codes mapped, regex patterns tested, edge cases covered). Integration test T-33.4-12 is deferred to Story 33.7. As a P1 criterion, unit coverage is acceptable for story-level gate. The error parsing regex patterns are well-tested against multiple Solana error message formats.
 
 ---
 
@@ -258,7 +310,37 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Critical Gaps (BLOCKER)
 
-0 gaps found. All P0 criteria have FULL coverage.
+5 gaps found. **Do not release until resolved.**
+
+1. **AC 1: Open Channel Transaction** (P0)
+   - Current Coverage: NONE
+   - Missing Tests: Integration test for openChannel() on-chain execution
+   - Recommend: Implement T-33.4-01 (Integration/bankrun)
+   - Impact: No verification that the SDK can create payment channels. Core entry point untested.
+
+2. **AC 2: Deposit Transaction** (P0)
+   - Current Coverage: NONE
+   - Missing Tests: Integration test for deposit() SPL token transfer
+   - Recommend: Implement T-33.4-02 (Integration/bankrun)
+   - Impact: No verification that funding channels works. Without deposits, channels are useless.
+
+3. **AC 3: Sign Balance Proof -- Cross-Language** (P0)
+   - Current Coverage: UNIT-ONLY (signature production tested, not on-chain acceptance)
+   - Missing Tests: Cross-language verification (TS signature accepted by Rust program)
+   - Recommend: Implement T-33.4-04 (Integration/bankrun)
+   - Impact: If the canonical message format has any byte-level mismatch with Rust, claims will silently fail on-chain.
+
+4. **AC 4: Claim Transaction** (P0)
+   - Current Coverage: UNIT-ONLY (Ed25519 instruction layout tested, not on-chain execution)
+   - Missing Tests: End-to-end claim with Ed25519 precompile + program instruction
+   - Recommend: Implement T-33.4-05 (Integration/bankrun)
+   - Impact: The 2-instruction transaction pattern (precompile + claim) is complex and error-prone. No on-chain validation exists.
+
+5. **AC 5: Channel State Deserialization -- Integration** (P0)
+   - Current Coverage: UNIT-ONLY (golden byte test passes, no RPC fetch test)
+   - Missing Tests: getChannelState() via RPC fetch and deserialization pipeline
+   - Recommend: Implement T-33.4-08 (Integration/bankrun)
+   - Impact: The RPC response format (base64 encoding, account info wrapper) is not tested end-to-end.
 
 ---
 
@@ -266,27 +348,17 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 1 gap found. **Address before PR merge.**
 
-1. **AC 9: Overflow Protection** (P1)
-   - Current Coverage: PARTIAL
-   - Missing Tests: Explicit ArithmeticOverflow error assertion when deposits sum past u64::MAX
-   - Recommend: `T-33.3-09b` (Rust security test in security.rs)
-   - Impact: The overflow error path (error code 10) is not verified to fire correctly. While the happy-path large-value test provides some confidence, the AC explicitly requires the error to be triggered.
+1. **AC 9: Close, Settle, and Force-Close Delegation** (P1)
+   - Current Coverage: NONE
+   - Missing Tests: No active tests at any level (all 3 tests skipped)
+   - Recommend: Add unit tests for instruction construction (discriminator, account lists), implement T-33.4-09a/b/c integration tests
+   - Impact: Three transaction builders are completely untested. Instruction discriminator or account list errors would go undetected.
 
 ---
 
 #### Medium Priority Gaps (Nightly)
 
-2 gaps found. **Address in nightly test improvements.**
-
-1. **AC 11: Deployment Script Deploys to Devnet** (P1)
-   - Current Coverage: PARTIAL (manual/script review only)
-   - Recommend: Integration test in Story 33.8 CI pipeline
-   - Note: Accepted risk -- script is created here, executed in Story 33.8
-
-2. **AC 12: Upgrade Authority Configuration** (P1)
-   - Current Coverage: PARTIAL (manual/script review only)
-   - Recommend: Verification in Story 33.8 deployment workflow
-   - Note: Accepted risk -- deployment-time validation
+0 gaps found.
 
 ---
 
@@ -300,20 +372,21 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Endpoint Coverage Gaps
 
-- Not applicable. This is a Solana on-chain program, not an API with endpoints. All 6 instruction handlers (initialize_channel, deposit, close_channel, settle_channel, force_close_expired, claim_from_channel) are exercised across the test suites.
+- Not applicable -- this is an SDK (no HTTP endpoints). Transaction builder methods are the equivalent "endpoints."
 
 #### Auth/Authz Negative-Path Gaps
 
-- Criteria missing denied/invalid-path tests: 0
-- All authorization checks are tested:
-  - Non-participant signer rejection (T-33.3-10b, T-33.1-12, T-33.1-12a)
-  - Unauthorized claim signer (T-33.3-10b)
-  - Invalid signature (T-33.3-10a)
+- Criteria missing denied/invalid-path tests: 1
+- Examples:
+  - AC 9: No test verifying that a non-participant calling closeChannel() is rejected (unauthorized signer error)
+  - AC 1: No test verifying duplicate channel creation is rejected (ChannelAlreadyExists error)
 
 #### Happy-Path-Only Criteria
 
-- Criteria missing error/edge scenarios: 1
-- AC 9 has only happy-path large-value test; missing the error-triggering overflow path.
+- Criteria missing error/edge scenarios: 2
+- Examples:
+  - AC 1 (openChannel): No error path tests (invalid program ID, insufficient SOL for rent, etc.)
+  - AC 2 (deposit): No error path tests (insufficient token balance, zero amount deposit rejection)
 
 ---
 
@@ -323,23 +396,27 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 **BLOCKER Issues**
 
-- None
+- None found in active tests.
 
 **WARNING Issues**
 
-- `T-33.3-09` (test_large_deposits_accumulate_correctly) - Tests defense-in-depth but does not trigger the ArithmeticOverflow error (error code 10) as specified by AC 9. The test name and comment note this is defense-in-depth, not a negative-path test.
+- `T-33.4-10` - Uses `setTimeout(resolve, 50)` for async coordination. This is a timing-dependent pattern that could be flaky under load. Consider using a deterministic signal (e.g., polling for `receivedStates.length`) instead.
+- `T-33.4-10` - Uses `(sdk as any)._rpcSubscriptions = ...` to inject mock. This couples the test to internal implementation details and will break if the private field is renamed.
 
 **INFO Issues**
 
-- All 19 new tests duplicate helper functions across test files (by design, per story dev notes). This is acceptable for test isolation in the Solana test framework.
+- The integration test describe block references `_sdk` and `TEST_CHALLENGE_DURATION` with void expressions (`void _sdk; void TEST_CHALLENGE_DURATION;`) to suppress unused variable warnings. This is a minor style issue.
 
 ---
 
 #### Tests Passing Quality Gates
 
-**18/19 tests (95%) meet all quality criteria** PASS
+**36/36 active tests (100%) meet all quality criteria**
 
-The one WARNING is T-33.3-09 which tests behavior correctly but does not cover the full AC 9 requirement.
+- All active tests have explicit assertions
+- All follow Given-When-Then structure
+- No hard waits except the one 50ms setTimeout noted above
+- Test file is ~1192 lines (exceeds 300 line recommended limit but is a single comprehensive test file for the SDK)
 
 ---
 
@@ -347,28 +424,22 @@ The one WARNING is T-33.3-09 which tests behavior correctly but does not cover t
 
 #### Acceptable Overlap (Defense in Depth)
 
-- AC 4 (nonce replay): Tested in both `security.rs` (T-33.3-04 multi-claim sequence) and `claims.rs` (T-33.2-02, T-33.2-03 individual nonce tests). This is defense-in-depth: Story 33.2 tests individual nonce rejection, Story 33.3 tests multi-claim replay sequence. PASS
-- AC 5 (challenge timing): Tested in both `security.rs` (T-33.3-05 boundary precision) and `lifecycle.rs` (T-33.1-06 basic failure). Defense in depth for boundary vs. general case. PASS
-- AC 6 (PDA ordering): Tested in both `security.rs` (T-33.3-06 with swapped keypairs) and `lifecycle.rs` (T-33.1-07 basic assertion). PASS
-- AC 10 (security edge cases): Tested in both `security.rs` (T-33.3-10a/b/c) and `claims.rs` (T-33.2-04/05/06). Story 33.2 tests at the claim level; Story 33.3 provides integration-level security testing. PASS
+- AC 5: Tested at unit level (golden bytes deserialization) and planned at integration level (RPC fetch + deserialization). This is defense in depth -- unit test catches byte offset bugs, integration test catches RPC response format bugs.
+- AC 10: Tested at unit level (error code mapping, regex parsing) and planned at integration level (real program error). Unit tests catch mapping logic bugs, integration tests catch error format parsing bugs.
 
 #### Unacceptable Duplication
 
-- None found. All overlaps are defense-in-depth across different test scopes.
+- None identified.
 
 ---
 
 ### Coverage by Test Level
 
-| Test Level       | Tests  | Criteria Covered       | Coverage % |
-| ---------------- | ------ | ---------------------- | ---------- |
-| Rust Integration | 5      | AC 1, 2, 3             | 25%        |
-| Rust Security    | 10     | AC 4, 5, 6, 9, 10     | 42%        |
-| Rust Performance | 4      | AC 7, 8                | 17%        |
-| Deployment       | 0*     | AC 11, 12              | 17%        |
-| **Total**        | **19** | **12**                 | **100%**   |
-
-*AC 11 and AC 12 are covered by script/Makefile review (no automated tests possible in this story's scope).
+| Test Level  | Tests   | Criteria Covered | Coverage %    |
+| ----------- | ------- | ---------------- | ------------- |
+| Unit        | 36      | 7 (AC 3-8, 10)  | 70%           |
+| Integration | 0 (10 skipped) | 0          | 0%            |
+| **Total**   | **36**  | **7 partial**    | **20% FULL**  |
 
 ---
 
@@ -376,15 +447,17 @@ The one WARNING is T-33.3-09 which tests behavior correctly but does not cover t
 
 #### Immediate Actions (Before PR Merge)
 
-1. **Add ArithmeticOverflow Error Path Test** - Add `T-33.3-09b` in `security.rs` that deposits an amount causing u64 overflow and asserts failure with custom error code 10. This closes the only P1 gap that has a testable fix within this story's scope.
+1. **Un-skip or implement bankrun integration tests for P0 ACs** -- AC 1, AC 2, AC 4, AC 5 have ZERO active coverage. AC 3 has no cross-language verification. These are the story's primary value proposition.
+2. **Add unit tests for AC 9 instruction builders** -- closeChannel, settleChannel, forceCloseExpired have no tests at any level. At minimum, verify discriminator bytes and account list construction.
 
 #### Short-term Actions (This Milestone)
 
-1. **Deployment Verification in Story 33.8** - When Story 33.8 executes the actual devnet deployment, verify AC 11 and AC 12 are met (program deploys, upgrade authority is set correctly).
+1. **Implement full bankrun integration suite** -- All 10 `it.skip` tests should be activated. Story 33.7 is the planned venue but these are P0 requirements of Story 33.4.
+2. **Replace timing-dependent mock** in T-33.4-10 with deterministic coordination to prevent flakiness.
 
 #### Long-term Actions (Backlog)
 
-1. **Deployment Script CI Test** - Consider adding a CI job that deploys to a local test validator (`solana-test-validator`) to get automated coverage of the deployment script.
+1. **Cross-language PDA verification** -- Add a test that compares TS-derived PDA with a known Rust-derived PDA for the same inputs (currently implicit via integration tests).
 
 ---
 
@@ -399,22 +472,22 @@ The one WARNING is T-33.3-09 which tests behavior correctly but does not cover t
 
 #### Test Execution Results
 
-- **Total Tests**: 51 (19 lifecycle + 13 claims + 5 integration + 10 security + 4 performance)
-- **Passed**: 51 (100%)
+- **Total Tests**: 36 active + 10 skipped = 46 total
+- **Passed**: 36 (100% of active)
 - **Failed**: 0 (0%)
-- **Skipped**: 0 (0%)
-- **Duration**: Per dev agent completion notes, all 51 tests pass via `cargo test-sbf`
+- **Skipped**: 10 (21.7%)
+- **Duration**: Not measured (local run)
 
 **Priority Breakdown:**
 
-- **P0 Tests**: 6/6 criteria fully covered, all underlying tests pass (100%) PASS
-- **P1 Tests**: 4/6 criteria fully covered (67%), 2 partial (deployment script ACs) WARN
-- **P2 Tests**: N/A
-- **P3 Tests**: N/A
+- **P0 Tests**: 30/30 active passed (100%) -- but 7 integration tests skipped
+- **P1 Tests**: 6/6 active passed (100%) -- but 3 integration tests skipped
+- **P2 Tests**: 0/0 (none)
+- **P3 Tests**: 0/0 (none)
 
-**Overall Pass Rate**: 100% (51/51 tests pass) PASS
+**Overall Pass Rate**: 100% of active tests
 
-**Test Results Source**: Dev agent completion notes (local `cargo test-sbf` run, 2026-03-25)
+**Test Results Source**: Story dev record (2026-03-26 local run)
 
 ---
 
@@ -422,52 +495,25 @@ The one WARNING is T-33.3-09 which tests behavior correctly but does not cover t
 
 **Requirements Coverage:**
 
-- **P0 Acceptance Criteria**: 6/6 covered (100%) PASS
-- **P1 Acceptance Criteria**: 4/6 covered (67%) WARN
-- **Overall Coverage**: 10/12 (83%)
+- **P0 Acceptance Criteria**: 2/7 FULL covered (29%) -- AC 6, AC 7 only
+- **P1 Acceptance Criteria**: 0/3 FULL covered (0%) -- AC 8 partial, AC 9 none, AC 10 unit-only
+- **Overall Coverage**: 2/10 FULL (20%)
 
 **Code Coverage** (if available):
 
-- Not available. Solana BPF programs do not have standard code coverage tooling. N/A.
-
-**Coverage Source**: Traceability analysis (this document)
+- Not measured (no code coverage report available)
 
 ---
 
 #### Non-Functional Requirements (NFRs)
 
-**Security**: PASS
+**Security**: PASS -- Semgrep scan 0 findings, 3 review passes completed, input validation guards added
 
-- Security Issues: 0
-- 3 code reviews completed, semgrep + OWASP scan clean
-- All security edge cases (AC 4, 5, 6, 9, 10) have test coverage
+**Performance**: NOT_ASSESSED -- No performance benchmarks for SDK methods
 
-**Performance**: PASS
+**Reliability**: NOT_ASSESSED -- No flakiness data available (no burn-in run)
 
-- CU profiling tests pass (claim < 50K CU, all instructions within budget)
-- Rent economics verified (all accounts rent-exempt)
-
-**Reliability**: NOT_ASSESSED
-
-- No flakiness or reliability testing framework for BPF programs
-
-**Maintainability**: PASS
-
-- Test helpers duplicated by design (per story dev notes)
-- Clear test IDs and AC references in all test files
-- 3 rounds of code review with all issues resolved
-
-**NFR Source**: Code review record in story file, semgrep scan results
-
----
-
-#### Flakiness Validation
-
-**Burn-in Results**: Not available
-
-- BPF program tests run deterministically in `solana-program-test` (in-process BanksClient)
-- No network calls, no external dependencies
-- Flakiness risk: negligible (deterministic execution environment)
+**Maintainability**: PASS -- TypeScript strict mode, no `any` types (except justified @solana/kit interop), named exports, Pino logger
 
 ---
 
@@ -475,28 +521,28 @@ The one WARNING is T-33.3-09 which tests behavior correctly but does not cover t
 
 #### P0 Criteria (Must ALL Pass)
 
-| Criterion             | Threshold | Actual | Status |
-| --------------------- | --------- | ------ | ------ |
-| P0 Coverage           | 100%      | 100%   | PASS   |
-| P0 Test Pass Rate     | 100%      | 100%   | PASS   |
-| Security Issues       | 0         | 0      | PASS   |
-| Critical NFR Failures | 0         | 0      | PASS   |
-| Flaky Tests           | 0         | 0      | PASS   |
+| Criterion             | Threshold | Actual        | Status    |
+| --------------------- | --------- | ------------- | --------- |
+| P0 Coverage           | 100%      | 29%           | FAIL      |
+| P0 Test Pass Rate     | 100%      | 100% (active) | PASS      |
+| Security Issues       | 0         | 0             | PASS      |
+| Critical NFR Failures | 0         | 0             | PASS      |
+| Flaky Tests           | 0         | 0             | PASS      |
 
-**P0 Evaluation**: ALL PASS
+**P0 Evaluation**: ONE OR MORE FAILED -- P0 coverage is 29% (5 of 7 P0 ACs lack FULL coverage)
 
 ---
 
 #### P1 Criteria (Required for PASS, May Accept for CONCERNS)
 
-| Criterion              | Threshold | Actual | Status   |
-| ---------------------- | --------- | ------ | -------- |
-| P1 Coverage            | >=90%     | 67%    | CONCERNS |
-| P1 Test Pass Rate      | >=95%     | 100%   | PASS     |
-| Overall Test Pass Rate | >=95%     | 100%   | PASS     |
-| Overall Coverage       | >=80%     | 83%    | PASS     |
+| Criterion              | Threshold | Actual | Status    |
+| ---------------------- | --------- | ------ | --------- |
+| P1 Coverage            | >=90%     | 0%     | FAIL      |
+| P1 Test Pass Rate      | >=95%     | 100%   | PASS      |
+| Overall Test Pass Rate | >=95%     | 100%   | PASS      |
+| Overall Coverage       | >=80%     | 20%    | FAIL      |
 
-**P1 Evaluation**: SOME CONCERNS
+**P1 Evaluation**: FAILED -- P1 coverage is 0% FULL, overall coverage is 20%
 
 ---
 
@@ -504,69 +550,85 @@ The one WARNING is T-33.3-09 which tests behavior correctly but does not cover t
 
 | Criterion         | Actual | Notes                   |
 | ----------------- | ------ | ----------------------- |
-| P2 Test Pass Rate | N/A    | No P2 criteria in story |
-| P3 Test Pass Rate | N/A    | No P3 criteria in story |
+| P2 Test Pass Rate | N/A    | No P2 criteria defined  |
+| P3 Test Pass Rate | N/A    | No P3 criteria defined  |
 
 ---
 
-### GATE DECISION: CONCERNS
+### GATE DECISION: FAIL
 
 ---
 
 ### Rationale
 
-All P0 criteria are met with 100% coverage and 100% pass rate across all 51 tests. The on-chain program's critical security, lifecycle, and balance conservation requirements are fully validated. No security issues were detected across 3 rounds of code review and automated scanning.
+P0 coverage is critically insufficient at 29% (2/7 P0 ACs have FULL coverage). Five P0 acceptance criteria (AC 1, AC 2, AC 3, AC 4, AC 5) have zero active integration test coverage -- their integration tests all use `it.skip`. The story's core value proposition is a TypeScript SDK that wraps on-chain Solana program instructions, yet none of the transaction builder methods (openChannel, deposit, claimFromChannel) have been verified against the actual on-chain program.
 
-However, P1 coverage is at 67% (4/6 criteria fully covered) due to two factors:
+The unit tests are well-written and comprehensive for the pure-function components (PDA derivation, message format, error mapping, Ed25519 instruction layout). However, the critical gap is the absence of integration tests that validate the SDK's transaction builders against the real Solana program. The story's dev notes acknowledge this: "11 integration test stubs ready for bankrun" and "integration tests deferred to Story 33.7."
 
-1. **AC 9 (Overflow Protection):** The test validates defense-in-depth with large values but does not explicitly trigger the ArithmeticOverflow error (code 10). This is a testable gap that can be closed with an additional test.
+**Key evidence:**
+- 10 of 10 integration tests are `it.skip` -- deferred to Story 33.7
+- AC 9 (close/settle/force-close) has ZERO coverage at any level
+- AC 1 and AC 2 have ZERO coverage at any level
+- All active unit tests pass (36/36, 100%)
+- Security review completed (3 passes, 0 critical issues)
 
-2. **AC 11 and AC 12 (Deployment Script):** These are deployment-time acceptance criteria that cannot be automated within the Rust test framework. The deployment script exists, has been code-reviewed 3 times, and will be validated when Story 33.8 executes the actual deployment. This is an accepted architectural constraint, not a quality gap.
-
-**Key evidence:** All 51 tests pass. The on-chain program code was not modified. All security edge cases are covered. The deployment script is well-structured with proper error handling.
-
-**Caveats:** AC 11/12 partial coverage is by design (deployment script testing requires a live Solana cluster). If only testable ACs are considered (AC 1-10), P1 coverage is 4/4 = 100% for testable criteria.
+**Assumptions:**
+- Story 33.7 will implement the bankrun integration tests
+- The SDK implementation is correct based on code review verification of byte-level correctness against Rust source
+- Unit tests provide confidence in pure-function logic but not in RPC interaction or on-chain execution
 
 ---
 
-### Residual Risks (For CONCERNS)
+### Critical Issues (For FAIL)
 
-1. **AC 9 ArithmeticOverflow Error Path Not Explicitly Tested**
-   - **Priority**: P1
-   - **Probability**: Low (the overflow check is implemented in the program code and defense-in-depth test passes)
-   - **Impact**: Low (the error path exists but is not explicitly verified to fire)
-   - **Risk Score**: Low
-   - **Mitigation**: Large-value deposit test provides partial confidence
-   - **Remediation**: Add `T-33.3-09b` test before Story 33.4 begins
+| Priority | Issue | Description | Owner | Due Date | Status |
+| -------- | ----- | ----------- | ----- | -------- | ------ |
+| P0 | AC 1 no coverage | openChannel() has no active test | Dev team | Before Story 33.5 | OPEN |
+| P0 | AC 2 no coverage | deposit() has no active test | Dev team | Before Story 33.5 | OPEN |
+| P0 | AC 3 no cross-lang | signBalanceProof cross-language verification missing | Dev team | Before Story 33.5 | OPEN |
+| P0 | AC 4 no integration | claimFromChannel() on-chain execution untested | Dev team | Before Story 33.5 | OPEN |
+| P0 | AC 5 no integration | getChannelState() via RPC untested | Dev team | Before Story 33.5 | OPEN |
+| P1 | AC 9 zero coverage | close/settle/forceClose have no tests at all | Dev team | Before Story 33.5 | OPEN |
 
-2. **Deployment Script Not Execution-Tested**
-   - **Priority**: P1
-   - **Probability**: Low (3 code reviews, structured script with validation)
-   - **Impact**: Medium (if script has a bug, Story 33.8 deployment would fail)
-   - **Risk Score**: Low-Medium
-   - **Mitigation**: Script uses standard `solana program deploy` commands
-   - **Remediation**: Story 33.8 will validate during actual deployment
-
-**Overall Residual Risk**: LOW
+**Blocking Issues Count**: 5 P0 blockers, 1 P1 issue
 
 ---
 
 ### Gate Recommendations
 
-#### For CONCERNS Decision
+#### For FAIL Decision
 
-1. **Deploy with Enhanced Monitoring**
-   - Proceed to Story 33.4 (TypeScript SDK) with current test coverage
-   - The on-chain program is verified correct for all critical paths
-   - Monitor for any issues when Story 33.8 executes deployment
+1. **Block Deployment Immediately**
+   - Do NOT consider Story 33.4 as "done" for gate purposes
+   - Story 33.5 (provider wrapper) depends on this SDK -- gaps here cascade downstream
 
-2. **Create Remediation Backlog**
-   - Add test `T-33.3-09b`: ArithmeticOverflow error path verification (P1, quick fix)
-   - Validate AC 11/AC 12 in Story 33.8 deployment (already planned)
+2. **Fix Critical Issues**
+   - Option A: Un-skip and implement bankrun integration tests in Story 33.4 scope
+   - Option B: Accept that Story 33.7 will provide integration coverage and waive the story-level gate (requires business justification and explicit tracking)
+   - Add unit tests for AC 9 instruction builders regardless (no bankrun needed)
 
-3. **Post-Deployment Actions**
-   - Verify deployment script in Story 33.8 devnet deployment
-   - Re-run `*trace` after AC 9 gap is closed
+3. **Re-Run Gate After Fixes**
+   - Re-run `testarch-trace` after integration tests are active
+   - Target: P0 coverage >= 100%, P1 coverage >= 90%
+
+---
+
+### Uncovered ACs
+
+The following acceptance criteria have no FULL test coverage:
+
+| AC | Description | Priority | Coverage Status | Reason |
+|----|-------------|----------|-----------------|--------|
+| AC 1 | Open Channel Transaction | P0 | NONE | Integration test T-33.4-01 is `it.skip` |
+| AC 2 | Deposit Transaction | P0 | NONE | Integration test T-33.4-02 is `it.skip` |
+| AC 3 | Sign Balance Proof | P0 | UNIT-ONLY | Cross-language test T-33.4-04 is `it.skip` |
+| AC 4 | Claim Transaction With Ed25519 Precompile | P0 | UNIT-ONLY | Integration test T-33.4-05 is `it.skip` |
+| AC 5 | Channel State Deserialization | P0 | UNIT-ONLY | Integration test T-33.4-08 is `it.skip` |
+| AC 8 | Account Subscription | P1 | PARTIAL | Mock-only test, no real RPC subscription |
+| AC 9 | Close, Settle, and Force-Close Delegation | P1 | NONE | All 3 integration tests are `it.skip` |
+| AC 10 | Error Mapping | P1 | UNIT-ONLY | Integration test T-33.4-12 is `it.skip` |
+
+**Only 2 of 10 ACs have FULL coverage: AC 6 (PDA Derivation) and AC 7 (Balance Proof Message Format).**
 
 ---
 
@@ -574,18 +636,21 @@ However, P1 coverage is at 67% (4/6 criteria fully covered) due to two factors:
 
 **Immediate Actions** (next 24-48 hours):
 
-1. Add `T-33.3-09b` test in `security.rs` to close the ArithmeticOverflow gap
-2. Proceed with Story 33.4 (TypeScript SDK) -- the on-chain program is validated
-3. No deployment blockers -- all P0 criteria pass
+1. Add unit tests for AC 9 instruction builders (closeChannel, settleChannel, forceCloseExpired discriminators and account lists)
+2. Decide: implement bankrun integration tests now (Story 33.4 scope) or formally defer to Story 33.7 with a documented waiver
+3. If deferring, create tracking issue for Story 33.7 with explicit list of 10 integration tests to implement
 
-**Follow-up Actions** (next milestone/release):
+**Follow-up Actions** (Story 33.7):
 
-1. Validate AC 11/12 during Story 33.8 devnet deployment
-2. Consider local test-validator CI job for deployment script testing
+1. Implement all 10 `it.skip` integration tests with solana-bankrun
+2. Re-run traceability analysis to verify P0 coverage reaches 100%
+3. Run burn-in (3-5 iterations) on integration tests to verify stability
 
 **Stakeholder Communication**:
 
-- Notify PM: Story 33.3 gate decision is CONCERNS -- all P0 pass, P1 has one testable gap (AC 9 overflow error path) and two expected deployment-scope gaps (AC 11, 12). Safe to proceed to Story 33.4.
+- Notify PM: Story 33.4 FAILS quality gate -- 5 P0 ACs lack integration test coverage (unit tests pass but on-chain verification deferred)
+- Notify Dev lead: 10 integration tests scaffolded as `it.skip`, need bankrun activation before Story 33.5 can be considered safe
+- Notify SM: Story status "done" in story file does not reflect test coverage reality -- recommend "done with caveats" status
 
 ---
 
@@ -595,40 +660,40 @@ However, P1 coverage is at 67% (4/6 criteria fully covered) due to two factors:
 traceability_and_gate:
   # Phase 1: Traceability
   traceability:
-    story_id: '33.3'
-    date: '2026-03-25'
+    story_id: "33.4"
+    date: "2026-03-26"
     coverage:
-      overall: 83%
-      p0: 100%
-      p1: 67%
+      overall: 20%
+      p0: 29%
+      p1: 0%
       p2: N/A
       p3: N/A
     gaps:
-      critical: 0
+      critical: 5
       high: 1
-      medium: 2
+      medium: 0
       low: 0
     quality:
-      passing_tests: 19
-      total_tests: 19
+      passing_tests: 36
+      total_tests: 46
       blocker_issues: 0
-      warning_issues: 1
+      warning_issues: 2
     recommendations:
-      - 'Add T-33.3-09b: ArithmeticOverflow error path test'
-      - 'Validate AC 11/12 in Story 33.8 deployment'
+      - "Implement bankrun integration tests for AC 1, 2, 3, 4, 5 (P0 blockers)"
+      - "Add unit tests for AC 9 instruction builders (P1 high priority)"
 
   # Phase 2: Gate Decision
   gate_decision:
-    decision: 'CONCERNS'
-    gate_type: 'story'
-    decision_mode: 'deterministic'
+    decision: "FAIL"
+    gate_type: "story"
+    decision_mode: "deterministic"
     criteria:
-      p0_coverage: 100%
+      p0_coverage: 29%
       p0_pass_rate: 100%
-      p1_coverage: 67%
+      p1_coverage: 0%
       p1_pass_rate: 100%
       overall_pass_rate: 100%
-      overall_coverage: 83%
+      overall_coverage: 20%
       security_issues: 0
       critical_nfrs_fail: 0
       flaky_tests: 0
@@ -640,40 +705,23 @@ traceability_and_gate:
       min_overall_pass_rate: 95
       min_coverage: 80
     evidence:
-      test_results: 'local cargo test-sbf run (2026-03-25)'
-      traceability: '_bmad-output/test-artifacts/traceability-matrix.md'
-      nfr_assessment: 'code review record (3 rounds, all passed)'
-      code_coverage: 'not available (BPF programs)'
-    next_steps: 'Add T-33.3-09b overflow test, proceed to Story 33.4, validate AC 11/12 in Story 33.8'
+      test_results: "local_run_2026-03-26"
+      traceability: "_bmad-output/test-artifacts/traceability-matrix.md"
+      nfr_assessment: "code_review_3_passes"
+      code_coverage: "not_available"
+    next_steps: "Implement 10 bankrun integration tests or formally waive with Story 33.7 remediation plan"
 ```
-
----
-
-## Uncovered ACs
-
-The following acceptance criteria have gaps in automated test coverage:
-
-| AC    | Description                              | Gap Type              | Severity    | Notes                                                                                               |
-| ----- | ---------------------------------------- | --------------------- | ----------- | --------------------------------------------------------------------------------------------------- |
-| AC 9  | Overflow Protection (ArithmeticOverflow) | Missing negative path | P1 - HIGH   | Test verifies large-value success but not the error code 10 failure path. Testable within this story |
-| AC 11 | Deployment Script Deploys to Devnet      | Architectural         | P1 - MEDIUM | Requires live Solana cluster. Deferred to Story 33.8 by design                                      |
-| AC 12 | Upgrade Authority Configuration          | Architectural         | P1 - MEDIUM | Requires live Solana cluster. Deferred to Story 33.8 by design                                      |
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/33-3-solana-payment-channel-program-tests-deployment.md`
-- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-33.md`
-- **Test Files:**
-  - `packages/solana-program/tests/integration.rs` (5 tests)
-  - `packages/solana-program/tests/security.rs` (10 tests)
-  - `packages/solana-program/tests/performance.rs` (4 tests)
-- **Deployment Script:** `tools/solana/deploy.sh`
-- **Makefile:** `Makefile` (solana-deploy-devnet target)
-- **Existing Tests (regression):**
-  - `packages/solana-program/tests/lifecycle.rs` (19 tests)
-  - `packages/solana-program/tests/claims.rs` (13 tests)
+- **Story File:** `_bmad-output/implementation-artifacts/33-4-solana-payment-channel-sdk-typescript-integration.md`
+- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-33.md` (referenced but not loaded)
+- **Tech Spec:** N/A
+- **Test Results:** Local run 2026-03-26 (36 pass, 0 fail, 10 skip)
+- **NFR Assessment:** Code review record in story file (3 passes, 0 critical)
+- **Test Files:** `packages/connector/src/settlement/solana-payment-channel-sdk.test.ts`
 
 ---
 
@@ -681,32 +729,27 @@ The following acceptance criteria have gaps in automated test coverage:
 
 **Phase 1 - Traceability Assessment:**
 
-- Overall Coverage: 83%
-- P0 Coverage: 100% PASS
-- P1 Coverage: 67% WARN
-- Critical Gaps: 0
+- Overall Coverage: 20%
+- P0 Coverage: 29% FAIL
+- P1 Coverage: 0% FAIL
+- Critical Gaps: 5
 - High Priority Gaps: 1
 
 **Phase 2 - Gate Decision:**
 
-- **Decision**: CONCERNS
-- **P0 Evaluation**: ALL PASS
-- **P1 Evaluation**: SOME CONCERNS
+- **Decision**: FAIL
+- **P0 Evaluation**: ONE OR MORE FAILED
+- **P1 Evaluation**: FAILED
 
-**Overall Status:** CONCERNS
-
-**Uncovered ACs:** AC 9 (overflow error path not triggered), AC 11 (deployment script not execution-tested), AC 12 (upgrade authority not execution-tested). See Uncovered ACs table above for details.
+**Overall Status:** FAIL
 
 **Next Steps:**
 
-- CONCERNS: Deploy with monitoring, create remediation backlog
-- Add `T-33.3-09b` overflow error path test
-- Proceed to Story 33.4 (no P0 blockers)
-- Validate AC 11/12 in Story 33.8
+- If FAIL: Block deployment, fix critical issues, re-run workflow
 
-**Generated:** 2026-03-25
+**Generated:** 2026-03-26
 **Workflow:** testarch-trace v5.0 (Enhanced with Gate Decision)
 
 ---
 
-<!-- Powered by BMAD-CORE -->
+<!-- Powered by BMAD-CORE™ -->

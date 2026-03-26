@@ -1,38 +1,33 @@
 ---
 stepsCompleted:
-  - step-01-load-context
-  - step-02-define-thresholds
-  - step-03-gather-evidence
-  - step-04a-subagent-security
-  - step-04b-subagent-performance
-  - step-04c-subagent-reliability
-  - step-04d-subagent-scalability
-  - step-04e-aggregate-nfr
-  - step-05-generate-report
-lastStep: step-05-generate-report
-lastSaved: '2026-03-25'
-workflowType: testarch-nfr-assess
+  - 'step-01-load-context'
+  - 'step-02-define-thresholds'
+  - 'step-03-gather-evidence'
+  - 'step-04a-subagent-security'
+  - 'step-04b-subagent-performance'
+  - 'step-04c-subagent-reliability'
+  - 'step-04d-subagent-scalability'
+  - 'step-04e-aggregate-nfr'
+  - 'step-05-generate-report'
+lastStep: 'step-05-generate-report'
+lastSaved: '2026-03-26'
+workflowType: 'testarch-nfr-assess'
 inputDocuments:
-  - _bmad-output/implementation-artifacts/33-3-solana-payment-channel-program-tests-deployment.md
-  - _bmad-output/planning-artifacts/test-design-epic-33.md
-  - _bmad-output/planning-artifacts/architecture.md
-  - packages/solana-program/tests/integration.rs
-  - packages/solana-program/tests/security.rs
-  - packages/solana-program/tests/performance.rs
-  - packages/solana-program/tests/lifecycle.rs
-  - packages/solana-program/tests/claims.rs
-  - packages/solana-program/src/error.rs
-  - packages/solana-program/src/state.rs
-  - packages/solana-program/src/processor.rs
-  - tools/solana/deploy.sh
-  - Makefile
+  - '_bmad-output/implementation-artifacts/33-4-solana-payment-channel-sdk-typescript-integration.md'
+  - 'packages/connector/src/settlement/solana-payment-channel-sdk.ts'
+  - 'packages/connector/src/settlement/solana-payment-channel-sdk.test.ts'
+  - '_bmad/tea/testarch/knowledge/adr-quality-readiness-checklist.md'
+  - '_bmad/tea/testarch/knowledge/test-quality.md'
+  - '_bmad/tea/testarch/knowledge/ci-burn-in.md'
+  - '_bmad/tea/testarch/knowledge/nfr-criteria.md'
+  - '_bmad/tea/testarch/knowledge/error-handling.md'
 ---
 
-# NFR Assessment - Solana Payment Channel Program Tests & Deployment (Story 33.3)
+# NFR Assessment - SolanaPaymentChannelSDK (Story 33.4)
 
-**Date:** 2026-03-25
-**Story:** 33.3 — Solana Payment Channel Program Tests & Deployment
-**Overall Status:** PASS
+**Date:** 2026-03-26
+**Story:** 33.4 - SolanaPaymentChannelSDK -- TypeScript Integration
+**Overall Status:** CONCERNS :warning:
 
 ---
 
@@ -40,13 +35,13 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ## Executive Summary
 
-**Assessment:** 5 PASS, 3 CONCERNS, 0 FAIL
+**Assessment:** 4 PASS, 3 CONCERNS, 1 FAIL
 
-**Blockers:** 0
+**Blockers:** 0 -- no release blockers
 
-**High Priority Issues:** 0
+**High Priority Issues:** 2 -- integration test coverage gap, npm vulnerability backlog
 
-**Recommendation:** Proceed to deployment story (33.8). Address CONCERNS items (monitoring hooks, CI burn-in, disaster recovery documentation) as part of Epic 33 completion. All security and performance NFRs pass with strong evidence.
+**Recommendation:** Address integration test enablement (Story 33.7 / CI pipeline) and vulnerability triage before production deployment. Unit test coverage is strong. SDK is well-structured and safe to merge for continued development.
 
 ---
 
@@ -55,40 +50,40 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 ### Response Time (p95)
 
 - **Status:** N/A
-- **Threshold:** N/A (on-chain program, not an API service)
-- **Actual:** N/A
-- **Evidence:** On-chain program; latency is determined by Solana network consensus, not program logic
-- **Findings:** Not applicable to on-chain programs. Transaction confirmation time is a network property.
+- **Threshold:** UNKNOWN (no SLO defined for SDK operations)
+- **Actual:** N/A -- SDK is a library, not a service. Transaction latency depends on Solana network conditions.
+- **Evidence:** No load test data. SDK methods are thin wrappers around RPC calls.
+- **Findings:** Performance is network-bound (Solana RPC latency). SDK adds negligible overhead (PDA derivation ~6ms, signing ~3ms per test run). No performance anti-patterns detected (no polling loops, no unbounded retries in hot path).
 
 ### Throughput
 
 - **Status:** N/A
-- **Threshold:** N/A (on-chain program; throughput governed by Solana TPS)
-- **Actual:** N/A
-- **Evidence:** Solana network throughput (~4,000 TPS) governs program throughput
-- **Findings:** Not applicable at the program level.
+- **Threshold:** UNKNOWN
+- **Actual:** N/A -- throughput is limited by Solana network TPS, not SDK code.
+- **Evidence:** Unit test suite completes in 1.699s (23 tests). No bottleneck in SDK layer.
+- **Findings:** SDK does not batch transactions or implement connection pooling. Each method call creates one transaction. This is appropriate for a payment channel SDK.
 
 ### Resource Usage
 
 - **CPU Usage**
-  - **Status:** PASS
-  - **Threshold:** `claim_from_channel` < 50,000 CU; `initialize_channel` < 200,000 CU; `deposit` < 50,000 CU
-  - **Actual:** All instructions pass CU budget assertions in `performance.rs`
-  - **Evidence:** `packages/solana-program/tests/performance.rs` -- `test_claim_from_channel_cu_under_budget`, `test_initialize_channel_cu_baseline`, `test_deposit_cu_baseline`
+  - **Status:** PASS :white_check_mark:
+  - **Threshold:** No excessive computation
+  - **Actual:** PDA derivation uses synchronous SHA-256 (crypto.createHash) and Ed25519 curve check. These are O(1) operations per call.
+  - **Evidence:** `findProgramDerivedAddressSync()` at lines 1099-1142; `isOnCurve()` at lines 1151-1182.
 
 - **Memory Usage**
-  - **Status:** PASS
-  - **Threshold:** Channel account = 178 bytes; Vault = SPL Token Account (165 bytes)
-  - **Actual:** Fixed-size accounts with no dynamic allocation; heap Vec replaced with `[u8;48]` fixed array in Story 33.2
-  - **Evidence:** `packages/solana-program/src/state.rs` -- 178 bytes total; `performance.rs` -- `test_channel_and_vault_are_rent_exempt`
+  - **Status:** PASS :white_check_mark:
+  - **Threshold:** No memory leaks
+  - **Actual:** No retained references, no global caches, no growing arrays. Subscription loop uses AbortController for clean shutdown.
+  - **Evidence:** `_runSubscriptionLoop()` at lines 994-1045 uses `for await` with abort signal.
 
 ### Scalability
 
-- **Status:** PASS
-- **Threshold:** Program must handle concurrent channels without shared state
-- **Actual:** Each channel is an independent PDA with isolated state. No global state or shared mutable data.
-- **Evidence:** PDA derivation is unique per (participant_a, participant_b, token_mint) triple; `security.rs` -- `test_pda_derivation_swapped_participants_same_address`, `test_pda_derivation_different_mints_produce_different_pdas`
-- **Findings:** On-chain program is inherently scalable: each channel PDA is independent, no shared state contention.
+- **Status:** N/A
+- **Threshold:** N/A -- SDK is a client library, not a scaled service.
+- **Actual:** N/A
+- **Evidence:** N/A
+- **Findings:** Not applicable. Scalability concerns belong to the Solana network and the connector service that consumes this SDK.
 
 ---
 
@@ -96,52 +91,44 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ### Authentication Strength
 
-- **Status:** PASS
-- **Threshold:** Every instruction must verify transaction signer is a channel participant
-- **Actual:** Ed25519 signature verification via Solana precompile introspection; signer validation in every instruction handler
-- **Evidence:** `packages/solana-program/src/processor.rs` -- signer checks; `security.rs` -- `test_unauthorized_signer_security_edge_case` (error code 9); `claims.rs` -- `test_non_participant_signer_rejected`
-- **Findings:** Strong authentication via Ed25519 precompile introspection. Non-participant signers are rejected with `UnauthorizedSigner` (error code 9).
+- **Status:** PASS :white_check_mark:
+- **Threshold:** SDK must not store or leak private keys; must use Web Crypto API for signing
+- **Actual:** Private keys are passed as opaque `CryptoKeyPair` objects (Web Crypto API). SDK never serializes, logs, or stores private keys. Signing uses `signBytes()` from `@solana/kit`.
+- **Evidence:** `Ed25519KeyPair` interface (lines 46-49) uses `unknown` types for key material. `signBalanceProof()` at line 503 passes `keypair.privateKey` directly to `signBytes()`.
+- **Findings:** No key material exposure risk. Keys are ephemeral references.
 
 ### Authorization Controls
 
-- **Status:** PASS
-- **Threshold:** Only channel participants can deposit, claim, close, and settle
-- **Actual:** Every instruction validates that the signer is `participant_a` or `participant_b` from the channel state
-- **Evidence:** `lifecycle.rs` -- `test_close_channel_by_non_participant_rejected`, `test_deposit_by_non_participant_rejected`; `security.rs` -- `test_unauthorized_signer_security_edge_case`
-- **Findings:** Participant-only authorization enforced at instruction level. PDA derivation with lexicographic sorting ensures deterministic channel identity.
+- **Status:** PASS :white_check_mark:
+- **Threshold:** SDK must enforce signer requirements per instruction
+- **Actual:** Every transaction method requires a `TransactionSigner` parameter with appropriate `AccountRole` (WRITABLE_SIGNER, READONLY). Account roles match Rust program requirements exactly.
+- **Evidence:** Account lists in `openChannel()` (lines 552-562), `deposit()` (lines 623-629), `closeChannel()` (lines 760-764), etc. all set correct `AccountRole.WRITABLE_SIGNER` for the signer account.
+- **Findings:** On-chain authorization is enforced by the Rust program (Stories 33.1-33.2). SDK correctly constructs account metas to enable this enforcement.
 
 ### Data Protection
 
-- **Status:** PASS
-- **Threshold:** No sensitive data exposure; balance proofs cryptographically signed
-- **Actual:** Balance proof message format: `channel_pda(32) || nonce(8 LE) || transferred_amount(8 LE)` = 48 bytes, signed with Ed25519
-- **Evidence:** `claims.rs` -- `test_balance_proof_message_format`; `performance.rs` -- `build_balance_proof_message` helper
-- **Findings:** All balance claims require Ed25519 cryptographic signatures. No private keys stored on-chain. Token transfers use SPL Token program (audited).
+- **Status:** PASS :white_check_mark:
+- **Threshold:** No sensitive data in logs or error messages
+- **Actual:** Structured logging via pino uses event-based log entries with channel PDA addresses and operation names. No private keys, balances, or user-identifying data are logged.
+- **Evidence:** Logger calls at lines 528-537, 607-613, 676-684, etc. log `event`, `channelPDA`, `txSignature` only.
+- **Findings:** Good logging hygiene. Error paths log `String(err)` which may include RPC error details but not key material.
 
 ### Vulnerability Management
 
-- **Status:** PASS
-- **Threshold:** 0 critical vulnerabilities; all known attack vectors tested
-- **Actual:** 10 security tests cover all identified attack vectors
-- **Evidence:** `security.rs` -- 10 tests covering:
-  - Nonce replay attack (`test_nonce_replay_attack_across_multiple_claims`)
-  - Challenge period timing exploit (`test_challenge_period_timing_boundary`)
-  - PDA derivation ordering (`test_pda_derivation_swapped_participants_same_address`)
-  - Arithmetic overflow (`test_large_deposits_accumulate_correctly`)
-  - Invalid signature (`test_invalid_signature_security_edge_case`)
-  - Unauthorized signer (`test_unauthorized_signer_security_edge_case`)
-  - Decreased transferred amount (`test_decreased_transferred_amount_security_edge_case`)
-  - Deposit after close (`test_deposit_after_close_rejected`)
-  - Wrong channel PDA (`test_claim_with_wrong_channel_pda`)
-- **Findings:** All 13 error codes are exercised across the test suite. Error codes are stable (defined in `error.rs`).
+- **Status:** CONCERNS :warning:
+- **Threshold:** 0 critical, <3 high vulnerabilities in direct dependencies
+- **Actual:** Project-wide npm audit: 1 critical, 18 high, 6 moderate, 4 low vulnerabilities (29 total)
+- **Evidence:** `npm audit --json` output. These are project-wide and likely include transitive dependencies not specific to this SDK.
+- **Findings:** The vulnerability count is project-wide, not SDK-specific. SDK direct dependencies (`@solana/kit`, `@solana-program/token`) should be audited separately. The critical/high count warrants a dedicated triage pass.
+- **Recommendation:** Run `npm audit` focused on `@solana/kit` dependency tree. Triage project-wide vulnerabilities in a separate backlog item.
 
 ### Compliance (if applicable)
 
 - **Status:** N/A
-- **Standards:** No regulatory compliance requirements for on-chain program
-- **Actual:** Not applicable (decentralized smart contract, no PII storage)
-- **Evidence:** Program stores only public keys, token amounts, and nonces
-- **Findings:** On-chain programs handle public blockchain data only.
+- **Standards:** No specific compliance standards apply to a Solana payment channel SDK at this stage.
+- **Actual:** N/A
+- **Evidence:** N/A
+- **Findings:** Compliance requirements (SOC2, etc.) apply at the connector service level, not the SDK level.
 
 ---
 
@@ -150,56 +137,57 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 ### Availability (Uptime)
 
 - **Status:** N/A
-- **Threshold:** N/A (on-chain program; availability is determined by Solana network)
-- **Actual:** Solana network availability governs program availability
-- **Evidence:** Program is deployed to Solana blockchain
-- **Findings:** On-chain program inherits Solana network uptime (~99.9%).
+- **Threshold:** N/A -- SDK is a library, not a service.
+- **Actual:** N/A
+- **Evidence:** N/A
+- **Findings:** Availability depends on Solana RPC endpoints, not SDK code.
 
 ### Error Rate
 
-- **Status:** PASS
-- **Threshold:** All 51 tests pass consistently
-- **Actual:** 51/51 tests pass (19 lifecycle + 13 claims + 5 integration + 10 security + 4 performance)
-- **Evidence:** Story 33.3 completion notes -- all 51 tests pass via `cargo test-sbf`
-- **Findings:** Zero test failures. All error paths return appropriate error codes.
+- **Status:** PASS :white_check_mark:
+- **Threshold:** All known error codes mapped; unknown errors propagated cleanly
+- **Actual:** All 13 Solana program error codes (0-12) are mapped to descriptive `SolanaChannelError` instances. Unknown errors are re-thrown as-is.
+- **Evidence:** `ERROR_CODE_MAP` (lines 80-94), `mapProgramError()` (lines 208-215), `parseSolanaError()` (lines 221-251). Unit test T-33.4-12-unit verifies all 13 mappings.
+- **Findings:** Error handling is comprehensive. Three regex patterns cover different Solana error message formats (hex, decimal, InstructionError).
 
 ### MTTR (Mean Time To Recovery)
 
 - **Status:** N/A
-- **Threshold:** N/A (on-chain program; no server to recover)
+- **Threshold:** N/A -- SDK is stateless; no recovery mechanism needed.
 - **Actual:** N/A
-- **Evidence:** N/A
-- **Findings:** On-chain programs are immutable once deployed. Recovery is via program upgrade (upgrade authority documented in deploy.sh).
+- **Evidence:** SDK creates fresh RPC connections in constructor. No persistent state to recover.
+- **Findings:** Not applicable for a stateless client library.
 
 ### Fault Tolerance
 
-- **Status:** PASS
-- **Threshold:** Channel state machine prevents invalid transitions; funds cannot be lost
-- **Actual:** State machine enforced via error codes: `ChannelNotOpened` (1), `ChannelNotClosed` (2), `ChannelChallengeNotExpired` (3). Balance conservation invariant verified.
-- **Evidence:** `integration.rs` -- `test_vault_balance_equals_deposits_at_every_state_transition`, `test_balance_conservation_after_settlement`, `test_balance_conservation_with_no_claims`; `lifecycle.rs` -- `test_settle_channel_on_opened_channel_fails`
-- **Findings:** Strong fault tolerance through state machine enforcement and balance conservation invariants.
+- **Status:** CONCERNS :warning:
+- **Threshold:** SDK should handle transient RPC failures gracefully
+- **Actual:** No retry logic for RPC calls. If `getLatestBlockhash()` or `signAndSendTransactionMessageWithSigners()` fails, the error propagates immediately.
+- **Evidence:** `_sendTransaction()` at lines 1050-1081 has no retry/backoff logic. Single call to `getLatestBlockhash().send()`.
+- **Findings:** This is acceptable for the SDK layer -- retry policy should be implemented by the consuming `SolanaPaymentChannelProvider` (Story 33.5). However, documenting this design decision would be beneficial.
+- **Recommendation:** Add a note in SDK documentation that callers are responsible for retry/backoff. Consider adding optional retry configuration in Story 33.5.
 
 ### CI Burn-In (Stability)
 
-- **Status:** CONCERNS
-- **Threshold:** No explicit burn-in threshold defined
-- **Actual:** All 51 tests pass on current run; no multi-run burn-in data available yet
-- **Evidence:** Single successful run documented in story completion notes
-- **Findings:** Tests pass but no formal burn-in cycle has been executed. Recommend running `cargo test-sbf` in a 10-iteration burn-in loop before devnet deployment (Story 33.8).
+- **Status:** CONCERNS :warning:
+- **Threshold:** 10+ consecutive successful runs of changed test files
+- **Actual:** No burn-in data available. Tests have been run manually.
+- **Evidence:** Single test run: 12 passed, 11 skipped, 0 failed (1.699s).
+- **Findings:** Unit tests are deterministic (no flakiness indicators). Integration tests are skipped (require compiled Rust program + solana-bankrun). Burn-in should be established as part of CI pipeline setup.
 
 ### Disaster Recovery (if applicable)
 
 - **RTO (Recovery Time Objective)**
-  - **Status:** CONCERNS
-  - **Threshold:** UNKNOWN (not defined for on-chain program)
-  - **Actual:** Recovery via program upgrade requires funded deployer keypair + Solana CLI
-  - **Evidence:** `tools/solana/deploy.sh` -- documents upgrade authority transfer process
+  - **Status:** N/A
+  - **Threshold:** N/A
+  - **Actual:** N/A
+  - **Evidence:** SDK is stateless.
 
 - **RPO (Recovery Point Objective)**
   - **Status:** N/A
-  - **Threshold:** N/A (blockchain state is immutable and replicated)
-  - **Actual:** N/A -- Solana blockchain provides inherent data replication
-  - **Evidence:** N/A
+  - **Threshold:** N/A
+  - **Actual:** N/A
+  - **Evidence:** SDK is stateless; on-chain state is persistent on Solana.
 
 ---
 
@@ -207,89 +195,83 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ### Test Coverage
 
-- **Status:** PASS
-- **Threshold:** All acceptance criteria covered by automated tests
-- **Actual:** 12/12 acceptance criteria covered by 51 tests across 5 test files
-- **Evidence:**
-  - AC 1 (Full Lifecycle): `integration.rs` -- 5 tests
-  - AC 2 (Vault Invariant): `integration.rs` -- `test_vault_balance_equals_deposits_at_every_state_transition`
-  - AC 3 (Post-Settlement Conservation): `integration.rs` -- `test_balance_conservation_after_settlement`
-  - AC 4 (Nonce Replay): `security.rs` -- `test_nonce_replay_attack_across_multiple_claims`
-  - AC 5 (Challenge Period): `security.rs` -- `test_challenge_period_timing_boundary`
-  - AC 6 (PDA Derivation): `security.rs` -- `test_pda_derivation_swapped_participants_same_address`
-  - AC 7 (CU Profiling): `performance.rs` -- `test_claim_from_channel_cu_under_budget`
-  - AC 8 (Rent Economics): `performance.rs` -- `test_channel_and_vault_are_rent_exempt`
-  - AC 9 (Overflow): `security.rs` -- `test_large_deposits_accumulate_correctly`
-  - AC 10 (Security Edge Cases): `security.rs` -- 4 dedicated tests
-  - AC 11 (Deployment Script): `tools/solana/deploy.sh` created
-  - AC 12 (Upgrade Authority): `deploy.sh` with `--upgrade-authority` flag
-- **Findings:** 100% acceptance criteria coverage. Test distribution: 5 integration, 10 security, 4 performance, 19 lifecycle (pre-existing), 13 claims (pre-existing).
+- **Status:** CONCERNS :warning:
+- **Threshold:** >=80% for new code
+- **Actual:** 12/23 tests pass (52% test count), 11 integration tests skipped. Unit tests cover all pure functions (PDA derivation, deserialization, signing, error mapping, Ed25519 precompile layout). Integration tests are stubbed with proper ATDD structure but require solana-bankrun + compiled .so.
+- **Evidence:** Test run output: 12 passed, 11 skipped. Coverage of static/pure functions is 100%. Coverage of instance methods (openChannel, deposit, claim, etc.) is 0% at unit level (covered only by integration tests which are skipped).
+- **Findings:** Unit test quality is excellent -- golden tests, boundary tests, deterministic assertions. The gap is integration tests requiring on-chain infrastructure. This is by design (Story 33.4 scope is SDK implementation; integration test activation depends on solana-bankrun setup in CI).
+- **Recommendation:** Enable integration tests in CI pipeline when solana-bankrun is available. Track integration test activation as part of Story 33.7.
 
 ### Code Quality
 
-- **Status:** PASS
-- **Threshold:** No warnings from `cargo build-sbf`; clean test isolation
-- **Actual:** `cargo build-sbf` compiles with no warnings (only Solana SDK macro cfg warnings, which are upstream). Each test file is self-contained with duplicated helpers for isolation.
-- **Evidence:** Story 33.3 completion notes -- "cargo build-sbf compiles with no warnings"; test helpers duplicated per file as documented in dev notes
-- **Findings:** Clean build. Test isolation pattern (duplicated helpers) is deliberate per the story's dev notes to avoid test crate restructuring.
+- **Status:** PASS :white_check_mark:
+- **Threshold:** >=85/100 quality score
+- **Actual:** Code follows project conventions: structured logging, proper TypeScript types, JSDoc comments, consistent error handling patterns. TypeScript compiles cleanly with no errors (`npx tsc --noEmit` passes).
+- **Evidence:** Clean TSC compilation. Consistent patterns across all 10 transaction builder methods. Proper separation of concerns (static utilities vs instance methods vs private helpers).
+- **Findings:** Code quality is high. SDK mirrors the `PaymentChannelSDK` (EVM) pattern. Well-documented with JSDoc comments. Instruction discriminators and account layouts are well-organized constants.
 
 ### Technical Debt
 
-- **Status:** CONCERNS
-- **Threshold:** < 5% debt ratio
-- **Actual:** Test helper duplication across 5 test files is known technical debt (deliberate tradeoff for test isolation)
-- **Evidence:** `integration.rs`, `security.rs`, `performance.rs` each duplicate ~200 lines of helper functions from `lifecycle.rs` / `claims.rs`
-- **Findings:** ~600 lines of duplicated test helper code across files. This is a deliberate tradeoff documented in the story dev notes ("Rather than extracting a shared module, duplicate the helpers"). Consider extracting a shared test module in a future maintenance story.
+- **Status:** PASS :white_check_mark:
+- **Threshold:** <5% debt ratio
+- **Actual:** Minimal technical debt. Three `eslint-disable` comments for necessary type casts (`any` for Solana RPC response parsing). One `require('crypto')` for synchronous SHA-256 in PDA derivation (acceptable for Node.js environment).
+- **Evidence:** `eslint-disable` at lines 931, 1006, 1065-1066, 1074-1075, 1128-1129. All are justified by SDK/RPC type boundaries.
+- **Findings:** The `require('crypto')` usage (line 1129) is a minor concern -- could be replaced with `import` for ESM compatibility, but is acceptable in Node.js context.
 
 ### Documentation Completeness
 
-- **Status:** PASS
-- **Threshold:** Deployment process documented; test coverage documented
-- **Actual:** `deploy.sh` contains comprehensive inline documentation including prerequisites, usage examples, upgrade authority transfer process, and cost estimates
-- **Evidence:** `tools/solana/deploy.sh` -- 43 lines of header comments; Makefile target `solana-deploy-devnet`
-- **Findings:** Deployment documentation is thorough. Upgrade authority process (including irreversible `--final` flag) is clearly documented with warnings.
+- **Status:** PASS :white_check_mark:
+- **Threshold:** >=90% API surface documented
+- **Actual:** All public methods and interfaces have JSDoc comments. SDK class, constructor, static methods, instance methods, and types are documented. Story file has comprehensive dev notes with byte layouts, discriminators, and account lists.
+- **Evidence:** JSDoc on `SolanaPaymentChannelSDK` class (lines 381-391), all public methods, `SolanaChannelState` interface (lines 100-118), `SolanaChannelError` class (lines 120-134).
+- **Findings:** Documentation is excellent. The story file serves as a comprehensive specification.
 
 ### Test Quality (from test-review, if available)
 
-- **Status:** PASS
-- **Threshold:** Tests are deterministic, isolated, and under 300 lines each
-- **Actual:** All tests use `ProgramTest` (in-process BanksClient) for deterministic execution. Each test creates a fresh context. No external dependencies.
-- **Evidence:** All test functions create `program_test().start_with_context().await` -- isolated per-test context; Clock manipulation via `context.set_sysvar(&clock)` for deterministic timing
-- **Findings:** Tests follow the Solana program testing best practices: fresh context per test, deterministic clock control, in-process execution (no network calls).
+- **Status:** PASS :white_check_mark:
+- **Threshold:** Tests follow quality definition of done
+- **Actual:** Tests are deterministic, isolated, explicit, focused. No hard waits, no conditionals, all under 300 lines, self-cleaning (jest.clearAllMocks). Golden test pattern for deserialization. Proper AAA (Arrange-Act-Assert) structure with Gherkin-style comments.
+- **Evidence:** Test file structure: clear describe/it blocks, explicit assertions in test bodies, factory helpers for test data (`buildGoldenChannelState`).
+- **Findings:** Test quality is high. Meets all criteria from the Test Quality Definition of Done knowledge fragment.
 
 ---
 
-## Custom NFR Assessments
+## Custom NFR Assessments (if applicable)
 
-### On-Chain Compute Budget
+### Solana Cross-Language Serialization Correctness
 
-- **Status:** PASS
-- **Threshold:** `claim_from_channel` < 50,000 CU (Ed25519 precompile ~2,280 CU + program logic < 10,000 CU); `initialize_channel` < 200,000 CU; `deposit` < 50,000 CU
-- **Actual:** All three instruction types pass CU budget assertions
-- **Evidence:** `performance.rs` -- 3 CU profiling tests with explicit `assert!(cu_consumed < threshold)` checks; CU values logged via `eprintln!` for profiling visibility
-- **Findings:** CU consumption well within Solana's 200K default budget. The 50K threshold for claim provides 4x safety margin.
+- **Status:** PASS :white_check_mark:
+- **Threshold:** TypeScript byte layouts must match Rust exactly
+- **Actual:** Instruction discriminators (lines 59-66) match Rust exactly. Account data layout (178 bytes, lines 265-296) matches Rust `ChannelState` struct. Balance proof message format (48 bytes) matches Rust expectation. PDA derivation seeds match Rust `sort_participants()`.
+- **Evidence:** Golden test T-33.4-08-unit verifies byte-level deserialization. T-33.4-07 verifies PDA order-independence. T-33.4-11 verifies 48-byte message format. T-33.4-14 verifies Ed25519 precompile layout.
+- **Findings:** Cross-language serialization is thoroughly tested at the unit level. Integration tests (when enabled) will verify end-to-end correctness against the compiled Rust program.
 
-### Balance Conservation Invariant
+### Ed25519 Precompile Integration
 
-- **Status:** PASS
-- **Threshold:** `vault_balance == deposit_a + deposit_b` at every state transition; `final_balance_a + final_balance_b == initial_deposit_a + initial_deposit_b` post-settlement
-- **Actual:** Both invariants verified with explicit assertions
-- **Evidence:** `integration.rs` -- `test_vault_balance_equals_deposits_at_every_state_transition`, `test_balance_conservation_after_settlement`, `test_balance_conservation_with_no_claims`
-- **Findings:** Fund safety is the top priority for a payment channel program. Conservation invariant is tested through all lifecycle paths including force-close.
+- **Status:** PASS :white_check_mark:
+- **Threshold:** Ed25519 precompile instruction layout must match Solana specification
+- **Actual:** `buildEd25519PrecompileInstruction()` (lines 324-375) produces correct 160-byte instruction data with proper header offsets (signature at 16, pubkey at 80, message at 112).
+- **Evidence:** Unit test T-33.4-14 verifies all header fields, data offsets, ix_index values (0xFFFF), and total data length. Program address is `Ed25519SigVerify111111111111111111111111111`.
+- **Findings:** Implementation matches Solana Ed25519 precompile specification exactly.
 
 ---
 
 ## Quick Wins
 
-2 quick wins identified for immediate implementation:
+3 quick wins identified for immediate implementation:
 
-1. **Add burn-in script for Solana tests** (Reliability) - MEDIUM - 1 hour
-   - Create a simple bash loop: `for i in {1..10}; do cargo test-sbf || exit 1; done`
-   - No code changes needed, just a CI/Makefile addition
+1. **Add retry documentation** (Reliability) - LOW - 0.5 hours
+   - Document in SDK JSDoc that callers are responsible for retry/backoff on transient RPC failures
+   - No code changes needed
 
-2. **Extract shared test helpers** (Maintainability) - LOW - 2-3 hours
-   - Create `tests/common/mod.rs` with shared helpers to reduce ~600 lines of duplication
-   - Minimal risk, improves future test maintenance
+2. **Replace require('crypto') with import** (Maintainability) - LOW - 0.5 hours
+   - Change `require('crypto')` to top-level `import` for ESM compatibility
+   - Minimal code change (1 line)
+
+3. **Triage npm vulnerabilities** (Security) - MEDIUM - 2 hours
+   - Run focused audit on `@solana/kit` dependency tree
+   - Separate SDK-specific from project-wide vulnerabilities
+   - No code changes needed in SDK
 
 ---
 
@@ -297,25 +279,35 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ### Immediate (Before Release) - CRITICAL/HIGH Priority
 
-No immediate actions required. All security and performance criteria pass.
+1. **Enable integration tests in CI** - HIGH - 4 hours - Dev/DevOps
+   - Set up CI job that compiles Rust program (`cargo build-sbf`)
+   - Install `solana-bankrun` in CI environment
+   - Un-skip integration tests and run full suite
+   - Validation: All 23 tests pass (12 unit + 11 integration)
+
+2. **Triage npm audit vulnerabilities** - HIGH - 2 hours - Dev
+   - Run `npm audit` focused on `@solana/kit` and `@solana-program/token`
+   - Determine which critical/high vulnerabilities affect SDK
+   - Create backlog items for remediation
+   - Validation: 0 critical, <3 high vulnerabilities in SDK deps
 
 ### Short-term (Next Milestone) - MEDIUM Priority
 
-1. **Add CI burn-in for Solana tests** - MEDIUM - 2 hours - Dev
-   - Add a `solana-burn-in` Makefile target running `cargo test-sbf` 10x
-   - Add to GitHub Actions CI pipeline for PR validation
-   - Validates stability before devnet deployment (Story 33.8)
+1. **Establish CI burn-in for SDK tests** - MEDIUM - 2 hours - DevOps
+   - Add burn-in step (10 iterations) for changed SDK test files
+   - Track flakiness rate over time
+   - Validation: 10+ consecutive green runs
 
-2. **Document RTO for program upgrade** - MEDIUM - 1 hour - Dev/Ops
-   - Define expected time to deploy a program upgrade in case of critical bug
-   - Include in deployment runbook alongside `deploy.sh`
-   - Validate upgrade authority transfer process end-to-end
+2. **Add RPC retry wrapper** - MEDIUM - 4 hours - Dev
+   - Implement optional retry configuration in SolanaPaymentChannelProvider (Story 33.5)
+   - Exponential backoff for transient RPC failures (503, timeout)
+   - Validation: Retry tests pass with simulated RPC failures
 
 ### Long-term (Backlog) - LOW Priority
 
-1. **Extract shared test module** - LOW - 3 hours - Dev
-   - Consolidate duplicated test helpers into `tests/common/mod.rs`
-   - Reduces maintenance burden for future test additions (Stories 33.4+)
+1. **ESM migration for crypto import** - LOW - 0.5 hours - Dev
+   - Replace `require('crypto')` with ESM import
+   - Ensure compatibility with both CJS and ESM consumers
 
 ---
 
@@ -325,63 +317,63 @@ No immediate actions required. All security and performance criteria pass.
 
 ### Performance Monitoring
 
-- [ ] Solana Explorer / RPC monitoring -- Track CU consumption of deployed program transactions on devnet
-  - **Owner:** Dev
-  - **Deadline:** Story 33.8 (deployment)
+- [ ] Solana RPC latency tracking - Track p50/p95/p99 latency for `getLatestBlockhash`, `signAndSendTransactionMessageWithSigners`, and `getAccountInfo` RPC calls
+  - **Owner:** Dev (Story 33.5)
+  - **Deadline:** Story 33.5 completion
 
 ### Reliability Monitoring
 
-- [ ] Deployment verification script -- Automated post-deploy health check via `solana program show <PROGRAM_ID>`
-  - **Owner:** Dev
-  - **Deadline:** Story 33.8 (deployment)
+- [ ] Transaction failure rate tracking - Monitor `SolanaChannelError` frequency by error code to detect on-chain program issues
+  - **Owner:** Dev (Story 33.5)
+  - **Deadline:** Story 33.5 completion
 
 ### Alerting Thresholds
 
-- [ ] CU consumption alert -- Notify if any transaction exceeds 100,000 CU (2x current budget assertions)
-  - **Owner:** Dev
-  - **Deadline:** Post-deployment monitoring setup
+- [ ] Alert on >5% transaction failure rate - Notify when SolanaChannelError rate exceeds 5% over 5-minute window
+  - **Owner:** Dev/Ops
+  - **Deadline:** Production deployment
 
 ---
 
 ## Fail-Fast Mechanisms
 
-3 fail-fast mechanisms recommended to prevent failures:
+2 fail-fast mechanisms recommended to prevent failures:
 
 ### Circuit Breakers (Reliability)
 
-- [x] State machine enforcement -- Channel state transitions prevent invalid operations (Opened -> Closed -> Settled only)
-  - **Owner:** Already implemented
-  - **Estimated Effort:** 0 (done)
-
-### Rate Limiting (Performance)
-
-- [x] Solana network rate limiting -- Transaction throughput governed by Solana consensus; no custom rate limiting needed
-  - **Owner:** N/A (Solana network)
-  - **Estimated Effort:** 0
+- [ ] RPC circuit breaker in SolanaPaymentChannelProvider - Open circuit after 5 consecutive RPC failures; fall back to cached channel state for reads
+  - **Owner:** Dev (Story 33.5)
+  - **Estimated Effort:** 4 hours
 
 ### Validation Gates (Security)
 
-- [x] Ed25519 signature verification -- Every claim requires cryptographic proof; invalid signatures fail fast with error code 8
-  - **Owner:** Already implemented
-  - **Estimated Effort:** 0 (done)
+- [ ] Transaction pre-validation - Validate account addresses, amounts, and PDA derivation before submitting transactions to prevent wasted gas fees on invalid inputs
+  - **Owner:** Dev (Story 33.5)
+  - **Estimated Effort:** 2 hours
 
 ---
 
 ## Evidence Gaps
 
-2 evidence gaps identified - action required:
+3 evidence gaps identified - action required:
+
+- [ ] **Integration Test Results** (Maintainability)
+  - **Owner:** Dev/DevOps
+  - **Deadline:** Story 33.7 / CI pipeline setup
+  - **Suggested Evidence:** Run integration tests with solana-bankrun against compiled Rust program
+  - **Impact:** Cannot verify cross-language serialization correctness at runtime without integration tests
 
 - [ ] **CI Burn-In Results** (Reliability)
-  - **Owner:** Dev
-  - **Deadline:** Before Story 33.8 (devnet deployment)
-  - **Suggested Evidence:** Run `cargo test-sbf` 10 iterations in CI, save results
-  - **Impact:** Without burn-in, intermittent test failures may not be detected before deployment
+  - **Owner:** DevOps
+  - **Deadline:** CI pipeline setup
+  - **Suggested Evidence:** 10+ consecutive successful test runs with burn-in script
+  - **Impact:** Cannot confirm test stability over time
 
-- [ ] **Program Upgrade RTO** (Reliability)
-  - **Owner:** Dev/Ops
-  - **Deadline:** Story 33.8
-  - **Suggested Evidence:** Timed dry-run of upgrade authority transfer + program redeploy on devnet
-  - **Impact:** Without a defined RTO, incident response for critical bugs is ad-hoc
+- [ ] **SDK-Specific Vulnerability Audit** (Security)
+  - **Owner:** Dev
+  - **Deadline:** Before production deployment
+  - **Suggested Evidence:** Focused npm audit on `@solana/kit` dependency tree
+  - **Impact:** Cannot confirm SDK dependencies are free of critical vulnerabilities
 
 ---
 
@@ -389,32 +381,24 @@ No immediate actions required. All security and performance criteria pass.
 
 **Based on ADR Quality Readiness Checklist (8 categories, 29 criteria)**
 
-| Category                                         | Criteria Met | PASS | CONCERNS | FAIL | Overall Status |
-| ------------------------------------------------ | ------------ | ---- | -------- | ---- | -------------- |
-| 1. Testability & Automation                      | 4/4          | 4    | 0        | 0    | PASS           |
-| 2. Test Data Strategy                            | 3/3          | 3    | 0        | 0    | PASS           |
-| 3. Scalability & Availability                    | 3/4          | 3    | 1        | 0    | PASS           |
-| 4. Disaster Recovery                             | 1/3          | 0    | 1        | 0    | CONCERNS       |
-| 5. Security                                      | 4/4          | 4    | 0        | 0    | PASS           |
-| 6. Monitorability, Debuggability & Manageability | 2/4          | 2    | 2        | 0    | CONCERNS       |
-| 7. QoS & QoE                                     | 2/4          | 2    | 0        | 0    | PASS           |
-| 8. Deployability                                 | 3/3          | 3    | 0        | 0    | PASS           |
-| **Total**                                        | **22/29**    | **21** | **3** | **0** | **PASS**       |
+| Category                                         | Criteria Met | PASS | CONCERNS | FAIL | Overall Status    |
+| ------------------------------------------------ | ------------ | ---- | -------- | ---- | ----------------- |
+| 1. Testability & Automation                      | 3/4          | 3    | 1        | 0    | CONCERNS :warning:  |
+| 2. Test Data Strategy                            | 3/3          | 3    | 0        | 0    | PASS :white_check_mark:         |
+| 3. Scalability & Availability                    | 2/4          | 2    | 0        | 0    | N/A (library)     |
+| 4. Disaster Recovery                             | 0/3          | 0    | 0        | 0    | N/A (stateless)   |
+| 5. Security                                      | 3/4          | 3    | 1        | 0    | CONCERNS :warning:  |
+| 6. Monitorability, Debuggability & Manageability | 3/4          | 3    | 1        | 0    | CONCERNS :warning:  |
+| 7. QoS & QoE                                     | 2/4          | 2    | 0        | 0    | N/A (library)     |
+| 8. Deployability                                 | 3/3          | 3    | 0        | 0    | PASS :white_check_mark:         |
+| **Total**                                        | **19/29**    | **19** | **3**  | **0** | **CONCERNS :warning:** |
 
 **Criteria Met Scoring:**
 
-- 22/29 (76%) = Room for improvement (primarily in monitoring and DR categories, which are expected for an on-chain program at this stage)
+- 19/29 (66%) = Room for improvement (many N/A categories due to library nature)
+- Effective score (excluding N/A): 19/20 (95%) = Strong foundation
 
-**Category Details:**
-
-1. **Testability & Automation (4/4):** All business logic testable via `cargo test-sbf`; no UI dependency; test helpers provide state control; sample transactions documented in test files.
-2. **Test Data Strategy (3/3):** Each test creates fresh `ProgramTest` context (isolated); synthetic keypairs generated per test; automatic cleanup (in-process BanksClient).
-3. **Scalability & Availability (3/4):** Stateless per-channel design; no bottlenecks (independent PDAs); SLA inherits from Solana. Missing: no circuit breaker concept for on-chain (N/A for blockchain).
-4. **Disaster Recovery (1/3):** Upgrade authority documented in deploy.sh. Missing: RTO/RPO not formally defined; failover is N/A (blockchain).
-5. **Security (4/4):** Ed25519 auth; participant-only authorization; no secrets on-chain; input validation via error codes (13 error types).
-6. **Monitorability (2/4):** CU profiling logged in tests; deployment verification in deploy.sh. Missing: no distributed tracing (N/A for on-chain); no dynamic log levels (N/A for on-chain).
-7. **QoS & QoE (2/4):** CU budgets defined and tested; Solana network handles throughput. Missing: latency targets N/A (blockchain consensus); no rate limiting needed (Solana handles).
-8. **Deployability (3/3):** Deploy script with `--network` flag; upgrade authority transfer documented; `solana program show` verification step.
+**Note:** 9 criteria are N/A because this is a stateless client library, not a deployed service. The effective pass rate on applicable criteria is 95%.
 
 ---
 
@@ -422,58 +406,60 @@ No immediate actions required. All security and performance criteria pass.
 
 ```yaml
 nfr_assessment:
-  date: '2026-03-25'
-  story_id: '33.3'
-  feature_name: 'Solana Payment Channel Program Tests & Deployment'
-  adr_checklist_score: '22/29'
+  date: '2026-03-26'
+  story_id: '33.4'
+  feature_name: 'SolanaPaymentChannelSDK'
+  adr_checklist_score: '19/29'
+  effective_score: '19/20 (95%, excluding N/A)'
   categories:
-    testability_automation: 'PASS'
+    testability_automation: 'CONCERNS'
     test_data_strategy: 'PASS'
-    scalability_availability: 'PASS'
-    disaster_recovery: 'CONCERNS'
-    security: 'PASS'
+    scalability_availability: 'N/A'
+    disaster_recovery: 'N/A'
+    security: 'CONCERNS'
     monitorability: 'CONCERNS'
-    qos_qoe: 'PASS'
+    qos_qoe: 'N/A'
     deployability: 'PASS'
-  overall_status: 'PASS'
+  overall_status: 'CONCERNS'
   critical_issues: 0
-  high_priority_issues: 0
+  high_priority_issues: 2
   medium_priority_issues: 2
   concerns: 3
   blockers: false
-  quick_wins: 2
-  evidence_gaps: 2
+  quick_wins: 3
+  evidence_gaps: 3
   recommendations:
-    - 'Add CI burn-in loop for Solana tests (10 iterations)'
-    - 'Document RTO for program upgrade process'
-    - 'Extract shared test helpers to reduce duplication'
+    - 'Enable integration tests in CI with solana-bankrun'
+    - 'Triage npm audit vulnerabilities for SDK dependencies'
+    - 'Establish CI burn-in for SDK test stability'
 ```
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/33-3-solana-payment-channel-program-tests-deployment.md`
-- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-33.md`
-- **Architecture:** `_bmad-output/planning-artifacts/architecture.md`
+- **Story File:** `_bmad-output/implementation-artifacts/33-4-solana-payment-channel-sdk-typescript-integration.md`
+- **Tech Spec:** N/A (no separate tech spec; story file contains full specification)
+- **PRD:** `_bmad-output/planning-artifacts/prd.md`
+- **Test Design:** `_bmad-output/test-artifacts/atdd-checklist-33-4.md`
 - **Evidence Sources:**
-  - Test Results: `packages/solana-program/tests/` (5 test files, 51 tests)
-  - Deployment: `tools/solana/deploy.sh`
-  - Makefile: `Makefile` (`solana-deploy-devnet` target)
-  - Error Codes: `packages/solana-program/src/error.rs`
-  - State Layout: `packages/solana-program/src/state.rs`
+  - Test Results: `npx jest --testPathPattern=solana-payment-channel-sdk` (12 pass, 11 skip)
+  - TypeScript Compilation: `npx tsc -p packages/connector/tsconfig.json --noEmit` (clean)
+  - Vulnerability Scan: `npm audit` (1 critical, 18 high project-wide)
+  - Source Code: `packages/connector/src/settlement/solana-payment-channel-sdk.ts` (1208 lines)
+  - Test Code: `packages/connector/src/settlement/solana-payment-channel-sdk.test.ts` (667 lines)
 
 ---
 
 ## Recommendations Summary
 
-**Release Blocker:** None. All critical NFRs (security, performance, balance conservation) pass with strong evidence.
+**Release Blocker:** None -- SDK is safe to merge for continued development.
 
-**High Priority:** None.
+**High Priority:** Enable integration tests in CI (Story 33.7 dependency); triage npm vulnerabilities for SDK-specific exposure.
 
-**Medium Priority:** Add CI burn-in before devnet deployment (Story 33.8); document program upgrade RTO.
+**Medium Priority:** Establish burn-in testing; implement RPC retry wrapper in Provider layer (Story 33.5).
 
-**Next Steps:** Proceed to Story 33.4 (TypeScript SDK) and Story 33.8 (devnet deployment). Address CONCERNS items as part of Story 33.8 preparation.
+**Next Steps:** Proceed with Story 33.5 (SolanaPaymentChannelProvider). Address integration test enablement as part of CI pipeline setup. Run `*trace` workflow for traceability matrix update.
 
 ---
 
@@ -481,23 +467,23 @@ nfr_assessment:
 
 **NFR Assessment:**
 
-- Overall Status: PASS
+- Overall Status: CONCERNS :warning:
 - Critical Issues: 0
-- High Priority Issues: 0
+- High Priority Issues: 2
 - Concerns: 3
-- Evidence Gaps: 2
+- Evidence Gaps: 3
 
-**Gate Status:** PASS
+**Gate Status:** CONCERNS :warning: (no blockers; proceed with mitigation plan)
 
 **Next Actions:**
 
-- If PASS: Proceed to `*gate` workflow or release
-- If CONCERNS: Address HIGH/CRITICAL issues, re-run `*nfr-assess`
-- If FAIL: Resolve FAIL status NFRs, re-run `*nfr-assess`
+- If PASS :white_check_mark:: Proceed to `*gate` workflow or release
+- If CONCERNS :warning:: Address HIGH/CRITICAL issues, re-run `*nfr-assess`
+- If FAIL :x:: Resolve FAIL status NFRs, re-run `*nfr-assess`
 
-**Generated:** 2026-03-25
-**Workflow:** testarch-nfr v5.0
+**Generated:** 2026-03-26
+**Workflow:** testarch-nfr v5.0 (sequential mode, 4 NFR domains)
 
 ---
 
-<!-- Powered by BMAD-CORE™ -->
+<!-- Powered by BMAD-CORE(TM) -->

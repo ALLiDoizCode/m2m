@@ -75,6 +75,8 @@
     "prepublishOnly": "npm run build:publish && npm test"
   },
   "dependencies": {
+    "@solana-program/token": "^0.6.0",
+    "@solana/kit": "^3.0.3",
     "@toon-protocol/shared": "^1.0.0",
     "better-sqlite3": "^11.8.1",
     "cors": "^2.8.6",
@@ -113,6 +115,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
+    "solana-bankrun": "^0.4.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jest": "^29.5.12",
