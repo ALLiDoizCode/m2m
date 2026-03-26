@@ -42,7 +42,7 @@ epics:
         status: done
       33.2:
         name: "Solana Payment Channel Program — Claim Verification"
-        status: backlog
+        status: done
       33.3:
         name: "Solana Payment Channel Program — Tests & Deployment"
         status: backlog

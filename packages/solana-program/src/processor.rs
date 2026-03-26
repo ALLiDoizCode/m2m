@@ -1,6 +1,7 @@
 // Payment Channel Program — Instruction Processor
 //
-// Handles all channel lifecycle instructions: initialize, deposit, close, settle, force_close.
+// Handles all channel instructions: initialize, deposit, close, settle, force_close,
+// and claim_from_channel (Ed25519 precompile introspection for balance proof verification).
 
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
@@ -13,7 +14,7 @@ use solana_program::{
     pubkey::Pubkey,
     rent::Rent,
     system_instruction,
-    sysvar::{self, Sysvar},
+    sysvar::{self, instructions as sysvar_instructions, Sysvar},
 };
 
 use crate::error::PaymentChannelError;
@@ -40,11 +41,10 @@ pub fn process_instruction(
         PaymentChannelInstruction::ForceCloseExpired => {
             process_force_close_expired(program_id, accounts)
         }
-        PaymentChannelInstruction::ClaimFromChannel => {
-            // Story 33.2 — not yet implemented
-            msg!("claim_from_channel not yet implemented (Story 33.2)");
-            Err(ProgramError::InvalidInstructionData)
-        }
+        PaymentChannelInstruction::ClaimFromChannel {
+            nonce,
+            transferred_amount,
+        } => process_claim_from_channel(program_id, accounts, nonce, transferred_amount),
     }
 }
 
@@ -607,4 +607,222 @@ fn process_force_close_expired(
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     process_settlement(program_id, accounts)
+}
+
+// ---------------------------------------------------------------------------
+// claim_from_channel
+// ---------------------------------------------------------------------------
+// Accounts:
+//   0. [signer]    claimer        — participant submitting the claim
+//   1. [writable]  channel_pda    — channel state account
+//   2. []          instructions   — Instructions sysvar
+
+/// Ed25519 precompile instruction data offsets (matching solana-sdk layout).
+const ED25519_PUBKEY_SERIALIZED_SIZE: usize = 32;
+const ED25519_SIGNATURE_OFFSETS_SERIALIZED_SIZE: usize = 14;
+const ED25519_SIGNATURE_OFFSETS_START: usize = 2;
+const ED25519_DATA_START: usize =
+    ED25519_SIGNATURE_OFFSETS_SERIALIZED_SIZE + ED25519_SIGNATURE_OFFSETS_START;
+
+fn process_claim_from_channel(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    nonce: u64,
+    transferred_amount: u64,
+) -> ProgramResult {
+    let account_iter = &mut accounts.iter();
+    let claimer = next_account_info(account_iter)?;
+    let channel_pda_info = next_account_info(account_iter)?;
+    let instructions_sysvar = next_account_info(account_iter)?;
+
+    // Claimer must be a signer
+    if !claimer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Verify instructions sysvar identity
+    if !sysvar_instructions::check_id(instructions_sysvar.key) {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    // Verify channel is owned by this program
+    if channel_pda_info.owner != program_id {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // Deserialize channel state
+    let data = channel_pda_info.try_borrow_data()?;
+    let mut channel = ChannelState::deserialize(&data)?;
+    drop(data);
+
+    // Verify channel PDA derivation
+    let (expected_channel_pda, _) = derive_channel_pda(
+        &channel.participant_a,
+        &channel.participant_b,
+        &channel.token_mint,
+        program_id,
+    );
+    if *channel_pda_info.key != expected_channel_pda {
+        return Err(PaymentChannelError::InvalidPDA.into());
+    }
+
+    // Reject if channel state is Settled (allow Opened and Closed).
+    // Note: Reuses ChannelNotOpened error for Settled state to avoid adding new error codes
+    // (error code stability required by Stories 33.4/33.5). In practice, settled channels have
+    // zeroed account data and would fail deserialization before reaching this check.
+    let status = ChannelStatus::from_u8(channel.state);
+    match status {
+        Some(ChannelStatus::Opened) | Some(ChannelStatus::Closed) => {}
+        Some(ChannelStatus::Settled) | None => {
+            return Err(PaymentChannelError::ChannelNotOpened.into());
+        }
+    }
+
+    // Determine which participant the claimer is
+    let is_participant_a = *claimer.key == channel.participant_a;
+    let is_participant_b = *claimer.key == channel.participant_b;
+    if !is_participant_a && !is_participant_b {
+        return Err(PaymentChannelError::UnauthorizedSigner.into());
+    }
+
+    // Verify nonce is strictly greater than stored nonce
+    let stored_nonce = if is_participant_a {
+        channel.nonce_a
+    } else {
+        channel.nonce_b
+    };
+    if nonce <= stored_nonce {
+        return Err(PaymentChannelError::NonceNotMonotonic.into());
+    }
+
+    // Verify transferred_amount >= stored transferred_amount
+    let stored_transferred = if is_participant_a {
+        channel.transferred_amount_a
+    } else {
+        channel.transferred_amount_b
+    };
+    if transferred_amount < stored_transferred {
+        return Err(PaymentChannelError::TransferredAmountDecreased.into());
+    }
+
+    // Verify Ed25519 precompile instruction at index 0
+    verify_ed25519_precompile(
+        instructions_sysvar,
+        claimer.key,
+        channel_pda_info.key,
+        nonce,
+        transferred_amount,
+    )?;
+
+    // Update channel state for the claiming participant
+    if is_participant_a {
+        channel.nonce_a = nonce;
+        channel.transferred_amount_a = transferred_amount;
+    } else {
+        channel.nonce_b = nonce;
+        channel.transferred_amount_b = transferred_amount;
+    }
+
+    // Serialize updated state back
+    let mut data = channel_pda_info.try_borrow_mut_data()?;
+    channel.serialize(&mut data)?;
+
+    msg!(
+        "Claim processed: nonce={}, transferred_amount={}",
+        nonce,
+        transferred_amount
+    );
+    Ok(())
+}
+
+/// Verify that the Ed25519 precompile instruction at index 0 contains a valid
+/// signature verification for the expected balance proof message.
+fn verify_ed25519_precompile(
+    instructions_sysvar: &AccountInfo,
+    claimer: &Pubkey,
+    channel_pda: &Pubkey,
+    nonce: u64,
+    transferred_amount: u64,
+) -> ProgramResult {
+    // Load instruction at index 0 (Ed25519 precompile must be first)
+    let ed25519_ix = sysvar_instructions::load_instruction_at_checked(0, instructions_sysvar)
+        .map_err(|_| PaymentChannelError::InvalidSignature)?;
+
+    // Verify it's the Ed25519 precompile program
+    if ed25519_ix.program_id != solana_program::ed25519_program::id() {
+        return Err(PaymentChannelError::InvalidSignature.into());
+    }
+
+    let ix_data = &ed25519_ix.data;
+
+    // Minimum size check: header (2 bytes) + offsets (14 bytes) = 16 bytes
+    if ix_data.len() < ED25519_DATA_START {
+        return Err(PaymentChannelError::InvalidSignature.into());
+    }
+
+    // Check num_signatures == 1
+    if ix_data[0] != 1 {
+        return Err(PaymentChannelError::InvalidSignature.into());
+    }
+
+    // Parse offsets from the Ed25519 instruction data
+    let signature_ix_index =
+        u16::from_le_bytes([ix_data[4], ix_data[5]]);
+    let public_key_offset =
+        u16::from_le_bytes([ix_data[6], ix_data[7]]) as usize;
+    let public_key_ix_index =
+        u16::from_le_bytes([ix_data[8], ix_data[9]]);
+    let message_data_offset =
+        u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
+    let message_data_size =
+        u16::from_le_bytes([ix_data[12], ix_data[13]]) as usize;
+    let message_ix_index =
+        u16::from_le_bytes([ix_data[14], ix_data[15]]);
+
+    // Defense-in-depth: all data (signature, public key, message) must reside within
+    // the Ed25519 instruction itself (index = 0xFFFF). Reject instructions that reference
+    // data from other transaction instructions to prevent cross-instruction data confusion.
+    if signature_ix_index != u16::MAX
+        || public_key_ix_index != u16::MAX
+        || message_ix_index != u16::MAX
+    {
+        return Err(PaymentChannelError::InvalidSignature.into());
+    }
+
+    // Extract public key from the instruction data
+    let pubkey_end = public_key_offset
+        .checked_add(ED25519_PUBKEY_SERIALIZED_SIZE)
+        .ok_or::<ProgramError>(PaymentChannelError::InvalidSignature.into())?;
+    if ix_data.len() < pubkey_end {
+        return Err(PaymentChannelError::InvalidSignature.into());
+    }
+    let pubkey_bytes = &ix_data[public_key_offset..pubkey_end];
+
+    // Verify the public key matches the claimer
+    if pubkey_bytes != claimer.as_ref() {
+        return Err(PaymentChannelError::UnauthorizedSigner.into());
+    }
+
+    // Extract message from the instruction data
+    let message_end = message_data_offset
+        .checked_add(message_data_size)
+        .ok_or::<ProgramError>(PaymentChannelError::InvalidSignature.into())?;
+    if ix_data.len() < message_end {
+        return Err(PaymentChannelError::InvalidSignature.into());
+    }
+    let message_bytes = &ix_data[message_data_offset..message_end];
+
+    // Build expected balance proof: channel_pda (32) || nonce (8 LE) || transferred_amount (8 LE)
+    // Uses a fixed-size array to avoid heap allocation in the BPF runtime.
+    let mut expected_message = [0u8; 48];
+    expected_message[0..32].copy_from_slice(channel_pda.as_ref());
+    expected_message[32..40].copy_from_slice(&nonce.to_le_bytes());
+    expected_message[40..48].copy_from_slice(&transferred_amount.to_le_bytes());
+
+    // Verify message matches expected balance proof
+    if message_bytes.len() != 48 || message_bytes != &expected_message[..] {
+        return Err(PaymentChannelError::InvalidSignature.into());
+    }
+
+    Ok(())
 }

@@ -30,8 +30,12 @@ pub enum PaymentChannelInstruction {
     /// Force close an expired channel.
     ForceCloseExpired,
 
-    /// Claim from channel with balance proof (Story 33.2 — stub).
-    ClaimFromChannel,
+    /// Claim from channel with balance proof.
+    /// Data: nonce (u64 LE, 8 bytes) || transferred_amount (u64 LE, 8 bytes)
+    ClaimFromChannel {
+        nonce: u64,
+        transferred_amount: u64,
+    },
 }
 
 impl PaymentChannelInstruction {
@@ -70,7 +74,23 @@ impl PaymentChannelInstruction {
             CLOSE_CHANNEL => Ok(Self::CloseChannel),
             SETTLE_CHANNEL => Ok(Self::SettleChannel),
             FORCE_CLOSE_EXPIRED => Ok(Self::ForceCloseExpired),
-            CLAIM_FROM_CHANNEL => Ok(Self::ClaimFromChannel),
+            CLAIM_FROM_CHANNEL => {
+                if rest.len() < 16 {
+                    return Err(solana_program::program_error::ProgramError::InvalidInstructionData);
+                }
+                let nonce_bytes: [u8; 8] = rest[0..8]
+                    .try_into()
+                    .map_err(|_| solana_program::program_error::ProgramError::InvalidInstructionData)?;
+                let nonce = u64::from_le_bytes(nonce_bytes);
+                let amount_bytes: [u8; 8] = rest[8..16]
+                    .try_into()
+                    .map_err(|_| solana_program::program_error::ProgramError::InvalidInstructionData)?;
+                let transferred_amount = u64::from_le_bytes(amount_bytes);
+                Ok(Self::ClaimFromChannel {
+                    nonce,
+                    transferred_amount,
+                })
+            }
             _ => Err(solana_program::program_error::ProgramError::InvalidInstructionData),
         }
     }
