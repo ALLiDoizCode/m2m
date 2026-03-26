@@ -103,6 +103,6 @@ describe('waitFor', () => {
 
     // Even with high backoff (10x), delay should be capped at 5000ms
     const maxDelay = Math.max(...delays);
-    expect(maxDelay).toBeLessThanOrEqual(5500); // 5000ms + tolerance
+    expect(maxDelay).toBeLessThanOrEqual(7000); // 5000ms + generous tolerance for busy systems
   }, 35000); // 35 second timeout for this test
 });

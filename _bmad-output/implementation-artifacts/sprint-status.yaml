@@ -57,7 +57,7 @@ epics:
         status: done
       33.7:
         name: "Integration Tests — Solana Provider E2E"
-        status: backlog
+        status: done
       33.8:
         name: "Solana Devnet Deployment & Documentation"
         status: backlog
