@@ -34,3 +34,8 @@ export {
   EVMPaymentChannelProvider,
   createEVMProviderFactory,
 } from './evm-payment-channel-provider';
+
+export {
+  SolanaPaymentChannelProvider,
+  createSolanaProviderFactory,
+} from './solana-payment-channel-provider';

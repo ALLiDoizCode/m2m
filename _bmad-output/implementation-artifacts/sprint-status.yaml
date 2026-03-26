@@ -51,7 +51,7 @@ epics:
         status: done
       33.5:
         name: "Implement SolanaPaymentChannelProvider"
-        status: backlog
+        status: done
       33.6:
         name: "Solana Claim Message Types & Serialization"
         status: backlog
