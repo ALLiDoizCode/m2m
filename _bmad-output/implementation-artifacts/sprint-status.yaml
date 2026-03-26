@@ -61,7 +61,8 @@ epics:
       33.8:
         name: "Solana Devnet Deployment & Documentation"
         status: done
-
+    retrospective:
+      status: done
   epic-34:
     name: "Mina Protocol Payment Channel Provider"
     status: backlog
@@ -93,3 +94,5 @@ epics:
       34.9:
         name: "Mina Devnet Deployment & Documentation"
         status: backlog
+    retrospective:
+      status: backlog

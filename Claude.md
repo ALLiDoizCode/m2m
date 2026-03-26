@@ -1,10 +1,62 @@
 # CLAUDE.md
 
-> Project-level coding standards, architecture, and testing rules are in `_bmad-output/project-context.md` (auto-loaded by BMAD workflows). This file covers tooling defaults, MCP integrations, and workflow instructions that are NOT in project-context.md.
+> **Do not duplicate** content from `_bmad-output/project-context.md` -- that file contains all coding standards, architecture details, testing rules, and critical implementation rules. It is auto-loaded by BMAD workflows. This file covers only: quick-start setup, tooling defaults, MCP integrations, and workflow instructions.
 
 ## Terminology
 
 - Use **"BLS"** (not "agent runtime") for the local delivery handler component.
+
+## Quick Start
+
+```bash
+# Prerequisites: Node.js >= 22.11.0, npm >= 10.0.0
+npm install
+
+# Build (shared MUST build first -- it provides type definitions)
+npm run build --workspace=packages/shared
+npm run build
+
+# Run all tests
+make test
+
+# Lint + format
+make lint
+npm run format:check
+```
+
+### Local EVM Development
+
+```bash
+make anvil-up       # Start Anvil local Ethereum node + Token Faucet (Docker)
+make anvil-down     # Stop local blockchain
+make anvil-logs     # Follow Docker Compose logs
+```
+
+### Solana Program (Rust)
+
+Requires Rust toolchain + Solana CLI (`cargo build-sbf`).
+
+```bash
+make solana-build              # Build BPF program
+make solana-test               # Run Rust integration tests
+make solana-deploy-devnet DEPLOYER_KEYPAIR=path/to/keypair.json
+```
+
+See `docs/solana-deployment.md` for full deployment and operations guide.
+
+## Key Make Targets
+
+Run `make help` for the complete list. Most-used:
+
+| Target              | What it does                         |
+| ------------------- | ------------------------------------ |
+| `make build`        | Build all packages                   |
+| `make test`         | Run all tests                        |
+| `make test-unit`    | Unit tests only                      |
+| `make lint`         | ESLint                               |
+| `make clean`        | Remove `dist/` artifacts             |
+| `make solana-build` | Compile Solana program to BPF        |
+| `make solana-test`  | Run Solana Rust tests via `test-sbf` |
 
 ## Default UI Library: shadcn-ui v4
 
