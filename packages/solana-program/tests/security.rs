@@ -1,14 +1,17 @@
-// Claim Verification Tests for Story 33.2: Solana Payment Channel Program — Claim Verification
+// Security Tests for Story 33.3: Solana Payment Channel Program
 //
-// GREEN PHASE: All tests should pass with the implemented claim_from_channel handler.
+// Tests cover nonce replay attacks, challenge period timing enforcement,
+// PDA derivation ordering, overflow protection, and all security edge cases.
+//
+// Test IDs: T-33.3-04, T-33.3-05, T-33.3-06, T-33.3-09, T-33.3-10
 //
 // Test framework: solana-program-test (BanksClient, in-process)
 // Runner: cargo test-sbf
-//
-// Test IDs reference: test-design-epic-33.md (T-33.2-01 through T-33.2-12)
 
 use solana_program_test::*;
 use solana_sdk::{
+    account::Account as SolanaAccount,
+    clock::Clock,
     ed25519_instruction::new_ed25519_instruction,
     instruction::{AccountMeta, Instruction},
     program_pack::Pack,
@@ -18,26 +21,25 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
-/// Program ID for the payment channel program (must match lifecycle.rs and lib.rs).
+/// Program ID for the payment channel program.
 const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("598iSn5tfXsLcTPKj97SzKiCLVbKf7okNY4AEjgpLg2W");
-
-// ============================================================================
-// Byte offsets matching the program's state.rs layout
-// ============================================================================
-const TRANSFERRED_AMOUNT_A_OFFSET: usize = 120;
-const TRANSFERRED_AMOUNT_B_OFFSET: usize = 128;
-const NONCE_A_OFFSET: usize = 136;
-const NONCE_B_OFFSET: usize = 144;
-const STATE_FIELD_OFFSET: usize = 160;
-
-const STATE_OPENED: u8 = 0;
-const STATE_CLOSED: u8 = 1;
 
 /// Challenge duration used in tests (60 seconds).
 const TEST_CHALLENGE_DURATION: u64 = 60;
 
+/// Byte offsets matching the program's state.rs layout.
+const DEPOSIT_A_OFFSET: usize = 104;
+const DEPOSIT_B_OFFSET: usize = 112;
+const TRANSFERRED_AMOUNT_A_OFFSET: usize = 120;
+const NONCE_A_OFFSET: usize = 136;
+const STATE_FIELD_OFFSET: usize = 160;
+const CLOSE_TIMESTAMP_OFFSET: usize = 161;
+
+const STATE_OPENED: u8 = 0;
+const STATE_CLOSED: u8 = 1;
+
 // ============================================================================
-// Test Helpers (duplicated from lifecycle.rs for test isolation)
+// Test Helpers (duplicated for test isolation)
 // ============================================================================
 
 fn derive_channel_pda(
@@ -265,7 +267,6 @@ fn build_settle_channel_instruction(
     }
 }
 
-/// Build a claim_from_channel instruction.
 fn build_claim_instruction(
     claimer: &Pubkey,
     channel_pda: &Pubkey,
@@ -288,7 +289,6 @@ fn build_claim_instruction(
     }
 }
 
-/// Build a balance proof message: channel_pda (32) || nonce (8 LE) || transferred_amount (8 LE)
 fn build_balance_proof_message(
     channel_pda: &Pubkey,
     nonce: u64,
@@ -301,13 +301,10 @@ fn build_balance_proof_message(
     msg
 }
 
-/// Convert a solana_sdk::Keypair to an ed25519_dalek::Keypair for use with new_ed25519_instruction.
 fn to_dalek_keypair(keypair: &Keypair) -> ed25519_dalek::Keypair {
     ed25519_dalek::Keypair::from_bytes(&keypair.to_bytes()).unwrap()
 }
 
-/// Full setup: initialize channel, deposit tokens for both participants.
-/// Returns (channel_pda, vault_pda, token_mint, token_account_a, token_account_b).
 async fn setup_funded_channel(
     context: &mut ProgramTestContext,
     participant_a: &Keypair,
@@ -325,7 +322,6 @@ async fn setup_funded_channel(
     );
     let (vault_pda, _) = derive_vault_pda(&channel_pda, &PROGRAM_ID);
 
-    // Initialize channel
     let ix = build_initialize_channel_instruction(
         &context.payer.pubkey(),
         &participant_a.pubkey(),
@@ -344,7 +340,6 @@ async fn setup_funded_channel(
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    // Create and fund token accounts
     let token_account_a = create_and_fund_token_account(
         context,
         &token_mint,
@@ -362,7 +357,6 @@ async fn setup_funded_channel(
     )
     .await;
 
-    // Deposit for participant A
     if deposit_a > 0 {
         let ix = build_deposit_instruction(
             &participant_a.pubkey(),
@@ -381,7 +375,6 @@ async fn setup_funded_channel(
         context.banks_client.process_transaction(tx).await.unwrap();
     }
 
-    // Deposit for participant B
     if deposit_b > 0 {
         let ix = build_deposit_instruction(
             &participant_b.pubkey(),
@@ -409,7 +402,6 @@ async fn setup_funded_channel(
     )
 }
 
-/// Submit a claim transaction with Ed25519 precompile at index 0.
 async fn submit_claim(
     context: &mut ProgramTestContext,
     claimer: &Keypair,
@@ -433,31 +425,33 @@ async fn submit_claim(
     context.banks_client.process_transaction(tx).await
 }
 
-/// Read a u64 from account data at a given offset.
 fn read_u64_at(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }
 
-/// Advances the clock sysvar by the given number of seconds.
-async fn advance_clock_by_seconds(context: &mut ProgramTestContext, seconds: i64) {
-    let current_clock = context
-        .banks_client
-        .get_sysvar::<solana_sdk::clock::Clock>()
-        .await
-        .unwrap();
+/// Set the clock to a specific unix timestamp (absolute).
+async fn set_clock_to_timestamp(context: &mut ProgramTestContext, timestamp: i64) {
+    let current_clock = context.banks_client.get_sysvar::<Clock>().await.unwrap();
     let mut new_clock = current_clock.clone();
-    new_clock.unix_timestamp += seconds;
-    new_clock.slot += (seconds as u64) * 2;
+    let delta = timestamp - new_clock.unix_timestamp;
+    new_clock.unix_timestamp = timestamp;
+    if delta > 0 {
+        new_clock.slot += (delta as u64) * 2;
+    } else {
+        // Cannot go backward in slots, but we can keep the same slot
+        new_clock.slot += 1;
+    }
     context.set_sysvar(&new_clock);
     context.warp_to_slot(new_clock.slot).unwrap();
 }
 
 // ============================================================================
-// T-33.2-01: Valid claim updates nonce and transferred_amount (P0)
+// T-33.3-04: Nonce replay attack across multiple claims (P0)
+// AC 4: Nonce replay is rejected across a sequence of claims
 // ============================================================================
 
 #[tokio::test]
-async fn test_valid_claim_updates_channel_state() {
+async fn test_nonce_replay_attack_across_multiple_claims() {
     let mut context = program_test().start_with_context().await;
     let (participant_a, participant_b) = sorted_participants();
     let mint_authority = Keypair::new();
@@ -472,71 +466,485 @@ async fn test_valid_claim_updates_channel_state() {
     )
     .await;
 
-    // Submit a valid claim from participant A
-    submit_claim(&mut context, &participant_a, &channel_pda, 1, 5000)
+    // Submit claims with nonces 1, 2, 3 successfully
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 1000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_a, &channel_pda, 2, 2000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_a, &channel_pda, 3, 3000)
         .await
         .unwrap();
 
-    // Verify channel state
+    // Replay nonce 2 — must fail with NonceNotMonotonic (error code 6)
+    let result = submit_claim(&mut context, &participant_a, &channel_pda, 2, 4000).await;
+    assert!(
+        result.is_err(),
+        "Replaying nonce 2 after nonces 1,2,3 should fail"
+    );
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("Custom(6)") || err_str.contains("NonceNotMonotonic"),
+        "Expected NonceNotMonotonic error (Custom(6)), got: {}",
+        err_str
+    );
+
+    // Also replay nonce 1 — must fail
+    let result = submit_claim(&mut context, &participant_a, &channel_pda, 1, 5000).await;
+    assert!(result.is_err(), "Replaying nonce 1 should fail");
+
+    // Replay nonce 3 (current) — must also fail (not strictly greater)
+    let result = submit_claim(&mut context, &participant_a, &channel_pda, 3, 5000).await;
+    assert!(result.is_err(), "Replaying current nonce 3 should fail");
+
+    // Nonce 4 should succeed (strictly greater)
+    submit_claim(&mut context, &participant_a, &channel_pda, 4, 4000)
+        .await
+        .unwrap();
+
+    // Verify final state
     let account = context
         .banks_client
         .get_account(channel_pda)
         .await
         .unwrap()
+        .unwrap();
+    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 4);
+    assert_eq!(
+        read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET),
+        4000
+    );
+}
+
+// ============================================================================
+// T-33.3-05: Challenge period timing boundary enforcement (P0)
+// AC 5: Settlement timing boundary is enforced precisely
+// ============================================================================
+
+#[tokio::test]
+async fn test_challenge_period_timing_boundary() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    // Close the channel
+    let close_ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[close_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // Read the close_timestamp
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    let close_timestamp = i64::from_le_bytes(
+        channel_account.data[CLOSE_TIMESTAMP_OFFSET..CLOSE_TIMESTAMP_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+
+    // Create token accounts for settlement
+    let a_token_account = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
+    let b_token_account = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
+
+    // Attempt settle at close_timestamp + 59 (1 second before deadline) — should FAIL
+    set_clock_to_timestamp(
+        &mut context,
+        close_timestamp + TEST_CHALLENGE_DURATION as i64 - 1,
+    )
+    .await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    let result = context.banks_client.process_transaction(tx).await;
+    assert!(
+        result.is_err(),
+        "Settle at close_timestamp + 59 should fail (challenge not expired)"
+    );
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("Custom(3)") || err_str.contains("ChannelChallengeNotExpired"),
+        "Expected ChannelChallengeNotExpired error, got: {}",
+        err_str
+    );
+
+    // Attempt settle at close_timestamp + 60 (exactly at deadline) — should SUCCEED
+    set_clock_to_timestamp(
+        &mut context,
+        close_timestamp + TEST_CHALLENGE_DURATION as i64,
+    )
+    .await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // Verify channel is settled (account closed)
+    let channel_account = context.banks_client.get_account(channel_pda).await.unwrap();
+    assert!(
+        channel_account.is_none(),
+        "Channel should be closed after settlement at exact deadline"
+    );
+}
+
+// ============================================================================
+// T-33.3-06: PDA derivation with swapped participants (P0)
+// AC 6: PDA derivation is order-independent
+// ============================================================================
+
+#[tokio::test]
+async fn test_pda_derivation_swapped_participants_same_address() {
+    let participant_a = Keypair::new();
+    let participant_b = Keypair::new();
+    let token_mint = Pubkey::new_unique();
+
+    let (pda_ab, bump_ab) = derive_channel_pda(
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &token_mint,
+        &PROGRAM_ID,
+    );
+    let (pda_ba, bump_ba) = derive_channel_pda(
+        &participant_b.pubkey(),
+        &participant_a.pubkey(),
+        &token_mint,
+        &PROGRAM_ID,
+    );
+
+    assert_eq!(
+        pda_ab, pda_ba,
+        "PDA must be the same regardless of participant ordering"
+    );
+    assert_eq!(
+        bump_ab, bump_ba,
+        "Bump must be the same regardless of participant ordering"
+    );
+
+    // Verify lexicographic sorting is applied
+    let (min, max) = if participant_a.pubkey() < participant_b.pubkey() {
+        (participant_a.pubkey(), participant_b.pubkey())
+    } else {
+        (participant_b.pubkey(), participant_a.pubkey())
+    };
+
+    let (pda_sorted, _) = Pubkey::find_program_address(
+        &[b"channel", min.as_ref(), max.as_ref(), token_mint.as_ref()],
+        &PROGRAM_ID,
+    );
+
+    assert_eq!(
+        pda_ab, pda_sorted,
+        "PDA should match direct derivation with sorted participants"
+    );
+}
+
+// ============================================================================
+// T-33.3-06b: PDA derivation with multiple different token mints
+// ============================================================================
+
+#[tokio::test]
+async fn test_pda_derivation_different_mints_produce_different_pdas() {
+    let participant_a = Keypair::new();
+    let participant_b = Keypair::new();
+    let mint1 = Pubkey::new_unique();
+    let mint2 = Pubkey::new_unique();
+
+    let (pda1, _) = derive_channel_pda(
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &mint1,
+        &PROGRAM_ID,
+    );
+    let (pda2, _) = derive_channel_pda(
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &mint2,
+        &PROGRAM_ID,
+    );
+
+    assert_ne!(pda1, pda2, "Different mints should produce different PDAs");
+}
+
+// ============================================================================
+// T-33.3-09: Overflow protection — large deposits accumulate safely (P1)
+// AC 9: ArithmeticOverflow defense-in-depth
+//
+// Note: The overflow check in process_deposit uses `checked_add` on deposit_a/deposit_b.
+// Since SPL Token mint supply is capped at u64::MAX, it is not possible to trigger
+// the on-chain overflow through normal token operations (the mint_to or transfer would
+// fail first). This test verifies that large deposits near practical limits work
+// correctly and that the checked arithmetic does not cause false rejections.
+//
+// The overflow protection is defense-in-depth against future program changes or
+// alternative deposit paths that might bypass SPL Token supply constraints.
+// ============================================================================
+
+#[tokio::test]
+async fn test_large_deposits_accumulate_correctly() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        0,
+        0,
+    )
+    .await;
+
+    // Multiple deposits from A that accumulate to a large total
+    let deposit_amount: u64 = 1_000_000_000; // 1 billion
+    for i in 0..3u64 {
+        let token_account = create_and_fund_token_account(
+            &mut context,
+            &token_mint,
+            &participant_a.pubkey(),
+            &mint_authority,
+            deposit_amount,
+        )
+        .await;
+
+        let ix = build_deposit_instruction(
+            &participant_a.pubkey(),
+            &token_account,
+            &vault_pda,
+            &channel_pda,
+            deposit_amount,
+        );
+        let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&context.payer.pubkey()),
+            &[&context.payer, &participant_a],
+            recent,
+        );
+        context.banks_client.process_transaction(tx).await.unwrap();
+
+        // Verify the accumulation is correct
+        let channel_account = context
+            .banks_client
+            .get_account(channel_pda)
+            .await
+            .unwrap()
+            .expect("Channel should exist");
+        let stored_deposit_a = read_u64_at(&channel_account.data, DEPOSIT_A_OFFSET);
+        assert_eq!(
+            stored_deposit_a,
+            deposit_amount * (i + 1),
+            "deposit_a should accumulate correctly after {} deposits",
+            i + 1
+        );
+    }
+
+    // Verify final state: deposit_a = 3 billion, deposit_b = 0
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        read_u64_at(&channel_account.data, DEPOSIT_A_OFFSET),
+        3_000_000_000
+    );
+    assert_eq!(read_u64_at(&channel_account.data, DEPOSIT_B_OFFSET), 0);
+    assert_eq!(channel_account.data[STATE_FIELD_OFFSET], STATE_OPENED);
+}
+
+// ============================================================================
+// T-33.3-09b: Overflow protection — deposits summing past u64::MAX (P1)
+// AC 9: ArithmeticOverflow error code 10 when deposit_a + amount > u64::MAX
+//
+// Strategy: Initialize a channel with a small deposit, then directly manipulate
+// the channel PDA account data to set deposit_a near u64::MAX. A subsequent
+// legitimate deposit triggers the checked_add overflow in process_deposit.
+// This bypasses the SPL Token supply cap limitation that would otherwise prevent
+// minting u64::MAX tokens, allowing us to exercise the on-chain overflow guard.
+// ============================================================================
+
+#[tokio::test]
+async fn test_deposit_overflow_past_u64_max() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    // Set up channel with a small initial deposit so SPL Token state is valid
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        1_000, // participant A deposits 1000
+        0,
+    )
+    .await;
+
+    // Read current channel account and manipulate deposit_a to near u64::MAX
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
         .expect("Channel should exist");
-    let data = &account.data;
 
-    assert_eq!(read_u64_at(data, NONCE_A_OFFSET), 1);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_A_OFFSET), 5000);
-    // B's fields should be unchanged
-    assert_eq!(read_u64_at(data, NONCE_B_OFFSET), 0);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_B_OFFSET), 0);
-    // Channel should remain Opened
-    assert_eq!(data[STATE_FIELD_OFFSET], STATE_OPENED);
-}
+    let mut manipulated_data = channel_account.data.clone();
+    // Set deposit_a to u64::MAX - 500 (so adding 1000 will overflow)
+    let overflow_deposit: u64 = u64::MAX - 500;
+    manipulated_data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8]
+        .copy_from_slice(&overflow_deposit.to_le_bytes());
 
-// ============================================================================
-// T-33.2-02: Replayed nonce fails with NonceNotMonotonic (P0)
-// ============================================================================
+    // Write the manipulated account back
+    context.set_account(
+        &channel_pda,
+        &SolanaAccount {
+            lamports: channel_account.lamports,
+            data: manipulated_data,
+            owner: channel_account.owner,
+            executable: channel_account.executable,
+            rent_epoch: channel_account.rent_epoch,
+        }
+        .into(),
+    );
 
-#[tokio::test]
-async fn test_replayed_nonce_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
+    // Verify manipulation took effect
+    let verify_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        read_u64_at(&verify_account.data, DEPOSIT_A_OFFSET),
+        overflow_deposit,
+        "deposit_a should be manipulated to u64::MAX - 500"
+    );
 
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
+    // Create a new token account with 1000 tokens for participant A
+    let new_token_account = create_and_fund_token_account(
         &mut context,
-        &participant_a,
-        &participant_b,
+        &token_mint,
+        &participant_a.pubkey(),
         &mint_authority,
-        10_000,
-        10_000,
+        1_000,
     )
     .await;
 
-    // First claim succeeds
-    submit_claim(&mut context, &participant_a, &channel_pda, 5, 1000)
-        .await
-        .unwrap();
+    // Attempt deposit of 1000 — checked_add(u64::MAX - 500, 1000) overflows
+    let ix = build_deposit_instruction(
+        &participant_a.pubkey(),
+        &new_token_account,
+        &vault_pda,
+        &channel_pda,
+        1_000,
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
+    );
 
-    // Replay same nonce = 5 should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 5, 2000).await;
-    assert!(result.is_err(), "Replayed nonce should be rejected");
+    let result = context.banks_client.process_transaction(tx).await;
+    assert!(
+        result.is_err(),
+        "Deposit causing u64 overflow should be rejected"
+    );
     let err_str = format!("{:?}", result.unwrap_err());
     assert!(
-        err_str.contains("Custom(6)") || err_str.contains("NonceNotMonotonic"),
-        "Expected NonceNotMonotonic error (Custom(6)), got: {}",
+        err_str.contains("Custom(10)") || err_str.contains("ArithmeticOverflow"),
+        "Expected ArithmeticOverflow error (Custom(10)), got: {}",
         err_str
+    );
+
+    // Verify no state corruption — deposit_a should remain unchanged
+    let final_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .expect("Channel should still exist after failed deposit");
+    assert_eq!(
+        read_u64_at(&final_account.data, DEPOSIT_A_OFFSET),
+        overflow_deposit,
+        "deposit_a should not be corrupted after overflow rejection"
+    );
+    assert_eq!(
+        final_account.data[STATE_FIELD_OFFSET],
+        STATE_OPENED,
+        "Channel should remain in Opened state after overflow rejection"
     );
 }
 
 // ============================================================================
-// T-33.2-03: Stale nonce fails with NonceNotMonotonic (P0)
+// T-33.3-10a: Invalid signature rejected (P0)
+// AC 10: InvalidSignature error for bad Ed25519 signatures
 // ============================================================================
 
 #[tokio::test]
-async fn test_stale_nonce_rejected() {
+async fn test_invalid_signature_security_edge_case() {
     let mut context = program_test().start_with_context().await;
     let (participant_a, participant_b) = sorted_participants();
     let mint_authority = Keypair::new();
@@ -551,48 +959,12 @@ async fn test_stale_nonce_rejected() {
     )
     .await;
 
-    // First claim with nonce = 5
-    submit_claim(&mut context, &participant_a, &channel_pda, 5, 1000)
-        .await
-        .unwrap();
-
-    // Stale nonce = 4 should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 4, 2000).await;
-    assert!(result.is_err(), "Stale nonce should be rejected");
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(6)") || err_str.contains("NonceNotMonotonic"),
-        "Expected NonceNotMonotonic error (Custom(6)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-04: Invalid signature fails with InvalidSignature (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_invalid_signature_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Sign a WRONG message (different nonce in the signed message vs the instruction)
-    let wrong_message = build_balance_proof_message(&channel_pda, 999, 5000);
+    // Sign a WRONG message (different transferred_amount in the signed message)
+    let wrong_message = build_balance_proof_message(&channel_pda, 1, 9999);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &wrong_message);
 
-    // But claim instruction has nonce = 1
+    // But claim instruction has transferred_amount = 5000
     let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -603,10 +975,7 @@ async fn test_invalid_signature_rejected() {
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
-    assert!(
-        result.is_err(),
-        "Mismatched balance proof message should be rejected"
-    );
+    assert!(result.is_err(), "Mismatched signature should be rejected");
     let err_str = format!("{:?}", result.unwrap_err());
     assert!(
         err_str.contains("Custom(8)") || err_str.contains("InvalidSignature"),
@@ -616,11 +985,12 @@ async fn test_invalid_signature_rejected() {
 }
 
 // ============================================================================
-// T-33.2-05: Non-participant signer fails with UnauthorizedSigner (P0)
+// T-33.3-10b: Unauthorized signer rejected (P0)
+// AC 10: UnauthorizedSigner error for non-participant signers
 // ============================================================================
 
 #[tokio::test]
-async fn test_non_participant_signer_rejected() {
+async fn test_unauthorized_signer_security_edge_case() {
     let mut context = program_test().start_with_context().await;
     let (participant_a, participant_b) = sorted_participants();
     let mint_authority = Keypair::new();
@@ -636,7 +1006,7 @@ async fn test_non_participant_signer_rejected() {
     )
     .await;
 
-    // The outsider signs the balance proof but is not a channel participant
+    // Outsider signs a valid balance proof but is not a participant
     let message = build_balance_proof_message(&channel_pda, 1, 5000);
     let dalek_outsider = to_dalek_keypair(&outsider);
     let ed25519_ix = new_ed25519_instruction(&dalek_outsider, &message);
@@ -650,10 +1020,7 @@ async fn test_non_participant_signer_rejected() {
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
-    assert!(
-        result.is_err(),
-        "Non-participant signer should be rejected with UnauthorizedSigner"
-    );
+    assert!(result.is_err(), "Non-participant signer should be rejected");
     let err_str = format!("{:?}", result.unwrap_err());
     assert!(
         err_str.contains("Custom(9)") || err_str.contains("UnauthorizedSigner"),
@@ -663,11 +1030,12 @@ async fn test_non_participant_signer_rejected() {
 }
 
 // ============================================================================
-// T-33.2-06: Decreased transferred_amount fails (P0)
+// T-33.3-10c: Decreased transferred_amount rejected (P0)
+// AC 10: TransferredAmountDecreased error
 // ============================================================================
 
 #[tokio::test]
-async fn test_decreased_transferred_amount_rejected() {
+async fn test_decreased_transferred_amount_security_edge_case() {
     let mut context = program_test().start_with_context().await;
     let (participant_a, participant_b) = sorted_participants();
     let mint_authority = Keypair::new();
@@ -687,8 +1055,8 @@ async fn test_decreased_transferred_amount_rejected() {
         .await
         .unwrap();
 
-    // Second claim with decreased amount = 4000 should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 2, 4000).await;
+    // Second claim with decreased amount = 3000 — must fail
+    let result = submit_claim(&mut context, &participant_a, &channel_pda, 2, 3000).await;
     assert!(
         result.is_err(),
         "Decreased transferred_amount should be rejected"
@@ -702,16 +1070,16 @@ async fn test_decreased_transferred_amount_rejected() {
 }
 
 // ============================================================================
-// T-33.2-07: Claim on closed channel succeeds (P0)
+// T-33.3-S01: Deposit after close rejected
 // ============================================================================
 
 #[tokio::test]
-async fn test_claim_on_closed_channel_succeeds() {
+async fn test_deposit_after_close_rejected() {
     let mut context = program_test().start_with_context().await;
     let (participant_a, participant_b) = sorted_participants();
     let mint_authority = Keypair::new();
 
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
         &mut context,
         &participant_a,
         &participant_b,
@@ -732,7 +1100,7 @@ async fn test_claim_on_closed_channel_succeeds() {
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    // Verify channel is Closed
+    // Verify closed
     let account = context
         .banks_client
         .get_account(channel_pda)
@@ -741,80 +1109,51 @@ async fn test_claim_on_closed_channel_succeeds() {
         .unwrap();
     assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_CLOSED);
 
-    // Claim should still succeed on closed channel
-    submit_claim(&mut context, &participant_a, &channel_pda, 1, 3000)
-        .await
-        .unwrap();
-
-    // Verify state was updated
-    let account = context
-        .banks_client
-        .get_account(channel_pda)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 1);
-    assert_eq!(
-        read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET),
-        3000
-    );
-    // Channel should still be Closed
-    assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_CLOSED);
-}
-
-// ============================================================================
-// T-33.2-08: Ed25519 precompile instruction missing fails (P1)
-// ============================================================================
-
-#[tokio::test]
-async fn test_missing_ed25519_precompile_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
+    // Attempt deposit on closed channel
+    let new_token_account = create_and_fund_token_account(
         &mut context,
-        &participant_a,
-        &participant_b,
+        &token_mint,
+        &participant_a.pubkey(),
         &mint_authority,
-        10_000,
-        10_000,
+        1000,
     )
     .await;
-
-    // Submit claim WITHOUT Ed25519 precompile instruction
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
+    let ix = build_deposit_instruction(
+        &participant_a.pubkey(),
+        &new_token_account,
+        &vault_pda,
+        &channel_pda,
+        1000,
+    );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[claim_ix],
+        &[ix],
         Some(&context.payer.pubkey()),
         &[&context.payer, &participant_a],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
-    assert!(
-        result.is_err(),
-        "Missing Ed25519 precompile should be rejected"
-    );
+    assert!(result.is_err(), "Deposit after close should fail");
     let err_str = format!("{:?}", result.unwrap_err());
     assert!(
-        err_str.contains("Custom(8)") || err_str.contains("InvalidSignature"),
-        "Expected InvalidSignature error (Custom(8)), got: {}",
+        err_str.contains("Custom(1)") || err_str.contains("ChannelNotOpened"),
+        "Expected ChannelNotOpened error (Custom(1)), got: {}",
         err_str
     );
 }
 
 // ============================================================================
-// T-33.2-09: Ed25519 precompile at wrong index fails (P1)
+// T-33.3-S02: Claim with wrong channel PDA
 // ============================================================================
 
 #[tokio::test]
-async fn test_ed25519_precompile_at_wrong_index_rejected() {
+async fn test_claim_with_wrong_channel_pda() {
     let mut context = program_test().start_with_context().await;
     let (participant_a, participant_b) = sorted_participants();
     let mint_authority = Keypair::new();
 
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
+    // Set up channel 1
+    let (channel_pda_1, _vault_pda_1, _token_mint_1, _ta_a_1, _ta_b_1) = setup_funded_channel(
         &mut context,
         &participant_a,
         &participant_b,
@@ -824,15 +1163,28 @@ async fn test_ed25519_precompile_at_wrong_index_rejected() {
     )
     .await;
 
-    // Put claim instruction FIRST, Ed25519 precompile SECOND (wrong order)
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
+    // Set up channel 2 with different participants
+    let (participant_c, participant_d) = sorted_participants();
+    let (channel_pda_2, _vault_pda_2, _token_mint_2, _ta_c, _ta_d) = setup_funded_channel(
+        &mut context,
+        &participant_c,
+        &participant_d,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    // Try to claim on channel 2's PDA using participant A's signature
+    // The balance proof references channel 2's PDA but participant A is not in channel 2
+    let message = build_balance_proof_message(&channel_pda_2, 1, 5000);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
+    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda_2, 1, 5000);
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[claim_ix, ed25519_ix], // Wrong order: claim at 0, ed25519 at 1
+        &[ed25519_ix, claim_ix],
         Some(&context.payer.pubkey()),
         &[&context.payer, &participant_a],
         recent,
@@ -840,197 +1192,23 @@ async fn test_ed25519_precompile_at_wrong_index_rejected() {
     let result = context.banks_client.process_transaction(tx).await;
     assert!(
         result.is_err(),
-        "Ed25519 precompile at wrong index should be rejected"
+        "Claim on wrong channel PDA should be rejected"
     );
+    // Should fail with UnauthorizedSigner since participant_a is not in channel 2
     let err_str = format!("{:?}", result.unwrap_err());
     assert!(
-        err_str.contains("Custom(8)") || err_str.contains("InvalidSignature"),
-        "Expected InvalidSignature error (Custom(8)), got: {}",
+        err_str.contains("Custom(9)") || err_str.contains("UnauthorizedSigner"),
+        "Expected UnauthorizedSigner error for wrong channel, got: {}",
         err_str
     );
-}
 
-// ============================================================================
-// T-33.2-10: Multiple sequential claims succeed (P1)
-// ============================================================================
-
-#[tokio::test]
-async fn test_multiple_sequential_claims_succeed() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Submit claims with nonces 1, 2, 3
-    for i in 1..=3u64 {
-        submit_claim(&mut context, &participant_a, &channel_pda, i, 1000 * i)
-            .await
-            .unwrap();
-    }
-
-    // Verify final state
+    // Original channel should be unaffected
     let account = context
         .banks_client
-        .get_account(channel_pda)
+        .get_account(channel_pda_1)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 3);
-    assert_eq!(
-        read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET),
-        3000
-    );
-}
-
-// ============================================================================
-// T-33.2-11: Claim on settled channel fails (P1)
-// ============================================================================
-
-#[tokio::test]
-async fn test_claim_on_settled_channel_fails() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, vault_pda, _token_mint, token_account_a, token_account_b) =
-        setup_funded_channel(
-            &mut context,
-            &participant_a,
-            &participant_b,
-            &mint_authority,
-            10_000,
-            10_000,
-        )
-        .await;
-
-    // Close the channel
-    let close_ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
-    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[close_ix],
-        Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
-        recent,
-    );
-    context.banks_client.process_transaction(tx).await.unwrap();
-
-    // Advance clock past challenge period
-    advance_clock_by_seconds(&mut context, (TEST_CHALLENGE_DURATION + 1) as i64).await;
-
-    // Settle the channel
-    let settle_ix = build_settle_channel_instruction(
-        &participant_a.pubkey(),
-        &channel_pda,
-        &vault_pda,
-        &token_account_a,
-        &token_account_b,
-        &context.payer.pubkey(),
-    );
-    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[settle_ix],
-        Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
-        recent,
-    );
-    context.banks_client.process_transaction(tx).await.unwrap();
-
-    // Verify channel account is closed (zeroed/reclaimed)
-    let account = context.banks_client.get_account(channel_pda).await.unwrap();
-    assert!(
-        account.is_none() || account.unwrap().data.iter().all(|&b| b == 0),
-        "Channel account should be zeroed after settlement"
-    );
-
-    // Attempt to claim on settled channel should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 1, 5000).await;
-    assert!(
-        result.is_err(),
-        "Claim on settled channel should be rejected"
-    );
-}
-
-// ============================================================================
-// T-33.2-12: Balance proof message format is exactly 48 bytes (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_balance_proof_message_format() {
-    let channel_pda = Pubkey::new_unique();
-    let nonce: u64 = 42;
-    let transferred_amount: u64 = 123456;
-
-    let message = build_balance_proof_message(&channel_pda, nonce, transferred_amount);
-
-    // Total size is 48 bytes
-    assert_eq!(
-        message.len(),
-        48,
-        "Balance proof message must be exactly 48 bytes"
-    );
-
-    // First 32 bytes are channel_pda
-    assert_eq!(&message[0..32], channel_pda.as_ref());
-
-    // Next 8 bytes are nonce (LE)
-    assert_eq!(
-        u64::from_le_bytes(message[32..40].try_into().unwrap()),
-        nonce
-    );
-
-    // Next 8 bytes are transferred_amount (LE)
-    assert_eq!(
-        u64::from_le_bytes(message[40..48].try_into().unwrap()),
-        transferred_amount
-    );
-}
-
-// ============================================================================
-// T-33.2-13: Claim from participant B updates B's fields (not A's)
-// ============================================================================
-
-#[tokio::test]
-async fn test_claim_from_participant_b_updates_b_fields() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Submit a claim from participant B
-    submit_claim(&mut context, &participant_b, &channel_pda, 1, 7000)
-        .await
-        .unwrap();
-
-    // Verify B's fields are updated
-    let account = context
-        .banks_client
-        .get_account(channel_pda)
-        .await
-        .unwrap()
-        .unwrap();
-    let data = &account.data;
-
-    assert_eq!(read_u64_at(data, NONCE_B_OFFSET), 1);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_B_OFFSET), 7000);
-    // A's fields should be unchanged
-    assert_eq!(read_u64_at(data, NONCE_A_OFFSET), 0);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_A_OFFSET), 0);
+    assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_OPENED);
+    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 0);
 }

@@ -17,7 +17,6 @@ use solana_sdk::{
     system_program,
     transaction::Transaction,
 };
-use spl_token;
 
 /// Program ID for the payment channel program.
 const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("598iSn5tfXsLcTPKj97SzKiCLVbKf7okNY4AEjgpLg2W");
@@ -87,10 +86,7 @@ fn program_test() -> ProgramTest {
 }
 
 /// Creates a new SPL Token mint and returns its pubkey.
-async fn create_test_mint(
-    context: &mut ProgramTestContext,
-    mint_authority: &Keypair,
-) -> Pubkey {
+async fn create_test_mint(context: &mut ProgramTestContext, mint_authority: &Keypair) -> Pubkey {
     let mint = Keypair::new();
     let rent = context.banks_client.get_rent().await.unwrap();
     let mint_rent = rent.minimum_balance(spl_token::state::Mint::LEN);
@@ -369,21 +365,39 @@ async fn test_initialize_channel_creates_pda_with_correct_state() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, _vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
-    let channel_account = context.banks_client
-        .get_account(channel_pda).await.unwrap()
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
         .expect("Channel PDA should exist");
     let data = &channel_account.data;
 
-    assert_eq!(data[STATE_FIELD_OFFSET], STATE_OPENED, "state should be Opened (0)");
+    assert_eq!(
+        data[STATE_FIELD_OFFSET], STATE_OPENED,
+        "state should be Opened (0)"
+    );
 
-    let deposit_a = u64::from_le_bytes(data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8].try_into().unwrap());
+    let deposit_a = u64::from_le_bytes(
+        data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
     assert_eq!(deposit_a, 0, "deposit_a should be 0");
 
-    let deposit_b = u64::from_le_bytes(data[DEPOSIT_B_OFFSET..DEPOSIT_B_OFFSET + 8].try_into().unwrap());
+    let deposit_b = u64::from_le_bytes(
+        data[DEPOSIT_B_OFFSET..DEPOSIT_B_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
     assert_eq!(deposit_b, 0, "deposit_b should be 0");
 
     // Verify participants stored in sorted order
@@ -391,8 +405,16 @@ async fn test_initialize_channel_creates_pda_with_correct_state() {
     let stored_b = Pubkey::try_from(&data[40..72]).unwrap();
     let stored_mint = Pubkey::try_from(&data[72..104]).unwrap();
 
-    assert_eq!(stored_a, participant_a.pubkey(), "participant_a should be lexicographic min");
-    assert_eq!(stored_b, participant_b.pubkey(), "participant_b should be lexicographic max");
+    assert_eq!(
+        stored_a,
+        participant_a.pubkey(),
+        "participant_a should be lexicographic min"
+    );
+    assert_eq!(
+        stored_b,
+        participant_b.pubkey(),
+        "participant_b should be lexicographic max"
+    );
     assert_eq!(stored_mint, token_mint, "token_mint should be stored");
 
     // Verify transferred_amount_a = 0 (AC 1)
@@ -413,14 +435,23 @@ async fn test_initialize_channel_creates_pda_with_correct_state() {
 
     // Verify challenge_duration stored correctly (AC 1)
     let stored_challenge_duration = u64::from_le_bytes(data[152..160].try_into().unwrap());
-    assert_eq!(stored_challenge_duration, TEST_CHALLENGE_DURATION, "challenge_duration should match");
+    assert_eq!(
+        stored_challenge_duration, TEST_CHALLENGE_DURATION,
+        "challenge_duration should match"
+    );
 
     // Verify bump seed stored (AC 1)
     let stored_bump = data[169];
     let (_, expected_bump) = derive_channel_pda(
-        &participant_a.pubkey(), &participant_b.pubkey(), &token_mint, &PROGRAM_ID,
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &token_mint,
+        &PROGRAM_ID,
     );
-    assert_eq!(stored_bump, expected_bump, "bump seed should be stored correctly");
+    assert_eq!(
+        stored_bump, expected_bump,
+        "bump seed should be stored correctly"
+    );
 }
 
 // ============================================================================
@@ -434,29 +465,49 @@ async fn test_deposit_participant_a_transfers_tokens_and_increments_deposit_a() 
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 1000,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        1000,
+    )
+    .await;
 
     let deposit_ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 1000,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        1000,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[deposit_ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[deposit_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    let channel_account = context.banks_client
-        .get_account(channel_pda).await.unwrap()
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
         .expect("Channel PDA should exist");
     let deposit_a = u64::from_le_bytes(
-        channel_account.data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8].try_into().unwrap(),
+        channel_account.data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8]
+            .try_into()
+            .unwrap(),
     );
     assert_eq!(deposit_a, 1000, "deposit_a should be 1000 after deposit");
 }
@@ -472,32 +523,54 @@ async fn test_deposit_participant_b_increments_deposit_b_not_deposit_a() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 500,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        500,
+    )
+    .await;
 
     let deposit_ix = build_deposit_instruction(
-        &participant_b.pubkey(), &b_token_account, &vault_pda, &channel_pda, 500,
+        &participant_b.pubkey(),
+        &b_token_account,
+        &vault_pda,
+        &channel_pda,
+        500,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[deposit_ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_b], recent,
+        &[deposit_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    let channel_account = context.banks_client
-        .get_account(channel_pda).await.unwrap()
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
         .expect("Channel PDA should exist");
     let deposit_a = u64::from_le_bytes(
-        channel_account.data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8].try_into().unwrap(),
+        channel_account.data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8]
+            .try_into()
+            .unwrap(),
     );
     let deposit_b = u64::from_le_bytes(
-        channel_account.data[DEPOSIT_B_OFFSET..DEPOSIT_B_OFFSET + 8].try_into().unwrap(),
+        channel_account.data[DEPOSIT_B_OFFSET..DEPOSIT_B_OFFSET + 8]
+            .try_into()
+            .unwrap(),
     );
     assert_eq!(deposit_a, 0, "deposit_a should remain 0 when B deposits");
     assert_eq!(deposit_b, 500, "deposit_b should be 500 after B's deposit");
@@ -514,26 +587,40 @@ async fn test_close_channel_sets_state_and_timestamp() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, _vault_pda, _token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     let close_ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[close_ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[close_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    let channel_account = context.banks_client
-        .get_account(channel_pda).await.unwrap()
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
         .expect("Channel PDA should exist");
 
-    assert_eq!(channel_account.data[STATE_FIELD_OFFSET], STATE_CLOSED, "state should be Closed (1)");
+    assert_eq!(
+        channel_account.data[STATE_FIELD_OFFSET], STATE_CLOSED,
+        "state should be Closed (1)"
+    );
 
     let close_timestamp = i64::from_le_bytes(
-        channel_account.data[CLOSE_TIMESTAMP_OFFSET..CLOSE_TIMESTAMP_OFFSET + 8].try_into().unwrap(),
+        channel_account.data[CLOSE_TIMESTAMP_OFFSET..CLOSE_TIMESTAMP_OFFSET + 8]
+            .try_into()
+            .unwrap(),
     );
     assert!(close_timestamp > 0, "close_timestamp should be set");
 }
@@ -549,35 +636,61 @@ async fn test_settle_channel_distributes_funds_after_challenge_period() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Deposit: A deposits 1000
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 1000,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        1000,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 1000,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        1000,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Deposit: B deposits 500
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 500,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        500,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_b.pubkey(), &b_token_account, &vault_pda, &channel_pda, 500,
+        &participant_b.pubkey(),
+        &b_token_account,
+        &vault_pda,
+        &channel_pda,
+        500,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_b], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -585,8 +698,10 @@ async fn test_settle_channel_distributes_funds_after_challenge_period() {
     let ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -597,36 +712,54 @@ async fn test_settle_channel_distributes_funds_after_challenge_period() {
     // Anyone can call settle_channel, it doesn't need to be a participant.
     let settle_ix = build_settle_channel_instruction(
         &context.payer.pubkey(),
-        &channel_pda, &vault_pda,
-        &a_token_account, &b_token_account,
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
         &context.payer.pubkey(),
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[settle_ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Verify A received 1000 tokens back
-    let a_account = context.banks_client.get_account(a_token_account).await.unwrap().unwrap();
+    let a_account = context
+        .banks_client
+        .get_account(a_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let a_balance = u64::from_le_bytes(a_account.data[64..72].try_into().unwrap());
     assert_eq!(a_balance, 1000, "A should receive 1000 tokens");
 
     // Verify B received 500 tokens back
-    let b_account = context.banks_client.get_account(b_token_account).await.unwrap().unwrap();
+    let b_account = context
+        .banks_client
+        .get_account(b_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let b_balance = u64::from_le_bytes(b_account.data[64..72].try_into().unwrap());
     assert_eq!(b_balance, 500, "B should receive 500 tokens");
 
     // Verify balance conservation invariant: final_balance_a + final_balance_b == deposit_a + deposit_b
     assert_eq!(
-        a_balance + b_balance, 1000 + 500,
+        a_balance + b_balance,
+        1000 + 500,
         "Balance conservation: sum of distributed funds must equal sum of deposits"
     );
 
     // Verify channel PDA is closed after settlement (accounts reclaimed)
     let channel_account = context.banks_client.get_account(channel_pda).await.unwrap();
-    assert!(channel_account.is_none(), "Channel PDA should be closed after settlement");
+    assert!(
+        channel_account.is_none(),
+        "Channel PDA should be closed after settlement"
+    );
 }
 
 // ============================================================================
@@ -640,43 +773,66 @@ async fn test_settle_channel_fails_before_challenge_deadline() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Close channel
     let ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Do NOT warp time — challenge period still active
 
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 0,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 0,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
 
     // Settle with payer as caller to avoid signing issues
     let settle_ix = build_settle_channel_instruction(
         &context.payer.pubkey(),
-        &channel_pda, &vault_pda,
-        &a_token_account, &b_token_account,
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
         &context.payer.pubkey(),
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[settle_ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
 
     let result = context.banks_client.process_transaction(tx).await;
-    assert!(result.is_err(), "settle_channel should fail before challenge deadline");
+    assert!(
+        result.is_err(),
+        "settle_channel should fail before challenge deadline"
+    );
 
     // Verify the error is ChannelChallengeNotExpired (custom error code 3)
     let err = result.unwrap_err();
@@ -699,10 +855,16 @@ async fn test_pda_derivation_order_independent() {
     let token_mint = Pubkey::new_unique();
 
     let (pda_ab, bump_ab) = derive_channel_pda(
-        &participant_a.pubkey(), &participant_b.pubkey(), &token_mint, &PROGRAM_ID,
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &token_mint,
+        &PROGRAM_ID,
     );
     let (pda_ba, bump_ba) = derive_channel_pda(
-        &participant_b.pubkey(), &participant_a.pubkey(), &token_mint, &PROGRAM_ID,
+        &participant_b.pubkey(),
+        &participant_a.pubkey(),
+        &token_mint,
+        &PROGRAM_ID,
     );
 
     assert_eq!(pda_ab, pda_ba, "PDA should be same regardless of order");
@@ -720,34 +882,60 @@ async fn test_force_close_expired_distributes_funds_after_deadline() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Deposit: A deposits 800, B deposits 400
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 800,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        800,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 800,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        800,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 400,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        400,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_b.pubkey(), &b_token_account, &vault_pda, &channel_pda, 400,
+        &participant_b.pubkey(),
+        &b_token_account,
+        &vault_pda,
+        &channel_pda,
+        400,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_b], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -755,8 +943,10 @@ async fn test_force_close_expired_distributes_funds_after_deadline() {
     let ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -766,29 +956,44 @@ async fn test_force_close_expired_distributes_funds_after_deadline() {
     // force_close_expired called by payer
     let ix = build_force_close_expired_instruction(
         &context.payer.pubkey(),
-        &channel_pda, &vault_pda,
-        &a_token_account, &b_token_account,
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
         &context.payer.pubkey(),
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // A deposited 800, B deposited 400, no transfers — each gets their deposit back
-    let a_account = context.banks_client.get_account(a_token_account).await.unwrap().unwrap();
+    let a_account = context
+        .banks_client
+        .get_account(a_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let a_balance = u64::from_le_bytes(a_account.data[64..72].try_into().unwrap());
     assert_eq!(a_balance, 800, "A should receive 800 tokens back");
 
-    let b_account = context.banks_client.get_account(b_token_account).await.unwrap().unwrap();
+    let b_account = context
+        .banks_client
+        .get_account(b_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let b_balance = u64::from_le_bytes(b_account.data[64..72].try_into().unwrap());
     assert_eq!(b_balance, 400, "B should receive 400 tokens back");
 
     // Verify balance conservation
     assert_eq!(
-        a_balance + b_balance, 800 + 400,
+        a_balance + b_balance,
+        800 + 400,
         "Balance conservation: sum of distributed funds must equal sum of deposits"
     );
 }
@@ -804,21 +1009,30 @@ async fn test_initialize_channel_rejects_double_init() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Try to initialize again
     let ix = build_initialize_channel_instruction(
         &context.payer.pubkey(),
-        &participant_a.pubkey(), &participant_b.pubkey(),
-        &token_mint, &channel_pda, &vault_pda,
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &token_mint,
+        &channel_pda,
+        &vault_pda,
         TEST_CHALLENGE_DURATION,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
 
     let result = context.banks_client.process_transaction(tx).await;
@@ -828,7 +1042,9 @@ async fn test_initialize_channel_rejects_double_init() {
     let err = result.unwrap_err();
     let err_str = format!("{:?}", err);
     assert!(
-        err_str.contains("Custom(0)") || err_str.contains("ChannelAlreadyExists") || err_str.contains("already in use"),
+        err_str.contains("Custom(0)")
+            || err_str.contains("ChannelAlreadyExists")
+            || err_str.contains("already in use"),
         "Expected ChannelAlreadyExists error (Custom(0)), got: {}",
         err_str
     );
@@ -845,30 +1061,47 @@ async fn test_deposit_to_closed_channel_rejected() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Close channel
     let ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Try to deposit on closed channel
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 100,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        100,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 100,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        100,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
 
     let result = context.banks_client.process_transaction(tx).await;
@@ -895,20 +1128,35 @@ async fn test_deposit_zero_amount_rejected() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 1000,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        1000,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 0,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        0,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
 
     let result = context.banks_client.process_transaction(tx).await;
@@ -936,15 +1184,21 @@ async fn test_close_channel_by_non_participant_rejected() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, _vault_pda, _token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     let ix = build_close_channel_instruction(&non_participant_c.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &non_participant_c], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &non_participant_c],
+        recent,
     );
 
     let result = context.banks_client.process_transaction(tx).await;
@@ -972,20 +1226,35 @@ async fn test_deposit_by_non_participant_rejected() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     let c_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &non_participant_c.pubkey(), &mint_authority, 100,
-    ).await;
+        &mut context,
+        &token_mint,
+        &non_participant_c.pubkey(),
+        &mint_authority,
+        100,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &non_participant_c.pubkey(), &c_token_account, &vault_pda, &channel_pda, 100,
+        &non_participant_c.pubkey(),
+        &c_token_account,
+        &vault_pda,
+        &channel_pda,
+        100,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &non_participant_c], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &non_participant_c],
+        recent,
     );
 
     let result = context.banks_client.process_transaction(tx).await;
@@ -1012,16 +1281,22 @@ async fn test_settle_channel_reclaims_rent() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Close channel
     let ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -1029,46 +1304,72 @@ async fn test_settle_channel_reclaims_rent() {
     advance_clock_by_seconds(&mut context, 70).await;
 
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 0,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 0,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
 
     let rent_recipient = context.payer.pubkey();
 
     // Record rent recipient's lamport balance before settlement
-    let recipient_before = context.banks_client
-        .get_account(rent_recipient).await.unwrap()
+    let recipient_before = context
+        .banks_client
+        .get_account(rent_recipient)
+        .await
+        .unwrap()
         .expect("Rent recipient should exist")
         .lamports;
 
     let settle_ix = build_settle_channel_instruction(
         &context.payer.pubkey(),
-        &channel_pda, &vault_pda,
-        &a_token_account, &b_token_account,
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
         &rent_recipient,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[settle_ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Channel PDA and vault should be closed
     let channel_account = context.banks_client.get_account(channel_pda).await.unwrap();
-    assert!(channel_account.is_none(), "Channel PDA should be closed after settlement");
+    assert!(
+        channel_account.is_none(),
+        "Channel PDA should be closed after settlement"
+    );
 
     let vault_account = context.banks_client.get_account(vault_pda).await.unwrap();
-    assert!(vault_account.is_none(), "Vault PDA should be closed after settlement");
+    assert!(
+        vault_account.is_none(),
+        "Vault PDA should be closed after settlement"
+    );
 
     // Verify rent recipient received lamports (balance increased despite paying tx fee)
     // The recipient gets rent from both channel PDA and vault token account closure.
     // We can't check exact amounts due to tx fees, but we can verify the recipient
     // still has a balance (the rent reclaimed offsets the tx fee cost).
-    let recipient_after = context.banks_client
-        .get_account(rent_recipient).await.unwrap()
+    let recipient_after = context
+        .banks_client
+        .get_account(rent_recipient)
+        .await
+        .unwrap()
         .expect("Rent recipient should still exist")
         .lamports;
 
@@ -1078,7 +1379,8 @@ async fn test_settle_channel_reclaims_rent() {
     assert!(
         recipient_after > recipient_before - 10_000,
         "Rent recipient should have received rent lamports back (before: {}, after: {})",
-        recipient_before, recipient_after,
+        recipient_before,
+        recipient_after,
     );
 }
 
@@ -1093,33 +1395,64 @@ async fn test_deposit_transfers_tokens_to_vault() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 1000,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        1000,
+    )
+    .await;
 
     let deposit_ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 1000,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        1000,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[deposit_ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[deposit_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Verify vault token account received the tokens
-    let vault_account = context.banks_client.get_account(vault_pda).await.unwrap().unwrap();
+    let vault_account = context
+        .banks_client
+        .get_account(vault_pda)
+        .await
+        .unwrap()
+        .unwrap();
     let vault_balance = u64::from_le_bytes(vault_account.data[64..72].try_into().unwrap());
-    assert_eq!(vault_balance, 1000, "Vault should hold 1000 tokens after deposit");
+    assert_eq!(
+        vault_balance, 1000,
+        "Vault should hold 1000 tokens after deposit"
+    );
 
     // Verify depositor token account is drained
-    let a_account = context.banks_client.get_account(a_token_account).await.unwrap().unwrap();
+    let a_account = context
+        .banks_client
+        .get_account(a_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let a_balance = u64::from_le_bytes(a_account.data[64..72].try_into().unwrap());
-    assert_eq!(a_balance, 0, "Depositor token account should be drained after full deposit");
+    assert_eq!(
+        a_balance, 0,
+        "Depositor token account should be drained after full deposit"
+    );
 }
 
 // ============================================================================
@@ -1133,29 +1466,46 @@ async fn test_close_channel_by_participant_b() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, _vault_pda, _token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Participant B closes the channel
     let close_ix = build_close_channel_instruction(&participant_b.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[close_ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_b], recent,
+        &[close_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    let channel_account = context.banks_client
-        .get_account(channel_pda).await.unwrap()
+    let channel_account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
         .expect("Channel PDA should exist");
 
-    assert_eq!(channel_account.data[STATE_FIELD_OFFSET], STATE_CLOSED, "state should be Closed when B closes");
+    assert_eq!(
+        channel_account.data[STATE_FIELD_OFFSET], STATE_CLOSED,
+        "state should be Closed when B closes"
+    );
 
     let close_timestamp = i64::from_le_bytes(
-        channel_account.data[CLOSE_TIMESTAMP_OFFSET..CLOSE_TIMESTAMP_OFFSET + 8].try_into().unwrap(),
+        channel_account.data[CLOSE_TIMESTAMP_OFFSET..CLOSE_TIMESTAMP_OFFSET + 8]
+            .try_into()
+            .unwrap(),
     );
-    assert!(close_timestamp > 0, "close_timestamp should be set when B closes");
+    assert!(
+        close_timestamp > 0,
+        "close_timestamp should be set when B closes"
+    );
 }
 
 // ============================================================================
@@ -1169,34 +1519,60 @@ async fn test_settle_channel_sets_state_to_settled_and_conserves_balance() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Deposit: A deposits 700, B deposits 300
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 700,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        700,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 700,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        700,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 300,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        300,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_b.pubkey(), &b_token_account, &vault_pda, &channel_pda, 300,
+        &participant_b.pubkey(),
+        &b_token_account,
+        &vault_pda,
+        &channel_pda,
+        300,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_b], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -1204,8 +1580,10 @@ async fn test_settle_channel_sets_state_to_settled_and_conserves_balance() {
     let ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -1215,34 +1593,58 @@ async fn test_settle_channel_sets_state_to_settled_and_conserves_balance() {
     // Settle
     let settle_ix = build_settle_channel_instruction(
         &context.payer.pubkey(),
-        &channel_pda, &vault_pda,
-        &a_token_account, &b_token_account,
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
         &context.payer.pubkey(),
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[settle_ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Verify balance conservation: A gets 700 back, B gets 300 back (no transfers)
-    let a_account = context.banks_client.get_account(a_token_account).await.unwrap().unwrap();
+    let a_account = context
+        .banks_client
+        .get_account(a_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let a_balance = u64::from_le_bytes(a_account.data[64..72].try_into().unwrap());
-    let b_account = context.banks_client.get_account(b_token_account).await.unwrap().unwrap();
+    let b_account = context
+        .banks_client
+        .get_account(b_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let b_balance = u64::from_le_bytes(b_account.data[64..72].try_into().unwrap());
 
     assert_eq!(a_balance, 700, "A should receive deposit_a back");
     assert_eq!(b_balance, 300, "B should receive deposit_b back");
-    assert_eq!(a_balance + b_balance, 1000, "Balance conservation: sum of payouts == sum of deposits");
+    assert_eq!(
+        a_balance + b_balance,
+        1000,
+        "Balance conservation: sum of payouts == sum of deposits"
+    );
 
     // Channel PDA should be closed (zeroed out and lamports reclaimed)
     let channel_account = context.banks_client.get_account(channel_pda).await.unwrap();
-    assert!(channel_account.is_none(), "Channel PDA should be closed after settlement (state = Settled)");
+    assert!(
+        channel_account.is_none(),
+        "Channel PDA should be closed after settlement (state = Settled)"
+    );
 
     // Vault should be closed
     let vault_account = context.banks_client.get_account(vault_pda).await.unwrap();
-    assert!(vault_account.is_none(), "Vault should be closed after settlement");
+    assert!(
+        vault_account.is_none(),
+        "Vault should be closed after settlement"
+    );
 }
 
 // ============================================================================
@@ -1256,34 +1658,60 @@ async fn test_force_close_expired_closes_accounts() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Deposit: A deposits 500, B deposits 500
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 500,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        500,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_a.pubkey(), &a_token_account, &vault_pda, &channel_pda, 500,
+        &participant_a.pubkey(),
+        &a_token_account,
+        &vault_pda,
+        &channel_pda,
+        500,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 500,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        500,
+    )
+    .await;
     let ix = build_deposit_instruction(
-        &participant_b.pubkey(), &b_token_account, &vault_pda, &channel_pda, 500,
+        &participant_b.pubkey(),
+        &b_token_account,
+        &vault_pda,
+        &channel_pda,
+        500,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_b], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -1291,8 +1719,10 @@ async fn test_force_close_expired_closes_accounts() {
     let ix = build_close_channel_instruction(&participant_b.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_b], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
@@ -1302,32 +1732,58 @@ async fn test_force_close_expired_closes_accounts() {
     // Force close expired
     let ix = build_force_close_expired_instruction(
         &context.payer.pubkey(),
-        &channel_pda, &vault_pda,
-        &a_token_account, &b_token_account,
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
         &context.payer.pubkey(),
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     // Verify funds distributed correctly
-    let a_account = context.banks_client.get_account(a_token_account).await.unwrap().unwrap();
+    let a_account = context
+        .banks_client
+        .get_account(a_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let a_balance = u64::from_le_bytes(a_account.data[64..72].try_into().unwrap());
-    let b_account = context.banks_client.get_account(b_token_account).await.unwrap().unwrap();
+    let b_account = context
+        .banks_client
+        .get_account(b_token_account)
+        .await
+        .unwrap()
+        .unwrap();
     let b_balance = u64::from_le_bytes(b_account.data[64..72].try_into().unwrap());
 
-    assert_eq!(a_balance, 500, "A should receive deposit_a back via force_close");
-    assert_eq!(b_balance, 500, "B should receive deposit_b back via force_close");
+    assert_eq!(
+        a_balance, 500,
+        "A should receive deposit_a back via force_close"
+    );
+    assert_eq!(
+        b_balance, 500,
+        "B should receive deposit_b back via force_close"
+    );
 
     // Verify accounts are closed (same as settle_channel — AC 6)
     let channel_account = context.banks_client.get_account(channel_pda).await.unwrap();
-    assert!(channel_account.is_none(), "Channel PDA should be closed after force_close_expired");
+    assert!(
+        channel_account.is_none(),
+        "Channel PDA should be closed after force_close_expired"
+    );
 
     let vault_account = context.banks_client.get_account(vault_pda).await.unwrap();
-    assert!(vault_account.is_none(), "Vault should be closed after force_close_expired");
+    assert!(
+        vault_account.is_none(),
+        "Vault should be closed after force_close_expired"
+    );
 }
 
 // ============================================================================
@@ -1341,33 +1797,54 @@ async fn test_settle_channel_on_opened_channel_fails() {
     let mint_authority = Keypair::new();
 
     let (channel_pda, vault_pda, token_mint) = setup_channel(
-        &mut context, &participant_a, &participant_b, &mint_authority,
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
         TEST_CHALLENGE_DURATION,
-    ).await;
+    )
+    .await;
 
     // Create token accounts for settlement (even though it should fail)
     let a_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_a.pubkey(), &mint_authority, 0,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
     let b_token_account = create_and_fund_token_account(
-        &mut context, &token_mint, &participant_b.pubkey(), &mint_authority, 0,
-    ).await;
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
 
     // Try to settle without closing first
     let settle_ix = build_settle_channel_instruction(
         &context.payer.pubkey(),
-        &channel_pda, &vault_pda,
-        &a_token_account, &b_token_account,
+        &channel_pda,
+        &vault_pda,
+        &a_token_account,
+        &b_token_account,
         &context.payer.pubkey(),
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[settle_ix], Some(&context.payer.pubkey()),
-        &[&context.payer], recent,
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
     );
 
     let result = context.banks_client.process_transaction(tx).await;
-    assert!(result.is_err(), "settle_channel on Opened channel should fail");
+    assert!(
+        result.is_err(),
+        "settle_channel on Opened channel should fail"
+    );
 
     // Verify the error is ChannelNotClosed (custom error code 2)
     let err = result.unwrap_err();

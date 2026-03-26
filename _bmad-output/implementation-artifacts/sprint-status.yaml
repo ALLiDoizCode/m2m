@@ -45,7 +45,7 @@ epics:
         status: done
       33.3:
         name: "Solana Payment Channel Program — Tests & Deployment"
-        status: backlog
+        status: done
       33.4:
         name: "SolanaPaymentChannelSDK — TypeScript Integration"
         status: backlog

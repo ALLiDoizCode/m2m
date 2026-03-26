@@ -32,10 +32,7 @@ pub enum PaymentChannelInstruction {
 
     /// Claim from channel with balance proof.
     /// Data: nonce (u64 LE, 8 bytes) || transferred_amount (u64 LE, 8 bytes)
-    ClaimFromChannel {
-        nonce: u64,
-        transferred_amount: u64,
-    },
+    ClaimFromChannel { nonce: u64, transferred_amount: u64 },
 }
 
 impl PaymentChannelInstruction {
@@ -53,21 +50,25 @@ impl PaymentChannelInstruction {
         match disc_arr {
             INITIALIZE_CHANNEL => {
                 if rest.len() < 8 {
-                    return Err(solana_program::program_error::ProgramError::InvalidInstructionData);
+                    return Err(
+                        solana_program::program_error::ProgramError::InvalidInstructionData,
+                    );
                 }
-                let bytes: [u8; 8] = rest[0..8]
-                    .try_into()
-                    .map_err(|_| solana_program::program_error::ProgramError::InvalidInstructionData)?;
+                let bytes: [u8; 8] = rest[0..8].try_into().map_err(|_| {
+                    solana_program::program_error::ProgramError::InvalidInstructionData
+                })?;
                 let challenge_duration = u64::from_le_bytes(bytes);
                 Ok(Self::InitializeChannel { challenge_duration })
             }
             DEPOSIT => {
                 if rest.len() < 8 {
-                    return Err(solana_program::program_error::ProgramError::InvalidInstructionData);
+                    return Err(
+                        solana_program::program_error::ProgramError::InvalidInstructionData,
+                    );
                 }
-                let bytes: [u8; 8] = rest[0..8]
-                    .try_into()
-                    .map_err(|_| solana_program::program_error::ProgramError::InvalidInstructionData)?;
+                let bytes: [u8; 8] = rest[0..8].try_into().map_err(|_| {
+                    solana_program::program_error::ProgramError::InvalidInstructionData
+                })?;
                 let amount = u64::from_le_bytes(bytes);
                 Ok(Self::Deposit { amount })
             }
@@ -76,15 +77,17 @@ impl PaymentChannelInstruction {
             FORCE_CLOSE_EXPIRED => Ok(Self::ForceCloseExpired),
             CLAIM_FROM_CHANNEL => {
                 if rest.len() < 16 {
-                    return Err(solana_program::program_error::ProgramError::InvalidInstructionData);
+                    return Err(
+                        solana_program::program_error::ProgramError::InvalidInstructionData,
+                    );
                 }
-                let nonce_bytes: [u8; 8] = rest[0..8]
-                    .try_into()
-                    .map_err(|_| solana_program::program_error::ProgramError::InvalidInstructionData)?;
+                let nonce_bytes: [u8; 8] = rest[0..8].try_into().map_err(|_| {
+                    solana_program::program_error::ProgramError::InvalidInstructionData
+                })?;
                 let nonce = u64::from_le_bytes(nonce_bytes);
-                let amount_bytes: [u8; 8] = rest[8..16]
-                    .try_into()
-                    .map_err(|_| solana_program::program_error::ProgramError::InvalidInstructionData)?;
+                let amount_bytes: [u8; 8] = rest[8..16].try_into().map_err(|_| {
+                    solana_program::program_error::ProgramError::InvalidInstructionData
+                })?;
                 let transferred_amount = u64::from_le_bytes(amount_bytes);
                 Ok(Self::ClaimFromChannel {
                     nonce,

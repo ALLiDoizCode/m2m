@@ -176,16 +176,16 @@ fn process_initialize_channel(
             ACCOUNT_SIZE as u64,
             program_id,
         ),
-        &[payer.clone(), channel_pda_info.clone(), system_program.clone()],
+        &[
+            payer.clone(),
+            channel_pda_info.clone(),
+            system_program.clone(),
+        ],
         &[channel_seeds],
     )?;
 
     // Create vault token account (raw SPL Token account owned by vault PDA)
-    let vault_seeds: &[&[u8]] = &[
-        b"vault",
-        expected_channel_pda.as_ref(),
-        &[vault_bump],
-    ];
+    let vault_seeds: &[&[u8]] = &[b"vault", expected_channel_pda.as_ref(), &[vault_bump]];
     let token_account_size = spl_token::state::Account::LEN;
     let vault_rent = rent.minimum_balance(token_account_size);
 
@@ -197,7 +197,11 @@ fn process_initialize_channel(
             token_account_size as u64,
             &spl_token::id(),
         ),
-        &[payer.clone(), vault_pda_info.clone(), system_program.clone()],
+        &[
+            payer.clone(),
+            vault_pda_info.clone(),
+            system_program.clone(),
+        ],
         &[vault_seeds],
     )?;
 
@@ -251,11 +255,7 @@ fn process_initialize_channel(
 //   3. [writable] channel_pda
 //   4. [] token_program
 
-fn process_deposit(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    amount: u64,
-) -> ProgramResult {
+fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> ProgramResult {
     let account_iter = &mut accounts.iter();
     let depositor = next_account_info(account_iter)?;
     let depositor_token_account = next_account_info(account_iter)?;
@@ -363,10 +363,7 @@ fn process_deposit(
 //   1. [writable] channel_pda
 //   2. [] clock sysvar
 
-fn process_close_channel(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+fn process_close_channel(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_iter = &mut accounts.iter();
     let closer = next_account_info(account_iter)?;
     let channel_pda_info = next_account_info(account_iter)?;
@@ -430,10 +427,7 @@ fn process_close_channel(
 //   6. [] token_program
 //   7. [] clock sysvar
 
-fn process_settlement(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+fn process_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_iter = &mut accounts.iter();
     let caller = next_account_info(account_iter)?;
     let channel_pda_info = next_account_info(account_iter)?;
@@ -511,11 +505,7 @@ fn process_settlement(
         return Err(PaymentChannelError::InvalidVaultPDA.into());
     }
 
-    let vault_seeds: &[&[u8]] = &[
-        b"vault",
-        channel_pda_key.as_ref(),
-        &[vault_bump],
-    ];
+    let vault_seeds: &[&[u8]] = &[b"vault", channel_pda_key.as_ref(), &[vault_bump]];
 
     // Transfer balance_a to participant A's token account
     if balance_a > 0 {
@@ -595,17 +585,11 @@ fn process_settlement(
     Ok(())
 }
 
-fn process_settle_channel(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+fn process_settle_channel(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     process_settlement(program_id, accounts)
 }
 
-fn process_force_close_expired(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+fn process_force_close_expired(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     process_settlement(program_id, accounts)
 }
 
@@ -766,18 +750,12 @@ fn verify_ed25519_precompile(
     }
 
     // Parse offsets from the Ed25519 instruction data
-    let signature_ix_index =
-        u16::from_le_bytes([ix_data[4], ix_data[5]]);
-    let public_key_offset =
-        u16::from_le_bytes([ix_data[6], ix_data[7]]) as usize;
-    let public_key_ix_index =
-        u16::from_le_bytes([ix_data[8], ix_data[9]]);
-    let message_data_offset =
-        u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
-    let message_data_size =
-        u16::from_le_bytes([ix_data[12], ix_data[13]]) as usize;
-    let message_ix_index =
-        u16::from_le_bytes([ix_data[14], ix_data[15]]);
+    let signature_ix_index = u16::from_le_bytes([ix_data[4], ix_data[5]]);
+    let public_key_offset = u16::from_le_bytes([ix_data[6], ix_data[7]]) as usize;
+    let public_key_ix_index = u16::from_le_bytes([ix_data[8], ix_data[9]]);
+    let message_data_offset = u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
+    let message_data_size = u16::from_le_bytes([ix_data[12], ix_data[13]]) as usize;
+    let message_ix_index = u16::from_le_bytes([ix_data[14], ix_data[15]]);
 
     // Defense-in-depth: all data (signature, public key, message) must reside within
     // the Ed25519 instruction itself (index = 0xFFFF). Reject instructions that reference

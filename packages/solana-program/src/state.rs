@@ -98,19 +98,28 @@ impl ChannelState {
             return Err(solana_program::program_error::ProgramError::InvalidAccountData);
         }
 
-        fn read_u64(data: &[u8], offset: usize) -> Result<u64, solana_program::program_error::ProgramError> {
+        fn read_u64(
+            data: &[u8],
+            offset: usize,
+        ) -> Result<u64, solana_program::program_error::ProgramError> {
             let bytes: [u8; 8] = data[offset..offset + 8]
                 .try_into()
                 .map_err(|_| solana_program::program_error::ProgramError::InvalidAccountData)?;
             Ok(u64::from_le_bytes(bytes))
         }
-        fn read_i64(data: &[u8], offset: usize) -> Result<i64, solana_program::program_error::ProgramError> {
+        fn read_i64(
+            data: &[u8],
+            offset: usize,
+        ) -> Result<i64, solana_program::program_error::ProgramError> {
             let bytes: [u8; 8] = data[offset..offset + 8]
                 .try_into()
                 .map_err(|_| solana_program::program_error::ProgramError::InvalidAccountData)?;
             Ok(i64::from_le_bytes(bytes))
         }
-        fn read_pubkey(data: &[u8], offset: usize) -> Result<Pubkey, solana_program::program_error::ProgramError> {
+        fn read_pubkey(
+            data: &[u8],
+            offset: usize,
+        ) -> Result<Pubkey, solana_program::program_error::ProgramError> {
             Pubkey::try_from(&data[offset..offset + 32])
                 .map_err(|_| solana_program::program_error::ProgramError::InvalidAccountData)
         }
@@ -133,7 +142,10 @@ impl ChannelState {
     }
 
     /// Serialize into raw account data bytes.
-    pub fn serialize(&self, data: &mut [u8]) -> Result<(), solana_program::program_error::ProgramError> {
+    pub fn serialize(
+        &self,
+        data: &mut [u8],
+    ) -> Result<(), solana_program::program_error::ProgramError> {
         if data.len() < ACCOUNT_SIZE {
             return Err(solana_program::program_error::ProgramError::AccountDataTooSmall);
         }
@@ -143,20 +155,15 @@ impl ChannelState {
             .copy_from_slice(self.participant_a.as_ref());
         data[PARTICIPANT_B_OFFSET..PARTICIPANT_B_OFFSET + 32]
             .copy_from_slice(self.participant_b.as_ref());
-        data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32]
-            .copy_from_slice(self.token_mint.as_ref());
-        data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8]
-            .copy_from_slice(&self.deposit_a.to_le_bytes());
-        data[DEPOSIT_B_OFFSET..DEPOSIT_B_OFFSET + 8]
-            .copy_from_slice(&self.deposit_b.to_le_bytes());
+        data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32].copy_from_slice(self.token_mint.as_ref());
+        data[DEPOSIT_A_OFFSET..DEPOSIT_A_OFFSET + 8].copy_from_slice(&self.deposit_a.to_le_bytes());
+        data[DEPOSIT_B_OFFSET..DEPOSIT_B_OFFSET + 8].copy_from_slice(&self.deposit_b.to_le_bytes());
         data[TRANSFERRED_AMOUNT_A_OFFSET..TRANSFERRED_AMOUNT_A_OFFSET + 8]
             .copy_from_slice(&self.transferred_amount_a.to_le_bytes());
         data[TRANSFERRED_AMOUNT_B_OFFSET..TRANSFERRED_AMOUNT_B_OFFSET + 8]
             .copy_from_slice(&self.transferred_amount_b.to_le_bytes());
-        data[NONCE_A_OFFSET..NONCE_A_OFFSET + 8]
-            .copy_from_slice(&self.nonce_a.to_le_bytes());
-        data[NONCE_B_OFFSET..NONCE_B_OFFSET + 8]
-            .copy_from_slice(&self.nonce_b.to_le_bytes());
+        data[NONCE_A_OFFSET..NONCE_A_OFFSET + 8].copy_from_slice(&self.nonce_a.to_le_bytes());
+        data[NONCE_B_OFFSET..NONCE_B_OFFSET + 8].copy_from_slice(&self.nonce_b.to_le_bytes());
         data[CHALLENGE_DURATION_OFFSET..CHALLENGE_DURATION_OFFSET + 8]
             .copy_from_slice(&self.challenge_duration.to_le_bytes());
         data[STATE_OFFSET] = self.state;
@@ -165,8 +172,8 @@ impl ChannelState {
         data[BUMP_OFFSET] = self.bump;
 
         // Zero out reserved padding bytes
-        for i in (BUMP_OFFSET + 1)..ACCOUNT_SIZE {
-            data[i] = 0;
+        for byte in data.iter_mut().take(ACCOUNT_SIZE).skip(BUMP_OFFSET + 1) {
+            *byte = 0;
         }
 
         Ok(())

@@ -1,14 +1,17 @@
-// Claim Verification Tests for Story 33.2: Solana Payment Channel Program — Claim Verification
+// Integration Tests for Story 33.3: Full Lifecycle End-to-End Tests
 //
-// GREEN PHASE: All tests should pass with the implemented claim_from_channel handler.
+// These tests validate the complete payment channel lifecycle:
+//   initialize -> deposit -> claim -> close -> settle
+// with balance conservation invariants verified at every state transition.
+//
+// Test IDs: T-33.3-01, T-33.3-02, T-33.3-03
 //
 // Test framework: solana-program-test (BanksClient, in-process)
 // Runner: cargo test-sbf
-//
-// Test IDs reference: test-design-epic-33.md (T-33.2-01 through T-33.2-12)
 
 use solana_program_test::*;
 use solana_sdk::{
+    clock::Clock,
     ed25519_instruction::new_ed25519_instruction,
     instruction::{AccountMeta, Instruction},
     program_pack::Pack,
@@ -18,12 +21,15 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
-/// Program ID for the payment channel program (must match lifecycle.rs and lib.rs).
+/// Program ID for the payment channel program.
 const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("598iSn5tfXsLcTPKj97SzKiCLVbKf7okNY4AEjgpLg2W");
 
-// ============================================================================
-// Byte offsets matching the program's state.rs layout
-// ============================================================================
+/// Challenge duration used in tests (60 seconds).
+const TEST_CHALLENGE_DURATION: u64 = 60;
+
+/// Byte offsets matching the program's state.rs layout.
+const DEPOSIT_A_OFFSET: usize = 104;
+const DEPOSIT_B_OFFSET: usize = 112;
 const TRANSFERRED_AMOUNT_A_OFFSET: usize = 120;
 const TRANSFERRED_AMOUNT_B_OFFSET: usize = 128;
 const NONCE_A_OFFSET: usize = 136;
@@ -33,11 +39,8 @@ const STATE_FIELD_OFFSET: usize = 160;
 const STATE_OPENED: u8 = 0;
 const STATE_CLOSED: u8 = 1;
 
-/// Challenge duration used in tests (60 seconds).
-const TEST_CHALLENGE_DURATION: u64 = 60;
-
 // ============================================================================
-// Test Helpers (duplicated from lifecycle.rs for test isolation)
+// Test Helpers (duplicated from lifecycle.rs / claims.rs for test isolation)
 // ============================================================================
 
 fn derive_channel_pda(
@@ -265,7 +268,33 @@ fn build_settle_channel_instruction(
     }
 }
 
-/// Build a claim_from_channel instruction.
+fn build_force_close_expired_instruction(
+    caller: &Pubkey,
+    channel_pda: &Pubkey,
+    vault_token_account: &Pubkey,
+    participant_a_token_account: &Pubkey,
+    participant_b_token_account: &Pubkey,
+    rent_recipient: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(8);
+    data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*caller, true),
+            AccountMeta::new(*channel_pda, false),
+            AccountMeta::new(*vault_token_account, false),
+            AccountMeta::new(*participant_a_token_account, false),
+            AccountMeta::new(*participant_b_token_account, false),
+            AccountMeta::new(*rent_recipient, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
+        ],
+        data,
+    }
+}
+
 fn build_claim_instruction(
     claimer: &Pubkey,
     channel_pda: &Pubkey,
@@ -288,7 +317,6 @@ fn build_claim_instruction(
     }
 }
 
-/// Build a balance proof message: channel_pda (32) || nonce (8 LE) || transferred_amount (8 LE)
 fn build_balance_proof_message(
     channel_pda: &Pubkey,
     nonce: u64,
@@ -301,7 +329,6 @@ fn build_balance_proof_message(
     msg
 }
 
-/// Convert a solana_sdk::Keypair to an ed25519_dalek::Keypair for use with new_ed25519_instruction.
 fn to_dalek_keypair(keypair: &Keypair) -> ed25519_dalek::Keypair {
     ed25519_dalek::Keypair::from_bytes(&keypair.to_bytes()).unwrap()
 }
@@ -438,13 +465,25 @@ fn read_u64_at(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }
 
+/// Get the token balance from an SPL token account.
+fn read_token_balance(account_data: &[u8]) -> u64 {
+    u64::from_le_bytes(account_data[64..72].try_into().unwrap())
+}
+
+/// Get the vault token balance.
+async fn get_vault_balance(context: &mut ProgramTestContext, vault_pda: &Pubkey) -> u64 {
+    let account = context
+        .banks_client
+        .get_account(*vault_pda)
+        .await
+        .unwrap()
+        .expect("Vault should exist");
+    read_token_balance(&account.data)
+}
+
 /// Advances the clock sysvar by the given number of seconds.
 async fn advance_clock_by_seconds(context: &mut ProgramTestContext, seconds: i64) {
-    let current_clock = context
-        .banks_client
-        .get_sysvar::<solana_sdk::clock::Clock>()
-        .await
-        .unwrap();
+    let current_clock = context.banks_client.get_sysvar::<Clock>().await.unwrap();
     let mut new_clock = current_clock.clone();
     new_clock.unix_timestamp += seconds;
     new_clock.slot += (seconds as u64) * 2;
@@ -453,466 +492,67 @@ async fn advance_clock_by_seconds(context: &mut ProgramTestContext, seconds: i64
 }
 
 // ============================================================================
-// T-33.2-01: Valid claim updates nonce and transferred_amount (P0)
+// T-33.3-01: Full lifecycle — open -> deposit -> claim -> close -> settle (P0)
+// AC 1: Complete lifecycle passes end-to-end
 // ============================================================================
 
 #[tokio::test]
-async fn test_valid_claim_updates_channel_state() {
+async fn test_full_lifecycle_open_deposit_claim_close_settle() {
     let mut context = program_test().start_with_context().await;
     let (participant_a, participant_b) = sorted_participants();
     let mint_authority = Keypair::new();
 
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
+    let initial_deposit_a: u64 = 10_000;
+    let initial_deposit_b: u64 = 5_000;
 
-    // Submit a valid claim from participant A
-    submit_claim(&mut context, &participant_a, &channel_pda, 1, 5000)
-        .await
-        .unwrap();
-
-    // Verify channel state
-    let account = context
-        .banks_client
-        .get_account(channel_pda)
-        .await
-        .unwrap()
-        .expect("Channel should exist");
-    let data = &account.data;
-
-    assert_eq!(read_u64_at(data, NONCE_A_OFFSET), 1);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_A_OFFSET), 5000);
-    // B's fields should be unchanged
-    assert_eq!(read_u64_at(data, NONCE_B_OFFSET), 0);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_B_OFFSET), 0);
-    // Channel should remain Opened
-    assert_eq!(data[STATE_FIELD_OFFSET], STATE_OPENED);
-}
-
-// ============================================================================
-// T-33.2-02: Replayed nonce fails with NonceNotMonotonic (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_replayed_nonce_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // First claim succeeds
-    submit_claim(&mut context, &participant_a, &channel_pda, 5, 1000)
-        .await
-        .unwrap();
-
-    // Replay same nonce = 5 should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 5, 2000).await;
-    assert!(result.is_err(), "Replayed nonce should be rejected");
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(6)") || err_str.contains("NonceNotMonotonic"),
-        "Expected NonceNotMonotonic error (Custom(6)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-03: Stale nonce fails with NonceNotMonotonic (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_stale_nonce_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // First claim with nonce = 5
-    submit_claim(&mut context, &participant_a, &channel_pda, 5, 1000)
-        .await
-        .unwrap();
-
-    // Stale nonce = 4 should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 4, 2000).await;
-    assert!(result.is_err(), "Stale nonce should be rejected");
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(6)") || err_str.contains("NonceNotMonotonic"),
-        "Expected NonceNotMonotonic error (Custom(6)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-04: Invalid signature fails with InvalidSignature (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_invalid_signature_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Sign a WRONG message (different nonce in the signed message vs the instruction)
-    let wrong_message = build_balance_proof_message(&channel_pda, 999, 5000);
-    let dalek_keypair = to_dalek_keypair(&participant_a);
-    let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &wrong_message);
-
-    // But claim instruction has nonce = 1
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
-
-    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[ed25519_ix, claim_ix],
-        Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
-        recent,
-    );
-    let result = context.banks_client.process_transaction(tx).await;
-    assert!(
-        result.is_err(),
-        "Mismatched balance proof message should be rejected"
-    );
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(8)") || err_str.contains("InvalidSignature"),
-        "Expected InvalidSignature error (Custom(8)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-05: Non-participant signer fails with UnauthorizedSigner (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_non_participant_signer_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-    let outsider = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // The outsider signs the balance proof but is not a channel participant
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
-    let dalek_outsider = to_dalek_keypair(&outsider);
-    let ed25519_ix = new_ed25519_instruction(&dalek_outsider, &message);
-    let claim_ix = build_claim_instruction(&outsider.pubkey(), &channel_pda, 1, 5000);
-
-    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[ed25519_ix, claim_ix],
-        Some(&context.payer.pubkey()),
-        &[&context.payer, &outsider],
-        recent,
-    );
-    let result = context.banks_client.process_transaction(tx).await;
-    assert!(
-        result.is_err(),
-        "Non-participant signer should be rejected with UnauthorizedSigner"
-    );
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(9)") || err_str.contains("UnauthorizedSigner"),
-        "Expected UnauthorizedSigner error (Custom(9)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-06: Decreased transferred_amount fails (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_decreased_transferred_amount_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // First claim: transferred_amount = 5000
-    submit_claim(&mut context, &participant_a, &channel_pda, 1, 5000)
-        .await
-        .unwrap();
-
-    // Second claim with decreased amount = 4000 should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 2, 4000).await;
-    assert!(
-        result.is_err(),
-        "Decreased transferred_amount should be rejected"
-    );
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(7)") || err_str.contains("TransferredAmountDecreased"),
-        "Expected TransferredAmountDecreased error (Custom(7)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-07: Claim on closed channel succeeds (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_claim_on_closed_channel_succeeds() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Close the channel
-    let close_ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
-    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[close_ix],
-        Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
-        recent,
-    );
-    context.banks_client.process_transaction(tx).await.unwrap();
-
-    // Verify channel is Closed
-    let account = context
-        .banks_client
-        .get_account(channel_pda)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_CLOSED);
-
-    // Claim should still succeed on closed channel
-    submit_claim(&mut context, &participant_a, &channel_pda, 1, 3000)
-        .await
-        .unwrap();
-
-    // Verify state was updated
-    let account = context
-        .banks_client
-        .get_account(channel_pda)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 1);
-    assert_eq!(
-        read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET),
-        3000
-    );
-    // Channel should still be Closed
-    assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_CLOSED);
-}
-
-// ============================================================================
-// T-33.2-08: Ed25519 precompile instruction missing fails (P1)
-// ============================================================================
-
-#[tokio::test]
-async fn test_missing_ed25519_precompile_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Submit claim WITHOUT Ed25519 precompile instruction
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
-    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[claim_ix],
-        Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
-        recent,
-    );
-    let result = context.banks_client.process_transaction(tx).await;
-    assert!(
-        result.is_err(),
-        "Missing Ed25519 precompile should be rejected"
-    );
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(8)") || err_str.contains("InvalidSignature"),
-        "Expected InvalidSignature error (Custom(8)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-09: Ed25519 precompile at wrong index fails (P1)
-// ============================================================================
-
-#[tokio::test]
-async fn test_ed25519_precompile_at_wrong_index_rejected() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Put claim instruction FIRST, Ed25519 precompile SECOND (wrong order)
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
-    let dalek_keypair = to_dalek_keypair(&participant_a);
-    let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
-
-    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[claim_ix, ed25519_ix], // Wrong order: claim at 0, ed25519 at 1
-        Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
-        recent,
-    );
-    let result = context.banks_client.process_transaction(tx).await;
-    assert!(
-        result.is_err(),
-        "Ed25519 precompile at wrong index should be rejected"
-    );
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("Custom(8)") || err_str.contains("InvalidSignature"),
-        "Expected InvalidSignature error (Custom(8)), got: {}",
-        err_str
-    );
-}
-
-// ============================================================================
-// T-33.2-10: Multiple sequential claims succeed (P1)
-// ============================================================================
-
-#[tokio::test]
-async fn test_multiple_sequential_claims_succeed() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
-        &mut context,
-        &participant_a,
-        &participant_b,
-        &mint_authority,
-        10_000,
-        10_000,
-    )
-    .await;
-
-    // Submit claims with nonces 1, 2, 3
-    for i in 1..=3u64 {
-        submit_claim(&mut context, &participant_a, &channel_pda, i, 1000 * i)
-            .await
-            .unwrap();
-    }
-
-    // Verify final state
-    let account = context
-        .banks_client
-        .get_account(channel_pda)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 3);
-    assert_eq!(
-        read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET),
-        3000
-    );
-}
-
-// ============================================================================
-// T-33.2-11: Claim on settled channel fails (P1)
-// ============================================================================
-
-#[tokio::test]
-async fn test_claim_on_settled_channel_fails() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
+    // Step 1: Initialize and deposit
     let (channel_pda, vault_pda, _token_mint, token_account_a, token_account_b) =
         setup_funded_channel(
             &mut context,
             &participant_a,
             &participant_b,
             &mint_authority,
-            10_000,
-            10_000,
+            initial_deposit_a,
+            initial_deposit_b,
         )
         .await;
 
-    // Close the channel
+    // Verify channel is in Opened state
+    let account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .expect("Channel should exist");
+    assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_OPENED);
+
+    // Step 2: Claims — A claims 3000 transferred, B claims 1000 transferred
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 3000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_b, &channel_pda, 1, 1000)
+        .await
+        .unwrap();
+
+    // Verify claims updated state correctly
+    let account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .expect("Channel should exist");
+    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 1);
+    assert_eq!(
+        read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET),
+        3000
+    );
+    assert_eq!(read_u64_at(&account.data, NONCE_B_OFFSET), 1);
+    assert_eq!(
+        read_u64_at(&account.data, TRANSFERRED_AMOUNT_B_OFFSET),
+        1000
+    );
+
+    // Step 3: Close channel
     let close_ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
@@ -923,12 +563,20 @@ async fn test_claim_on_settled_channel_fails() {
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    // Advance clock past challenge period
-    advance_clock_by_seconds(&mut context, (TEST_CHALLENGE_DURATION + 1) as i64).await;
+    // Verify channel is now Closed
+    let account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .expect("Channel should exist");
+    assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_CLOSED);
 
-    // Settle the channel
+    // Step 4: Advance clock past challenge period and settle
+    advance_clock_by_seconds(&mut context, (TEST_CHALLENGE_DURATION + 10) as i64).await;
+
     let settle_ix = build_settle_channel_instruction(
-        &participant_a.pubkey(),
+        &context.payer.pubkey(),
         &channel_pda,
         &vault_pda,
         &token_account_a,
@@ -939,98 +587,473 @@ async fn test_claim_on_settled_channel_fails() {
     let tx = Transaction::new_signed_with_payer(
         &[settle_ix],
         Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // Step 5: Verify final balances
+    // A gets: deposit_a - transferred_amount_a + transferred_amount_b = 10000 - 3000 + 1000 = 8000
+    // B gets: deposit_b - transferred_amount_b + transferred_amount_a = 5000 - 1000 + 3000 = 7000
+    let a_account = context
+        .banks_client
+        .get_account(token_account_a)
+        .await
+        .unwrap()
+        .unwrap();
+    let a_balance = read_token_balance(&a_account.data);
+    assert_eq!(
+        a_balance, 8000,
+        "A should receive deposit_a - transferred_a + transferred_b"
+    );
+
+    let b_account = context
+        .banks_client
+        .get_account(token_account_b)
+        .await
+        .unwrap()
+        .unwrap();
+    let b_balance = read_token_balance(&b_account.data);
+    assert_eq!(
+        b_balance, 7000,
+        "B should receive deposit_b - transferred_b + transferred_a"
+    );
+
+    // Verify balance conservation (AC 3)
+    assert_eq!(
+        a_balance + b_balance,
+        initial_deposit_a + initial_deposit_b,
+        "Balance conservation: final_a + final_b == initial_deposit_a + initial_deposit_b"
+    );
+
+    // Verify channel PDA is closed after settlement
+    let channel_account = context.banks_client.get_account(channel_pda).await.unwrap();
+    assert!(
+        channel_account.is_none(),
+        "Channel PDA should be closed after settlement"
+    );
+}
+
+// ============================================================================
+// T-33.3-01b: Full lifecycle with force_close_expired path (P0)
+// AC 1: Alternate settlement path
+// ============================================================================
+
+#[tokio::test]
+async fn test_full_lifecycle_with_force_close_expired() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let initial_deposit_a: u64 = 8_000;
+    let initial_deposit_b: u64 = 4_000;
+
+    let (channel_pda, vault_pda, _token_mint, token_account_a, token_account_b) =
+        setup_funded_channel(
+            &mut context,
+            &participant_a,
+            &participant_b,
+            &mint_authority,
+            initial_deposit_a,
+            initial_deposit_b,
+        )
+        .await;
+
+    // Claims: A transfers 2000, B transfers 500
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 2000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_b, &channel_pda, 1, 500)
+        .await
+        .unwrap();
+
+    // Close
+    let close_ix = build_close_channel_instruction(&participant_b.pubkey(), &channel_pda);
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[close_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // Advance clock and use force_close_expired
+    advance_clock_by_seconds(&mut context, (TEST_CHALLENGE_DURATION + 10) as i64).await;
+
+    let ix = build_force_close_expired_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &token_account_a,
+        &token_account_b,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // A gets: 8000 - 2000 + 500 = 6500
+    // B gets: 4000 - 500 + 2000 = 5500
+    let a_account = context
+        .banks_client
+        .get_account(token_account_a)
+        .await
+        .unwrap()
+        .unwrap();
+    let a_balance = read_token_balance(&a_account.data);
+    assert_eq!(a_balance, 6500);
+
+    let b_account = context
+        .banks_client
+        .get_account(token_account_b)
+        .await
+        .unwrap()
+        .unwrap();
+    let b_balance = read_token_balance(&b_account.data);
+    assert_eq!(b_balance, 5500);
+
+    assert_eq!(
+        a_balance + b_balance,
+        initial_deposit_a + initial_deposit_b,
+        "Balance conservation with force_close_expired"
+    );
+}
+
+// ============================================================================
+// T-33.3-02: Vault balance == deposit_a + deposit_b at every state transition (P0)
+// AC 2: Balance conservation — vault invariant
+// ============================================================================
+
+#[tokio::test]
+async fn test_vault_balance_equals_deposits_at_every_state_transition() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let token_mint = create_test_mint(&mut context, &mint_authority).await;
+    let (channel_pda, _) = derive_channel_pda(
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &token_mint,
+        &PROGRAM_ID,
+    );
+    let (vault_pda, _) = derive_vault_pda(&channel_pda, &PROGRAM_ID);
+
+    // Initialize channel
+    let ix = build_initialize_channel_instruction(
+        &context.payer.pubkey(),
+        &participant_a.pubkey(),
+        &participant_b.pubkey(),
+        &token_mint,
+        &channel_pda,
+        &vault_pda,
+        TEST_CHALLENGE_DURATION,
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // After init: vault balance = 0
+    let vault_balance = get_vault_balance(&mut context, &vault_pda).await;
+    assert_eq!(vault_balance, 0, "Vault should be empty after init");
+
+    // Deposit A: 5000
+    let token_account_a = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        5000,
+    )
+    .await;
+    let ix = build_deposit_instruction(
+        &participant_a.pubkey(),
+        &token_account_a,
+        &vault_pda,
+        &channel_pda,
+        5000,
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&context.payer.pubkey()),
         &[&context.payer, &participant_a],
         recent,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    // Verify channel account is closed (zeroed/reclaimed)
-    let account = context.banks_client.get_account(channel_pda).await.unwrap();
-    assert!(
-        account.is_none() || account.unwrap().data.iter().all(|&b| b == 0),
-        "Channel account should be zeroed after settlement"
-    );
+    // After deposit A: vault = 5000
+    let vault_balance = get_vault_balance(&mut context, &vault_pda).await;
+    assert_eq!(vault_balance, 5000, "Vault should be 5000 after A deposits");
 
-    // Attempt to claim on settled channel should fail
-    let result = submit_claim(&mut context, &participant_a, &channel_pda, 1, 5000).await;
-    assert!(
-        result.is_err(),
-        "Claim on settled channel should be rejected"
-    );
-}
-
-// ============================================================================
-// T-33.2-12: Balance proof message format is exactly 48 bytes (P0)
-// ============================================================================
-
-#[tokio::test]
-async fn test_balance_proof_message_format() {
-    let channel_pda = Pubkey::new_unique();
-    let nonce: u64 = 42;
-    let transferred_amount: u64 = 123456;
-
-    let message = build_balance_proof_message(&channel_pda, nonce, transferred_amount);
-
-    // Total size is 48 bytes
-    assert_eq!(
-        message.len(),
-        48,
-        "Balance proof message must be exactly 48 bytes"
-    );
-
-    // First 32 bytes are channel_pda
-    assert_eq!(&message[0..32], channel_pda.as_ref());
-
-    // Next 8 bytes are nonce (LE)
-    assert_eq!(
-        u64::from_le_bytes(message[32..40].try_into().unwrap()),
-        nonce
-    );
-
-    // Next 8 bytes are transferred_amount (LE)
-    assert_eq!(
-        u64::from_le_bytes(message[40..48].try_into().unwrap()),
-        transferred_amount
-    );
-}
-
-// ============================================================================
-// T-33.2-13: Claim from participant B updates B's fields (not A's)
-// ============================================================================
-
-#[tokio::test]
-async fn test_claim_from_participant_b_updates_b_fields() {
-    let mut context = program_test().start_with_context().await;
-    let (participant_a, participant_b) = sorted_participants();
-    let mint_authority = Keypair::new();
-
-    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
+    // Deposit B: 3000
+    let token_account_b = create_and_fund_token_account(
         &mut context,
-        &participant_a,
-        &participant_b,
+        &token_mint,
+        &participant_b.pubkey(),
         &mint_authority,
-        10_000,
-        10_000,
+        3000,
     )
     .await;
+    let ix = build_deposit_instruction(
+        &participant_b.pubkey(),
+        &token_account_b,
+        &vault_pda,
+        &channel_pda,
+        3000,
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_b],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
 
-    // Submit a claim from participant B
-    submit_claim(&mut context, &participant_b, &channel_pda, 1, 7000)
-        .await
-        .unwrap();
+    // After deposit B: vault = 5000 + 3000 = 8000
+    let vault_balance = get_vault_balance(&mut context, &vault_pda).await;
+    assert_eq!(
+        vault_balance, 8000,
+        "Vault should be 8000 after both deposits"
+    );
 
-    // Verify B's fields are updated
-    let account = context
+    // Verify vault == deposit_a + deposit_b
+    let channel_account = context
         .banks_client
         .get_account(channel_pda)
         .await
         .unwrap()
         .unwrap();
-    let data = &account.data;
+    let deposit_a = read_u64_at(&channel_account.data, DEPOSIT_A_OFFSET);
+    let deposit_b = read_u64_at(&channel_account.data, DEPOSIT_B_OFFSET);
+    assert_eq!(
+        vault_balance,
+        deposit_a + deposit_b,
+        "Vault balance must equal deposit_a + deposit_b"
+    );
 
-    assert_eq!(read_u64_at(data, NONCE_B_OFFSET), 1);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_B_OFFSET), 7000);
-    // A's fields should be unchanged
-    assert_eq!(read_u64_at(data, NONCE_A_OFFSET), 0);
-    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_A_OFFSET), 0);
+    // After claim: vault balance should NOT change (claims only update transferred_amount)
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 2000)
+        .await
+        .unwrap();
+
+    let vault_balance_after_claim = get_vault_balance(&mut context, &vault_pda).await;
+    assert_eq!(
+        vault_balance_after_claim, vault_balance,
+        "Vault balance must not change after claim (claims only update transferred_amount, not vault)"
+    );
+
+    // After another claim from B: vault still unchanged
+    submit_claim(&mut context, &participant_b, &channel_pda, 1, 1000)
+        .await
+        .unwrap();
+
+    let vault_balance_after_claim_b = get_vault_balance(&mut context, &vault_pda).await;
+    assert_eq!(
+        vault_balance_after_claim_b, vault_balance,
+        "Vault balance unchanged after B's claim"
+    );
+}
+
+// ============================================================================
+// T-33.3-03: Balance conservation after settle (P0)
+// AC 3: token_balance_a + token_balance_b == initial_deposit_a + initial_deposit_b
+// ============================================================================
+
+#[tokio::test]
+async fn test_balance_conservation_after_settlement() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let initial_deposit_a: u64 = 15_000;
+    let initial_deposit_b: u64 = 10_000;
+
+    let (channel_pda, vault_pda, _token_mint, token_account_a, token_account_b) =
+        setup_funded_channel(
+            &mut context,
+            &participant_a,
+            &participant_b,
+            &mint_authority,
+            initial_deposit_a,
+            initial_deposit_b,
+        )
+        .await;
+
+    // Multiple claims from both participants
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 5000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_a, &channel_pda, 2, 8000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_b, &channel_pda, 1, 3000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_b, &channel_pda, 2, 6000)
+        .await
+        .unwrap();
+
+    // Close and settle
+    let close_ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[close_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    advance_clock_by_seconds(&mut context, (TEST_CHALLENGE_DURATION + 10) as i64).await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &token_account_a,
+        &token_account_b,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // final_balance_a = 15000 - 8000 + 6000 = 13000
+    // final_balance_b = 10000 - 6000 + 8000 = 12000
+    let a_account = context
+        .banks_client
+        .get_account(token_account_a)
+        .await
+        .unwrap()
+        .unwrap();
+    let final_balance_a = read_token_balance(&a_account.data);
+
+    let b_account = context
+        .banks_client
+        .get_account(token_account_b)
+        .await
+        .unwrap()
+        .unwrap();
+    let final_balance_b = read_token_balance(&b_account.data);
+
+    assert_eq!(
+        final_balance_a, 13000,
+        "A: deposit_a(15000) - transferred_a(8000) + transferred_b(6000)"
+    );
+    assert_eq!(
+        final_balance_b, 12000,
+        "B: deposit_b(10000) - transferred_b(6000) + transferred_a(8000)"
+    );
+
+    // Conservation invariant
+    assert_eq!(
+        final_balance_a + final_balance_b,
+        initial_deposit_a + initial_deposit_b,
+        "Total tokens must be conserved: final_a + final_b == deposit_a + deposit_b"
+    );
+}
+
+// ============================================================================
+// T-33.3-03b: Balance conservation with zero transferred amounts (P0)
+// ============================================================================
+
+#[tokio::test]
+async fn test_balance_conservation_with_no_claims() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let initial_deposit_a: u64 = 7_500;
+    let initial_deposit_b: u64 = 2_500;
+
+    let (channel_pda, vault_pda, _token_mint, token_account_a, token_account_b) =
+        setup_funded_channel(
+            &mut context,
+            &participant_a,
+            &participant_b,
+            &mint_authority,
+            initial_deposit_a,
+            initial_deposit_b,
+        )
+        .await;
+
+    // No claims — close and settle directly
+    let close_ix = build_close_channel_instruction(&participant_a.pubkey(), &channel_pda);
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[close_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    advance_clock_by_seconds(&mut context, (TEST_CHALLENGE_DURATION + 10) as i64).await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &token_account_a,
+        &token_account_b,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // Each participant gets their deposit back exactly
+    let a_account = context
+        .banks_client
+        .get_account(token_account_a)
+        .await
+        .unwrap()
+        .unwrap();
+    let final_balance_a = read_token_balance(&a_account.data);
+
+    let b_account = context
+        .banks_client
+        .get_account(token_account_b)
+        .await
+        .unwrap()
+        .unwrap();
+    let final_balance_b = read_token_balance(&b_account.data);
+
+    assert_eq!(
+        final_balance_a, initial_deposit_a,
+        "A should get deposit back exactly"
+    );
+    assert_eq!(
+        final_balance_b, initial_deposit_b,
+        "B should get deposit back exactly"
+    );
+
+    assert_eq!(
+        final_balance_a + final_balance_b,
+        initial_deposit_a + initial_deposit_b,
+        "Conservation with no claims"
+    );
 }

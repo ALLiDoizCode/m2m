@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test solana-deploy-devnet
 
 # Default target - show help
 help:
@@ -24,6 +24,7 @@ help:
 	@echo "Solana Program:"
 	@echo "  make solana-build         Build Solana payment channel program"
 	@echo "  make solana-test          Run Solana program tests"
+	@echo "  make solana-deploy-devnet Deploy Solana program to devnet"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean                Remove build artifacts"
@@ -64,3 +65,11 @@ solana-build:
 
 solana-test:
 	cd packages/solana-program && cargo test-sbf
+
+solana-deploy-devnet:
+ifndef DEPLOYER_KEYPAIR
+	$(error DEPLOYER_KEYPAIR is not set. Usage: make solana-deploy-devnet DEPLOYER_KEYPAIR=path/to/keypair.json [UPGRADE_AUTHORITY=path/to/authority.json] [PROGRAM_ID=<pubkey>])
+endif
+	./tools/solana/deploy.sh --network devnet --keypair $(DEPLOYER_KEYPAIR) \
+		$(if $(UPGRADE_AUTHORITY),--upgrade-authority $(UPGRADE_AUTHORITY)) \
+		$(if $(PROGRAM_ID),--program-id $(PROGRAM_ID))
