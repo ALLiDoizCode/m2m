@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test solana-deploy-devnet mina-build mina-test
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test solana-deploy-devnet mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -29,6 +29,7 @@ help:
 	@echo "Mina zkApp:"
 	@echo "  make mina-build           Build Mina payment channel zkApp"
 	@echo "  make mina-test            Run Mina zkApp tests"
+	@echo "  make mina-deploy-devnet   Deploy Mina zkApp to devnet"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean                Remove build artifacts"
@@ -84,3 +85,9 @@ mina-build:
 
 mina-test:
 	npm run test --workspace=packages/mina-zkapp
+
+mina-deploy-devnet:
+ifndef DEPLOYER_KEY
+	$(error DEPLOYER_KEY is not set. Usage: make mina-deploy-devnet DEPLOYER_KEY=<base58-private-key>)
+endif
+	MINA_DEPLOYER_KEY=$(DEPLOYER_KEY) npx ts-node tools/mina/deploy-zkapp.ts --network https://api.minascan.io/node/devnet/v1/graphql
