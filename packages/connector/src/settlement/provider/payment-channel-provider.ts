@@ -271,6 +271,8 @@ export interface SolanaProviderConfig {
   keyId: string;
   /** Solana cluster name for chain ID namespacing (e.g., 'mainnet-beta', 'devnet') */
   cluster?: string;
+  /** SPL token mint address (base58-encoded) for the payment channel token */
+  tokenMint?: string;
 }
 
 /**

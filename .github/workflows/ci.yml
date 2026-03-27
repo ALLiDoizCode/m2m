@@ -382,6 +382,111 @@ jobs:
           npm run test:rfc-links
           echo "✓ RFC links verified"
 
+  # Solana integration tests (Docker-gated)
+  # Runs T-33.7-05 and T-33.7-10 which require solana-test-validator
+  solana-integration:
+    name: Solana Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    needs: [test]
+    # Only run when explicitly triggered or on main branch pushes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    services:
+      solana-validator:
+        image: solanalabs/solana:v2.1.0
+        ports:
+          - '8899:8899'
+          - '8900:8900'
+        options: >-
+          --health-cmd "curl -s http://localhost:8899/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build --workspace=packages/shared
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Build Solana program
+        working-directory: packages/solana-program
+        run: cargo build-sbf
+
+      - name: Deploy program to local validator
+        run: |
+          solana config set --url http://localhost:8899
+          solana-keygen new --no-bip39-passphrase --force
+          solana airdrop 10
+          solana program deploy packages/solana-program/target/deploy/payment_channel.so
+
+      - name: Run Solana integration tests
+        run: |
+          echo "Running Docker-gated Solana integration tests (T-33.7-05, T-33.7-10)..."
+          npx jest test/integration/solana-subscription.test.ts --ci --verbose
+        working-directory: packages/connector
+        env:
+          CI: true
+          NODE_ENV: test
+          SOLANA_INTEGRATION: 'true'
+          SOLANA_RPC_URL: http://localhost:8899
+          SOLANA_WS_URL: ws://localhost:8900
+
+      - name: Report results
+        if: always()
+        run: |
+          echo "Solana integration tests completed"
+          echo "Tests T-33.7-05 and T-33.7-10 executed with SOLANA_INTEGRATION=true"
+
+  # Solana program tests (Rust/BPF)
+  solana-program:
+    name: Solana Program Tests (Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Cache Solana program build
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/solana-program/target
+          key: solana-program-${{ runner.os }}-${{ hashFiles('packages/solana-program/Cargo.lock') }}
+          restore-keys: |
+            solana-program-${{ runner.os }}-
+
+      - name: Run Solana program tests
+        working-directory: packages/solana-program
+        run: cargo test-sbf
+
   # Build and push Docker image to GitHub Container Registry
   docker-build-push:
     name: Build and Push Docker Image
@@ -500,7 +605,7 @@ jobs:
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
-    needs: [lint-and-format, test, build, type-check, contracts-coverage, security, rfc-links, docker-build-push, container-scan, performance-benchmark]
+    needs: [lint-and-format, test, build, type-check, contracts-coverage, security, rfc-links, solana-program, solana-integration, docker-build-push, container-scan, performance-benchmark]
     if: always()
 
     steps:
@@ -516,6 +621,8 @@ jobs:
           echo "  Build: ${{ needs.build.result }}"
           echo "  Type Check: ${{ needs.type-check.result }}"
           echo "  EVM Contracts: ${{ needs.contracts-coverage.result }}"
+          echo "  Solana Program: ${{ needs.solana-program.result }}"
+          echo "  Solana Integration: ${{ needs.solana-integration.result }}"
           echo "  Security: ${{ needs.security.result }}"
           echo "  RFC Links: ${{ needs.rfc-links.result }}"
           echo "  Docker Build: ${{ needs.docker-build-push.result }}"
@@ -528,7 +635,8 @@ jobs:
           if [[ "${{ needs.lint-and-format.result }}" == "failure" ]] || \
              [[ "${{ needs.test.result }}" == "failure" ]] || \
              [[ "${{ needs.build.result }}" == "failure" ]] || \
-             [[ "${{ needs.type-check.result }}" == "failure" ]]; then
+             [[ "${{ needs.type-check.result }}" == "failure" ]] || \
+             [[ "${{ needs.solana-program.result }}" == "failure" ]]; then
             echo "❌ CI Pipeline FAILED"
             echo ""
             echo "Please check the failed jobs above for details."

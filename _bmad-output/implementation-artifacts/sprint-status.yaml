@@ -65,7 +65,7 @@ epics:
       status: done
   epic-34:
     name: "Mina Protocol Payment Channel Provider"
-    status: backlog
+    status: in-progress
     stories:
       34.1:
         name: "Mina Payment Channel zkApp — Channel Lifecycle"
