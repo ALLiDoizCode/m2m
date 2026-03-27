@@ -1,116 +1,101 @@
 ---
 workflow: TA (Test Automation)
 mode: YOLO
-inputDocument: _bmad-output/test-artifacts/test-design-epic-multihop-e2e.md
+inputDocument: _bmad-output/implementation-artifacts/34-1-mina-payment-channel-zkapp-channel-lifecycle.md
 generatedFiles:
-  - packages/connector/test/integration/multi-hop-helpers.ts
-  - packages/connector/test/integration/multi-hop-e2e.test.ts
+  - packages/mina-zkapp/src/payment-channel.test.ts (modified - 3 tests added)
 stepsCompleted:
-  - step-01-preflight
-  - step-02-target-identification
-  - step-03-load-subagent
-  - step-04-generate-test-code
-  - step-05-aggregation
-lastStep: step-05-aggregation
-lastSaved: '2026-03-11'
+  - step-01-preflight-and-context
+  - step-02-identify-targets
+  - step-03-generate-tests
+  - step-04-validate
+  - step-05-summary
+lastStep: step-05-summary
+lastSaved: '2026-03-27'
 stackDetected: backend
 framework: Jest
 language: TypeScript
 runner: ts-jest
 ---
 
-# Test Automation Summary: Multi-Hop E2E Integration
+# Test Automation Summary: Story 34.1 Gap Coverage
 
-**Date:** 2026-03-11
+**Date:** 2026-03-27
 **TEA Workflow:** [TA] Test Automation → YOLO mode
-**Input:** test-design-epic-multihop-e2e.md (20 test scenarios)
+**Input:** Story 34-1 acceptance criteria vs existing ATDD tests (15 tests)
+**Story:** 34.1 -- Mina Payment Channel zkApp -- Channel Lifecycle
 
 ---
 
-## Generated Files
+## Gap Analysis
 
-### 1. `packages/connector/test/integration/multi-hop-helpers.ts`
+Mapped all 12 acceptance criteria (AC 1, 1a, 2, 2a, 2b, 3, 3a, 3b, 4, 5, 5a, 6) against the 15 existing ATDD tests (T-34.1-01 through T-34.1-15).
 
-Test network factory and utility functions:
+### Gaps Identified
 
-| Export                        | Type    | Description                                                                        |
-| ----------------------------- | ------- | ---------------------------------------------------------------------------------- |
-| `createMultiHopTestNetwork()` | Factory | Creates N ConnectorNode instances in linear chain with real settlementInfra config |
-| `waitForAnvilReady()`         | Helper  | Polls Anvil RPC + Faucet health endpoints                                          |
-| `fundPeerAccounts()`          | Helper  | Calls faucet POST /api/request for each peer address                               |
-| `calculateExpectedFee()`      | Utility | `(amount * 10n) / 10000n` — matches PacketHandler                                  |
-| `calculateForwardedAmount()`  | Utility | `amount - fee`                                                                     |
-| `calculateAmountsPerHop()`    | Utility | Array of amounts at each hop after fee cascade                                     |
-| `calculateExpectedBalances()` | Utility | Map of peer-pair → debit/credit after one packet                                   |
-| `waitForCondition()`          | Polling | Generic condition poller with timeout                                              |
-| `createTestPacketParams()`    | Helper  | Random preimage + SHA-256 condition + expiry                                       |
-| `sleep()`                     | Utility | Promise-based delay                                                                |
+| AC | Gap Description | Existing Coverage | New Test |
+|----|----------------|-------------------|----------|
+| AC 2a | Deposit to SETTLED channel not tested | T-34.1-10 only tested CLOSING state | T-34.1-16 |
+| AC 3a | initiateClose on SETTLED channel not tested | T-34.1-12 only tested CLOSING state | T-34.1-17 |
+| AC 5a | settle on SETTLED channel not tested | T-34.1-13 only tested OPEN state | T-34.1-18 |
 
-Constants exported: `ANVIL_RPC_URL`, `FAUCET_URL`, `ANVIL_CHAIN_ID`, `REGISTRY_ADDRESS`, `TOKEN_ADDRESS`, `PEER_PRIVATE_KEYS`, `PEER_EVM_ADDRESSES`.
+### ACs Already Fully Covered (no gap)
 
-### 2. `packages/connector/test/integration/multi-hop-e2e.test.ts`
-
-All 20 test scenarios organized by priority:
-
-| Priority | IDs                   | Count | Scenarios                                                          |
-| -------- | --------------------- | ----- | ------------------------------------------------------------------ |
-| P0       | T-001 to T-006        | 6     | Core fulfill/reject, balances, settlement triggers                 |
-| P1       | T-007 to T-012, T-020 | 7     | Fee cascade, claims, credit limits, state machine, self-describing |
-| P2       | T-013 to T-017        | 5     | Expired packets, invalid packets, routing, zero-amount, burst      |
-| P3       | T-018 to T-019        | 2     | Concurrency, bi-directional                                        |
+| AC | Description | Covered By |
+|----|-------------|------------|
+| AC 1 | Initialize Channel | T-34.1-01, T-34.1-02 |
+| AC 1a | Double Init Rejected | T-34.1-09 |
+| AC 2 | Deposit Tokens | T-34.1-03 |
+| AC 2b | Zero Deposit Rejected | T-34.1-11 |
+| AC 3 | Initiate Close | T-34.1-04, T-34.1-08 |
+| AC 3b | Close Balance Mismatch | T-34.1-14 |
+| AC 4 | Settle After Challenge | T-34.1-05 |
+| AC 5 | Settle During Challenge | T-34.1-06 |
+| AC 6 | 8 State Fields | T-34.1-07 |
 
 ---
 
-## Coverage Matrix
+## Tests Generated
 
-| Test ID | Scenario                 | Components Exercised                                         | Status    |
-| ------- | ------------------------ | ------------------------------------------------------------ | --------- |
-| T-001   | 5-hop fulfill            | ConnectorNode, PacketHandler, BTPServer/Client, RoutingTable | Generated |
-| T-002   | Balance verification     | AccountManager, InMemoryLedgerClient, getBalance()           | Generated |
-| T-003   | Reject propagation       | PacketHandler, setPacketHandler(), F99                       | Generated |
-| T-004   | Settlement threshold     | SettlementMonitor, SETTLEMENT_REQUIRED event                 | Generated |
-| T-005   | Multi-peer settlement    | SettlementMonitor at Peer2/3/4                               | Generated |
-| T-006   | Post-settlement balance  | AccountManager, balance consistency                          | Generated |
-| T-007   | Fee cascade              | PacketHandler fee calculation, BigInt arithmetic             | Generated |
-| T-008   | EIP-712 claims           | PerPacketClaimService, PaymentChannelSDK                     | Generated |
-| T-009   | Credit limit T04         | AccountManager credit limits, T04_INSUFFICIENT_LIQUIDITY     | Generated |
-| T-010   | Unreachable F02          | RoutingTable, F02_UNREACHABLE                                | Generated |
-| T-011   | Settlement state machine | SettlementMonitor state transitions                          | Generated |
-| T-012   | 10-packet claims         | PerPacketClaimService accumulation                           | Generated |
-| T-013   | Expired packet R00       | PacketHandler expiry check, R00/R02                          | Generated |
-| T-014   | Invalid packet F01       | Packet validation, F01                                       | Generated |
-| T-015   | Route verification       | RoutingTable, multi-destination reachability                 | Generated |
-| T-016   | Zero-amount              | PacketHandler edge case, no settlement                       | Generated |
-| T-017   | Burst stability          | BTPClient/Server under load, 50 packets                      | Generated |
-| T-018   | Concurrency              | Promise.all, 10 concurrent packets                           | Generated |
-| T-019   | Bi-directional           | Forward + reverse routing                                    | Generated |
-| T-020   | Self-describing claims   | ClaimReceiver, on-chain channel verification                 | Generated |
+### Modified File: `packages/mina-zkapp/src/payment-channel.test.ts`
+
+3 new tests appended (T-34.1-16 through T-34.1-18):
+
+| Test ID | AC | Priority | Scenario | Status |
+|---------|-----|----------|----------|--------|
+| T-34.1-16 | 2a | P1 | Deposit to SETTLED channel is rejected | PASS |
+| T-34.1-17 | 3a | P1 | initiateClose on SETTLED channel is rejected | PASS |
+| T-34.1-18 | 5a | P1 | settle on already SETTLED channel is rejected (double-settle) | PASS |
+
+Each test drives the channel through the full lifecycle (init -> deposit -> close -> settle) to reach SETTLED state, then verifies the target operation is rejected.
 
 ---
 
-## Architecture Alignment
+## Test Results
 
-- **No mocks**: All tests use real Anvil blockchain (chainId 31337)
-- **Config-driven**: `ConnectorConfig.settlementInfra` with direct private key injection
-- **InMemoryLedgerClient**: Same `ILedgerClient` interface as TigerBeetle
-- **Sequential startup**: Peer5→Peer1 (R-001 mitigation for BTP race conditions)
-- **Environment gate**: `EVM_INTEGRATION=true` required; `describe.skip` otherwise
-- **Jest timeout**: 180s for real EVM operations
-
-## Prerequisites
-
-```bash
-make anvil-up                                    # Start Anvil + deploy contracts + faucet
-EVM_INTEGRATION=true npx jest test/integration/  # Run integration suite
-make anvil-down                                  # Teardown
+```
+Test Suites: 1 passed, 1 total
+Tests:       18 passed, 18 total (15 existing + 3 new)
+Time:        13.37s
 ```
 
-## Risk Mitigations Implemented
+### Priority Breakdown
 
-| Risk                    | Score | Mitigation in Code                                            |
-| ----------------------- | ----- | ------------------------------------------------------------- |
-| R-001 BTP race          | 9     | Reverse startup order + 500ms delay between peers             |
-| R-002 Settlement timing | 6     | pollingInterval=100ms + sleep() for detection window          |
-| R-003 Balance drift     | 6     | `calculateAmountsPerHop()` with exact BigInt arithmetic       |
-| R-004 EVM dependency    | 6     | `waitForAnvilReady()` + phased startup + EVM_INTEGRATION gate |
-| R-005 Timeout           | 9     | `jest.setTimeout(180_000)` + parallel funding                 |
+| Priority | Count | Description |
+|----------|-------|-------------|
+| P0 | 8 | Critical path (init, deposit, close, settle, fields, commitment) |
+| P1 | 10 | State guards and input validation (negative scenarios) |
+
+---
+
+## Coverage Summary
+
+- **Acceptance Criteria**: 12/12 covered (100%)
+- **Total Tests**: 18 (15 original ATDD + 3 gap-filling)
+- **All tests passing**: Yes
+- **Build clean**: Yes (tsc compiles with no errors)
+
+## Next Steps
+
+- Story 34.2 will add `claimFromChannel` method and corresponding tests
+- Story 34.3 will add comprehensive security/privacy tests and proof-enabled integration tests

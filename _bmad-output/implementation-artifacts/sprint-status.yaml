@@ -69,7 +69,7 @@ epics:
     stories:
       34.1:
         name: "Mina Payment Channel zkApp — Channel Lifecycle"
-        status: backlog
+        status: done
       34.2:
         name: "Mina Payment Channel zkApp — ZK-Private Claims"
         status: backlog

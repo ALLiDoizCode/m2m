@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test solana-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test solana-deploy-devnet mina-build mina-test
 
 # Default target - show help
 help:
@@ -26,6 +26,10 @@ help:
 	@echo "  make solana-test          Run Solana program tests"
 	@echo "  make solana-deploy-devnet Deploy Solana program to devnet"
 	@echo ""
+	@echo "Mina zkApp:"
+	@echo "  make mina-build           Build Mina payment channel zkApp"
+	@echo "  make mina-test            Run Mina zkApp tests"
+	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean                Remove build artifacts"
 
@@ -47,7 +51,7 @@ lint:
 
 # Remove build artifacts
 clean:
-	rm -rf packages/connector/dist packages/shared/dist
+	rm -rf packages/connector/dist packages/shared/dist packages/mina-zkapp/dist
 
 # Local Blockchain (Anvil + Faucet)
 anvil-up:
@@ -73,3 +77,10 @@ endif
 	./tools/solana/deploy.sh --network devnet --keypair $(DEPLOYER_KEYPAIR) \
 		$(if $(UPGRADE_AUTHORITY),--upgrade-authority $(UPGRADE_AUTHORITY)) \
 		$(if $(PROGRAM_ID),--program-id $(PROGRAM_ID))
+
+# Mina Payment Channel zkApp
+mina-build:
+	npm run build --workspace=packages/mina-zkapp
+
+mina-test:
+	npm run test --workspace=packages/mina-zkapp
