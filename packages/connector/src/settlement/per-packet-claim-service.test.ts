@@ -9,13 +9,20 @@
  */
 
 import { PerPacketClaimService } from './per-packet-claim-service';
-import { BTP_CLAIM_PROTOCOL, type EVMClaimMessage, isEVMClaim } from '../btp/btp-claim-types';
+import {
+  BTP_CLAIM_PROTOCOL,
+  type EVMClaimMessage,
+  type SolanaClaimMessage,
+  isEVMClaim,
+  isSolanaClaim,
+} from '../btp/btp-claim-types';
 import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 import type { ChannelManager } from './channel-manager';
 import type { Database } from 'better-sqlite3';
 import type { Logger } from 'pino';
 import type { PaymentChannelSDK } from './payment-channel-sdk';
 import { EVMPaymentChannelProvider } from './provider/evm-payment-channel-provider';
+import { SolanaPaymentChannelProvider } from './provider/solana-payment-channel-provider';
 
 // Mock logger
 const createMockLogger = (): Logger =>
@@ -673,6 +680,390 @@ describe('PerPacketClaimService', () => {
       expect(result).not.toBeNull();
       // Logger.error should have been called
       expect(mockLogger.error).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Acceptance Tests for Story 33.6: Solana Claim Message Types & Serialization
+   *
+   * Tests Solana claim construction, context population, nonce tracking,
+   * cumulative amounts, serialization, and EVM backward compatibility.
+   */
+  describe('Solana claim construction (Story 33.6)', () => {
+    const SOLANA_CHANNEL_ACCOUNT = 'AbCdEfGh11111111111111111111111111111111111';
+    const SOLANA_PROGRAM_ID = 'PayChan11111111111111111111111111111111111';
+    const SOLANA_TOKEN_MINT = 'SoLtOkEn1111111111111111111111111111111111';
+    const SOLANA_SIGNER_PUBKEY = 'SiGnEr111111111111111111111111111111111111';
+    const SOLANA_PEER_ID = 'connector-solana';
+    const SOLANA_CLUSTER = 'devnet';
+
+    // Mock SolanaPaymentChannelProvider
+    const createMockSolanaProvider = (): jest.Mocked<SolanaPaymentChannelProvider> => {
+      const provider = {
+        signBalanceProof: jest.fn().mockResolvedValue('c29sYW5hLXNpZ25hdHVyZS1kYXRh'),
+        verifyBalanceProof: jest.fn().mockResolvedValue(true),
+        getChannelState: jest.fn(),
+        openChannel: jest.fn(),
+        deposit: jest.fn(),
+        claimFromChannel: jest.fn(),
+        closeChannel: jest.fn(),
+        settleChannel: jest.fn(),
+        subscribeToEvents: jest.fn(),
+        chainType: 'solana' as const,
+        chainId: 'solana:devnet',
+        getSolanaContext: jest.fn().mockReturnValue({
+          programId: SOLANA_PROGRAM_ID,
+          tokenMint: SOLANA_TOKEN_MINT,
+          cluster: SOLANA_CLUSTER,
+          signerAddress: SOLANA_SIGNER_PUBKEY,
+        }),
+      } as unknown as jest.Mocked<SolanaPaymentChannelProvider>;
+      // Set prototype so that `instanceof SolanaPaymentChannelProvider` checks pass
+      Object.setPrototypeOf(provider, SolanaPaymentChannelProvider.prototype);
+      return provider;
+    };
+
+    // Registry that returns Solana provider for Solana chain
+    const createSolanaRegistry = (
+      solanaProvider: jest.Mocked<SolanaPaymentChannelProvider>,
+      evmProvider?: EVMPaymentChannelProvider
+    ): jest.Mocked<Pick<ChainProviderRegistry, 'getProviderForPeer'>> => ({
+      getProviderForPeer: jest
+        .fn()
+        .mockImplementation((peerConfig: { peerId: string; chain?: string }) => {
+          if (peerConfig.chain?.startsWith('solana:')) return solanaProvider;
+          if (peerConfig.chain?.startsWith('evm:') && evmProvider) return evmProvider;
+          return undefined;
+        }),
+    });
+
+    // Channel manager that returns Solana channel metadata
+    const createSolanaChannelManager = (): jest.Mocked<
+      Pick<ChannelManager, 'getChannelForPeer' | 'ensureChannelExists'>
+    > => ({
+      getChannelForPeer: jest.fn().mockImplementation((peerId: string, _tokenId: string) => {
+        if (peerId === SOLANA_PEER_ID) {
+          return {
+            channelId: SOLANA_CHANNEL_ACCOUNT,
+            tokenAddress: SOLANA_TOKEN_MINT,
+            peerId,
+            tokenId: 'SOL',
+            chain: 'solana:devnet',
+            createdAt: new Date(),
+            lastActivityAt: new Date(),
+            status: 'open' as const,
+          };
+        }
+        return null;
+      }),
+      ensureChannelExists: jest.fn().mockResolvedValue(undefined),
+    });
+
+    it('[P0] should construct SolanaClaimMessage for Solana peer (T-33.6-01)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createSolanaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(isSolanaClaim(result!.claimMessage)).toBe(true);
+
+      const solanaClaim = result!.claimMessage as SolanaClaimMessage;
+      expect(solanaClaim.blockchain).toBe('solana');
+      expect(solanaClaim.version).toBe('1.0');
+      expect(solanaClaim.senderId).toBe(TEST_NODE_ID);
+    });
+
+    it('[P0] should populate correct Solana fields from getSolanaContext (T-33.6-02)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createSolanaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 1000n);
+
+      const solanaClaim = result!.claimMessage as SolanaClaimMessage;
+      expect(solanaClaim.programId).toBe(SOLANA_PROGRAM_ID);
+      expect(solanaClaim.channelAccount).toBe(SOLANA_CHANNEL_ACCOUNT);
+      expect(solanaClaim.signerPublicKey).toBe(SOLANA_SIGNER_PUBKEY);
+      expect(solanaClaim.cluster).toBe(SOLANA_CLUSTER);
+    });
+
+    it('[P0] should increment Solana claim nonce per packet (T-33.6-03)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createSolanaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result1 = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 100n);
+      const result2 = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 200n);
+      const result3 = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 300n);
+
+      expect((result1!.claimMessage as SolanaClaimMessage).nonce).toBe(1);
+      expect((result2!.claimMessage as SolanaClaimMessage).nonce).toBe(2);
+      expect((result3!.claimMessage as SolanaClaimMessage).nonce).toBe(3);
+    });
+
+    it('[P0] should accumulate Solana claim transferredAmount cumulatively (T-33.6-04)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createSolanaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result1 = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 100n);
+      const result2 = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 200n);
+      const result3 = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 300n);
+
+      expect((result1!.claimMessage as SolanaClaimMessage).transferredAmount).toBe('100');
+      expect((result2!.claimMessage as SolanaClaimMessage).transferredAmount).toBe('300'); // 100 + 200
+      expect((result3!.claimMessage as SolanaClaimMessage).transferredAmount).toBe('600'); // 100 + 200 + 300
+    });
+
+    it('[P0] should call getSolanaContext during buildChannelContext (T-33.6-05)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createSolanaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 1000n);
+
+      expect(solanaProvider.getSolanaContext).toHaveBeenCalledTimes(1);
+    });
+
+    it('[P0] should serialize Solana claim to valid JSON in BTP protocolData (T-33.6-02/AC2)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createSolanaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 5000n);
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.protocolData.data.toString('utf8'));
+      expect(parsed.blockchain).toBe('solana');
+      expect(parsed.programId).toBe(SOLANA_PROGRAM_ID);
+      expect(parsed.channelAccount).toBe(SOLANA_CHANNEL_ACCOUNT);
+      expect(parsed.signerPublicKey).toBe(SOLANA_SIGNER_PUBKEY);
+      expect(parsed.cluster).toBe(SOLANA_CLUSTER);
+      expect(parsed.nonce).toBe(1);
+      expect(parsed.transferredAmount).toBe('5000');
+      expect(parsed.signature).toBe('c29sYW5hLXNpZ25hdHVyZS1kYXRh');
+
+      // AC5: tokenMint must NOT be serialized in the claim message
+      // (it is stored in ChannelClaimContext for logging/validation only)
+      expect(parsed).not.toHaveProperty('tokenMint');
+    });
+
+    it('[P1] should throw when Solana context fields are missing (AC5 guard)', async () => {
+      const badSolanaProvider = createMockSolanaProvider();
+      // Return incomplete context (missing programId)
+      badSolanaProvider.getSolanaContext.mockReturnValue({
+        programId: '',
+        tokenMint: SOLANA_TOKEN_MINT,
+        cluster: SOLANA_CLUSTER,
+        signerAddress: SOLANA_SIGNER_PUBKEY,
+      });
+      const solanaRegistry = createSolanaRegistry(badSolanaProvider);
+      const solanaChannelManager = createSolanaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      await expect(svc.generateClaimForPacket(SOLANA_PEER_ID, 'SOL', 1000n)).rejects.toThrow(
+        /programId/
+      );
+    });
+
+    it('[P0] should NOT break EVM claim construction (AC1/AC4 regression)', async () => {
+      // Verify EVM claims still work when Solana support is wired in
+      const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(isEVMClaim(result!.claimMessage)).toBe(true);
+      const evmClaim = result!.claimMessage as EVMClaimMessage;
+      expect(evmClaim.blockchain).toBe('evm');
+      expect(evmClaim.channelId).toBe(TEST_CHANNEL_ID);
+      expect(evmClaim.nonce).toBe(1);
+      expect(evmClaim.transferredAmount).toBe('1000');
+    });
+  });
+
+  describe('Solana claim recovery from DB (Story 33.6)', () => {
+    it('[P0] should recover Solana claim state from database on startup (T-33.6-06)', () => {
+      const SOLANA_CHANNEL = 'AbCdEfGh11111111111111111111111111111111111';
+      const existingClaims = [
+        {
+          claim_data: JSON.stringify({
+            blockchain: 'solana',
+            messageId: 'solana-AbCdEfGh-5-1706889600000',
+            programId: 'PayChan11111111111111111111111111111111111',
+            channelAccount: SOLANA_CHANNEL,
+            nonce: 5,
+            transferredAmount: '50000',
+            signature: 'c29sYW5hLXNpZw==',
+            signerPublicKey: 'SiGnEr111111111111111111111111111111111111',
+            cluster: 'devnet',
+          }),
+        },
+      ];
+
+      const recoveryDb = createMockDb(existingClaims);
+
+      const recoveredService = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockChannelManager as unknown as ChannelManager,
+        recoveryDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const latest = recoveredService.getLatestClaim(SOLANA_CHANNEL);
+      expect(latest).not.toBeNull();
+      expect(isSolanaClaim(latest!)).toBe(true);
+      expect((latest as SolanaClaimMessage).nonce).toBe(5);
+      expect((latest as SolanaClaimMessage).transferredAmount).toBe('50000');
+      expect((latest as SolanaClaimMessage).channelAccount).toBe(SOLANA_CHANNEL);
+    });
+
+    it('[P0] should continue Solana claim generation from recovered state (T-33.6-06 cont.)', async () => {
+      const SOLANA_CHANNEL = 'AbCdEfGh11111111111111111111111111111111111';
+      const existingClaims = [
+        {
+          claim_data: JSON.stringify({
+            blockchain: 'solana',
+            messageId: 'solana-AbCdEfGh-10-1706889600000',
+            programId: 'PayChan11111111111111111111111111111111111',
+            channelAccount: SOLANA_CHANNEL,
+            nonce: 10,
+            transferredAmount: '100000',
+            signature: 'c29sYW5hLXNpZw==',
+            signerPublicKey: 'SiGnEr111111111111111111111111111111111111',
+            cluster: 'devnet',
+          }),
+        },
+      ];
+
+      const recoveryDb = createMockDb(existingClaims);
+
+      const solanaProvider = {
+        signBalanceProof: jest.fn().mockResolvedValue('bmV3LXNpZw=='),
+        chainType: 'solana' as const,
+        chainId: 'solana:devnet',
+        getSolanaContext: jest.fn().mockReturnValue({
+          programId: 'PayChan11111111111111111111111111111111111',
+          tokenMint: 'SoLtOkEn1111111111111111111111111111111111',
+          cluster: 'devnet',
+          signerAddress: 'SiGnEr111111111111111111111111111111111111',
+        }),
+      } as unknown as jest.Mocked<SolanaPaymentChannelProvider>;
+      Object.setPrototypeOf(solanaProvider, SolanaPaymentChannelProvider.prototype);
+
+      const solanaRegistry = {
+        getProviderForPeer: jest.fn().mockReturnValue(solanaProvider),
+      };
+
+      const solanaChannelManager = {
+        getChannelForPeer: jest.fn().mockReturnValue({
+          channelId: SOLANA_CHANNEL,
+          tokenAddress: 'SoLtOkEn1111111111111111111111111111111111',
+          peerId: 'connector-solana',
+          tokenId: 'SOL',
+          chain: 'solana:devnet',
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          status: 'open' as const,
+        }),
+        ensureChannelExists: jest.fn(),
+      };
+
+      const recoveredService = new PerPacketClaimService(
+        solanaRegistry as unknown as ChainProviderRegistry,
+        solanaChannelManager as unknown as ChannelManager,
+        recoveryDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await recoveredService.generateClaimForPacket('connector-solana', 'SOL', 500n);
+      expect(result).not.toBeNull();
+      expect((result!.claimMessage as SolanaClaimMessage).nonce).toBe(11); // continues from 10
+      expect((result!.claimMessage as SolanaClaimMessage).transferredAmount).toBe('100500'); // 100000 + 500
+    });
+
+    it('[P1] should skip structurally invalid Solana claims during recovery (T-33.6-06 guard)', () => {
+      const existingClaims = [
+        {
+          claim_data: JSON.stringify({
+            blockchain: 'solana',
+            messageId: 'solana-bad-claim',
+            // Missing channelAccount, nonce, transferredAmount
+            programId: 'PayChan11111111111111111111111111111111111',
+          }),
+        },
+      ];
+
+      const recoveryDb = createMockDb(existingClaims);
+
+      // Should not throw
+      expect(
+        () =>
+          new PerPacketClaimService(
+            mockRegistry as unknown as ChainProviderRegistry,
+            mockChannelManager as unknown as ChannelManager,
+            recoveryDb as unknown as Database,
+            mockLogger,
+            TEST_NODE_ID
+          )
+      ).not.toThrow();
     });
   });
 });

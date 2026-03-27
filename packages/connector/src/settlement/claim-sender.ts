@@ -25,14 +25,16 @@
  */
 
 import type { Database } from 'better-sqlite3';
-import { Logger } from 'pino';
-import { BTPClient } from '../btp/btp-client';
+import type { Logger } from 'pino';
+import type { BTPClient } from '../btp/btp-client';
 import {
   BTP_CLAIM_PROTOCOL,
-  BTPClaimMessage,
-  EVMClaimMessage,
-  BlockchainType,
+  type BTPClaimMessage,
+  type EVMClaimMessage,
+  type SolanaClaimMessage,
+  type BlockchainType,
 } from '../btp/btp-claim-types';
+
 /**
  * Result of a claim send operation
  */
@@ -141,6 +143,68 @@ export class ClaimSender {
   }
 
   /**
+   * Send a Solana payment channel claim to a peer
+   *
+   * @param peerId - Peer identifier
+   * @param btpClient - BTPClient instance for this peer connection
+   * @param programId - Base58-encoded Solana program address
+   * @param channelAccount - Base58-encoded PDA channel account address
+   * @param nonce - Balance proof nonce
+   * @param transferredAmount - Cumulative transferred amount in lamports
+   * @param signature - Base64-encoded Ed25519 signature
+   * @param signerPublicKey - Base58-encoded Ed25519 public key of the signer
+   * @param cluster - Optional Solana cluster identifier (e.g., 'devnet')
+   * @returns Promise resolving to ClaimSendResult
+   *
+   * @example
+   * ```typescript
+   * // Solana message ID: solana-AbCdEfGh-42-1706889600000
+   * const result = await claimSender.sendSolanaClaim(
+   *   'peer-bob',
+   *   btpClient,
+   *   '11111111111111111111111111111111',
+   *   'AbCdEfGhIjKlMnOpQrStUvWxYz123456',
+   *   42,
+   *   '1000000',
+   *   'base64signature==',
+   *   'SignerPubKey123456789012345678901',
+   *   'devnet',
+   * );
+   * ```
+   */
+  async sendSolanaClaim(
+    peerId: string,
+    btpClient: BTPClient,
+    programId: string,
+    channelAccount: string,
+    nonce: number,
+    transferredAmount: string,
+    signature: string,
+    signerPublicKey: string,
+    cluster?: string
+  ): Promise<ClaimSendResult> {
+    const messageId = this._generateMessageId('solana', channelAccount, nonce);
+    const timestamp = new Date().toISOString();
+
+    const claimMessage: SolanaClaimMessage = {
+      version: '1.0',
+      blockchain: 'solana',
+      messageId,
+      timestamp,
+      senderId: this.nodeId ?? 'unknown',
+      programId,
+      channelAccount,
+      nonce,
+      transferredAmount,
+      signature,
+      signerPublicKey,
+      ...(cluster !== undefined && { cluster }),
+    };
+
+    return this.sendClaim(peerId, btpClient, claimMessage);
+  }
+
+  /**
    * Core claim sending logic (private method)
    *
    * Handles serialization, retry logic, and persistence for all claim types.
@@ -207,6 +271,7 @@ export class ClaimSender {
    *
    * @example
    * // EVM: evm-0xabcdef-42-1706889600000
+   * // Solana: solana-AbCdEfGh-42-1706889600000
    */
   private _generateMessageId(blockchain: BlockchainType, channelId: string, nonce: number): string {
     const prefix = channelId.substring(0, 8);

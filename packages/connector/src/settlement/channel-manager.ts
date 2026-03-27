@@ -165,9 +165,10 @@ export class ChannelManager extends EventEmitter {
     channelId: string;
     peerId: string;
     tokenAddress: string;
-    tokenNetworkAddress: string;
-    chainId: number;
+    tokenNetworkAddress?: string; // EVM-only (optional for Solana)
+    chainId?: number; // EVM-only (optional for Solana)
     status: AdminChannelStatus;
+    chain?: string; // Full chain string (e.g., 'solana:devnet'); overrides evm:${chainId} derivation
   }): ChannelMetadata {
     // Idempotent: return existing if already registered
     const existing = this.channelMetadata.get(params.channelId);
@@ -180,12 +181,32 @@ export class ChannelManager extends EventEmitter {
     }
 
     // Resolve tokenId by reverse-lookup from tokenAddressMap
+    // Use case-sensitive comparison for non-EVM chains (base58 addresses are case-sensitive)
+    const isEVM = params.chain ? params.chain.startsWith('evm') : true;
     let tokenId: string = params.tokenAddress;
     for (const [id, address] of this.config.tokenAddressMap.entries()) {
-      if (address.toLowerCase() === params.tokenAddress.toLowerCase()) {
-        tokenId = id;
-        break;
+      if (isEVM) {
+        if (address.toLowerCase() === params.tokenAddress.toLowerCase()) {
+          tokenId = id;
+          break;
+        }
+      } else {
+        // Case-sensitive comparison for Solana and other non-EVM chains
+        if (address === params.tokenAddress) {
+          tokenId = id;
+          break;
+        }
       }
+    }
+
+    // Determine chain string: use explicit chain param, or derive from chainId for EVM
+    const chain = params.chain ?? (params.chainId !== undefined ? `evm:${params.chainId}` : '');
+
+    if (!chain) {
+      this.logger.warn(
+        { channelId: params.channelId, peerId: params.peerId },
+        'External channel registered without chain identifier (neither chain nor chainId provided)'
+      );
     }
 
     const metadata: ChannelMetadata = {
@@ -193,7 +214,7 @@ export class ChannelManager extends EventEmitter {
       peerId: params.peerId,
       tokenId,
       tokenAddress: params.tokenAddress,
-      chain: `evm:${params.chainId}`,
+      chain,
       createdAt: new Date(),
       lastActivityAt: new Date(),
       status: 'open',
@@ -210,8 +231,7 @@ export class ChannelManager extends EventEmitter {
       {
         channelId: params.channelId,
         peerId: params.peerId,
-        chainId: params.chainId,
-        tokenNetworkAddress: params.tokenNetworkAddress,
+        chain,
       },
       'External channel registered'
     );

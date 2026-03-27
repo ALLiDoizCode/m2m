@@ -665,6 +665,49 @@ export class SettlementExecutor extends EventEmitter {
   }
 
   /**
+   * Register or update a peer's chain mapping at runtime.
+   *
+   * Supports mixed EVM+Solana deployments where peers may be discovered
+   * dynamically via self-describing claims or peer discovery service.
+   * Existing mappings are overwritten if chainId changes (e.g., peer migrates chains).
+   *
+   * @param peerId - Peer connector ID
+   * @param chainId - Chain identifier (e.g., 'evm:8453', 'solana:mainnet-beta')
+   */
+  registerPeerChain(peerId: string, chainId: string): void {
+    const existingChain = this.config.peerIdToChainMap.get(peerId);
+    this.config.peerIdToChainMap.set(peerId, chainId);
+
+    if (existingChain && existingChain !== chainId) {
+      this.logger.info(
+        { event: 'peer_chain_updated', peerId, oldChain: existingChain, newChain: chainId },
+        'Peer chain mapping updated'
+      );
+    } else if (!existingChain) {
+      this.logger.info(
+        { event: 'peer_chain_registered', peerId, chainId },
+        'Peer chain mapping registered'
+      );
+    }
+  }
+
+  /**
+   * Register or update a peer's settlement address at runtime.
+   *
+   * @param peerId - Peer connector ID
+   * @param address - On-chain address for this peer (format depends on chain)
+   */
+  registerPeerAddress(peerId: string, address: string): void {
+    if (!this.config.peerIdToAddressMap.has(peerId)) {
+      this.config.peerIdToAddressMap.set(peerId, address);
+      this.logger.info(
+        { event: 'peer_address_registered', peerId },
+        'Peer settlement address registered'
+      );
+    }
+  }
+
+  /**
    * Get settlement state for peer-token pair
    *
    * Queries the SettlementMonitor for current settlement state.

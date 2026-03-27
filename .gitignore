@@ -7,6 +7,7 @@ dist/
 *.js.map
 *.d.ts.map
 packages/contracts-aptos/build/
+target/
 
 # Test coverage
 coverage/
@@ -21,6 +22,9 @@ coverage/
 
 # Deployer wallet (NEVER commit private keys)
 deployer-wallet.json
+
+# Solana deployment output (environment-specific)
+tools/solana/program-id.json
 
 # Testnet wallets (contains private keys for testing)
 testnet-wallets.json

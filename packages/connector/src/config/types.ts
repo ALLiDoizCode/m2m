@@ -272,6 +272,11 @@ export interface ConnectorConfig {
    *
    * @deprecated Use `chainProviders` for multi-chain configuration.
    * When `chainProviders` is present, this field is ignored.
+   *
+   * **Coexistence strategy:** `settlementInfra` remains functional for single-EVM
+   * deployments. `connector-node.ts` auto-creates an EVMPaymentChannelProvider from
+   * `settlementInfra` when `chainProviders` is absent. New deployments should use
+   * `chainProviders` exclusively. `settlementInfra` will be removed in a future major version.
    */
   settlementInfra?: SettlementInfraConfig;
 
@@ -1724,7 +1729,7 @@ const KNOWN_CHAIN_TYPES: ReadonlySet<string> = new Set<string>(['evm', 'solana',
 /** Required fields per chain type for runtime validation of YAML-loaded configs. */
 const REQUIRED_FIELDS_BY_CHAIN_TYPE: Record<string, readonly string[]> = {
   evm: ['rpcUrl', 'registryAddress', 'keyId'],
-  solana: ['rpcUrl', 'programId'],
+  solana: ['rpcUrl', 'programId', 'keyId'],
   mina: ['graphqlUrl', 'zkAppAddress'],
 };
 

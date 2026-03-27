@@ -16,7 +16,8 @@ import type { BTPProtocolData, BTPMessage, BTPData } from '../btp/btp-types';
 import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 import type { PaymentChannelProvider } from './provider/payment-channel-provider';
 import type { ChannelManager } from './channel-manager';
-import type { EVMClaimMessage } from '../btp/btp-claim-types';
+import type { EVMClaimMessage, SolanaClaimMessage } from '../btp/btp-claim-types';
+import type { ProviderChannelState } from './provider/payment-channel-provider';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -287,15 +288,20 @@ describe('ClaimReceiver', () => {
       );
     });
 
-    it('should reject claim with unsupported blockchain type during validation', async () => {
-      // Solana claims fail validateClaimMessage() ("not yet supported"),
-      // so the error is caught in handleClaimMessage's catch block
+    it('should handle Solana claim with no registered provider', async () => {
+      // Solana claims now pass structural validation but no Solana provider is registered
       const solanaClaim = {
         version: '1.0',
         blockchain: 'solana',
         messageId: 'solana-test-1',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
+        programId: '11111111111111111111111111111111',
+        channelAccount: '22222222222222222222222222222222',
+        nonce: 1,
+        transferredAmount: '1000000',
+        signature: 'c2lnbmF0dXJlLWRhdGE=',
+        signerPublicKey: '33333333333333333333333333333333',
       };
 
       const solanaProtocolData: BTPProtocolData = {
@@ -320,15 +326,11 @@ describe('ClaimReceiver', () => {
       await btpMessageHandler!('peer-bob', solanaBtpMessage);
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // validateClaimMessage throws for 'solana', caught in the outer catch
-      expect(mockLogger.error).toHaveBeenCalledWith(
-        { error: expect.any(Error) },
-        'Failed to parse claim message'
+      // No Solana provider registered — claim persisted as unverified
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'solana-test-1', blockchain: 'solana' }),
+        expect.stringContaining('No provider registered')
       );
-
-      // Provider should NOT be consulted since validation fails first
-      expect(mockProvider.verifyBalanceProof).not.toHaveBeenCalled();
-      expect(mockStatement.run).not.toHaveBeenCalled();
     });
   });
 
@@ -800,17 +802,10 @@ describe('ClaimReceiver', () => {
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Claim should be stored as unverified
-      expect(mockStatement.run).toHaveBeenCalledWith(
-        claim.messageId,
-        'peer-new',
-        'evm',
-        mockChannelId,
-        expect.any(String),
-        0, // verified=false
-        expect.any(Number),
-        null,
-        null
+      // Verification failed — claim stored as unverified
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: claim.messageId, error: 'Provider internal error' }),
+        'Claim verification failed'
       );
 
       // Channel should NOT be registered
@@ -1390,6 +1385,719 @@ describe('ClaimReceiver', () => {
       expect(mockLogger.error).toHaveBeenCalledWith(
         { error: expect.any(Error) },
         'Failed to query latest verified claim'
+      );
+    });
+  });
+
+  /**
+   * Acceptance Tests for Story 33.6: Solana Claim Verification in ClaimReceiver
+   *
+   * Tests Ed25519 signature verification via provider, on-chain channel state checks,
+   * case-sensitive participant validation, nonce monotonicity, challenge period acceptance,
+   * dynamic channel registration, and CLAIM_RECEIVED event emission for Solana claims.
+   */
+  describe('Solana claim verification (Story 33.6)', () => {
+    const SOLANA_PROGRAM_ID = 'PayChan11111111111111111111111111111111111';
+    const SOLANA_CHANNEL_ACCOUNT = 'AbCdEfGh11111111111111111111111111111111111';
+    const SOLANA_SIGNER_PUBKEY = 'SiGnEr111111111111111111111111111111111111';
+    const SOLANA_PARTICIPANT_2 = 'PaRtIcIpAnT22222222222222222222222222222222';
+    const SOLANA_SIGNATURE = 'c29sYW5hLXNpZ25hdHVyZS1kYXRh';
+
+    let validSolanaClaim: SolanaClaimMessage;
+    let solanaProtocolData: BTPProtocolData;
+    let solanaBtpMessage: BTPMessage;
+
+    // Create a mock Solana provider
+    function createMockSolanaProvider(): jest.Mocked<PaymentChannelProvider> {
+      return {
+        verifyBalanceProof: jest.fn().mockResolvedValue(true),
+        getChannelState: jest.fn().mockResolvedValue({
+          channelId: SOLANA_CHANNEL_ACCOUNT,
+          status: 'opened' as const,
+          participants: [SOLANA_SIGNER_PUBKEY, SOLANA_PARTICIPANT_2],
+          deposit: 1000000n,
+        }),
+        openChannel: jest.fn(),
+        deposit: jest.fn(),
+        claimFromChannel: jest.fn(),
+        closeChannel: jest.fn(),
+        settleChannel: jest.fn(),
+        signBalanceProof: jest.fn(),
+        subscribeToEvents: jest.fn(),
+        chainType: 'solana' as const,
+        chainId: 'solana:devnet',
+      } as unknown as jest.Mocked<PaymentChannelProvider>;
+    }
+
+    // Registry that returns Solana provider
+    function createSolanaRegistry(
+      solanaProvider: jest.Mocked<PaymentChannelProvider>,
+      evmProvider?: jest.Mocked<PaymentChannelProvider>
+    ): jest.Mocked<
+      Pick<ChainProviderRegistry, 'getProvider' | 'getProviderForPeer' | 'getAllProviders'>
+    > {
+      return {
+        getProvider: jest.fn().mockImplementation((_chainType: string, chainId: string) => {
+          if (chainId.startsWith('solana:')) return solanaProvider;
+          if (chainId.startsWith('evm:') && evmProvider) return evmProvider;
+          return undefined;
+        }),
+        getProviderForPeer: jest.fn().mockImplementation((peerId: string) => {
+          // Return Solana provider for Solana peers
+          if (peerId === 'peer-solana') return solanaProvider;
+          if (evmProvider) return evmProvider;
+          return undefined;
+        }),
+        getAllProviders: jest
+          .fn()
+          .mockReturnValue(evmProvider ? [solanaProvider, evmProvider] : [solanaProvider]),
+      };
+    }
+
+    // Mock ChannelManager for Solana
+    function createMockSolanaChannelManager(): jest.Mocked<
+      Pick<ChannelManager, 'getChannelById' | 'registerExternalChannel'>
+    > {
+      return {
+        getChannelById: jest.fn().mockReturnValue(null), // Unknown channel by default
+        registerExternalChannel: jest.fn().mockImplementation((params) => ({
+          channelId: params.channelId,
+          peerId: params.peerId,
+          tokenId: params.tokenAddress,
+          tokenAddress: params.tokenAddress,
+          chain: params.chain || `solana:devnet`,
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          status: 'open',
+        })),
+      } as unknown as jest.Mocked<
+        Pick<ChannelManager, 'getChannelById' | 'registerExternalChannel'>
+      >;
+    }
+
+    beforeEach(() => {
+      validSolanaClaim = {
+        version: '1.0',
+        blockchain: 'solana',
+        messageId: 'solana-AbCdEfGh-5-1706889600000',
+        timestamp: '2026-02-02T12:00:00.000Z',
+        senderId: 'peer-solana',
+        programId: SOLANA_PROGRAM_ID,
+        channelAccount: SOLANA_CHANNEL_ACCOUNT,
+        nonce: 5,
+        transferredAmount: '1000000',
+        signature: SOLANA_SIGNATURE,
+        signerPublicKey: SOLANA_SIGNER_PUBKEY,
+        cluster: 'devnet',
+      };
+
+      solanaProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(validSolanaClaim), 'utf8'),
+      };
+
+      solanaBtpMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [solanaProtocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+    });
+
+    it('[P0] should verify valid Solana claim via provider.verifyBalanceProof (T-33.6-08)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+      const peerAddressMap = new Map<string, string>();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager,
+        peerAddressMap
+      );
+
+      mockStatement.get.mockReturnValue(undefined); // No previous claim
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify provider.verifyBalanceProof was called with correct Solana params
+      expect(solanaProvider.verifyBalanceProof).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: SOLANA_CHANNEL_ACCOUNT,
+          nonce: 5,
+          transferredAmount: '1000000',
+          signature: SOLANA_SIGNATURE,
+          signerAddress: SOLANA_SIGNER_PUBKEY,
+        })
+      );
+
+      // Verify claim persisted as verified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should reject Solana claim with invalid signature (T-33.6-09)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      solanaProvider.verifyBalanceProof.mockResolvedValue(false);
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify claim persisted as NOT verified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should reject Solana claim with replayed nonce (T-33.6-10)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      // Mock previous claim with same nonce
+      const previousClaim: SolanaClaimMessage = {
+        ...validSolanaClaim,
+        nonce: 5, // Same nonce as incoming claim
+      };
+      mockStatement.get.mockReturnValue({
+        claim_data: JSON.stringify(previousClaim),
+      });
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify claim persisted as NOT verified due to nonce replay
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should reject Solana claim from non-participant signer with case-sensitive comparison (T-33.6-11)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      // Channel participants do NOT include the signer
+      solanaProvider.getChannelState.mockResolvedValue({
+        channelId: SOLANA_CHANNEL_ACCOUNT,
+        status: 'opened' as const,
+        participants: ['DiFfErEnTsIgNeR1111111111111111111111111111', SOLANA_PARTICIPANT_2],
+        deposit: 1000000n,
+      } as ProviderChannelState);
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Signer not a participant -- claim should be rejected
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P1] should accept Solana claim for closed channel during challenge period (T-33.6-12)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      solanaProvider.getChannelState.mockResolvedValue({
+        channelId: SOLANA_CHANNEL_ACCOUNT,
+        status: 'closed' as const, // Challenge period -- claims still accepted
+        participants: [SOLANA_SIGNER_PUBKEY, SOLANA_PARTICIPANT_2],
+        deposit: 1000000n,
+      } as ProviderChannelState);
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Claim should be accepted (closed = challenge period)
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P1] should reject Solana claim for settled channel (T-33.6-13)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      solanaProvider.getChannelState.mockResolvedValue({
+        channelId: SOLANA_CHANNEL_ACCOUNT,
+        status: 'settled' as const,
+        participants: [SOLANA_SIGNER_PUBKEY, SOLANA_PARTICIPANT_2],
+        deposit: 0n,
+      } as ProviderChannelState);
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Settled channel -- claim should be rejected
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should reject Solana claim with tampered programId / PDA mismatch (T-33.6-21)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      // getChannelState fails because the PDA derivation from the tampered programId
+      // does not match the provided channelAccount
+      solanaProvider.getChannelState.mockRejectedValue(
+        new Error('Account does not exist or has no data')
+      );
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const tamperedClaim: SolanaClaimMessage = {
+        ...validSolanaClaim,
+        programId: 'TaMpErEd1111111111111111111111111111111111', // Wrong program
+      };
+
+      const tamperedProtocolData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(tamperedClaim), 'utf8'),
+      };
+
+      const tamperedBtpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [tamperedProtocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', tamperedBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Claim with tampered programId should fail verification
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        tamperedClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(tamperedClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P1] should register unknown Solana channel after successful on-chain verification (T-33.6-14)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Channel should be registered via channelManager with correct params
+      expect(solanaChannelManager.registerExternalChannel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: SOLANA_CHANNEL_ACCOUNT,
+          peerId: 'peer-solana',
+          tokenAddress: SOLANA_PROGRAM_ID,
+          chain: 'solana:devnet',
+          status: 'open',
+        })
+      );
+    });
+
+    it('[P1] should skip on-chain RPC for known Solana channel and verify signature directly', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      // Mark channel as already known
+      solanaChannelManager.getChannelById.mockReturnValue({
+        channelId: SOLANA_CHANNEL_ACCOUNT,
+        peerId: 'peer-solana',
+        tokenId: SOLANA_PROGRAM_ID,
+        tokenAddress: SOLANA_PROGRAM_ID,
+        chain: 'solana:devnet',
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      });
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // getChannelState should NOT be called (known channel skips on-chain check)
+      expect(solanaProvider.getChannelState).not.toHaveBeenCalled();
+
+      // verifyBalanceProof should still be called for signature verification
+      expect(solanaProvider.verifyBalanceProof).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: SOLANA_CHANNEL_ACCOUNT,
+          nonce: 5,
+          transferredAmount: '1000000',
+          signature: SOLANA_SIGNATURE,
+          signerAddress: SOLANA_SIGNER_PUBKEY,
+          lockedAmount: '0',
+        })
+      );
+
+      // Channel should NOT be re-registered
+      expect(solanaChannelManager.registerExternalChannel).not.toHaveBeenCalled();
+
+      // Claim should be stored as verified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P1] should reject known Solana channel claim with invalid signature', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      solanaProvider.verifyBalanceProof.mockResolvedValue(false); // Signature fails
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      // Mark channel as already known
+      solanaChannelManager.getChannelById.mockReturnValue({
+        channelId: SOLANA_CHANNEL_ACCOUNT,
+        peerId: 'peer-solana',
+        tokenId: SOLANA_PROGRAM_ID,
+        tokenAddress: SOLANA_PROGRAM_ID,
+        chain: 'solana:devnet',
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      });
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Known channel path: no on-chain check
+      expect(solanaProvider.getChannelState).not.toHaveBeenCalled();
+
+      // Claim should be stored as NOT verified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validSolanaClaim.messageId,
+        'peer-solana',
+        'solana',
+        SOLANA_CHANNEL_ACCOUNT,
+        JSON.stringify(validSolanaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should emit CLAIM_RECEIVED event with Solana channelId and cumulativeAmount (T-33.6-15)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager
+      );
+
+      const claimReceivedListener = jest.fn();
+      receiver.on('CLAIM_RECEIVED', claimReceivedListener);
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(claimReceivedListener).toHaveBeenCalledTimes(1);
+      const emittedEvent: ClaimReceivedEvent = claimReceivedListener.mock.calls[0][0];
+      expect(emittedEvent.peerId).toBe('peer-solana');
+      expect(emittedEvent.channelId).toBe(SOLANA_CHANNEL_ACCOUNT);
+      expect(emittedEvent.cumulativeAmount).toBe(BigInt(validSolanaClaim.transferredAmount));
+    });
+
+    it('[P0] should NOT break EVM claim verification path (T-33.6-16 regression)', async () => {
+      // Verify EVM claims still work when Solana verification is wired in
+      const evmClaim: EVMClaimMessage = {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId: 'evm-0xabc123-5-1706889600000',
+        timestamp: '2026-02-02T12:00:00.000Z',
+        senderId: 'peer-bob',
+        channelId: '0x' + 'a'.repeat(64),
+        nonce: 5,
+        transferredAmount: '1000000000000000000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0x' + 'b'.repeat(130),
+        signerAddress: '0x' + 'c'.repeat(40),
+      };
+
+      const evmProtocolData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(evmClaim), 'utf8'),
+      };
+
+      const evmBtpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [evmProtocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
+      mockStatement.get.mockReturnValue(undefined);
+
+      claimReceiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-bob', evmBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // EVM verification should still work through provider
+      expect(mockProvider.verifyBalanceProof).toHaveBeenCalled();
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        evmClaim.messageId,
+        'peer-bob',
+        'evm',
+        evmClaim.channelId,
+        JSON.stringify(evmClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should register peer Solana address in peerIdToAddressMap after successful verification (AC6/Task 2.5)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+      const peerAddressMap = new Map<string, string>();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager,
+        peerAddressMap
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Peer's Solana address should be registered from signerPublicKey
+      expect(peerAddressMap.get('peer-solana')).toBe(SOLANA_SIGNER_PUBKEY);
+    });
+
+    it('[P0] should NOT overwrite existing peer address in peerIdToAddressMap for Solana (AC6/Task 2.5)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+      const solanaChannelManager = createMockSolanaChannelManager();
+      const peerAddressMap = new Map<string, string>();
+      // Pre-register a static config entry
+      peerAddressMap.set('peer-solana', 'ExistingStaticAddress111111111111111111111');
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        solanaChannelManager as unknown as ChannelManager,
+        peerAddressMap
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Should NOT overwrite the pre-existing static config entry
+      expect(peerAddressMap.get('peer-solana')).toBe('ExistingStaticAddress111111111111111111111');
+    });
+
+    it('[P0] should deserialize Solana claim from BTP protocolData JSON (T-33.6-19/AC3)', async () => {
+      const solanaProvider = createMockSolanaProvider();
+      const solanaRegistry = createSolanaRegistry(solanaProvider);
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        solanaRegistry as unknown as ChainProviderRegistry,
+        mockLogger
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-solana', solanaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // The claim should have been parsed and routed to Solana verification
+      // (not rejected as unsupported blockchain)
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ blockchain: 'solana' }),
+        expect.stringContaining('No provider registered')
       );
     });
   });

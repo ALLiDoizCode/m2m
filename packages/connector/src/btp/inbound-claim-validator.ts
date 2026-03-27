@@ -13,8 +13,8 @@
  */
 
 import type { BTPProtocolData } from './btp-types';
-import { BTP_CLAIM_PROTOCOL, validateClaimMessage } from './btp-claim-types';
-import type { EVMClaimMessage } from './btp-claim-types';
+import { BTP_CLAIM_PROTOCOL, validateClaimMessage, isEVMClaim } from './btp-claim-types';
+import type { BTPClaimMessage, EVMClaimMessage } from './btp-claim-types';
 import type { ILPPreparePacket, ILPRejectPacket } from '@toon-protocol/shared';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { BalanceProof } from '@toon-protocol/shared';
@@ -95,11 +95,11 @@ export class InboundClaimValidator {
     }
 
     // Parse and validate claim structure
-    let claim: EVMClaimMessage;
+    let claim: BTPClaimMessage;
     try {
       const parsed = JSON.parse(claimData.data.toString('utf8'));
       validateClaimMessage(parsed);
-      claim = parsed as EVMClaimMessage;
+      claim = parsed;
     } catch (error) {
       this.logger.warn(
         {
@@ -114,14 +114,62 @@ export class InboundClaimValidator {
       );
     }
 
+    // Dispatch verification based on blockchain type
+    if (isEVMClaim(claim)) {
+      return this.verifyEVMClaim(claim, peerId);
+    }
+
+    // Non-EVM claims: signature verification is not yet wired to a provider
+    // This path is reachable now that Solana claims pass structural validation.
+    // Full provider-based verification will be added in Epic 33.
+    this.logger.warn(
+      {
+        event: 'inbound_claim_unsupported_chain',
+        peerId,
+        blockchain: claim.blockchain,
+      },
+      'Rejecting ILP PREPARE: signature verification not yet supported for this blockchain'
+    );
+    return this.createReject(
+      `Signature verification not yet supported for blockchain: ${claim.blockchain}`
+    );
+  }
+
+  /**
+   * Verify an EVM claim's EIP-712 signature.
+   *
+   * @param claim - Validated EVM claim message
+   * @param peerId - Authenticated peer ID
+   * @returns null if valid (proceed), or ILPRejectPacket to reject
+   * @private
+   */
+  private async verifyEVMClaim(
+    claim: EVMClaimMessage,
+    peerId: string
+  ): Promise<ILPRejectPacket | null> {
     // Verify EIP-712 signature
-    const balanceProof: BalanceProof = {
-      channelId: claim.channelId,
-      nonce: claim.nonce,
-      transferredAmount: BigInt(claim.transferredAmount),
-      lockedAmount: BigInt(claim.lockedAmount),
-      locksRoot: claim.locksRoot,
-    };
+    // BigInt() can throw on non-numeric strings; wrap in try/catch for defense-in-depth
+    // even though validateClaimMessage() already validates the format.
+    let balanceProof: BalanceProof;
+    try {
+      balanceProof = {
+        channelId: claim.channelId,
+        nonce: claim.nonce,
+        transferredAmount: BigInt(claim.transferredAmount),
+        lockedAmount: BigInt(claim.lockedAmount),
+        locksRoot: claim.locksRoot,
+      };
+    } catch {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_invalid_amount',
+          peerId,
+          channelId: claim.channelId,
+        },
+        'Rejecting ILP PREPARE: invalid transferredAmount or lockedAmount for BigInt conversion'
+      );
+      return this.createReject('Invalid claim amounts');
+    }
 
     let signatureValid: boolean;
     try {

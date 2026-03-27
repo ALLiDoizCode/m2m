@@ -27,8 +27,10 @@ import type { ChannelManager } from './channel-manager';
 import {
   type BTPClaimMessage,
   type EVMClaimMessage,
+  type SolanaClaimMessage,
   type BlockchainType,
   isEVMClaim,
+  isSolanaClaim,
   validateClaimMessage,
 } from '../btp/btp-claim-types';
 
@@ -174,17 +176,42 @@ export class ClaimReceiver extends EventEmitter {
         childLogger.info({ messageId }, 'Claim verified and stored');
 
         // Emit event for event-driven settlement monitoring
-        // Any claim type with channelId and transferredAmount should emit the event
-        if (isEVMClaim(claimMessage)) {
-          const event: ClaimReceivedEvent = {
-            peerId,
-            channelId: claimMessage.channelId,
-            cumulativeAmount: BigInt(claimMessage.transferredAmount),
-          };
-          this.emit('CLAIM_RECEIVED', event);
-          childLogger.debug(
-            { channelId: event.channelId, cumulativeAmount: event.cumulativeAmount.toString() },
-            'CLAIM_RECEIVED event emitted'
+        // BigInt() can throw on non-numeric strings; guard to prevent
+        // uncaught exceptions from propagating past the verification path.
+        try {
+          if (isEVMClaim(claimMessage)) {
+            const event: ClaimReceivedEvent = {
+              peerId,
+              channelId: claimMessage.channelId,
+              cumulativeAmount: BigInt(claimMessage.transferredAmount),
+            };
+            this.emit('CLAIM_RECEIVED', event);
+            childLogger.debug(
+              { channelId: event.channelId, cumulativeAmount: event.cumulativeAmount.toString() },
+              'CLAIM_RECEIVED event emitted'
+            );
+          } else if (isSolanaClaim(claimMessage)) {
+            const event: ClaimReceivedEvent = {
+              peerId,
+              channelId: claimMessage.channelAccount,
+              cumulativeAmount: BigInt(claimMessage.transferredAmount),
+            };
+            this.emit('CLAIM_RECEIVED', event);
+            childLogger.debug(
+              {
+                channelAccount: event.channelId,
+                cumulativeAmount: event.cumulativeAmount.toString(),
+              },
+              'CLAIM_RECEIVED event emitted (Solana)'
+            );
+          }
+        } catch (eventError) {
+          childLogger.warn(
+            {
+              messageId: claimMessage.messageId,
+              error: eventError instanceof Error ? eventError.message : String(eventError),
+            },
+            'Failed to emit CLAIM_RECEIVED event (invalid transferredAmount for BigInt conversion)'
           );
         }
       } else {
@@ -206,25 +233,39 @@ export class ClaimReceiver extends EventEmitter {
    * For unknown channels (dynamic verification), constructs a chain key from the
    * claim's self-describing fields.
    *
-   * @param claim - The claim message (narrowed to EVMClaimMessage after validation)
+   * @param claim - The validated BTP claim message
    * @returns The matching provider, or undefined if none found
    * @private
    */
-  private resolveProvider(claim: EVMClaimMessage): PaymentChannelProvider | undefined {
-    // Try known channel first (uses channel's chain metadata for provider lookup)
-    if (this.channelManager) {
-      const knownChannel = this.channelManager.getChannelById(claim.channelId);
-      if (knownChannel && knownChannel.chain) {
-        // Use the known channel's chain metadata to resolve the provider
-        return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
+  private resolveProvider(claim: BTPClaimMessage): PaymentChannelProvider | undefined {
+    // EVM claims: try known channel first, then self-describing fields
+    if (isEVMClaim(claim)) {
+      if (this.channelManager) {
+        const knownChannel = this.channelManager.getChannelById(claim.channelId);
+        if (knownChannel && knownChannel.chain) {
+          return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
+        }
+      }
+
+      if (claim.chainId !== undefined) {
+        const chainKey = `${claim.blockchain}:${claim.chainId}`;
+        return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
       }
     }
 
-    // For unknown channels or when channelManager is not available,
-    // construct chain key from self-describing fields
-    if (claim.chainId !== undefined) {
-      const chainKey = `${claim.blockchain}:${claim.chainId}`;
-      return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
+    // Solana claims: try known channel first, then cluster-based lookup
+    if (isSolanaClaim(claim)) {
+      if (this.channelManager) {
+        const knownChannel = this.channelManager.getChannelById(claim.channelAccount);
+        if (knownChannel && knownChannel.chain) {
+          return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
+        }
+      }
+
+      if (claim.cluster !== undefined) {
+        const chainKey = `${claim.blockchain}:${claim.cluster}`;
+        return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
+      }
     }
 
     // Fallback: try the first registered provider for this blockchain type
@@ -238,163 +279,36 @@ export class ClaimReceiver extends EventEmitter {
    * Delegates signature verification and on-chain state checks to the provider.
    * Maintains chain-agnostic nonce monotonicity checking.
    *
-   * @param claim - Claim message (currently EVMClaimMessage after validation narrowing)
+   * @param claim - Validated BTP claim message
    * @param peerId - Peer ID of sender
    * @param provider - The resolved PaymentChannelProvider
    * @returns Verification result
    * @private
    */
   private async verifyClaim(
-    claim: EVMClaimMessage,
+    claim: BTPClaimMessage,
     peerId: string,
     provider: PaymentChannelProvider
   ): Promise<ClaimVerificationResult> {
     try {
-      this.logger.debug({ channelId: claim.channelId }, 'Checking channel existence in metadata');
-
-      // Check if channel is known (pre-registered or previously verified)
-      const knownChannel = this.channelManager?.getChannelById(claim.channelId);
-
-      if (!knownChannel && this.channelManager) {
-        // Unknown channel -- attempt dynamic on-chain verification
-        this.logger.info(
-          { channelId: claim.channelId },
-          'Unknown channel detected, starting on-chain verification'
-        );
-
-        // Require all self-describing fields
-        if (claim.chainId === undefined || !claim.tokenNetworkAddress || !claim.tokenAddress) {
-          this.logger.warn(
-            { channelId: claim.channelId, signerAddress: claim.signerAddress },
-            ERRORS.MISSING_SELF_DESCRIBING_FIELDS
-          );
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: ERRORS.MISSING_SELF_DESCRIBING_FIELDS,
-          };
-        }
-
-        // Query on-chain state via provider
-        let channelState: ProviderChannelState;
-        try {
-          channelState = await provider.getChannelState(claim.channelId);
-        } catch (error) {
-          this.logger.warn(
-            { channelId: claim.channelId, signerAddress: claim.signerAddress, error },
-            ERRORS.ON_CHAIN_VERIFICATION_FAILED
-          );
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: ERRORS.ON_CHAIN_VERIFICATION_FAILED,
-          };
-        }
-
-        // Verify channel is opened
-        if (channelState.status !== 'opened') {
-          const errorMsg =
-            channelState.status === 'settled' || channelState.status === 'closed'
-              ? ERRORS.CHANNEL_NOT_OPENED
-              : ERRORS.CHANNEL_NOT_FOUND;
-          this.logger.warn(
-            { channelId: claim.channelId, signerAddress: claim.signerAddress },
-            errorMsg
-          );
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: errorMsg,
-          };
-        }
-
-        // Verify signerAddress is a channel participant
-        const signerLower = claim.signerAddress.toLowerCase();
-        if (!channelState.participants.some((p) => p.toLowerCase() === signerLower)) {
-          this.logger.warn(
-            { channelId: claim.channelId, signerAddress: claim.signerAddress },
-            ERRORS.SIGNER_NOT_PARTICIPANT
-          );
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: ERRORS.SIGNER_NOT_PARTICIPANT,
-          };
-        }
-
-        this.logger.info(
-          {
-            channelId: claim.channelId,
-            participants: channelState.participants,
-            status: channelState.status,
-          },
-          'On-chain channel verified successfully'
-        );
-
-        // Verify signature via provider (provider handles domain context internally)
-        const verifyParams = this.buildVerifyParams(claim);
-        const sigValid = await provider.verifyBalanceProof(verifyParams);
-
-        if (!sigValid) {
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: ERRORS.INVALID_SIGNATURE,
-          };
-        }
-
-        // Register channel in ChannelManager
-        this.channelManager.registerExternalChannel({
-          channelId: claim.channelId,
-          peerId,
-          tokenAddress: claim.tokenAddress,
-          tokenNetworkAddress: claim.tokenNetworkAddress,
-          chainId: claim.chainId,
-          status: 'open',
-        });
-
-        this.logger.info({ channelId: claim.channelId, peerId }, 'External channel registered');
-
-        // Register peer's EVM address for SettlementExecutor lookup
-        if (this.peerIdToAddressMap && !this.peerIdToAddressMap.has(peerId)) {
-          this.peerIdToAddressMap.set(peerId, claim.signerAddress);
-          this.logger.info(
-            { peerId, signerAddress: claim.signerAddress },
-            'Peer EVM address registered from self-describing claim'
-          );
-        }
-      } else {
-        // Known channel (pre-registered or previously verified) -- use provider verification
-        const verifyParams = this.buildVerifyParams(claim);
-        const isValid = await provider.verifyBalanceProof(verifyParams);
-
-        if (!isValid) {
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: ERRORS.INVALID_SIGNATURE,
-          };
-        }
+      // Dispatch verification based on blockchain type
+      // NOTE: `return await` is intentional — `return promise` inside try/catch
+      // does NOT catch rejections; the promise bypasses the catch block.
+      if (isEVMClaim(claim)) {
+        return await this.verifyEVMClaim(claim, peerId, provider);
       }
 
-      // Check nonce monotonicity - nonce must strictly increase
-      const latestClaim = await this.getLatestVerifiedClaim(
-        peerId,
-        claim.blockchain,
-        claim.channelId
-      );
-
-      if (latestClaim && isEVMClaim(latestClaim)) {
-        if (claim.nonce <= latestClaim.nonce) {
-          return {
-            valid: false,
-            messageId: claim.messageId,
-            error: 'Nonce not monotonically increasing',
-          };
-        }
+      // Solana claims: full provider-based verification (Story 33.6)
+      if (isSolanaClaim(claim)) {
+        return await this.verifySolanaClaim(claim, peerId, provider);
       }
 
-      return { valid: true, messageId: claim.messageId };
+      // Unsupported blockchain type
+      return {
+        valid: false,
+        messageId: claim.messageId,
+        error: `Verification not supported for blockchain: ${claim.blockchain}`,
+      };
     } catch (error) {
       return {
         valid: false,
@@ -402,6 +316,167 @@ export class ClaimReceiver extends EventEmitter {
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
+  }
+
+  /**
+   * Verify an EVM claim with on-chain state checks and signature verification.
+   *
+   * @param claim - Validated EVM claim message
+   * @param peerId - Peer ID of sender
+   * @param provider - The resolved PaymentChannelProvider
+   * @returns Verification result
+   * @private
+   */
+  private async verifyEVMClaim(
+    claim: EVMClaimMessage,
+    peerId: string,
+    provider: PaymentChannelProvider
+  ): Promise<ClaimVerificationResult> {
+    this.logger.debug({ channelId: claim.channelId }, 'Checking channel existence in metadata');
+
+    // Check if channel is known (pre-registered or previously verified)
+    const knownChannel = this.channelManager?.getChannelById(claim.channelId);
+
+    if (!knownChannel && this.channelManager) {
+      // Unknown channel -- attempt dynamic on-chain verification
+      this.logger.info(
+        { channelId: claim.channelId },
+        'Unknown channel detected, starting on-chain verification'
+      );
+
+      // Require all self-describing fields
+      if (claim.chainId === undefined || !claim.tokenNetworkAddress || !claim.tokenAddress) {
+        this.logger.warn(
+          { channelId: claim.channelId, signerAddress: claim.signerAddress },
+          ERRORS.MISSING_SELF_DESCRIBING_FIELDS
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.MISSING_SELF_DESCRIBING_FIELDS,
+        };
+      }
+
+      // Query on-chain state via provider
+      let channelState: ProviderChannelState;
+      try {
+        channelState = await provider.getChannelState(claim.channelId);
+      } catch (error) {
+        this.logger.warn(
+          { channelId: claim.channelId, signerAddress: claim.signerAddress, error },
+          ERRORS.ON_CHAIN_VERIFICATION_FAILED
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.ON_CHAIN_VERIFICATION_FAILED,
+        };
+      }
+
+      // Verify channel is opened
+      if (channelState.status !== 'opened') {
+        const errorMsg =
+          channelState.status === 'settled' || channelState.status === 'closed'
+            ? ERRORS.CHANNEL_NOT_OPENED
+            : ERRORS.CHANNEL_NOT_FOUND;
+        this.logger.warn(
+          { channelId: claim.channelId, signerAddress: claim.signerAddress },
+          errorMsg
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: errorMsg,
+        };
+      }
+
+      // Verify signerAddress is a channel participant
+      const signerLower = claim.signerAddress.toLowerCase();
+      if (!channelState.participants.some((p) => p.toLowerCase() === signerLower)) {
+        this.logger.warn(
+          { channelId: claim.channelId, signerAddress: claim.signerAddress },
+          ERRORS.SIGNER_NOT_PARTICIPANT
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.SIGNER_NOT_PARTICIPANT,
+        };
+      }
+
+      this.logger.info(
+        {
+          channelId: claim.channelId,
+          participants: channelState.participants,
+          status: channelState.status,
+        },
+        'On-chain channel verified successfully'
+      );
+
+      // Verify signature via provider (provider handles domain context internally)
+      const verifyParams = this.buildVerifyParams(claim);
+      const sigValid = await provider.verifyBalanceProof(verifyParams);
+
+      if (!sigValid) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.INVALID_SIGNATURE,
+        };
+      }
+
+      // Register channel in ChannelManager
+      this.channelManager.registerExternalChannel({
+        channelId: claim.channelId,
+        peerId,
+        tokenAddress: claim.tokenAddress,
+        tokenNetworkAddress: claim.tokenNetworkAddress,
+        chainId: claim.chainId,
+        status: 'open',
+      });
+
+      this.logger.info({ channelId: claim.channelId, peerId }, 'External channel registered');
+
+      // Register peer's EVM address for SettlementExecutor lookup
+      if (this.peerIdToAddressMap && !this.peerIdToAddressMap.has(peerId)) {
+        this.peerIdToAddressMap.set(peerId, claim.signerAddress);
+        this.logger.info(
+          { peerId, signerAddress: claim.signerAddress },
+          'Peer EVM address registered from self-describing claim'
+        );
+      }
+    } else {
+      // Known channel (pre-registered or previously verified) -- use provider verification
+      const verifyParams = this.buildVerifyParams(claim);
+      const isValid = await provider.verifyBalanceProof(verifyParams);
+
+      if (!isValid) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.INVALID_SIGNATURE,
+        };
+      }
+    }
+
+    // Check nonce monotonicity - nonce must strictly increase
+    const latestClaim = await this.getLatestVerifiedClaim(
+      peerId,
+      claim.blockchain,
+      claim.channelId
+    );
+
+    if (latestClaim && isEVMClaim(latestClaim)) {
+      if (claim.nonce <= latestClaim.nonce) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: 'Nonce not monotonically increasing',
+        };
+      }
+    }
+
+    return { valid: true, messageId: claim.messageId };
   }
 
   /**
@@ -427,6 +502,194 @@ export class ClaimReceiver extends EventEmitter {
   }
 
   /**
+   * Verify a Solana claim with on-chain state checks and Ed25519 signature verification.
+   *
+   * Follows the same pattern as verifyEVMClaim but with Solana-specific address handling:
+   * - Case-sensitive base58 address comparison (not lowercased like EVM)
+   * - Accepts claims for channels in both 'opened' and 'closed' states (challenge period)
+   * - Registers unknown channels via channelManager.registerExternalChannel()
+   *
+   * @param claim - Validated Solana claim message
+   * @param peerId - Peer ID of sender
+   * @param provider - The resolved PaymentChannelProvider
+   * @returns Verification result
+   * @private
+   */
+  private async verifySolanaClaim(
+    claim: SolanaClaimMessage,
+    peerId: string,
+    provider: PaymentChannelProvider
+  ): Promise<ClaimVerificationResult> {
+    this.logger.debug({ channelAccount: claim.channelAccount }, 'Verifying Solana claim');
+
+    // Check if channel is known (pre-registered or previously verified)
+    const knownChannel = this.channelManager?.getChannelById(claim.channelAccount);
+
+    if (!knownChannel && this.channelManager) {
+      // Unknown channel -- attempt dynamic on-chain verification
+      this.logger.info(
+        { channelAccount: claim.channelAccount },
+        'Unknown Solana channel detected, starting on-chain verification'
+      );
+
+      // Query on-chain state via provider
+      let channelState: ProviderChannelState;
+      try {
+        channelState = await provider.getChannelState(claim.channelAccount);
+      } catch (error) {
+        this.logger.warn(
+          {
+            channelAccount: claim.channelAccount,
+            signerPublicKey: claim.signerPublicKey,
+            error,
+          },
+          ERRORS.ON_CHAIN_VERIFICATION_FAILED
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.ON_CHAIN_VERIFICATION_FAILED,
+        };
+      }
+
+      // Verify channel is opened or closed (claims accepted during challenge period)
+      if (channelState.status !== 'opened' && channelState.status !== 'closed') {
+        const errorMsg =
+          channelState.status === 'settled' ? ERRORS.CHANNEL_NOT_OPENED : ERRORS.CHANNEL_NOT_FOUND;
+        this.logger.warn(
+          { channelAccount: claim.channelAccount, status: channelState.status },
+          errorMsg
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: errorMsg,
+        };
+      }
+
+      // Verify signerPublicKey is a channel participant (case-sensitive for base58)
+      if (!channelState.participants.includes(claim.signerPublicKey)) {
+        this.logger.warn(
+          {
+            channelAccount: claim.channelAccount,
+            signerPublicKey: claim.signerPublicKey,
+          },
+          ERRORS.SIGNER_NOT_PARTICIPANT
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.SIGNER_NOT_PARTICIPANT,
+        };
+      }
+
+      this.logger.info(
+        {
+          channelAccount: claim.channelAccount,
+          participants: channelState.participants,
+          status: channelState.status,
+        },
+        'On-chain Solana channel verified successfully'
+      );
+
+      // Verify signature via provider
+      const verifyParams = this.buildSolanaVerifyParams(claim);
+      const sigValid = await provider.verifyBalanceProof(verifyParams);
+
+      if (!sigValid) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.INVALID_SIGNATURE,
+        };
+      }
+
+      // Register channel in ChannelManager (Solana-specific parameters)
+      // NOTE: SolanaClaimMessage does not carry tokenMint (by design -- AC 5), so we
+      // use programId as a placeholder for tokenAddress.  The tokenAddressMap reverse-
+      // lookup will not match a program ID, and tokenId will fall back to the raw
+      // programId string.  A future claim format revision could add tokenMint to
+      // resolve this to a proper SPL token identifier.
+      this.channelManager.registerExternalChannel({
+        channelId: claim.channelAccount,
+        peerId,
+        tokenAddress: claim.programId,
+        status: 'open',
+        chain: `solana:${claim.cluster ?? 'devnet'}`,
+      });
+
+      this.logger.info(
+        { channelAccount: claim.channelAccount, peerId },
+        'External Solana channel registered'
+      );
+
+      // Register peer's Solana address for SettlementExecutor lookup
+      if (this.peerIdToAddressMap && !this.peerIdToAddressMap.has(peerId)) {
+        this.peerIdToAddressMap.set(peerId, claim.signerPublicKey);
+        this.logger.info(
+          { peerId, signerPublicKey: claim.signerPublicKey },
+          'Peer Solana address registered from self-describing claim'
+        );
+      }
+    } else {
+      // Known channel -- use provider verification
+      const verifyParams = this.buildSolanaVerifyParams(claim);
+      const isValid = await provider.verifyBalanceProof(verifyParams);
+
+      if (!isValid) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.INVALID_SIGNATURE,
+        };
+      }
+    }
+
+    // Check nonce monotonicity - nonce must strictly increase
+    const latestClaim = await this.getLatestVerifiedClaim(
+      peerId,
+      claim.blockchain,
+      claim.channelAccount
+    );
+
+    if (latestClaim && isSolanaClaim(latestClaim)) {
+      if (claim.nonce <= latestClaim.nonce) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: 'Nonce not monotonically increasing',
+        };
+      }
+    }
+
+    return { valid: true, messageId: claim.messageId };
+  }
+
+  /**
+   * Build VerifyBalanceProofParams from a Solana claim message.
+   *
+   * Maps Solana-specific field names to the chain-agnostic params:
+   * - channelAccount -> channelId
+   * - signerPublicKey -> signerAddress
+   * - lockedAmount/locksRoot set to zero (Solana does not use them)
+   *
+   * @param claim - The Solana claim message
+   * @returns Parameters for provider.verifyBalanceProof()
+   * @private
+   */
+  private buildSolanaVerifyParams(claim: SolanaClaimMessage): VerifyBalanceProofParams {
+    return {
+      channelId: claim.channelAccount,
+      nonce: claim.nonce,
+      transferredAmount: claim.transferredAmount,
+      lockedAmount: '0',
+      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      signature: claim.signature,
+      signerAddress: claim.signerPublicKey,
+    };
+  }
+
+  /**
    * Persist received claim to database
    *
    * @param peerId - Peer ID of sender
@@ -436,8 +699,13 @@ export class ClaimReceiver extends EventEmitter {
    */
   private _persistReceivedClaim(peerId: string, claim: BTPClaimMessage, verified: boolean): void {
     try {
-      // EVM claims use channelId; other chains are not yet supported at runtime
-      const channelId = isEVMClaim(claim) ? claim.channelId : '';
+      // Extract channel identifier based on blockchain type
+      let channelId = '';
+      if (isEVMClaim(claim)) {
+        channelId = claim.channelId;
+      } else if (isSolanaClaim(claim)) {
+        channelId = claim.channelAccount;
+      }
 
       // Insert into database
       const stmt = this.db.prepare(`

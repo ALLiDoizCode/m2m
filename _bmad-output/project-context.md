@@ -1,7 +1,7 @@
 ---
 project_name: 'connector'
 user_name: 'Jonathan'
-date: '2026-03-25'
+date: '2026-03-26'
 sections_completed:
   [
     'technology_stack',
@@ -13,7 +13,7 @@ sections_completed:
     'critical_rules',
   ]
 status: 'complete'
-rule_count: 72
+rule_count: 82
 optimized_for_llm: true
 ---
 
@@ -27,20 +27,25 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 - **Language:** TypeScript 5.3.3 (strict mode enabled, ES2022 target, CommonJS modules)
 - **Runtime:** Node.js >= 22.11.0
-- **Monorepo:** npm workspaces (`packages/connector`, `packages/shared`, `packages/contracts`, `packages/faucet`)
-- **Blockchain:** ethers 6.16.0 (EVM settlement via chain-agnostic provider abstraction)
+- **Monorepo:** npm workspaces (`packages/connector`, `packages/shared`, `packages/contracts`, `packages/faucet`) + Rust crate (`packages/solana-program`)
+- **Blockchain (EVM):** ethers 6.16.0 (EVM settlement via chain-agnostic provider abstraction)
+- **Blockchain (Solana):** @solana/kit 3.0.3, @solana-program/token 0.6.0 (Solana settlement via `SolanaPaymentChannelProvider`)
+- **Solana Program:** Rust/solana-program 2.1.0, spl-token 6.0.0 (on-chain payment channel — `packages/solana-program/`)
 - **Transport:** ws 8.16.0 (BTP over WebSocket, RFC-0023)
 - **HTTP:** Express 4.18.x (admin API, health checks, explorer)
 - **Logging:** Pino 8.21.0 (structured JSON)
 - **Validation:** Zod 3.25.76 (config schemas)
 - **Persistence:** better-sqlite3 11.8.1 (claims DB), TigerBeetle 0.16.68 (accounting, optional)
-- **Testing:** Jest 29.7.0 + ts-jest 29.1.2
+- **Testing (TypeScript):** Jest 29.7.0 + ts-jest 29.1.2
+- **Testing (Rust):** solana-program-test 2.1.0 + tokio (BPF integration tests)
+- **Testing (Solana TS):** solana-bankrun 0.4.0 (devDependency for TypeScript-side Solana integration tests)
 - **Linting:** ESLint 8.56.0 + @typescript-eslint 6.21.0
 - **Formatting:** Prettier 3.2.5 (single quotes, trailing commas, 100 char width, LF endings)
 - **Git Hooks:** Husky 9.1.7 + lint-staged (pre-commit: eslint --fix + prettier)
 - **Releases:** semantic-release 24.2.0 (conventional commits)
-- **Contracts:** Solidity (Foundry/Anvil — TokenNetwork.sol, TokenNetworkRegistry.sol)
+- **Contracts (EVM):** Solidity (Foundry/Anvil — TokenNetwork.sol, TokenNetworkRegistry.sol)
 - **Local Dev Infra:** Docker Compose (Anvil local Ethereum node + Token Faucet)
+- **Deployment (Solana):** `cargo build-sbf` + Solana CLI for devnet/mainnet deployment (`tools/solana/deploy.sh`)
 - **Optional AI:** @ai-sdk/anthropic, @ai-sdk/openai, ai (optional dependencies for agent features)
 
 ## Project Structure
@@ -61,7 +66,9 @@ connector/                          # Monorepo root
 │   │   │   ├── routing/            # Routing table, packet processor, worker pool
 │   │   │   ├── security/           # Key management (HSM/KMS), rate limiting, audit, fraud detection
 │   │   │   ├── settlement/         # Settlement layer (accounts, claims, channels, providers)
-│   │   │   │   └── provider/       # Chain abstraction layer (Epic 32)
+│   │   │   │   ├── provider/       # Chain abstraction layer (Epics 32–33)
+│   │   │   │   ├── solana-payment-channel-sdk.ts  # Solana SDK wrapper (Epic 33)
+│   │   │   │   └── ...             # EVM SDK, claim services, channel manager, etc.
 │   │   │   ├── test-utils/         # Mock factories, isolated test environment
 │   │   │   ├── utils/              # Logger, connection pool, EVM RPC pool, optional-require
 │   │   │   └── wallet/             # Treasury wallet, seed management, wallet security
@@ -69,7 +76,7 @@ connector/                          # Monorepo root
 │   │       ├── acceptance/         # Acceptance tests (run separately)
 │   │       ├── fixtures/           # Test fixtures
 │   │       ├── helpers/            # Test helpers
-│   │       ├── integration/        # Integration tests (multi-hop, claim validation)
+│   │       ├── integration/        # Integration tests (multi-hop, claim validation, Solana E2E)
 │   │       ├── stability/          # Stability tests
 │   │       └── unit/               # Unit tests
 │   ├── shared/                     # Shared types package (@toon-protocol/shared)
@@ -78,13 +85,20 @@ connector/                          # Monorepo root
 │   │       └── types/              # ILP types, payment channel types, routing types
 │   ├── contracts/                  # Solidity smart contracts (Foundry)
 │   │   └── src/                    # TokenNetwork.sol, TokenNetworkRegistry.sol
+│   ├── solana-program/             # Solana payment channel program (Rust/BPF) — Epic 33
+│   │   ├── src/                    # lib.rs, processor.rs, state.rs, instruction.rs, error.rs
+│   │   └── tests/                  # integration.rs, lifecycle.rs, claims.rs, security.rs, performance.rs
 │   └── faucet/                     # Token faucet service (Docker)
 ├── tools/
 │   ├── send-packet/                # ILP packet sending utility
-│   └── fund-peers/                 # Peer funding utility
+│   ├── fund-peers/                 # Peer funding utility
+│   └── solana/                     # Solana deployment tooling (deploy.sh)
+├── docs/
+│   ├── solana-deployment.md        # Solana devnet deployment & operations guide (Epic 33)
+│   └── ...                         # Architecture docs, operator guides, stories
 ├── docker-compose.yml              # Anvil + Faucet local dev infrastructure
 ├── Dockerfile                      # Multi-stage Docker build (node:22-alpine)
-└── Makefile                        # Development workflow commands
+└── Makefile                        # Development workflow commands (incl. Solana targets)
 ```
 
 ## Chain Abstraction Layer (Epic 32)
@@ -135,6 +149,75 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - `config/chain-provider-config.test.ts` — configuration schema validation tests
 - Tests cover: multi-chain registration, peer lookup, factory initialization, EVM provider adapter, event forwarding
 
+## Solana Payment Channel (Epic 33)
+
+Epic 33 added full Solana payment channel support — an on-chain Rust program, a TypeScript SDK, a chain-abstraction provider, claim message types, and devnet deployment tooling.
+
+### On-Chain Program (`packages/solana-program/`)
+
+- **Language:** Rust (edition 2021), compiled to BPF via `cargo build-sbf`
+- **Framework:** Native `solana-program` 2.1.0 (not Anchor) with `spl-token` 6.0.0
+- **Crate name:** `payment-channel` (cdylib + lib)
+- **Architecture:** `lib.rs` (entrypoint) → `processor.rs` (instruction dispatch) → `state.rs` (account schemas) → `instruction.rs` (discriminators) → `error.rs` (custom errors)
+- **Instructions:** `OpenChannel`, `Deposit`, `SubmitClaim` (Ed25519 balance proofs), `InitiateClose`, `Settle`, `ForceClose`
+- **Channel accounts:** PDA-based (`["channel", sender, receiver, mint]`), stores cumulative transferred amounts, nonces, close timestamps
+- **Signing:** Ed25519 signatures over `(channel_pda ++ nonce_le ++ amount_le)` — verified on-chain via `ed25519_dalek`
+- **Tests (Rust):** 5 test files (~5,800 lines) using `solana-program-test` + `tokio`:
+  - `integration.rs` — full lifecycle, open/deposit/claim/close/settle
+  - `lifecycle.rs` — state transitions, edge cases, timeout handling
+  - `claims.rs` — balance proof verification, nonce ordering, replay prevention
+  - `security.rs` — unauthorized access, invalid signatures, account spoofing
+  - `performance.rs` — compute unit budgets, concurrent channels
+- **Build/test:** `make solana-build` / `make solana-test` (or `cargo build-sbf` / `cargo test-sbf`)
+- **Deploy:** `make solana-deploy-devnet DEPLOYER_KEYPAIR=path/to/keypair.json` (uses `tools/solana/deploy.sh`)
+
+### SolanaPaymentChannelSDK (`settlement/solana-payment-channel-sdk.ts`)
+
+- TypeScript wrapper (~1,220 lines) around the on-chain program using `@solana/kit` v3
+- Methods: `openChannel`, `deposit`, `submitClaim`, `initiateClose`, `settle`, `forceClose`, `getChannelState`, `deriveChannelPDA`
+- Constructs raw `Instruction` objects with correct account metas and serialized data
+- Ed25519 signing via `@solana/kit` `signBytes()` for balance proofs
+- ATA (Associated Token Account) derivation via `@solana-program/token` `findAssociatedTokenPda()`
+- Unit tests (~1,190 lines) in `solana-payment-channel-sdk.test.ts`
+
+### SolanaPaymentChannelProvider (`settlement/provider/solana-payment-channel-provider.ts`)
+
+- Implements `PaymentChannelProvider` interface (chain abstraction layer)
+- `chainType: 'solana'`, `chainId: 'solana:{cluster}'` (e.g., `'solana:devnet'`)
+- Delegates to `SolanaPaymentChannelSDK` — adapts string amounts to bigint, base64 signatures to Uint8Array
+- Factory function `createSolanaProviderFactory(logger)` for `ChainProviderRegistry` integration
+- Event subscription via state-diffing (polls channel state, emits `ProviderEvent` on changes)
+- Unit tests (~1,180 lines) in `solana-payment-channel-provider.test.ts`
+
+### Solana Claim Messages (`btp/btp-claim-types.ts`)
+
+- `SolanaClaimMessage` extends `BaseClaimMessage` with `blockchain: 'solana'`
+- Fields: `programId` (base58), `channelAccount` (base58 PDA), `nonce`, `transferredAmount`, `signature` (base64 Ed25519), `signerPublicKey` (base58), optional `cluster`
+- Type guard `isSolanaClaim()` and validator `validateSolanaClaim()` with base58 format checks
+- Discriminated union: `BTPClaimMessage = EVMClaimMessage | SolanaClaimMessage | MinaClaimMessage`
+
+### Mixed-Chain Routing Tests (`provider/mixed-chain-routing.test.ts`)
+
+- Validates `ChainProviderRegistry` routes claims to correct provider based on blockchain discriminator
+- Tests EVM + Solana peers coexisting: Peer A on EVM, Peer B on Solana
+- EVM regression: EVM settlement works identically alongside Solana provider
+
+### Solana Integration Tests (`test/integration/solana-*.ts`)
+
+- `solana-provider.test.ts` (~1,010 lines) — E2E provider tests with mock SDK
+- `solana-config.test.ts` (~290 lines) — Solana config schema validation
+- `solana-deployment.test.ts` (~740 lines) — deployment verification tests
+- `solana-subscription.test.ts` (~350 lines) — event subscription tests
+
+### Devnet Deployment Documentation (`docs/solana-deployment.md`)
+
+- Prerequisites (Solana CLI, Rust toolchain, funded deployer keypair)
+- Build and deploy commands, cost estimates
+- Connector YAML configuration for Solana providers
+- Upgrade runbook (binary rebuild, deploy upgrade, authority management, rollback)
+- Monitoring guide (channel health, stuck channel detection, RPC and SDK-based monitoring)
+- Rent economics reference
+
 ## Critical Implementation Rules
 
 ### TypeScript Rules
@@ -165,6 +248,10 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - **Class-based architecture:** major components are classes with constructor-based dependency injection; private fields use `private readonly` pattern
 - **EventEmitter pattern:** BTP clients and services extend or compose EventEmitter for lifecycle and state change notifications
 - **Chain provider pattern:** settlement services resolve providers via `ChainProviderRegistry.getProviderForPeer(peerConfig)` — never hardcode chain-specific logic in service classes
+- **Solana SDK pattern:** `SolanaPaymentChannelSDK` wraps on-chain program instructions using `@solana/kit` v3; constructs raw `Instruction` objects with explicit `AccountMeta` arrays — never use Anchor client codegen
+- **Solana addresses:** use `address()` from `@solana/kit` for base58 address creation; PDA derivation via `getProgramDerivedAddress()` with seed arrays
+- **Solana signing:** Ed25519 signatures via `signBytes()` from `@solana/kit`; signature payload is `(channel_pda ++ nonce_le ++ amount_le)` — must match on-chain verification exactly
+- **Solana amounts:** `SolanaPaymentChannelProvider` converts string amounts to bigint via `safeBigInt()` — same pattern as `EVMPaymentChannelProvider`
 
 ### Testing Rules
 
@@ -183,6 +270,8 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - **Default timeout:** 30s for most tests; specific overrides for integration (60s for security)
 - **Cross-package mapping:** `@toon-protocol/shared` mapped to source via `moduleNameMapper` in jest config
 - **Specialized test scripts:** `test:settlement`, `test:btp`, `test:evm`, `test:embedded`, `test:integration`, `test:acceptance`, `test:performance`, `test:domain`, `test:epic`
+- **Solana Rust tests:** run via `cargo test-sbf` in `packages/solana-program/` (or `make solana-test`); uses `solana-program-test` with `tokio` async runtime; tests run against a BPF VM — not a live cluster
+- **Solana TS tests:** integration tests in `test/integration/solana-*.ts`; unit tests co-located in `src/settlement/` alongside source files; `solana-bankrun` available as devDependency for local validator simulation
 
 ### Code Quality & Style Rules
 
@@ -206,12 +295,12 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - **Pre-commit hook:** lint-staged runs `eslint --fix` + `prettier --write` on staged `.ts/.tsx` files
 - **Pre-push hook:** optimized — runs lint/format/related unit tests only for changed source files; auto-skips for docs-only or config-only changes
 - **Build order matters:** `packages/shared` MUST build before `packages/connector` (shared provides type definitions); use `npm run build --workspace=packages/shared` first
-- **CI gates (required to pass):** lint, format, tests (Node 22.11.0 + 22.x), TypeScript type check, build, EVM contract tests
+- **CI gates (required to pass):** lint, format, tests (Node 22.11.0 + 22.x), TypeScript type check, build, EVM contract tests, Solana program tests (`cargo test-sbf`)
 - **CI gates (advisory):** security audit (npm audit + Snyk), container scan (Trivy), performance benchmark
 - **Docker deployment:** images pushed to GHCR on merge to main; multi-platform (amd64 + arm64); multi-stage build with node:22-alpine
 - **Config via YAML:** connector topology defined in YAML config files; validated by Zod at startup
 - **semantic-release:** version bumps and changelogs auto-generated from conventional commit messages
-- **Makefile shortcuts:** `make build`, `make test`, `make test-unit`, `make lint`, `make clean`, `make anvil-up`, `make anvil-down`, `make anvil-logs`
+- **Makefile shortcuts:** `make build`, `make test`, `make test-unit`, `make lint`, `make clean`, `make anvil-up`, `make anvil-down`, `make anvil-logs`, `make solana-build`, `make solana-test`, `make solana-deploy-devnet`
 
 ### Critical Don't-Miss Rules
 
@@ -230,6 +319,11 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - **YAML config is the source of truth** — network topology, peers, routes, chain providers, and settlement config all come from YAML; never hardcode topology
 - **ILP addresses are hierarchical** — dot-separated format (e.g., `g.alice.wallet.USD`); validate with `isValidILPAddress()` from shared package
 - **Backward compatibility** — legacy `settlementInfra` config auto-creates EVM provider; per-peer `chain` field is optional (defaults to legacy behavior when absent)
+- **Solana PDA seeds matter** — channel PDAs derived from `["channel", sender, receiver, mint]`; changing seed order or contents produces a different address and will fail on-chain validation
+- **Solana signature payload** — Ed25519 signatures sign `(channel_pda ++ nonce_le ++ amount_le)` as raw bytes; must match the on-chain `processor.rs` verification exactly — any mismatch causes `InvalidSignature` error
+- **Solana instruction discriminators** — each instruction has a 1-byte discriminator (e.g., `OpenChannel=0`, `Deposit=1`); must match between `instruction.rs` (Rust) and `solana-payment-channel-sdk.ts` (TypeScript) — desync causes `InvalidInstruction` error
+- **Solana account ordering** — on-chain instructions require accounts in a specific order with correct `is_signer`/`is_writable` flags; the TypeScript SDK constructs `AccountMeta[]` arrays that must match `processor.rs` exactly
+- **Multi-chain claim routing** — `BTPClaimMessage.blockchain` field is the discriminator; `ClaimReceiver` dispatches to the correct `PaymentChannelProvider` via registry — never switch on blockchain type in business logic
 
 ---
 
@@ -249,4 +343,4 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-03-25
+Last Updated: 2026-03-26

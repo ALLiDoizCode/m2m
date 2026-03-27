@@ -884,6 +884,7 @@ describe('createEVMProviderFactory (T-32.3-13)', () => {
       chainType: 'solana' as const,
       rpcUrl: 'https://api.mainnet-beta.solana.com',
       programId: 'SolanaProgram123',
+      keyId: 'solana-key',
     };
 
     expect(() => factory(solanaConfig)).toThrow(/non-EVM/i);
