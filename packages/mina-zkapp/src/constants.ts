@@ -58,8 +58,10 @@ export const ASSERT_MESSAGES = {
   DEPOSIT_TOTAL_OVERFLOW: 'deposit total would exceed safe range (max 2^64 - 1)',
   BALANCE_EXCEEDS_DEPOSIT: 'individual balance must not exceed depositTotal',
 
-  // Story 34.2 -- claim verification (define now for stable error surface)
+  // Story 34.2 -- claim verification
   NONCE_MUST_INCREASE: 'nonce must be greater than current nonce',
-  INVALID_CLAIM_PROOF: 'claim proof verification failed',
   BALANCE_CONSERVATION_VIOLATED: 'claim violates balance conservation invariant',
+  INVALID_SIGNATURE_A: 'participant A signature verification failed',
+  INVALID_SIGNATURE_B: 'participant B signature verification failed',
+  NONCE_EXCEEDS_SAFE_RANGE: 'nonce exceeds safe range (max 2^64 - 1)',
 } as const;

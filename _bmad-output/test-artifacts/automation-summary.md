@@ -1,9 +1,9 @@
 ---
 workflow: TA (Test Automation)
 mode: YOLO
-inputDocument: _bmad-output/implementation-artifacts/34-1-mina-payment-channel-zkapp-channel-lifecycle.md
+inputDocument: _bmad-output/implementation-artifacts/34-2-mina-payment-channel-zkapp-zk-private-claims.md
 generatedFiles:
-  - packages/mina-zkapp/src/payment-channel.test.ts (modified - 3 tests added)
+  - packages/mina-zkapp/src/payment-channel-claims.test.ts (modified - 6 gap-filling tests added)
 stepsCompleted:
   - step-01-preflight-and-context
   - step-02-identify-targets
@@ -18,84 +18,99 @@ language: TypeScript
 runner: ts-jest
 ---
 
-# Test Automation Summary: Story 34.1 Gap Coverage
+# Test Automation Summary: Story 34.2 Gap Coverage
 
 **Date:** 2026-03-27
-**TEA Workflow:** [TA] Test Automation → YOLO mode
-**Input:** Story 34-1 acceptance criteria vs existing ATDD tests (15 tests)
-**Story:** 34.1 -- Mina Payment Channel zkApp -- Channel Lifecycle
+**TEA Workflow:** [TA] Test Automation -- YOLO mode
+**Input:** Story 34-2 acceptance criteria vs existing ATDD tests (13 tests)
+**Story:** 34.2 -- Mina Payment Channel zkApp -- ZK-Private Claims
 
 ---
 
 ## Gap Analysis
 
-Mapped all 12 acceptance criteria (AC 1, 1a, 2, 2a, 2b, 3, 3a, 3b, 4, 5, 5a, 6) against the 15 existing ATDD tests (T-34.1-01 through T-34.1-15).
+Mapped all 9 acceptance criteria (AC 1-9) against the 13 existing ATDD tests (T-34.2-01 through T-34.2-13).
 
 ### Gaps Identified
 
 | AC | Gap Description | Existing Coverage | New Test |
 |----|----------------|-------------------|----------|
-| AC 2a | Deposit to SETTLED channel not tested | T-34.1-10 only tested CLOSING state | T-34.1-16 |
-| AC 3a | initiateClose on SETTLED channel not tested | T-34.1-12 only tested CLOSING state | T-34.1-17 |
-| AC 5a | settle on SETTLED channel not tested | T-34.1-13 only tested OPEN state | T-34.1-18 |
+| AC 4 | Nonce strictly less than current not tested | T-34.2-04 only tests equal nonce | T-34.2-14 |
+| AC 9 | Wrong participant B key not tested | T-34.2-13 only tests wrong participant A | T-34.2-15 |
+| AC 9 | Wrong channelNonce not tested | T-34.2-13 only tests wrong participant key | T-34.2-16 |
+| AC 7 | Claim on UNINITIALIZED channel not tested | T-34.2-10/11 test CLOSING/SETTLED only | T-34.2-17 |
+| AC 1 | Zero-balance edge case not tested | T-34.2-01 uses split balances only | T-34.2-18 |
+| AC 5 | Same-key double-signing attack not tested | T-34.2-05/06 use random foreign keys | T-34.2-19 |
 
-### ACs Already Fully Covered (no gap)
+### ACs Already Fully Covered (no gap before this run)
 
 | AC | Description | Covered By |
 |----|-------------|------------|
-| AC 1 | Initialize Channel | T-34.1-01, T-34.1-02 |
-| AC 1a | Double Init Rejected | T-34.1-09 |
-| AC 2 | Deposit Tokens | T-34.1-03 |
-| AC 2b | Zero Deposit Rejected | T-34.1-11 |
-| AC 3 | Initiate Close | T-34.1-04, T-34.1-08 |
-| AC 3b | Close Balance Mismatch | T-34.1-14 |
-| AC 4 | Settle After Challenge | T-34.1-05 |
-| AC 5 | Settle During Challenge | T-34.1-06 |
-| AC 6 | 8 State Fields | T-34.1-07 |
+| AC 1 | Valid claim updates commitment and nonce | T-34.2-01 |
+| AC 2 | Conservation violation rejected | T-34.2-02 |
+| AC 3 | Non-negativity violation rejected | T-34.2-03 |
+| AC 5 | Dual-party auth (invalid sig A) | T-34.2-05 |
+| AC 5 | Dual-party auth (invalid sig B) | T-34.2-06 |
+| AC 6 | Privacy -- on-chain state reveals no balances | T-34.2-07 |
+| AC 7 | Channel remains OPEN after claim | T-34.2-08 |
+| AC 8 | Commitment mismatch rejected | T-34.2-12 |
 
 ---
 
 ## Tests Generated
 
-### Modified File: `packages/mina-zkapp/src/payment-channel.test.ts`
+### Modified File: `packages/mina-zkapp/src/payment-channel-claims.test.ts`
 
-3 new tests appended (T-34.1-16 through T-34.1-18):
+6 new tests appended (T-34.2-14 through T-34.2-19):
 
 | Test ID | AC | Priority | Scenario | Status |
 |---------|-----|----------|----------|--------|
-| T-34.1-16 | 2a | P1 | Deposit to SETTLED channel is rejected | PASS |
-| T-34.1-17 | 3a | P1 | initiateClose on SETTLED channel is rejected | PASS |
-| T-34.1-18 | 5a | P1 | settle on already SETTLED channel is rejected (double-settle) | PASS |
-
-Each test drives the channel through the full lifecycle (init -> deposit -> close -> settle) to reach SETTLED state, then verifies the target operation is rejected.
+| T-34.2-14 | 4 | P1 | Claim with nonce strictly less than current is rejected | PASS |
+| T-34.2-15 | 9 | P1 | Claim with wrong participant B key (channelHash mismatch) is rejected | PASS |
+| T-34.2-16 | 9 | P1 | Claim with wrong channelNonce (channelHash mismatch) is rejected | PASS |
+| T-34.2-17 | 7 | P1 | Claim on UNINITIALIZED channel is rejected | PASS |
+| T-34.2-18 | 1 | P1 | Valid claim with one balance at zero (full transfer) succeeds | PASS |
+| T-34.2-19 | 5 | P1 | Claim where both signatures come from same participant is rejected | PASS |
 
 ---
 
 ## Test Results
 
 ```
-Test Suites: 1 passed, 1 total
-Tests:       18 passed, 18 total (15 existing + 3 new)
-Time:        13.37s
+Test Suites: 2 passed, 2 total
+Tests:       39 passed, 39 total (20 Story 34.1 + 13 original Story 34.2 + 6 new gap-filling)
+Time:        33.785s
 ```
 
-### Priority Breakdown
+### Full Project Regression
+
+```
+mina-zkapp:  39 passed (2 suites)
+connector:  157 passed (4 suites)
+shared:      11 passed (1 suite)
+Total:      207 passed, 0 failed
+Lint:        Clean (no errors)
+```
+
+### Priority Breakdown (Story 34.2 tests only)
 
 | Priority | Count | Description |
 |----------|-------|-------------|
-| P0 | 8 | Critical path (init, deposit, close, settle, fields, commitment) |
-| P1 | 10 | State guards and input validation (negative scenarios) |
+| P0 | 8 | Core claim functionality (valid claim, conservation, non-negativity, nonce, signatures, privacy, state, commitment, channelHash) |
+| P1 | 11 | Edge cases and state guards (sequential claims, CLOSING/SETTLED/UNINITIALIZED guards, wrong keys, wrong nonce, zero balance, same-key attack) |
 
 ---
 
 ## Coverage Summary
 
-- **Acceptance Criteria**: 12/12 covered (100%)
-- **Total Tests**: 18 (15 original ATDD + 3 gap-filling)
+- **Acceptance Criteria**: 9/9 covered (100%)
+- **Total Story 34.2 Tests**: 19 (13 original ATDD + 6 gap-filling)
 - **All tests passing**: Yes
 - **Build clean**: Yes (tsc compiles with no errors)
+- **Lint clean**: Yes (no ESLint errors)
+- **Full regression**: 207/207 tests passing across all workspaces
 
 ## Next Steps
 
-- Story 34.2 will add `claimFromChannel` method and corresponding tests
-- Story 34.3 will add comprehensive security/privacy tests and proof-enabled integration tests
+- Story 34.3 will add proof-enabled integration tests for claimFromChannel (proofsEnabled: true)
+- Story 34.4 SDK will wrap claimFromChannel with client-side proof generation

@@ -72,7 +72,7 @@ epics:
         status: done
       34.2:
         name: "Mina Payment Channel zkApp — ZK-Private Claims"
-        status: backlog
+        status: done
       34.3:
         name: "Mina Payment Channel zkApp — Tests & Deployment"
         status: backlog

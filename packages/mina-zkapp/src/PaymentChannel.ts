@@ -261,4 +261,91 @@ export class PaymentChannel extends SmartContract {
     // Transition to SETTLED
     this.channelState.set(CHANNEL_STATE.SETTLED);
   }
+
+  /**
+   * Cooperative balance update via zk-SNARK proof (private claim).
+   *
+   * Updates the on-chain balance commitment and nonce without revealing actual
+   * balances. The proof circuit enforces six invariants: commitment validity,
+   * conservation, non-negativity, monotonic nonce, participant binding, and
+   * dual-party authorization.
+   *
+   * All parameters except newBalanceCommitment and newNonce are private circuit
+   * witnesses -- they are consumed inside the proof but never appear on-chain.
+   * This is the core privacy mechanism: on-chain observers see only the updated
+   * Poseidon commitment hash and nonce.
+   *
+   * Story 34.2 -- Epic 34: Mina Protocol Payment Channel Provider
+   *
+   * @param newBalanceA - New balance for participant A (private)
+   * @param newBalanceB - New balance for participant B (private)
+   * @param newSalt - Salt for the new balance commitment (private)
+   * @param signatureA - Signature from participant A (private)
+   * @param signatureB - Signature from participant B (private)
+   * @param participantA - Public key of participant A (private, verified against channelHash)
+   * @param participantB - Public key of participant B (private, verified against channelHash)
+   * @param channelNonce - Channel nonce for channelHash binding (private)
+   * @param newBalanceCommitment - Poseidon(newBalanceA, newBalanceB, newSalt) (written to state)
+   * @param newNonce - New monotonically increasing nonce (written to state)
+   */
+  @method async claimFromChannel(
+    newBalanceA: Field,
+    newBalanceB: Field,
+    newSalt: Field,
+    signatureA: Signature,
+    signatureB: Signature,
+    participantA: PublicKey,
+    participantB: PublicKey,
+    channelNonce: Field,
+    newBalanceCommitment: Field,
+    newNonce: Field
+  ): Promise<void> {
+    // 1. Require channel is OPEN (AC: 7 -- claims only when OPEN)
+    const currentState = this.channelState.getAndRequireEquals();
+    currentState.assertEquals(CHANNEL_STATE.OPEN, ASSERT_MESSAGES.CHANNEL_MUST_BE_OPEN);
+
+    // 2. Read and bind on-chain state with preconditions (security)
+    const storedChannelHash = this.channelHash.getAndRequireEquals();
+    const currentDeposit = this.depositTotal.getAndRequireEquals();
+    const currentNonce = this.nonceField.getAndRequireEquals();
+
+    // 3. Commitment validity: Poseidon(newBalanceA, newBalanceB, newSalt) == newBalanceCommitment (AC: 1, 8)
+    const computedCommitment = Poseidon.hash([newBalanceA, newBalanceB, newSalt]);
+    computedCommitment.assertEquals(newBalanceCommitment, ASSERT_MESSAGES.COMMITMENT_MISMATCH);
+
+    // 4. Conservation: newBalanceA + newBalanceB == depositTotal (AC: 2)
+    newBalanceA
+      .add(newBalanceB)
+      .assertEquals(currentDeposit, ASSERT_MESSAGES.BALANCE_CONSERVATION_VIOLATED);
+
+    // 5. Non-negativity + range checks (AC: 3)
+    // Fields are unsigned in o1js, so >= 0 is inherent. However, modular
+    // arithmetic can produce large values that "wrap around" to appear valid.
+    // The <= depositTotal check prevents this exploit (same pattern as initiateClose).
+    newBalanceA.assertLessThanOrEqual(currentDeposit, ASSERT_MESSAGES.BALANCE_EXCEEDS_DEPOSIT);
+    newBalanceB.assertLessThanOrEqual(currentDeposit, ASSERT_MESSAGES.BALANCE_EXCEEDS_DEPOSIT);
+
+    // Defense-in-depth: bound balances to MAX_SAFE_AMOUNT (same as deposit())
+    newBalanceA.assertLessThanOrEqual(MAX_SAFE_AMOUNT, ASSERT_MESSAGES.AMOUNT_EXCEEDS_SAFE_RANGE);
+    newBalanceB.assertLessThanOrEqual(MAX_SAFE_AMOUNT, ASSERT_MESSAGES.AMOUNT_EXCEEDS_SAFE_RANGE);
+
+    // 6. Monotonic nonce: newNonce > currentNonce (AC: 4)
+    newNonce.assertGreaterThan(currentNonce, ASSERT_MESSAGES.NONCE_MUST_INCREASE);
+
+    // Nonce range check to prevent Field overflow
+    newNonce.assertLessThanOrEqual(MAX_SAFE_AMOUNT, ASSERT_MESSAGES.NONCE_EXCEEDS_SAFE_RANGE);
+
+    // 7. Participant binding: verify supplied keys match channelHash (AC: 5, 9)
+    const computedHash = Poseidon.hash([participantA.x, participantB.x, channelNonce]);
+    computedHash.assertEquals(storedChannelHash, ASSERT_MESSAGES.CHANNEL_HASH_MISMATCH);
+
+    // 8. Dual-party authorization: both participants signed [newBalanceCommitment, newNonce, channelHash] (AC: 5)
+    const message = [newBalanceCommitment, newNonce, storedChannelHash];
+    signatureA.verify(participantA, message).assertTrue(ASSERT_MESSAGES.INVALID_SIGNATURE_A);
+    signatureB.verify(participantB, message).assertTrue(ASSERT_MESSAGES.INVALID_SIGNATURE_B);
+
+    // 9. Update on-chain state (AC: 1) -- only commitment and nonce are visible
+    this.balanceCommitment.set(newBalanceCommitment);
+    this.nonceField.set(newNonce);
+  }
 }
