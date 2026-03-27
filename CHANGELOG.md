@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0](https://github.com/toon-protocol/connector/compare/v2.2.0...v2.3.0) (2026-03-27)
+
+### Features
+
+- **33-1:** Solana payment channel program — channel lifecycle ([bdced7b](https://github.com/toon-protocol/connector/commit/bdced7b5c6a91726730c2172f06613a93b2a087a))
+- **33-2:** Solana payment channel program — claim verification ([6ac4106](https://github.com/toon-protocol/connector/commit/6ac4106fe731f214689510371593430cc6fd92f2))
+- **33-3:** Solana payment channel program — tests & deployment ([77c71c9](https://github.com/toon-protocol/connector/commit/77c71c9e842ce296abb03548f48215a3fd52e860))
+- **33-4:** SolanaPaymentChannelSDK — TypeScript integration ([e68f018](https://github.com/toon-protocol/connector/commit/e68f018738b62ab1b68fec518868b4769da6bd5f))
+- **33-5:** SolanaPaymentChannelProvider — TypeScript adapter for Solana payment channels ([6c6d21c](https://github.com/toon-protocol/connector/commit/6c6d21c2410ea8c5b58e9ad2b135b5714c97bb75))
+- **33-6:** Solana claim message types & serialization — pipeline wiring ([caf4bc4](https://github.com/toon-protocol/connector/commit/caf4bc492f07388d12e3db1a8eface4dad726100))
+- **33-7:** Integration Tests — Solana Provider E2E ([a349783](https://github.com/toon-protocol/connector/commit/a349783e797a0e8b3a59fd2e8e787c25e266b820))
+- **33-8:** Solana devnet deployment documentation & verification ([6f7302e](https://github.com/toon-protocol/connector/commit/6f7302e73d1f75e4ef1161302c11f8ea27d4ee5c))
+
 ## [2.2.0](https://github.com/toon-protocol/connector/compare/v2.1.0...v2.2.0) (2026-03-25)
 
 ### Features
