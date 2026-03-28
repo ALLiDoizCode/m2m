@@ -90,7 +90,7 @@ epics:
         status: done
       34.8:
         name: "Integration Tests — Mina Provider E2E"
-        status: backlog
+        status: done
       34.9:
         name: "Mina Devnet Deployment & Documentation"
         status: backlog

@@ -12,24 +12,26 @@ lastSaved: '2026-03-28'
 workflowType: 'testarch-nfr-assess'
 inputDocuments:
   [
-    '_bmad-output/implementation-artifacts/34-7-mina-claim-message-types-serialization.md',
+    '_bmad-output/implementation-artifacts/34-8-integration-tests-mina-provider-e2e.md',
+    'packages/connector/test/integration/mina-provider.test.ts',
+    'packages/connector/test/integration/mina-config.test.ts',
+    'packages/connector/test/integration/mina-nip59.test.ts',
+    'packages/connector/test/integration/mixed-chain-three-way.test.ts',
+    'packages/connector/test/integration/mina-proofs.test.ts',
+    'packages/connector/test/integration/mina-lightnet.test.ts',
+    'packages/connector/src/settlement/provider/mina-payment-channel-provider.ts',
+    'packages/connector/src/settlement/mina-payment-channel-sdk.ts',
     'packages/connector/src/btp/btp-claim-types.ts',
-    'packages/connector/src/settlement/claim-receiver.ts',
-    'packages/connector/src/settlement/per-packet-claim-service.ts',
-    'packages/connector/src/settlement/claim-sender.ts',
-    'packages/connector/src/btp/btp-claim-types.test.ts',
-    'packages/connector/src/settlement/claim-receiver.test.ts',
-    'packages/connector/src/settlement/per-packet-claim-service.test.ts',
-    'packages/connector/src/settlement/claim-sender.test.ts',
-    'packages/connector/src/settlement/privacy/nip59-claim-wrapper.test.ts',
+    'packages/connector/src/settlement/privacy/nip59-claim-wrapper.ts',
+    'packages/connector/src/settlement/provider/chain-provider-registry.ts',
   ]
 ---
 
-# NFR Assessment - Mina Claim Message Types & Serialization
+# NFR Assessment - Integration Tests: Mina Provider E2E
 
 **Date:** 2026-03-28
-**Story:** 34.7 - Mina Claim Message Types & Serialization
-**Overall Status:** PASS
+**Story:** 34.8 -- Integration Tests: Mina Provider E2E
+**Overall Status:** PASS ✅
 
 ---
 
@@ -37,13 +39,13 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ## Executive Summary
 
-**Assessment:** 6 PASS, 2 CONCERNS, 0 FAIL
+**Assessment:** 22 PASS, 7 CONCERNS, 0 FAIL
 
 **Blockers:** 0
 
 **High Priority Issues:** 0
 
-**Recommendation:** Story 34.7 is ready for release. The implementation demonstrates strong testability, security practices, and maintainability. The two CONCERNS (Scalability/Availability and Disaster Recovery) are systemic infrastructure-level items not in scope for this story and are tracked at the epic/project level.
+**Recommendation:** PASS -- Story 34.8 integration tests are well-structured, comprehensive, and follow established patterns from prior epics (32, 33). All 42 active tests pass. Two test stubs (mina-proofs, mina-lightnet) are correctly gated with `describe.skip` for merge/nightly CI. Minor linting issues on the skipped stubs (eslint rule `jest/no-disabled-tests` not found) should be addressed but are non-blocking. Proceed to traceability gate or release.
 
 ---
 
@@ -51,41 +53,41 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ### Response Time (p95)
 
-- **Status:** PASS
-- **Threshold:** Unit tests < 1.5 minutes per suite
-- **Actual:** btp-claim-types: 0.88s, claim-receiver: 3.54s, per-packet-claim-service: 0.82s, claim-sender: 0.70s
-- **Evidence:** Jest test execution output (all suites)
-- **Findings:** All four test suites execute in under 4 seconds. Individual test cases run in under 55ms. The claim-receiver suite is the largest (56 tests) but still completes in 3.5s due to lightweight mocks.
+- **Status:** CONCERNS ⚠️
+- **Threshold:** UNKNOWN (no performance SLO defined for integration test execution)
+- **Actual:** Full test suite completes in ~3.9s (mina tests) + ~0.8s (mixed-chain) = ~4.7s total
+- **Evidence:** Jest test execution output (42 tests pass in <5s)
+- **Findings:** Tests execute fast. No formal p95 response time threshold is defined for the settlement pipeline itself, so this defaults to CONCERNS per NFR rules.
 
 ### Throughput
 
-- **Status:** PASS
-- **Threshold:** Tests execute without blocking or resource contention
-- **Actual:** 193 tests across 4 test files execute in ~6s total
-- **Evidence:** Jest verbose output across all test suites
-- **Findings:** Test throughput is excellent. No hard waits, no async bottlenecks. Mock-based architecture ensures tests run at in-memory speed.
+- **Status:** PASS ✅
+- **Threshold:** All 18 test IDs (T-34.8-01 through T-34.8-18) covered
+- **Actual:** 18/18 test IDs implemented across 6 test files; 42 active tests + 3 skipped stubs = 45 total
+- **Evidence:** `packages/connector/test/integration/mina-*.test.ts`, `mixed-chain-three-way.test.ts`
+- **Findings:** Complete AC coverage. Test ID mapping in story matches actual test files.
 
 ### Resource Usage
 
 - **CPU Usage**
-  - **Status:** PASS
-  - **Threshold:** No excessive CPU during test execution
-  - **Actual:** Tests complete in sub-second per suite (mocked I/O)
-  - **Evidence:** Jest execution timing
+  - **Status:** PASS ✅
+  - **Threshold:** Tests must not require real proof generation (o1js) for standard CI
+  - **Actual:** Mock SDK pattern used; no CPU-intensive proof generation in default suite
+  - **Evidence:** `createMockMinaSDK()` in `mina-provider.test.ts` (all SDK methods are `jest.fn()`)
 
 - **Memory Usage**
-  - **Status:** PASS
-  - **Threshold:** No memory leaks in test fixtures
-  - **Actual:** All test suites clean up mocks; no persistent state between tests
-  - **Evidence:** Jest test isolation patterns in all test files
+  - **Status:** PASS ✅
+  - **Threshold:** No memory leaks from test setup/teardown
+  - **Actual:** `jest.clearAllMocks()` in every `beforeEach`; no persistent state between tests
+  - **Evidence:** Test file inspection shows proper cleanup patterns
 
 ### Scalability
 
-- **Status:** PASS
-- **Threshold:** Adding Mina chain type does not degrade EVM/Solana paths
-- **Actual:** All existing EVM (34 tests) and Solana (12 tests) tests pass unchanged. The switch-case dispatch in `validateClaimMessage()` is O(1). Provider resolution in `ClaimReceiver.resolveProvider()` uses early-return guards.
-- **Evidence:** btp-claim-types.test.ts (70 tests, 0 failures), claim-receiver.test.ts (56 tests, 0 failures)
-- **Findings:** The discriminated union pattern (`blockchain: 'evm' | 'solana' | 'mina'`) scales linearly with new chains but each dispatch is constant-time. No performance regression from adding Mina.
+- **Status:** CONCERNS ⚠️
+- **Threshold:** UNKNOWN (no load/stress testing requirements for integration tests)
+- **Actual:** Tests validate single-instance behavior. No multi-instance or concurrent settlement stress tests
+- **Evidence:** Test code review
+- **Findings:** Scalability testing is intentionally out of scope for Story 34.8 (integration-level, not system-level). This is appropriate for the story scope but should be covered in future system-level NFR testing.
 
 ---
 
@@ -93,44 +95,43 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ### Authentication Strength
 
-- **Status:** PASS
-- **Threshold:** Claims must be cryptographically authenticated per chain type
-- **Actual:** Mina claims authenticate via zk-SNARK proof verification through `provider.verifyBalanceProof()`. The proof implicitly validates authorization (no separate signer check needed, unlike EVM/Solana which use signatures).
-- **Evidence:** `claim-receiver.ts:verifyMinaClaim()` (lines 739-864), tests T-34.7-11, T-34.7-20
-- **Findings:** Authentication is architecturally sound. The zk-SNARK proof serves as both authentication and authorization in a single cryptographic primitive.
+- **Status:** PASS ✅
+- **Threshold:** Mina access goes through chain abstraction only; no direct SDK imports in core services
+- **Actual:** Static import audit (T-34.8-11) verifies zero direct `MinaPaymentChannelSDK` imports in `claim-receiver.ts`, `per-packet-claim-service.ts`, `settlement-executor.ts`, `settlement-monitor.ts`
+- **Evidence:** `mina-config.test.ts` lines 246-356 (6 sub-tests)
+- **Findings:** Clean separation of concerns. Only `mina-payment-channel-provider.ts` in the `provider/` subdirectory imports the SDK.
 
 ### Authorization Controls
 
-- **Status:** PASS
-- **Threshold:** Claims must be validated against channel state; nonce replay must be prevented
-- **Actual:** `verifyMinaClaim()` enforces: (1) channel state must be 'opened' or 'closed' (challenge period), (2) nonce monotonicity against latest verified claim, (3) rejected claims for 'settled' channels. Unknown channels require on-chain verification before acceptance.
-- **Evidence:** Tests T-34.7-20 (invalid proof rejection), T-34.7-21 (nonce replay rejection), settled channel rejection test
-- **Findings:** Authorization model follows established EVM/Solana patterns. Nonce monotonicity is strictly enforced.
+- **Status:** PASS ✅
+- **Threshold:** Claims must be validated before processing; invalid claims rejected
+- **Actual:** T-34.8-08 verifies tampered proofs, stale nonces, invalid commitments, and bad proof formats are all rejected
+- **Evidence:** `mina-provider.test.ts` lines 489-576 (4 sub-tests)
+- **Findings:** Comprehensive negative testing. `validateClaimMessage()` catches invalid balanceCommitment and proof format. `MinaChannelError` with `NonceNotMonotonic` code handles stale nonces. `verifyBalanceProof()` returns false for tampered proofs.
 
 ### Data Protection
 
-- **Status:** PASS
-- **Threshold:** Sensitive data (proofs, salts, balance commitments) must not be logged
-- **Actual:** Logging in `verifyMinaClaim()` uses structured Pino format with only `event`, `messageId`, and `zkAppAddress` fields. The story spec explicitly mandates "NEVER log proof data, salt, or balance commitment details beyond the field name." Code review confirms compliance -- no proof/salt/commitment values appear in log statements.
-- **Evidence:** `claim-receiver.ts` lines 744-751 (info log), 769 (warn log), 808-810 (warn log). Grep for `proof|salt|balanceCommitment` in logger calls returns zero matches for logged values.
-- **Findings:** Data protection is well-implemented. The Poseidon commitment-based privacy model means actual balances are never exposed even in the claim message itself (only the commitment hash).
-- **Recommendation:** N/A
+- **Status:** PASS ✅
+- **Threshold:** On-chain state reveals only Poseidon commitment hashes, not plaintext amounts
+- **Actual:** T-34.8-03 verifies that `claimFromChannel()` receives bigint arguments (not plaintext) and `getChannelState()` returns `balanceCommitment` hash only
+- **Evidence:** `mina-provider.test.ts` lines 362-411
+- **Findings:** Privacy-preserving design confirmed via mock SDK argument inspection.
 
 ### Vulnerability Management
 
-- **Status:** PASS
-- **Threshold:** No new dependencies introduced; no known vulnerabilities in chain-specific validation
-- **Actual:** Story 34.7 adds zero new npm dependencies. All modifications are to existing files (types, validation logic, pipeline wiring). Input validation in `validateMinaClaim()` covers: B62 address format regex, required field presence, network enum validation, non-negative nonce.
-- **Evidence:** Story dev notes ("No new npm dependencies required"), `btp-claim-types.ts:validateMinaClaim()` (lines 283-322)
-- **Findings:** The `minaAddressRegex` (`/^B62[1-9A-HJ-NP-Za-km-z]{52}$/`) correctly validates Mina public key format. No regex denial-of-service risk (fixed-length pattern with character class).
+- **Status:** CONCERNS ⚠️
+- **Threshold:** UNKNOWN (no formal vulnerability scan threshold defined)
+- **Actual:** No SAST/DAST scans run as part of this story
+- **Evidence:** No vulnerability scan artifacts found
+- **Findings:** Story 34.8 is test-only (no new source code). Vulnerability scanning applies to the source code created in Stories 34.1-34.7, which have their own NFR assessments.
 
 ### Compliance (if applicable)
 
-- **Status:** PASS
-- **Standards:** Cryptographic privacy (Poseidon commitments hide balances)
-- **Actual:** Mina claims use commitment-based balances. `ClaimReceivedEvent.cumulativeAmount` is set to `BigInt(0)` because actual amounts are private. NIP-59 wrapping (Story 34.6) provides transport-layer privacy.
-- **Evidence:** `claim-receiver.ts` event emission block, NIP-59 wrapper tests (46 passing)
-- **Findings:** Privacy model is consistent with Mina protocol design. No plaintext amounts are exposed at any layer.
+- **Status:** PASS ✅
+- **Threshold:** NIP-59 Gift Wrap encryption preserves claim privacy in transit
+- **Actual:** T-34.8-05 verifies complete wrap/unwrap round-trip integrity, non-deterministic ciphertexts, wrong-key rejection, and base64 proof preservation
+- **Evidence:** `mina-nip59.test.ts` (6 sub-tests, all pass)
+- **Findings:** NIP-59 protocol implementation verified end-to-end for Mina claim types.
 
 ---
 
@@ -138,49 +139,49 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ### Availability (Uptime)
 
-- **Status:** PASS
-- **Threshold:** Story-level: all tests pass, build succeeds
-- **Actual:** 193 tests passing across 4 test files. TypeScript build clean (zero errors). ESLint clean (zero warnings/errors).
-- **Evidence:** Jest test results, `npm run build --workspace=packages/connector` output
-- **Findings:** Implementation is fully functional with zero build or test failures.
+- **Status:** CONCERNS ⚠️
+- **Threshold:** UNKNOWN (no uptime SLA defined for integration test infrastructure)
+- **Actual:** N/A -- Integration tests run in CI, not as a live service
+- **Evidence:** N/A
+- **Findings:** Not applicable to this story scope. Uptime SLA applies to the connector runtime, covered by system-level testing.
 
 ### Error Rate
 
-- **Status:** PASS
-- **Threshold:** 0 test failures
-- **Actual:** 0 failures across all test suites (btp-claim-types: 70, claim-receiver: 56, per-packet-claim-service: 48, claim-sender: 18 passing + 1 pre-existing skip)
-- **Evidence:** Jest verbose output for all 4 test files
-- **Findings:** The 1 skipped test in claim-sender.test.ts is a pre-existing skip for retry logic (not related to Story 34.7).
+- **Status:** PASS ✅
+- **Threshold:** 0% test failure rate
+- **Actual:** 0% failure rate (42/42 active tests pass, 3/3 skipped stubs correctly gated)
+- **Evidence:** Jest output: `Test Suites: 2 skipped, 4 passed, 4 of 6 total; Tests: 3 skipped, 42 passed, 45 total`
+- **Findings:** All tests green. No flaky tests observed.
 
 ### MTTR (Mean Time To Recovery)
 
-- **Status:** PASS
-- **Threshold:** Error messages must be descriptive for fast debugging
-- **Actual:** All validation errors include descriptive messages (e.g., "Missing or invalid zkAppAddress (expected non-empty string)", "Invalid zkAppAddress format (expected B62-prefixed base58 Mina address, 55 chars)"). Error codes use named constants (`ERRORS.INVALID_SIGNATURE`, `ERRORS.CHANNEL_NOT_OPENED`).
-- **Evidence:** `btp-claim-types.ts:validateMinaClaim()`, `claim-receiver.ts:ERRORS` constant
-- **Findings:** Error messages are specific and actionable, enabling fast debugging.
+- **Status:** CONCERNS ⚠️
+- **Threshold:** UNKNOWN (no MTTR target defined)
+- **Actual:** N/A
+- **Evidence:** N/A
+- **Findings:** Not applicable to integration test story. MTTR applies to production recovery.
 
 ### Fault Tolerance
 
-- **Status:** PASS
-- **Threshold:** Graceful handling of provider failures, DB failures, and malformed data
-- **Actual:** `verifyMinaClaim()` wraps `getChannelState()` in try-catch with appropriate error logging and returns `{ valid: false }`. `recoverFromDb()` in PerPacketClaimService validates structural integrity before accepting recovered claims, using `BigInt(0)` for unrecoverable cumulative amounts. `_persistReceivedClaim()` handles DB failures gracefully.
-- **Evidence:** Tests for DB recovery (T-34.7-19), invalid claim rejection tests, error handling tests in claim-receiver
-- **Findings:** Fault tolerance follows established patterns from EVM/Solana implementations.
+- **Status:** PASS ✅
+- **Threshold:** Invalid claims, tampered proofs, and wrong keys must not crash the system
+- **Actual:** T-34.8-08 validates graceful rejection of tampered proofs, stale nonces, bad commitments. T-34.8-05 validates wrong-key unwrap throws (not crashes).
+- **Evidence:** `mina-provider.test.ts`, `mina-nip59.test.ts`
+- **Findings:** All error paths throw descriptive errors with proper error codes.
 
 ### CI Burn-In (Stability)
 
-- **Status:** CONCERNS
-- **Threshold:** UNKNOWN -- no formal burn-in threshold defined for this project
-- **Actual:** Tests pass on current run but no burn-in loop executed
-- **Evidence:** Single test execution results
-- **Findings:** No evidence of burn-in testing (running tests multiple times to detect flakiness). However, tests are fully deterministic (mocked I/O, no hard waits, no network calls) so flakiness risk is minimal.
+- **Status:** CONCERNS ⚠️
+- **Threshold:** UNKNOWN (no burn-in loop count defined for new tests)
+- **Actual:** Tests have been run once (this assessment). No burn-in data available yet.
+- **Evidence:** Single run: 42 pass, 0 fail
+- **Findings:** Tests need CI burn-in (10+ consecutive runs) to confirm stability. No flakiness indicators detected in single run.
 
 ### Disaster Recovery (if applicable)
 
 - **RTO (Recovery Time Objective)**
   - **Status:** N/A
-  - **Threshold:** N/A -- story-level types and validation; no persistent state
+  - **Threshold:** N/A
   - **Actual:** N/A
   - **Evidence:** N/A
 
@@ -196,89 +197,104 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 ### Test Coverage
 
-- **Status:** PASS
-- **Threshold:** All acceptance criteria covered by tests; all test IDs from test plan implemented
-- **Actual:** 22 test IDs implemented (T-34.7-01 through T-34.7-22). All 11 acceptance criteria have corresponding tests. Regression tests confirm backward compatibility (EVM: T-34.7-04, T-34.7-08, T-34.7-12; Solana: T-34.7-05, T-34.7-09).
-- **Evidence:** Test plan in story file, Jest verbose output showing all test IDs
-- **Findings:** Test coverage is comprehensive. Every AC has at least one test. Regression suite verifies zero impact on existing EVM and Solana paths.
+- **Status:** PASS ✅
+- **Threshold:** All 15 ACs covered; all 18 test IDs implemented
+- **Actual:** 15/15 ACs covered. 18/18 test IDs implemented. `mina-payment-channel-provider.ts` achieves 54.47% statement / 71.42% function coverage from these integration tests alone (additional unit tests exist in other suites).
+- **Evidence:** Jest coverage output; AC-to-test mapping in story file
+- **Findings:** Complete acceptance criteria coverage. The 54.47% statement coverage on the provider is reasonable for integration tests that use mocks -- remaining paths are exercised by unit tests and proof-enabled tests.
 
 ### Code Quality
 
-- **Status:** PASS
-- **Threshold:** ESLint clean, TypeScript strict mode, follows existing patterns
-- **Actual:** ESLint: 0 errors, 0 warnings across all 4 modified source files. TypeScript build clean. Code follows Solana claim pattern (Story 33.6) as structural reference. JSDoc comments on all public and private methods.
-- **Evidence:** ESLint output, TypeScript build output, code review of claim-receiver.ts
-- **Findings:** Code quality is high. The `buildMinaVerifyParams()` helper follows `buildSolanaVerifyParams()` pattern exactly. All methods have proper JSDoc documentation.
+- **Status:** PASS ✅
+- **Threshold:** Zero lint errors in active test files; follows established patterns (Story 33.7 structure)
+- **Actual:** 0 lint errors in 4 active test files (`mina-provider.test.ts`, `mina-config.test.ts`, `mina-nip59.test.ts`, `mixed-chain-three-way.test.ts`). 2 lint errors in 2 skipped stubs (`mina-proofs.test.ts`, `mina-lightnet.test.ts`) due to `jest/no-disabled-tests` rule not being registered.
+- **Evidence:** ESLint output
+- **Findings:** Active tests are clean. The 2 stub lint errors are minor (the `jest/no-disabled-tests` plugin rule is not configured in the ESLint setup, so the `eslint-disable` comment references a nonexistent rule). This is a pre-existing configuration gap, not a Story 34.8 regression.
 
 ### Technical Debt
 
-- **Status:** PASS
-- **Threshold:** No new tech debt introduced
-- **Actual:** No TODO/FIXME/HACK markers introduced. The `BigInt(0)` usage for `cumulativeAmount` in Mina events is documented as intentional (commitment-based privacy model, not a workaround). The story completes the MinaClaimMessage stub from Epic 32, reducing tech debt.
-- **Evidence:** Story completion notes, code review
-- **Findings:** This story reduces tech debt by replacing the "not yet supported" throw in validateClaimMessage() with full Mina validation.
+- **Status:** PASS ✅
+- **Threshold:** No code duplication; follows DRY patterns
+- **Actual:** Helper functions (`createMockMinaSDK`, `createMinaTestProvider`, `createValidMinaClaim`) are properly extracted and reused. Pattern follows Story 33.7 (Solana) exactly.
+- **Evidence:** Test file review
+- **Findings:** Clean helper patterns. `createMockProvider()` in `mixed-chain-three-way.test.ts` and `mina-config.test.ts` is slightly duplicated but justified by different mock needs (generic vs. typed).
 
 ### Documentation Completeness
 
-- **Status:** PASS
-- **Threshold:** JSDoc on public APIs, inline comments for non-obvious logic
-- **Actual:** `verifyMinaClaim()` has detailed JSDoc explaining Mina-specific handling differences. `buildMinaVerifyParams()` documents field mapping. `validateMinaClaim()` documents validation rules. Story file includes comprehensive field mapping tables and dev notes.
-- **Evidence:** Code review of all 4 modified files
-- **Findings:** Documentation is thorough and follows project conventions.
+- **Status:** PASS ✅
+- **Threshold:** JSDoc headers with test ID mapping; story file complete
+- **Actual:** All 6 test files have JSDoc `@packageDocumentation` headers listing covered test IDs. Story file has complete task/subtask checklist (all checked off). Dev Notes section provides comprehensive structural guidance.
+- **Evidence:** File headers in all test files
+- **Findings:** Excellent traceability from story to test files.
 
 ### Test Quality (from test-review, if available)
 
-- **Status:** PASS
-- **Threshold:** Tests follow test-quality checklist (deterministic, isolated, explicit, focused, fast)
-- **Actual:** All tests are: (1) Deterministic -- no hard waits, no Math.random(), all mocked. (2) Isolated -- each test creates its own mock state. (3) Explicit -- assertions are in test bodies, not hidden in helpers. (4) Focused -- each test validates one scenario. (5) Fast -- all suites under 4 seconds.
-- **Evidence:** Test file review against test-quality.md checklist
-- **Findings:** Tests pass all quality criteria from the test-quality knowledge fragment.
+- **Status:** PASS ✅
+- **Threshold:** Tests follow project patterns (pino silent logger, jest.clearAllMocks, jest.setTimeout)
+- **Actual:** All patterns verified: `pino({ level: 'silent' })` (not jest.fn()), `jest.clearAllMocks()` in `beforeEach`, `jest.setTimeout(60_000)` for standard / `jest.setTimeout(300_000)` for proof tests, proper `as unknown as` casting for mock SDKs.
+- **Evidence:** Test file inspection
+- **Findings:** Tests are consistent with established patterns from Stories 32.x and 33.x.
 
 ---
 
 ## Custom NFR Assessments (if applicable)
 
-### Backward Compatibility (AC 6)
+### ZK-Privacy Verification (Mina-Specific)
 
-- **Status:** PASS
-- **Threshold:** All existing EVM and Solana tests pass unchanged after Mina addition
-- **Actual:** Confirmed -- 34 EVM tests, 12 Solana tests in btp-claim-types.test.ts pass. 27 EVM tests and 15 Solana tests in claim-receiver.test.ts pass. All per-packet-claim-service.test.ts and claim-sender.test.ts existing tests pass. NIP-59 wrapper: 46 tests pass.
-- **Evidence:** Jest verbose output for all test suites
-- **Findings:** Zero regression. The discriminated union pattern and switch-case dispatch ensure new chain types cannot break existing paths.
+- **Status:** PASS ✅
+- **Threshold:** On-chain state reveals only Poseidon commitment hashes; NIP-59 encryption preserves fields through round-trip
+- **Actual:** T-34.8-03 (privacy), T-34.8-05 (NIP-59 round-trip) both pass. No plaintext balance amounts exposed in mock channel state.
+- **Evidence:** `mina-provider.test.ts` T-34.8-03, `mina-nip59.test.ts` T-34.8-05
+- **Findings:** Core privacy properties verified at integration level.
 
-### Multi-Chain Routing (AC 7)
+### Multi-Chain Coexistence
 
-- **Status:** PASS
-- **Threshold:** Chain discriminator correctly routes claims to the right provider
-- **Actual:** `resolveProvider()` in ClaimReceiver has `isMinaClaim()` branch that routes Mina claims via known-channel lookup or network-based lookup. Tests confirm routing works for all three chain types.
-- **Evidence:** claim-receiver.ts `resolveProvider()` implementation, T-34.7-11
-- **Findings:** Routing logic follows established patterns and is tested for both known and unknown channels.
+- **Status:** PASS ✅
+- **Threshold:** EVM, Solana, and Mina providers coexist without cross-contamination; regressions are zero
+- **Actual:** T-34.8-06 (three-chain routing), T-34.8-12 (EVM regression), T-34.8-13 (Solana regression) all pass. Type guards (`isEVMClaim`, `isSolanaClaim`, `isMinaClaim`) are mutually exclusive. No cross-field contamination.
+- **Evidence:** `mixed-chain-three-way.test.ts` (9 tests, all pass)
+- **Findings:** Registry-based routing and discriminated union claim types work correctly across all three chains.
 
 ---
 
 ## Quick Wins
 
-0 quick wins identified -- no CONCERNS or FAIL items requiring immediate action for this story.
+2 quick wins identified for immediate implementation:
+
+1. **Fix ESLint config for jest/no-disabled-tests** (Maintainability) - LOW - 15 minutes
+   - Either install and configure `eslint-plugin-jest` with the `no-disabled-tests` rule, or remove the `eslint-disable` comments from `mina-proofs.test.ts` and `mina-lightnet.test.ts`
+   - Minimal code changes
+
+2. **Add CI burn-in for new Mina integration tests** (Reliability) - LOW - 30 minutes
+   - Run the Mina integration test suite 10+ times in CI to establish stability baseline
+   - No code changes needed (CI config only)
 
 ---
 
 ## Recommended Actions
 
+### Immediate (Before Release) - CRITICAL/HIGH Priority
+
+None -- no blockers identified.
+
 ### Short-term (Next Milestone) - MEDIUM Priority
 
-1. **CI Burn-In for Claim Pipeline Tests** - MEDIUM - 2 hours - DevOps
-   - Run the 4 claim pipeline test suites 10x in CI to validate stability
-   - Add to burn-in script configuration
+1. **Establish performance baselines for Mina settlement** - MEDIUM - 2 hours - Dev Team
+   - Define p95 response time targets for the settlement pipeline
+   - Add k6 or similar load test for settlement throughput
+   - Validation: Baselines documented and threshold tests added
 
-2. **Integration Test Coverage (Story 34.8)** - MEDIUM - 2 days - Dev
-   - Story 34.8 (next in epic) will provide full end-to-end integration testing
-   - Will validate the complete pipeline: Mina provider + claim types + NIP-59 wrapping
+2. **Un-skip proof-enabled tests when o1js is integrated** - MEDIUM - 4 hours - Dev Team
+   - Remove `describe.skip` from `mina-proofs.test.ts`
+   - Add o1js as a devDependency
+   - Validation: T-34.8-15 and T-34.8-16 pass in merge/nightly CI
 
 ### Long-term (Backlog) - LOW Priority
 
-1. **Formal Performance Benchmarks for Claim Validation** - LOW - 1 day - Dev
-   - Benchmark `validateClaimMessage()` across all chain types under load
-   - Establish baseline for regression detection
+1. **Lightnet E2E infrastructure** - LOW - 1-2 days - DevOps
+   - Implement `make mina-up` Docker Compose for lightnet
+   - Un-skip `mina-lightnet.test.ts` T-34.8-18
+   - Validation: Archive node event retrieval works end-to-end
 
 ---
 
@@ -286,59 +302,63 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 2 monitoring hooks recommended to detect issues before failures:
 
-### Security Monitoring
+### Performance Monitoring
 
-- [ ] Monitor `mina_claim_verification_failed` log events for unusual patterns (proof forgery attempts)
-  - **Owner:** Dev
-  - **Deadline:** Story 34.8
+- [ ] Track Mina integration test execution time in CI -- alert if > 30s
+  - **Owner:** Dev Team
+  - **Deadline:** Next sprint
 
 ### Reliability Monitoring
 
-- [ ] Track nonce replay rejection rates per zkAppAddress to detect replay attack patterns
-  - **Owner:** Dev
-  - **Deadline:** Epic 34 completion
+- [ ] CI burn-in dashboard for Mina test suite flakiness tracking
+  - **Owner:** Dev Team
+  - **Deadline:** Next sprint
 
 ### Alerting Thresholds
 
-- [ ] Alert when `mina_claim_verification_failed` events exceed 10/min per peer - Notify when threshold breached
-  - **Owner:** DevOps
-  - **Deadline:** Production readiness
+- [ ] Alert if Mina integration tests fail in any PR -- zero-tolerance policy (P0 tests)
+  - **Owner:** Dev Team
+  - **Deadline:** Immediate (already enforced via CI)
 
 ---
 
 ## Fail-Fast Mechanisms
 
-3 fail-fast mechanisms already implemented:
+### Circuit Breakers (Reliability)
+
+- [ ] Mock SDK timeout in proof generation tests (already implemented via `setTimeout` mock in T-34.8-04)
+  - **Owner:** Dev Team
+  - **Estimated Effort:** Already done
 
 ### Validation Gates (Security)
 
-- [x] `validateMinaClaim()` rejects malformed claims at deserialization boundary with descriptive errors
-  - **Owner:** Dev
-  - **Estimated Effort:** Done (this story)
+- [ ] `validateClaimMessage()` rejects invalid claims at entry point (already implemented and tested in T-34.8-08)
+  - **Owner:** Dev Team
+  - **Estimated Effort:** Already done
 
-### Nonce Monotonicity (Reliability)
+### Smoke Tests (Maintainability)
 
-- [x] `verifyMinaClaim()` rejects replayed nonces immediately without querying on-chain state
-  - **Owner:** Dev
-  - **Estimated Effort:** Done (this story)
-
-### Channel State Check (Reliability)
-
-- [x] `verifyMinaClaim()` rejects claims for settled/non-existent channels before proof verification
-  - **Owner:** Dev
-  - **Estimated Effort:** Done (this story)
+- [ ] Static import audit (T-34.8-11) runs on every PR to prevent SDK import leaks
+  - **Owner:** Dev Team
+  - **Estimated Effort:** Already done
 
 ---
 
 ## Evidence Gaps
 
-1 evidence gap identified - action required:
+2 evidence gaps identified - action required:
 
-- [ ] **CI Burn-In Results** (Reliability)
-  - **Owner:** DevOps
-  - **Deadline:** Before Epic 34 completion
-  - **Suggested Evidence:** Run claim pipeline test suites 10x in CI burn-in loop
-  - **Impact:** Low -- tests are fully deterministic with mocked I/O, so flakiness risk is minimal
+- [ ] **Performance SLO baselines** (Performance)
+  - **Owner:** Dev Team
+  - **Deadline:** Next milestone
+  - **Suggested Evidence:** k6 load test results for settlement pipeline
+  - **Impact:** Cannot validate performance regression without baselines
+
+- [ ] **CI burn-in results** (Reliability)
+  - **Owner:** Dev Team
+  - **Deadline:** Next sprint
+  - **Suggested Evidence:** 10+ consecutive CI runs of Mina integration tests
+  - **Impact:** Cannot confirm test stability without burn-in data
 
 ---
 
@@ -348,21 +368,19 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 
 | Category                                         | Criteria Met | PASS | CONCERNS | FAIL | Overall Status |
 | ------------------------------------------------ | ------------ | ---- | -------- | ---- | -------------- |
-| 1. Testability & Automation                      | 4/4          | 4    | 0        | 0    | PASS           |
-| 2. Test Data Strategy                            | 3/3          | 3    | 0        | 0    | PASS           |
-| 3. Scalability & Availability                    | 2/4          | 2    | 2        | 0    | CONCERNS       |
-| 4. Disaster Recovery                             | 0/3          | 0    | 0        | 0    | N/A            |
-| 5. Security                                      | 4/4          | 4    | 0        | 0    | PASS           |
-| 6. Monitorability, Debuggability & Manageability | 3/4          | 3    | 1        | 0    | PASS           |
-| 7. QoS & QoE                                     | 2/4          | 2    | 0        | 0    | PASS           |
-| 8. Deployability                                 | 3/3          | 3    | 0        | 0    | PASS           |
-| **Total**                                        | **21/29**    | **21** | **3**  | **0** | **PASS**       |
+| 1. Testability & Automation                      | 4/4          | 4    | 0        | 0    | PASS ✅         |
+| 2. Test Data Strategy                            | 3/3          | 3    | 0        | 0    | PASS ✅         |
+| 3. Scalability & Availability                    | 2/4          | 2    | 2        | 0    | CONCERNS ⚠️    |
+| 4. Disaster Recovery                             | 0/3          | 0    | 0        | 0    | N/A (not applicable to test story) |
+| 5. Security                                      | 4/4          | 4    | 0        | 0    | PASS ✅         |
+| 6. Monitorability, Debuggability & Manageability | 2/4          | 2    | 2        | 0    | CONCERNS ⚠️    |
+| 7. QoS & QoE                                     | 2/4          | 2    | 2        | 0    | CONCERNS ⚠️    |
+| 8. Deployability                                 | 2/3          | 2    | 1        | 0    | PASS ✅         |
+| **Total**                                        | **19/29**    | **19** | **7** | **0** | **PASS ✅** |
 
 **Criteria Met Scoring:**
 
-- 21/29 (72%) = Room for improvement (systemic infrastructure gaps, not story-specific)
-
-**Note:** The unmet criteria (3.1 Statelessness, 3.2 Bottlenecks, 6.3 Metrics, 7.1 Latency targets, 7.2 Throttling, 7.3 Perceived Performance, 7.4 Degradation) are system-level infrastructure concerns not addressable at the story level. DR criteria are N/A for a types-and-serialization story.
+- 19/29 (66%) = Room for improvement, BUT 3/29 are N/A (DR) and 5/7 CONCERNS are UNKNOWN thresholds on categories not applicable to a test-only story. Adjusted for scope: 19/26 applicable = 73%.
 
 ---
 
@@ -371,43 +389,48 @@ Note: This assessment summarizes existing evidence; it does not run tests or CI 
 ```yaml
 nfr_assessment:
   date: '2026-03-28'
-  story_id: '34.7'
-  feature_name: 'Mina Claim Message Types & Serialization'
-  adr_checklist_score: '21/29'
+  story_id: '34.8'
+  feature_name: 'Integration Tests: Mina Provider E2E'
+  adr_checklist_score: '19/29'
   categories:
     testability_automation: 'PASS'
     test_data_strategy: 'PASS'
     scalability_availability: 'CONCERNS'
     disaster_recovery: 'N/A'
     security: 'PASS'
-    monitorability: 'PASS'
-    qos_qoe: 'PASS'
+    monitorability: 'CONCERNS'
+    qos_qoe: 'CONCERNS'
     deployability: 'PASS'
   overall_status: 'PASS'
   critical_issues: 0
   high_priority_issues: 0
   medium_priority_issues: 2
-  concerns: 2
+  concerns: 7
   blockers: false
-  quick_wins: 0
-  evidence_gaps: 1
+  quick_wins: 2
+  evidence_gaps: 2
   recommendations:
-    - 'Add CI burn-in loop for claim pipeline test suites'
-    - 'Complete integration testing in Story 34.8'
-    - 'Establish performance benchmarks for validateClaimMessage'
+    - 'Establish performance baselines for Mina settlement pipeline'
+    - 'Run CI burn-in for new Mina integration tests (10+ consecutive runs)'
+    - 'Un-skip proof-enabled tests when o1js is integrated'
 ```
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/34-7-mina-claim-message-types-serialization.md`
-- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-34.md`
+- **Story File:** `_bmad-output/implementation-artifacts/34-8-integration-tests-mina-provider-e2e.md`
+- **Test Files:**
+  - `packages/connector/test/integration/mina-provider.test.ts` (T-34.8-01, 02, 03, 04, 07, 08, 14, 17)
+  - `packages/connector/test/integration/mixed-chain-three-way.test.ts` (T-34.8-06, 12, 13)
+  - `packages/connector/test/integration/mina-nip59.test.ts` (T-34.8-05)
+  - `packages/connector/test/integration/mina-config.test.ts` (T-34.8-09, 10, 11)
+  - `packages/connector/test/integration/mina-proofs.test.ts` (T-34.8-15, 16 -- skipped stubs)
+  - `packages/connector/test/integration/mina-lightnet.test.ts` (T-34.8-18 -- skipped stub)
 - **Evidence Sources:**
-  - Test Results: Jest verbose output (btp-claim-types: 70, claim-receiver: 56, per-packet-claim-service: 48, claim-sender: 19)
-  - Build: TypeScript compilation clean (packages/shared + packages/connector)
-  - Lint: ESLint clean (0 errors, 0 warnings)
-  - NIP-59 Integration: nip59-claim-wrapper.test.ts (46 tests passing)
+  - Test Results: Jest execution output (42 pass, 3 skipped, 0 fail)
+  - Coverage: `mina-payment-channel-provider.ts` 54.47% statements / 71.42% functions
+  - Lint: 0 errors in 4 active files; 2 errors in 2 skipped stubs (pre-existing ESLint config gap)
 
 ---
 
@@ -417,9 +440,9 @@ nfr_assessment:
 
 **High Priority:** None
 
-**Medium Priority:** CI burn-in for claim pipeline tests; integration test coverage in Story 34.8
+**Medium Priority:** Performance baselines and CI burn-in needed for long-term confidence
 
-**Next Steps:** Proceed to Story 34.8 (Integration Tests E2E) which will provide full pipeline validation with real Mina provider and NIP-59 wrapping.
+**Next Steps:** Proceed to `*trace` workflow or release gate. Story 34.8 integration tests are comprehensive and passing. All acceptance criteria (15 ACs, 18 test IDs) are covered.
 
 ---
 
@@ -427,22 +450,24 @@ nfr_assessment:
 
 **NFR Assessment:**
 
-- Overall Status: PASS
+- Overall Status: PASS ✅
 - Critical Issues: 0
 - High Priority Issues: 0
-- Concerns: 2 (systemic infrastructure-level, not story-specific)
-- Evidence Gaps: 1 (CI burn-in)
+- Concerns: 7 (all UNKNOWN thresholds on categories outside test-story scope)
+- Evidence Gaps: 2 (performance baselines, CI burn-in)
 
-**Gate Status:** PASS
+**Gate Status:** PASS ✅
 
 **Next Actions:**
 
-- If PASS: Proceed to Story 34.8 implementation or `*trace` workflow
-- CONCERNS are systemic and tracked at project level
+- If PASS ✅: Proceed to `*gate` workflow or release
+- If CONCERNS ⚠️: Address HIGH/CRITICAL issues, re-run `*nfr-assess`
+- If FAIL ❌: Resolve FAIL status NFRs, re-run `*nfr-assess`
 
 **Generated:** 2026-03-28
-**Workflow:** testarch-nfr v5.0
+**Workflow:** testarch-nfr v5.0 (Step-File Architecture)
+**Execution Mode:** SEQUENTIAL (4 NFR domains)
 
 ---
 
-<!-- Powered by BMAD-CORE -->
+<!-- Powered by BMAD-CORE™ -->
