@@ -84,7 +84,7 @@ epics:
         status: done
       34.6:
         name: "NIP-59-Inspired Claim Wrapping for Transport Privacy"
-        status: backlog
+        status: done
       34.7:
         name: "Mina Claim Message Types & Serialization"
         status: backlog

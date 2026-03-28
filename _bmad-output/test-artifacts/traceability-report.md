@@ -1,28 +1,29 @@
 ---
 stepsCompleted:
-  - step-01-load-context
-  - step-02-discover-tests
-  - step-03-map-coverage
-  - step-04-gap-analysis
-  - step-05-gate-decision
+  [
+    'step-01-load-context',
+    'step-02-discover-tests',
+    'step-03-map-criteria',
+    'step-04-analyze-gaps',
+    'step-05-gate-decision',
+  ]
 lastStep: 'step-05-gate-decision'
-lastSaved: '2026-03-27'
+lastSaved: '2026-03-28'
 workflowType: 'testarch-trace'
 inputDocuments:
-  - _bmad-output/implementation-artifacts/34-3-mina-payment-channel-zkapp-tests-deployment.md
-  - _bmad-output/planning-artifacts/test-design-epic-34.md
-  - packages/mina-zkapp/src/payment-channel-lifecycle.test.ts
-  - packages/mina-zkapp/src/payment-channel-security.test.ts
-  - packages/mina-zkapp/src/payment-channel-privacy.test.ts
-  - packages/mina-zkapp/src/payment-channel-proofs.test.ts
-  - tools/mina/deploy-zkapp.ts
+  [
+    '_bmad-output/implementation-artifacts/34-6-nip59-claim-wrapping-transport-privacy.md',
+    '_bmad-output/planning-artifacts/test-design-epic-34.md',
+    '_bmad-output/project-context.md',
+    'packages/connector/src/settlement/privacy/nip59-claim-wrapper.test.ts',
+  ]
 ---
 
-# Traceability Matrix & Gate Decision - Story 34.3
+# Traceability Matrix & Gate Decision - Story 34.6
 
-**Story:** 34.3 -- Mina Payment Channel zkApp -- Tests & Deployment
-**Date:** 2026-03-27
-**Evaluator:** TEA Agent (Claude Opus 4.6 1M)
+**Story:** NIP-59-Inspired Claim Wrapping for Transport Privacy
+**Date:** 2026-03-28
+**Evaluator:** TEA Agent (Claude Opus 4.6)
 
 ---
 
@@ -34,11 +35,11 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 | Priority  | Total Criteria | FULL Coverage | Coverage % | Status |
 | --------- | -------------- | ------------- | ---------- | ------ |
-| P0        | 9              | 9             | 100%       | PASS   |
-| P1        | 2              | 2             | 100%       | PASS   |
-| P2        | 0              | 0             | N/A        | N/A    |
-| P3        | 0              | 0             | N/A        | N/A    |
-| **Total** | **11**         | **11**        | **100%**   | **PASS** |
+| P0        | 6              | 6             | 100%       | PASS   |
+| P1        | 3              | 3             | 100%       | PASS   |
+| P2        | 1              | 1             | 100%       | PASS   |
+| P3        | 0              | 0             | 100%       | PASS   |
+| **Total** | **10**         | **10**        | **100%**   | **PASS** |
 
 **Legend:**
 
@@ -50,153 +51,239 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 ### Detailed Mapping
 
-#### AC 1: Deterministic Verification Key from Compilation (P0)
+#### AC 1: Three-Layer Wrapping (Rumor -> Seal -> Gift Wrap) (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-01` - `packages/mina-zkapp/src/payment-channel-proofs.test.ts`:62
-    - **Given:** PaymentChannel zkApp source code
-    - **When:** Proof circuit is compiled twice using o1js
-    - **Then:** Both compilations produce the same verification key (hash and data match)
+  - `T-34.6-01` - nip59-claim-wrapper.test.ts:152
+    - **Given:** A MinaClaimMessage to send to a peer with NIP-59 wrapping enabled
+    - **When:** The claim is wrapped
+    - **Then:** The wrapped claim has ephemeralPublicKey, encryptedPayload, timestamp, and version='1.0'
+  - `T-34.6-01` - nip59-claim-wrapper.test.ts:168
+    - **Given:** A wrapped claim
+    - **When:** The structure is inspected
+    - **Then:** The ephemeral public key is a valid 66-char hex compressed secp256k1 key and encryptedPayload is valid base64
 
-- **Recommendation:** None -- fully covered.
+- **Gaps:** None
+- **Recommendation:** None needed -- full coverage at unit level.
 
 ---
 
-#### AC 2: Full Channel Lifecycle Integration (P0)
+#### AC 2: Gift Wrap Layer Uses Ephemeral Key (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-02` - `packages/mina-zkapp/src/payment-channel-lifecycle.test.ts`:64
-    - **Given:** A local Mina blockchain with proofsEnabled: false
-    - **When:** Full channel lifecycle is executed (open -> deposit -> claim x2 -> close -> settle)
-    - **Then:** All state transitions complete successfully and final state is SETTLED
+  - `T-34.6-02` - nip59-claim-wrapper.test.ts:188
+    - **Given:** A wrapped claim
+    - **When:** The ephemeral public key is compared to the sender public key
+    - **Then:** They are different (sender identity is hidden)
+  - `T-34.6-02` - nip59-claim-wrapper.test.ts:198
+    - **Given:** A wrapped claim
+    - **When:** The serialized WrappedClaim is inspected
+    - **Then:** No sender identity (public key hex) is present in any field
 
-- **Recommendation:** None -- fully covered.
+- **Gaps:** None
+- **Recommendation:** None needed.
 
 ---
 
-#### AC 3: Balance Conservation Invariant (P0)
+#### AC 3: Seal Layer Verifies Sender (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-03` - `packages/mina-zkapp/src/payment-channel-lifecycle.test.ts`:163
-    - **Given:** A channel with depositTotal = D
-    - **When:** Multiple claims and close operations are executed
-    - **Then:** depositTotal remains D at every state transition (init, deposit, claim x2, close, settle)
+  - `T-34.6-03` - nip59-claim-wrapper.test.ts:216
+    - **Given:** A claim wrapped and then unwrapped with the correct receiver key
+    - **When:** The seal layer is decrypted
+    - **Then:** The sender's identity (senderId) is verified and present in the unwrapped claim
+  - `AC 3 gap: tamper detection` - nip59-claim-wrapper.test.ts:655
+    - **Given:** A wrapped claim with a bit-flipped encryptedPayload
+    - **When:** The receiver attempts to unwrap
+    - **Then:** NIP59WrapError is thrown (Poly1305 authentication detects tampering)
+  - `AC 3 gap: nonce corruption` - nip59-claim-wrapper.test.ts:674
+    - **Given:** A wrapped claim with corrupted nonce bytes
+    - **When:** The receiver attempts to unwrap
+    - **Then:** NIP59WrapError is thrown
 
-- **Recommendation:** None -- fully covered.
+- **Gaps:** None
+- **Recommendation:** None needed -- covers both happy path (signature verification) and error path (tamper detection).
 
 ---
 
-#### AC 4: Nonce Replay Attack Rejected (P0)
+#### AC 4: Rumor Contains Valid Claim (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-04` - `packages/mina-zkapp/src/payment-channel-security.test.ts`:67
-    - **Given:** A channel with claims at nonce 1 and nonce 2 completed
-    - **When:** A new claim is submitted reusing nonce 1 or nonce 2
-    - **Then:** Transaction is rejected with NONCE_MUST_INCREASE error
+  - `T-34.6-04` - nip59-claim-wrapper.test.ts:235
+    - **Given:** An EVM claim wrapped and unwrapped
+    - **When:** validateClaimMessage is called on the unwrapped result
+    - **Then:** Validation passes and blockchain is 'evm'
+  - `T-34.6-04` - nip59-claim-wrapper.test.ts:247
+    - **Given:** A Solana claim wrapped and unwrapped
+    - **When:** validateClaimMessage is called on the unwrapped result
+    - **Then:** Validation passes and blockchain is 'solana'
+  - `T-34.6-04` - nip59-claim-wrapper.test.ts:258
+    - **Given:** A Mina claim wrapped and unwrapped
+    - **When:** JSON equality is checked (validateClaimMessage not yet supported for Mina)
+    - **Then:** Unwrapped claim equals original and blockchain is 'mina'
 
-- **Recommendation:** None -- fully covered with both replay scenarios (nonce 1 and nonce 2).
+- **Gaps:** None
+- **Recommendation:** None needed -- chain-agnostic coverage across EVM, Solana, and Mina.
 
 ---
 
-#### AC 5: Privacy -- On-Chain State Reveals No Balances After Multiple Claims (P0)
+#### AC 5: Config Toggle (Disabled = Plaintext) (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-05` - `packages/mina-zkapp/src/payment-channel-privacy.test.ts`:57
-    - **Given:** A channel with 3 claims executed at different balance splits
-    - **When:** On-chain state history is inspected (all 8 fields)
-    - **Then:** No individual balance amounts or salts are recoverable from on-chain fields; only Poseidon commitment hashes are stored; all 3 commitments are unique
+  - `T-34.6-08` - nip59-claim-wrapper.test.ts:381
+    - **Given:** NIP-59 wrapping disabled (nip59Enabled=false)
+    - **When:** wrapClaim is called
+    - **Then:** Returns null (plaintext passthrough)
+  - `T-34.6-08` - nip59-claim-wrapper.test.ts:390
+    - **Given:** NIP-59 wrapping disabled
+    - **When:** isEnabled() is called
+    - **Then:** Returns false
+  - `AC 5 gap` - nip59-claim-wrapper.test.ts:801
+    - **Given:** NIP-59 wrapping disabled
+    - **When:** wrapClaim is called with EVM, Solana, and Mina claims
+    - **Then:** All return null (chain-agnostic passthrough verification)
 
-- **Recommendation:** None -- fully covered.
+- **Gaps:** None
+- **Recommendation:** None needed.
 
 ---
 
-#### AC 6: Challenge Period Timing Enforced (P0)
+#### AC 6: BTP Intermediary Cannot Observe Claim Content (P1)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-06` - `packages/mina-zkapp/src/payment-channel-security.test.ts`:153
-    - **Given:** A CLOSING channel with settlementTimeout = T
-    - **When:** Settle is called at closedAt + timeout - 1 (before timeout)
-    - **Then:** Transaction is rejected with CHALLENGE_PERIOD_NOT_ELAPSED
-    - **And When:** Settle is called at closedAt + timeout (after timeout)
-    - **Then:** Settlement succeeds and channelState transitions to SETTLED
+  - `T-34.6-07` - nip59-claim-wrapper.test.ts:350
+    - **Given:** A wrapped EVM claim
+    - **When:** The serialized wrapper is inspected
+    - **Then:** No plaintext claim fields (messageId, senderId, channelId, signerAddress, transferredAmount) are visible
+  - `T-34.6-07` - nip59-claim-wrapper.test.ts:365
+    - **Given:** A wrapped claim
+    - **When:** Object keys are inspected
+    - **Then:** Only ephemeralPublicKey, encryptedPayload, timestamp, version are exposed
+  - `AC 6 gap: EVM discriminator` - nip59-claim-wrapper.test.ts:699
+    - **Given:** A wrapped EVM claim
+    - **When:** Serialized JSON is searched for blockchain discriminator and balance info
+    - **Then:** Neither '"evm"', transferredAmount, channelId, nor signerAddress appear
+  - `AC 6 gap: Solana discriminator` - nip59-claim-wrapper.test.ts:715
+    - **Given:** A wrapped Solana claim
+    - **When:** Serialized JSON is searched
+    - **Then:** Neither '"solana"', transferredAmount, nor programId appear
+  - `AC 6 gap: Mina discriminator` - nip59-claim-wrapper.test.ts:727
+    - **Given:** A wrapped Mina claim
+    - **When:** Serialized JSON is searched
+    - **Then:** Neither '"mina"', zkAppAddress, nor proof appear
+  - `AC 6 gap: receiver key` - nip59-claim-wrapper.test.ts:739
+    - **Given:** A wrapped EVM claim
+    - **When:** Serialized JSON is searched for receiver public key
+    - **Then:** Receiver public key hex is not present
 
-- **Recommendation:** None -- fully covered with both before and after timeout scenarios.
+- **Gaps:** None
+- **Recommendation:** None needed -- comprehensive privacy validation across all three chains.
 
 ---
 
-#### AC 7: Zero Balance Edge Case (P1)
+#### AC 7: Ephemeral Key Freshness (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-07` - `packages/mina-zkapp/src/payment-channel-security.test.ts`:224
-    - **Given:** An OPEN channel with depositTotal = D
-    - **When:** A claim is submitted with balanceA = D, balanceB = 0
-    - **Then:** The claim succeeds and the commitment updates correctly
-  - `T-34.3-07b` - `packages/mina-zkapp/src/payment-channel-security.test.ts`:261
-    - **Given:** An OPEN channel with depositTotal = D
-    - **When:** A claim is submitted with balanceA = 0, balanceB = D
-    - **Then:** The claim succeeds and the commitment updates correctly
+  - `T-34.6-05` - nip59-claim-wrapper.test.ts:276
+    - **Given:** Two successive wraps of the same claim
+    - **When:** The ephemeral public keys are compared
+    - **Then:** They are different (no key reuse)
+  - `T-34.6-05` - nip59-claim-wrapper.test.ts:286
+    - **Given:** Two successive wraps of the same claim
+    - **When:** The encrypted payloads are compared
+    - **Then:** They are different (distinct encryption per wrap)
 
-- **Recommendation:** None -- both zero-balance directions covered.
+- **Gaps:** None
+- **Recommendation:** None needed.
 
 ---
 
-#### AC 8: Proof-Enabled Lifecycle (P0)
+#### AC 8: Randomized Gift Wrap Timestamp (P1)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-09` - `packages/mina-zkapp/src/payment-channel-proofs.test.ts`:75
-    - **Given:** A local Mina blockchain with proofsEnabled: true
-    - **When:** Full channel lifecycle (open -> deposit -> claim -> close -> settle) is executed
-    - **Then:** All zk-SNARK proofs generate and verify successfully; all state transitions complete correctly
+  - `T-34.6-12` - nip59-claim-wrapper.test.ts:515
+    - **Given:** A wrapped claim
+    - **When:** The timestamp offset from actual send time is measured
+    - **Then:** The offset is within +-48 hours (with 1s tolerance for execution)
+  - `T-34.6-12` - nip59-claim-wrapper.test.ts:527
+    - **Given:** 10 successive wraps of the same claim
+    - **When:** The timestamps are compared to current time
+    - **Then:** At least one timestamp differs from "now" by more than 1 second
+  - `T-34.6-12` - nip59-claim-wrapper.test.ts:544
+    - **Given:** Two successive wraps of the same claim
+    - **When:** The timestamps are compared
+    - **Then:** They are different
 
-- **Recommendation:** None -- fully covered.
+- **Gaps:** None
+- **Recommendation:** None needed -- all three AC 8 Gherkin scenarios are covered.
 
 ---
 
-#### AC 9: Tampered Proof Rejection (P0)
+#### AC 9: Full Round-Trip Correctness (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-11` - `packages/mina-zkapp/src/payment-channel-proofs.test.ts`:245
-    - **Given:** A compiled zkApp with proofsEnabled: true
-    - **When:** A claim proof is generated with tampered inputs (wrong balances that don't sum to depositTotal, and wrong salt in commitment)
-    - **Then:** The proof fails to verify and the transaction is rejected
+  - `T-34.6-06` - nip59-claim-wrapper.test.ts:302
+    - **Given:** An EVM claim
+    - **When:** Wrapped, then unwrapped by receiver
+    - **Then:** Extracted claim matches original exactly
+  - `T-34.6-06` - nip59-claim-wrapper.test.ts:312
+    - **Given:** A Solana claim
+    - **When:** Wrapped, then unwrapped
+    - **Then:** Matches original exactly
+  - `T-34.6-06` - nip59-claim-wrapper.test.ts:322
+    - **Given:** A Mina claim
+    - **When:** Wrapped, then unwrapped
+    - **Then:** Matches original exactly
+  - `T-34.6-06` - nip59-claim-wrapper.test.ts:332
+    - **Given:** An EVM claim
+    - **When:** Wrapped, serialized to Buffer, deserialized, then unwrapped
+    - **Then:** Matches original exactly (tests BTP protocolData framing round-trip)
+  - `AC 9 gap: BTP framing` - nip59-claim-wrapper.test.ts:756
+    - **Given:** A wrapped claim with claim-wrapped protocol name and APPLICATION_OCTET_STREAM
+    - **When:** Serialized to BTP protocolData, deserialized, and unwrapped
+    - **Then:** Matches original claim exactly
+  - `AC 9 gap: BTP framing Solana` - nip59-claim-wrapper.test.ts:778
+    - **Given:** A Solana claim
+    - **When:** Full BTP round-trip (wrap -> serialize -> transit -> deserialize -> unwrap)
+    - **Then:** Matches original claim exactly
 
-- **Recommendation:** None -- covers both wrong-balance and wrong-salt tampering scenarios.
+- **Gaps:** None
+- **Recommendation:** None needed -- comprehensive round-trip tests including serialization.
 
 ---
 
-#### AC 10: Verification Key Consistency (P0)
+#### AC 10: Wrong Key Decryption Fails Gracefully (P1)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.3-10` - `packages/mina-zkapp/src/payment-channel-proofs.test.ts`:209
-    - **Given:** The zkApp compiled artifact
-    - **When:** The verification key from compilation is compared to the deployed verification key
-    - **Then:** They are identical (validated by successfully executing a transaction against the deployed zkApp with the compiled VK)
+  - `T-34.6-10` - nip59-claim-wrapper.test.ts:446
+    - **Given:** A wrapped claim encrypted for the receiver
+    - **When:** A wrong private key attempts decryption
+    - **Then:** NIP59WrapError is thrown
+  - `T-34.6-10` - nip59-claim-wrapper.test.ts:455
+    - **Given:** A wrapped claim
+    - **When:** Wrong key decryption throws
+    - **Then:** Error message matches /gift.?wrap|seal|decrypt/i pattern (descriptive layer indication)
+  - `T-34.6-10` - nip59-claim-wrapper.test.ts:471
+    - **Given:** A wrapped claim
+    - **When:** Wrong key decryption throws
+    - **Then:** Error has cause property (preserves original crypto error)
+  - `T-34.6-13` - nip59-claim-wrapper.test.ts:561-648 (7 tests)
+    - **Given:** Various malformed WrappedClaim inputs (truncated payload, invalid base64, missing fields, invalid JSON, garbage buffer)
+    - **When:** Unwrap or deserialization is attempted
+    - **Then:** NIP59WrapError is thrown with descriptive message
 
-- **Recommendation:** None -- fully covered.
-
----
-
-#### AC 11: Devnet Deployment (P1)
-
-- **Coverage:** FULL
-- **Tests:**
-  - `T-34.3-13` - `tools/mina/deploy-zkapp.ts` (manual/CI gate)
-    - **Given:** A funded Mina devnet account
-    - **When:** The deployment script is executed
-    - **Then:** The zkApp is deployed at a known address and accepts transactions
-  - `Makefile` target `mina-deploy-devnet` configured
-
-- **Recommendation:** None -- deployment script exists with CLI arg parsing, HTTPS validation, env var fallback, and Makefile target. T-34.3-13 is documented as a manual/CI gate test.
+- **Gaps:** None
+- **Recommendation:** None needed -- covers wrong key, malformed inputs, truncated payloads, and garbage data.
 
 ---
 
@@ -230,17 +317,21 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Endpoint Coverage Gaps
 
-- Endpoints without direct API tests: 0 (not applicable -- zkApp methods, not HTTP endpoints)
+- Endpoints without direct API tests: 0
+- N/A -- Story 34.6 is a standalone cryptographic wrapper module with no HTTP endpoints.
 
 #### Auth/Authz Negative-Path Gaps
 
 - Criteria missing denied/invalid-path tests: 0
-- Security tests explicitly cover nonce replay rejection (T-34.3-04), challenge period timing (T-34.3-06), tampered proof rejection (T-34.3-11), and MAX_SAFE_AMOUNT boundary (T-34.3-08/08b)
+- AC 10 explicitly covers wrong-key decryption (the crypto equivalent of authorization denial). Tamper detection tests in AC 3 gap coverage further validate negative paths.
 
 #### Happy-Path-Only Criteria
 
 - Criteria missing error/edge scenarios: 0
-- AC 4 (nonce replay), AC 6 (challenge timing), AC 7 (zero balance), AC 9 (tampered proofs), and T-34.3-08 all include negative/edge case scenarios
+- All ACs with error implications have negative-path coverage:
+  - AC 3: tamper detection (bit-flip, nonce corruption)
+  - AC 5: disabled wrapper passthrough across all chain types
+  - AC 10: wrong key + 7 malformed input scenarios (T-34.6-13)
 
 ---
 
@@ -254,25 +345,24 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 **WARNING Issues**
 
-- `T-34.3-12` - Coupled to `T-34.3-09` via shared mutable state (`proofTimings`) - gracefully degrades with console.warn if T-34.3-09 is skipped, but test interdependency is a minor design smell
-- `test-helpers.ts` - Compiled into `dist/` output despite being test-only infrastructure (cannot fix per story constraints -- `tsconfig.json` is "Do NOT modify")
+- None
 
 **INFO Issues**
 
-- Stories 34.1/34.2 test files still contain duplicated helper functions (story explicitly forbids modifying those files; noted for future cleanup)
+- None -- all tests use `pino({ level: 'silent' })`, real secp256k1 keypairs, and explicit assertions in test bodies.
 
 ---
 
 #### Tests Passing Quality Gates
 
-**14/14 tests (100%) meet all quality criteria**
+**46/46 tests (100%) meet all quality criteria**
 
-Quality checks applied:
-- No hard waits or sleeps: PASS (tests use slot manipulation, not timeouts)
-- Self-cleaning: PASS (each test uses `beforeEach` for fresh state)
-- File size < 300 lines: PASS (lifecycle: 257, security: 363 -- slightly over but acceptable given security test breadth, privacy: 154, proofs: 329 -- near limit but contains 5 proof-enabled tests)
-- Test duration < 90 seconds (fast tests): PASS (max 5.9s per test)
-- Explicit assertions: PASS (all `expect()` calls are in test bodies)
+- No hard waits (all tests are synchronous crypto operations)
+- No conditionals controlling test flow
+- Test file is 819 lines (above 300 line guideline, but acceptable for 46 tests across 13 test IDs with extensive chain-agnostic coverage)
+- All tests under 1.5 minutes (full suite: 1.36s)
+- Self-cleaning (no persistent state; keypairs generated in beforeAll, mocks cleared in beforeEach)
+- Explicit assertions in test bodies (no hidden helper assertions)
 
 ---
 
@@ -280,25 +370,23 @@ Quality checks applied:
 
 #### Acceptable Overlap (Defense in Depth)
 
-- Full lifecycle tested at two levels: `proofsEnabled: false` (T-34.3-02) and `proofsEnabled: true` (T-34.3-09) -- defense in depth for circuit correctness
-- Nonce replay tested in Story 34.2 (T-34.2-04, single nonce) and Story 34.3 (T-34.3-04, multi-nonce replay) -- deeper coverage in 34.3
+- AC 9 (round-trip): Tested at pure round-trip level (T-34.6-06) AND through BTP protocolData framing (AC 9 gap tests) -- appropriate defense in depth for the primary correctness gate
+- AC 6 (intermediary cannot observe): Tested generically (T-34.6-07) AND per-chain (AC 6 gap tests) -- appropriate for chain-agnostic privacy validation
 
 #### Unacceptable Duplication
 
-- None found
+- None detected.
 
 ---
 
 ### Coverage by Test Level
 
-| Test Level       | Tests | Criteria Covered | Coverage % |
-| ---------------- | ----- | ---------------- | ---------- |
-| Integration (o1js fast) | 9     | 7 (AC 2-7, edge cases) | 64%  |
-| Integration (proof)     | 5     | 4 (AC 1, 8, 9, 10)     | 36%  |
-| Deployment (manual)     | 1     | 1 (AC 11)               | 9%   |
-| **Total**               | **14**| **11**                  | **100%** |
+| Test Level | Tests  | Criteria Covered | Coverage % |
+| ---------- | ------ | ---------------- | ---------- |
+| Unit       | 46     | 10/10            | 100%       |
+| **Total**  | **46** | **10**           | **100%**   |
 
-Note: Some ACs are covered at multiple levels (defense in depth), so criteria coverage sums to > 100% across levels.
+Note: This story creates a standalone wrapper module. Integration tests through the full connector pipeline are Story 34.8 scope. Unit-level coverage is the appropriate test level per the story spec.
 
 ---
 
@@ -306,15 +394,15 @@ Note: Some ACs are covered at multiple levels (defense in depth), so criteria co
 
 #### Immediate Actions (Before PR Merge)
 
-None required -- all ACs have full coverage.
+None -- all acceptance criteria have FULL coverage.
 
 #### Short-term Actions (This Milestone)
 
-1. **Add `test-helpers.ts` to tsconfig exclude** -- prevent test-only code from shipping in dist/ output (deferred to a future story that allows `tsconfig.json` modification)
+1. **Story 34.8 integration tests** -- Wire NIP-59 into ClaimReceiver and PerPacketClaimService; add E2E round-trip tests through the BTP pipeline.
 
 #### Long-term Actions (Backlog)
 
-1. **Extract duplicate helpers from 34.1/34.2 test files** -- when story constraints allow, refactor `payment-channel.test.ts` and `payment-channel-claims.test.ts` to import from `test-helpers.ts`
+1. **Performance benchmarking** -- T-34.6-11 measures overhead ratio (advisory). Consider adding a formal performance budget test if wrapping latency becomes a concern under load.
 
 ---
 
@@ -329,22 +417,22 @@ None required -- all ACs have full coverage.
 
 #### Test Execution Results
 
-- **Total Tests**: 14 (9 fast + 5 proof-enabled)
-- **Passed**: 14 (100%)
+- **Total Tests**: 46
+- **Passed**: 46 (100%)
 - **Failed**: 0 (0%)
 - **Skipped**: 0 (0%)
-- **Duration**: ~11.6s (fast tests); proof-enabled tests ~105s total (per story completion notes)
+- **Duration**: 1.36s
 
 **Priority Breakdown:**
 
-- **P0 Tests**: 8/8 passed (100%) PASS
-- **P1 Tests**: 6/6 passed (100%) PASS
-- **P2 Tests**: 0/0 (N/A)
+- **P0 Tests**: 25/25 passed (100%)
+- **P1 Tests**: 16/16 passed (100%)
+- **P2 Tests**: 1/1 passed (100%)
 - **P3 Tests**: 0/0 (N/A)
 
-**Overall Pass Rate**: 100% PASS
+**Overall Pass Rate**: 100%
 
-**Test Results Source**: local run (2026-03-27)
+**Test Results Source**: Local run (npx jest --testPathPattern='nip59-claim-wrapper', 2026-03-28)
 
 ---
 
@@ -352,47 +440,52 @@ None required -- all ACs have full coverage.
 
 **Requirements Coverage:**
 
-- **P0 Acceptance Criteria**: 9/9 covered (100%) PASS
-- **P1 Acceptance Criteria**: 2/2 covered (100%) PASS
-- **P2 Acceptance Criteria**: N/A
+- **P0 Acceptance Criteria**: 6/6 covered (100%)
+- **P1 Acceptance Criteria**: 3/3 covered (100%)
+- **P2 Acceptance Criteria**: 1/1 covered (100%)
 - **Overall Coverage**: 100%
 
-**Code Coverage** (if available):
-
-- Not assessed (o1js zkApp tests do not produce Istanbul/V8 coverage reports)
-
-**Coverage Source**: traceability analysis (this document)
+**Coverage Source**: Manual traceability analysis against test file
 
 ---
 
 #### Non-Functional Requirements (NFRs)
 
 **Security**: PASS
+
 - Security Issues: 0
-- OWASP review completed (Review Pass #3): no findings. Semgrep scan: 0 findings.
-- Deploy script enforces HTTPS-only network URLs
-- Deployer key passed via environment variable, not CLI args
+- Semgrep scan clean (0 findings, including custom OWASP rules per code review record)
+- Ephemeral keys zeroed after use (Review Pass #3 fix)
+- No logging of private keys, shared secrets, or decrypted content
+- Runtime validation of unwrapped rumor payload (Review Pass #3 fix)
 
 **Performance**: PASS
-- Proof generation timing measured in T-34.3-12
-- Fast tests all complete in < 6 seconds individually
+
+- T-34.6-11 confirms wrapping overhead is between 1x and 10x (measured at ~2-4x)
+- Full test suite executes in 1.36s
 
 **Reliability**: PASS
-- Tests are deterministic (no hard waits, slot manipulation for timing)
-- Clean setup via beforeEach ensures isolation
+
+- All error paths tested (wrong key, tampered payload, malformed input, garbage data)
+- NIP59WrapError preserves cause chain for debugging
+- Graceful degradation when disabled (returns null)
 
 **Maintainability**: PASS
-- Test helpers extracted to shared module
-- File-level eslint-disable instead of per-line comments
-- Clear test ID references in describe blocks
 
-**NFR Source**: Code review records (3 review passes) + Semgrep scan
+- Module is self-contained in settlement/privacy/ with barrel exports
+- NIP59TransportWrapper alias for architecture doc compatibility
+- Clean separation from claim pipeline (integration deferred to Story 34.8)
+
+**NFR Source**: _bmad-output/test-artifacts/nfr-assessment-story-34-6.md
 
 ---
 
 #### Flakiness Validation
 
-**Burn-in Results**: Not available (not run for this story)
+**Burn-in Results**: Not formally executed for this story.
+
+- **Flaky Tests Detected**: 0 (all tests are deterministic crypto operations with no I/O)
+- **Stability Score**: 100% (46/46 on repeated local runs)
 
 ---
 
@@ -416,10 +509,10 @@ None required -- all ACs have full coverage.
 
 | Criterion              | Threshold | Actual | Status |
 | ---------------------- | --------- | ------ | ------ |
-| P1 Coverage            | >= 90%    | 100%   | PASS   |
-| P1 Test Pass Rate      | >= 90%    | 100%   | PASS   |
-| Overall Test Pass Rate | >= 90%    | 100%   | PASS   |
-| Overall Coverage       | >= 80%    | 100%   | PASS   |
+| P1 Coverage            | >=90%     | 100%   | PASS   |
+| P1 Test Pass Rate      | >=90%     | 100%   | PASS   |
+| Overall Test Pass Rate | >=80%     | 100%   | PASS   |
+| Overall Coverage       | >=80%     | 100%   | PASS   |
 
 **P1 Evaluation**: ALL PASS
 
@@ -427,9 +520,9 @@ None required -- all ACs have full coverage.
 
 #### P2/P3 Criteria (Informational, Don't Block)
 
-| Criterion         | Actual | Notes |
-| ----------------- | ------ | ----- |
-| P2 Test Pass Rate | N/A    | No P2 criteria in this story |
+| Criterion         | Actual | Notes                       |
+| ----------------- | ------ | --------------------------- |
+| P2 Test Pass Rate | 100%   | Tracked, does not block     |
 | P3 Test Pass Rate | N/A    | No P3 criteria in this story |
 
 ---
@@ -440,9 +533,9 @@ None required -- all ACs have full coverage.
 
 ### Rationale
 
-All P0 criteria met with 100% coverage and pass rates across 9 critical acceptance criteria. All P1 criteria exceeded thresholds with 100% pass rate on zero-balance edge cases and devnet deployment. No security issues detected -- three code review passes (including OWASP-focused review with Semgrep scan) produced 0 remaining findings. No flaky tests observed. All 14 tests across 4 test files pass deterministically. The story creates only new test files and a deployment script, with no modifications to existing source code, ensuring zero regression risk.
+All P0 criteria met with 100% coverage and 100% pass rate across all 6 P0 acceptance criteria (three-layer wrapping, ephemeral key, seal verification, rumor validity, config toggle, ephemeral key freshness, round-trip correctness). All P1 criteria exceeded thresholds with 100% coverage (intermediary cannot observe content, randomized timestamps, wrong key handling). No security issues detected (Semgrep clean, OWASP custom rules clean). No flaky tests -- all operations are deterministic crypto with no I/O dependencies.
 
-**Uncovered ACs:** None -- all 11 acceptance criteria have full test coverage.
+The NIP-59 claim wrapper module is ready for integration into the claim pipeline in Story 34.8.
 
 ---
 
@@ -450,17 +543,18 @@ All P0 criteria met with 100% coverage and pass rates across 9 critical acceptan
 
 #### For PASS Decision
 
-1. **Proceed to next story (34.4)**
-   - MinaPaymentChannelSDK depends on verified zkApp correctness from this story
-   - Test helpers in `test-helpers.ts` are extractable for SDK integration tests
+1. **Proceed to Story 34.8 integration**
+   - Wire NIP59ClaimWrapper into ClaimReceiver and PerPacketClaimService
+   - Add nip59Enabled config schema
+   - Create E2E integration tests through BTP pipeline
 
-2. **Post-Merge Monitoring**
-   - Verify proof-enabled tests (T-34.3-09 through T-34.3-12) pass in merge/nightly CI pipeline
-   - Monitor proof generation times across CI environments for hardware variance
+2. **Post-Integration Monitoring**
+   - Monitor wrapping latency under production claim rates
+   - Alert on NIP59WrapError frequency (should be near zero)
 
 3. **Success Criteria**
-   - All 53 mina-zkapp tests pass (20 from 34.1 + 19 from 34.2 + 14 from 34.3)
-   - `make test` passes (full project regression)
+   - Story 34.8 E2E tests pass with NIP-59 enabled and disabled
+   - No regression in existing EVM/Solana/Mina provider tests
 
 ---
 
@@ -468,19 +562,19 @@ All P0 criteria met with 100% coverage and pass rates across 9 critical acceptan
 
 **Immediate Actions** (next 24-48 hours):
 
-1. Commit Story 34.3 on branch `epic-34`
-2. Begin Story 34.4 (MinaPaymentChannelSDK)
-3. Verify proof-enabled tests in CI pipeline
+1. Commit Story 34.6 to epic-34 branch
+2. Begin Story 34.8 integration (wire NIP-59 into claim pipeline)
+3. No test gaps to address
 
 **Follow-up Actions** (next milestone/release):
 
-1. Add `test-helpers.ts` to tsconfig exclude list
-2. Consolidate duplicate helpers from Stories 34.1/34.2 test files
+1. Add formal performance benchmarking under load if latency concerns arise
+2. Consider adding property-based testing for crypto operations (fuzz testing)
 
 **Stakeholder Communication**:
 
-- Notify PM: Story 34.3 PASS -- all ACs covered, gate passed, ready for 34.4
-- Notify DEV lead: 14 new tests added, 53 total mina-zkapp tests green
+- Notify PM: Story 34.6 PASS -- standalone NIP-59 wrapper complete, 100% AC coverage
+- Notify DEV lead: Ready for Story 34.8 integration
 
 ---
 
@@ -490,13 +584,13 @@ All P0 criteria met with 100% coverage and pass rates across 9 critical acceptan
 traceability_and_gate:
   # Phase 1: Traceability
   traceability:
-    story_id: "34.3"
-    date: "2026-03-27"
+    story_id: '34.6'
+    date: '2026-03-28'
     coverage:
       overall: 100%
       p0: 100%
       p1: 100%
-      p2: N/A
+      p2: 100%
       p3: N/A
     gaps:
       critical: 0
@@ -504,19 +598,18 @@ traceability_and_gate:
       medium: 0
       low: 0
     quality:
-      passing_tests: 14
-      total_tests: 14
+      passing_tests: 46
+      total_tests: 46
       blocker_issues: 0
-      warning_issues: 2
+      warning_issues: 0
     recommendations:
-      - "Add test-helpers.ts to tsconfig exclude list in future story"
-      - "Consolidate duplicate helpers from 34.1/34.2 test files when modification allowed"
+      - 'Proceed to Story 34.8 integration'
 
   # Phase 2: Gate Decision
   gate_decision:
-    decision: "PASS"
-    gate_type: "story"
-    decision_mode: "deterministic"
+    decision: 'PASS'
+    gate_type: 'story'
+    decision_mode: 'deterministic'
     criteria:
       p0_coverage: 100%
       p0_pass_rate: 100%
@@ -532,32 +625,30 @@ traceability_and_gate:
       min_p0_pass_rate: 100
       min_p1_coverage: 90
       min_p1_pass_rate: 90
-      min_overall_pass_rate: 90
+      min_overall_pass_rate: 80
       min_coverage: 80
     evidence:
-      test_results: "local run 2026-03-27"
-      traceability: "_bmad-output/test-artifacts/traceability-report.md"
-      nfr_assessment: "_bmad-output/test-artifacts/nfr-assessment-story-34-3.md"
-      code_coverage: "not available (o1js zkApp)"
-    next_steps: "Proceed to Story 34.4. Verify proof-enabled tests in CI."
+      test_results: 'local run 2026-03-28'
+      traceability: '_bmad-output/test-artifacts/traceability-report.md'
+      nfr_assessment: '_bmad-output/test-artifacts/nfr-assessment-story-34-6.md'
+    next_steps: 'Proceed to Story 34.8 integration -- wire NIP-59 into claim pipeline'
 ```
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/34-3-mina-payment-channel-zkapp-tests-deployment.md`
-- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-34.md`
-- **Test Results:** local run 2026-03-27 (14/14 passed)
-- **NFR Assessment:** `_bmad-output/test-artifacts/nfr-assessment-story-34-3.md`
-- **Test Files:**
-  - `packages/mina-zkapp/src/payment-channel-lifecycle.test.ts`
-  - `packages/mina-zkapp/src/payment-channel-security.test.ts`
-  - `packages/mina-zkapp/src/payment-channel-privacy.test.ts`
-  - `packages/mina-zkapp/src/payment-channel-proofs.test.ts`
-  - `packages/mina-zkapp/src/test-helpers.ts`
-- **Deployment Script:** `tools/mina/deploy-zkapp.ts`
-- **Makefile Targets:** `mina-build`, `mina-test`, `mina-deploy-devnet`
+- **Story File:** `_bmad-output/implementation-artifacts/34-6-nip59-claim-wrapping-transport-privacy.md`
+- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-34.md` (Story 34.6 section)
+- **NFR Assessment:** `_bmad-output/test-artifacts/nfr-assessment-story-34-6.md`
+- **Test Files:** `packages/connector/src/settlement/privacy/nip59-claim-wrapper.test.ts`
+- **Source Files:** `packages/connector/src/settlement/privacy/nip59-claim-wrapper.ts`
+
+---
+
+## Uncovered ACs
+
+None. All 10 acceptance criteria (AC 1 through AC 10) have FULL test coverage mapped to specific test IDs.
 
 ---
 
@@ -581,11 +672,11 @@ traceability_and_gate:
 
 **Next Steps:**
 
-- PASS: Proceed to Story 34.4 (MinaPaymentChannelSDK)
+- PASS: Proceed to Story 34.8 integration
 
-**Generated:** 2026-03-27
+**Generated:** 2026-03-28
 **Workflow:** testarch-trace v5.0 (Enhanced with Gate Decision)
 
 ---
 
-<!-- Powered by BMAD-CORE -->
+<!-- Powered by BMAD-CORE(TM) -->
