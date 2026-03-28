@@ -15,6 +15,7 @@ module.exports = {
     'tigerbeetle-5peer-deployment\.test\.ts$',
     'test/acceptance/', // Acceptance tests (run separately)
     'test/unit/performance/', // Unit performance tests (timing-sensitive)
+    // mina-deployment.test.ts runs via Jest (Story 34.9)
   ],
   testTimeout: 30000, // 30 second default timeout for integration tests
   collectCoverageFrom: [

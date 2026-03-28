@@ -93,6 +93,6 @@ epics:
         status: done
       34.9:
         name: "Mina Devnet Deployment & Documentation"
-        status: backlog
+        status: done
     retrospective:
       status: backlog

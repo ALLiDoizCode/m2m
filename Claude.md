@@ -12,8 +12,7 @@
 # Prerequisites: Node.js >= 22.11.0, npm >= 10.0.0
 npm install
 
-# Build (shared MUST build first -- it provides type definitions)
-npm run build --workspace=packages/shared
+# Build all packages (root script builds shared first, then all workspaces including mina-zkapp)
 npm run build
 
 # Run all tests
@@ -44,19 +43,34 @@ make solana-deploy-devnet DEPLOYER_KEYPAIR=path/to/keypair.json
 
 See `docs/solana-deployment.md` for full deployment and operations guide.
 
+### Mina zkApp (TypeScript)
+
+Requires o1js (installed via `npm install`).
+
+```bash
+make mina-build              # Build Mina zkApp
+make mina-test               # Run Mina zkApp tests
+make mina-deploy-devnet DEPLOYER_KEY=<base58-private-key>
+```
+
+See `docs/mina-deployment.md` for full deployment and operations guide.
+
 ## Key Make Targets
 
 Run `make help` for the complete list. Most-used:
 
-| Target              | What it does                         |
-| ------------------- | ------------------------------------ |
-| `make build`        | Build all packages                   |
-| `make test`         | Run all tests                        |
-| `make test-unit`    | Unit tests only                      |
-| `make lint`         | ESLint                               |
-| `make clean`        | Remove `dist/` artifacts             |
-| `make solana-build` | Compile Solana program to BPF        |
-| `make solana-test`  | Run Solana Rust tests via `test-sbf` |
+| Target                    | What it does                         |
+| ------------------------- | ------------------------------------ |
+| `make build`              | Build all packages                   |
+| `make test`               | Run all tests                        |
+| `make test-unit`          | Unit tests only                      |
+| `make lint`               | ESLint                               |
+| `make clean`              | Remove `dist/` artifacts             |
+| `make solana-build`       | Compile Solana program to BPF        |
+| `make solana-test`        | Run Solana Rust tests via `test-sbf` |
+| `make mina-build`         | Build Mina zkApp                     |
+| `make mina-test`          | Run Mina zkApp tests                 |
+| `make mina-deploy-devnet` | Deploy Mina zkApp to devnet          |
 
 ## Default UI Library: shadcn-ui v4
 

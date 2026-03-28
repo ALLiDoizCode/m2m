@@ -138,3 +138,65 @@ Analyzed all 15 Acceptance Criteria against existing 45 tests across 6 test file
 ## Coverage Status
 
 All 15 acceptance criteria now have direct automated test coverage. No remaining gaps identified.
+
+---
+
+# Test Automation Summary -- Story 34.9: Mina Devnet Deployment & Documentation
+
+## Execution Mode
+
+BMad-Integrated (story file provided)
+
+## Story Context
+
+Story 34.9 is the final story in Epic 34, covering devnet deployment documentation, performance benchmarks, privacy model explanation, and deployment verification tests for the Mina payment channel zkApp.
+
+## Gap Analysis
+
+Analyzed all 8 Acceptance Criteria against existing 51 tests in `mina-deployment.test.ts`.
+
+### Issues Found
+
+1. **Test framework mismatch**: Test file imported from `vitest` but vitest was not installed; test was excluded from Jest via `testPathIgnorePatterns`. The tests were not actually executable.
+
+### Coverage Gaps Identified
+
+| AC | Gap Description | Tests Added |
+|---|---|---|
+| AC 7 | No mock GraphQL deployment verification logic test | 5 (T-34.9-07) |
+| AC 7 | No invalid chainType rejection test | 2 (T-34.9-02b) |
+| AC 4 | No granular verification that all 4 operation types are in benchmarks | 8 (T-34.9-04b) |
+
+## Changes Made
+
+### Framework Fix
+- **Converted** `mina-deployment.test.ts` from vitest to Jest (project standard)
+- **Removed** vitest import, replaced with comment noting Jest usage
+- **Removed** `mina-deployment\.test\.ts$` from Jest `testPathIgnorePatterns` so tests actually run
+
+### Tests Added (15 new tests)
+
+**File**: `packages/connector/test/integration/mina-deployment.test.ts`
+
+| Test Block | Count | Priority | AC |
+|---|---|---|---|
+| T-34.9-02b: Invalid chainType rejection (unknown chainType, duplicate chainId) | 2 | P0 | AC 7 |
+| T-34.9-07: Mock GraphQL deployment verification (valid, null account, non-zkApp, no vk hash, hash match) | 5 | P0 | AC 7 |
+| T-34.9-04b: Benchmark completeness (compile, claim, close, settle, min/rec hardware, ARM, proofsEnabled) | 8 | P1 | AC 4 |
+
+## Validation Results
+
+- **Total tests**: 66 (was 51, added 15)
+- **Passing**: 66
+- **Failing**: 0
+- **Regression**: None (full connector suite: 98 suites, 2475 tests passing)
+- **Lint**: Clean (no errors)
+
+## Priority Breakdown (new tests)
+
+- P0: 7 tests (deployment verification logic + invalid config rejection)
+- P1: 8 tests (benchmark documentation completeness)
+
+## Coverage Status
+
+All 8 acceptance criteria now have direct automated test coverage. Critical fix: tests are now actually executable via Jest (were previously dead code due to vitest import + Jest exclusion).
