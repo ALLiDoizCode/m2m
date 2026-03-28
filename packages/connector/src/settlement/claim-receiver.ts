@@ -28,9 +28,11 @@ import {
   type BTPClaimMessage,
   type EVMClaimMessage,
   type SolanaClaimMessage,
+  type MinaClaimMessage,
   type BlockchainType,
   isEVMClaim,
   isSolanaClaim,
+  isMinaClaim,
   validateClaimMessage,
 } from '../btp/btp-claim-types';
 
@@ -204,6 +206,17 @@ export class ClaimReceiver extends EventEmitter {
               },
               'CLAIM_RECEIVED event emitted (Solana)'
             );
+          } else if (isMinaClaim(claimMessage)) {
+            const event: ClaimReceivedEvent = {
+              peerId,
+              channelId: claimMessage.zkAppAddress,
+              cumulativeAmount: BigInt(0), // Mina uses commitment-based balances; amount is private
+            };
+            this.emit('CLAIM_RECEIVED', event);
+            childLogger.debug(
+              { zkAppAddress: event.channelId },
+              'CLAIM_RECEIVED event emitted (Mina)'
+            );
           }
         } catch (eventError) {
           childLogger.warn(
@@ -268,6 +281,20 @@ export class ClaimReceiver extends EventEmitter {
       }
     }
 
+    // Mina claims: try known channel first, then network-based lookup
+    if (isMinaClaim(claim)) {
+      if (this.channelManager) {
+        const knownChannel = this.channelManager.getChannelById(claim.zkAppAddress);
+        if (knownChannel && knownChannel.chain) {
+          return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
+        }
+      }
+      if (claim.network !== undefined) {
+        const chainKey = `${claim.blockchain}:${claim.network}`;
+        return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
+      }
+    }
+
     // Fallback: try the first registered provider for this blockchain type
     const allProviders = this.chainProviderRegistry.getAllProviders();
     return allProviders.find((p) => p.chainType === claim.blockchain);
@@ -303,16 +330,22 @@ export class ClaimReceiver extends EventEmitter {
         return await this.verifySolanaClaim(claim, peerId, provider);
       }
 
-      // Unsupported blockchain type
+      // Mina claims: full provider-based verification (Story 34.7)
+      if (isMinaClaim(claim)) {
+        return await this.verifyMinaClaim(claim, peerId, provider);
+      }
+
+      // Unsupported blockchain type -- exhaustive check
+      const _exhaustiveCheck: never = claim;
       return {
         valid: false,
-        messageId: claim.messageId,
-        error: `Verification not supported for blockchain: ${claim.blockchain}`,
+        messageId: (_exhaustiveCheck as BTPClaimMessage).messageId,
+        error: `Verification not supported for blockchain: ${(_exhaustiveCheck as BTPClaimMessage).blockchain}`,
       };
     } catch (error) {
       return {
         valid: false,
-        messageId: claim.messageId,
+        messageId: (claim as BTPClaimMessage).messageId,
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
@@ -690,6 +723,172 @@ export class ClaimReceiver extends EventEmitter {
   }
 
   /**
+   * Verify a Mina claim with on-chain state checks and zk-SNARK proof verification.
+   *
+   * Follows the same pattern as verifySolanaClaim but with Mina-specific handling:
+   * - Accepts claims for channels in both 'opened' and 'closed' states (challenge period)
+   * - No separate signer check -- zk-SNARK proof verification implicitly validates authorization
+   * - Registers unknown channels via channelManager.registerExternalChannel()
+   *
+   * @param claim - Validated Mina claim message
+   * @param peerId - Peer ID of sender
+   * @param provider - The resolved PaymentChannelProvider
+   * @returns Verification result
+   * @private
+   */
+  private async verifyMinaClaim(
+    claim: MinaClaimMessage,
+    peerId: string,
+    provider: PaymentChannelProvider
+  ): Promise<ClaimVerificationResult> {
+    this.logger.debug(
+      {
+        event: 'mina_claim_received',
+        messageId: claim.messageId,
+        zkAppAddress: claim.zkAppAddress,
+      },
+      'Verifying Mina claim'
+    );
+
+    // Check if channel is known (pre-registered or previously verified)
+    const knownChannel = this.channelManager?.getChannelById(claim.zkAppAddress);
+
+    if (!knownChannel && this.channelManager) {
+      // Unknown channel -- attempt dynamic on-chain verification
+      this.logger.info(
+        { zkAppAddress: claim.zkAppAddress },
+        'Unknown Mina channel detected, starting on-chain verification'
+      );
+
+      // Query on-chain state via provider
+      let channelState: ProviderChannelState;
+      try {
+        channelState = await provider.getChannelState(claim.zkAppAddress);
+      } catch (error) {
+        this.logger.warn(
+          { event: 'mina_claim_verification_failed', messageId: claim.messageId, error },
+          ERRORS.ON_CHAIN_VERIFICATION_FAILED
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.ON_CHAIN_VERIFICATION_FAILED,
+        };
+      }
+
+      // Verify channel is opened or closed (claims accepted during challenge period)
+      if (channelState.status !== 'opened' && channelState.status !== 'closed') {
+        const errorMsg =
+          channelState.status === 'settled' ? ERRORS.CHANNEL_NOT_OPENED : ERRORS.CHANNEL_NOT_FOUND;
+        this.logger.warn(
+          { zkAppAddress: claim.zkAppAddress, status: channelState.status },
+          errorMsg
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: errorMsg,
+        };
+      }
+
+      this.logger.info(
+        {
+          zkAppAddress: claim.zkAppAddress,
+          participants: channelState.participants,
+          status: channelState.status,
+        },
+        'On-chain Mina channel verified successfully'
+      );
+
+      // Verify zk-SNARK proof via provider
+      const verifyParams = this.buildMinaVerifyParams(claim);
+      const proofValid = await provider.verifyBalanceProof(verifyParams);
+
+      if (!proofValid) {
+        this.logger.warn(
+          { event: 'mina_claim_verification_failed', messageId: claim.messageId },
+          ERRORS.INVALID_SIGNATURE
+        );
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.INVALID_SIGNATURE,
+        };
+      }
+
+      // Register channel in ChannelManager (Mina-specific parameters)
+      this.channelManager.registerExternalChannel({
+        channelId: claim.zkAppAddress,
+        peerId,
+        tokenAddress: claim.tokenId,
+        status: 'open',
+        chain: `mina:${claim.network ?? 'devnet'}`,
+      });
+
+      this.logger.info(
+        { zkAppAddress: claim.zkAppAddress, peerId },
+        'External Mina channel registered'
+      );
+    } else {
+      // Known channel -- use provider verification
+      const verifyParams = this.buildMinaVerifyParams(claim);
+      const isValid = await provider.verifyBalanceProof(verifyParams);
+
+      if (!isValid) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: ERRORS.INVALID_SIGNATURE,
+        };
+      }
+    }
+
+    // Check nonce monotonicity - nonce must strictly increase
+    const latestClaim = await this.getLatestVerifiedClaim(
+      peerId,
+      claim.blockchain,
+      claim.zkAppAddress
+    );
+
+    if (latestClaim && isMinaClaim(latestClaim)) {
+      if (claim.nonce <= latestClaim.nonce) {
+        return {
+          valid: false,
+          messageId: claim.messageId,
+          error: 'Nonce not monotonically increasing',
+        };
+      }
+    }
+
+    return { valid: true, messageId: claim.messageId };
+  }
+
+  /**
+   * Build VerifyBalanceProofParams from a Mina claim message.
+   *
+   * Maps Mina-specific field names to the chain-agnostic params:
+   * - zkAppAddress -> channelId and signerAddress
+   * - balanceCommitment -> transferredAmount (commitment replaces plaintext amount)
+   * - proof -> signature (zk-SNARK proof maps to signature slot)
+   * - lockedAmount/locksRoot set to zero (Mina does not use them)
+   *
+   * @param claim - The Mina claim message
+   * @returns Parameters for provider.verifyBalanceProof()
+   * @private
+   */
+  private buildMinaVerifyParams(claim: MinaClaimMessage): VerifyBalanceProofParams {
+    return {
+      channelId: claim.zkAppAddress,
+      nonce: claim.nonce,
+      transferredAmount: claim.balanceCommitment,
+      lockedAmount: '0',
+      locksRoot: '0x' + '0'.repeat(64),
+      signature: claim.proof,
+      signerAddress: claim.zkAppAddress,
+    };
+  }
+
+  /**
    * Persist received claim to database
    *
    * @param peerId - Peer ID of sender
@@ -705,6 +904,8 @@ export class ClaimReceiver extends EventEmitter {
         channelId = claim.channelId;
       } else if (isSolanaClaim(claim)) {
         channelId = claim.channelAccount;
+      } else if (isMinaClaim(claim)) {
+        channelId = claim.zkAppAddress;
       }
 
       // Insert into database

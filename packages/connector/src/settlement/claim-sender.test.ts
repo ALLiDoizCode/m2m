@@ -634,4 +634,92 @@ describe('ClaimSender', () => {
       expect(claimData).not.toHaveProperty('cluster');
     }, 50);
   });
+
+  /**
+   * Acceptance Tests for Story 34.7: sendMinaClaim in ClaimSender (T-34.7-13)
+   */
+  describe('sendMinaClaim (Story 34.7)', () => {
+    const MINA_ZKAPP_ADDRESS = 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy';
+    const MINA_TOKEN_ID = 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf';
+    const MINA_PROOF = 'eyJwcm9vZiI6InRlc3QifQ==';
+    const MINA_SALT = 'abcdef1234567890';
+    const MINA_COMMITMENT = '12345678901234567890';
+
+    it('[P1] should send Mina claim successfully (T-34.7-13)', async () => {
+      const result = await claimSender.sendMinaClaim(
+        'peer-mina',
+        mockBtpClient as unknown as BTPClient,
+        MINA_ZKAPP_ADDRESS,
+        MINA_TOKEN_ID,
+        MINA_COMMITMENT,
+        42,
+        MINA_PROOF,
+        MINA_SALT,
+        'devnet'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.messageId).toMatch(/^mina-B62qre3e-42-\d+$/);
+
+      // Verify JSON payload includes Mina-specific fields
+      const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
+      const claimData = JSON.parse(dataBuffer.toString('utf8'));
+      expect(claimData).toMatchObject({
+        version: '1.0',
+        blockchain: 'mina',
+        zkAppAddress: MINA_ZKAPP_ADDRESS,
+        tokenId: MINA_TOKEN_ID,
+        balanceCommitment: MINA_COMMITMENT,
+        nonce: 42,
+        proof: MINA_PROOF,
+        salt: MINA_SALT,
+        network: 'devnet',
+      });
+
+      // Verify database insert with blockchain='mina'
+      expect(mockPreparedStatement.run).toHaveBeenCalledWith(
+        result.messageId,
+        'peer-mina',
+        'mina',
+        expect.any(String),
+        expect.any(Number)
+      );
+    }, 50);
+
+    it('[P1] should omit network when not provided', async () => {
+      const result = await claimSender.sendMinaClaim(
+        'peer-mina',
+        mockBtpClient as unknown as BTPClient,
+        MINA_ZKAPP_ADDRESS,
+        MINA_TOKEN_ID,
+        MINA_COMMITMENT,
+        1,
+        MINA_PROOF,
+        MINA_SALT
+        // network omitted
+      );
+
+      expect(result.success).toBe(true);
+
+      const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
+      const claimData = JSON.parse(dataBuffer.toString('utf8'));
+      expect(claimData).not.toHaveProperty('network');
+    }, 50);
+
+    it('[P1] should generate message ID with Mina B62 address prefix (T-34.7-13)', async () => {
+      const result = await claimSender.sendMinaClaim(
+        'peer-mina',
+        mockBtpClient as unknown as BTPClient,
+        MINA_ZKAPP_ADDRESS,
+        MINA_TOKEN_ID,
+        MINA_COMMITMENT,
+        999,
+        MINA_PROOF,
+        MINA_SALT
+      );
+
+      // Message ID should use first 8 chars of B62 zkAppAddress
+      expect(result.messageId).toMatch(/^mina-B62qre3e-999-\d{13}$/);
+    }, 50);
+  });
 });

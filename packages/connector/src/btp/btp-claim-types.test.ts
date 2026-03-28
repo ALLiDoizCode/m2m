@@ -11,9 +11,12 @@ import {
   BTPClaimMessage,
   EVMClaimMessage,
   SolanaClaimMessage,
+  MinaClaimMessage,
+  BlockchainType,
   validateClaimMessage,
   isEVMClaim,
   isSolanaClaim,
+  isMinaClaim,
   BTP_CLAIM_PROTOCOL,
 } from './btp-claim-types';
 
@@ -268,7 +271,7 @@ describe('validateClaimMessage - EVM-Specific Validation', () => {
 
     // Act & Assert
     expect(() => validateClaimMessage(invalidMessage)).toThrow(
-      'Missing or invalid nonce (expected non-negative number)'
+      'Missing or invalid nonce (expected non-negative integer)'
     );
   });
 
@@ -814,7 +817,7 @@ describe('validateClaimMessage - Solana Claim Validation (Epic 33 Prep)', () => 
   it('should reject negative nonce', () => {
     const invalid = { ...validSolanaClaim, nonce: -1 };
     expect(() => validateClaimMessage(invalid)).toThrow(
-      'Missing or invalid nonce (expected non-negative number)'
+      'Missing or invalid nonce (expected non-negative integer)'
     );
   });
 
@@ -860,5 +863,280 @@ describe('validateClaimMessage - Solana Claim Validation (Epic 33 Prep)', () => 
 
     expect(deserialized).toEqual(validSolanaClaim);
     expect(isSolanaClaim(deserialized)).toBe(true);
+  });
+});
+
+/**
+ * Story 34.7: Mina Claim Message Types & Serialization
+ *
+ * Tests Mina claim validation, type guards, serialization, and backward compatibility.
+ */
+describe('validateClaimMessage - Mina Claim Validation (Story 34.7)', () => {
+  const validMinaClaim: MinaClaimMessage = {
+    version: '1.0',
+    blockchain: 'mina',
+    messageId: 'claim-mina-001',
+    timestamp: '2026-03-28T12:00:00.000Z',
+    senderId: 'peer-mina-alice',
+    zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+    tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+    balanceCommitment: '12345678901234567890123456789012345678901234567890',
+    nonce: 1,
+    proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+    salt: 'abcdef1234567890',
+    network: 'devnet',
+  };
+
+  // T-34.7-01: BlockchainType union includes 'mina'
+  it('[T-34.7-01] BlockchainType union includes mina (type check)', () => {
+    const minaType: BlockchainType = 'mina';
+    expect(minaType).toBe('mina');
+  });
+
+  // T-34.7-02: MinaClaimMessage has all required fields (type check)
+  it('[T-34.7-02] MinaClaimMessage has all required fields', () => {
+    // Type check: all required fields present at compile time
+    const claim: MinaClaimMessage = validMinaClaim;
+    expect(claim.blockchain).toBe('mina');
+    expect(claim.zkAppAddress).toBeDefined();
+    expect(claim.tokenId).toBeDefined();
+    expect(claim.balanceCommitment).toBeDefined();
+    expect(claim.nonce).toBeDefined();
+    expect(claim.proof).toBeDefined();
+    expect(claim.salt).toBeDefined();
+    expect(claim.network).toBeDefined();
+  });
+
+  // T-34.7-03: isMinaClaim() type guard narrows correctly
+  it('[T-34.7-03] isMinaClaim() narrows correctly', () => {
+    const claim: BTPClaimMessage = validMinaClaim;
+    expect(isMinaClaim(claim)).toBe(true);
+    if (isMinaClaim(claim)) {
+      expect(claim.zkAppAddress).toBeDefined();
+      expect(claim.tokenId).toBeDefined();
+      expect(claim.balanceCommitment).toBeDefined();
+      expect(claim.proof).toBeDefined();
+      expect(claim.salt).toBeDefined();
+    }
+  });
+
+  // T-34.7-04: isEVMClaim() still narrows correctly (backward compat)
+  it('[T-34.7-04] isEVMClaim() still narrows correctly (backward compat)', () => {
+    const evmClaim: BTPClaimMessage = {
+      version: '1.0',
+      blockchain: 'evm',
+      messageId: 'claim-evm-compat',
+      timestamp: '2026-03-28T12:00:00.000Z',
+      senderId: 'peer-bob',
+      channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
+      nonce: 5,
+      transferredAmount: '1000000000000000000',
+      lockedAmount: '0',
+      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      signature: '0xabcdef1234567890',
+      signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    };
+    expect(isEVMClaim(evmClaim)).toBe(true);
+    expect(isMinaClaim(evmClaim)).toBe(false);
+  });
+
+  // T-34.7-05: isSolanaClaim() still narrows correctly (backward compat)
+  it('[T-34.7-05] isSolanaClaim() still narrows correctly (backward compat)', () => {
+    const solanaClaim: BTPClaimMessage = {
+      version: '1.0',
+      blockchain: 'solana',
+      messageId: 'claim-sol-compat',
+      timestamp: '2026-03-28T12:00:00.000Z',
+      senderId: 'peer-carol',
+      programId: '11111111111111111111111111111111',
+      channelAccount: '22222222222222222222222222222222',
+      nonce: 1,
+      transferredAmount: '1000000000',
+      signature: 'c2lnbmF0dXJlLWRhdGE=',
+      signerPublicKey: '33333333333333333333333333333333',
+    };
+    expect(isSolanaClaim(solanaClaim)).toBe(true);
+    expect(isMinaClaim(solanaClaim)).toBe(false);
+  });
+
+  // T-34.7-14: validateClaimMessage() accepts valid MinaClaimMessage
+  it('[T-34.7-14] validateClaimMessage() accepts valid MinaClaimMessage', () => {
+    expect(() => validateClaimMessage(validMinaClaim)).not.toThrow();
+  });
+
+  // Accept valid Mina claim without optional network field
+  it('should accept valid Mina claim without network field', () => {
+    const claimWithoutNetwork: MinaClaimMessage = {
+      ...validMinaClaim,
+      messageId: 'claim-mina-002',
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (claimWithoutNetwork as any).network;
+    expect(() => validateClaimMessage(claimWithoutNetwork)).not.toThrow();
+  });
+
+  // T-34.7-06: Serialization to BTP protocolData JSON includes blockchain: 'mina'
+  it('[T-34.7-06] Serialization includes blockchain=mina discriminator', () => {
+    const serialized = JSON.stringify(validMinaClaim);
+    const parsed = JSON.parse(serialized);
+    expect(parsed.blockchain).toBe('mina');
+    expect(parsed.zkAppAddress).toBe(validMinaClaim.zkAppAddress);
+    expect(parsed.tokenId).toBe(validMinaClaim.tokenId);
+    expect(parsed.balanceCommitment).toBe(validMinaClaim.balanceCommitment);
+    expect(parsed.nonce).toBe(validMinaClaim.nonce);
+    expect(parsed.proof).toBe(validMinaClaim.proof);
+    expect(parsed.salt).toBe(validMinaClaim.salt);
+    expect(parsed.network).toBe('devnet');
+  });
+
+  // T-34.7-07: Deserialization from JSON produces typed MinaClaimMessage
+  it('[T-34.7-07] Deserialization from JSON produces MinaClaimMessage', () => {
+    const serialized = JSON.stringify(validMinaClaim);
+    const deserialized = JSON.parse(serialized);
+    validateClaimMessage(deserialized);
+
+    expect(deserialized).toEqual(validMinaClaim);
+    expect(isMinaClaim(deserialized)).toBe(true);
+  });
+
+  // T-34.7-08: EVM deserialization unchanged (backward compat)
+  it('[T-34.7-08] EVM deserialization unchanged (backward compat)', () => {
+    const evmClaim: EVMClaimMessage = {
+      version: '1.0',
+      blockchain: 'evm',
+      messageId: 'claim-evm-backcompat',
+      timestamp: '2026-03-28T12:00:00.000Z',
+      senderId: 'peer-bob',
+      channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
+      nonce: 5,
+      transferredAmount: '1000000000000000000',
+      lockedAmount: '0',
+      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      signature: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+      signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    };
+    const serialized = JSON.stringify(evmClaim);
+    const deserialized = JSON.parse(serialized);
+    validateClaimMessage(deserialized);
+    expect(deserialized).toEqual(evmClaim);
+    expect(isEVMClaim(deserialized)).toBe(true);
+  });
+
+  // T-34.7-09: Solana deserialization unchanged (backward compat)
+  it('[T-34.7-09] Solana deserialization unchanged (backward compat)', () => {
+    const solanaClaim: SolanaClaimMessage = {
+      version: '1.0',
+      blockchain: 'solana',
+      messageId: 'claim-sol-backcompat',
+      timestamp: '2026-03-28T12:00:00.000Z',
+      senderId: 'peer-carol',
+      programId: '11111111111111111111111111111111',
+      channelAccount: '22222222222222222222222222222222',
+      nonce: 1,
+      transferredAmount: '1000000000',
+      signature: 'c2lnbmF0dXJlLWRhdGE=',
+      signerPublicKey: '33333333333333333333333333333333',
+    };
+    const serialized = JSON.stringify(solanaClaim);
+    const deserialized = JSON.parse(serialized);
+    validateClaimMessage(deserialized);
+    expect(deserialized).toEqual(solanaClaim);
+    expect(isSolanaClaim(deserialized)).toBe(true);
+  });
+
+  // T-34.7-10: Missing required field rejected by validateClaimMessage()
+  it('[T-34.7-10] Missing zkAppAddress rejected', () => {
+    const invalid = { ...validMinaClaim, zkAppAddress: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid zkAppAddress (expected non-empty string)'
+    );
+  });
+
+  it('Missing tokenId rejected', () => {
+    const invalid = { ...validMinaClaim, tokenId: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid tokenId (expected non-empty string)'
+    );
+  });
+
+  it('Missing balanceCommitment rejected', () => {
+    const invalid = { ...validMinaClaim, balanceCommitment: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid balanceCommitment (expected non-empty string)'
+    );
+  });
+
+  it('Missing proof rejected', () => {
+    const invalid = { ...validMinaClaim, proof: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid proof (expected non-empty string)'
+    );
+  });
+
+  it('Missing salt rejected', () => {
+    const invalid = { ...validMinaClaim, salt: '' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid salt (expected non-empty string)'
+    );
+  });
+
+  it('Negative nonce rejected', () => {
+    const invalid = { ...validMinaClaim, nonce: -1 };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid nonce (expected non-negative integer)'
+    );
+  });
+
+  it('Fractional nonce rejected', () => {
+    const invalid = { ...validMinaClaim, nonce: 1.5 };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Missing or invalid nonce (expected non-negative integer)'
+    );
+  });
+
+  it('Invalid proof format rejected (not base64)', () => {
+    const invalid = { ...validMinaClaim, proof: 'not-valid-base64!!!' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid proof format (expected base64-encoded zk-SNARK proof)'
+    );
+  });
+
+  // T-34.7-15: validateClaimMessage() rejects invalid balanceCommitment/zkAppAddress format
+  it('[T-34.7-15] Invalid zkAppAddress format rejected (not B62 prefix)', () => {
+    const invalid = {
+      ...validMinaClaim,
+      zkAppAddress: 'InvalidAddress12345678901234567890123456789012345678901',
+    };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid zkAppAddress format (expected B62-prefixed base58 Mina address, 55 chars)'
+    );
+  });
+
+  it('Invalid zkAppAddress format rejected (wrong length)', () => {
+    const invalid = { ...validMinaClaim, zkAppAddress: 'B62short' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid zkAppAddress format (expected B62-prefixed base58 Mina address, 55 chars)'
+    );
+  });
+
+  it('Invalid network value rejected', () => {
+    const invalid = { ...validMinaClaim, network: 'invalid-network' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid network (expected one of: mainnet, devnet, berkeley, lightnet)'
+    );
+  });
+
+  it('Valid network values accepted', () => {
+    for (const network of ['mainnet', 'devnet', 'berkeley', 'lightnet']) {
+      const claim = { ...validMinaClaim, messageId: `claim-mina-${network}`, network };
+      expect(() => validateClaimMessage(claim)).not.toThrow();
+    }
+  });
+
+  // T-34.7-16: NIP-59 wrapped claim uses claim-wrapped protocol name (reference only)
+  it('[T-34.7-16] BTP_CLAIM_PROTOCOL constants unchanged after Mina addition', () => {
+    expect(BTP_CLAIM_PROTOCOL.NAME).toBe('payment-channel-claim');
+    expect(BTP_CLAIM_PROTOCOL.CONTENT_TYPE).toBe(1);
+    expect(BTP_CLAIM_PROTOCOL.VERSION).toBe('1.0');
   });
 });

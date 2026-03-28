@@ -30,11 +30,15 @@ import {
   type BTPClaimMessage,
   type EVMClaimMessage,
   type SolanaClaimMessage,
+  type MinaClaimMessage,
   isEVMClaim,
   isSolanaClaim,
+  isMinaClaim,
 } from '../btp/btp-claim-types';
 import { EVMPaymentChannelProvider } from './provider/evm-payment-channel-provider';
 import { SolanaPaymentChannelProvider } from './provider/solana-payment-channel-provider';
+import { MinaPaymentChannelProvider } from './provider/mina-payment-channel-provider';
+import { randomBytes } from 'crypto';
 
 /**
  * BTP protocol data entry for claim attachment
@@ -63,6 +67,11 @@ interface ChannelClaimContext {
   signerPublicKey?: string;
   cluster?: string;
   tokenMint?: string;
+  // Mina-specific fields (populated only when blockchain === 'mina')
+  zkAppAddress?: string;
+  minaTokenId?: string;
+  minaNetwork?: string;
+  minaSalt?: string; // per-session random salt, generated on first claim
 }
 
 /**
@@ -216,6 +225,36 @@ export class PerPacketClaimService {
         ...(ctx.cluster !== undefined && { cluster: ctx.cluster }),
       };
       claimMessage = solanaClaim;
+    } else if (ctx.blockchain === 'mina') {
+      // Mina claim construction (Story 34.7)
+      if (!ctx.zkAppAddress || !ctx.minaTokenId) {
+        throw new Error(
+          `Mina claim construction requires zkAppAddress and minaTokenId ` +
+            `but they were not populated for channel ${channelId}`
+        );
+      }
+      // Generate per-session salt on first claim and cache it
+      if (!ctx.minaSalt) {
+        ctx.minaSalt = randomBytes(16).toString('hex');
+      }
+      const minaClaim: MinaClaimMessage = {
+        version: '1.0',
+        blockchain: 'mina',
+        messageId,
+        timestamp,
+        senderId: this.nodeId,
+        zkAppAddress: ctx.zkAppAddress,
+        tokenId: ctx.minaTokenId,
+        // NOTE: balanceCommitment carries the plaintext cumulative amount here.
+        // The Mina provider's signBalanceProof() internally computes the Poseidon
+        // commitment from this value. The receiver verifies via the zk-SNARK proof.
+        balanceCommitment: newCumulative.toString(),
+        nonce: newNonce,
+        proof: signature, // signBalanceProof returns the serialized zk-SNARK proof
+        salt: ctx.minaSalt,
+        ...(ctx.minaNetwork !== undefined && { network: ctx.minaNetwork }),
+      };
+      claimMessage = minaClaim;
     } else {
       // Future chain claim types will be constructed here based on blockchain discriminator
       throw new Error(`Claim construction not implemented for blockchain: ${ctx.blockchain}`);
@@ -338,6 +377,14 @@ export class PerPacketClaimService {
         solanaContext = provider.getSolanaContext();
       }
 
+      // For Mina providers: get Mina-specific context (Story 34.7)
+      let minaContext:
+        | { zkAppAddress: string; tokenId: string; network: string; signerAddress: string }
+        | undefined;
+      if (provider instanceof MinaPaymentChannelProvider) {
+        minaContext = provider.getMinaContext();
+      }
+
       return {
         channelId: metadata.channelId,
         provider,
@@ -354,6 +401,12 @@ export class PerPacketClaimService {
           signerPublicKey: solanaContext.signerAddress,
           cluster: solanaContext.cluster,
           tokenMint: solanaContext.tokenMint,
+        }),
+        ...(minaContext && {
+          zkAppAddress: minaContext.zkAppAddress,
+          minaTokenId: minaContext.tokenId,
+          minaNetwork: minaContext.network,
+          // minaSalt is generated on first claim, not here
         }),
       };
     } catch (error) {
@@ -425,7 +478,21 @@ export class PerPacketClaimService {
               this.latestClaim.set(claim.channelAccount, claim);
             }
           }
-          // Non-EVM/Solana claims: nonce/cumulative recovery is chain-specific and
+          // Mina claims: recover nonce state (Story 34.7)
+          // Mina uses commitment-based balances, so cumulative is not recoverable from the claim.
+          // Use BigInt(0) and rely on the provider's internal state for actual balances.
+          else if (isMinaClaim(claim)) {
+            if (typeof claim.zkAppAddress !== 'string' || typeof claim.nonce !== 'number') {
+              continue; // Skip structurally invalid claims
+            }
+            if (!recoveredChannels.has(claim.zkAppAddress)) {
+              recoveredChannels.add(claim.zkAppAddress);
+              this.currentNonce.set(claim.zkAppAddress, claim.nonce);
+              this.cumulativeTransferred.set(claim.zkAppAddress, BigInt(0));
+              this.latestClaim.set(claim.zkAppAddress, claim);
+            }
+          }
+          // Non-EVM/Solana/Mina claims: nonce/cumulative recovery is chain-specific and
           // deferred to future implementations (no storage in latestClaim until then)
         } catch {
           // Skip malformed claim data

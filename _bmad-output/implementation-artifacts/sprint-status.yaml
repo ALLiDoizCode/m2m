@@ -87,7 +87,7 @@ epics:
         status: done
       34.7:
         name: "Mina Claim Message Types & Serialization"
-        status: backlog
+        status: done
       34.8:
         name: "Integration Tests — Mina Provider E2E"
         status: backlog

@@ -113,8 +113,13 @@ function createMinaClaimFixture(): MinaClaimMessage {
     messageId: `claim-mina-${Date.now()}`,
     timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z'),
     senderId: 'peer-charlie',
-    zkAppAddress: 'B62qmina1234567890abcdefghijklmnopqrstuvwxyz',
-    proof: 'base64-encoded-zk-proof-placeholder',
+    zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+    tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+    balanceCommitment: '12345678901234567890123456789012345678901234567890',
+    nonce: 1,
+    proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+    salt: 'abcdef1234567890',
+    network: 'devnet',
   };
 }
 
@@ -255,14 +260,15 @@ describe('T-34.6-04: Rumor contains valid claim message', () => {
     expect(unwrapped.blockchain).toBe('solana');
   });
 
-  test('unwrapped Mina claim matches original (JSON equality, no validateClaimMessage)', () => {
+  test('unwrapped Mina claim matches original and passes validation (Story 34.7)', () => {
     const wrapper = createWrapper();
     const claim = createMinaClaimFixture();
 
     const wrapped = wrapClaimNonNull(wrapper, claim, senderPrivKey, receiverPubKey);
     const unwrapped = wrapper.unwrapClaim(wrapped, receiverPrivKey);
 
-    // Mina validation throws "not yet supported" -- verify JSON equality instead
+    // Story 34.7 added validateMinaClaim -- Mina validation now works
+    expect(() => validateClaimMessage(unwrapped)).not.toThrow();
     expect(unwrapped).toEqual(claim);
     expect(unwrapped.blockchain).toBe('mina');
   });
@@ -773,6 +779,33 @@ describe('AC 9 gap: BTP protocolData framing round-trip', () => {
     const deserialized = deserializeWrappedClaim(protocolData.data);
     const unwrapped = wrapper.unwrapClaim(deserialized, receiverPrivKey);
     expect(unwrapped).toEqual(claim);
+  });
+
+  test('NIP-59 wrapped Mina claim uses claim-wrapped protocol with APPLICATION_OCTET_STREAM (AC 8, Story 34.7)', () => {
+    const wrapper = createWrapper();
+    const claim = createMinaClaimFixture();
+
+    const wrapped = wrapClaimNonNull(wrapper, claim, senderPrivKey, receiverPubKey);
+
+    // Simulate BTP protocolData framing for wrapped Mina claim
+    const protocolData = {
+      protocolName: BTP_WRAPPED_CLAIM_PROTOCOL.NAME,
+      contentType: BTP_WRAPPED_CLAIM_PROTOCOL.CONTENT_TYPE,
+      data: serializeWrappedClaim(wrapped),
+    };
+
+    // Then: protocolName is 'claim-wrapped' with APPLICATION_OCTET_STREAM content type
+    expect(protocolData.protocolName).toBe('claim-wrapped');
+    expect(protocolData.contentType).toBe(0); // APPLICATION_OCTET_STREAM
+
+    // And: receiver can deserialize and unwrap to get the original Mina claim
+    const deserialized = deserializeWrappedClaim(protocolData.data);
+    const unwrapped = wrapper.unwrapClaim(deserialized, receiverPrivKey);
+    expect(unwrapped).toEqual(claim);
+    expect(unwrapped.blockchain).toBe('mina');
+
+    // And: the unwrapped Mina claim passes validation (Story 34.7)
+    expect(() => validateClaimMessage(unwrapped)).not.toThrow();
   });
 
   test('full BTP round-trip with Solana claim through protocolData framing', () => {

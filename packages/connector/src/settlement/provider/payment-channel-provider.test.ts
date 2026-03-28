@@ -309,13 +309,22 @@ describe('SolanaClaimMessage and MinaClaimMessage stubs (T-32.1-05)', () => {
       messageId: 'claim-mina-001',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-dave',
-      zkAppAddress: 'B62qkR...minaAddress',
-      proof: 'zk-proof-data-abc',
+      zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+      tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+      balanceCommitment: '12345678901234567890123456789012345678901234567890',
+      nonce: 1,
+      proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+      salt: 'abcdef1234567890',
+      network: 'devnet',
     };
 
     expect(minaClaim.blockchain).toBe('mina');
     expect(minaClaim.zkAppAddress).toBeDefined();
+    expect(minaClaim.tokenId).toBeDefined();
+    expect(minaClaim.balanceCommitment).toBeDefined();
+    expect(minaClaim.nonce).toBeDefined();
     expect(minaClaim.proof).toBeDefined();
+    expect(minaClaim.salt).toBeDefined();
   });
 });
 
@@ -434,8 +443,12 @@ describe('BTPClaimMessage union (T-32.1-07)', () => {
       messageId: 'msg-3',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-3',
-      zkAppAddress: 'zkApp1',
-      proof: 'proof1',
+      zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+      tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+      balanceCommitment: '12345678901234567890',
+      nonce: 1,
+      proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+      salt: 'abcdef1234567890',
     };
     expect(msg.blockchain).toBe('mina');
   });
@@ -483,20 +496,23 @@ describe('validateClaimMessage() (T-32.1-08)', () => {
     expect(() => validateClaimMessage(solanaClaim)).not.toThrow();
   });
 
-  it('should throw "not yet supported" for mina claims', () => {
+  it('should accept valid Mina claims (Story 34.7)', () => {
     const minaClaim = {
       version: '1.0',
       blockchain: 'mina',
       messageId: 'claim-mina-001',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-dave',
-      zkAppAddress: 'zkApp1',
-      proof: 'proof1',
+      zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+      tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+      balanceCommitment: '12345678901234567890',
+      nonce: 1,
+      proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+      salt: 'abcdef1234567890',
+      network: 'devnet',
     };
 
-    expect(() => validateClaimMessage(minaClaim)).toThrow(
-      "Blockchain type 'mina' validation not yet supported"
-    );
+    expect(() => validateClaimMessage(minaClaim)).not.toThrow();
   });
 
   it('should still reject unknown blockchain types', () => {
@@ -561,8 +577,12 @@ describe('isSolanaClaim() type guard', () => {
       messageId: 'msg-mina-cross-1',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-1',
-      zkAppAddress: 'zkApp1',
-      proof: 'proof1',
+      zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+      tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+      balanceCommitment: '12345678901234567890',
+      nonce: 1,
+      proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+      salt: 'abcdef1234567890',
     };
     expect(isSolanaClaim(msg)).toBe(false);
   });
@@ -597,8 +617,12 @@ describe('isMinaClaim() type guard', () => {
       messageId: 'msg-mina-1',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-1',
-      zkAppAddress: 'zkApp1',
-      proof: 'proof1',
+      zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+      tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+      balanceCommitment: '12345678901234567890',
+      nonce: 1,
+      proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+      salt: 'abcdef1234567890',
     };
     expect(isMinaClaim(msg)).toBe(true);
   });
@@ -645,13 +669,19 @@ describe('isMinaClaim() type guard', () => {
       messageId: 'msg-mina-2',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-2',
-      zkAppAddress: 'zkApp1',
-      proof: 'proof1',
+      zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+      tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+      balanceCommitment: '12345678901234567890',
+      nonce: 1,
+      proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+      salt: 'abcdef1234567890',
     };
 
     if (isMinaClaim(msg)) {
-      expect(msg.zkAppAddress).toBe('zkApp1');
-      expect(msg.proof).toBe('proof1');
+      expect(msg.zkAppAddress).toBe('B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy');
+      expect(msg.proof).toBe('eyJwcm9vZiI6InRlc3QifQ==');
+      expect(msg.tokenId).toBe('wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf');
+      expect(msg.salt).toBe('abcdef1234567890');
     }
   });
 });

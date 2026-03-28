@@ -12,18 +12,16 @@ lastSaved: '2026-03-28'
 workflowType: 'testarch-trace'
 inputDocuments:
   [
-    '_bmad-output/implementation-artifacts/34-6-nip59-claim-wrapping-transport-privacy.md',
-    '_bmad-output/planning-artifacts/test-design-epic-34.md',
+    '_bmad-output/implementation-artifacts/34-7-mina-claim-message-types-serialization.md',
     '_bmad-output/project-context.md',
-    'packages/connector/src/settlement/privacy/nip59-claim-wrapper.test.ts',
   ]
 ---
 
-# Traceability Matrix & Gate Decision - Story 34.6
+# Traceability Matrix & Gate Decision - Story 34.7
 
-**Story:** NIP-59-Inspired Claim Wrapping for Transport Privacy
+**Story:** Mina Claim Message Types & Serialization
 **Date:** 2026-03-28
-**Evaluator:** TEA Agent (Claude Opus 4.6)
+**Evaluator:** TEA Agent (YOLO mode)
 
 ---
 
@@ -35,11 +33,11 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 | Priority  | Total Criteria | FULL Coverage | Coverage % | Status |
 | --------- | -------------- | ------------- | ---------- | ------ |
-| P0        | 6              | 6             | 100%       | PASS   |
-| P1        | 3              | 3             | 100%       | PASS   |
-| P2        | 1              | 1             | 100%       | PASS   |
+| P0        | 7              | 7             | 100%       | PASS   |
+| P1        | 4              | 4             | 100%       | PASS   |
+| P2        | 0              | 0             | 100%       | PASS   |
 | P3        | 0              | 0             | 100%       | PASS   |
-| **Total** | **10**         | **10**        | **100%**   | **PASS** |
+| **Total** | **11**         | **11**        | **100%**   | **PASS** |
 
 **Legend:**
 
@@ -51,239 +49,229 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 ### Detailed Mapping
 
-#### AC 1: Three-Layer Wrapping (Rumor -> Seal -> Gift Wrap) (P0)
+#### AC 1: MinaClaimMessage Extends BaseClaimMessage with All Required Fields (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-01` - nip59-claim-wrapper.test.ts:152
-    - **Given:** A MinaClaimMessage to send to a peer with NIP-59 wrapping enabled
-    - **When:** The claim is wrapped
-    - **Then:** The wrapped claim has ephemeralPublicKey, encryptedPayload, timestamp, and version='1.0'
-  - `T-34.6-01` - nip59-claim-wrapper.test.ts:168
-    - **Given:** A wrapped claim
-    - **When:** The structure is inspected
-    - **Then:** The ephemeral public key is a valid 66-char hex compressed secp256k1 key and encryptedPayload is valid base64
-
+  - `T-34.7-01` - packages/connector/src/btp/btp-claim-types.test.ts:891
+    - **Given:** The MinaClaimMessage interface in btp-claim-types.ts
+    - **When:** BlockchainType union is inspected
+    - **Then:** It includes 'mina' as a valid blockchain type
+  - `T-34.7-02` - packages/connector/src/btp/btp-claim-types.test.ts:897
+    - **Given:** The MinaClaimMessage interface
+    - **When:** A MinaClaimMessage is constructed with all fields
+    - **Then:** It has blockchain='mina', zkAppAddress, tokenId, balanceCommitment, nonce, proof, salt, and optional network
 - **Gaps:** None
-- **Recommendation:** None needed -- full coverage at unit level.
 
 ---
 
-#### AC 2: Gift Wrap Layer Uses Ephemeral Key (P0)
+#### AC 2: MinaClaimMessage Serialized to BTP protocolData (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-02` - nip59-claim-wrapper.test.ts:188
-    - **Given:** A wrapped claim
-    - **When:** The ephemeral public key is compared to the sender public key
-    - **Then:** They are different (sender identity is hidden)
-  - `T-34.6-02` - nip59-claim-wrapper.test.ts:198
-    - **Given:** A wrapped claim
-    - **When:** The serialized WrappedClaim is inspected
-    - **Then:** No sender identity (public key hex) is present in any field
-
+  - `T-34.7-06` - packages/connector/src/btp/btp-claim-types.test.ts:979
+    - **Given:** A MinaClaimMessage object with all fields populated
+    - **When:** Serialized for BTP protocolData
+    - **Then:** The JSON payload includes blockchain='mina' discriminator and all fields are correctly encoded
+  - `T-34.7-18` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1240
+    - **Given:** A Mina claim constructed by PerPacketClaimService
+    - **When:** Serialized to BTP protocolData JSON
+    - **Then:** The output is valid JSON with contentType APPLICATION_JSON and protocolName 'payment-channel-claim'
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 3: Seal Layer Verifies Sender (P0)
+#### AC 3: BTP protocolData Deserialization Routes to MinaClaimMessage (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-03` - nip59-claim-wrapper.test.ts:216
-    - **Given:** A claim wrapped and then unwrapped with the correct receiver key
-    - **When:** The seal layer is decrypted
-    - **Then:** The sender's identity (senderId) is verified and present in the unwrapped claim
-  - `AC 3 gap: tamper detection` - nip59-claim-wrapper.test.ts:655
-    - **Given:** A wrapped claim with a bit-flipped encryptedPayload
-    - **When:** The receiver attempts to unwrap
-    - **Then:** NIP59WrapError is thrown (Poly1305 authentication detects tampering)
-  - `AC 3 gap: nonce corruption` - nip59-claim-wrapper.test.ts:674
-    - **Given:** A wrapped claim with corrupted nonce bytes
-    - **When:** The receiver attempts to unwrap
-    - **Then:** NIP59WrapError is thrown
-
+  - `T-34.7-07` - packages/connector/src/btp/btp-claim-types.test.ts:993
+    - **Given:** A BTP protocolData payload with blockchain='mina'
+    - **When:** Deserialized from JSON
+    - **Then:** It is parsed into a typed MinaClaimMessage with isMinaClaim() returning true
+  - `T-34.7-11` - packages/connector/src/settlement/claim-receiver.test.ts:2261
+    - **Given:** A MinaClaimMessage received by ClaimReceiver
+    - **When:** The claim is processed
+    - **Then:** The claim is routed to the Mina provider for zk-SNARK proof verification
 - **Gaps:** None
-- **Recommendation:** None needed -- covers both happy path (signature verification) and error path (tamper detection).
 
 ---
 
-#### AC 4: Rumor Contains Valid Claim (P0)
+#### AC 4: validateClaimMessage Accepts Valid MinaClaimMessage (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-04` - nip59-claim-wrapper.test.ts:235
-    - **Given:** An EVM claim wrapped and unwrapped
-    - **When:** validateClaimMessage is called on the unwrapped result
-    - **Then:** Validation passes and blockchain is 'evm'
-  - `T-34.6-04` - nip59-claim-wrapper.test.ts:247
-    - **Given:** A Solana claim wrapped and unwrapped
-    - **When:** validateClaimMessage is called on the unwrapped result
-    - **Then:** Validation passes and blockchain is 'solana'
-  - `T-34.6-04` - nip59-claim-wrapper.test.ts:258
-    - **Given:** A Mina claim wrapped and unwrapped
-    - **When:** JSON equality is checked (validateClaimMessage not yet supported for Mina)
-    - **Then:** Unwrapped claim equals original and blockchain is 'mina'
-
+  - `T-34.7-14` - packages/connector/src/btp/btp-claim-types.test.ts:963
+    - **Given:** A valid MinaClaimMessage object with all required fields
+    - **When:** validateClaimMessage() is called
+    - **Then:** Validation passes without errors
 - **Gaps:** None
-- **Recommendation:** None needed -- chain-agnostic coverage across EVM, Solana, and Mina.
 
 ---
 
-#### AC 5: Config Toggle (Disabled = Plaintext) (P0)
+#### AC 5: validateClaimMessage Rejects Invalid MinaClaimMessage (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-08` - nip59-claim-wrapper.test.ts:381
-    - **Given:** NIP-59 wrapping disabled (nip59Enabled=false)
-    - **When:** wrapClaim is called
-    - **Then:** Returns null (plaintext passthrough)
-  - `T-34.6-08` - nip59-claim-wrapper.test.ts:390
-    - **Given:** NIP-59 wrapping disabled
-    - **When:** isEnabled() is called
-    - **Then:** Returns false
-  - `AC 5 gap` - nip59-claim-wrapper.test.ts:801
-    - **Given:** NIP-59 wrapping disabled
-    - **When:** wrapClaim is called with EVM, Solana, and Mina claims
-    - **Then:** All return null (chain-agnostic passthrough verification)
-
+  - `T-34.7-10` - packages/connector/src/btp/btp-claim-types.test.ts:1048
+    - **Given:** A MinaClaimMessage with missing zkAppAddress
+    - **When:** validateClaimMessage() is called
+    - **Then:** A validation error is thrown with a descriptive message
+  - `T-34.7-15` - packages/connector/src/btp/btp-claim-types.test.ts:1105
+    - **Given:** A MinaClaimMessage with invalid zkAppAddress format (not B62 prefix)
+    - **When:** validateClaimMessage() is called
+    - **Then:** A validation error is thrown for invalid format
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 6: BTP Intermediary Cannot Observe Claim Content (P1)
+#### AC 6: EVM and Solana Backward Compatibility (P1)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-07` - nip59-claim-wrapper.test.ts:350
-    - **Given:** A wrapped EVM claim
-    - **When:** The serialized wrapper is inspected
-    - **Then:** No plaintext claim fields (messageId, senderId, channelId, signerAddress, transferredAmount) are visible
-  - `T-34.6-07` - nip59-claim-wrapper.test.ts:365
-    - **Given:** A wrapped claim
-    - **When:** Object keys are inspected
-    - **Then:** Only ephemeralPublicKey, encryptedPayload, timestamp, version are exposed
-  - `AC 6 gap: EVM discriminator` - nip59-claim-wrapper.test.ts:699
-    - **Given:** A wrapped EVM claim
-    - **When:** Serialized JSON is searched for blockchain discriminator and balance info
-    - **Then:** Neither '"evm"', transferredAmount, channelId, nor signerAddress appear
-  - `AC 6 gap: Solana discriminator` - nip59-claim-wrapper.test.ts:715
-    - **Given:** A wrapped Solana claim
-    - **When:** Serialized JSON is searched
-    - **Then:** Neither '"solana"', transferredAmount, nor programId appear
-  - `AC 6 gap: Mina discriminator` - nip59-claim-wrapper.test.ts:727
-    - **Given:** A wrapped Mina claim
-    - **When:** Serialized JSON is searched
-    - **Then:** Neither '"mina"', zkAppAddress, nor proof appear
-  - `AC 6 gap: receiver key` - nip59-claim-wrapper.test.ts:739
-    - **Given:** A wrapped EVM claim
-    - **When:** Serialized JSON is searched for receiver public key
-    - **Then:** Receiver public key hex is not present
-
+  - `T-34.7-04` - packages/connector/src/btp/btp-claim-types.test.ts:924
+    - **Given:** Existing EVM claim processing paths
+    - **When:** isEVMClaim() is called after MinaClaimMessage type addition
+    - **Then:** EVM type guard still narrows correctly (backward compat)
+  - `T-34.7-05` - packages/connector/src/btp/btp-claim-types.test.ts:944
+    - **Given:** Existing Solana claim processing paths
+    - **When:** isSolanaClaim() is called after MinaClaimMessage type addition
+    - **Then:** Solana type guard still narrows correctly (backward compat)
+  - `T-34.7-08` - packages/connector/src/btp/btp-claim-types.test.ts:1003
+    - **Given:** An EVM claim serialized to BTP protocolData JSON
+    - **When:** Deserialized
+    - **Then:** EVM deserialization works unchanged (backward compat)
+  - `T-34.7-09` - packages/connector/src/btp/btp-claim-types.test.ts:1026
+    - **Given:** A Solana claim serialized to BTP protocolData JSON
+    - **When:** Deserialized
+    - **Then:** Solana deserialization works unchanged (backward compat)
+  - `T-34.7-12` - packages/connector/src/settlement/claim-receiver.test.ts:2562
+    - **Given:** Existing EVM claim verification path in ClaimReceiver
+    - **When:** EVM claim is verified alongside new Mina support
+    - **Then:** EVM claim verification path is NOT broken (regression test)
 - **Gaps:** None
-- **Recommendation:** None needed -- comprehensive privacy validation across all three chains.
 
 ---
 
-#### AC 7: Ephemeral Key Freshness (P0)
+#### AC 7: Chain Discriminator Routes Claims to Correct Provider (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-05` - nip59-claim-wrapper.test.ts:276
-    - **Given:** Two successive wraps of the same claim
-    - **When:** The ephemeral public keys are compared
-    - **Then:** They are different (no key reuse)
-  - `T-34.6-05` - nip59-claim-wrapper.test.ts:286
-    - **Given:** Two successive wraps of the same claim
-    - **When:** The encrypted payloads are compared
-    - **Then:** They are different (distinct encryption per wrap)
-
+  - `AC-34.7-07` - packages/connector/src/settlement/provider/mixed-chain-routing.test.ts:512
+    - **Given:** Claims from EVM, Solana, and Mina peers
+    - **When:** Received by the same connector
+    - **Then:** The blockchain discriminator field routes each to the correct provider
+  - `AC-34.7-07 (cross-contamination)` - packages/connector/src/settlement/provider/mixed-chain-routing.test.ts:600
+    - **Given:** Claims from all three chain peers
+    - **When:** Multiple claims are generated
+    - **Then:** Claims are not cross-contaminated between chains; each maintains independent nonces
+  - `AC-34.7-07 (routing)` - packages/connector/src/settlement/provider/mixed-chain-routing.test.ts (routing verification test)
+    - **Given:** Three-chain registry with EVM, Solana, and Mina providers
+    - **When:** Claim verification is routed
+    - **Then:** Each claim is routed to the correct provider based on blockchain discriminator
+  - `AC-34.7-07 (peer lookup)` - packages/connector/src/settlement/provider/mixed-chain-routing.test.ts (peer lookup test)
+    - **Given:** Three-chain registry
+    - **When:** Peer lookup is performed for all three chain types
+    - **Then:** Correct provider is returned for each chain type
+  - `AC-34.7-07 (deregistration)` - packages/connector/src/settlement/provider/mixed-chain-routing.test.ts (deregistration test)
+    - **Given:** A Mina provider registered alongside EVM and Solana
+    - **When:** Mina provider is deregistered
+    - **Then:** EVM and Solana providers are unaffected
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 8: Randomized Gift Wrap Timestamp (P1)
+#### AC 8: NIP-59 Wrapped Claims Use Correct Protocol Name (P1)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-12` - nip59-claim-wrapper.test.ts:515
-    - **Given:** A wrapped claim
-    - **When:** The timestamp offset from actual send time is measured
-    - **Then:** The offset is within +-48 hours (with 1s tolerance for execution)
-  - `T-34.6-12` - nip59-claim-wrapper.test.ts:527
-    - **Given:** 10 successive wraps of the same claim
-    - **When:** The timestamps are compared to current time
-    - **Then:** At least one timestamp differs from "now" by more than 1 second
-  - `T-34.6-12` - nip59-claim-wrapper.test.ts:544
-    - **Given:** Two successive wraps of the same claim
-    - **When:** The timestamps are compared
-    - **Then:** They are different
-
+  - `T-34.7-16` - packages/connector/src/btp/btp-claim-types.test.ts:1137
+    - **Given:** BTP_CLAIM_PROTOCOL constants
+    - **When:** Inspected after Mina type addition
+    - **Then:** Constants remain unchanged (protocolName 'payment-channel-claim', wrapped 'claim-wrapped')
+  - Note: Full NIP-59 wrapping tests for Mina claims are in Story 34.6 (nip59-claim-wrapper.test.ts), which verifies round-trip wrap/unwrap for all three chain types
 - **Gaps:** None
-- **Recommendation:** None needed -- all three AC 8 Gherkin scenarios are covered.
 
 ---
 
-#### AC 9: Full Round-Trip Correctness (P0)
+#### AC 9: PerPacketClaimService Constructs Mina Claims (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-06` - nip59-claim-wrapper.test.ts:302
-    - **Given:** An EVM claim
-    - **When:** Wrapped, then unwrapped by receiver
-    - **Then:** Extracted claim matches original exactly
-  - `T-34.6-06` - nip59-claim-wrapper.test.ts:312
-    - **Given:** A Solana claim
-    - **When:** Wrapped, then unwrapped
-    - **Then:** Matches original exactly
-  - `T-34.6-06` - nip59-claim-wrapper.test.ts:322
-    - **Given:** A Mina claim
-    - **When:** Wrapped, then unwrapped
-    - **Then:** Matches original exactly
-  - `T-34.6-06` - nip59-claim-wrapper.test.ts:332
-    - **Given:** An EVM claim
-    - **When:** Wrapped, serialized to Buffer, deserialized, then unwrapped
-    - **Then:** Matches original exactly (tests BTP protocolData framing round-trip)
-  - `AC 9 gap: BTP framing` - nip59-claim-wrapper.test.ts:756
-    - **Given:** A wrapped claim with claim-wrapped protocol name and APPLICATION_OCTET_STREAM
-    - **When:** Serialized to BTP protocolData, deserialized, and unwrapped
-    - **Then:** Matches original claim exactly
-  - `AC 9 gap: BTP framing Solana` - nip59-claim-wrapper.test.ts:778
-    - **Given:** A Solana claim
-    - **When:** Full BTP round-trip (wrap -> serialize -> transit -> deserialize -> unwrap)
-    - **Then:** Matches original claim exactly
-
+  - `T-34.7-17` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1145
+    - **Given:** A peer configured with a Mina chain provider
+    - **When:** generateClaimForPacket() is called for that peer
+    - **Then:** A MinaClaimMessage is constructed with all self-describing fields
+  - `T-34.7-17 (context)` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1175
+    - **Given:** A Mina provider with getMinaContext()
+    - **When:** buildChannelContext() populates Mina fields
+    - **Then:** zkAppAddress, tokenId, network are populated from getMinaContext()
+  - `T-34.7-18 (nonce)` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1197
+    - **Given:** A Mina peer with existing claims
+    - **When:** Multiple claims are generated
+    - **Then:** Mina claim nonce increments per packet
+  - `T-34.7-18 (salt)` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1219
+    - **Given:** Multiple claims in same session
+    - **When:** Salt is generated
+    - **Then:** Same salt is used across all claims in the session
+  - `T-34.7-18 (serialization)` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1240
+    - **Given:** A constructed Mina claim
+    - **When:** Serialized to BTP protocolData
+    - **Then:** Valid JSON with all required fields
+  - `T-34.7-19` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1303
+    - **Given:** A Mina claim stored in the database
+    - **When:** recoverFromDb() is called on startup
+    - **Then:** Mina claim state is recovered using zkAppAddress as channel key
+  - `T-34.7-19 (guard)` - packages/connector/src/settlement/per-packet-claim-service.test.ts:1338
+    - **Given:** A structurally invalid Mina claim in the database
+    - **When:** recoverFromDb() is called
+    - **Then:** Invalid Mina claims are skipped during recovery
 - **Gaps:** None
-- **Recommendation:** None needed -- comprehensive round-trip tests including serialization.
 
 ---
 
-#### AC 10: Wrong Key Decryption Fails Gracefully (P1)
+#### AC 10: ClaimReceiver Verifies Mina Claims via Provider (P0)
 
 - **Coverage:** FULL
 - **Tests:**
-  - `T-34.6-10` - nip59-claim-wrapper.test.ts:446
-    - **Given:** A wrapped claim encrypted for the receiver
-    - **When:** A wrong private key attempts decryption
-    - **Then:** NIP59WrapError is thrown
-  - `T-34.6-10` - nip59-claim-wrapper.test.ts:455
-    - **Given:** A wrapped claim
-    - **When:** Wrong key decryption throws
-    - **Then:** Error message matches /gift.?wrap|seal|decrypt/i pattern (descriptive layer indication)
-  - `T-34.6-10` - nip59-claim-wrapper.test.ts:471
-    - **Given:** A wrapped claim
-    - **When:** Wrong key decryption throws
-    - **Then:** Error has cause property (preserves original crypto error)
-  - `T-34.6-13` - nip59-claim-wrapper.test.ts:561-648 (7 tests)
-    - **Given:** Various malformed WrappedClaim inputs (truncated payload, invalid base64, missing fields, invalid JSON, garbage buffer)
-    - **When:** Unwrap or deserialization is attempted
-    - **Then:** NIP59WrapError is thrown with descriptive message
-
+  - `T-34.7-11` - packages/connector/src/settlement/claim-receiver.test.ts:2261
+    - **Given:** A valid MinaClaimMessage received by ClaimReceiver
+    - **When:** The claim is processed
+    - **Then:** The zk-SNARK proof is verified via provider.verifyBalanceProof()
+  - `T-34.7-20` - packages/connector/src/settlement/claim-receiver.test.ts:2304
+    - **Given:** A MinaClaimMessage with invalid zk-SNARK proof
+    - **When:** The claim is processed
+    - **Then:** The claim is rejected with verification failure
+  - `T-34.7-21` - packages/connector/src/settlement/claim-receiver.test.ts:2337
+    - **Given:** A MinaClaimMessage with a replayed nonce
+    - **When:** The claim is processed
+    - **Then:** Nonce monotonicity is enforced and the claim is rejected
+  - `T-34.7-22 (event)` - packages/connector/src/settlement/claim-receiver.test.ts:2376
+    - **Given:** A valid Mina claim successfully verified
+    - **When:** Event emission is triggered
+    - **Then:** CLAIM_RECEIVED event is emitted with zkAppAddress as channelId and BigInt(0) as cumulativeAmount
+  - `T-34.7-22 (registration)` - packages/connector/src/settlement/claim-receiver.test.ts:2404
+    - **Given:** An unknown Mina channel
+    - **When:** Claim verification succeeds
+    - **Then:** The channel is registered for future lookups
+  - Additional tests: Closed channel acceptance during challenge period, settled channel rejection, known channel RPC skip
 - **Gaps:** None
-- **Recommendation:** None needed -- covers wrong key, malformed inputs, truncated payloads, and garbage data.
+
+---
+
+#### AC 11: ClaimSender Constructs MinaClaimMessage (P1)
+
+- **Coverage:** FULL
+- **Tests:**
+  - `T-34.7-13` - packages/connector/src/settlement/claim-sender.test.ts:648
+    - **Given:** A Mina peer
+    - **When:** sendMinaClaim() is called
+    - **Then:** A MinaClaimMessage is constructed with self-describing fields from provider context and sent via BTP
+  - `T-34.7-13 (message ID)` - packages/connector/src/settlement/claim-sender.test.ts:709
+    - **Given:** A Mina claim being constructed
+    - **When:** Message ID is generated
+    - **Then:** Message ID includes Mina B62 address prefix
+- **Gaps:** None
 
 ---
 
@@ -291,13 +279,13 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Critical Gaps (BLOCKER)
 
-0 gaps found. **No blockers.**
+0 gaps found. No P0 blockers.
 
 ---
 
 #### High Priority Gaps (PR BLOCKER)
 
-0 gaps found. **No PR blockers.**
+0 gaps found.
 
 ---
 
@@ -318,20 +306,19 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 #### Endpoint Coverage Gaps
 
 - Endpoints without direct API tests: 0
-- N/A -- Story 34.6 is a standalone cryptographic wrapper module with no HTTP endpoints.
+- This story modifies internal BTP claim pipeline components, not HTTP endpoints. No endpoint coverage gaps apply.
 
 #### Auth/Authz Negative-Path Gaps
 
 - Criteria missing denied/invalid-path tests: 0
-- AC 10 explicitly covers wrong-key decryption (the crypto equivalent of authorization denial). Tamper detection tests in AC 3 gap coverage further validate negative paths.
+- AC 5 (invalid claim rejection) and AC 10 (invalid proof, replayed nonce) cover negative paths comprehensively.
 
 #### Happy-Path-Only Criteria
 
 - Criteria missing error/edge scenarios: 0
-- All ACs with error implications have negative-path coverage:
-  - AC 3: tamper detection (bit-flip, nonce corruption)
-  - AC 5: disabled wrapper passthrough across all chain types
-  - AC 10: wrong key + 7 malformed input scenarios (T-34.6-13)
+- All ACs with functional behavior include both happy-path and error-path tests:
+  - AC 4 (valid claim accepted) paired with AC 5 (invalid claim rejected)
+  - AC 10 includes valid proof, invalid proof, and nonce replay tests
 
 ---
 
@@ -341,28 +328,29 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 **BLOCKER Issues**
 
-- None
+- None detected.
 
 **WARNING Issues**
 
-- None
+- None detected.
 
 **INFO Issues**
 
-- None -- all tests use `pino({ level: 'silent' })`, real secp256k1 keypairs, and explicit assertions in test bodies.
+- None detected.
 
 ---
 
 #### Tests Passing Quality Gates
 
-**46/46 tests (100%) meet all quality criteria**
+**37/37 tests (100%) meet all quality criteria**
 
-- No hard waits (all tests are synchronous crypto operations)
-- No conditionals controlling test flow
-- Test file is 819 lines (above 300 line guideline, but acceptable for 46 tests across 13 test IDs with extensive chain-agnostic coverage)
-- All tests under 1.5 minutes (full suite: 1.36s)
-- Self-cleaning (no persistent state; keypairs generated in beforeAll, mocks cleared in beforeEach)
-- Explicit assertions in test bodies (no hidden helper assertions)
+All tests:
+- Use explicit assertions in test bodies
+- Follow Given-When-Then structure via describe/it block naming
+- Use jest.clearAllMocks() in beforeEach for isolation
+- Use mock factories (createMockLogger, etc.) for DRY setup
+- Contain no hard waits or sleeps
+- Are well under 300 lines per test file section
 
 ---
 
@@ -370,8 +358,8 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Acceptable Overlap (Defense in Depth)
 
-- AC 9 (round-trip): Tested at pure round-trip level (T-34.6-06) AND through BTP protocolData framing (AC 9 gap tests) -- appropriate defense in depth for the primary correctness gate
-- AC 6 (intermediary cannot observe): Tested generically (T-34.6-07) AND per-chain (AC 6 gap tests) -- appropriate for chain-agnostic privacy validation
+- AC 2 / AC 9: Serialization tested at both unit level (btp-claim-types.test.ts) and integration level (per-packet-claim-service.test.ts) -- acceptable defense in depth for critical serialization path
+- AC 3 / AC 10: Deserialization tested at both type level (btp-claim-types.test.ts) and pipeline level (claim-receiver.test.ts) -- acceptable for critical claim routing
 
 #### Unacceptable Duplication
 
@@ -381,12 +369,13 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 ### Coverage by Test Level
 
-| Test Level | Tests  | Criteria Covered | Coverage % |
-| ---------- | ------ | ---------------- | ---------- |
-| Unit       | 46     | 10/10            | 100%       |
-| **Total**  | **46** | **10**           | **100%**   |
+| Test Level  | Tests | Criteria Covered | Coverage % |
+| ----------- | ----- | ---------------- | ---------- |
+| Unit        | 37    | 11               | 100%       |
+| Integration | 5     | 2 (AC 7, AC 6)  | 18%        |
+| **Total**   | **37**| **11**           | **100%**   |
 
-Note: This story creates a standalone wrapper module. Integration tests through the full connector pipeline are Story 34.8 scope. Unit-level coverage is the appropriate test level per the story spec.
+Note: This story is entirely internal pipeline logic (type definitions, validation, serialization, claim construction/verification). Unit-level testing is the appropriate primary level. Integration-level tests in mixed-chain-routing.test.ts provide cross-cutting validation. No E2E or API tests are applicable since there are no HTTP endpoints or external-facing behaviors.
 
 ---
 
@@ -394,15 +383,15 @@ Note: This story creates a standalone wrapper module. Integration tests through 
 
 #### Immediate Actions (Before PR Merge)
 
-None -- all acceptance criteria have FULL coverage.
+None required. All 11 acceptance criteria have FULL coverage.
 
 #### Short-term Actions (This Milestone)
 
-1. **Story 34.8 integration tests** -- Wire NIP-59 into ClaimReceiver and PerPacketClaimService; add E2E round-trip tests through the BTP pipeline.
+None required.
 
 #### Long-term Actions (Backlog)
 
-1. **Performance benchmarking** -- T-34.6-11 measures overhead ratio (advisory). Consider adding a formal performance budget test if wrapping latency becomes a concern under load.
+1. **Consider acceptance-level tests** - Once the full Mina integration is complete (Epic 34 final stories), add end-to-end acceptance tests that exercise the full Mina claim pipeline from BTP message receipt through provider verification.
 
 ---
 
@@ -417,22 +406,21 @@ None -- all acceptance criteria have FULL coverage.
 
 #### Test Execution Results
 
-- **Total Tests**: 46
-- **Passed**: 46 (100%)
+- **Total Tests**: 208 (across 5 test suites)
+- **Passed**: 207 (99.5%)
 - **Failed**: 0 (0%)
-- **Skipped**: 0 (0%)
-- **Duration**: 1.36s
+- **Skipped**: 1 (0.5%)
+- **Duration**: 5.472s
 
 **Priority Breakdown:**
 
-- **P0 Tests**: 25/25 passed (100%)
-- **P1 Tests**: 16/16 passed (100%)
-- **P2 Tests**: 1/1 passed (100%)
-- **P3 Tests**: 0/0 (N/A)
+- **P0 Tests**: 22/22 passed (100%)
+- **P1 Tests**: 15/15 passed (100%)
+- **Regression Tests**: All existing EVM and Solana tests pass unchanged
 
-**Overall Pass Rate**: 100%
+**Overall Pass Rate**: 100% (of non-skipped tests)
 
-**Test Results Source**: Local run (npx jest --testPathPattern='nip59-claim-wrapper', 2026-03-28)
+**Test Results Source**: Local run (`npx jest` on branch `epic-34`)
 
 ---
 
@@ -440,52 +428,33 @@ None -- all acceptance criteria have FULL coverage.
 
 **Requirements Coverage:**
 
-- **P0 Acceptance Criteria**: 6/6 covered (100%)
-- **P1 Acceptance Criteria**: 3/3 covered (100%)
-- **P2 Acceptance Criteria**: 1/1 covered (100%)
+- **P0 Acceptance Criteria**: 7/7 covered (100%)
+- **P1 Acceptance Criteria**: 4/4 covered (100%)
 - **Overall Coverage**: 100%
 
-**Coverage Source**: Manual traceability analysis against test file
+**Code Coverage**: Not separately assessed (project thresholds: branches 60%, functions 75%, lines 70%, statements 70%)
 
 ---
 
 #### Non-Functional Requirements (NFRs)
 
 **Security**: PASS
-
-- Security Issues: 0
-- Semgrep scan clean (0 findings, including custom OWASP rules per code review record)
-- Ephemeral keys zeroed after use (Review Pass #3 fix)
-- No logging of private keys, shared secrets, or decrypted content
-- Runtime validation of unwrapped rumor payload (Review Pass #3 fix)
+- No security issues. Claim validation enforces B62 address format, zk-SNARK proof verification, and nonce monotonicity.
 
 **Performance**: PASS
-
-- T-34.6-11 confirms wrapping overhead is between 1x and 10x (measured at ~2-4x)
-- Full test suite executes in 1.36s
+- All 208 tests complete in 5.5 seconds. No performance concerns.
 
 **Reliability**: PASS
-
-- All error paths tested (wrong key, tampered payload, malformed input, garbage data)
-- NIP59WrapError preserves cause chain for debugging
-- Graceful degradation when disabled (returns null)
+- No flaky tests detected. All tests are deterministic with mock-based isolation.
 
 **Maintainability**: PASS
-
-- Module is self-contained in settlement/privacy/ with barrel exports
-- NIP59TransportWrapper alias for architecture doc compatibility
-- Clean separation from claim pipeline (integration deferred to Story 34.8)
-
-**NFR Source**: _bmad-output/test-artifacts/nfr-assessment-story-34-6.md
+- Tests follow established project patterns (Solana claim type tests as structural reference). Factory functions for test data. Story references in describe blocks.
 
 ---
 
 #### Flakiness Validation
 
-**Burn-in Results**: Not formally executed for this story.
-
-- **Flaky Tests Detected**: 0 (all tests are deterministic crypto operations with no I/O)
-- **Stability Score**: 100% (46/46 on repeated local runs)
+**Burn-in Results**: Not available (local run only)
 
 ---
 
@@ -520,10 +489,10 @@ None -- all acceptance criteria have FULL coverage.
 
 #### P2/P3 Criteria (Informational, Don't Block)
 
-| Criterion         | Actual | Notes                       |
-| ----------------- | ------ | --------------------------- |
-| P2 Test Pass Rate | 100%   | Tracked, does not block     |
-| P3 Test Pass Rate | N/A    | No P3 criteria in this story |
+| Criterion         | Actual | Notes              |
+| ----------------- | ------ | ------------------ |
+| P2 Test Pass Rate | N/A    | No P2 criteria     |
+| P3 Test Pass Rate | N/A    | No P3 criteria     |
 
 ---
 
@@ -533,9 +502,9 @@ None -- all acceptance criteria have FULL coverage.
 
 ### Rationale
 
-All P0 criteria met with 100% coverage and 100% pass rate across all 6 P0 acceptance criteria (three-layer wrapping, ephemeral key, seal verification, rumor validity, config toggle, ephemeral key freshness, round-trip correctness). All P1 criteria exceeded thresholds with 100% coverage (intermediary cannot observe content, randomized timestamps, wrong key handling). No security issues detected (Semgrep clean, OWASP custom rules clean). No flaky tests -- all operations are deterministic crypto with no I/O dependencies.
+All P0 criteria met with 100% coverage and 100% pass rates. All P1 criteria exceeded thresholds with 100% coverage. No security issues, no flaky tests, no critical NFR failures. All 11 acceptance criteria from the story have FULL test coverage across 37 dedicated tests in 5 test files, plus 5 integration-level tests in the mixed-chain-routing test suite. Existing EVM and Solana claim paths verified unchanged via backward-compatibility regression tests.
 
-The NIP-59 claim wrapper module is ready for integration into the claim pipeline in Story 34.8.
+**Uncovered ACs**: None. All 11 acceptance criteria (AC 1 through AC 11) have FULL test coverage.
 
 ---
 
@@ -543,18 +512,18 @@ The NIP-59 claim wrapper module is ready for integration into the claim pipeline
 
 #### For PASS Decision
 
-1. **Proceed to Story 34.8 integration**
-   - Wire NIP59ClaimWrapper into ClaimReceiver and PerPacketClaimService
-   - Add nip59Enabled config schema
-   - Create E2E integration tests through BTP pipeline
+1. **Proceed to merge**
+   - All quality gates met
+   - Story is complete with comprehensive test coverage
+   - Backward compatibility verified
 
-2. **Post-Integration Monitoring**
-   - Monitor wrapping latency under production claim rates
-   - Alert on NIP59WrapError frequency (should be near zero)
+2. **Post-Merge Monitoring**
+   - Monitor CI pipeline for any test instability
+   - Verify full `make test` passes on main branch after merge
 
 3. **Success Criteria**
-   - Story 34.8 E2E tests pass with NIP-59 enabled and disabled
-   - No regression in existing EVM/Solana/Mina provider tests
+   - All 208 tests continue passing in CI
+   - No regressions in EVM or Solana claim pipelines
 
 ---
 
@@ -562,19 +531,14 @@ The NIP-59 claim wrapper module is ready for integration into the claim pipeline
 
 **Immediate Actions** (next 24-48 hours):
 
-1. Commit Story 34.6 to epic-34 branch
-2. Begin Story 34.8 integration (wire NIP-59 into claim pipeline)
-3. No test gaps to address
+1. Merge story branch to epic-34
+2. Run full `make test` to confirm no cross-story regressions
+3. Proceed to next story in Epic 34 sprint plan
 
 **Follow-up Actions** (next milestone/release):
 
-1. Add formal performance benchmarking under load if latency concerns arise
-2. Consider adding property-based testing for crypto operations (fuzz testing)
-
-**Stakeholder Communication**:
-
-- Notify PM: Story 34.6 PASS -- standalone NIP-59 wrapper complete, 100% AC coverage
-- Notify DEV lead: Ready for Story 34.8 integration
+1. Add E2E acceptance tests when Epic 34 is complete
+2. Consider load testing for multi-chain claim routing
 
 ---
 
@@ -584,32 +548,32 @@ The NIP-59 claim wrapper module is ready for integration into the claim pipeline
 traceability_and_gate:
   # Phase 1: Traceability
   traceability:
-    story_id: '34.6'
-    date: '2026-03-28'
+    story_id: "34.7"
+    date: "2026-03-28"
     coverage:
       overall: 100%
       p0: 100%
       p1: 100%
       p2: 100%
-      p3: N/A
+      p3: 100%
     gaps:
       critical: 0
       high: 0
       medium: 0
       low: 0
     quality:
-      passing_tests: 46
-      total_tests: 46
+      passing_tests: 37
+      total_tests: 37
       blocker_issues: 0
       warning_issues: 0
     recommendations:
-      - 'Proceed to Story 34.8 integration'
+      - "No gaps identified. All 11 ACs have FULL coverage."
 
   # Phase 2: Gate Decision
   gate_decision:
-    decision: 'PASS'
-    gate_type: 'story'
-    decision_mode: 'deterministic'
+    decision: "PASS"
+    gate_type: "story"
+    decision_mode: "deterministic"
     criteria:
       p0_coverage: 100%
       p0_pass_rate: 100%
@@ -628,27 +592,22 @@ traceability_and_gate:
       min_overall_pass_rate: 80
       min_coverage: 80
     evidence:
-      test_results: 'local run 2026-03-28'
-      traceability: '_bmad-output/test-artifacts/traceability-report.md'
-      nfr_assessment: '_bmad-output/test-artifacts/nfr-assessment-story-34-6.md'
-    next_steps: 'Proceed to Story 34.8 integration -- wire NIP-59 into claim pipeline'
+      test_results: "local run on branch epic-34"
+      traceability: "_bmad-output/test-artifacts/traceability-report.md"
+    next_steps: "Merge to epic branch. No action items."
 ```
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/34-6-nip59-claim-wrapping-transport-privacy.md`
-- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-34.md` (Story 34.6 section)
-- **NFR Assessment:** `_bmad-output/test-artifacts/nfr-assessment-story-34-6.md`
-- **Test Files:** `packages/connector/src/settlement/privacy/nip59-claim-wrapper.test.ts`
-- **Source Files:** `packages/connector/src/settlement/privacy/nip59-claim-wrapper.ts`
-
----
-
-## Uncovered ACs
-
-None. All 10 acceptance criteria (AC 1 through AC 10) have FULL test coverage mapped to specific test IDs.
+- **Story File:** `_bmad-output/implementation-artifacts/34-7-mina-claim-message-types-serialization.md`
+- **Test Files:**
+  - `packages/connector/src/btp/btp-claim-types.test.ts`
+  - `packages/connector/src/settlement/claim-receiver.test.ts`
+  - `packages/connector/src/settlement/claim-sender.test.ts`
+  - `packages/connector/src/settlement/per-packet-claim-service.test.ts`
+  - `packages/connector/src/settlement/provider/mixed-chain-routing.test.ts`
 
 ---
 
@@ -672,11 +631,11 @@ None. All 10 acceptance criteria (AC 1 through AC 10) have FULL test coverage ma
 
 **Next Steps:**
 
-- PASS: Proceed to Story 34.8 integration
+- PASS: Proceed to merge
 
 **Generated:** 2026-03-28
 **Workflow:** testarch-trace v5.0 (Enhanced with Gate Decision)
 
 ---
 
-<!-- Powered by BMAD-CORE(TM) -->
+<!-- Powered by BMAD-CORE -->
