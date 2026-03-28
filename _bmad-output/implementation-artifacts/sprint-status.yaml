@@ -81,7 +81,7 @@ epics:
         status: backlog
       34.5:
         name: "Implement MinaPaymentChannelProvider"
-        status: backlog
+        status: done
       34.6:
         name: "NIP-59-Inspired Claim Wrapping for Transport Privacy"
         status: backlog

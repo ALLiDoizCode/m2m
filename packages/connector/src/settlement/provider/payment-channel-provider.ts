@@ -276,9 +276,18 @@ export interface SolanaProviderConfig {
 }
 
 /**
- * Mina provider configuration stub.
+ * Mina provider configuration.
  *
- * Placeholder for future Mina integration — no runtime Mina SDK dependencies.
+ * Configures a Mina payment channel provider for the chain abstraction layer.
+ * Uses `MinaPaymentChannelSDK` for GraphQL communication and Poseidon-based signing.
+ *
+ * **Interface compatibility notes for PaymentChannelProvider:**
+ * - `channelId` maps to zkApp address (base58-encoded public key)
+ * - `signBalanceProof` uses Poseidon commitments (not EIP-712 or Ed25519)
+ * - `subscribeToEvents` maps to interval-based polling with state-diffing
+ * - `getChannelState` reads zkApp on-chain state via GraphQL
+ * - `verifyBalanceProof` uses zk-SNARK proof verification
+ * - Amounts are in nanomina, serialized as string for bigint precision
  */
 export interface MinaProviderConfig {
   /** Discriminator */
@@ -287,6 +296,12 @@ export interface MinaProviderConfig {
   graphqlUrl: string;
   /** zkApp address for the payment channel contract */
   zkAppAddress: string;
+  /** Key identifier for signing operations */
+  keyId?: string;
+  /** Mina token ID (native MINA or custom fungible token) */
+  tokenId?: string;
+  /** Mina network name for chain ID namespacing (e.g., 'devnet', 'mainnet') */
+  network?: string;
 }
 
 /**

@@ -39,3 +39,9 @@ export {
   SolanaPaymentChannelProvider,
   createSolanaProviderFactory,
 } from './solana-payment-channel-provider';
+
+export {
+  MinaPaymentChannelProvider,
+  createMinaProviderFactory,
+  type MinaProviderOptions,
+} from './mina-payment-channel-provider';
