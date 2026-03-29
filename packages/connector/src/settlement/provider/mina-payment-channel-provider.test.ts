@@ -49,6 +49,7 @@ jest.mock('../mina-payment-channel-sdk', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MockSDKClass: any = jest.fn().mockImplementation(() => ({
     compileContract: jest.fn().mockResolvedValue(undefined),
+    getSignerPublicKey: jest.fn().mockResolvedValue('B62qMockSignerPublicKey'),
     openChannel: jest.fn(),
     deposit: jest.fn(),
     claimFromChannel: jest.fn(),
@@ -94,6 +95,7 @@ interface MockMinaPaymentChannelSDK {
   signBalanceProof: jest.Mock;
   verifyBalanceProof: jest.Mock;
   compileContract: jest.Mock;
+  getSignerPublicKey: jest.Mock;
   subscribeToChannel: jest.Mock;
 }
 
@@ -126,6 +128,7 @@ function createMockSDK(): MockMinaPaymentChannelSDK {
     signBalanceProof: jest.fn(),
     verifyBalanceProof: jest.fn(),
     compileContract: jest.fn().mockResolvedValue(undefined),
+    getSignerPublicKey: jest.fn().mockResolvedValue('B62qMockSignerPublicKey'),
     subscribeToChannel: jest.fn(),
   };
 }
@@ -966,29 +969,29 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
   // -------------------------------------------------------------------------
 
   describe('getMinaContext (AC 13)', () => {
-    it('should return Mina-specific context', () => {
+    it('should return Mina-specific context with derived public key', async () => {
       // Given: a MinaPaymentChannelProvider instance
       // When: getMinaContext() is called
-      const context = provider.getMinaContext();
+      const context = await provider.getMinaContext();
 
-      // Then: it returns zkAppAddress, tokenId, network, and signerAddress (public, NOT private key)
+      // Then: it returns zkAppAddress, tokenId, network, and signerAddress (derived public key)
       expect(context).toEqual({
         zkAppAddress: TEST_ZKAPP_ADDRESS,
         tokenId: TEST_TOKEN_ID,
         network: TEST_NETWORK,
-        signerAddress: TEST_ZKAPP_ADDRESS, // returns zkApp address, not private key
+        signerAddress: 'B62qMockSignerPublicKey', // derived from SDK.getSignerPublicKey()
       });
     });
 
-    it('should not expose private key material in signerAddress', () => {
-      const context = provider.getMinaContext();
+    it('should not expose private key material in signerAddress', async () => {
+      const context = await provider.getMinaContext();
       // signerAddress must NOT be the raw private key
       expect(context.signerAddress).not.toBe(TEST_SIGNER_KEY);
-      // It should be the zkApp address (a public identifier)
-      expect(context.signerAddress).toBe(TEST_ZKAPP_ADDRESS);
+      // It should be the derived signer public key
+      expect(context.signerAddress).toBe('B62qMockSignerPublicKey');
     });
 
-    it('should extract network from chainId when not explicitly provided', () => {
+    it('should extract network from chainId when not explicitly provided', async () => {
       const providerWithoutNetwork = new MinaPaymentChannelProvider(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         mockSDK as any,
@@ -998,7 +1001,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         mockLogger
       );
 
-      const context = providerWithoutNetwork.getMinaContext();
+      const context = await providerWithoutNetwork.getMinaContext();
       expect(context.network).toBe('mainnet');
     });
   });
@@ -1491,9 +1494,11 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
 
       await provider.openChannel(participant, timeout);
 
-      // Verify exact arguments passed to SDK
+      // Verify the signer's public key is derived via SDK, not the raw private key
+      expect(mockSDK.getSignerPublicKey).toHaveBeenCalled();
+      // Verify exact arguments passed to SDK (public key, not private key)
       expect(mockSDK.openChannel).toHaveBeenCalledWith(
-        TEST_SIGNER_KEY, // participantA (signer)
+        'B62qMockSignerPublicKey', // participantA (derived signer public key)
         participant, // participantB (counterparty)
         timeout, // settlementTimeout
         TEST_TOKEN_ID // tokenId
@@ -1528,7 +1533,8 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         0n, // balanceB placeholder
         0n, // salt placeholder
         7n, // nonce as BigInt
-        signature // signature passed through
+        signature, // signatureA passed through
+        signature // signatureB -- same signature used as placeholder (Story 34.4)
       );
     });
   });

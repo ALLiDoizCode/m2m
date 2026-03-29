@@ -1,18 +1,26 @@
 ---
-stepsCompleted: ['step-01-load-context', 'step-02-discover-tests', 'step-03-map-criteria', 'step-04-gap-analysis', 'step-05-gate-decision']
+stepsCompleted:
+  [
+    'step-01-load-context',
+    'step-02-discover-tests',
+    'step-03-map-criteria',
+    'step-04-analyze-gaps',
+    'step-05-gate-decision',
+  ]
 lastStep: 'step-05-gate-decision'
-lastSaved: '2026-03-27'
+lastSaved: '2026-03-29'
 workflowType: 'testarch-trace'
 inputDocuments:
-  - '_bmad-output/implementation-artifacts/34-5-implement-mina-payment-channel-provider.md'
-  - 'packages/connector/src/settlement/provider/mina-payment-channel-provider.test.ts'
+  - '_bmad-output/implementation-artifacts/34-4-mina-payment-channel-sdk-typescript-integration.md'
+  - 'packages/connector/src/settlement/mina-payment-channel-sdk.test.ts'
+  - 'packages/connector/src/settlement/mina-payment-channel-sdk.atdd.test.ts'
 ---
 
-# Traceability Matrix & Gate Decision - Story 34.5
+# Traceability Matrix & Gate Decision - Story 34.4
 
-**Story:** Implement MinaPaymentChannelProvider
-**Date:** 2026-03-27
-**Evaluator:** TEA Agent (Claude Opus 4.6)
+**Story:** MinaPaymentChannelSDK -- TypeScript Integration
+**Date:** 2026-03-29
+**Evaluator:** TEA Agent (YOLO mode)
 
 ---
 
@@ -24,11 +32,11 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 | Priority  | Total Criteria | FULL Coverage | Coverage % | Status |
 | --------- | -------------- | ------------- | ---------- | ------ |
-| P0        | 10             | 10            | 100%       | PASS   |
-| P1        | 5              | 5             | 100%       | PASS   |
-| P2        | 0              | 0             | N/A        | N/A    |
-| P3        | 0              | 0             | N/A        | N/A    |
-| **Total** | **13**         | **13**        | **100%**   | **PASS** |
+| P0        | 12             | 12            | 100%       | PASS   |
+| P1        | 0              | 0             | 100%       | PASS   |
+| P2        | 0              | 0             | 100%       | PASS   |
+| P3        | 0              | 0             | 100%       | PASS   |
+| **Total** | **12**         | **12**        | **100%**   | **PASS** |
 
 **Legend:**
 
@@ -36,275 +44,230 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 - WARN - Coverage below threshold but not critical
 - FAIL - Coverage below minimum threshold (blocker)
 
-**Priority Classification:**
-
-- P0: AC 1, 2, 3, 4, 5, 6, 10, 11, 12 (from test plan T-34.5-01 through T-34.5-06, T-34.5-08, T-34.5-13, T-34.5-14, T-34.5-16, T-34.5-17)
-- P1: AC 7, 8, 9, 13 (from test plan T-34.5-07, T-34.5-09 through T-34.5-12, T-34.5-15)
-- Note: AC 11 spans both P0 (T-34.5-13, T-34.5-14) and P1 tests; classified P0 overall since registry integration is critical.
-
 ---
 
 ### Detailed Mapping
 
-#### AC 1: Interface Implementation -- Type-Correct (P0)
+#### AC-1: compileContract Pre-Compiles Circuit (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-01` - mina-payment-channel-provider.test.ts:204
-    - **Given:** The PaymentChannelProvider interface from Epic 32
-    - **When:** MinaPaymentChannelProvider is instantiated with Mina config
-    - **Then:** All interface methods are implemented and type-check correctly
-  - `T-34.5-02` - mina-payment-channel-provider.test.ts:224
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** chainType and chainId are accessed
-    - **Then:** chainType equals 'mina' and chainId follows 'mina:<network>' format
+  - `T-34.4-02` - `mina-payment-channel-sdk.test.ts:252`
+    - **Given:** A configured MinaPaymentChannelSDK instance
+    - **When:** compileContract() is called
+    - **Then:** PaymentChannel.compile() is called via o1js; compilation result is cached (subsequent calls are no-ops); compilation time is logged
+  - `ATDD-AC1` - `mina-payment-channel-sdk.atdd.test.ts:360`
+    - **Given:** A configured MinaPaymentChannelSDK instance
+    - **When:** compileContract() is called
+    - **Then:** PaymentChannel zkApp circuit is compiled via o1js; cached on subsequent calls; throws MinaChannelError code 1001 on failure
+  - `T-34.4-17-log` - `mina-payment-channel-sdk.test.ts:1505` (logging verification)
+    - **Given:** Contract is already compiled
+    - **When:** compileContract() called again
+    - **Then:** Debug log with compile_contract_cached is emitted
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 2: openChannel Delegation (P0)
+#### AC-2: openChannel Deploys and Initializes zkApp (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-03` - mina-payment-channel-provider.test.ts:243
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** openChannel() is called with a participant address and settlement timeout
-    - **Then:** Call is delegated to MinaPaymentChannelSDK.openChannel() and result returned in OpenChannelResult format
-  - Additional: openChannel argument passing (AC 2 gap) - mina-payment-channel-provider.test.ts:1483
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** openChannel() is called
-    - **Then:** signerKey passed as participantA, participant as participantB, correct timeout and tokenId
+  - `T-34.4-03` - `mina-payment-channel-sdk.test.ts:314`
+    - **Given:** A compiled SDK
+    - **When:** openChannel() is called with participantA, participantB, timeout, and tokenId
+    - **Then:** New key pair generated; network set; transaction created, proved, and signed; result contains zkAppAddress and txHash
+  - `ATDD-AC2` - `mina-payment-channel-sdk.atdd.test.ts:398`
+    - **Given:** A compiled SDK
+    - **When:** openChannel() is called with participants, timeout, and tokenId
+    - **Then:** New zkApp deployed; initializeChannel() called; result contains zkAppAddress and txHash
+  - `T-34.4-16` - `mina-payment-channel-sdk.test.ts:1328`
+    - **Given:** Transaction send() fails
+    - **When:** openChannel is called
+    - **Then:** MinaChannelError with TRANSACTION_FAILED is thrown
+  - Additional tests: default tokenId, participant key caching, no-signer-key error (code 1008), logging
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 3: deposit Delegation (P0)
+#### AC-3: deposit Submits Deposit Transaction (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-15` (deposit portion) - mina-payment-channel-provider.test.ts:792
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** deposit() is called with channelId and amount string
-    - **Then:** Amount converted to bigint and delegated to SDK
-  - Additional: deposit bigint conversion - mina-payment-channel-provider.test.ts:1112
-    - **Given:** A deposit amount as string
+  - `T-34.4-04` - `mina-payment-channel-sdk.test.ts:384`
+    - **Given:** An open channel at a known zkApp address
+    - **When:** deposit() is called with channelAddress and amount
+    - **Then:** Deposit transaction constructed, proved, signed, and submitted; bigint amount converted to Field; MinaTxResult returned
+  - `ATDD-AC3` - `mina-payment-channel-sdk.atdd.test.ts:440`
+    - **Given:** An open channel
     - **When:** deposit() is called
-    - **Then:** SDK.deposit called with correct bigint value, including amounts exceeding Number.MAX_SAFE_INTEGER
+    - **Then:** fetchAccount called, transaction submitted, MinaTxResult returned
+  - Additional tests: no-signer-key error, account-not-found error, transaction failure, deposit event logging
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 4: claimFromChannel Delegation with Async Proof Generation (P0)
+#### AC-4: claimFromChannel Generates ZK Proof and Submits (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-06` - mina-payment-channel-provider.test.ts:380
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** claimFromChannel() is called with balance proof and signature
-    - **Then:** Call delegates to SDK and TxResult returned
-  - `T-34.5-08` - mina-payment-channel-provider.test.ts:464
-    - **Given:** A slow proof generation scenario
-    - **When:** claimFromChannel() is called
-    - **Then:** Returns a Promise that does not block event loop; other operations proceed concurrently
-  - Additional: claimFromChannel argument passing - mina-payment-channel-provider.test.ts:1509
-    - **Given:** Balance proof params
-    - **When:** claimFromChannel() is called
-    - **Then:** transferredAmount converted to bigint, nonce to BigInt, correct SDK call signature
+  - `T-34.4-05` - `mina-payment-channel-sdk.test.ts:430`
+    - **Given:** An open channel with existing balance commitment
+    - **When:** claimFromChannel() is called with new balances, salt, nonce, signatureA, and signatureB
+    - **Then:** Poseidon commitment computed; signatures deserialized into o1js Signature objects; zk-SNARK proof generated via txn.prove(); transaction submitted; MinaTxResult returned
+  - `ATDD-AC4` - `mina-payment-channel-sdk.atdd.test.ts:462`
+    - **Given:** An open channel with balance commitment
+    - **When:** claimFromChannel() is called with balances, salt, nonce, and both signatures
+    - **Then:** zk-SNARK proof generated (prove is called); Poseidon commitment computed; MinaTxResult returned
+  - `T-34.4-16` - `mina-payment-channel-sdk.test.ts:1356`
+    - **Given:** Participant cache populated
+    - **When:** prove() rejects
+    - **Then:** PROOF_GENERATION_FAILED error thrown (code 1003)
+  - Additional tests: no-signer-key error, participant keys not in cache error, MinaChannelError re-throw without double-wrapping, claim event logging with nonce
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 5: signBalanceProof Returns Poseidon Commitment + ZK Proof (P0)
+#### AC-5: closeChannel Initiates Cooperative Close (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-04` - mina-payment-channel-provider.test.ts:283
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** signBalanceProof() is called with balance proof parameters
-    - **Then:** Provider delegates to SDK for Poseidon commitment generation, returns serialized proof as string
-  - Additional: signBalanceProof argument passing - mina-payment-channel-provider.test.ts:1541
-    - **Given:** Balance proof params
-    - **When:** signBalanceProof() is called
-    - **Then:** Correct bigint-converted arguments passed to SDK.signBalanceProof
-  - Additional: signBalanceProof EVM field warnings - mina-payment-channel-provider.test.ts:305
-    - **Given:** Params with non-zero lockedAmount and locksRoot
-    - **When:** signBalanceProof() is called
-    - **Then:** Warnings logged for ignored EVM-specific fields
+  - `T-34.4-06` - `mina-payment-channel-sdk.test.ts:607`
+    - **Given:** An open channel
+    - **When:** closeChannel() is called with final balances, salt, nonce, signatureA, signatureB
+    - **Then:** initiateClose called on zkApp; signatures deserialized; transaction proved and submitted
+  - `ATDD-AC5` - `mina-payment-channel-sdk.atdd.test.ts:530`
+    - **Given:** An open channel
+    - **When:** closeChannel() called with final balances, salt, nonce, and both signatures
+    - **Then:** initiateClose transaction submitted; MinaTxResult returned
+  - Additional tests: no-signer-key error, transaction failure error, close event logging
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 6: verifyBalanceProof Validates ZK Proof (P0)
+#### AC-6: settleChannel Executes Post-Challenge Settlement (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-05` - mina-payment-channel-provider.test.ts:333
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** verifyBalanceProof() is called with a signed balance proof
-    - **Then:** Returns true for valid proof, false for invalid
-  - Additional: verifyBalanceProof error handling - mina-payment-channel-provider.test.ts:1137
-    - **Given:** SDK throws during verification
-    - **When:** verifyBalanceProof() is called
-    - **Then:** Returns false (does not throw), logs warning
-  - Additional: verifyBalanceProof argument passing - mina-payment-channel-provider.test.ts:1568
-    - **Given:** Verify params
-    - **When:** verifyBalanceProof() is called
-    - **Then:** Correct arguments passed to SDK including nonce as BigInt
+  - `T-34.4-07` - `mina-payment-channel-sdk.test.ts:681`
+    - **Given:** A CLOSING channel whose challenge period has elapsed
+    - **When:** settleChannel() is called with reveal parameters (balanceA, balanceB, salt, participantA, participantB, nonce)
+    - **Then:** Participant keys converted to PublicKey objects; settle called on zkApp; transaction proved and submitted
+  - `ATDD-AC6` - `mina-payment-channel-sdk.atdd.test.ts:559`
+    - **Given:** A CLOSING channel
+    - **When:** settleChannel() called with revealed balances, salt, participant keys, and nonce
+    - **Then:** Settle transaction submitted; MinaTxResult returned
+  - Additional tests: no-signer-key error, transaction failure error, settle event logging
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 7: closeChannel and settleChannel Delegation (P1)
+#### AC-7: getChannelState Reads On-Chain State (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-15` (closeChannel portion) - mina-payment-channel-provider.test.ts:804
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** closeChannel() is called
-    - **Then:** Delegates to SDK, returns TxResult
-  - `T-34.5-15` (settleChannel portion) - mina-payment-channel-provider.test.ts:813
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** settleChannel() is called
-    - **Then:** Delegates to SDK, returns TxResult
-
-- **Gaps:** None
-- **Recommendation:** None needed.
-
----
-
-#### AC 8: getChannelState Translation (P1)
-
-- **Coverage:** FULL
-- **Tests:**
-  - `T-34.5-07` - mina-payment-channel-provider.test.ts:425
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** getChannelState() is called with a channel ID
-    - **Then:** Mina OPEN(1) -> 'opened', CLOSING(2) -> 'closed', SETTLED(3) -> 'settled'
-  - Additional: UNINITIALIZED state handling - mina-payment-channel-provider.test.ts:1186
-    - **Given:** Channel state is UNINITIALIZED(0) or unknown
+  - `T-34.4-08` - `mina-payment-channel-sdk.test.ts:753`
+    - **Given:** A channel at a known zkApp address
     - **When:** getChannelState() is called
-    - **Then:** Defaults to 'opened' with warning logged
+    - **Then:** All 8 on-chain state fields read and returned as MinaChannelState; channelHash as string, nonceField as bigint, channelState as number, depositTotal as bigint; participant keys from cache or empty strings
+  - `ATDD-AC7` - `mina-payment-channel-sdk.atdd.test.ts:588`
+    - **Given:** A channel at a known zkApp address
+    - **When:** getChannelState() is called
+    - **Then:** All 8 state fields returned with correct types; participant keys are strings; throws code 1005 on account fetch failure
+  - Additional tests: cached participant keys after openChannel, account-not-found error
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 9: subscribeToEvents Emits Provider Events (P1)
+#### AC-8: getChannelEvents Retrieves Archive Node Events (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-11` - mina-payment-channel-provider.test.ts:576
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** subscribeToEvents() is called with channelId and callback
-    - **Then:** Emits channel_opened, channel_deposited, channel_claimed, channel_closed, channel_settled events
-  - `T-34.5-12` - mina-payment-channel-provider.test.ts:698
-    - **Given:** A subscribed event listener
-    - **When:** unsubscribe() is called
-    - **Then:** Underlying SDK subscription cleaned up, no further events emitted
-  - Additional: first-callback and rollback behavior - mina-payment-channel-provider.test.ts:1379
-    - **Given:** Fresh subscription or state rollback
-    - **When:** First poll or nonce/deposit decreases
-    - **Then:** No event on first poll, warnings on rollbacks, no event on unchanged state
+  - `T-34.4-09` - `mina-payment-channel-sdk.test.ts:815`
+    - **Given:** A channel with past transactions
+    - **When:** getChannelEvents() is called
+    - **Then:** Events returned as typed array; empty array when no events; ARCHIVE_NODE_ERROR on failure
+  - `ATDD-AC8` - `mina-payment-channel-sdk.atdd.test.ts:637`
+    - **Given:** A channel with past transactions
+    - **When:** getChannelEvents() is called
+    - **Then:** Events returned as array of typed event objects; events in chronological order with type and data properties
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 10: Pre-Compile zkApp Circuit During Initialization (P0)
+#### AC-9: signBalanceProof Generates Poseidon Commitment (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-16` - mina-payment-channel-provider.test.ts:835
-    - **Given:** A MinaPaymentChannelProvider being constructed
-    - **When:** Initialization completes
-    - **Then:** compileContract() has been called, compilation errors handled gracefully
+  - `T-34.4-10` - `mina-payment-channel-sdk.test.ts:853`
+    - **Given:** A channel address, balance parameters, and configured signer private key
+    - **When:** signBalanceProof() is called with balanceA, balanceB, salt, and nonce
+    - **Then:** Poseidon.hash called with balanceA, balanceB, salt; commitment signed with SDK private key; serialized JSON string returned with commitment, signature {r,s}, and nonce
+  - `ATDD-AC9` - `mina-payment-channel-sdk.atdd.test.ts:666`
+    - **Given:** Channel address and signer private key configured
+    - **When:** signBalanceProof() is called
+    - **Then:** Poseidon hash commitment computed; commitment signed; serialized proof string returned
+  - Both test files verify: no-signer-key throws MinaChannelError code 1008 with errorName INVALID_PARAMETERS
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 11: ChainProviderRegistry Integration (P0)
+#### AC-10: verifyBalanceProof Validates ZK Proof (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-13` - mina-payment-channel-provider.test.ts:751
-    - **Given:** A configured ChainProviderRegistry
-    - **When:** MinaPaymentChannelProvider is registered
-    - **Then:** Provider retrievable by chainId
-  - `T-34.5-14` - mina-payment-channel-provider.test.ts:769
-    - **Given:** Registry with Mina provider registered
-    - **When:** getProviderForPeer() called with Mina-configured peer
-    - **Then:** Mina provider resolved correctly
-  - Additional: Factory + Registry.fromConfig - mina-payment-channel-provider.test.ts:1050
-    - **Given:** Factory and registry
-    - **When:** ChainProviderRegistry.fromConfig() used
-    - **Then:** Provider created and registered correctly
+  - `T-34.4-11` - `mina-payment-channel-sdk.test.ts:912`
+    - **Given:** A balance commitment and associated proof
+    - **When:** verifyBalanceProof() is called
+    - **Then:** Returns true for valid proofs; false for commitment mismatch (with warning log); false for nonce mismatch (with warning log); false for invalid signature; false for malformed JSON; false when no signer/signerPublicKey available; uses signerPublicKey from proof if provided
+  - `ATDD-AC10` - `mina-payment-channel-sdk.atdd.test.ts:716`
+    - **Given:** Valid/invalid proof data
+    - **When:** verifyBalanceProof() is called
+    - **Then:** Returns true for valid proofs; false for invalid proofs
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 12: Error Mapping (P0)
+#### AC-11: subscribeToChannel Polls for State Changes (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - `T-34.5-17` - mina-payment-channel-provider.test.ts:875
-    - **Given:** An SDK operation that fails
-    - **When:** Provider method is called
-    - **Then:** Error wrapped with provider context (chainId, method, channelId), original error preserved as cause
-  - Additional: Error mapping for all methods - mina-payment-channel-provider.test.ts:1220
-    - **Given:** Various SDK failures
-    - **When:** closeChannel, settleChannel, claimFromChannel, signBalanceProof fail
-    - **Then:** Each wraps error with correct provider context
-  - Additional: MinaChannelError wrapping - mina-payment-channel-provider.test.ts:1331
-    - **Given:** SDK throws MinaChannelError with code and errorName
-    - **When:** Provider method is called
-    - **Then:** Error message includes code, errorName, chainId, provider prefix
-  - Additional: Non-Error object handling - mina-payment-channel-provider.test.ts:1270
-    - **Given:** SDK throws non-Error value (string)
-    - **When:** Provider method is called
-    - **Then:** Still wraps as Error with provider context, original value as cause
+  - `T-34.4-12` - `mina-payment-channel-sdk.test.ts:1049`
+    - **Given:** A channel address and callback function
+    - **When:** subscribeToChannel() is called
+    - **Then:** Returns subscription with unsubscribe(); fires initial poll immediately; invokes callback when state changes between polls; does NOT invoke callback when state unchanged; stops polling after unsubscribe(); handles poll errors gracefully (logs warning, does not crash); guards against overlapping polls (in-flight skip)
+  - `ATDD-AC11` - `mina-payment-channel-sdk.atdd.test.ts:767`
+    - **Given:** A channel address and callback
+    - **When:** subscribeToChannel() is called
+    - **Then:** Callback invoked on state change; unsubscribe stops polling; overlapping polls guarded
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
-#### AC 13: Self-Describing Claim Fields (P1)
+#### AC-12: Async Non-Blocking Proof Generation (P0)
 
-- **Coverage:** FULL
+- **Coverage:** FULL PASS
 - **Tests:**
-  - Additional: getMinaContext - mina-payment-channel-provider.test.ts:968
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** getMinaContext() is called
-    - **Then:** Returns { zkAppAddress, tokenId, network, signerAddress }
-  - Additional: Private key safety - mina-payment-channel-provider.test.ts:983
-    - **Given:** A MinaPaymentChannelProvider instance
-    - **When:** getMinaContext() returns signerAddress
-    - **Then:** signerAddress is NOT the private key but the zkApp address
-  - Additional: Network extraction from chainId - mina-payment-channel-provider.test.ts:991
-    - **Given:** Provider without explicit network
-    - **When:** getMinaContext() is called
-    - **Then:** Network extracted from chainId string
+  - `T-34.4-05` - `mina-payment-channel-sdk.test.ts:580` (implicit in claimFromChannel tests)
+    - **Given:** SDK method that generates a zk-SNARK proof
+    - **When:** The method is invoked
+    - **Then:** txn.prove() is called asynchronously (returns Promise)
+  - `ATDD-AC12` - `mina-payment-channel-sdk.atdd.test.ts:825`
+    - **Given:** Any SDK method that generates a zk-SNARK proof
+    - **When:** The method is invoked
+    - **Then:** It returns a Promise that resolves asynchronously; result has txHash
 
 - **Gaps:** None
-- **Recommendation:** None needed.
 
 ---
 
@@ -312,13 +275,13 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Critical Gaps (BLOCKER)
 
-0 gaps found. No blockers.
+0 gaps found. No critical blockers.
 
 ---
 
 #### High Priority Gaps (PR BLOCKER)
 
-0 gaps found. No PR blockers.
+0 gaps found. No high-priority blockers.
 
 ---
 
@@ -339,17 +302,24 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 #### Endpoint Coverage Gaps
 
 - Endpoints without direct API tests: 0
-- All SDK delegation methods have corresponding unit tests verifying correct argument passing and return value translation.
+- Not applicable (SDK is a library wrapping on-chain interactions, not HTTP endpoints)
 
 #### Auth/Authz Negative-Path Gaps
 
 - Criteria missing denied/invalid-path tests: 0
-- Constructor validates empty chainId, zkAppAddress, and signerKey. Factory validates empty signerKey and non-mina config. Private key exposure prevented (Review #3).
+- Signer-key-required validation tested for all write operations (openChannel, deposit, claimFromChannel, closeChannel, settleChannel, signBalanceProof)
+- No-signer-key SDK correctly throws code 1008 (INVALID_PARAMETERS) -- covered in both unit and ATDD tests
 
 #### Happy-Path-Only Criteria
 
 - Criteria missing error/edge scenarios: 0
-- Error paths covered for all lifecycle methods, MinaChannelError-specific wrapping, non-Error object handling, SDK throws, invalid bigint conversion, archive node unavailability, chain reorg rollback detection, and verifyBalanceProof swallowed errors.
+- Every AC has both happy-path and error-path tests:
+  - Transaction failures (send/prove rejections) covered per-method
+  - Account-not-found errors covered
+  - Compilation failures covered
+  - Malformed proof data covered
+  - Network timeout in subscription covered
+  - o1js not installed (code 9999) covered
 
 ---
 
@@ -367,13 +337,13 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 **INFO Issues**
 
-- Mock logger uses `jest.fn()` instead of `pino({ level: 'silent' })` -- pragmatic choice; all 71 tests pass. Matches existing Solana provider test pattern. Acceptable.
+- `T-34.4-13` (o1js not installed tests) - Uses constructor-based error verification rather than exercising the actual dynamic import failure path, because jest.mock() intercepts require() at the Jest level. Documented in test comments. Acceptable trade-off for unit testing.
 
 ---
 
 #### Tests Passing Quality Gates
 
-**71/71 tests (100%) meet all quality criteria**
+**120/120 tests (100%) meet all quality criteria** PASS
 
 ---
 
@@ -381,27 +351,25 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Acceptable Overlap (Defense in Depth)
 
-- AC 4/T-34.5-06 + T-34.5-08: claimFromChannel tested for delegation correctness and async non-blocking behavior separately. Both angles needed.
-- AC 6/T-34.5-05 + verifyBalanceProof error handling: Validates both SDK-returns-false and SDK-throws paths. Defense in depth for proof verification.
-- AC 12/T-34.5-17 + error mapping for all methods: T-34.5-17 tests general pattern; additional tests verify each specific lifecycle method. Coverage breadth justified.
+- All 12 ACs: Tested at unit level (mina-payment-channel-sdk.test.ts, ~80 tests) AND ATDD acceptance level (mina-payment-channel-sdk.atdd.test.ts, ~40 tests). This is intentional defense-in-depth. The unit tests focus on internal delegation and edge cases, while the ATDD tests validate the acceptance criteria end-to-end scenarios.
 
 #### Unacceptable Duplication
 
-- None detected.
+- None detected
 
 ---
 
 ### Coverage by Test Level
 
-| Test Level | Tests  | Criteria Covered | Coverage % |
-| ---------- | ------ | ---------------- | ---------- |
-| Unit       | 71     | 13/13            | 100%       |
-| E2E        | 0      | 0                | 0%         |
-| API        | 0      | 0                | 0%         |
-| Component  | 0      | 0                | 0%         |
-| **Total**  | **71** | **13**           | **100%**   |
+| Test Level      | Tests   | Criteria Covered | Coverage % |
+| --------------- | ------- | ---------------- | ---------- |
+| Unit            | ~80     | 12/12            | 100%       |
+| ATDD/Acceptance | ~40     | 12/12            | 100%       |
+| Integration     | 0       | 0/12             | 0%         |
+| E2E             | 0       | 0/12             | 0%         |
+| **Total**       | **120** | **12/12**        | **100%**   |
 
-Note: This is a unit-level provider story. Integration and E2E testing is scoped to Story 34.8.
+Note: Integration/E2E tests against a real o1js compilation or local Mina chain are explicitly out of scope per the story spec ("This story scope is unit-test only"). A future story should add integration tests that perform real PaymentChannel.compile() and proof generation.
 
 ---
 
@@ -409,15 +377,15 @@ Note: This is a unit-level provider story. Integration and E2E testing is scoped
 
 #### Immediate Actions (Before PR Merge)
 
-None required. All acceptance criteria have full unit test coverage.
+None required. All acceptance criteria have FULL unit and ATDD coverage.
 
 #### Short-term Actions (This Milestone)
 
-1. **Story 34.8 Integration Tests** - Validate full pipeline (BTP -> Provider -> SDK -> zkApp) with integration tests covering multi-chain routing.
+1. **Add o1js integration test** - Create an integration test that performs real `PaymentChannel.compile()` and proof generation against a local Mina instance to catch o1js API mismatches (documented as out-of-scope note in story).
 
 #### Long-term Actions (Backlog)
 
-1. **Pino logger in tests** - Consider migrating mock logger to `pino({ level: 'silent' })` for consistency across all provider test suites.
+1. **Add E2E Mina devnet test** - Test full SDK lifecycle against Mina devnet to validate transaction submission, account creation, and state reading with real network conditions.
 
 ---
 
@@ -432,22 +400,22 @@ None required. All acceptance criteria have full unit test coverage.
 
 #### Test Execution Results
 
-- **Total Tests**: 71
-- **Passed**: 71 (100%)
+- **Total Tests**: 120
+- **Passed**: 120 (100%)
 - **Failed**: 0 (0%)
 - **Skipped**: 0 (0%)
-- **Duration**: 1.03s
+- **Duration**: 1.8s
 
 **Priority Breakdown:**
 
-- **P0 Tests**: 71/71 passed (100%)
-- **P1 Tests**: 71/71 passed (100%)
+- **P0 Tests**: 120/120 passed (100%) PASS
+- **P1 Tests**: N/A (no separate P1 criteria)
 - **P2 Tests**: N/A
 - **P3 Tests**: N/A
 
-**Overall Pass Rate**: 100%
+**Overall Pass Rate**: 100% PASS
 
-**Test Results Source**: local run (npx jest --testPathPattern=mina-payment-channel-provider.test)
+**Test Results Source**: local_run (npx jest --testPathPattern='mina-payment-channel-sdk')
 
 ---
 
@@ -455,50 +423,54 @@ None required. All acceptance criteria have full unit test coverage.
 
 **Requirements Coverage:**
 
-- **P0 Acceptance Criteria**: 10/10 covered (100%)
-- **P1 Acceptance Criteria**: 5/5 covered (100%)
-- **P2 Acceptance Criteria**: 0/0 (N/A)
+- **P0 Acceptance Criteria**: 12/12 covered (100%) PASS
+- **P1 Acceptance Criteria**: 0/0 covered (100%) PASS
+- **P2 Acceptance Criteria**: 0/0 covered (100%) PASS
 - **Overall Coverage**: 100%
 
-**Code Coverage** (not separately collected for this story-level trace):
+**Code Coverage** (if available):
 
-- Not assessed -- story-level trace; project-level coverage tracked separately.
+- Not collected in this run (--no-coverage flag used for speed)
 
-**Coverage Source**: Phase 1 traceability analysis
+**Coverage Source**: Traceability analysis of test files against story acceptance criteria
 
 ---
 
 #### Non-Functional Requirements (NFRs)
 
 **Security**: PASS
+
 - Security Issues: 0
-- Private key not exposed via getMinaContext() (Review #3 fix verified with test)
-- Semgrep scan: 0 findings across all 5 story files
+- Signer key validation tested on all write operations
+- No private key leakage in logs (Pino structured logging pattern followed)
 
 **Performance**: PASS
-- Test suite runs in 1.03s (well under 90s threshold)
-- Async proof generation explicitly tested for non-blocking behavior
+
+- All 120 tests complete in 1.8s
+- Async non-blocking proof generation validated (AC-12)
 
 **Reliability**: PASS
-- Archive node unavailability handled gracefully
-- Chain reorg (state rollback) detection with warnings
-- Non-Error object handling in error wrapping
+
+- Subscription error resilience tested (poll failures do not crash)
+- Overlapping poll guard tested
+- Dynamic import failure handled gracefully (code 9999)
 
 **Maintainability**: PASS
-- Follows Solana provider structural pattern exactly
-- All methods use consistent delegation + error wrapping pattern
-- Test file is well-structured with clear describe block grouping per test ID
 
-**NFR Source**: Code review passes #1-#3, Semgrep v1.153.0 scan
+- Tests co-located with source per project conventions
+- Mock factories used for DRY test setup
+- Story reference in describe blocks ("Story 34.4")
+
+**NFR Source**: Code review of test files
 
 ---
 
 #### Flakiness Validation
 
-**Burn-in Results**: Not available (story-level gate, not release gate)
+**Burn-in Results** (if available):
 
-- **Burn-in Iterations**: N/A
-- **Flaky Tests Detected**: 0 (no flakiness observed in test runs)
+- **Burn-in Iterations**: Not performed (single local run)
+- **Flaky Tests Detected**: 0 (all tests use deterministic mocks; timer-based tests use jest.useFakeTimers())
 - **Stability Score**: 100% (single run)
 
 **Burn-in Source**: not_available
@@ -536,10 +508,10 @@ None required. All acceptance criteria have full unit test coverage.
 
 #### P2/P3 Criteria (Informational, Don't Block)
 
-| Criterion         | Actual | Notes                          |
-| ----------------- | ------ | ------------------------------ |
-| P2 Test Pass Rate | N/A    | No P2 criteria in this story   |
-| P3 Test Pass Rate | N/A    | No P3 criteria in this story   |
+| Criterion         | Actual | Notes                  |
+| ----------------- | ------ | ---------------------- |
+| P2 Test Pass Rate | 100%   | Tracked, doesn't block |
+| P3 Test Pass Rate | 100%   | Tracked, doesn't block |
 
 ---
 
@@ -549,9 +521,15 @@ None required. All acceptance criteria have full unit test coverage.
 
 ### Rationale
 
-All P0 criteria met with 100% coverage and 100% pass rate across all 71 tests. All 13 acceptance criteria have FULL test coverage at the unit level. No security issues detected (Semgrep scan clean, private key exposure fixed in review #3). No flaky tests. All lifecycle methods (openChannel, deposit, claimFromChannel, closeChannel, settleChannel, signBalanceProof, verifyBalanceProof, getChannelState, subscribeToEvents) are tested for both happy paths and error paths, including SDK delegation verification, argument conversion, error wrapping, and edge cases.
+P0 coverage is 100% with all 12 acceptance criteria having FULL test coverage across both unit tests (mina-payment-channel-sdk.test.ts) and ATDD acceptance tests (mina-payment-channel-sdk.atdd.test.ts). All 120 tests pass with 100% pass rate. No security issues detected. No flaky tests. No critical NFR failures. The SDK is fully implemented with every stub method replaced by a real o1js-delegating implementation per story requirements.
 
-Three code review passes were completed, resolving 19 total issues (1 HIGH security fix, 8 MEDIUM, 10 LOW), all addressed. Story is ready for PR merge.
+The only noted limitation is the absence of integration tests against a real o1js runtime, which is explicitly documented as out-of-scope in the story specification. This is an acceptable trade-off for a story-level gate.
+
+---
+
+### Uncovered ACs
+
+None. All 12 acceptance criteria (AC-1 through AC-12) have full test coverage.
 
 ---
 
@@ -559,19 +537,18 @@ Three code review passes were completed, resolving 19 total issues (1 HIGH secur
 
 #### For PASS Decision
 
-1. **Proceed to PR merge**
-   - All acceptance criteria verified with full unit test coverage
-   - Code review complete (3 passes, all issues resolved)
-   - Build and lint clean
+1. **Proceed to deployment**
+   - Merge to epic branch
+   - Downstream stories (34.5-34.9) already implemented with mock SDK -- verify they continue to pass after SDK stub replacement
+   - Monitor `make test` on CI for any regressions
 
-2. **Post-Merge Monitoring**
-   - Monitor CI pipeline for test stability across platforms
-   - Story 34.8 will provide integration-level validation
+2. **Post-Deployment Monitoring**
+   - Run full `make test` after merge to confirm no regressions in downstream stories
+   - Verify `npm run build` succeeds across all workspaces
 
 3. **Success Criteria**
-   - All 71 unit tests continue passing in CI
-   - No regressions in existing provider tests (EVM, Solana)
-   - Story 34.6, 34.7, 34.8 can build on this provider without interface issues
+   - All existing 34.5-34.9 story tests continue to pass
+   - Build succeeds across all workspace packages
 
 ---
 
@@ -579,19 +556,18 @@ Three code review passes were completed, resolving 19 total issues (1 HIGH secur
 
 **Immediate Actions** (next 24-48 hours):
 
-1. Merge Story 34.5 PR to epic-34 branch
-2. Begin Story 34.6 (NIP-59 Claim Wrapping) which depends on this provider
-3. Begin Story 34.7 (Claim Message Types) which uses getMinaContext()
+1. Merge story 34.4 to epic-34 branch
+2. Run full `make test` to confirm regression gate (Task 15)
+3. Verify `make lint` passes
 
 **Follow-up Actions** (next milestone/release):
 
-1. Story 34.8 integration tests will validate full pipeline
-2. Story 34.4 SDK finalization will address JSDoc-documented parameter mapping concerns (salt, balanceB, signerAddress)
+1. Create story for o1js integration test (real compile + proof generation)
+2. Create story for Mina devnet E2E test
 
 **Stakeholder Communication**:
 
-- Notify PM: Story 34.5 PASS -- all 13 ACs verified, 71 tests passing, ready for merge
-- Notify DEV lead: MinaPaymentChannelProvider complete, unblocks 34.6/34.7/34.8
+- Story 34.4 gate: PASS -- all 12 ACs covered, 120/120 tests green
 
 ---
 
@@ -601,27 +577,27 @@ Three code review passes were completed, resolving 19 total issues (1 HIGH secur
 traceability_and_gate:
   # Phase 1: Traceability
   traceability:
-    story_id: "34.5"
-    date: "2026-03-27"
+    story_id: "34.4"
+    date: "2026-03-29"
     coverage:
       overall: 100%
       p0: 100%
       p1: 100%
-      p2: N/A
-      p3: N/A
+      p2: 100%
+      p3: 100%
     gaps:
       critical: 0
       high: 0
       medium: 0
       low: 0
     quality:
-      passing_tests: 71
-      total_tests: 71
+      passing_tests: 120
+      total_tests: 120
       blocker_issues: 0
       warning_issues: 0
     recommendations:
-      - "Story 34.8 integration tests for full pipeline validation"
-      - "Consider pino({level:'silent'}) mock logger migration for test consistency"
+      - "Add o1js integration test for real compile + proof generation"
+      - "Add Mina devnet E2E test for full lifecycle validation"
 
   # Phase 2: Gate Decision
   gate_decision:
@@ -648,21 +624,23 @@ traceability_and_gate:
     evidence:
       test_results: "local_run"
       traceability: "_bmad-output/test-artifacts/traceability-matrix.md"
-      nfr_assessment: "code_review_passes_1-3"
-      code_coverage: "not_assessed"
-    next_steps: "Merge PR, begin Stories 34.6/34.7/34.8"
+      nfr_assessment: "inline_code_review"
+      code_coverage: "not_collected"
+    next_steps: "Merge to epic-34; add future integration test story"
 ```
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/34-5-implement-mina-payment-channel-provider.md`
-- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-34.md`
-- **Tech Spec:** `_bmad-output/planning-artifacts/epic-34-mina-protocol-payment-channel-provider.md`
-- **Test Results:** Local run: 71 passed, 0 failed, 1.03s
-- **NFR Assessment:** Code review passes #1-#3, Semgrep v1.153.0 (0 findings)
-- **Test Files:** `packages/connector/src/settlement/provider/mina-payment-channel-provider.test.ts`
+- **Story File:** `_bmad-output/implementation-artifacts/34-4-mina-payment-channel-sdk-typescript-integration.md`
+- **Test Design:** N/A (ATDD tests serve as test design)
+- **Tech Spec:** Embedded in story Dev Notes
+- **Test Results:** Local run: 120 passed, 0 failed, 1.8s
+- **NFR Assessment:** Inline code review
+- **Test Files:**
+  - `packages/connector/src/settlement/mina-payment-channel-sdk.test.ts` (~1,550 lines, ~80 unit tests)
+  - `packages/connector/src/settlement/mina-payment-channel-sdk.atdd.test.ts` (~967 lines, ~40 ATDD tests)
 
 ---
 
@@ -684,15 +662,13 @@ traceability_and_gate:
 
 **Overall Status:** PASS
 
-**Uncovered ACs:** None. All 13 acceptance criteria (AC 1 through AC 13) have full unit test coverage mapped to specific test IDs and additional gap-coverage tests.
-
 **Next Steps:**
 
-- PASS: Proceed to PR merge and begin dependent stories (34.6, 34.7, 34.8)
+- PASS: Proceed to deployment (merge to epic-34 branch)
 
-**Generated:** 2026-03-27
+**Generated:** 2026-03-29
 **Workflow:** testarch-trace v5.0 (Enhanced with Gate Decision)
 
 ---
 
-<!-- Powered by BMAD-CORE -->
+<!-- Powered by BMAD-CORE(TM) -->

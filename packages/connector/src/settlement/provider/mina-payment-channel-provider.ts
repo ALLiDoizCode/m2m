@@ -107,13 +107,16 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
   /** Resolved network name */
   private readonly _network: string;
 
+  /** Cached signer public key (derived from private key, populated lazily) */
+  private _signerPublicKey: string | null = null;
+
   /**
    * Create a new MinaPaymentChannelProvider.
    *
    * @param _sdk - The underlying MinaPaymentChannelSDK instance
    * @param chainId - Namespaced chain identifier (e.g., `'mina:devnet'`)
    * @param _zkAppAddress - zkApp address for the payment channel contract (base58)
-   * @param _signerKey - Private key or key identifier for signing operations
+   * @param signerKey - Private key or key identifier for signing operations (validated, not stored)
    * @param _logger - Logger instance for diagnostic output
    * @param options - Optional parameters (tokenId, network)
    */
@@ -121,7 +124,7 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     private readonly _sdk: MinaPaymentChannelSDK,
     chainId: string,
     private readonly _zkAppAddress: string,
-    private readonly _signerKey: string,
+    signerKey: string,
     private readonly _logger: Logger,
     options?: MinaProviderOptions
   ) {
@@ -131,7 +134,7 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     if (!_zkAppAddress) {
       throw new Error('MinaPaymentChannelProvider: zkAppAddress must not be empty');
     }
-    if (!_signerKey) {
+    if (!signerKey) {
       throw new Error('MinaPaymentChannelProvider: signerKey must not be empty');
     }
     this.chainId = chainId;
@@ -193,8 +196,11 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     );
 
     try {
+      // Derive the signer's public key from the private key via the SDK.
+      // The provider must NOT pass the raw private key as participantA.
+      const signerPublicKey = await this._ensureSignerPublicKey();
       const result = await this._sdk.openChannel(
-        this._signerKey,
+        signerPublicKey,
         participant,
         settlementTimeout,
         this._tokenId
@@ -239,14 +245,13 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    * @remarks
    * `balanceB` and `salt` are passed as `0n` placeholders. The EVM-centric
    * `BalanceProofParams` interface does not carry these Mina-specific fields.
-   * Story 34.4 SDK implementation should either derive `balanceB` from channel
-   * state or accept it through an extended parameter object. The `salt` must be
-   * non-zero in production for Poseidon commitment privacy; the SDK should
-   * generate or manage it internally.
+   * The `signature` parameter is passed as both `signatureA` and `signatureB`
+   * to the SDK. In production, callers should provide both participant
+   * signatures via the SDK directly for dual-party authorization.
    *
    * @param channelId - zkApp address (base58)
    * @param balanceProof - The balance proof parameters
-   * @param signature - Serialized proof/commitment string
+   * @param signature - Serialized proof/commitment string (used as both signatureA and signatureB)
    * @returns Transaction hash
    */
   async claimFromChannel(
@@ -270,7 +275,8 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
         0n, // balanceB -- adapted by SDK
         0n, // salt -- adapted by SDK
         nonce,
-        signature
+        signature, // signatureA
+        signature // signatureB -- same signature used as placeholder
       );
 
       return { txHash: result.txHash };
@@ -280,19 +286,41 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
   }
 
   /**
-   * Initiate channel closure.
+   * Initiate channel closure with final balances.
    *
    * @param channelId - zkApp address to close
+   * @param finalBalanceA - Final balance for participant A (optional, defaults to 0n)
+   * @param finalBalanceB - Final balance for participant B (optional, defaults to 0n)
+   * @param salt - Salt for balance commitment (optional, defaults to 0n)
+   * @param nonce - Close nonce (optional, defaults to 0n)
+   * @param signatureA - Signature from participant A (optional)
+   * @param signatureB - Signature from participant B (optional)
    * @returns Transaction hash
    */
-  async closeChannel(channelId: string): Promise<TxResult> {
+  async closeChannel(
+    channelId: string,
+    finalBalanceA?: bigint,
+    finalBalanceB?: bigint,
+    salt?: bigint,
+    nonce?: bigint,
+    signatureA?: string,
+    signatureB?: string
+  ): Promise<TxResult> {
     this._logger.info(
       { event: 'close_channel', channelId, chainId: this.chainId },
       'Closing Mina payment channel'
     );
 
     try {
-      const result = await this._sdk.closeChannel(channelId);
+      const result = await this._sdk.closeChannel(
+        channelId,
+        finalBalanceA ?? 0n,
+        finalBalanceB ?? 0n,
+        salt ?? 0n,
+        nonce ?? 0n,
+        signatureA ?? '{"r":"0","s":"0"}',
+        signatureB ?? '{"r":"0","s":"0"}'
+      );
       return { txHash: result.txHash };
     } catch (err: unknown) {
       throw this._wrapError(err, 'closeChannel', channelId);
@@ -303,16 +331,38 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    * Settle a closed channel after the challenge period expires.
    *
    * @param channelId - zkApp address to settle
+   * @param balanceA - Revealed balance for participant A (optional, defaults to 0n)
+   * @param balanceB - Revealed balance for participant B (optional, defaults to 0n)
+   * @param salt - Salt used in the balance commitment (optional, defaults to 0n)
+   * @param participantA - Base58 public key of participant A (optional)
+   * @param participantB - Base58 public key of participant B (optional)
+   * @param nonce - Channel nonce (optional, defaults to 0n)
    * @returns Transaction hash
    */
-  async settleChannel(channelId: string): Promise<TxResult> {
+  async settleChannel(
+    channelId: string,
+    balanceA?: bigint,
+    balanceB?: bigint,
+    salt?: bigint,
+    participantA?: string,
+    participantB?: string,
+    nonce?: bigint
+  ): Promise<TxResult> {
     this._logger.info(
       { event: 'settle_channel', channelId, chainId: this.chainId },
       'Settling Mina payment channel'
     );
 
     try {
-      const result = await this._sdk.settleChannel(channelId);
+      const result = await this._sdk.settleChannel(
+        channelId,
+        balanceA ?? 0n,
+        balanceB ?? 0n,
+        salt ?? 0n,
+        participantA ?? '',
+        participantB ?? '',
+        nonce ?? 0n
+      );
       return { txHash: result.txHash };
     } catch (err: unknown) {
       throw this._wrapError(err, 'settleChannel', channelId);
@@ -521,26 +571,37 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    *
    * @returns Mina context with zkAppAddress, tokenId, network, and signerAddress
    */
-  getMinaContext(): {
+  async getMinaContext(): Promise<{
     zkAppAddress: string;
     tokenId: string;
     network: string;
     signerAddress: string;
-  } {
-    // SECURITY: Do NOT return _signerKey here -- it may contain private key material.
-    // Return the zkApp address as a safe public identifier until Story 34.4 SDK
-    // provides a proper public key derivation method.
+  }> {
+    // Derive the signer's public key from the private key via the SDK.
+    // SECURITY: The signer private key is stored in the SDK, not this provider.
+    const signerPublicKey = await this._ensureSignerPublicKey();
     return {
       zkAppAddress: this._zkAppAddress,
       tokenId: this._tokenId,
       network: this._network,
-      signerAddress: this._zkAppAddress,
+      signerAddress: signerPublicKey,
     };
   }
 
   // -------------------------------------------------------------------------
   // Private Helpers
   // -------------------------------------------------------------------------
+
+  /**
+   * Lazily derive and cache the signer's public key from the private key.
+   * Uses the SDK's `getSignerPublicKey()` method which calls o1js internally.
+   */
+  private async _ensureSignerPublicKey(): Promise<string> {
+    if (!this._signerPublicKey) {
+      this._signerPublicKey = await this._sdk.getSignerPublicKey();
+    }
+    return this._signerPublicKey;
+  }
 
   /**
    * Map `MinaChannelState` to chain-agnostic `ProviderChannelState`.
@@ -740,7 +801,12 @@ export function createMinaProviderFactory(logger: Logger, signerKey: string): Ch
     if (config.chainType !== 'mina') {
       throw new Error(`Mina factory received non-Mina config: ${config.chainType}`);
     }
-    const sdk = new MinaPaymentChannelSDK(config.graphqlUrl, config.zkAppAddress, logger);
+    const sdk = new MinaPaymentChannelSDK(
+      config.graphqlUrl,
+      config.zkAppAddress,
+      logger,
+      signerKey
+    );
     const network = config.network ?? 'devnet';
     const chainId = `mina:${network}`;
     return new MinaPaymentChannelProvider(sdk, chainId, config.zkAppAddress, signerKey, logger, {

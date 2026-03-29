@@ -382,7 +382,7 @@ export class PerPacketClaimService {
         | { zkAppAddress: string; tokenId: string; network: string; signerAddress: string }
         | undefined;
       if (provider instanceof MinaPaymentChannelProvider) {
-        minaContext = provider.getMinaContext();
+        minaContext = await provider.getMinaContext();
       }
 
       return {

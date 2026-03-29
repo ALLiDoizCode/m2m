@@ -71,6 +71,7 @@ function createMockMinaSDK(): jest.Mocked<
     | 'settleChannel'
     | 'getChannelState'
     | 'compileContract'
+    | 'getSignerPublicKey'
     | 'signBalanceProof'
     | 'verifyBalanceProof'
     | 'subscribeToChannel'
@@ -84,6 +85,7 @@ function createMockMinaSDK(): jest.Mocked<
     settleChannel: jest.fn(),
     getChannelState: jest.fn(),
     compileContract: jest.fn().mockResolvedValue(undefined),
+    getSignerPublicKey: jest.fn().mockResolvedValue('B62qMockSignerPublicKey'),
     signBalanceProof: jest.fn(),
     verifyBalanceProof: jest.fn(),
     subscribeToChannel: jest.fn(),
@@ -338,15 +340,15 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
 
       // Then: each provider has distinct context
       for (let i = 0; i < 3; i++) {
-        const ctx = providers[i]!.getMinaContext();
+        const ctx = await providers[i]!.getMinaContext();
         expect(ctx.zkAppAddress).toBe(addresses[i]);
       }
 
       // And: signing proofs produces unique results per provider
       const sigs = await Promise.all(
-        providers.map((p) =>
+        providers.map(async (p) =>
           p.signBalanceProof({
-            channelId: p.getMinaContext().zkAppAddress,
+            channelId: (await p.getMinaContext()).zkAppAddress,
             nonce: 1,
             transferredAmount: '1000',
             lockedAmount: '0',
@@ -496,7 +498,15 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
 
       // Then: an on-chain settlement is executed
       expect(result.txHash).toBe('tx-settle-threshold');
-      expect(mockSdk.settleChannel).toHaveBeenCalledWith(MINA_ZKAPP_ADDRESS);
+      expect(mockSdk.settleChannel).toHaveBeenCalledWith(
+        MINA_ZKAPP_ADDRESS,
+        0n,
+        0n,
+        0n,
+        '',
+        '',
+        0n
+      );
     });
 
     it('should trigger SETTLEMENT_REQUIRED event from SettlementMonitor when Mina peer threshold exceeded', async () => {
@@ -802,7 +812,7 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
       for (const { provider } of providers) {
         for (let nonce = 1; nonce <= 5; nonce++) {
           await provider.signBalanceProof({
-            channelId: provider.getMinaContext().zkAppAddress,
+            channelId: (await provider.getMinaContext()).zkAppAddress,
             nonce,
             transferredAmount: String(nonce * 1000),
             lockedAmount: '0',

@@ -151,7 +151,7 @@ function createMockMinaProvider(): jest.Mocked<PaymentChannelProvider> & {
   const minaProvider = provider as jest.Mocked<PaymentChannelProvider> & {
     getMinaContext: jest.Mock;
   };
-  minaProvider.getMinaContext = jest.fn().mockReturnValue({
+  minaProvider.getMinaContext = jest.fn().mockResolvedValue({
     zkAppAddress: MINA_ZKAPP_ADDRESS,
     tokenId: MINA_TOKEN_ID,
     network: 'devnet',

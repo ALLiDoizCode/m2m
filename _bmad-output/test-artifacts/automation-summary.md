@@ -1,9 +1,9 @@
 ---
 workflow: TA (Test Automation)
 mode: YOLO
-inputDocument: _bmad-output/implementation-artifacts/34-6-nip59-claim-wrapping-transport-privacy.md
+inputDocument: _bmad-output/implementation-artifacts/34-4-mina-payment-channel-sdk-typescript-integration.md
 generatedFiles:
-  - packages/connector/src/settlement/privacy/nip59-claim-wrapper.test.ts (modified - 9 tests added)
+  - packages/connector/src/settlement/mina-payment-channel-sdk.test.ts (modified - 26 tests added)
 stepsCompleted:
   - step-01-preflight-and-context
   - step-02-identify-targets
@@ -11,192 +11,137 @@ stepsCompleted:
   - step-04-validate
   - step-05-summary
 lastStep: step-05-summary
-lastSaved: '2026-03-28'
+lastSaved: '2026-03-29'
 stackDetected: backend
 framework: Jest
 language: TypeScript
 runner: ts-jest
 ---
 
-# Test Automation Summary -- Story 34.6: NIP-59 Claim Wrapping
+# Test Automation Summary -- Story 34.4
 
 ## Execution Mode
 
-BMad-Integrated (story file provided)
+**BMad-Integrated** -- Story file provided with 12 acceptance criteria.
 
 ## Story Context
 
-Story 34.6 implements NIP-59-inspired three-layer encryption wrapping for BTP claim messages. The module lives at `packages/connector/src/settlement/privacy/nip59-claim-wrapper.ts` and provides chain-agnostic transport privacy.
+**Story 34.4: MinaPaymentChannelSDK -- TypeScript Integration**
+- Epic 34: Mina Protocol Payment Channel Provider (ZK-Private Settlement)
+- Replaced stub SDK methods with real o1js implementations
+- 12 acceptance criteria covering full channel lifecycle
 
-## Gap Analysis
+## Coverage Analysis
 
-Analyzed all 10 Acceptance Criteria against existing 35 tests (T-34.6-01 through T-34.6-13). Identified 4 coverage gaps:
+### Existing Tests (Pre-Automation)
 
-| AC | Gap Description | Tests Added |
-|---|---|---|
-| AC 3 | No test for tamper detection (bit-flip in ciphertext) | 2 |
-| AC 5 | Only tested disabled mode for EVM, not all chains | 1 |
-| AC 6 | Missing assertions for blockchain discriminator, balance info, receiver key exposure | 4 |
-| AC 9 | No test simulating BTP protocolData framing round-trip | 2 |
+59 unit tests in `mina-payment-channel-sdk.test.ts` covering:
+- AC 1: compileContract (4 tests)
+- AC 2: openChannel (5 tests)
+- AC 3: deposit (4 tests)
+- AC 4: claimFromChannel (6 tests)
+- AC 5: closeChannel (4 tests)
+- AC 6: settleChannel (4 tests)
+- AC 7: getChannelState (5 tests)
+- AC 8: getChannelEvents (3 tests)
+- AC 9: signBalanceProof (5 tests)
+- AC 10: verifyBalanceProof (5 tests)
+- AC 11: subscribeToChannel (7 tests)
+- AC 12: Async proof (1 test via AC 4)
+- Error classes and constants (7 tests)
 
-## Tests Generated
+### Gaps Identified
 
-**File**: `packages/connector/src/settlement/privacy/nip59-claim-wrapper.test.ts`
+| Gap | AC | Priority | Description |
+|-----|-----|----------|-------------|
+| Transaction failure paths | 2,3,4,5,6 | P0/P1 | No tests for when `txn.prove()` or `txn.sign().send()` rejects |
+| Logging verification | 1,3,4,5,6 | P1/P2 | No tests for structured log events on deposit/close/settle/claim |
+| signBalanceProof errors | 9 | P1 | No tests for Poseidon.hash or Signature.create throwing |
+| getChannelState getter failure | 7 | P1 | No test for when zkApp state getter throws |
+| Event ordering | 8 | P1 | No explicit test for chronological ordering |
+| Event edge cases | 8 | P2 | No tests for missing type/data fields |
+| Default poll interval | 11 | P1 | No test verifying 30s default |
+| Async Promise verification | 12 | P0 | Insufficient tests for Promise-based API |
+| verifyBalanceProof error logging | 10 | P1 | No test for warn log on verification failure |
+| txHash undefined handling | 2 | P2 | No test for empty hash from send() |
+| Account not found on close/settle | 5,6 | P1 | No tests for channel account not found |
+| Error wrapping passthrough | 9 | P2 | No test that MinaChannelError is not double-wrapped |
 
-| Test Description | Priority | AC |
-|---|---|---|
-| tampered encryptedPayload (bit-flip) is detected and throws NIP59WrapError | P0 | AC 3 |
-| seal signature verification catches forged seal ciphertext | P1 | AC 3 |
-| wrapped EVM claim does not expose blockchain discriminator | P0 | AC 6 |
-| wrapped Solana claim does not expose blockchain discriminator or amounts | P0 | AC 6 |
-| wrapped Mina claim does not expose blockchain discriminator or zkApp address | P0 | AC 6 |
-| receiver public key is not present in the wrapped claim | P1 | AC 6 |
-| wrapped claim uses claim-wrapped protocol name with APPLICATION_OCTET_STREAM | P0 | AC 9 |
-| full BTP round-trip with Solana claim through protocolData framing | P0 | AC 9 |
-| disabled wrapper wrapClaim returns null for all blockchain types | P1 | AC 5 |
+### Tests Generated
 
-## Validation Results
+26 new tests across 11 new describe blocks:
 
-- **Total tests**: 44 (was 35, added 9)
-- **Passing**: 44
-- **Failing**: 0
-- **Regression**: None (full suite: 93 suites, 2311+ tests passing)
+| Block | Tests | Priority | ACs Covered |
+|-------|-------|----------|-------------|
+| Transaction failure error paths | 6 | P0-P1 | 2, 3, 4, 5, 6 |
+| Logging verification | 5 | P1-P2 | 1, 3, 4, 5, 6 |
+| signBalanceProof error handling | 3 | P1-P2 | 9 |
+| getChannelState error handling | 1 | P1 | 7 |
+| getChannelEvents ordering | 3 | P1-P2 | 8 |
+| subscribeToChannel default interval | 1 | P1 | 11 |
+| Async non-blocking proof generation | 3 | P0 | 12 |
+| verifyBalanceProof additional scenarios | 1 | P1 | 10 |
+| openChannel txHash handling | 1 | P2 | 2 |
+| closeChannel account not found | 1 | P1 | 5 |
+| settleChannel account not found | 1 | P1 | 6 |
 
-## Priority Breakdown
+### Priority Breakdown
 
-- P0: 6 tests
-- P1: 3 tests
+| Priority | Count |
+|----------|-------|
+| P0 | 5 |
+| P1 | 15 |
+| P2 | 6 |
+| **Total** | **26** |
 
-## Coverage Status
+## Test Execution Results
 
-All 10 acceptance criteria now have direct automated test coverage. No remaining gaps identified.
+```
+Test Suites: 1 passed, 1 total
+Tests:       85 passed, 85 total (59 existing + 26 new)
+Time:        ~1.5s
+```
 
----
+### Regression Verification
 
-# Test Automation Summary -- Story 34.8: Integration Tests -- Mina Provider E2E
+```
+Settlement test suites: 32 passed, 32 total
+Settlement tests: 955 passed, 11 skipped, 966 total
+Lint: clean (0 errors, 0 warnings)
+```
 
-## Execution Mode
+## Acceptance Criteria Coverage Matrix
 
-BMad-Integrated (story file provided)
+| AC | Description | Pre-Existing | New Tests | Total | Status |
+|----|-------------|-------------|-----------|-------|--------|
+| 1 | compileContract | 4 | 1 | 5 | Covered |
+| 2 | openChannel | 5 | 2 | 7 | Covered |
+| 3 | deposit | 4 | 2 | 6 | Covered |
+| 4 | claimFromChannel | 6 | 2 | 8 | Covered |
+| 5 | closeChannel | 4 | 2 | 6 | Covered |
+| 6 | settleChannel | 4 | 2 | 6 | Covered |
+| 7 | getChannelState | 5 | 1 | 6 | Covered |
+| 8 | getChannelEvents | 3 | 3 | 6 | Covered |
+| 9 | signBalanceProof | 5 | 3 | 8 | Covered |
+| 10 | verifyBalanceProof | 5 | 1 | 6 | Covered |
+| 11 | subscribeToChannel | 7 | 1 | 8 | Covered |
+| 12 | Async non-blocking | 1 | 3 | 4 | Covered |
 
-## Story Context
+**All 12 acceptance criteria now have comprehensive test coverage.**
 
-Story 34.8 is the final validation story for Epic 34, exercising the full Mina settlement path through the connector with end-to-end integration tests covering lifecycle, multi-peer, privacy, NIP-59, mixed-chain coexistence, threshold settlement, invalid claim rejection, config-driven creation, graceful shutdown, and static import auditing.
+## Files Modified
 
-## Gap Analysis
+| File | Action |
+|------|--------|
+| `packages/connector/src/settlement/mina-payment-channel-sdk.test.ts` | MODIFIED -- added 26 tests |
 
-Analyzed all 15 Acceptance Criteria against existing 45 tests across 6 test files:
-- `mina-provider.test.ts` (15 tests)
-- `mixed-chain-three-way.test.ts` (9 tests)
-- `mina-nip59.test.ts` (6 tests)
-- `mina-config.test.ts` (12 tests)
-- `mina-proofs.test.ts` (2 skipped stubs)
-- `mina-lightnet.test.ts` (1 skipped stub)
+## Definition of Done
 
-| AC | Status | Notes |
-|---|---|---|
-| AC 1 (Full Lifecycle) | Covered | T-34.8-01 |
-| AC 2 (Multi-Peer) | Covered | T-34.8-02 + unit tests in per-packet-claim-service.test.ts |
-| AC 3 (Privacy) | Covered | T-34.8-03 |
-| AC 4 (Non-Blocking) | Covered | T-34.8-04 |
-| AC 5 (NIP-59 Round-Trip) | Covered | T-34.8-05 |
-| AC 6 (Mixed-Chain) | Covered | T-34.8-06 |
-| AC 7 (Threshold Settlement) | **GAP** | Existing test only called settleChannel directly; AC requires SettlementMonitor trigger |
-| AC 8 (Invalid Claims) | Covered | T-34.8-08 |
-| AC 9 (Config-Driven) | Covered | T-34.8-09 |
-| AC 10 (Graceful Shutdown) | Covered | T-34.8-10 |
-| AC 11 (No SDK Imports) | Covered | T-34.8-11 |
-| AC 12 (EVM Regression) | Covered | T-34.8-12 |
-| AC 13 (Solana Regression) | Covered | T-34.8-13 |
-| AC 14 (Claim JSON Fields) | Covered | T-34.8-14 |
-| AC 15 (Nonce Monotonicity) | Covered | T-34.8-17 |
-
-## Tests Generated
-
-**File**: `packages/connector/test/integration/mina-provider.test.ts`
-
-| Test Description | Priority | AC |
-|---|---|---|
-| should trigger SETTLEMENT_REQUIRED event from SettlementMonitor when Mina peer threshold exceeded | P0 | AC 7 |
-| should not trigger settlement when Mina peer balance is below threshold | P1 | AC 7 |
-
-## Validation Results
-
-- **Total tests (active)**: 44 (was 42, added 2)
-- **Total tests (including skipped stubs)**: 47
-- **Passing**: 44
-- **Failing**: 0
-- **Skipped**: 3 (proof-enabled and lightnet stubs)
-- **Regression**: None
-- **Lint**: Clean (no errors)
-
-## Priority Breakdown (new tests)
-
-- P0: 1 test (threshold trigger integration with SettlementMonitor)
-- P1: 1 test (below-threshold negative case)
-
-## Coverage Status
-
-All 15 acceptance criteria now have direct automated test coverage. No remaining gaps identified.
-
----
-
-# Test Automation Summary -- Story 34.9: Mina Devnet Deployment & Documentation
-
-## Execution Mode
-
-BMad-Integrated (story file provided)
-
-## Story Context
-
-Story 34.9 is the final story in Epic 34, covering devnet deployment documentation, performance benchmarks, privacy model explanation, and deployment verification tests for the Mina payment channel zkApp.
-
-## Gap Analysis
-
-Analyzed all 8 Acceptance Criteria against existing 51 tests in `mina-deployment.test.ts`.
-
-### Issues Found
-
-1. **Test framework mismatch**: Test file imported from `vitest` but vitest was not installed; test was excluded from Jest via `testPathIgnorePatterns`. The tests were not actually executable.
-
-### Coverage Gaps Identified
-
-| AC | Gap Description | Tests Added |
-|---|---|---|
-| AC 7 | No mock GraphQL deployment verification logic test | 5 (T-34.9-07) |
-| AC 7 | No invalid chainType rejection test | 2 (T-34.9-02b) |
-| AC 4 | No granular verification that all 4 operation types are in benchmarks | 8 (T-34.9-04b) |
-
-## Changes Made
-
-### Framework Fix
-- **Converted** `mina-deployment.test.ts` from vitest to Jest (project standard)
-- **Removed** vitest import, replaced with comment noting Jest usage
-- **Removed** `mina-deployment\.test\.ts$` from Jest `testPathIgnorePatterns` so tests actually run
-
-### Tests Added (15 new tests)
-
-**File**: `packages/connector/test/integration/mina-deployment.test.ts`
-
-| Test Block | Count | Priority | AC |
-|---|---|---|---|
-| T-34.9-02b: Invalid chainType rejection (unknown chainType, duplicate chainId) | 2 | P0 | AC 7 |
-| T-34.9-07: Mock GraphQL deployment verification (valid, null account, non-zkApp, no vk hash, hash match) | 5 | P0 | AC 7 |
-| T-34.9-04b: Benchmark completeness (compile, claim, close, settle, min/rec hardware, ARM, proofsEnabled) | 8 | P1 | AC 4 |
-
-## Validation Results
-
-- **Total tests**: 66 (was 51, added 15)
-- **Passing**: 66
-- **Failing**: 0
-- **Regression**: None (full connector suite: 98 suites, 2475 tests passing)
-- **Lint**: Clean (no errors)
-
-## Priority Breakdown (new tests)
-
-- P0: 7 tests (deployment verification logic + invalid config rejection)
-- P1: 8 tests (benchmark documentation completeness)
-
-## Coverage Status
-
-All 8 acceptance criteria now have direct automated test coverage. Critical fix: tests are now actually executable via Jest (were previously dead code due to vitest import + Jest exclusion).
+- [x] All 12 acceptance criteria covered by automated tests
+- [x] Gap analysis completed for each AC
+- [x] 26 new tests generated to fill coverage gaps
+- [x] All 85 tests pass
+- [x] No regressions in settlement test suite (955 passing)
+- [x] Lint clean
+- [x] Tests follow project patterns (Given-When-Then comments, jest.clearAllMocks, mock logger)
+- [x] Priority tags assigned to all new tests

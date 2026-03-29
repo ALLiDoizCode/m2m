@@ -1096,7 +1096,7 @@ describe('PerPacketClaimService', () => {
         subscribeToEvents: jest.fn(),
         chainType: 'mina' as const,
         chainId: 'mina:devnet',
-        getMinaContext: jest.fn().mockReturnValue({
+        getMinaContext: jest.fn().mockResolvedValue({
           zkAppAddress: MINA_ZKAPP_ADDRESS,
           tokenId: MINA_TOKEN_ID,
           network: MINA_NETWORK,
@@ -1266,7 +1266,7 @@ describe('PerPacketClaimService', () => {
 
     it('[P1] should throw when Mina context fields are missing (guard)', async () => {
       const badMinaProvider = createMockMinaProvider();
-      badMinaProvider.getMinaContext.mockReturnValue({
+      badMinaProvider.getMinaContext.mockResolvedValue({
         zkAppAddress: '',
         tokenId: MINA_TOKEN_ID,
         network: MINA_NETWORK,

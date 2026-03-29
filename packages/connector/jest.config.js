@@ -38,6 +38,7 @@ module.exports = {
   moduleFileExtensions: ['ts', 'js', 'json'],
   moduleNameMapper: {
     '^@toon-protocol/shared$': '<rootDir>/../shared/src/index.ts',
+    '^@toon-protocol/mina-zkapp$': '<rootDir>/../mina-zkapp/src/index.ts',
   },
   transform: {
     '^.+\\.ts$': [

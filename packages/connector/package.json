@@ -80,6 +80,7 @@
     "@noble/hashes": "^1.8.0",
     "@solana-program/token": "^0.6.0",
     "@solana/kit": "^3.0.3",
+    "@toon-protocol/mina-zkapp": "^0.1.0",
     "@toon-protocol/shared": "^1.0.0",
     "better-sqlite3": "^11.8.1",
     "cors": "^2.8.6",
@@ -93,9 +94,13 @@
     "zod": "^3.25.76"
   },
   "peerDependencies": {
+    "o1js": "^2.2.0",
     "tigerbeetle-node": "0.16.68"
   },
   "peerDependenciesMeta": {
+    "o1js": {
+      "optional": true
+    },
     "tigerbeetle-node": {
       "optional": true
     }

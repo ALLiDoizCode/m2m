@@ -78,7 +78,7 @@ epics:
         status: done
       34.4:
         name: "MinaPaymentChannelSDK — TypeScript Integration"
-        status: backlog
+        status: done
       34.5:
         name: "Implement MinaPaymentChannelProvider"
         status: done
