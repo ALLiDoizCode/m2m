@@ -8,8 +8,11 @@
 #   make solana-up     Start Solana test validator
 #   make solana-down   Stop Solana services
 #   make solana-logs   Follow Solana logs
-#   make infra-up      Start all chains (EVM + Solana)
-#   make infra-down    Stop all chains
+#   make mina-up       Start Mina lightnet
+#   make mina-down     Stop Mina services
+#   make mina-logs     Follow Mina logs
+#   make infra-up      Start all chains (EVM + Solana + Mina)
+#   make infra-down    Stop all chains (EVM + Solana + Mina)
 
 services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -123,3 +126,29 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Mina Lightnet - Local Mina Network with Accounts Manager & Archive
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # NOTE: Mina lightnet requires 4-8 GB RAM. Ensure Docker Desktop has
+  # sufficient memory allocated (at least 8 GB recommended).
+  mina-lightnet:
+    image: o1labs/mina-local-network:o1js-main
+    profiles:
+      - mina
+    ports:
+      - '3085:3085'   # GraphQL
+      - '8181:8181'   # Accounts manager
+      - '8282:8282'   # Explorer
+      - '5433:5432'   # Archive PostgreSQL (remapped to avoid conflicts with local Postgres on 5432)
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:8181/list-acquired-accounts || exit 1']
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s

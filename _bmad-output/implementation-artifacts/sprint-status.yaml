@@ -99,6 +99,6 @@ epics:
         status: done
       34.10:
         name: "Mina Local Development Infrastructure"
-        status: ready-for-dev
+        status: done
     retrospective:
       status: backlog

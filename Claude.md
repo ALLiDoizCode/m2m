@@ -39,11 +39,19 @@ make solana-down    # Stop Solana services
 make solana-logs    # Follow Solana Docker Compose logs
 ```
 
+### Local Mina Development
+
+```bash
+make mina-up        # Start Mina lightnet (Docker)
+make mina-down      # Stop Mina services
+make mina-logs      # Follow Mina Docker Compose logs
+```
+
 ### All-Chain Infrastructure
 
 ```bash
-make infra-up       # Start all chains (EVM + Solana)
-make infra-down     # Stop all chains
+make infra-up       # Start all chains (EVM + Solana + Mina)
+make infra-down     # Stop all chains (EVM + Solana + Mina)
 ```
 
 ### Solana Program (Rust)
@@ -83,10 +91,15 @@ Run `make help` for the complete list. Most-used:
 | `make clean`              | Remove `dist/` artifacts                         |
 | `make anvil-up`           | Start Anvil + Faucet (`--profile evm`)           |
 | `make anvil-down`         | Stop EVM services                                |
+| `make anvil-logs`         | Follow EVM Docker Compose logs                   |
 | `make solana-up`          | Start Solana test validator (`--profile solana`) |
 | `make solana-down`        | Stop Solana services                             |
-| `make infra-up`           | Start all chains (EVM + Solana)                  |
-| `make infra-down`         | Stop all chains                                  |
+| `make solana-logs`        | Follow Solana Docker Compose logs                |
+| `make mina-up`            | Start Mina lightnet (`--profile mina`)           |
+| `make mina-down`          | Stop Mina services                               |
+| `make mina-logs`          | Follow Mina Docker Compose logs                  |
+| `make infra-up`           | Start all chains (EVM + Solana + Mina)           |
+| `make infra-down`         | Stop all chains (EVM + Solana + Mina)            |
 | `make solana-build`       | Compile Solana program to BPF                    |
 | `make solana-test`        | Run Solana Rust tests via `test-sbf`             |
 | `make mina-build`         | Build Mina zkApp                                 |

@@ -460,6 +460,75 @@ jobs:
           echo "Solana integration tests completed"
           echo "Tests T-33.7-05 and T-33.7-10 executed with SOLANA_INTEGRATION=true"
 
+  # Mina integration tests (Docker-gated)
+  # Runs T-34.8-18 which requires Mina lightnet
+  # Uses docker-compose --profile mina for consistency with local dev (Story 34.10)
+  mina-integration:
+    name: Mina Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    needs: [test]
+    # Only run on main branch pushes (matching Solana pattern)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build --workspace=packages/shared
+
+      - name: Start Mina lightnet via docker-compose
+        run: docker compose --profile mina up -d
+
+      - name: Wait for Mina lightnet health check
+        run: |
+          echo "Waiting for Mina lightnet to be ready (may take 1-3 minutes)..."
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:8181/list-acquired-accounts > /dev/null 2>&1; then
+              echo "Mina accounts manager is healthy."
+              # Also check GraphQL endpoint
+              if curl -sf -X POST http://localhost:3085/graphql -H 'Content-Type: application/json' -d '{"query":"{ __schema { queryType { name } } }"}' > /dev/null 2>&1; then
+                echo "Mina GraphQL endpoint is healthy."
+                exit 0
+              fi
+            fi
+            echo "Attempt $i/90 -- waiting..."
+            sleep 2
+          done
+          echo "Mina lightnet failed to become healthy within 180s"
+          docker compose --profile mina logs || true
+          exit 1
+
+      - name: Run Mina integration tests
+        run: |
+          echo "Running Docker-gated Mina integration tests (T-34.8-18)..."
+          npx jest test/integration/mina-lightnet.test.ts --ci --verbose
+        working-directory: packages/connector
+        env:
+          CI: true
+          NODE_ENV: test
+          MINA_INTEGRATION: 'true'
+
+      - name: Tear down Mina lightnet
+        if: always()
+        run: docker compose --profile mina down
+
+      - name: Report results
+        if: always()
+        run: |
+          echo "Mina integration tests completed"
+          echo "Test T-34.8-18 executed with MINA_INTEGRATION=true"
+
   # Solana program tests (Rust/BPF)
   solana-program:
     name: Solana Program Tests (Rust)
@@ -619,6 +688,7 @@ jobs:
         rfc-links,
         solana-program,
         solana-integration,
+        mina-integration,
         docker-build-push,
         container-scan,
         performance-benchmark,
@@ -640,6 +710,7 @@ jobs:
           echo "  EVM Contracts: ${{ needs.contracts-coverage.result }}"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Solana Integration: ${{ needs.solana-integration.result }}"
+          echo "  Mina Integration: ${{ needs.mina-integration.result }}"
           echo "  Security: ${{ needs.security.result }}"
           echo "  RFC Links: ${{ needs.rfc-links.result }}"
           echo "  Docker Build: ${{ needs.docker-build-push.result }}"

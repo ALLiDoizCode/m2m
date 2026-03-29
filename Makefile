@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -26,9 +26,14 @@ help:
 	@echo "  make solana-down          Stop Solana validator"
 	@echo "  make solana-logs          Follow Solana docker compose logs"
 	@echo ""
+	@echo "Local Blockchain (Mina):"
+	@echo "  make mina-up              Start Mina lightnet (docker compose --profile mina)"
+	@echo "  make mina-down            Stop Mina lightnet"
+	@echo "  make mina-logs            Follow Mina docker compose logs"
+	@echo ""
 	@echo "Local Blockchain (All Chains):"
-	@echo "  make infra-up             Start all chains (EVM + Solana)"
-	@echo "  make infra-down           Stop all chains"
+	@echo "  make infra-up             Start all chains (EVM + Solana + Mina)"
+	@echo "  make infra-down           Stop all chains (EVM + Solana + Mina)"
 	@echo ""
 	@echo "Solana Program:"
 	@echo "  make solana-build         Build Solana payment channel program"
@@ -83,12 +88,22 @@ solana-down:
 solana-logs:
 	docker compose --profile solana logs -f
 
-# Local Blockchain — All Chains
+# Local Blockchain — Mina (Lightnet)
+mina-up:
+	docker compose --profile mina up -d
+
+mina-down:
+	docker compose --profile mina down
+
+mina-logs:
+	docker compose --profile mina logs -f
+
+# Local Blockchain — All Chains (EVM + Solana + Mina)
 infra-up:
-	docker compose --profile evm --profile solana up -d
+	docker compose --profile evm --profile solana --profile mina up -d
 
 infra-down:
-	docker compose --profile evm --profile solana down
+	docker compose --profile evm --profile solana --profile mina down
 
 # Solana Payment Channel Program
 solana-build:
