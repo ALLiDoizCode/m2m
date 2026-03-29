@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-> **Do not duplicate** content from `_bmad-output/project-context.md` -- that file contains all coding standards, architecture details, testing rules, and critical implementation rules. It is auto-loaded by BMAD workflows. This file covers only: quick-start setup, tooling defaults, MCP integrations, and workflow instructions.
+Multi-chain ILP connector with EVM, Solana, and Mina payment channel settlement. Monorepo using npm workspaces (TypeScript) + a Rust crate (Solana program).
+
+> **Detailed rules live in `_bmad-output/project-context.md`** -- coding standards, architecture, testing rules, chain-specific patterns, and critical implementation rules are all there. It is auto-loaded by BMAD workflows. This file covers only: quick-start setup, gotchas, tooling defaults, and MCP workflow instructions.
 
 ## Terminology
 
@@ -11,144 +13,68 @@
 ```bash
 # Prerequisites: Node.js >= 22.11.0, npm >= 10.0.0
 npm install
-
-# Build all packages (root script builds shared first, then all workspaces including mina-zkapp)
-npm run build
-
-# Run all tests
-make test
-
-# Lint + format
-make lint
+npm run build    # Builds shared first, then all workspaces (including mina-zkapp)
+make test        # Run all tests
+make lint        # ESLint
 npm run format:check
 ```
 
-### Local EVM Development
+### Local Infrastructure
 
 ```bash
-make anvil-up       # Start Anvil local Ethereum node + Token Faucet (Docker)
-make anvil-down     # Stop EVM services
-make anvil-logs     # Follow EVM Docker Compose logs
+make anvil-up / anvil-down / anvil-logs    # EVM (Anvil + Token Faucet)
+make solana-up / solana-down / solana-logs  # Solana test validator
+make mina-up / mina-down / mina-logs       # Mina lightnet
+make infra-up / infra-down                 # All chains at once
 ```
 
-### Local Solana Development
+### Chain-Specific Build & Deploy
 
 ```bash
-make solana-up      # Start Solana test validator + auto-deploy programs (Docker)
-make solana-down    # Stop Solana services
-make solana-logs    # Follow Solana Docker Compose logs
-```
-
-### Local Mina Development
-
-```bash
-make mina-up        # Start Mina lightnet (Docker)
-make mina-down      # Stop Mina services
-make mina-logs      # Follow Mina Docker Compose logs
-```
-
-### All-Chain Infrastructure
-
-```bash
-make infra-up       # Start all chains (EVM + Solana + Mina)
-make infra-down     # Stop all chains (EVM + Solana + Mina)
-```
-
-### Solana Program (Rust)
-
-Requires Rust toolchain + Solana CLI (`cargo build-sbf`).
-
-```bash
-make solana-build              # Build BPF program
-make solana-test               # Run Rust integration tests
+# Solana (requires Rust toolchain + Solana CLI)
+make solana-build   # BPF program
+make solana-test    # Rust integration tests
 make solana-deploy-devnet DEPLOYER_KEYPAIR=path/to/keypair.json
-```
 
-See `docs/solana-deployment.md` for full deployment and operations guide.
-
-### Mina zkApp (TypeScript)
-
-Requires o1js (installed via `npm install`).
-
-```bash
-make mina-build              # Build Mina zkApp
-make mina-test               # Run Mina zkApp tests
+# Mina (requires o1js, installed via npm install)
+make mina-build     # zkApp
+make mina-test      # zkApp tests
 make mina-deploy-devnet DEPLOYER_KEY=<base58-private-key>
 ```
 
-See `docs/mina-deployment.md` for full deployment and operations guide.
+Run `make help` for the full target list. Deployment guides: `docs/solana-deployment.md`, `docs/mina-deployment.md`.
 
-## Key Make Targets
+## Gotchas
 
-Run `make help` for the complete list. Most-used:
+- **Build order matters**: `packages/shared` MUST build before `packages/connector` and `packages/mina-zkapp`. The root `npm run build` script handles this, but if building individual workspaces, build shared first.
+- **Mina zkApp tsconfig**: requires `experimentalDecorators: true`, `emitDecoratorMetadata: true`, `useDefineForClassFields: false` -- without the last one, `@state` decorators silently fail.
+- **Mina proof generation is slow**: 30-120s for circuit compilation/proof generation. Provider pre-compiles during construction (fire-and-forget).
+- **o1js is optional**: the connector package never imports o1js directly; it goes through `MinaPaymentChannelSDK` with dynamic `import()`. The connector starts fine without o1js installed.
 
-| Target                    | What it does                                     |
-| ------------------------- | ------------------------------------------------ |
-| `make build`              | Build all packages                               |
-| `make test`               | Run all tests                                    |
-| `make test-unit`          | Unit tests only                                  |
-| `make lint`               | ESLint                                           |
-| `make clean`              | Remove `dist/` artifacts                         |
-| `make anvil-up`           | Start Anvil + Faucet (`--profile evm`)           |
-| `make anvil-down`         | Stop EVM services                                |
-| `make anvil-logs`         | Follow EVM Docker Compose logs                   |
-| `make solana-up`          | Start Solana test validator (`--profile solana`) |
-| `make solana-down`        | Stop Solana services                             |
-| `make solana-logs`        | Follow Solana Docker Compose logs                |
-| `make mina-up`            | Start Mina lightnet (`--profile mina`)           |
-| `make mina-down`          | Stop Mina services                               |
-| `make mina-logs`          | Follow Mina Docker Compose logs                  |
-| `make infra-up`           | Start all chains (EVM + Solana + Mina)           |
-| `make infra-down`         | Stop all chains (EVM + Solana + Mina)            |
-| `make solana-build`       | Compile Solana program to BPF                    |
-| `make solana-test`        | Run Solana Rust tests via `test-sbf`             |
-| `make mina-build`         | Build Mina zkApp                                 |
-| `make mina-test`          | Run Mina zkApp tests                             |
-| `make mina-deploy-devnet` | Deploy Mina zkApp to devnet                      |
+## Key Entry Points
+
+| File                                          | Purpose                                      |
+| --------------------------------------------- | -------------------------------------------- |
+| `packages/connector/src/lib.ts`               | Public API (all exports consolidated here)   |
+| `packages/connector/src/core/`                | ConnectorNode, PacketHandler, PaymentHandler |
+| `packages/connector/src/settlement/provider/` | Chain abstraction layer (Epic 32+)           |
+| `packages/connector/src/config/`              | YAML config loading + Zod validation         |
+| `packages/mina-zkapp/src/PaymentChannel.ts`   | Mina SmartContract (8 on-chain Fields)       |
+| `packages/solana-program/src/lib.rs`          | Solana program entrypoint                    |
 
 ## Default UI Library: shadcn-ui v4
 
-shadcn-ui v4 is the **only** UI component library for this project. Do not use Material-UI, Ant Design, Chakra UI, or custom components for functionality shadcn-ui already provides.
+shadcn-ui v4 is the **only** UI component library. Do not use Material-UI, Ant Design, Chakra UI, or custom components for functionality shadcn-ui already provides.
 
-### Workflow
-
-1. **Demo first** -- always call `get_component_demo` before implementing any component.
-2. **Source second** -- only fetch source with `get_component` if deep customization is needed.
-3. **Blocks for complex UIs** -- use `list_blocks` / `get_block` for dashboards, login pages, settings panels.
-4. **Verify in browser** -- after implementing UI, use Playwright MCP tools to confirm rendering and behavior.
-
-### Available shadcn-ui MCP Tools
-
-| Tool                     | Purpose                                           |
-| ------------------------ | ------------------------------------------------- |
-| `list_components`        | List all available v4 components                  |
-| `get_component_demo`     | **Use first** -- demo code showing usage patterns |
-| `get_component`          | Component source code                             |
-| `get_component_metadata` | Dependencies, props, requirements                 |
-| `list_blocks`            | Pre-built UI blocks (dashboards, forms, etc.)     |
-| `get_block`              | Source code for a specific block                  |
+**Workflow**: `get_component_demo` first -> `get_component` only if deep customization needed -> `list_blocks`/`get_block` for complex UIs -> verify in browser with Playwright MCP.
 
 ## Playwright MCP -- Browser Verification
 
-Use Playwright MCP tools (`mcp__playwright__browser_*`) for all browser-related tasks:
-
-- **After UI changes**: navigate to the page and verify rendering.
-- **Prefer snapshots**: use `browser_snapshot` over `take_screenshot` when you need to interact with elements.
-- **Debug UI issues**: inspect `console_messages` and `network_requests`.
-- **E2E / integration testing**: automate form fills, clicks, navigation flows.
-
-Key tools: `snapshot`, `take_screenshot`, `navigate`, `click`, `type`, `fill_form`, `evaluate`, `wait_for`, `network_requests`, `console_messages`.
+Use Playwright MCP tools (`mcp__playwright__browser_*`) after UI changes. Prefer `browser_snapshot` over `take_screenshot` for interaction. Use `console_messages` and `network_requests` to debug.
 
 ## Interledger RFC Skill Activation
 
-When the user asks about Interledger protocols or RFCs:
-
-- **Immediately activate** the relevant skill(s) without asking -- use `mcp__interledger_org-v4_Docs__search_rfcs_documentation`.
-- **Activate multiple skills** if the question spans several RFCs.
-- **Cross-reference** related RFCs when one references another.
-- **Prefer skill-based answers** over general knowledge for RFC topics.
-
-Examples:
+When the user asks about Interledger protocols or RFCs, **immediately activate** the relevant skill(s) without asking -- use `mcp__interledger_org-v4_Docs__search_rfcs_documentation`. Activate multiple skills if the question spans several RFCs.
 
 | User question                          | Skills to activate                                   |
 | -------------------------------------- | ---------------------------------------------------- |
