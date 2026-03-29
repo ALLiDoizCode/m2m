@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-build solana-test solana-deploy-devnet mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -16,10 +16,19 @@ help:
 	@echo "  make test-unit            Run unit tests only"
 	@echo "  make lint                 Run linter"
 	@echo ""
-	@echo "Local Blockchain:"
-	@echo "  make anvil-up             Start Anvil + Faucet (docker compose)"
+	@echo "Local Blockchain (EVM):"
+	@echo "  make anvil-up             Start Anvil + Faucet (docker compose --profile evm)"
 	@echo "  make anvil-down           Stop Anvil + Faucet"
-	@echo "  make anvil-logs           Follow docker compose logs"
+	@echo "  make anvil-logs           Follow EVM docker compose logs"
+	@echo ""
+	@echo "Local Blockchain (Solana):"
+	@echo "  make solana-up            Start Solana test validator (docker compose --profile solana)"
+	@echo "  make solana-down          Stop Solana validator"
+	@echo "  make solana-logs          Follow Solana docker compose logs"
+	@echo ""
+	@echo "Local Blockchain (All Chains):"
+	@echo "  make infra-up             Start all chains (EVM + Solana)"
+	@echo "  make infra-down           Stop all chains"
 	@echo ""
 	@echo "Solana Program:"
 	@echo "  make solana-build         Build Solana payment channel program"
@@ -54,15 +63,32 @@ lint:
 clean:
 	rm -rf packages/connector/dist packages/shared/dist packages/mina-zkapp/dist
 
-# Local Blockchain (Anvil + Faucet)
+# Local Blockchain — EVM (Anvil + Faucet)
 anvil-up:
-	docker compose up -d
+	docker compose --profile evm up -d
 
 anvil-down:
-	docker compose down
+	docker compose --profile evm down
 
 anvil-logs:
-	docker compose logs -f
+	docker compose --profile evm logs -f
+
+# Local Blockchain — Solana (Test Validator + Program Deploy)
+solana-up:
+	docker compose --profile solana up -d
+
+solana-down:
+	docker compose --profile solana down
+
+solana-logs:
+	docker compose --profile solana logs -f
+
+# Local Blockchain — All Chains
+infra-up:
+	docker compose --profile evm --profile solana up -d
+
+infra-down:
+	docker compose --profile evm --profile solana down
 
 # Solana Payment Channel Program
 solana-build:

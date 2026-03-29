@@ -44,7 +44,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Git Hooks:** Husky 9.1.7 + lint-staged (pre-commit: eslint --fix + prettier)
 - **Releases:** semantic-release 24.2.0 (conventional commits)
 - **Contracts (EVM):** Solidity (Foundry/Anvil — TokenNetwork.sol, TokenNetworkRegistry.sol)
-- **Local Dev Infra:** Docker Compose (Anvil local Ethereum node + Token Faucet)
+- **Local Dev Infra:** Docker Compose with profiles (`evm`: Anvil + Token Faucet, `solana`: Solana test validator + program auto-deploy)
 - **Deployment (Solana):** `cargo build-sbf` + Solana CLI for devnet/mainnet deployment (`tools/solana/deploy.sh`)
 - **Optional AI:** @ai-sdk/anthropic, @ai-sdk/openai, ai (optional dependencies for agent features)
 
@@ -89,6 +89,8 @@ connector/                          # Monorepo root
 │   │   ├── src/                    # lib.rs, processor.rs, state.rs, instruction.rs, error.rs
 │   │   └── tests/                  # integration.rs, lifecycle.rs, claims.rs, security.rs, performance.rs
 │   └── faucet/                     # Token faucet service (Docker)
+├── infra/
+│   └── solana/                     # Solana Docker entrypoint (entrypoint.sh)
 ├── tools/
 │   ├── send-packet/                # ILP packet sending utility
 │   ├── fund-peers/                 # Peer funding utility
@@ -300,7 +302,7 @@ Epic 33 added full Solana payment channel support — an on-chain Rust program, 
 - **Docker deployment:** images pushed to GHCR on merge to main; multi-platform (amd64 + arm64); multi-stage build with node:22-alpine
 - **Config via YAML:** connector topology defined in YAML config files; validated by Zod at startup
 - **semantic-release:** version bumps and changelogs auto-generated from conventional commit messages
-- **Makefile shortcuts:** `make build`, `make test`, `make test-unit`, `make lint`, `make clean`, `make anvil-up`, `make anvil-down`, `make anvil-logs`, `make solana-build`, `make solana-test`, `make solana-deploy-devnet`
+- **Makefile shortcuts:** `make build`, `make test`, `make test-unit`, `make lint`, `make clean`, `make anvil-up`, `make anvil-down`, `make anvil-logs`, `make solana-up`, `make solana-down`, `make solana-logs`, `make infra-up`, `make infra-down`, `make solana-build`, `make solana-test`, `make solana-deploy-devnet`
 
 ### Critical Don't-Miss Rules
 

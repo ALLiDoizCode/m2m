@@ -149,7 +149,7 @@ Scenario: Test helper provides Mina readiness check matching Anvil pattern
 
 - [ ] Task 5: Regression verification (AC: 6)
   - [ ] 5.1 Verify `make anvil-up` and EVM integration tests still pass
-  - [ ] 5.2 Verify `make solana-up` and Solana integration tests still pass (if Story 33.10 is complete)
+  - [ ] 5.2 Verify `make solana-up` and Solana integration tests still pass (if Story 33.9 is complete)
   - [ ] 5.3 Verify `make infra-up` starts all three chains
   - [ ] 5.4 Verify `make infra-down` stops all three chains cleanly
 
@@ -251,6 +251,6 @@ This is acceptable because the `mina-lightnet.test.ts` stub already includes dep
 - Un-skipping proof-enabled tests (`mina-proofs.test.ts`) — those require o1js in CI, not Docker infrastructure
 - Mina devnet deployment (Story 34.9, already complete)
 - Custom Mina Fungible Token support (deferred)
-- Solana local infrastructure (Story 33.10, separate)
+- Solana local infrastructure (Story 33.9, separate)
 - zkApp auto-deployment on container startup (future optimization)
 - Archive node query optimization

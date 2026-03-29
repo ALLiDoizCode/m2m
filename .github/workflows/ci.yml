@@ -60,7 +60,7 @@ jobs:
     strategy:
       matrix:
         node-version: ['22.11.0', '22.x']
-      fail-fast: false  # Continue testing other versions even if one fails
+      fail-fast: false # Continue testing other versions even if one fails
 
     steps:
       - name: Checkout code
@@ -384,25 +384,13 @@ jobs:
 
   # Solana integration tests (Docker-gated)
   # Runs T-33.7-05 and T-33.7-10 which require solana-test-validator
+  # Uses docker-compose --profile solana for consistency with local dev (Story 33.9)
   solana-integration:
     name: Solana Integration Tests (Docker)
     runs-on: ubuntu-latest
     needs: [test]
     # Only run when explicitly triggered or on main branch pushes
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    services:
-      solana-validator:
-        image: solanalabs/solana:v2.1.0
-        ports:
-          - '8899:8899'
-          - '8900:8900'
-        options: >-
-          --health-cmd "curl -s http://localhost:8899/health"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-          --health-start-period 30s
 
     steps:
       - name: Checkout code
@@ -432,12 +420,23 @@ jobs:
         working-directory: packages/solana-program
         run: cargo build-sbf
 
-      - name: Deploy program to local validator
+      - name: Start Solana validator via docker-compose
+        run: docker compose --profile solana up -d
+
+      - name: Wait for Solana validator health check
         run: |
-          solana config set --url http://localhost:8899
-          solana-keygen new --no-bip39-passphrase --force
-          solana airdrop 10
-          solana program deploy packages/solana-program/target/deploy/payment_channel.so
+          echo "Waiting for Solana validator to be ready..."
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:8899/health | grep -q 'ok'; then
+              echo "Solana validator is healthy."
+              exit 0
+            fi
+            echo "Attempt $i/60 -- waiting..."
+            sleep 2
+          done
+          echo "Solana validator failed to become healthy within 120s"
+          docker compose --profile solana logs || true
+          exit 1
 
       - name: Run Solana integration tests
         run: |
@@ -450,6 +449,10 @@ jobs:
           SOLANA_INTEGRATION: 'true'
           SOLANA_RPC_URL: http://localhost:8899
           SOLANA_WS_URL: ws://localhost:8900
+
+      - name: Tear down Solana validator
+        if: always()
+        run: docker compose --profile solana down
 
       - name: Report results
         if: always()
@@ -605,7 +608,21 @@ jobs:
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
-    needs: [lint-and-format, test, build, type-check, contracts-coverage, security, rfc-links, solana-program, solana-integration, docker-build-push, container-scan, performance-benchmark]
+    needs:
+      [
+        lint-and-format,
+        test,
+        build,
+        type-check,
+        contracts-coverage,
+        security,
+        rfc-links,
+        solana-program,
+        solana-integration,
+        docker-build-push,
+        container-scan,
+        performance-benchmark,
+      ]
     if: always()
 
     steps:

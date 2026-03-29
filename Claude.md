@@ -27,8 +27,23 @@ npm run format:check
 
 ```bash
 make anvil-up       # Start Anvil local Ethereum node + Token Faucet (Docker)
-make anvil-down     # Stop local blockchain
-make anvil-logs     # Follow Docker Compose logs
+make anvil-down     # Stop EVM services
+make anvil-logs     # Follow EVM Docker Compose logs
+```
+
+### Local Solana Development
+
+```bash
+make solana-up      # Start Solana test validator + auto-deploy programs (Docker)
+make solana-down    # Stop Solana services
+make solana-logs    # Follow Solana Docker Compose logs
+```
+
+### All-Chain Infrastructure
+
+```bash
+make infra-up       # Start all chains (EVM + Solana)
+make infra-down     # Stop all chains
 ```
 
 ### Solana Program (Rust)
@@ -59,18 +74,24 @@ See `docs/mina-deployment.md` for full deployment and operations guide.
 
 Run `make help` for the complete list. Most-used:
 
-| Target                    | What it does                         |
-| ------------------------- | ------------------------------------ |
-| `make build`              | Build all packages                   |
-| `make test`               | Run all tests                        |
-| `make test-unit`          | Unit tests only                      |
-| `make lint`               | ESLint                               |
-| `make clean`              | Remove `dist/` artifacts             |
-| `make solana-build`       | Compile Solana program to BPF        |
-| `make solana-test`        | Run Solana Rust tests via `test-sbf` |
-| `make mina-build`         | Build Mina zkApp                     |
-| `make mina-test`          | Run Mina zkApp tests                 |
-| `make mina-deploy-devnet` | Deploy Mina zkApp to devnet          |
+| Target                    | What it does                                     |
+| ------------------------- | ------------------------------------------------ |
+| `make build`              | Build all packages                               |
+| `make test`               | Run all tests                                    |
+| `make test-unit`          | Unit tests only                                  |
+| `make lint`               | ESLint                                           |
+| `make clean`              | Remove `dist/` artifacts                         |
+| `make anvil-up`           | Start Anvil + Faucet (`--profile evm`)           |
+| `make anvil-down`         | Stop EVM services                                |
+| `make solana-up`          | Start Solana test validator (`--profile solana`) |
+| `make solana-down`        | Stop Solana services                             |
+| `make infra-up`           | Start all chains (EVM + Solana)                  |
+| `make infra-down`         | Stop all chains                                  |
+| `make solana-build`       | Compile Solana program to BPF                    |
+| `make solana-test`        | Run Solana Rust tests via `test-sbf`             |
+| `make mina-build`         | Build Mina zkApp                                 |
+| `make mina-test`          | Run Mina zkApp tests                             |
+| `make mina-deploy-devnet` | Deploy Mina zkApp to devnet                      |
 
 ## Default UI Library: shadcn-ui v4
 

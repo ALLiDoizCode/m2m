@@ -63,7 +63,7 @@ epics:
         status: done
       33.9:
         name: "Solana Local Development Infrastructure"
-        status: ready-for-dev
+        status: done
     retrospective:
       status: done
   epic-34:
