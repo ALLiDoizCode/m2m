@@ -417,7 +417,7 @@ jobs:
 
       - name: Install Solana CLI tools
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.2.12/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       - name: Build Solana program
@@ -547,7 +547,7 @@ jobs:
 
       - name: Install Solana CLI tools
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.2.12/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       - name: Cache Solana program build
