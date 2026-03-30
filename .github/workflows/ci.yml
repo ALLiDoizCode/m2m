@@ -561,7 +561,7 @@ jobs:
 
       - name: Run Solana program tests
         working-directory: packages/solana-program
-        run: cargo test-sbf
+        run: cargo test-sbf --tools-version v1.52
 
   # Build and push Docker image to GitHub Container Registry
   docker-build-push:
