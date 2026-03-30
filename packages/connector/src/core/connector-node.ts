@@ -66,6 +66,8 @@ import {
   SENT_CLAIMS_INDEXES,
 } from '../settlement/claim-sender-db-schema';
 import { InboundClaimValidator } from '../btp/inbound-claim-validator';
+import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
+import { hexToBytes } from '@noble/hashes/utils';
 import { promises as dns } from 'dns';
 // Import package.json for version information
 import packageJson from '../../package.json';
@@ -743,7 +745,13 @@ export class ConnectorNode implements HealthStatusProvider {
           // Create a shared ChainProviderRegistry wrapping the primary SDK
           // in an EVMPaymentChannelProvider. Both SettlementExecutor and
           // PerPacketClaimService share this registry instance.
-          const primaryChainIdStr = primaryChainId ? `evm:${primaryChainId}` : 'evm:unknown';
+          // Resolve primary chain ID string: prefer blockchain config, then chainProviders, then fallback
+          const chainProviderChainId = this._config.chainProviders?.find(
+            (cp) => cp.chainType === 'evm'
+          )?.chainId;
+          const primaryChainIdStr = primaryChainId
+            ? `evm:${primaryChainId}`
+            : (chainProviderChainId ?? 'evm:unknown');
           const chainRegistry = new ChainProviderRegistry();
           const evmProvider = new EVMPaymentChannelProvider(
             this._paymentChannelSDK,
@@ -770,6 +778,28 @@ export class ConnectorNode implements HealthStatusProvider {
             if (!peerIdToChainMap.has(peerId)) {
               peerIdToChainMap.set(peerId, primaryChainIdStr);
             }
+          }
+
+          // NIP-59 transport privacy setup
+          const nip59Enabled = this._config.nip59?.enabled ?? false;
+          const nip59Wrapper = new NIP59ClaimWrapper({
+            nip59Enabled,
+            logger: this._logger,
+          });
+          const nodeSecp256k1PrivKey = treasuryPrivateKey
+            ? hexToBytes(treasuryPrivateKey.replace(/^0x/, ''))
+            : undefined;
+          const peerIdToNip59PubKey = new Map<string, Uint8Array>();
+          for (const peer of this._config.peers) {
+            if (peer.nip59PublicKey) {
+              peerIdToNip59PubKey.set(peer.id, hexToBytes(peer.nip59PublicKey));
+            }
+          }
+          if (nip59Enabled) {
+            this._logger.info(
+              { event: 'nip59_enabled', peerCount: peerIdToNip59PubKey.size },
+              'NIP-59 transport privacy enabled for claim wrapping'
+            );
           }
 
           this._settlementExecutor = new SettlementExecutor(
@@ -862,7 +892,11 @@ export class ConnectorNode implements HealthStatusProvider {
                 this._channelManager,
                 claimDb,
                 this._logger,
-                this._config.nodeId
+                this._config.nodeId,
+                peerIdToChainMap,
+                nip59Wrapper,
+                nodeSecp256k1PrivKey,
+                peerIdToNip59PubKey
               );
               this._packetHandler.setPerPacketClaimService(perPacketClaimService);
               this._settlementExecutor?.setPerPacketClaimService(perPacketClaimService);
@@ -888,7 +922,9 @@ export class ConnectorNode implements HealthStatusProvider {
             this._paymentChannelSDK,
             this._config.nodeId,
             this._logger,
-            this._channelManager ?? undefined
+            this._channelManager ?? undefined,
+            nip59Wrapper,
+            nodeSecp256k1PrivKey
           );
           this._btpServer.setInboundClaimValidator((protocolData, ilpPacket, peerId) =>
             inboundClaimValidator.validate(protocolData, ilpPacket, peerId)
@@ -917,7 +953,9 @@ export class ConnectorNode implements HealthStatusProvider {
                 chainRegistry,
                 this._logger,
                 this._channelManager ?? undefined,
-                peerIdToAddressMap
+                peerIdToAddressMap,
+                nip59Wrapper,
+                nodeSecp256k1PrivKey
               );
 
               // Register with BTP server to receive claim messages
@@ -1091,9 +1129,15 @@ export class ConnectorNode implements HealthStatusProvider {
           const channelPromise = (async () => {
             try {
               const tokenId = this._defaultSettlementTokenId;
-              const channelId = await this._channelManager!.ensureChannelExists(peerId, tokenId);
+              const peerConfig = this._config.peers.find((p) => p.id === peerId);
+              const peerChain = peerConfig?.chain;
+              const channelId = await this._channelManager!.ensureChannelExists(
+                peerId,
+                tokenId,
+                peerChain ? { chain: peerChain } : undefined
+              );
               this._logger.info(
-                { event: 'payment_channel_ready', peerId, channelId },
+                { event: 'payment_channel_ready', peerId, channelId, chain: peerChain },
                 'Payment channel ready for peer'
               );
             } catch (error) {

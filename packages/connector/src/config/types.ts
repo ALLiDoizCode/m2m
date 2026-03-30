@@ -123,6 +123,13 @@ export interface PeerConfig {
    * When absent, defaults to auto-created EVM provider from settlementInfra.
    */
   chain?: string;
+
+  /**
+   * Compressed secp256k1 public key (hex, 66 chars) for NIP-59 claim encryption.
+   * When present and `nip59.enabled` is true, outgoing claims to this peer are
+   * wrapped in three-layer NIP-59 encryption for transport privacy.
+   */
+  nip59PublicKey?: string;
 }
 
 /**
@@ -366,6 +373,19 @@ export interface ConnectorConfig {
    * Epic 8 (EVM Payment Channels) uses config.blockchain.base
    */
   blockchain?: BlockchainConfig;
+
+  /**
+   * Optional NIP-59 transport privacy configuration.
+   * When enabled, per-packet claims are wrapped in three-layer encryption
+   * (Rumor → Seal → Gift Wrap) so BTP intermediaries cannot observe claim
+   * contents, sender identity, or timing patterns.
+   *
+   * Requires peers to have `nip59PublicKey` set in their config.
+   * Uses the node's treasury private key as the secp256k1 signing key.
+   */
+  nip59?: {
+    enabled: boolean;
+  };
 
   /**
    * Optional security configuration for key management

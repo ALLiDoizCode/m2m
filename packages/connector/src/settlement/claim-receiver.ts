@@ -35,6 +35,11 @@ import {
   isMinaClaim,
   validateClaimMessage,
 } from '../btp/btp-claim-types';
+import {
+  type NIP59ClaimWrapper,
+  BTP_WRAPPED_CLAIM_PROTOCOL,
+  deserializeWrappedClaim,
+} from './privacy/nip59-claim-wrapper';
 
 /**
  * Event emitted after a claim is successfully validated and persisted.
@@ -103,7 +108,9 @@ export class ClaimReceiver extends EventEmitter {
     private readonly chainProviderRegistry: ChainProviderRegistry,
     private readonly logger: Logger,
     private readonly channelManager?: ChannelManager,
-    private readonly peerIdToAddressMap?: Map<string, string>
+    private readonly peerIdToAddressMap?: Map<string, string>,
+    private readonly _nip59Wrapper?: NIP59ClaimWrapper,
+    private readonly _nodePrivateKey?: Uint8Array
   ) {
     super();
   }
@@ -127,14 +134,52 @@ export class ClaimReceiver extends EventEmitter {
       // TypeScript now knows message.data is BTPData, not BTPErrorData
       // Iterate through protocol data array
       for (const protocolData of message.data.protocolData) {
-        // Filter for claim protocol
         if (protocolData.protocolName === 'payment-channel-claim') {
+          // Plaintext claim
           await this.handleClaimMessage(peerId, protocolData);
+        } else if (
+          protocolData.protocolName === BTP_WRAPPED_CLAIM_PROTOCOL.NAME &&
+          this._nip59Wrapper &&
+          this._nodePrivateKey
+        ) {
+          // NIP-59 wrapped claim — unwrap then process
+          await this.handleWrappedClaimMessage(peerId, protocolData);
         }
       }
     });
 
     this.logger.info('ClaimReceiver registered with BTP server');
+  }
+
+  /**
+   * Handle NIP-59 wrapped claim message — unwrap and delegate to handleClaimMessage.
+   * @private
+   */
+  private async handleWrappedClaimMessage(
+    peerId: string,
+    protocolData: BTPProtocolData
+  ): Promise<void> {
+    const childLogger = this.logger.child({ peerId, protocol: 'claim-receiver-nip59' });
+    try {
+      const wrappedClaim = deserializeWrappedClaim(protocolData.data);
+      const claimMessage = this._nip59Wrapper!.unwrapClaim(wrappedClaim, this._nodePrivateKey!);
+      childLogger.debug(
+        { messageId: claimMessage.messageId },
+        'NIP-59 claim unwrapped successfully'
+      );
+      // Re-serialize as plaintext protocolData and delegate to existing handler
+      const plaintextData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(claimMessage), 'utf8'),
+      };
+      await this.handleClaimMessage(peerId, plaintextData);
+    } catch (error) {
+      childLogger.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to unwrap NIP-59 claim'
+      );
+    }
   }
 
   /**

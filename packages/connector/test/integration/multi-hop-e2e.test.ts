@@ -324,6 +324,40 @@ describeEvm('Multi-Hop E2E Integration (5-Peer Linear Chain)', () => {
       // If self-describing claims failed verification, the packet would be rejected
       expect(result.type).toBe(PacketType.FULFILL);
     });
+
+    // T-NIP59: NIP-59 claim wrapping across all 5 hops
+    it('T-NIP59: should deliver packets with NIP-59 wrapped claims across all 5 hops', async () => {
+      // Create a separate 5-peer network with NIP-59 enabled
+      const nip59Network = createMultiHopTestNetwork(5, {
+        settlementThreshold: 5000n,
+        connectorFeePercentage: 0.1,
+        pollingInterval: 100,
+        logLevel: 'warn',
+        nip59Enabled: true,
+      });
+
+      try {
+        await nip59Network.start();
+
+        // Send a packet — all hops use NIP-59 wrapped claims
+        const result = await nip59Network.sendPacket(0, 'test.peer5.receiver', 10000n);
+
+        // If NIP-59 wrapping/unwrapping failed at any hop, the packet would be rejected
+        expect(result.type).toBe(PacketType.FULFILL);
+
+        // Send multiple packets to verify claim accumulation works with NIP-59
+        for (let i = 0; i < 5; i++) {
+          const r = await nip59Network.sendPacket(0, 'test.peer5.receiver', 1000n);
+          expect(r.type).toBe(PacketType.FULFILL);
+        }
+
+        // Verify balances are correctly recorded (claims were properly unwrapped)
+        const peer2Balance = await nip59Network.getBalance(1, 'peer1');
+        expect(BigInt(peer2Balance.balances[0]!.creditBalance)).toBeGreaterThan(0n);
+      } finally {
+        await nip59Network.stop();
+      }
+    });
   });
 
   // ========================================================================

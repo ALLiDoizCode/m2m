@@ -133,7 +133,7 @@ services:
   # NOTE: Mina lightnet requires 4-8 GB RAM. Ensure Docker Desktop has
   # sufficient memory allocated (at least 8 GB recommended).
   mina-lightnet:
-    image: o1labs/mina-local-network:o1js-main
+    image: o1labs/mina-local-network:compatible-latest-lightnet
     profiles:
       - mina
     ports:

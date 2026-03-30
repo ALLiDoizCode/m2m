@@ -563,7 +563,11 @@ describe('PerPacketClaimService', () => {
 
       const result = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
       expect(result).not.toBeNull();
-      expect(onDemandChannelManager.ensureChannelExists).toHaveBeenCalledWith(TEST_PEER_ID, 'M2M');
+      expect(onDemandChannelManager.ensureChannelExists).toHaveBeenCalledWith(
+        TEST_PEER_ID,
+        'M2M',
+        undefined
+      );
     });
 
     it('should return null when ensureChannelExists fails and no channel available', async () => {

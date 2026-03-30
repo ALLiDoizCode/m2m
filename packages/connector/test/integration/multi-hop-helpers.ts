@@ -13,6 +13,8 @@
  */
 
 import { ethers } from 'ethers';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import { hexToBytes } from '@noble/hashes/utils';
 import { ConnectorNode } from '../../src/core/connector-node';
 import { createLogger } from '../../src/utils/logger';
 import type { ConnectorConfig, PeerAccountBalance, SendPacketParams } from '../../src/config/types';
@@ -69,6 +71,15 @@ export const PEER_EVM_ADDRESSES = [
 // Configuration Defaults
 // ============================================================================
 
+/**
+ * Compressed secp256k1 public keys derived from PEER_PRIVATE_KEYS.
+ * Used for NIP-59 claim wrapping (peers encrypt claims to each other).
+ */
+export const PEER_NIP59_PUBKEYS = PEER_PRIVATE_KEYS.map((pk) => {
+  const privBytes = hexToBytes(pk.replace(/^0x/, ''));
+  return Buffer.from(secp256k1.getPublicKey(privBytes, true)).toString('hex');
+});
+
 export interface MultiHopTestOptions {
   /** Settlement threshold in smallest unit (default: 5000n) */
   settlementThreshold?: bigint;
@@ -88,6 +99,8 @@ export interface MultiHopTestOptions {
   portBase?: number;
   /** Log level for connectors (default: 'warn') */
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  /** Enable NIP-59 claim wrapping (default: false) */
+  nip59Enabled?: boolean;
 }
 
 // ============================================================================
@@ -154,6 +167,7 @@ export function createMultiHopTestNetwork(
     tokenAddress = TOKEN_ADDRESS,
     portBase = 10000 + Math.floor(Math.random() * 40000),
     logLevel = 'warn',
+    nip59Enabled = false,
   } = options;
 
   const configs: ConnectorConfig[] = [];
@@ -174,6 +188,8 @@ export function createMultiHopTestNetwork(
         url: `ws://localhost:${portBase + i - 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i - 1],
+        chain: `evm:${ANVIL_CHAIN_ID}`,
+        ...(nip59Enabled ? { nip59PublicKey: PEER_NIP59_PUBKEYS[i - 1] } : {}),
       });
     }
 
@@ -184,6 +200,8 @@ export function createMultiHopTestNetwork(
         url: `ws://localhost:${portBase + i + 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i + 1],
+        chain: `evm:${ANVIL_CHAIN_ID}`,
+        ...(nip59Enabled ? { nip59PublicKey: PEER_NIP59_PUBKEYS[i + 1] } : {}),
       });
     }
 
@@ -243,6 +261,16 @@ export function createMultiHopTestNetwork(
       peers: peerConfigs,
       routes,
       settlement,
+      chainProviders: [
+        {
+          chainType: 'evm' as const,
+          chainId: `evm:${ANVIL_CHAIN_ID}`,
+          rpcUrl,
+          registryAddress,
+          keyId: PEER_PRIVATE_KEYS[i]!,
+        },
+      ],
+      ...(nip59Enabled ? { nip59: { enabled: true } } : {}),
       settlementInfra: {
         enabled: true,
         privateKey: PEER_PRIVATE_KEYS[i],

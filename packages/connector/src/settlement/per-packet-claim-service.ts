@@ -38,6 +38,11 @@ import {
 import { EVMPaymentChannelProvider } from './provider/evm-payment-channel-provider';
 import { SolanaPaymentChannelProvider } from './provider/solana-payment-channel-provider';
 import { MinaPaymentChannelProvider } from './provider/mina-payment-channel-provider';
+import {
+  type NIP59ClaimWrapper,
+  BTP_WRAPPED_CLAIM_PROTOCOL,
+  serializeWrappedClaim,
+} from './privacy/nip59-claim-wrapper';
 import { randomBytes } from 'crypto';
 
 /**
@@ -101,7 +106,11 @@ export class PerPacketClaimService {
     private readonly channelManager: ChannelManager,
     private readonly db: Database,
     logger: Logger,
-    private readonly nodeId: string
+    private readonly nodeId: string,
+    private readonly peerIdToChainMap?: Map<string, string>,
+    private readonly _nip59Wrapper?: NIP59ClaimWrapper,
+    private readonly _nodePrivateKey?: Uint8Array,
+    private readonly _peerNip59PubKeys?: Map<string, Uint8Array>
   ) {
     this.logger = logger.child({ component: 'per-packet-claim-service' });
     this.recoverFromDb();
@@ -266,13 +275,38 @@ export class PerPacketClaimService {
     // Persist to DB (non-blocking)
     this.persistClaim(toPeerId, claimMessage);
 
-    // Serialize to BTP protocolData
-    const data = Buffer.from(JSON.stringify(claimMessage), 'utf8');
-    const protocolData: BTPProtocolData = {
-      protocolName: BTP_CLAIM_PROTOCOL.NAME,
-      contentType: BTP_CLAIM_PROTOCOL.CONTENT_TYPE,
-      data,
-    };
+    // Serialize to BTP protocolData (optionally NIP-59 wrapped)
+    let protocolData: BTPProtocolData;
+    if (
+      this._nip59Wrapper?.isEnabled() &&
+      this._nodePrivateKey &&
+      this._peerNip59PubKeys?.has(toPeerId)
+    ) {
+      const wrapped = this._nip59Wrapper.wrapClaim(
+        claimMessage,
+        this._nodePrivateKey,
+        this._peerNip59PubKeys.get(toPeerId)!
+      );
+      if (wrapped) {
+        protocolData = {
+          protocolName: BTP_WRAPPED_CLAIM_PROTOCOL.NAME,
+          contentType: BTP_WRAPPED_CLAIM_PROTOCOL.CONTENT_TYPE,
+          data: serializeWrappedClaim(wrapped),
+        };
+      } else {
+        protocolData = {
+          protocolName: BTP_CLAIM_PROTOCOL.NAME,
+          contentType: BTP_CLAIM_PROTOCOL.CONTENT_TYPE,
+          data: Buffer.from(JSON.stringify(claimMessage), 'utf8'),
+        };
+      }
+    } else {
+      protocolData = {
+        protocolName: BTP_CLAIM_PROTOCOL.NAME,
+        contentType: BTP_CLAIM_PROTOCOL.CONTENT_TYPE,
+        data: Buffer.from(JSON.stringify(claimMessage), 'utf8'),
+      };
+    }
 
     this.logger.debug(
       {
@@ -333,7 +367,12 @@ export class PerPacketClaimService {
     if (!metadata) {
       // On-demand channel creation: peer may have connected after startup
       try {
-        await this.channelManager.ensureChannelExists(peerId, tokenId);
+        const peerChain = this.peerIdToChainMap?.get(peerId);
+        await this.channelManager.ensureChannelExists(
+          peerId,
+          tokenId,
+          peerChain ? { chain: peerChain } : undefined
+        );
         metadata = this.channelManager.getChannelForPeer(peerId, tokenId);
       } catch (error) {
         this.logger.warn(
