@@ -85,6 +85,8 @@ interface ChannelClaimContext {
 export interface PerPacketClaimResult {
   protocolData: BTPProtocolData;
   claimMessage: BTPClaimMessage;
+  /** SHA-256 execution condition (32 bytes) when NIP-59 condition derivation is active */
+  executionCondition?: Uint8Array;
 }
 
 /**
@@ -275,24 +277,26 @@ export class PerPacketClaimService {
     // Persist to DB (non-blocking)
     this.persistClaim(toPeerId, claimMessage);
 
-    // Serialize to BTP protocolData (optionally NIP-59 wrapped)
+    // Serialize to BTP protocolData (optionally NIP-59 wrapped with condition derivation)
     let protocolData: BTPProtocolData;
+    let executionCondition: Uint8Array | undefined;
     if (
       this._nip59Wrapper?.isEnabled() &&
       this._nodePrivateKey &&
       this._peerNip59PubKeys?.has(toPeerId)
     ) {
-      const wrapped = this._nip59Wrapper.wrapClaim(
+      const wrapResult = this._nip59Wrapper.wrapClaimWithCondition(
         claimMessage,
         this._nodePrivateKey,
         this._peerNip59PubKeys.get(toPeerId)!
       );
-      if (wrapped) {
+      if (wrapResult) {
         protocolData = {
           protocolName: BTP_WRAPPED_CLAIM_PROTOCOL.NAME,
           contentType: BTP_WRAPPED_CLAIM_PROTOCOL.CONTENT_TYPE,
-          data: serializeWrappedClaim(wrapped),
+          data: serializeWrappedClaim(wrapResult.wrapped),
         };
+        executionCondition = wrapResult.executionCondition;
       } else {
         protocolData = {
           protocolName: BTP_CLAIM_PROTOCOL.NAME,
@@ -319,7 +323,7 @@ export class PerPacketClaimService {
       'Generated per-packet claim'
     );
 
-    return { protocolData, claimMessage };
+    return { protocolData, claimMessage, executionCondition };
   }
 
   /**

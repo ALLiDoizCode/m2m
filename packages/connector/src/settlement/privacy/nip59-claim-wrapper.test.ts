@@ -24,6 +24,7 @@
 import { randomBytes } from 'crypto';
 import pino from 'pino';
 import { secp256k1 } from '@noble/curves/secp256k1';
+import { sha256 } from '@noble/hashes/sha2';
 import type {
   EVMClaimMessage,
   SolanaClaimMessage,
@@ -847,5 +848,133 @@ describe('AC 5 gap: Disabled wrapper plaintext passthrough semantics', () => {
 describe('NIP59TransportWrapper alias', () => {
   test('NIP59TransportWrapper is an alias for NIP59ClaimWrapper', () => {
     expect(NIP59TransportWrapper).toBe(NIP59ClaimWrapper);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dual HKDF Derivation: wrapClaimWithCondition / unwrapClaimWithPreimage
+// ---------------------------------------------------------------------------
+
+describe('Dual HKDF derivation: wrapClaimWithCondition', () => {
+  test('returns 32-byte executionCondition (not all zeros)', () => {
+    const wrapper = createWrapper();
+    const claim = createEVMClaimFixture();
+
+    const result = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+
+    expect(result).not.toBeNull();
+    expect(result!.executionCondition).toBeInstanceOf(Uint8Array);
+    expect(result!.executionCondition.length).toBe(32);
+    expect(result!.executionCondition.every((b) => b === 0)).toBe(false);
+  });
+
+  test('unwrapClaimWithPreimage returns preimage where SHA-256(preimage) === executionCondition', () => {
+    const wrapper = createWrapper();
+    const claim = createEVMClaimFixture();
+
+    const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+    expect(wrapResult).not.toBeNull();
+
+    const unwrapResult = wrapper.unwrapClaimWithPreimage(wrapResult!.wrapped, receiverPrivKey);
+
+    expect(unwrapResult.fulfillmentPreimage).toBeInstanceOf(Uint8Array);
+    expect(unwrapResult.fulfillmentPreimage.length).toBe(32);
+
+    const computedCondition = sha256(unwrapResult.fulfillmentPreimage);
+    expect(Buffer.from(computedCondition).equals(Buffer.from(wrapResult!.executionCondition))).toBe(
+      true
+    );
+  });
+
+  test('two successive wrapClaimWithCondition calls produce different executionConditions (per-packet uniqueness)', () => {
+    const wrapper = createWrapper();
+    const claim = createEVMClaimFixture();
+
+    const result1 = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+    const result2 = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+
+    expect(result1).not.toBeNull();
+    expect(result2).not.toBeNull();
+    expect(
+      Buffer.from(result1!.executionCondition).equals(Buffer.from(result2!.executionCondition))
+    ).toBe(false);
+  });
+
+  test('returns null when NIP-59 is disabled', () => {
+    const wrapper = createWrapper(false);
+    const claim = createEVMClaimFixture();
+
+    const result = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+
+    expect(result).toBeNull();
+  });
+
+  test('existing wrapClaim behavior unchanged after refactoring', () => {
+    const wrapper = createWrapper();
+    const claim = createEVMClaimFixture();
+
+    const wrapped = wrapper.wrapClaim(claim, senderPrivKey, receiverPubKey);
+    expect(wrapped).not.toBeNull();
+
+    const unwrapped = wrapper.unwrapClaim(wrapped!, receiverPrivKey);
+    expect(unwrapped).toEqual(claim);
+  });
+
+  test('unwrapClaimWithPreimage recovers original claim', () => {
+    const wrapper = createWrapper();
+    const claim = createMinaClaimFixture();
+
+    const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+    expect(wrapResult).not.toBeNull();
+
+    const unwrapResult = wrapper.unwrapClaimWithPreimage(wrapResult!.wrapped, receiverPrivKey);
+    expect(unwrapResult.claim).toEqual(claim);
+  });
+
+  test('unwrapClaimWithPreimage with wrong private key throws NIP59WrapError', () => {
+    const wrapper = createWrapper();
+    const claim = createEVMClaimFixture();
+
+    const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+    expect(wrapResult).not.toBeNull();
+
+    expect(() => wrapper.unwrapClaimWithPreimage(wrapResult!.wrapped, wrongPrivKey)).toThrow(
+      NIP59WrapError
+    );
+  });
+
+  test('unwrapClaimWithPreimage with tampered ciphertext throws NIP59WrapError', () => {
+    const wrapper = createWrapper();
+    const claim = createEVMClaimFixture();
+
+    const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+    expect(wrapResult).not.toBeNull();
+
+    const payloadBytes = Buffer.from(wrapResult!.wrapped.encryptedPayload, 'base64');
+    const midpoint = Math.floor(payloadBytes.length / 2);
+    payloadBytes[midpoint] = (payloadBytes[midpoint]! ^ 0xff) & 0xff;
+
+    const tampered = {
+      ...wrapResult!.wrapped,
+      encryptedPayload: payloadBytes.toString('base64'),
+    };
+
+    expect(() => wrapper.unwrapClaimWithPreimage(tampered, receiverPrivKey)).toThrow(
+      NIP59WrapError
+    );
+  });
+
+  test('unwrapClaimWithPreimage with empty ephemeralPublicKey throws NIP59WrapError', () => {
+    const wrapper = createWrapper();
+    const claim = createEVMClaimFixture();
+
+    const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+    expect(wrapResult).not.toBeNull();
+
+    const malformed = { ...wrapResult!.wrapped, ephemeralPublicKey: '' };
+
+    expect(() => wrapper.unwrapClaimWithPreimage(malformed, receiverPrivKey)).toThrow(
+      NIP59WrapError
+    );
   });
 });

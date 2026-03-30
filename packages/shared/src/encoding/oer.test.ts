@@ -428,7 +428,26 @@ describe('deserializePrepare', () => {
     expect(deserialized.destination).toBe(original.destination);
     expect(deserialized.expiresAt).toEqual(original.expiresAt);
     expect(deserialized.data).toEqual(original.data);
-    // executionCondition is not in the deserialized interface (skipped on wire)
+    // When executionCondition is omitted, OER serializes 32 zero bytes and deserializes to undefined
+    expect(deserialized.executionCondition).toBeUndefined();
+  });
+
+  it('should round-trip Prepare packet with known 32-byte executionCondition', () => {
+    const condition = new Uint8Array(32).fill(0xab);
+    const packet = createTestPreparePacket({ executionCondition: condition });
+    const serialized = serializePrepare(packet);
+    const deserialized = deserializePrepare(serialized);
+
+    expect(deserialized.executionCondition).toEqual(condition);
+  });
+
+  it('should round-trip Prepare packet without executionCondition as undefined (backward compat)', () => {
+    const packet = createTestPreparePacket();
+    expect(packet.executionCondition).toBeUndefined();
+    const serialized = serializePrepare(packet);
+    const deserialized = deserializePrepare(serialized);
+
+    expect(deserialized.executionCondition).toBeUndefined();
   });
 
   it('should throw BufferUnderflowError when buffer is empty (Line 515)', () => {
@@ -541,7 +560,26 @@ describe('deserializeFulfill', () => {
 
     expect(deserialized.type).toBe(PacketType.FULFILL);
     expect(deserialized.data).toEqual(original.data);
-    // fulfillment is not in the deserialized interface (skipped on wire)
+    // When fulfillment is omitted, OER serializes 32 zero bytes and deserializes to undefined
+    expect(deserialized.fulfillment).toBeUndefined();
+  });
+
+  it('should round-trip Fulfill packet with known 32-byte fulfillment', () => {
+    const fulfillmentBytes = new Uint8Array(32).fill(0xcd);
+    const packet = createTestFulfillPacket({ fulfillment: fulfillmentBytes });
+    const serialized = serializeFulfill(packet);
+    const deserialized = deserializeFulfill(serialized);
+
+    expect(deserialized.fulfillment).toEqual(fulfillmentBytes);
+  });
+
+  it('should round-trip Fulfill packet without fulfillment as undefined (backward compat)', () => {
+    const packet = createTestFulfillPacket();
+    expect(packet.fulfillment).toBeUndefined();
+    const serialized = serializeFulfill(packet);
+    const deserialized = deserializeFulfill(serialized);
+
+    expect(deserialized.fulfillment).toBeUndefined();
   });
 
   it('should throw InvalidPacketError when type byte is incorrect', () => {

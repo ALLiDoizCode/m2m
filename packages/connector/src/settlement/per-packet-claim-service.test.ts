@@ -1366,4 +1366,53 @@ describe('PerPacketClaimService', () => {
       ).not.toThrow();
     });
   });
+
+  describe('NIP-59 condition threading', () => {
+    it('should include executionCondition when NIP-59 is enabled', async () => {
+      const mockCondition = new Uint8Array(32).fill(0xab);
+      const mockNip59Wrapper = {
+        isEnabled: jest.fn().mockReturnValue(true),
+        wrapClaimWithCondition: jest.fn().mockReturnValue({
+          wrapped: {
+            ephemeralPublicKey: 'aa'.repeat(33),
+            encryptedPayload: Buffer.from('encrypted').toString('base64'),
+            timestamp: Date.now(),
+            version: '1.0' as const,
+          },
+          executionCondition: mockCondition,
+        }),
+      };
+      const mockNodePrivKey = new Uint8Array(32).fill(0x01);
+      const mockPeerPubKeys = new Map<string, Uint8Array>([
+        [TEST_PEER_ID, new Uint8Array(33).fill(0x02)],
+      ]);
+
+      const nip59Service = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID,
+        undefined,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        mockNip59Wrapper as any,
+        mockNodePrivKey,
+        mockPeerPubKeys
+      );
+
+      const result = await nip59Service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(result!.executionCondition).toBe(mockCondition);
+      expect(result!.executionCondition!.length).toBe(32);
+      expect(mockNip59Wrapper.wrapClaimWithCondition).toHaveBeenCalled();
+    });
+
+    it('should have undefined executionCondition when NIP-59 is disabled', async () => {
+      const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(result!.executionCondition).toBeUndefined();
+    });
+  });
 });

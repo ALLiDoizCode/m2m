@@ -50,6 +50,28 @@ export interface WrappedClaim {
 }
 
 /**
+ * Result of wrapping a claim with condition derivation.
+ * Contains the wrapped claim and the SHA-256 execution condition.
+ */
+export interface WrapClaimResult {
+  /** Three-layer wrapped claim message */
+  wrapped: WrappedClaim;
+  /** SHA-256(preimage) -- 32-byte execution condition for the ILP PREPARE */
+  executionCondition: Uint8Array;
+}
+
+/**
+ * Result of unwrapping a claim with preimage derivation.
+ * Contains the original claim and the ECDH-derived fulfillment preimage.
+ */
+export interface UnwrapClaimResult {
+  /** The original BTPClaimMessage */
+  claim: BTPClaimMessage;
+  /** 32-byte preimage such that SHA-256(fulfillmentPreimage) === executionCondition */
+  fulfillmentPreimage: Uint8Array;
+}
+
+/**
  * BTP protocol constants for wrapped (NIP-59 encrypted) claim messages.
  */
 export const BTP_WRAPPED_CLAIM_PROTOCOL = {
@@ -124,6 +146,7 @@ const CHACHA_NONCE_BYTES = 12;
 const HKDF_KEY_BYTES = 32;
 const SEAL_HKDF_INFO = 'nip59-seal';
 const GIFTWRAP_HKDF_INFO = 'nip59-giftwrap';
+const CONDITION_HKDF_INFO = 'ilp-condition-preimage';
 
 // ---------------------------------------------------------------------------
 // NIP59ClaimWrapper
@@ -268,11 +291,12 @@ export class NIP59ClaimWrapper {
       const ephemeralPubKey = hexToBytes(wrappedClaim.ephemeralPublicKey);
       const encryptedPayload = base64ToBytes(wrappedClaim.encryptedPayload);
 
-      sealPayloadBytes = this._decryptGiftWrap(
+      const giftWrapResult = this._decryptGiftWrap(
         encryptedPayload,
         receiverPrivateKey,
         ephemeralPubKey
       );
+      sealPayloadBytes = giftWrapResult.plaintext;
     } catch (err) {
       if (err instanceof NIP59WrapError) throw err;
       this._logger.warn(
@@ -363,6 +387,209 @@ export class NIP59ClaimWrapper {
     }
   }
 
+  /**
+   * Wrap a BTP claim message with dual HKDF derivation for ILP condition binding.
+   *
+   * A single ephemeral key derives both the gift wrap encryption key (info='nip59-giftwrap')
+   * and the condition preimage (info='ilp-condition-preimage'). The execution condition is
+   * SHA-256(preimage), binding the ILP fulfillment to the receiver's identity.
+   *
+   * @param claim - The plaintext BTPClaimMessage to wrap
+   * @param senderPrivateKey - 32-byte sender secp256k1 private key
+   * @param receiverPublicKey - 33-byte compressed receiver secp256k1 public key
+   * @returns WrapClaimResult if enabled, null if disabled (passthrough)
+   */
+  wrapClaimWithCondition(
+    claim: BTPClaimMessage,
+    senderPrivateKey: Uint8Array,
+    receiverPublicKey: Uint8Array
+  ): WrapClaimResult | null {
+    if (!this._nip59Enabled) {
+      this._logger.debug(
+        { event: 'nip59_wrap_condition_skip' },
+        'NIP-59 wrapping disabled, skipping condition derivation'
+      );
+      return null;
+    }
+
+    try {
+      // Layer 1: Rumor -- serialize claim to JSON (unsigned, deniable)
+      const rumor = JSON.stringify(claim);
+      const rumorBytes = utf8ToBytes(rumor);
+
+      // Layer 2: Seal -- encrypt rumor with ECDH(sender, receiver), sign ciphertext
+      const senderPubKey = secp256k1.getPublicKey(senderPrivateKey, true);
+      const sealCiphertext = this._encryptSeal(
+        rumorBytes,
+        senderPrivateKey,
+        receiverPublicKey,
+        senderPubKey
+      );
+      const sealSignature = this._signCiphertext(sealCiphertext, senderPrivateKey);
+
+      const sealPayload: SealPayload = {
+        senderPublicKey: Buffer.from(senderPubKey).toString('hex'),
+        signature: Buffer.from(sealSignature).toString('base64'),
+        sealCiphertext: Buffer.from(sealCiphertext).toString('base64'),
+      };
+
+      const sealPayloadBytes = utf8ToBytes(JSON.stringify(sealPayload));
+
+      // Layer 3: Gift Wrap -- encrypt seal with ephemeral key
+      const ephemeralPrivKey = randomBytes(32);
+      const ephemeralPubKey = secp256k1.getPublicKey(ephemeralPrivKey, true);
+
+      // Compute shared secret for dual HKDF derivation
+      const sharedSecret = this._computeSharedSecret(ephemeralPrivKey, receiverPublicKey);
+
+      // Derive gift wrap encryption key
+      const giftWrapKey = hkdf(sha256, sharedSecret, undefined, GIFTWRAP_HKDF_INFO, HKDF_KEY_BYTES);
+      const nonce = randomBytes(CHACHA_NONCE_BYTES);
+      const cipher = chacha20poly1305(giftWrapKey, nonce);
+      const giftWrapCiphertext = cipher.encrypt(sealPayloadBytes);
+
+      const encryptedResult = new Uint8Array(CHACHA_NONCE_BYTES + giftWrapCiphertext.length);
+      encryptedResult.set(nonce, 0);
+      encryptedResult.set(giftWrapCiphertext, CHACHA_NONCE_BYTES);
+
+      // Derive condition preimage from same shared secret
+      const preimage = hkdf(sha256, sharedSecret, undefined, CONDITION_HKDF_INFO, HKDF_KEY_BYTES);
+      const executionCondition = sha256(preimage);
+
+      // Zero ephemeral private key after use
+      ephemeralPrivKey.fill(0);
+
+      const wrapped: WrappedClaim = {
+        ephemeralPublicKey: Buffer.from(ephemeralPubKey).toString('hex'),
+        encryptedPayload: Buffer.from(encryptedResult).toString('base64'),
+        timestamp: this._randomizeTimestamp(),
+        version: '1.0',
+      };
+
+      this._logger.info(
+        { event: 'nip59_wrap_condition', claimMessageId: claim.messageId },
+        'Wrapping claim with NIP-59 Gift Wrap and condition derivation'
+      );
+
+      return { wrapped, executionCondition: new Uint8Array(executionCondition) };
+    } catch (err) {
+      throw new NIP59WrapError(
+        `Failed to wrap claim with condition: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      );
+    }
+  }
+
+  /**
+   * Unwrap a NIP-59 wrapped claim and derive the fulfillment preimage.
+   *
+   * Uses the shared secret from ECDH(receiverPriv, ephemeralPub) to derive the preimage
+   * via HKDF with info='ilp-condition-preimage'. The preimage satisfies
+   * SHA-256(preimage) === executionCondition from the corresponding wrapClaimWithCondition().
+   *
+   * @param wrappedClaim - The WrappedClaim to unwrap
+   * @param receiverPrivateKey - 32-byte receiver secp256k1 private key
+   * @returns UnwrapClaimResult with claim and fulfillmentPreimage
+   * @throws NIP59WrapError if decryption or verification fails
+   */
+  unwrapClaimWithPreimage(
+    wrappedClaim: WrappedClaim,
+    receiverPrivateKey: Uint8Array
+  ): UnwrapClaimResult {
+    // Validate wrapped claim structure
+    if (!wrappedClaim.ephemeralPublicKey || wrappedClaim.ephemeralPublicKey.length === 0) {
+      throw new NIP59WrapError('Invalid wrapped claim: missing ephemeralPublicKey', {
+        cause: new Error('Empty ephemeralPublicKey'),
+      });
+    }
+    if (!wrappedClaim.encryptedPayload || wrappedClaim.encryptedPayload.length === 0) {
+      throw new NIP59WrapError('Invalid wrapped claim: missing encryptedPayload', {
+        cause: new Error('Empty encryptedPayload'),
+      });
+    }
+
+    // Step 1: Decrypt Gift Wrap layer and get shared secret
+    let sealPayloadBytes: Uint8Array;
+    let sharedSecret: Uint8Array;
+    try {
+      const ephemeralPubKey = hexToBytes(wrappedClaim.ephemeralPublicKey);
+      const encryptedPayload = base64ToBytes(wrappedClaim.encryptedPayload);
+
+      const giftWrapResult = this._decryptGiftWrap(
+        encryptedPayload,
+        receiverPrivateKey,
+        ephemeralPubKey
+      );
+      sealPayloadBytes = giftWrapResult.plaintext;
+      sharedSecret = giftWrapResult.sharedSecret;
+    } catch (err) {
+      if (err instanceof NIP59WrapError) throw err;
+      throw new NIP59WrapError(
+        `Failed to decrypt gift wrap layer: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      );
+    }
+
+    // Step 2: Derive fulfillment preimage from shared secret
+    const fulfillmentPreimage = new Uint8Array(
+      hkdf(sha256, sharedSecret, undefined, CONDITION_HKDF_INFO, HKDF_KEY_BYTES)
+    );
+
+    // Step 3: Parse seal payload and decrypt seal layer
+    let rumorBytes: Uint8Array;
+    try {
+      const sealPayloadStr = bytesToUtf8(sealPayloadBytes);
+      const sealPayload = JSON.parse(sealPayloadStr) as SealPayload;
+
+      const senderPubKey = hexToBytes(sealPayload.senderPublicKey);
+      const sealSignature = base64ToBytes(sealPayload.signature);
+      const sealCiphertext = base64ToBytes(sealPayload.sealCiphertext);
+
+      this._verifyCiphertext(sealCiphertext, sealSignature, senderPubKey);
+      rumorBytes = this._decryptSeal(sealCiphertext, receiverPrivateKey, senderPubKey);
+    } catch (err) {
+      if (err instanceof NIP59WrapError) throw err;
+      throw new NIP59WrapError(
+        `Failed to decrypt seal layer: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      );
+    }
+
+    // Step 4: Parse rumor (JSON) -> BTPClaimMessage
+    try {
+      const rumorStr = bytesToUtf8(rumorBytes);
+      const claim = JSON.parse(rumorStr) as BTPClaimMessage;
+
+      if (
+        typeof claim !== 'object' ||
+        claim === null ||
+        typeof claim.version !== 'string' ||
+        typeof claim.blockchain !== 'string' ||
+        typeof claim.messageId !== 'string' ||
+        typeof claim.timestamp !== 'string' ||
+        typeof claim.senderId !== 'string'
+      ) {
+        throw new NIP59WrapError(
+          'Rumor payload is not a valid BTPClaimMessage: missing required base fields',
+          { cause: new Error('Invalid BTPClaimMessage structure') }
+        );
+      }
+
+      this._logger.info(
+        { event: 'nip59_unwrap_preimage', claimMessageId: claim.messageId },
+        'Successfully unwrapped NIP-59 claim with preimage derivation'
+      );
+
+      return { claim, fulfillmentPreimage };
+    } catch (err) {
+      if (err instanceof NIP59WrapError) throw err;
+      throw new NIP59WrapError(
+        `Failed to parse rumor layer: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      );
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Private: Encryption / Decryption helpers
   // -------------------------------------------------------------------------
@@ -437,12 +664,13 @@ export class NIP59ClaimWrapper {
   /**
    * Decrypt the gift wrap layer using ECDH(receiverPriv, ephemeralPub).
    * Expects nonce (12 bytes) prepended to ciphertext.
+   * Returns both the plaintext and the shared secret for downstream derivations.
    */
   private _decryptGiftWrap(
     giftWrapCiphertext: Uint8Array,
     receiverPrivateKey: Uint8Array,
     ephemeralPublicKey: Uint8Array
-  ): Uint8Array {
+  ): { plaintext: Uint8Array; sharedSecret: Uint8Array } {
     const sharedSecret = this._computeSharedSecret(receiverPrivateKey, ephemeralPublicKey);
     const key = hkdf(sha256, sharedSecret, undefined, GIFTWRAP_HKDF_INFO, HKDF_KEY_BYTES);
 
@@ -450,7 +678,8 @@ export class NIP59ClaimWrapper {
     const ciphertext = giftWrapCiphertext.slice(CHACHA_NONCE_BYTES);
 
     const cipher = chacha20poly1305(key, nonce);
-    return cipher.decrypt(ciphertext);
+    const plaintext = cipher.decrypt(ciphertext);
+    return { plaintext, sharedSecret };
   }
 
   // -------------------------------------------------------------------------

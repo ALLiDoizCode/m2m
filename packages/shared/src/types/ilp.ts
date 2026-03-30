@@ -52,9 +52,10 @@ export interface ILPPacket {
  * ILP Prepare Packet
  *
  * Represents a payment packet initiating an ILP transaction.
- * Self-described claims in the data field provide payment semantics;
- * the legacy executionCondition field is written as 32 zero bytes
- * on the wire for ILPv4 format compatibility.
+ * Self-described claims in the data field provide payment semantics.
+ * When NIP-59 is enabled, executionCondition carries a SHA-256 hash
+ * derived from ECDH key agreement with the receiver, binding the
+ * fulfillment to the receiver's identity.
  *
  * @see {@link https://interledger.org/rfcs/0027-interledger-protocol-4/#ilp-prepare|RFC-0027 Section 3.1: ILP Prepare}
  */
@@ -70,6 +71,12 @@ export interface ILPPreparePacket {
    * Payment must be fulfilled or rejected before this time
    */
   expiresAt: Date;
+  /**
+   * SHA-256 execution condition (32 bytes).
+   * When NIP-59 is enabled, derived from ECDH(ephemeral, receiver) via HKDF.
+   * When omitted, OER serialization writes 32 zero bytes for wire compatibility.
+   */
+  executionCondition?: Uint8Array;
   /** Application data payload (contains self-described claims) */
   data: Buffer;
 }
@@ -78,15 +85,20 @@ export interface ILPPreparePacket {
  * ILP Fulfill Packet
  *
  * Represents successful payment acceptance in response to a Prepare packet.
- * The legacy fulfillment field is written as 32 zero bytes on the wire
- * for ILPv4 format compatibility. Payment verification relies on
- * self-described claims rather than fulfillment/condition cryptography.
+ * When NIP-59 is enabled, fulfillment carries the ECDH-derived preimage
+ * such that SHA-256(fulfillment) === executionCondition from the Prepare.
  *
  * @see {@link https://interledger.org/rfcs/0027-interledger-protocol-4/#ilp-fulfill|RFC-0027 Section 3.2: ILP Fulfill}
  */
 export interface ILPFulfillPacket {
   /** Packet type identifier - always FULFILL (13) */
   type: PacketType.FULFILL;
+  /**
+   * Preimage (32 bytes) satisfying SHA-256(fulfillment) === condition.
+   * When NIP-59 is enabled, derived from ECDH(receiver, ephemeral) via HKDF.
+   * When omitted, OER serialization writes 32 zero bytes for wire compatibility.
+   */
+  fulfillment?: Uint8Array;
   /** Optional return data */
   data: Buffer;
 }
