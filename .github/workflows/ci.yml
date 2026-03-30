@@ -333,11 +333,15 @@ jobs:
           max_attempts: 3
           command: npm ci --verbose
 
-      - name: Build shared package (required for type checking other packages)
+      - name: Build shared and mina-zkapp packages (required for type checking connector)
         run: |
           echo "Building shared package for type definitions..."
           npm run build --workspace=packages/shared
           test -d packages/shared/dist && echo "✓ Shared package ready" || exit 1
+
+          echo "Building mina-zkapp package (connector imports via dynamic import)..."
+          npm run build --workspace=packages/mina-zkapp
+          test -d packages/mina-zkapp/dist && echo "✓ Mina zkApp package ready" || exit 1
 
       - name: Type check all packages
         run: |
