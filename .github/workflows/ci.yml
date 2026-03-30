@@ -60,7 +60,7 @@ jobs:
     strategy:
       matrix:
         node-version: ['22.11.0', '22.x']
-      fail-fast: false  # Continue testing other versions even if one fails
+      fail-fast: false # Continue testing other versions even if one fails
 
     steps:
       - name: Checkout code
@@ -102,18 +102,21 @@ jobs:
           echo "Checking workspace binaries..."
           ls -la node_modules/.bin/ | grep -E 'jest|ts-jest' || echo "Jest binaries not found in root"
 
-      - name: Build shared package (required for tests)
+      - name: Build shared and mina-zkapp packages (required for tests)
         run: |
           echo "Building shared package..."
           npm run build --workspace=packages/shared
-          echo "Verifying shared build output..."
           test -d packages/shared/dist && echo "✓ Shared package built successfully" || (echo "✗ Shared package build failed" && exit 1)
 
-      - name: Run tests with coverage
+          echo "Building mina-zkapp package (connector imports via dynamic import)..."
+          npm run build --workspace=packages/mina-zkapp
+          test -d packages/mina-zkapp/dist && echo "✓ Mina zkApp package ready" || exit 1
+
+      - name: Run unit tests with coverage
         run: |
-          echo "Running tests across all workspaces..."
+          echo "Running unit tests across all workspaces..."
           echo "Using npx to ensure jest is found..."
-          npm run test --workspaces --if-present -- --coverage --ci --verbose
+          npm run test:unit --workspaces --if-present -- --coverage --ci --verbose
         env:
           CI: true
           NODE_ENV: test
@@ -333,11 +336,15 @@ jobs:
           max_attempts: 3
           command: npm ci --verbose
 
-      - name: Build shared package (required for type checking other packages)
+      - name: Build shared and mina-zkapp packages (required for type checking connector)
         run: |
           echo "Building shared package for type definitions..."
           npm run build --workspace=packages/shared
           test -d packages/shared/dist && echo "✓ Shared package ready" || exit 1
+
+          echo "Building mina-zkapp package (connector imports via dynamic import)..."
+          npm run build --workspace=packages/mina-zkapp
+          test -d packages/mina-zkapp/dist && echo "✓ Mina zkApp package ready" || exit 1
 
       - name: Type check all packages
         run: |
@@ -381,6 +388,183 @@ jobs:
           echo "Verifying RFC links in documentation..."
           npm run test:rfc-links
           echo "✓ RFC links verified"
+
+  # Solana integration tests (Docker-gated)
+  # Runs T-33.7-05 and T-33.7-10 which require solana-test-validator
+  # Uses docker-compose --profile solana for consistency with local dev (Story 33.9)
+  solana-integration:
+    name: Solana Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    needs: [test]
+    # Only run when explicitly triggered or on main branch pushes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build --workspace=packages/shared
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Build Solana program
+        working-directory: packages/solana-program
+        run: cargo build-sbf
+
+      - name: Start Solana validator via docker-compose
+        run: docker compose --profile solana up -d
+
+      - name: Wait for Solana validator health check
+        run: |
+          echo "Waiting for Solana validator to be ready..."
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:8899/health | grep -q 'ok'; then
+              echo "Solana validator is healthy."
+              exit 0
+            fi
+            echo "Attempt $i/60 -- waiting..."
+            sleep 2
+          done
+          echo "Solana validator failed to become healthy within 120s"
+          docker compose --profile solana logs || true
+          exit 1
+
+      - name: Run Solana integration tests
+        run: |
+          echo "Running Docker-gated Solana integration tests (T-33.7-05, T-33.7-10)..."
+          npx jest test/integration/solana-subscription.test.ts --ci --verbose
+        working-directory: packages/connector
+        env:
+          CI: true
+          NODE_ENV: test
+          SOLANA_INTEGRATION: 'true'
+          SOLANA_RPC_URL: http://localhost:8899
+          SOLANA_WS_URL: ws://localhost:8900
+
+      - name: Tear down Solana validator
+        if: always()
+        run: docker compose --profile solana down
+
+      - name: Report results
+        if: always()
+        run: |
+          echo "Solana integration tests completed"
+          echo "Tests T-33.7-05 and T-33.7-10 executed with SOLANA_INTEGRATION=true"
+
+  # Mina integration tests (Docker-gated)
+  # Runs T-34.8-18 which requires Mina lightnet
+  # Uses docker-compose --profile mina for consistency with local dev (Story 34.10)
+  mina-integration:
+    name: Mina Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    needs: [test]
+    # Only run on main branch pushes (matching Solana pattern)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build --workspace=packages/shared
+
+      - name: Start Mina lightnet via docker-compose
+        run: docker compose --profile mina up -d
+
+      - name: Wait for Mina lightnet health check
+        run: |
+          echo "Waiting for Mina lightnet to be ready (may take 1-3 minutes)..."
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:8181/list-acquired-accounts > /dev/null 2>&1; then
+              echo "Mina accounts manager is healthy."
+              # Also check GraphQL endpoint
+              if curl -sf -X POST http://localhost:3085/graphql -H 'Content-Type: application/json' -d '{"query":"{ __schema { queryType { name } } }"}' > /dev/null 2>&1; then
+                echo "Mina GraphQL endpoint is healthy."
+                exit 0
+              fi
+            fi
+            echo "Attempt $i/90 -- waiting..."
+            sleep 2
+          done
+          echo "Mina lightnet failed to become healthy within 180s"
+          docker compose --profile mina logs || true
+          exit 1
+
+      - name: Run Mina integration tests
+        run: |
+          echo "Running Docker-gated Mina integration tests (T-34.8-18)..."
+          npx jest test/integration/mina-lightnet.test.ts --ci --verbose
+        working-directory: packages/connector
+        env:
+          CI: true
+          NODE_ENV: test
+          MINA_INTEGRATION: 'true'
+
+      - name: Tear down Mina lightnet
+        if: always()
+        run: docker compose --profile mina down
+
+      - name: Report results
+        if: always()
+        run: |
+          echo "Mina integration tests completed"
+          echo "Test T-34.8-18 executed with MINA_INTEGRATION=true"
+
+  # Solana program tests (Rust/BPF)
+  solana-program:
+    name: Solana Program Tests (Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Cache Solana program build
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/solana-program/target
+          key: solana-program-${{ runner.os }}-${{ hashFiles('packages/solana-program/Cargo.lock') }}
+          restore-keys: |
+            solana-program-${{ runner.os }}-
+
+      - name: Run Solana program tests
+        working-directory: packages/solana-program
+        run: cargo test-sbf --tools-version v1.52
 
   # Build and push Docker image to GitHub Container Registry
   docker-build-push:
@@ -500,7 +684,22 @@ jobs:
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
-    needs: [lint-and-format, test, build, type-check, contracts-coverage, security, rfc-links, docker-build-push, container-scan, performance-benchmark]
+    needs:
+      [
+        lint-and-format,
+        test,
+        build,
+        type-check,
+        contracts-coverage,
+        security,
+        rfc-links,
+        solana-program,
+        solana-integration,
+        mina-integration,
+        docker-build-push,
+        container-scan,
+        performance-benchmark,
+      ]
     if: always()
 
     steps:
@@ -516,6 +715,9 @@ jobs:
           echo "  Build: ${{ needs.build.result }}"
           echo "  Type Check: ${{ needs.type-check.result }}"
           echo "  EVM Contracts: ${{ needs.contracts-coverage.result }}"
+          echo "  Solana Program: ${{ needs.solana-program.result }}"
+          echo "  Solana Integration: ${{ needs.solana-integration.result }}"
+          echo "  Mina Integration: ${{ needs.mina-integration.result }}"
           echo "  Security: ${{ needs.security.result }}"
           echo "  RFC Links: ${{ needs.rfc-links.result }}"
           echo "  Docker Build: ${{ needs.docker-build-push.result }}"
@@ -528,7 +730,8 @@ jobs:
           if [[ "${{ needs.lint-and-format.result }}" == "failure" ]] || \
              [[ "${{ needs.test.result }}" == "failure" ]] || \
              [[ "${{ needs.build.result }}" == "failure" ]] || \
-             [[ "${{ needs.type-check.result }}" == "failure" ]]; then
+             [[ "${{ needs.type-check.result }}" == "failure" ]] || \
+             [[ "${{ needs.solana-program.result }}" == "failure" ]]; then
             echo "❌ CI Pipeline FAILED"
             echo ""
             echo "Please check the failed jobs above for details."

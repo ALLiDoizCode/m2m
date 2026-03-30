@@ -1,10 +1,18 @@
 # Local Blockchain Development Infrastructure
-# Anvil (local Ethereum node) + Token Faucet
+# Docker Compose with profiles for selective chain startup.
 #
 # Usage:
-#   make anvil-up      Start Anvil + Faucet
-#   make anvil-down    Stop all services
-#   make anvil-logs    Follow logs
+#   make anvil-up      Start Anvil + Faucet (EVM)
+#   make anvil-down    Stop EVM services
+#   make anvil-logs    Follow EVM logs
+#   make solana-up     Start Solana test validator
+#   make solana-down   Stop Solana services
+#   make solana-logs   Follow Solana logs
+#   make mina-up       Start Mina lightnet
+#   make mina-down     Stop Mina services
+#   make mina-logs     Follow Mina logs
+#   make infra-up      Start all chains (EVM + Solana + Mina)
+#   make infra-down    Stop all chains (EVM + Solana + Mina)
 
 services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -12,6 +20,8 @@ services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   anvil:
     image: ghcr.io/foundry-rs/foundry:latest
+    profiles:
+      - evm
     entrypoint: []
     command:
       - sh
@@ -55,6 +65,8 @@ services:
     build:
       context: ./packages/faucet
       dockerfile: Dockerfile
+    profiles:
+      - evm
     environment:
       PORT: 3500
       RPC_URL: http://anvil:8545
@@ -80,11 +92,63 @@ services:
     restart: unless-stopped
     healthcheck:
       test:
-        [
-          'CMD-SHELL',
-          'wget --no-verbose --tries=1 --spider http://localhost:3500/health || exit 1',
-        ]
+        ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://localhost:3500/health || exit 1']
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Solana Test Validator - Local Solana with Auto-Deployed Programs
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  solana-validator:
+    image: ghcr.io/beeman/solana-test-validator:latest
+    profiles:
+      - solana
+    entrypoint: []
+    command:
+      - sh
+      - /entrypoint.sh
+    volumes:
+      - ./infra/solana/entrypoint.sh:/entrypoint.sh:ro
+      - ./packages/solana-program/target/deploy:/programs:ro
+    tmpfs:
+      - /tmp/test-ledger
+    ports:
+      - '8899:8899'
+      - '8900:8900'
+    security_opt:
+      - seccomp=unconfined
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:8899/health | grep -q ok']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Mina Lightnet - Local Mina Network with Accounts Manager & Archive
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # NOTE: Mina lightnet requires 4-8 GB RAM. Ensure Docker Desktop has
+  # sufficient memory allocated (at least 8 GB recommended).
+  mina-lightnet:
+    image: o1labs/mina-local-network:compatible-latest-lightnet
+    profiles:
+      - mina
+    ports:
+      - '3085:3085'   # GraphQL
+      - '8181:8181'   # Accounts manager
+      - '8282:8282'   # Explorer
+      - '5433:5432'   # Archive PostgreSQL (remapped to avoid conflicts with local Postgres on 5432)
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:8181/list-acquired-accounts || exit 1']
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s

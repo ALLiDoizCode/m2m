@@ -313,8 +313,8 @@ Configuration is provided via YAML file (path set by `CONFIG_FILE` env var), dir
 3. Cumulative transferred amount incremented, nonce incremented (atomic under Node.js single-thread model)
 4. Balance proof signed via the peer's chain provider (EIP-712 for EVM, Ed25519 for Solana, Poseidon commitment for Mina)
 5. Self-describing claim message constructed with chain-specific metadata and `blockchain` discriminator
-6. Optionally wrapped via NIP-59 Gift Wrap if transport privacy is enabled for this peer
-7. Claim attached to BTP `protocolData` field (protocol name: `payment-channel-claim`)
+6. Optionally wrapped via NIP-59 Gift Wrap if transport privacy is enabled for this peer; when wrapping, dual HKDF derivation from the ephemeral ECDH shared secret produces both the encryption key and an ILP condition preimage, with the execution condition (`SHA-256(preimage)`) set on the forwarding PREPARE packet
+7. Claim attached to BTP `protocolData` field (protocol name: `payment-channel-claim` or `claim-wrapped` when NIP-59 is active)
 8. Claim persisted to SQLite for dispute resolution (non-blocking)
 9. Telemetry event emitted (non-blocking)
 10. On restart, nonce and cumulative state recovered from database — gap-free balance proof chain maintained
@@ -361,6 +361,8 @@ When enabled for a peer, claims are wrapped before BTP transmission:
 3. Seal encrypted with an **ephemeral one-time key** as a **Gift Wrap**, with randomized timestamp
 4. Gift Wrap transmitted via BTP `protocolData`
 5. Receiver unwraps: decrypt gift wrap → decrypt seal → extract rumor → verify claim via chain provider
+6. Receiver derives fulfillment preimage from same ECDH shared secret via `HKDF(shared, info='ilp-condition-preimage')` and injects it into the ILP FULFILL packet
+7. On the return path, sender and intermediaries verify `SHA-256(fulfillment) === executionCondition`; mismatches produce `F99_APPLICATION_ERROR` rejection
 
 This wrapping is transparent to the chain provider — it operates at the BTP transport layer.
 
@@ -438,6 +440,7 @@ Shared-secret authentication per peer. Permissionless mode available (empty auth
 - **Balance proof validation** — Transferred amounts must be non-decreasing (cumulative) for EVM/Solana; commitment consistency verified via zk proof for Mina
 - **Replay protection** — Channel ID + nonce + chain type prevent cross-chain and within-chain replay
 - **NIP-59 unwrapping validation** — If transport privacy is enabled, Gift Wrap must decrypt successfully with valid ephemeral key signature before claim is processed
+- **ECDH-derived fulfillment verification** — When NIP-59 is enabled, `SHA-256(fulfillment) === executionCondition` is verified on the return path by senders and intermediaries. The preimage is identity-bound to the receiver's secp256k1 private key, preventing fulfillment forgery by intermediaries
 
 ### 9.3 Key Management
 
@@ -462,6 +465,7 @@ Optional claim encryption at the BTP transport layer:
 - **Timing privacy** — Timestamps randomized at each wrapping layer to prevent correlation
 - **Deniability** — Inner Rumor is unsigned; sender can deny authorship if leaked
 - **Selective disclosure** — Seal layer proves authorship to the intended peer only
+- **Identity-bound fulfillments** — The ephemeral key used for gift wrapping also derives an ILP condition preimage via dual HKDF; only the receiver can produce a valid fulfillment, preventing intermediary forgery (zero additional wire overhead)
 
 ### 9.6 On-Chain Privacy (Mina)
 
@@ -599,7 +603,7 @@ These requirements describe the system as currently implemented.
 
 **FR7:** The connector generates self-describing, chain-specific per-packet balance proofs attached to BTP protocolData — EIP-712 for EVM, Ed25519 for Solana, Poseidon commitments for Mina — enabling the receiver to dispatch to the correct chain provider and verify payment channel state dynamically without prior negotiation.
 
-**FR17:** The connector supports optional NIP-59-inspired transport privacy for claim exchange. Claims are wrapped in three layers (Rumor → Seal → Gift Wrap) using ChaCha20 encryption and ephemeral keys, hiding sender identity, claim content, and timing from BTP intermediaries. This is chain-agnostic and configurable per peer.
+**FR17:** The connector supports optional NIP-59-inspired transport privacy for claim exchange. Claims are wrapped in three layers (Rumor → Seal → Gift Wrap) using ChaCha20 encryption and ephemeral keys, hiding sender identity, claim content, and timing from BTP intermediaries. When enabled, the ephemeral ECDH shared secret also derives an ILP execution condition via dual HKDF — binding each fulfillment to the receiver's identity with zero additional wire overhead. This is chain-agnostic and configurable per peer.
 
 **FR18:** The Mina Protocol provider generates zk-SNARK proofs where transferred amounts are private inputs — only Poseidon hash commitments appear on-chain or in claims. This provides on-chain settlement privacy not available on EVM or Solana.
 

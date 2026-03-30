@@ -1,0 +1,28 @@
+{
+  "name": "@toon-protocol/mina-zkapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mina Protocol payment channel zkApp (o1js SmartContract)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "test:unit": "jest",
+    "test:coverage": "jest --coverage",
+    "test:watch": "jest --watch",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "o1js": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=22.11.0"
+  }
+}

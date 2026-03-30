@@ -15,6 +15,11 @@
 import type { BTPProtocolData } from './btp-types';
 import { BTP_CLAIM_PROTOCOL, validateClaimMessage, isEVMClaim } from './btp-claim-types';
 import type { BTPClaimMessage, EVMClaimMessage } from './btp-claim-types';
+import {
+  type NIP59ClaimWrapper,
+  BTP_WRAPPED_CLAIM_PROTOCOL,
+  deserializeWrappedClaim,
+} from '../settlement/privacy/nip59-claim-wrapper';
 import type { ILPPreparePacket, ILPRejectPacket } from '@toon-protocol/shared';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { BalanceProof } from '@toon-protocol/shared';
@@ -45,16 +50,23 @@ export class InboundClaimValidator {
   private readonly channelManager?: ChannelManager;
   private readonly nodeId: string;
 
+  private readonly nip59Wrapper?: NIP59ClaimWrapper;
+  private readonly nip59PrivateKey?: Uint8Array;
+
   constructor(
     paymentChannelSDK: PaymentChannelSDK,
     nodeId: string,
     logger: Logger,
-    channelManager?: ChannelManager
+    channelManager?: ChannelManager,
+    nip59Wrapper?: NIP59ClaimWrapper,
+    nip59PrivateKey?: Uint8Array
   ) {
     this.paymentChannelSDK = paymentChannelSDK;
     this.nodeId = nodeId;
     this.logger = logger.child({ component: 'InboundClaimValidator' });
     this.channelManager = channelManager;
+    this.nip59Wrapper = nip59Wrapper;
+    this.nip59PrivateKey = nip59PrivateKey;
   }
 
   /**
@@ -79,8 +91,13 @@ export class InboundClaimValidator {
       return null;
     }
 
-    // Find the payment-channel-claim in protocol data
-    const claimData = protocolData.find((pd) => pd.protocolName === BTP_CLAIM_PROTOCOL.NAME);
+    // Find claim in protocol data — check both plaintext and NIP-59 wrapped
+    let claimData = protocolData.find((pd) => pd.protocolName === BTP_CLAIM_PROTOCOL.NAME);
+    let isWrapped = false;
+    if (!claimData) {
+      claimData = protocolData.find((pd) => pd.protocolName === BTP_WRAPPED_CLAIM_PROTOCOL.NAME);
+      isWrapped = !!claimData;
+    }
 
     if (!claimData) {
       this.logger.warn(
@@ -97,7 +114,15 @@ export class InboundClaimValidator {
     // Parse and validate claim structure
     let claim: BTPClaimMessage;
     try {
-      const parsed = JSON.parse(claimData.data.toString('utf8'));
+      let parsed: unknown;
+      if (isWrapped && this.nip59Wrapper && this.nip59PrivateKey) {
+        const wrapped = deserializeWrappedClaim(claimData.data);
+        parsed = this.nip59Wrapper.unwrapClaim(wrapped, this.nip59PrivateKey);
+      } else if (isWrapped) {
+        return this.createReject('Received NIP-59 wrapped claim but unwrapping not configured');
+      } else {
+        parsed = JSON.parse(claimData.data.toString('utf8'));
+      }
       validateClaimMessage(parsed);
       claim = parsed;
     } catch (error) {

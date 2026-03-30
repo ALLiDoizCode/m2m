@@ -13,8 +13,10 @@ import {
   BTP_CLAIM_PROTOCOL,
   type EVMClaimMessage,
   type SolanaClaimMessage,
+  type MinaClaimMessage,
   isEVMClaim,
   isSolanaClaim,
+  isMinaClaim,
 } from '../btp/btp-claim-types';
 import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 import type { ChannelManager } from './channel-manager';
@@ -23,6 +25,7 @@ import type { Logger } from 'pino';
 import type { PaymentChannelSDK } from './payment-channel-sdk';
 import { EVMPaymentChannelProvider } from './provider/evm-payment-channel-provider';
 import { SolanaPaymentChannelProvider } from './provider/solana-payment-channel-provider';
+import { MinaPaymentChannelProvider } from './provider/mina-payment-channel-provider';
 
 // Mock logger
 const createMockLogger = (): Logger =>
@@ -560,7 +563,11 @@ describe('PerPacketClaimService', () => {
 
       const result = await svc.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
       expect(result).not.toBeNull();
-      expect(onDemandChannelManager.ensureChannelExists).toHaveBeenCalledWith(TEST_PEER_ID, 'M2M');
+      expect(onDemandChannelManager.ensureChannelExists).toHaveBeenCalledWith(
+        TEST_PEER_ID,
+        'M2M',
+        undefined
+      );
     });
 
     it('should return null when ensureChannelExists fails and no channel available', async () => {
@@ -1064,6 +1071,348 @@ describe('PerPacketClaimService', () => {
             TEST_NODE_ID
           )
       ).not.toThrow();
+    });
+  });
+
+  /**
+   * Acceptance Tests for Story 34.7: Mina Claim Message Types & Serialization
+   *
+   * Tests Mina claim construction, context population, nonce tracking,
+   * serialization, and DB recovery for Mina claims.
+   */
+  describe('Mina claim construction (Story 34.7)', () => {
+    const MINA_ZKAPP_ADDRESS = 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy';
+    const MINA_TOKEN_ID = 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf';
+    const MINA_NETWORK = 'devnet';
+    const MINA_PEER_ID = 'connector-mina';
+
+    // Mock MinaPaymentChannelProvider
+    const createMockMinaProvider = (): jest.Mocked<MinaPaymentChannelProvider> => {
+      const provider = {
+        signBalanceProof: jest.fn().mockResolvedValue('eyJwcm9vZiI6InRlc3QifQ=='),
+        verifyBalanceProof: jest.fn().mockResolvedValue(true),
+        getChannelState: jest.fn(),
+        openChannel: jest.fn(),
+        deposit: jest.fn(),
+        claimFromChannel: jest.fn(),
+        closeChannel: jest.fn(),
+        settleChannel: jest.fn(),
+        subscribeToEvents: jest.fn(),
+        chainType: 'mina' as const,
+        chainId: 'mina:devnet',
+        getMinaContext: jest.fn().mockResolvedValue({
+          zkAppAddress: MINA_ZKAPP_ADDRESS,
+          tokenId: MINA_TOKEN_ID,
+          network: MINA_NETWORK,
+          signerAddress: MINA_ZKAPP_ADDRESS,
+        }),
+      } as unknown as jest.Mocked<MinaPaymentChannelProvider>;
+      // Set prototype so that `instanceof MinaPaymentChannelProvider` checks pass
+      Object.setPrototypeOf(provider, MinaPaymentChannelProvider.prototype);
+      return provider;
+    };
+
+    // Registry that returns Mina provider for Mina chain
+    const createMinaRegistry = (
+      minaProvider: jest.Mocked<MinaPaymentChannelProvider>
+    ): jest.Mocked<Pick<ChainProviderRegistry, 'getProviderForPeer'>> => ({
+      getProviderForPeer: jest
+        .fn()
+        .mockImplementation((peerConfig: { peerId: string; chain?: string }) => {
+          if (peerConfig.chain?.startsWith('mina:')) return minaProvider;
+          return undefined;
+        }),
+    });
+
+    // Channel manager that returns Mina channel metadata
+    const createMinaChannelManager = (): jest.Mocked<
+      Pick<ChannelManager, 'getChannelForPeer' | 'ensureChannelExists'>
+    > => ({
+      getChannelForPeer: jest.fn().mockImplementation((peerId: string, _tokenId: string) => {
+        if (peerId === MINA_PEER_ID) {
+          return {
+            channelId: MINA_ZKAPP_ADDRESS,
+            tokenAddress: MINA_TOKEN_ID,
+            peerId,
+            tokenId: 'MINA',
+            chain: 'mina:devnet',
+            createdAt: new Date(),
+            lastActivityAt: new Date(),
+            status: 'open' as const,
+          };
+        }
+        return null;
+      }),
+      ensureChannelExists: jest.fn().mockResolvedValue(undefined),
+    });
+
+    it('[P0] should construct MinaClaimMessage for Mina peer (T-34.7-17)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMinaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        minaRegistry as unknown as ChainProviderRegistry,
+        minaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(isMinaClaim(result!.claimMessage)).toBe(true);
+
+      const minaClaim = result!.claimMessage as MinaClaimMessage;
+      expect(minaClaim.blockchain).toBe('mina');
+      expect(minaClaim.version).toBe('1.0');
+      expect(minaClaim.senderId).toBe(TEST_NODE_ID);
+      expect(minaClaim.zkAppAddress).toBe(MINA_ZKAPP_ADDRESS);
+      expect(minaClaim.tokenId).toBe(MINA_TOKEN_ID);
+      expect(minaClaim.network).toBe(MINA_NETWORK);
+      expect(minaClaim.proof).toBe('eyJwcm9vZiI6InRlc3QifQ==');
+      expect(minaClaim.salt).toBeDefined();
+      expect(minaClaim.salt.length).toBeGreaterThan(0);
+    });
+
+    it('[P0] should populate correct Mina fields from getMinaContext (T-34.7-17)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMinaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        minaRegistry as unknown as ChainProviderRegistry,
+        minaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 1000n);
+
+      expect(minaProvider.getMinaContext).toHaveBeenCalledTimes(1);
+      const minaClaim = result!.claimMessage as MinaClaimMessage;
+      expect(minaClaim.zkAppAddress).toBe(MINA_ZKAPP_ADDRESS);
+      expect(minaClaim.tokenId).toBe(MINA_TOKEN_ID);
+      expect(minaClaim.network).toBe(MINA_NETWORK);
+    });
+
+    it('[P0] should increment Mina claim nonce per packet (T-34.7-18)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMinaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        minaRegistry as unknown as ChainProviderRegistry,
+        minaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result1 = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 100n);
+      const result2 = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 200n);
+      const result3 = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 300n);
+
+      expect((result1!.claimMessage as MinaClaimMessage).nonce).toBe(1);
+      expect((result2!.claimMessage as MinaClaimMessage).nonce).toBe(2);
+      expect((result3!.claimMessage as MinaClaimMessage).nonce).toBe(3);
+    });
+
+    it('[P0] should use same salt across multiple claims in same session (T-34.7-18)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMinaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        minaRegistry as unknown as ChainProviderRegistry,
+        minaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result1 = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 100n);
+      const result2 = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 200n);
+
+      const salt1 = (result1!.claimMessage as MinaClaimMessage).salt;
+      const salt2 = (result2!.claimMessage as MinaClaimMessage).salt;
+      expect(salt1).toBe(salt2); // Same salt across session
+    });
+
+    it('[P0] should serialize Mina claim to valid JSON in BTP protocolData (T-34.7-18)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMinaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        minaRegistry as unknown as ChainProviderRegistry,
+        minaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 5000n);
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.protocolData.data.toString('utf8'));
+      expect(parsed.blockchain).toBe('mina');
+      expect(parsed.zkAppAddress).toBe(MINA_ZKAPP_ADDRESS);
+      expect(parsed.tokenId).toBe(MINA_TOKEN_ID);
+      expect(parsed.network).toBe(MINA_NETWORK);
+      expect(parsed.nonce).toBe(1);
+      expect(parsed.proof).toBe('eyJwcm9vZiI6InRlc3QifQ==');
+      expect(typeof parsed.salt).toBe('string');
+      expect(typeof parsed.balanceCommitment).toBe('string');
+    });
+
+    it('[P1] should throw when Mina context fields are missing (guard)', async () => {
+      const badMinaProvider = createMockMinaProvider();
+      badMinaProvider.getMinaContext.mockResolvedValue({
+        zkAppAddress: '',
+        tokenId: MINA_TOKEN_ID,
+        network: MINA_NETWORK,
+        signerAddress: MINA_ZKAPP_ADDRESS,
+      });
+      const minaRegistry = createMinaRegistry(badMinaProvider);
+      const minaChannelManager = createMinaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        minaRegistry as unknown as ChainProviderRegistry,
+        minaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      await expect(svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 1000n)).rejects.toThrow(
+        /zkAppAddress/
+      );
+    });
+
+    it('[P0] should NOT break EVM claim construction (regression)', async () => {
+      const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(isEVMClaim(result!.claimMessage)).toBe(true);
+      const evmClaim = result!.claimMessage as EVMClaimMessage;
+      expect(evmClaim.blockchain).toBe('evm');
+      expect(evmClaim.channelId).toBe(TEST_CHANNEL_ID);
+    });
+  });
+
+  describe('Mina claim recovery from DB (Story 34.7)', () => {
+    it('[P0] should recover Mina claim state from database on startup (T-34.7-19)', () => {
+      const existingClaims = [
+        {
+          claim_data: JSON.stringify({
+            blockchain: 'mina',
+            messageId: 'mina-B62qre3e-5-1706889600000',
+            zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+            tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+            balanceCommitment: '50000',
+            nonce: 5,
+            proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+            salt: 'abcdef1234567890',
+            network: 'devnet',
+          }),
+        },
+      ];
+
+      const recoveryDb = createMockDb(existingClaims);
+
+      const recoveredService = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockChannelManager as unknown as ChannelManager,
+        recoveryDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const MINA_ZKAPP = 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy';
+      const latest = recoveredService.getLatestClaim(MINA_ZKAPP);
+      expect(latest).not.toBeNull();
+      expect(isMinaClaim(latest!)).toBe(true);
+      expect((latest as MinaClaimMessage).nonce).toBe(5);
+      expect((latest as MinaClaimMessage).zkAppAddress).toBe(MINA_ZKAPP);
+    });
+
+    it('[P1] should skip structurally invalid Mina claims during recovery (T-34.7-19 guard)', () => {
+      const existingClaims = [
+        {
+          claim_data: JSON.stringify({
+            blockchain: 'mina',
+            messageId: 'mina-bad-claim',
+            // Missing zkAppAddress, nonce
+            proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+          }),
+        },
+      ];
+
+      const recoveryDb = createMockDb(existingClaims);
+
+      // Should not throw
+      expect(
+        () =>
+          new PerPacketClaimService(
+            mockRegistry as unknown as ChainProviderRegistry,
+            mockChannelManager as unknown as ChannelManager,
+            recoveryDb as unknown as Database,
+            mockLogger,
+            TEST_NODE_ID
+          )
+      ).not.toThrow();
+    });
+  });
+
+  describe('NIP-59 condition threading', () => {
+    it('should include executionCondition when NIP-59 is enabled', async () => {
+      const mockCondition = new Uint8Array(32).fill(0xab);
+      const mockNip59Wrapper = {
+        isEnabled: jest.fn().mockReturnValue(true),
+        wrapClaimWithCondition: jest.fn().mockReturnValue({
+          wrapped: {
+            ephemeralPublicKey: 'aa'.repeat(33),
+            encryptedPayload: Buffer.from('encrypted').toString('base64'),
+            timestamp: Date.now(),
+            version: '1.0' as const,
+          },
+          executionCondition: mockCondition,
+        }),
+      };
+      const mockNodePrivKey = new Uint8Array(32).fill(0x01);
+      const mockPeerPubKeys = new Map<string, Uint8Array>([
+        [TEST_PEER_ID, new Uint8Array(33).fill(0x02)],
+      ]);
+
+      const nip59Service = new PerPacketClaimService(
+        mockRegistry as unknown as ChainProviderRegistry,
+        mockChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID,
+        undefined,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        mockNip59Wrapper as any,
+        mockNodePrivKey,
+        mockPeerPubKeys
+      );
+
+      const result = await nip59Service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(result!.executionCondition).toBe(mockCondition);
+      expect(result!.executionCondition!.length).toBe(32);
+      expect(mockNip59Wrapper.wrapClaimWithCondition).toHaveBeenCalled();
+    });
+
+    it('should have undefined executionCondition when NIP-59 is disabled', async () => {
+      const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);
+
+      expect(result).not.toBeNull();
+      expect(result!.executionCondition).toBeUndefined();
     });
   });
 });

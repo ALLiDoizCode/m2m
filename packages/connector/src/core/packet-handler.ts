@@ -28,7 +28,10 @@ import {
 import { AccountLedgerCodes } from '../settlement/types';
 import * as crypto from 'crypto';
 import { LocalDeliveryClient } from './local-delivery-client';
+import { sha256 } from '@noble/hashes/sha2';
 import type { PerPacketClaimService } from '../settlement/per-packet-claim-service';
+import type { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
+import { deserializeWrappedClaim } from '../settlement/privacy/nip59-claim-wrapper';
 
 /**
  * Packet validation result
@@ -135,6 +138,16 @@ export class PacketHandler {
    * direct in-process packet delivery without HTTP round-trip.
    */
   private localDeliveryHandler: LocalDeliveryHandler | null = null;
+
+  /**
+   * NIP-59 claim wrapper for receiver-side preimage derivation (optional)
+   */
+  private _nip59Wrapper: NIP59ClaimWrapper | null = null;
+
+  /**
+   * Node secp256k1 private key for receiver-side ECDH preimage derivation (optional)
+   */
+  private _nodePrivateKey: Uint8Array | null = null;
 
   /**
    * Creates a new PacketHandler instance
@@ -262,6 +275,53 @@ export class PacketHandler {
       { event: 'local_delivery_handler_set', hasHandler: handler !== null },
       'Local delivery function handler updated'
     );
+  }
+
+  /**
+   * Set the NIP-59 wrapper and node private key for receiver-side preimage derivation.
+   * @param wrapper - NIP-59 claim wrapper instance
+   * @param nodePrivateKey - 32-byte secp256k1 private key for ECDH
+   */
+  setNip59Wrapper(wrapper: NIP59ClaimWrapper, nodePrivateKey: Uint8Array): void {
+    this._nip59Wrapper = wrapper;
+    this._nodePrivateKey = nodePrivateKey;
+  }
+
+  /**
+   * Derive fulfillment preimage from NIP-59 wrapped claim in BTP protocolData.
+   *
+   * Finds the 'claim-wrapped' protocol entry, deserializes to WrappedClaim,
+   * and calls unwrapClaimWithPreimage() to derive the ECDH-based preimage.
+   *
+   * @param protocolData - BTP protocolData array from incoming message
+   * @returns 32-byte fulfillment preimage, or undefined if no wrapped claim found
+   */
+  private _derivePreimageFromProtocolData(
+    protocolData?: Array<{ protocolName: string; contentType: number; data: Buffer }>
+  ): Uint8Array | undefined {
+    if (!this._nip59Wrapper?.isEnabled() || !this._nodePrivateKey || !protocolData) {
+      return undefined;
+    }
+
+    const wrappedEntry = protocolData.find((p) => p.protocolName === 'claim-wrapped');
+    if (!wrappedEntry) {
+      return undefined;
+    }
+
+    try {
+      const wrappedClaim = deserializeWrappedClaim(wrappedEntry.data);
+      const result = this._nip59Wrapper.unwrapClaimWithPreimage(wrappedClaim, this._nodePrivateKey);
+      return result.fulfillmentPreimage;
+    } catch (err) {
+      this.logger.warn(
+        {
+          event: 'preimage_derivation_failed',
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to derive preimage from wrapped claim'
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -789,7 +849,8 @@ export class PacketHandler {
    */
   async handlePreparePacket(
     packet: ILPPreparePacket,
-    fromPeerId?: string
+    fromPeerId?: string,
+    incomingProtocolData?: Array<{ protocolName: string; contentType: number; data: Buffer }>
   ): Promise<ILPFulfillPacket | ILPRejectPacket> {
     const correlationId = generateCorrelationId();
     const sourcePeerId = fromPeerId || 'unknown';
@@ -875,6 +936,9 @@ export class PacketHandler {
         'Delivering packet locally'
       );
 
+      // Derive preimage from incoming NIP-59 wrapped claim (if present)
+      const preimage = this._derivePreimageFromProtocolData(incomingProtocolData);
+
       // Check for function handler first (in-process delivery, no HTTP)
       if (this.localDeliveryHandler) {
         const request: LocalDeliveryRequest = {
@@ -887,7 +951,11 @@ export class PacketHandler {
         };
         try {
           const result = await this.localDeliveryHandler(request, sourcePeerId);
-          return this.convertLocalDeliveryResponse(result);
+          const response = this.convertLocalDeliveryResponse(result);
+          if (response.type === PacketType.FULFILL && preimage) {
+            (response as ILPFulfillPacket).fulfillment = preimage;
+          }
+          return response;
         } catch (error) {
           return this.generateReject(
             ILPErrorCode.T00_INTERNAL_ERROR,
@@ -905,6 +973,11 @@ export class PacketHandler {
         );
 
         const response = await this.localDeliveryClient.deliver(packet, sourcePeerId);
+
+        // Inject preimage into FULFILL (BLS doesn't have NIP-59 keys)
+        if (response.type === PacketType.FULFILL && preimage) {
+          (response as ILPFulfillPacket).fulfillment = preimage;
+        }
 
         this.logger.info(
           {
@@ -925,6 +998,7 @@ export class PacketHandler {
       // Fallback: auto-fulfill local packets (educational/testing purposes)
       const fulfillPacket: ILPFulfillPacket = {
         type: PacketType.FULFILL,
+        fulfillment: preimage,
         data: Buffer.from('Local delivery - auto-fulfill stub'),
       };
 
@@ -1165,6 +1239,15 @@ export class PacketHandler {
           );
         }
         claimProtocolData = [result.protocolData];
+        // Set execution condition on forwarding packet if condition derivation is active
+        // Only if the packet doesn't already carry a condition from upstream (intermediary case)
+        if (
+          result.executionCondition &&
+          (!forwardingPacket.executionCondition ||
+            Buffer.from(forwardingPacket.executionCondition).every((b) => b === 0))
+        ) {
+          forwardingPacket = { ...forwardingPacket, executionCondition: result.executionCondition };
+        }
       } catch (error) {
         this.logger.error(
           {
@@ -1190,6 +1273,48 @@ export class PacketHandler {
       correlationId,
       claimProtocolData
     );
+
+    // Verify fulfillment against execution condition (sender + intermediary role)
+    if (
+      response.type === PacketType.FULFILL &&
+      forwardingPacket.executionCondition &&
+      !Buffer.from(forwardingPacket.executionCondition).every((b) => b === 0)
+    ) {
+      const fulfillmentBytes = (response as ILPFulfillPacket).fulfillment;
+      if (!fulfillmentBytes || Buffer.from(fulfillmentBytes).every((b) => b === 0)) {
+        this.logger.error(
+          {
+            correlationId,
+            event: 'fulfillment_missing',
+            peerId: nextHop,
+          },
+          'FULFILL missing fulfillment but execution condition is present'
+        );
+        return this.generateReject(
+          ILPErrorCode.F99_APPLICATION_ERROR,
+          'Fulfillment does not match execution condition',
+          this.nodeId
+        );
+      }
+      const expectedCondition = sha256(new Uint8Array(fulfillmentBytes));
+      if (
+        !Buffer.from(expectedCondition).equals(Buffer.from(forwardingPacket.executionCondition))
+      ) {
+        this.logger.error(
+          {
+            correlationId,
+            event: 'fulfillment_verification_failed',
+            peerId: nextHop,
+          },
+          'Fulfillment does not match execution condition'
+        );
+        return this.generateReject(
+          ILPErrorCode.F99_APPLICATION_ERROR,
+          'Fulfillment does not match execution condition',
+          this.nodeId
+        );
+      }
+    }
 
     this.logger.info(
       {

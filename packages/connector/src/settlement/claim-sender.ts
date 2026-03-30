@@ -32,6 +32,7 @@ import {
   type BTPClaimMessage,
   type EVMClaimMessage,
   type SolanaClaimMessage,
+  type MinaClaimMessage,
   type BlockchainType,
 } from '../btp/btp-claim-types';
 
@@ -199,6 +200,52 @@ export class ClaimSender {
       signature,
       signerPublicKey,
       ...(cluster !== undefined && { cluster }),
+    };
+
+    return this.sendClaim(peerId, btpClient, claimMessage);
+  }
+
+  /**
+   * Send a Mina payment channel claim to a peer
+   *
+   * @param peerId - Peer identifier
+   * @param btpClient - BTPClient instance for this peer connection
+   * @param zkAppAddress - Base58-encoded zkApp address (B62 prefix)
+   * @param tokenId - Mina token ID
+   * @param balanceCommitment - Poseidon hash of (balance_a, balance_b, salt)
+   * @param nonce - Balance proof nonce
+   * @param proof - Base64-encoded zk-SNARK proof
+   * @param salt - Shared salt for commitment verification
+   * @param network - Optional Mina network identifier (e.g., 'devnet')
+   * @returns Promise resolving to ClaimSendResult
+   */
+  async sendMinaClaim(
+    peerId: string,
+    btpClient: BTPClient,
+    zkAppAddress: string,
+    tokenId: string,
+    balanceCommitment: string,
+    nonce: number,
+    proof: string,
+    salt: string,
+    network?: string
+  ): Promise<ClaimSendResult> {
+    const messageId = this._generateMessageId('mina', zkAppAddress, nonce);
+    const timestamp = new Date().toISOString();
+
+    const claimMessage: MinaClaimMessage = {
+      version: '1.0',
+      blockchain: 'mina',
+      messageId,
+      timestamp,
+      senderId: this.nodeId ?? 'unknown',
+      zkAppAddress,
+      tokenId,
+      balanceCommitment,
+      nonce,
+      proof,
+      salt,
+      ...(network !== undefined && { network }),
     };
 
     return this.sendClaim(peerId, btpClient, claimMessage);

@@ -15,6 +15,7 @@ import {
 import { Logger } from '../utils/logger';
 import { BTPClientManager } from '../btp/btp-client-manager';
 import type { PerPacketClaimService } from '../settlement/per-packet-claim-service';
+import { sha256 } from '@noble/hashes/sha2';
 
 /**
  * Mock logger for testing log output without console noise
@@ -1406,6 +1407,250 @@ describe('PacketHandler', () => {
       expect(result.type).toBe(PacketType.REJECT);
       const reject = result as ILPRejectPacket;
       expect(reject.code).toBe(ILPErrorCode.F02_UNREACHABLE);
+    });
+  });
+
+  describe('handlePreparePacket() - Condition/Fulfillment Verification', () => {
+    it('should pass FULFILL with correct fulfillment through SHA-256 verification', async () => {
+      const preimage = new Uint8Array(32).fill(0xab);
+      const condition = sha256(preimage);
+
+      const mockClaimService = createMockPerPacketClaimService();
+      mockClaimService.generateClaimForPacket.mockResolvedValue({
+        protocolData: {
+          protocolName: 'claim-wrapped',
+          contentType: 0,
+          data: Buffer.from('mock'),
+        },
+        claimMessage: { version: '1.0', blockchain: 'evm' } as never,
+        executionCondition: new Uint8Array(condition),
+      });
+
+      const mockBtpManager = createMockBTPClientManager();
+      mockBtpManager.sendToPeer.mockResolvedValue({
+        type: PacketType.FULFILL,
+        fulfillment: preimage,
+        data: Buffer.alloc(0),
+      });
+
+      const routingTable = new RoutingTable();
+      routingTable.addRoute('g.alice', 'peer-a');
+      const handler = new PacketHandler(
+        routingTable,
+        mockBtpManager,
+        'test.connector',
+        createMockLogger(),
+        null,
+        {} as never,
+        { connectorFeePercentage: 0 } as never
+      );
+      handler.setPerPacketClaimService(mockClaimService);
+
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+      const result = await handler.handlePreparePacket(packet, 'sender-peer');
+
+      expect(result.type).toBe(PacketType.FULFILL);
+    });
+
+    it('should reject FULFILL with wrong fulfillment bytes (F99)', async () => {
+      const condition = new Uint8Array(32).fill(0xcc);
+
+      const mockClaimService = createMockPerPacketClaimService();
+      mockClaimService.generateClaimForPacket.mockResolvedValue({
+        protocolData: {
+          protocolName: 'claim-wrapped',
+          contentType: 0,
+          data: Buffer.from('mock'),
+        },
+        claimMessage: { version: '1.0', blockchain: 'evm' } as never,
+        executionCondition: condition,
+      });
+
+      const mockBtpManager = createMockBTPClientManager();
+      mockBtpManager.sendToPeer.mockResolvedValue({
+        type: PacketType.FULFILL,
+        fulfillment: new Uint8Array(32).fill(0xff),
+        data: Buffer.alloc(0),
+      });
+
+      const routingTable = new RoutingTable();
+      routingTable.addRoute('g.alice', 'peer-a');
+      const handler = new PacketHandler(
+        routingTable,
+        mockBtpManager,
+        'test.connector',
+        createMockLogger(),
+        null,
+        {} as never,
+        { connectorFeePercentage: 0 } as never
+      );
+      handler.setPerPacketClaimService(mockClaimService);
+
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+      const result = await handler.handlePreparePacket(packet, 'sender-peer');
+
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.F99_APPLICATION_ERROR);
+    });
+
+    it('should skip verification when executionCondition is zero bytes (NIP-59 disabled)', async () => {
+      const mockClaimService = createMockPerPacketClaimService();
+      // No executionCondition in result (NIP-59 disabled)
+      mockClaimService.generateClaimForPacket.mockResolvedValue({
+        protocolData: {
+          protocolName: 'evm_claim',
+          contentType: 0,
+          data: Buffer.from('mock'),
+        },
+        claimMessage: { version: '1.0', blockchain: 'evm' } as never,
+      });
+
+      const mockBtpManager = createMockBTPClientManager();
+      mockBtpManager.sendToPeer.mockResolvedValue({
+        type: PacketType.FULFILL,
+        data: Buffer.alloc(0),
+      });
+
+      const routingTable = new RoutingTable();
+      routingTable.addRoute('g.alice', 'peer-a');
+      const handler = new PacketHandler(
+        routingTable,
+        mockBtpManager,
+        'test.connector',
+        createMockLogger(),
+        null,
+        {} as never,
+        { connectorFeePercentage: 0 } as never
+      );
+      handler.setPerPacketClaimService(mockClaimService);
+
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+      const result = await handler.handlePreparePacket(packet, 'sender-peer');
+
+      // Should forward FULFILL as-is without verification
+      expect(result.type).toBe(PacketType.FULFILL);
+    });
+
+    it('should copy executionCondition to outgoing PREPARE via spread (intermediary)', async () => {
+      const preimage = new Uint8Array(32).fill(0xdd);
+      const condition = new Uint8Array(sha256(preimage));
+
+      const mockClaimService = createMockPerPacketClaimService();
+      // Intermediary's own claim service doesn't derive condition (no NIP-59 to next hop)
+      mockClaimService.generateClaimForPacket.mockResolvedValue({
+        protocolData: {
+          protocolName: 'evm_claim',
+          contentType: 0,
+          data: Buffer.from('mock'),
+        },
+        claimMessage: { version: '1.0', blockchain: 'evm' } as never,
+      });
+
+      const mockBtpManager = createMockBTPClientManager();
+      // Downstream returns FULFILL with correct preimage
+      mockBtpManager.sendToPeer.mockResolvedValue({
+        type: PacketType.FULFILL,
+        fulfillment: preimage,
+        data: Buffer.alloc(0),
+      });
+
+      const routingTable = new RoutingTable();
+      routingTable.addRoute('g.alice', 'peer-a');
+      const handler = new PacketHandler(
+        routingTable,
+        mockBtpManager,
+        'test.connector',
+        createMockLogger(),
+        null,
+        {} as never,
+        { connectorFeePercentage: 0 } as never
+      );
+      handler.setPerPacketClaimService(mockClaimService);
+
+      // Incoming packet with executionCondition (from upstream sender)
+      const packet = createValidPreparePacket({
+        destination: 'g.alice.wallet',
+        executionCondition: condition,
+      });
+      const result = await handler.handlePreparePacket(packet, 'sender-peer');
+
+      // The forwarded packet should have carried the condition via spread
+      const sentPacket = mockBtpManager.sendToPeer.mock.calls[0]?.[1] as
+        | ILPPreparePacket
+        | undefined;
+      expect(sentPacket?.executionCondition).toEqual(condition);
+      expect(result.type).toBe(PacketType.FULFILL);
+    });
+
+    it('should preserve upstream condition when own claim service also returns a condition (intermediary)', async () => {
+      const upstreamPreimage = new Uint8Array(32).fill(0xee);
+      const upstreamCondition = new Uint8Array(sha256(upstreamPreimage));
+      const ownCondition = new Uint8Array(32).fill(0x11); // different condition from own claim service
+
+      const mockClaimService = createMockPerPacketClaimService();
+      mockClaimService.generateClaimForPacket.mockResolvedValue({
+        protocolData: {
+          protocolName: 'claim-wrapped',
+          contentType: 0,
+          data: Buffer.from('mock'),
+        },
+        claimMessage: { version: '1.0', blockchain: 'evm' } as never,
+        executionCondition: ownCondition,
+      });
+
+      const mockBtpManager = createMockBTPClientManager();
+      mockBtpManager.sendToPeer.mockResolvedValue({
+        type: PacketType.FULFILL,
+        fulfillment: upstreamPreimage,
+        data: Buffer.alloc(0),
+      });
+
+      const routingTable = new RoutingTable();
+      routingTable.addRoute('g.alice', 'peer-a');
+      const handler = new PacketHandler(
+        routingTable,
+        mockBtpManager,
+        'test.connector',
+        createMockLogger(),
+        null,
+        {} as never,
+        { connectorFeePercentage: 0 } as never
+      );
+      handler.setPerPacketClaimService(mockClaimService);
+
+      // Incoming packet already has upstream condition — intermediary should NOT overwrite it
+      const packet = createValidPreparePacket({
+        destination: 'g.alice.wallet',
+        executionCondition: upstreamCondition,
+      });
+      const result = await handler.handlePreparePacket(packet, 'sender-peer');
+
+      // Forwarded packet should carry upstream condition, not own
+      const sentPacket = mockBtpManager.sendToPeer.mock.calls[0]?.[1] as
+        | ILPPreparePacket
+        | undefined;
+      expect(sentPacket?.executionCondition).toEqual(upstreamCondition);
+      // Fulfillment matches upstream condition, so should pass verification
+      expect(result.type).toBe(PacketType.FULFILL);
+    });
+
+    it('should set preimage as fulfillment in auto-fulfill stub when preimage is derived', async () => {
+      const routingTable = new RoutingTable();
+      routingTable.addRoute('g.local', 'local');
+      const handler = new PacketHandler(
+        routingTable,
+        createMockBTPClientManager(),
+        'test.connector',
+        createMockLogger()
+      );
+
+      // No NIP-59 wrapper set — preimage will be undefined
+      const packet = createValidPreparePacket({ destination: 'g.local.test' });
+      const result = await handler.handlePreparePacket(packet);
+
+      expect(result.type).toBe(PacketType.FULFILL);
+      // Without NIP-59, fulfillment is undefined (auto-fulfill stub)
+      expect((result as ILPFulfillPacket).fulfillment).toBeUndefined();
     });
   });
 });

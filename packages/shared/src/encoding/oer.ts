@@ -379,8 +379,10 @@ export function serializePrepare(packet: ILPPreparePacket): Buffer {
   const type = Buffer.from([PacketType.PREPARE]);
   const amount = encodeVarUInt(packet.amount);
   const expiresAt = encodeGeneralizedTime(packet.expiresAt);
-  // Write 32 zero bytes for ILPv4 wire format compatibility (executionCondition field unused)
-  const executionCondition = encodeFixedOctetString(Buffer.alloc(32), 32);
+  const executionCondition = encodeFixedOctetString(
+    Buffer.from(packet.executionCondition ?? Buffer.alloc(32)),
+    32
+  );
   const destination = encodeVarOctetString(Buffer.from(packet.destination, 'utf8'));
   const data = encodeVarOctetString(packet.data);
 
@@ -405,8 +407,10 @@ export function serializePrepare(packet: ILPPreparePacket): Buffer {
  */
 export function serializeFulfill(packet: ILPFulfillPacket): Buffer {
   const type = Buffer.from([PacketType.FULFILL]);
-  // Write 32 zero bytes for ILPv4 wire format compatibility (fulfillment field unused)
-  const fulfillment = encodeFixedOctetString(Buffer.alloc(32), 32);
+  const fulfillment = encodeFixedOctetString(
+    Buffer.from(packet.fulfillment ?? Buffer.alloc(32)),
+    32
+  );
   const data = encodeVarOctetString(packet.data);
 
   return Buffer.concat([type, fulfillment, data]);
@@ -517,8 +521,12 @@ export function deserializePrepare(buffer: Buffer): ILPPreparePacket {
   const { value: expiresAt, bytesRead: expiresAtBytes } = decodeGeneralizedTime(buffer, offset);
   offset += expiresAtBytes;
 
-  // Skip executionCondition field (32 bytes, unused — kept for ILPv4 wire compatibility)
-  const { bytesRead: conditionBytes } = decodeFixedOctetString(buffer, offset, 32);
+  // Read executionCondition field (32 bytes)
+  const { value: executionCondition, bytesRead: conditionBytes } = decodeFixedOctetString(
+    buffer,
+    offset,
+    32
+  );
   offset += conditionBytes;
 
   // Decode destination
@@ -539,11 +547,16 @@ export function deserializePrepare(buffer: Buffer): ILPPreparePacket {
   const { value: data, bytesRead: dataBytes } = decodeVarOctetString(buffer, offset);
   offset += dataBytes;
 
+  // Only populate executionCondition if non-zero (preserves optional semantics)
+  const conditionArray = new Uint8Array(executionCondition);
+  const hasCondition = !conditionArray.every((b: number) => b === 0);
+
   return {
     type: PacketType.PREPARE,
     amount,
     destination,
     expiresAt,
+    ...(hasCondition ? { executionCondition: conditionArray } : {}),
     data,
   };
 }
@@ -577,16 +590,25 @@ export function deserializeFulfill(buffer: Buffer): ILPFulfillPacket {
     );
   }
 
-  // Skip fulfillment field (32 bytes, unused — kept for ILPv4 wire compatibility)
-  const { bytesRead: fulfillmentBytes } = decodeFixedOctetString(buffer, offset, 32);
+  // Read fulfillment field (32 bytes)
+  const { value: fulfillment, bytesRead: fulfillmentBytes } = decodeFixedOctetString(
+    buffer,
+    offset,
+    32
+  );
   offset += fulfillmentBytes;
 
   // Decode data
   const { value: data, bytesRead: dataBytes } = decodeVarOctetString(buffer, offset);
   offset += dataBytes;
 
+  // Only populate fulfillment if non-zero (preserves optional semantics)
+  const fulfillmentArray = new Uint8Array(fulfillment);
+  const hasFulfillment = !fulfillmentArray.every((b: number) => b === 0);
+
   return {
     type: PacketType.FULFILL,
+    ...(hasFulfillment ? { fulfillment: fulfillmentArray } : {}),
     data,
   };
 }

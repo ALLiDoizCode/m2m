@@ -5,8 +5,9 @@
  * claims over the Bilateral Transfer Protocol (BTP). Claims are sent via BTP's
  * protocolData field with protocol name "payment-channel-claim" and content type 1 (JSON).
  *
- * Supports EVM-compatible chains (Raiden-style payment channels), with stub types
- * for Solana and Mina chains (Epic 32 chain abstraction).
+ * Supports EVM-compatible chains (Raiden-style payment channels), Solana chains
+ * (Ed25519 balance proofs), and Mina chains (zk-SNARK balance proofs with
+ * Poseidon commitments).
  *
  * Reference: RFC-0023 (Bilateral Transfer Protocol), Epic 17 PRD
  *
@@ -124,17 +125,44 @@ export interface SolanaClaimMessage extends BaseClaimMessage {
 }
 
 /**
- * Mina-compatible blockchain claim message stub.
+ * Mina-compatible blockchain claim message.
  *
- * Placeholder for future Mina zkApp payment channel integration.
- * No runtime Mina SDK dependencies — types only.
+ * Supports Mina zkApp payment channel claims using zk-SNARK balance proofs
+ * and Poseidon commitment-based privacy. No runtime Mina SDK dependencies — types only.
+ *
+ * Fields:
+ * - `zkAppAddress`: Base58-encoded zkApp address for the payment channel (B62 prefix, 55 chars)
+ * - `tokenId`: Mina token ID
+ * - `balanceCommitment`: Poseidon hash of (balance_a, balance_b, salt)
+ * - `nonce`: Monotonically increasing claim nonce (prevents replay attacks)
+ * - `proof`: Serialized zk-SNARK proof (base64-encoded)
+ * - `salt`: Shared salt for commitment verification (sent to peer, not on-chain)
+ * - `network`: (Optional) Mina network identifier (e.g., 'devnet', 'mainnet')
  */
 export interface MinaClaimMessage extends BaseClaimMessage {
   blockchain: 'mina';
-  /** zkApp address for the payment channel contract */
+  /** Base58-encoded zkApp address for the payment channel */
   zkAppAddress: string;
-  /** Zero-knowledge proof for the balance update */
+  /** Mina token ID */
+  tokenId: string;
+  /**
+   * Poseidon hash of (balance_a, balance_b, salt).
+   *
+   * @remarks
+   * During claim construction in PerPacketClaimService, this field carries the
+   * plaintext cumulative amount. The Mina provider's signBalanceProof() internally
+   * computes the Poseidon commitment from this value. On the receiver side, the
+   * zk-SNARK proof verification validates the commitment.
+   */
+  balanceCommitment: string;
+  /** Monotonically increasing claim nonce */
+  nonce: number;
+  /** Serialized zk-SNARK proof (base64) */
   proof: string;
+  /** Shared salt for commitment verification (sent to peer, not on-chain) */
+  salt: string;
+  /** Optional Mina network identifier (e.g., 'devnet', 'mainnet') */
+  network?: string;
 }
 
 /**
@@ -214,8 +242,13 @@ function validateSolanaClaim(claim: Partial<SolanaClaimMessage>): void {
   if (!claim.channelAccount || typeof claim.channelAccount !== 'string') {
     throw new Error('Missing or invalid channelAccount (expected non-empty string)');
   }
-  if (claim.nonce === undefined || typeof claim.nonce !== 'number' || claim.nonce < 0) {
-    throw new Error('Missing or invalid nonce (expected non-negative number)');
+  if (
+    claim.nonce === undefined ||
+    typeof claim.nonce !== 'number' ||
+    !Number.isInteger(claim.nonce) ||
+    claim.nonce < 0
+  ) {
+    throw new Error('Missing or invalid nonce (expected non-negative integer)');
   }
   if (!claim.transferredAmount || typeof claim.transferredAmount !== 'string') {
     throw new Error('Missing or invalid transferredAmount (expected non-empty string)');
@@ -258,6 +291,67 @@ function validateSolanaClaim(claim: Partial<SolanaClaimMessage>): void {
 }
 
 /**
+ * Validate Mina claim structure.
+ *
+ * @remarks
+ * Mina public keys use a `B62` prefix followed by 52 base58 characters (55 total).
+ * The regex enforces this format to prevent invalid addresses from passing validation.
+ * The `network` field, if present, must be one of the known Mina network identifiers.
+ *
+ * @throws Error if claim is invalid
+ */
+function validateMinaClaim(claim: Partial<MinaClaimMessage>): void {
+  // Mina address format: B62 prefix followed by 52 base58 characters (55 total)
+  const minaAddressRegex = /^B62[1-9A-HJ-NP-Za-km-z]{52}$/;
+
+  // Required fields
+  if (!claim.zkAppAddress || typeof claim.zkAppAddress !== 'string') {
+    throw new Error('Missing or invalid zkAppAddress (expected non-empty string)');
+  }
+  if (!minaAddressRegex.test(claim.zkAppAddress)) {
+    throw new Error(
+      'Invalid zkAppAddress format (expected B62-prefixed base58 Mina address, 55 chars)'
+    );
+  }
+  if (!claim.tokenId || typeof claim.tokenId !== 'string') {
+    throw new Error('Missing or invalid tokenId (expected non-empty string)');
+  }
+  if (!claim.balanceCommitment || typeof claim.balanceCommitment !== 'string') {
+    throw new Error('Missing or invalid balanceCommitment (expected non-empty string)');
+  }
+  if (
+    claim.nonce === undefined ||
+    typeof claim.nonce !== 'number' ||
+    !Number.isInteger(claim.nonce) ||
+    claim.nonce < 0
+  ) {
+    throw new Error('Missing or invalid nonce (expected non-negative integer)');
+  }
+  if (!claim.proof || typeof claim.proof !== 'string') {
+    throw new Error('Missing or invalid proof (expected non-empty string)');
+  }
+  // Base64 format validation for zk-SNARK proof
+  const base64Regex = /^[A-Za-z0-9+/]+=*$/;
+  if (!base64Regex.test(claim.proof)) {
+    throw new Error('Invalid proof format (expected base64-encoded zk-SNARK proof)');
+  }
+  if (!claim.salt || typeof claim.salt !== 'string') {
+    throw new Error('Missing or invalid salt (expected non-empty string)');
+  }
+
+  // Optional network validation
+  if (claim.network !== undefined) {
+    if (typeof claim.network !== 'string') {
+      throw new Error('Invalid network (expected string)');
+    }
+    const validNetworks = ['mainnet', 'devnet', 'berkeley', 'lightnet'];
+    if (!validNetworks.includes(claim.network)) {
+      throw new Error(`Invalid network (expected one of: ${validNetworks.join(', ')})`);
+    }
+  }
+}
+
+/**
  * Validate EVM claim structure
  * @throws Error if claim is invalid
  */
@@ -266,8 +360,13 @@ function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
   if (!claim.channelId || typeof claim.channelId !== 'string') {
     throw new Error('Missing or invalid channelId (expected non-empty string)');
   }
-  if (claim.nonce === undefined || typeof claim.nonce !== 'number' || claim.nonce < 0) {
-    throw new Error('Missing or invalid nonce (expected non-negative number)');
+  if (
+    claim.nonce === undefined ||
+    typeof claim.nonce !== 'number' ||
+    !Number.isInteger(claim.nonce) ||
+    claim.nonce < 0
+  ) {
+    throw new Error('Missing or invalid nonce (expected non-negative integer)');
   }
   if (!claim.transferredAmount || typeof claim.transferredAmount !== 'string') {
     throw new Error('Missing or invalid transferredAmount (expected non-empty string)');
@@ -375,11 +474,14 @@ export function validateClaimMessage(msg: unknown): asserts msg is BTPClaimMessa
 
   // Validate base fields
   if (claim.version !== '1.0') {
-    throw new Error(`Invalid version (expected '1.0', got '${claim.version}')`);
+    // Sanitize: truncate and stringify version to prevent information disclosure
+    // from untrusted input (OWASP A09:2021 - Security Logging and Monitoring Failures)
+    const sanitizedVersion = String(claim.version ?? '').slice(0, 20);
+    throw new Error(`Invalid version (expected '1.0', got '${sanitizedVersion}')`);
   }
 
-  if (!claim.blockchain) {
-    throw new Error('Missing blockchain field');
+  if (!claim.blockchain || typeof claim.blockchain !== 'string') {
+    throw new Error('Missing or invalid blockchain field (expected non-empty string)');
   }
 
   if (!claim.messageId || typeof claim.messageId !== 'string') {
@@ -408,8 +510,10 @@ export function validateClaimMessage(msg: unknown): asserts msg is BTPClaimMessa
       validateSolanaClaim(claim as Partial<SolanaClaimMessage>);
       break;
     case 'mina':
-      throw new Error("Blockchain type 'mina' validation not yet supported");
+      validateMinaClaim(claim as Partial<MinaClaimMessage>);
+      break;
     default:
-      throw new Error(`Unsupported blockchain type: ${claim.blockchain}`);
+      // Sanitize: truncate blockchain value to prevent log injection from untrusted input
+      throw new Error(`Unsupported blockchain type: ${String(claim.blockchain).slice(0, 30)}`);
   }
 }

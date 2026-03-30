@@ -35,7 +35,7 @@ epics:
 
   epic-33:
     name: "Solana Payment Channel Provider"
-    status: done
+    status: in-progress
     stories:
       33.1:
         name: "Solana Payment Channel Program — Channel Lifecycle"
@@ -61,38 +61,44 @@ epics:
       33.8:
         name: "Solana Devnet Deployment & Documentation"
         status: done
+      33.9:
+        name: "Solana Local Development Infrastructure"
+        status: done
     retrospective:
       status: done
   epic-34:
     name: "Mina Protocol Payment Channel Provider"
-    status: backlog
+    status: done
     stories:
       34.1:
         name: "Mina Payment Channel zkApp — Channel Lifecycle"
-        status: backlog
+        status: done
       34.2:
         name: "Mina Payment Channel zkApp — ZK-Private Claims"
-        status: backlog
+        status: done
       34.3:
         name: "Mina Payment Channel zkApp — Tests & Deployment"
-        status: backlog
+        status: done
       34.4:
         name: "MinaPaymentChannelSDK — TypeScript Integration"
-        status: backlog
+        status: done
       34.5:
         name: "Implement MinaPaymentChannelProvider"
-        status: backlog
+        status: done
       34.6:
         name: "NIP-59-Inspired Claim Wrapping for Transport Privacy"
-        status: backlog
+        status: done
       34.7:
         name: "Mina Claim Message Types & Serialization"
-        status: backlog
+        status: done
       34.8:
         name: "Integration Tests — Mina Provider E2E"
-        status: backlog
+        status: done
       34.9:
         name: "Mina Devnet Deployment & Documentation"
-        status: backlog
+        status: done
+      34.10:
+        name: "Mina Local Development Infrastructure"
+        status: done
     retrospective:
-      status: backlog
+      status: done

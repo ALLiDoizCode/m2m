@@ -22,6 +22,7 @@ import {
   AdminApiConfig,
   LocalDeliveryConfig,
   SettlementInfraConfig,
+  ChainProviderConfigEntry,
 } from './types';
 import { validateEnvironment } from './environment-validator';
 
@@ -197,6 +198,9 @@ export class ConfigLoader {
       mode: rawConfig.mode as 'connector' | 'gateway' | undefined,
       firstHopUrl: rawConfig.firstHopUrl as string | undefined,
       btpAuthToken: rawConfig.btpAuthToken as string | undefined,
+      chainProviders: rawConfig.chainProviders as ChainProviderConfigEntry[] | undefined,
+      deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
+      nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
     };
 
     // Validate environment configuration

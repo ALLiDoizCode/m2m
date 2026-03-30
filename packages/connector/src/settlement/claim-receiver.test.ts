@@ -16,7 +16,7 @@ import type { BTPProtocolData, BTPMessage, BTPData } from '../btp/btp-types';
 import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 import type { PaymentChannelProvider } from './provider/payment-channel-provider';
 import type { ChannelManager } from './channel-manager';
-import type { EVMClaimMessage, SolanaClaimMessage } from '../btp/btp-claim-types';
+import type { EVMClaimMessage, SolanaClaimMessage, MinaClaimMessage } from '../btp/btp-claim-types';
 import type { ProviderChannelState } from './provider/payment-channel-provider';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -329,6 +329,52 @@ describe('ClaimReceiver', () => {
       // No Solana provider registered — claim persisted as unverified
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ messageId: 'solana-test-1', blockchain: 'solana' }),
+        expect.stringContaining('No provider registered')
+      );
+    });
+
+    it('should handle Mina claim with no registered provider', async () => {
+      // Mina claims pass structural validation but no Mina provider is registered
+      const minaClaim = {
+        version: '1.0',
+        blockchain: 'mina',
+        messageId: 'mina-test-1',
+        timestamp: '2026-02-02T12:00:00.000Z',
+        senderId: 'peer-bob',
+        zkAppAddress: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+        tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf',
+        balanceCommitment: '12345678901234567890',
+        nonce: 1,
+        proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+        salt: 'abcdef1234567890',
+        network: 'devnet',
+      };
+
+      const minaProtocolData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(minaClaim), 'utf8'),
+      };
+
+      const minaBtpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [minaProtocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      claimReceiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-bob', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // No Mina provider registered — claim persisted as unverified
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'mina-test-1', blockchain: 'mina' }),
         expect.stringContaining('No provider registered')
       );
     });
@@ -2098,6 +2144,474 @@ describe('ClaimReceiver', () => {
       expect(mockLogger.warn).not.toHaveBeenCalledWith(
         expect.objectContaining({ blockchain: 'solana' }),
         expect.stringContaining('No provider registered')
+      );
+    });
+  });
+
+  /**
+   * Acceptance Tests for Story 34.7: Mina Claim Verification in ClaimReceiver
+   *
+   * Tests zk-SNARK proof verification via provider, on-chain channel state checks,
+   * nonce monotonicity, dynamic channel registration, and CLAIM_RECEIVED event
+   * emission for Mina claims.
+   */
+  describe('Mina claim verification (Story 34.7)', () => {
+    const MINA_ZKAPP_ADDRESS = 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy';
+    const MINA_TOKEN_ID = 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf';
+    const MINA_PARTICIPANT_2 = 'B62qjSytpSK7aEauBprjXDSZwc9ai4YMv9tpmXLQK14Vm9rcFtErmFy';
+
+    let validMinaClaim: MinaClaimMessage;
+    let minaProtocolData: BTPProtocolData;
+    let minaBtpMessage: BTPMessage;
+
+    // Create a mock Mina provider
+    function createMockMinaProvider(): jest.Mocked<PaymentChannelProvider> {
+      return {
+        verifyBalanceProof: jest.fn().mockResolvedValue(true),
+        getChannelState: jest.fn().mockResolvedValue({
+          channelId: MINA_ZKAPP_ADDRESS,
+          status: 'opened' as const,
+          participants: [MINA_ZKAPP_ADDRESS, MINA_PARTICIPANT_2],
+          deposit: 1000000n,
+        }),
+        openChannel: jest.fn(),
+        deposit: jest.fn(),
+        claimFromChannel: jest.fn(),
+        closeChannel: jest.fn(),
+        settleChannel: jest.fn(),
+        signBalanceProof: jest.fn(),
+        subscribeToEvents: jest.fn(),
+        chainType: 'mina' as const,
+        chainId: 'mina:devnet',
+      } as unknown as jest.Mocked<PaymentChannelProvider>;
+    }
+
+    // Registry that returns Mina provider
+    function createMinaRegistry(
+      minaProvider: jest.Mocked<PaymentChannelProvider>
+    ): jest.Mocked<
+      Pick<ChainProviderRegistry, 'getProvider' | 'getProviderForPeer' | 'getAllProviders'>
+    > {
+      return {
+        getProvider: jest.fn().mockImplementation((_chainType: string, chainId: string) => {
+          if (chainId.startsWith('mina:')) return minaProvider;
+          return undefined;
+        }),
+        getProviderForPeer: jest.fn().mockReturnValue(minaProvider),
+        getAllProviders: jest.fn().mockReturnValue([minaProvider]),
+      };
+    }
+
+    // Mock ChannelManager for Mina
+    function createMockMinaChannelManager(): jest.Mocked<
+      Pick<ChannelManager, 'getChannelById' | 'registerExternalChannel'>
+    > {
+      return {
+        getChannelById: jest.fn().mockReturnValue(null), // Unknown channel by default
+        registerExternalChannel: jest.fn().mockImplementation((params) => ({
+          channelId: params.channelId,
+          peerId: params.peerId,
+          tokenId: params.tokenAddress,
+          tokenAddress: params.tokenAddress,
+          chain: params.chain || 'mina:devnet',
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          status: 'open',
+        })),
+      } as unknown as jest.Mocked<
+        Pick<ChannelManager, 'getChannelById' | 'registerExternalChannel'>
+      >;
+    }
+
+    beforeEach(() => {
+      validMinaClaim = {
+        version: '1.0',
+        blockchain: 'mina',
+        messageId: 'mina-B62qre3e-5-1706889600000',
+        timestamp: '2026-03-28T12:00:00.000Z',
+        senderId: 'peer-mina',
+        zkAppAddress: MINA_ZKAPP_ADDRESS,
+        tokenId: MINA_TOKEN_ID,
+        balanceCommitment: '12345678901234567890',
+        nonce: 5,
+        proof: 'eyJwcm9vZiI6InRlc3QifQ==',
+        salt: 'abcdef1234567890',
+        network: 'devnet',
+      };
+
+      minaProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(validMinaClaim), 'utf8'),
+      };
+
+      minaBtpMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [minaProtocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+    });
+
+    it('[P0] should verify valid Mina claim via provider.verifyBalanceProof (T-34.7-11)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined); // No previous claim
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify provider.verifyBalanceProof was called with correct Mina params
+      expect(minaProvider.verifyBalanceProof).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: MINA_ZKAPP_ADDRESS,
+          nonce: 5,
+          transferredAmount: validMinaClaim.balanceCommitment,
+          signature: validMinaClaim.proof,
+          signerAddress: MINA_ZKAPP_ADDRESS,
+        })
+      );
+
+      // Verify claim persisted as verified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validMinaClaim.messageId,
+        'peer-mina',
+        'mina',
+        MINA_ZKAPP_ADDRESS,
+        JSON.stringify(validMinaClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should reject Mina claim with invalid zk-SNARK proof (T-34.7-20)', async () => {
+      const minaProvider = createMockMinaProvider();
+      minaProvider.verifyBalanceProof.mockResolvedValue(false);
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify claim persisted as NOT verified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validMinaClaim.messageId,
+        'peer-mina',
+        'mina',
+        MINA_ZKAPP_ADDRESS,
+        JSON.stringify(validMinaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should reject Mina claim with replayed nonce (T-34.7-21)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      // Mock previous claim with same nonce
+      const previousClaim: MinaClaimMessage = {
+        ...validMinaClaim,
+        nonce: 5, // Same nonce as incoming claim
+      };
+      mockStatement.get.mockReturnValue({
+        claim_data: JSON.stringify(previousClaim),
+      });
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Verify claim persisted as NOT verified due to nonce replay
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validMinaClaim.messageId,
+        'peer-mina',
+        'mina',
+        MINA_ZKAPP_ADDRESS,
+        JSON.stringify(validMinaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P1] should emit CLAIM_RECEIVED event with Mina zkAppAddress and BigInt(0) amount (T-34.7-22)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      const claimReceivedListener = jest.fn();
+      receiver.on('CLAIM_RECEIVED', claimReceivedListener);
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(claimReceivedListener).toHaveBeenCalledTimes(1);
+      const emittedEvent: ClaimReceivedEvent = claimReceivedListener.mock.calls[0][0];
+      expect(emittedEvent.peerId).toBe('peer-mina');
+      expect(emittedEvent.channelId).toBe(MINA_ZKAPP_ADDRESS);
+      expect(emittedEvent.cumulativeAmount).toBe(BigInt(0)); // Mina: commitment-based, amount private
+    });
+
+    it('[P1] should register unknown Mina channel after successful verification (T-34.7-22)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(minaChannelManager.registerExternalChannel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: MINA_ZKAPP_ADDRESS,
+          peerId: 'peer-mina',
+          tokenAddress: MINA_TOKEN_ID,
+          chain: 'mina:devnet',
+          status: 'open',
+        })
+      );
+    });
+
+    it('[P1] should accept Mina claim for closed channel during challenge period', async () => {
+      const minaProvider = createMockMinaProvider();
+      minaProvider.getChannelState.mockResolvedValue({
+        channelId: MINA_ZKAPP_ADDRESS,
+        status: 'closed' as const,
+        participants: [MINA_ZKAPP_ADDRESS, MINA_PARTICIPANT_2],
+        deposit: 1000000n,
+      } as ProviderChannelState);
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Claim should be accepted (closed = challenge period)
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validMinaClaim.messageId,
+        'peer-mina',
+        'mina',
+        MINA_ZKAPP_ADDRESS,
+        JSON.stringify(validMinaClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P1] should reject Mina claim for settled channel', async () => {
+      const minaProvider = createMockMinaProvider();
+      minaProvider.getChannelState.mockResolvedValue({
+        channelId: MINA_ZKAPP_ADDRESS,
+        status: 'settled' as const,
+        participants: [MINA_ZKAPP_ADDRESS, MINA_PARTICIPANT_2],
+        deposit: 0n,
+      } as ProviderChannelState);
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Settled channel -- claim should be rejected
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validMinaClaim.messageId,
+        'peer-mina',
+        'mina',
+        MINA_ZKAPP_ADDRESS,
+        JSON.stringify(validMinaClaim),
+        0, // verified=false
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should skip on-chain RPC for known Mina channel and verify proof directly', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      // Mark channel as already known
+      minaChannelManager.getChannelById.mockReturnValue({
+        channelId: MINA_ZKAPP_ADDRESS,
+        peerId: 'peer-mina',
+        tokenId: MINA_TOKEN_ID,
+        tokenAddress: MINA_TOKEN_ID,
+        chain: 'mina:devnet',
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      });
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', minaBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // getChannelState should NOT be called (known channel skips on-chain check)
+      expect(minaProvider.getChannelState).not.toHaveBeenCalled();
+
+      // verifyBalanceProof should still be called
+      expect(minaProvider.verifyBalanceProof).toHaveBeenCalled();
+
+      // Channel should NOT be re-registered
+      expect(minaChannelManager.registerExternalChannel).not.toHaveBeenCalled();
+
+      // Claim should be stored as verified
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        validMinaClaim.messageId,
+        'peer-mina',
+        'mina',
+        MINA_ZKAPP_ADDRESS,
+        JSON.stringify(validMinaClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('[P0] should NOT break EVM claim verification path (T-34.7-12 regression)', async () => {
+      const evmClaim: EVMClaimMessage = {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId: 'evm-0xabc123-5-1706889600000',
+        timestamp: '2026-02-02T12:00:00.000Z',
+        senderId: 'peer-bob',
+        channelId: '0x' + 'a'.repeat(64),
+        nonce: 5,
+        transferredAmount: '1000000000000000000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0x' + 'b'.repeat(130),
+        signerAddress: '0x' + 'c'.repeat(40),
+      };
+
+      const evmProtocolData: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(evmClaim), 'utf8'),
+      };
+
+      const evmBtpMessage: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [evmProtocolData],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      mockProvider.verifyBalanceProof.mockResolvedValue(true);
+      mockStatement.get.mockReturnValue(undefined);
+
+      claimReceiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-bob', evmBtpMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // EVM verification should still work through provider
+      expect(mockProvider.verifyBalanceProof).toHaveBeenCalled();
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        evmClaim.messageId,
+        'peer-bob',
+        'evm',
+        evmClaim.channelId,
+        JSON.stringify(evmClaim),
+        1, // verified=true
+        expect.any(Number),
+        null,
+        null
       );
     });
   });

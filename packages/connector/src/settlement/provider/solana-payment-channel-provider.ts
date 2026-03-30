@@ -594,12 +594,13 @@ export class SolanaPaymentChannelProvider implements PaymentChannelProvider {
  * Create a `ChainProviderFactory` for Solana providers.
  *
  * The returned factory validates that the incoming config has `chainType === 'solana'`
- * and constructs a `SolanaPaymentChannelProvider`. The `signer` and `tokenMint` are
- * provided as closure parameters since `SolanaProviderConfig` does not include them.
+ * and constructs a `SolanaPaymentChannelProvider`. The `signer` is provided as a closure
+ * parameter (key management is external). The `tokenMint` is read from
+ * `SolanaProviderConfig.tokenMint` when present, falling back to the closure parameter.
  *
  * @param logger - Logger instance
  * @param signer - Pre-built Ed25519 keypair signer (key management deferred to 33.8)
- * @param tokenMint - SPL token mint address (base58)
+ * @param tokenMint - Default SPL token mint address (base58); overridden by config.tokenMint
  * @returns A factory function compatible with `ChainProviderRegistry.fromConfig()`
  */
 export function createSolanaProviderFactory(
@@ -616,10 +617,11 @@ export function createSolanaProviderFactory(
     const sdk = new SolanaPaymentChannelSDK(config.rpcUrl, config.programId, logger);
     const cluster = config.cluster ?? 'devnet';
     const chainId = `solana:${cluster}`;
+    const resolvedTokenMint = config.tokenMint ?? tokenMint;
     return new SolanaPaymentChannelProvider(
       sdk,
       chainId,
-      tokenMint,
+      resolvedTokenMint,
       signer,
       config.programId,
       logger

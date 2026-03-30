@@ -290,6 +290,38 @@ describe('ILP Type Guards', () => {
   });
 });
 
+describe('ILP Packet Optional Fields', () => {
+  describe('executionCondition on ILPPreparePacket', () => {
+    it('should pass type guard when executionCondition is present', () => {
+      const packet = createTestPreparePacket({
+        executionCondition: new Uint8Array(32).fill(0xab),
+      });
+      expect(isPreparePacket(packet)).toBe(true);
+    });
+
+    it('should pass type guard when executionCondition is absent', () => {
+      const packet = createTestPreparePacket();
+      expect(isPreparePacket(packet)).toBe(true);
+      expect(packet.executionCondition).toBeUndefined();
+    });
+  });
+
+  describe('fulfillment on ILPFulfillPacket', () => {
+    it('should pass type guard when fulfillment is present', () => {
+      const packet = createTestFulfillPacket({
+        fulfillment: new Uint8Array(32).fill(0xcd),
+      });
+      expect(isFulfillPacket(packet)).toBe(true);
+    });
+
+    it('should pass type guard when fulfillment is absent', () => {
+      const packet = createTestFulfillPacket();
+      expect(isFulfillPacket(packet)).toBe(true);
+      expect(packet.fulfillment).toBeUndefined();
+    });
+  });
+});
+
 describe('ILP Address Validation', () => {
   describe('isValidILPAddress', () => {
     describe('Valid Addresses', () => {
