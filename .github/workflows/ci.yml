@@ -102,18 +102,21 @@ jobs:
           echo "Checking workspace binaries..."
           ls -la node_modules/.bin/ | grep -E 'jest|ts-jest' || echo "Jest binaries not found in root"
 
-      - name: Build shared package (required for tests)
+      - name: Build shared and mina-zkapp packages (required for tests)
         run: |
           echo "Building shared package..."
           npm run build --workspace=packages/shared
-          echo "Verifying shared build output..."
           test -d packages/shared/dist && echo "✓ Shared package built successfully" || (echo "✗ Shared package build failed" && exit 1)
 
-      - name: Run tests with coverage
+          echo "Building mina-zkapp package (connector imports via dynamic import)..."
+          npm run build --workspace=packages/mina-zkapp
+          test -d packages/mina-zkapp/dist && echo "✓ Mina zkApp package ready" || exit 1
+
+      - name: Run unit tests with coverage
         run: |
-          echo "Running tests across all workspaces..."
+          echo "Running unit tests across all workspaces..."
           echo "Using npx to ensure jest is found..."
-          npm run test --workspaces --if-present -- --coverage --ci --verbose
+          npm run test:unit --workspaces --if-present -- --coverage --ci --verbose
         env:
           CI: true
           NODE_ENV: test
