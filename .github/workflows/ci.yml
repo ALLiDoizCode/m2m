@@ -562,6 +562,10 @@ jobs:
       - name: Run Solana program tests
         working-directory: packages/solana-program
         run: cargo test-sbf
+        env:
+          # Use system Cargo (from dtolnay/rust-toolchain@stable) instead of
+          # Solana CLI's bundled Cargo 1.79.0 which can't parse edition2024 manifests
+          CARGO: cargo
 
   # Build and push Docker image to GitHub Container Registry
   docker-build-push:
