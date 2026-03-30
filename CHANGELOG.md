@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0](https://github.com/toon-protocol/connector/compare/v2.3.0...v2.4.0) (2026-03-30)
+
+### Features
+
+- **34-10:** Mina local development infrastructure — story complete ([c179ec9](https://github.com/toon-protocol/connector/commit/c179ec92a3c3c9ba00b1b0b4e454810d2c0f17c4))
+- **34-1:** Mina payment channel zkApp — channel lifecycle ([71a10f3](https://github.com/toon-protocol/connector/commit/71a10f3eb6fed62a2d1b71c2e26135cd77caa255))
+- **34-2:** Mina payment channel zkApp — zk-private claims ([be83f83](https://github.com/toon-protocol/connector/commit/be83f83e131f9fb28113c501cc23400168f89898))
+- **34-3:** Mina payment channel zkApp — tests & deployment ([3d15ef7](https://github.com/toon-protocol/connector/commit/3d15ef7ce76e689806aa34a0781b82a67bbc6271))
+- **34-4:** Mina payment channel SDK TypeScript integration — story complete ([cc3bfeb](https://github.com/toon-protocol/connector/commit/cc3bfeb80d6d5a3557572f3300c0feacdf0a882f))
+- **34-5:** Implement MinaPaymentChannelProvider — story complete ([ee13667](https://github.com/toon-protocol/connector/commit/ee13667a58ef7a7a06b9a9cfe42064bf2c440926))
+- **34-6:** NIP-59 claim wrapping for transport privacy — story complete ([8ecf12d](https://github.com/toon-protocol/connector/commit/8ecf12d0c9755d3f99ee0dcbb81bfcb6d89f86d1))
+- **34-7:** Mina claim message types & serialization — story complete ([be5a906](https://github.com/toon-protocol/connector/commit/be5a9063bce6c5d9cd724cdb477427c1b446c728))
+- **34-8:** Mina provider integration tests — story complete ([ec112a5](https://github.com/toon-protocol/connector/commit/ec112a5d9f6dfd3eb1d4993acaa616329056aeee))
+- **34-9:** Mina devnet deployment documentation & verification tests — story complete ([db6b065](https://github.com/toon-protocol/connector/commit/db6b065cdd9fc335432ad20d229c0d4497c933f6))
+- ECDH-derived conditions & fulfillments for ILP packets ([f6bc580](https://github.com/toon-protocol/connector/commit/f6bc580c8b22006a9d4eea242934fe6c064a9435))
+- **infra:** add Solana local dev infrastructure — story 33-9 complete ([d8c8a30](https://github.com/toon-protocol/connector/commit/d8c8a30ff730cc0df152718fe676e8ea5e204220))
+- **infra:** add story specs for Solana & Mina local dev infrastructure ([edcfc82](https://github.com/toon-protocol/connector/commit/edcfc8249a8794d05a5f37aca1e7112c29c3b6f1))
+- wire NIP-59 claim wrapping into per-packet pipeline with e2e verification ([dbf646f](https://github.com/toon-protocol/connector/commit/dbf646fa303f6ee2698819533ef1bda9c7aca859))
+
+### Bug Fixes
+
+- **ci:** build mina-zkapp before connector type-check; downgrade proc-macro-crate for Solana compat ([347be15](https://github.com/toon-protocol/connector/commit/347be15e9467c110ed3d9f13bb2e814b0b4cc923))
+- **ci:** build mina-zkapp before tests and run test:unit to exclude integration tests ([8b6b3c5](https://github.com/toon-protocol/connector/commit/8b6b3c53328f3c1c39292478689381d0718f4658))
+- **ci:** pin Solana deps to avoid edition2024 and use system Cargo for test-sbf ([71eb45d](https://github.com/toon-protocol/connector/commit/71eb45d99e6b30f31500ca388c57370a8df27b80))
+- **ci:** upgrade Solana CLI to v2.3.13 (Cargo 1.85+ for edition2024) ([59015fd](https://github.com/toon-protocol/connector/commit/59015fd26698875f54c5600b0323424592a6f4c2))
+- **ci:** upgrade Solana CLI v2.1.0 → v2.2.12 for rustc/edition2024 compat ([30804aa](https://github.com/toon-protocol/connector/commit/30804aaab4aba142c128474886898fe4530e4046))
+- **ci:** use --tools-version v1.52 for cargo test-sbf (Cargo 1.85+ compat) ([d207ef5](https://github.com/toon-protocol/connector/commit/d207ef5fd8c5fc1d16b9d8707de66fe5b1507a6e))
+
 ## [2.3.0](https://github.com/toon-protocol/connector/compare/v2.2.0...v2.3.0) (2026-03-27)
 
 ### Features
