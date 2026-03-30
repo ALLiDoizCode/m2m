@@ -13,6 +13,7 @@
 import { randomBytes } from 'crypto';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import pino from 'pino';
+import { sha256 } from '@noble/hashes/sha2';
 import {
   NIP59ClaimWrapper,
   BTP_WRAPPED_CLAIM_PROTOCOL,
@@ -186,6 +187,103 @@ describe('Mina NIP-59 Wrapped Claim Round-Trip (Story 34.8)', () => {
       // Then: encrypted payloads are different (due to ephemeral keys and random nonces)
       expect(wrapped1!.encryptedPayload).not.toBe(wrapped2!.encryptedPayload);
       expect(wrapped1!.ephemeralPublicKey).not.toBe(wrapped2!.ephemeralPublicKey);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // ECDH-Derived Conditions & Fulfillments for Mina Claims
+  // -------------------------------------------------------------------------
+
+  describe('[T-34.8-COND] ECDH-derived conditions with Mina claims', () => {
+    it('should derive condition and fulfillment preimage via wrapClaimWithCondition', () => {
+      // Given: NIP-59 enabled, a valid Mina claim
+      const wrapper = new NIP59ClaimWrapper({ nip59Enabled: true, logger });
+      const claim = createValidMinaClaim();
+
+      // When: wrapping with condition derivation
+      const result = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+
+      // Then: result includes wrapped claim and 32-byte execution condition
+      expect(result).not.toBeNull();
+      expect(result!.wrapped).toBeDefined();
+      expect(result!.executionCondition).toBeInstanceOf(Uint8Array);
+      expect(result!.executionCondition.length).toBe(32);
+
+      // And: condition is not all zeros (ECDH-derived)
+      const isAllZeros = result!.executionCondition.every((b) => b === 0);
+      expect(isAllZeros).toBe(false);
+    });
+
+    it('should produce fulfillment preimage where SHA-256(preimage) === condition', () => {
+      // Given: a Mina claim wrapped with condition
+      const wrapper = new NIP59ClaimWrapper({ nip59Enabled: true, logger });
+      const claim = createValidMinaClaim();
+      const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+      expect(wrapResult).not.toBeNull();
+
+      // When: the receiver unwraps with preimage derivation
+      const unwrapResult = wrapper.unwrapClaimWithPreimage(wrapResult!.wrapped, receiverPrivKey);
+
+      // Then: SHA-256(fulfillmentPreimage) === executionCondition
+      expect(unwrapResult.fulfillmentPreimage).toBeInstanceOf(Uint8Array);
+      expect(unwrapResult.fulfillmentPreimage.length).toBe(32);
+
+      const derivedCondition = sha256(unwrapResult.fulfillmentPreimage);
+      expect(
+        Buffer.from(derivedCondition).equals(Buffer.from(wrapResult!.executionCondition))
+      ).toBe(true);
+
+      // And: the unwrapped claim preserves all Mina fields
+      expect(isMinaClaim(unwrapResult.claim)).toBe(true);
+      if (isMinaClaim(unwrapResult.claim)) {
+        expect(unwrapResult.claim.zkAppAddress).toBe(claim.zkAppAddress);
+        expect(unwrapResult.claim.balanceCommitment).toBe(claim.balanceCommitment);
+        expect(unwrapResult.claim.proof).toBe(claim.proof);
+        expect(unwrapResult.claim.network).toBe(claim.network);
+      }
+    });
+
+    it('should produce unique conditions per packet from fresh ephemeral keys', () => {
+      // Given: the same Mina claim wrapped multiple times
+      const wrapper = new NIP59ClaimWrapper({ nip59Enabled: true, logger });
+      const claim = createValidMinaClaim();
+
+      const conditions: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const result = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+        expect(result).not.toBeNull();
+        conditions.push(Buffer.from(result!.executionCondition).toString('hex'));
+      }
+
+      // Then: each condition is unique (fresh ephemeral key per call)
+      const uniqueConditions = new Set(conditions);
+      expect(uniqueConditions.size).toBe(5);
+    });
+
+    it('should return null from wrapClaimWithCondition when NIP-59 disabled', () => {
+      // Given: NIP-59 disabled
+      const wrapper = new NIP59ClaimWrapper({ nip59Enabled: false, logger });
+      const claim = createValidMinaClaim();
+
+      // When/Then: returns null (no condition derivation)
+      const result = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+      expect(result).toBeNull();
+    });
+
+    it('should fail preimage derivation with wrong receiver key', () => {
+      // Given: a Mina claim wrapped with condition
+      const wrapper = new NIP59ClaimWrapper({ nip59Enabled: true, logger });
+      const claim = createValidMinaClaim();
+      const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+      expect(wrapResult).not.toBeNull();
+
+      // When: unwrapping with a different private key
+      const wrongPrivKey = randomBytes(32);
+
+      // Then: unwrapping fails (cannot derive correct ECDH shared secret)
+      expect(() => {
+        wrapper.unwrapClaimWithPreimage(wrapResult!.wrapped, wrongPrivKey);
+      }).toThrow();
     });
   });
 });

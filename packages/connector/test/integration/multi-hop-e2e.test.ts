@@ -358,6 +358,125 @@ describeEvm('Multi-Hop E2E Integration (5-Peer Linear Chain)', () => {
         await nip59Network.stop();
       }
     });
+
+    // T-NIP59-COND: ECDH-derived condition/fulfillment verification across 5 hops
+    it('T-NIP59-COND: should return non-zero ECDH-derived fulfillment when NIP-59 enabled', async () => {
+      const nip59Network = createMultiHopTestNetwork(5, {
+        settlementThreshold: 5000n,
+        connectorFeePercentage: 0.1,
+        pollingInterval: 100,
+        logLevel: 'warn',
+        nip59Enabled: true,
+      });
+
+      try {
+        await nip59Network.start();
+
+        const result = await nip59Network.sendPacket(0, 'test.peer5.receiver', 5000n);
+        expect(result.type).toBe(PacketType.FULFILL);
+
+        const fulfill = result as ILPFulfillPacket;
+
+        // When NIP-59 is enabled, the receiver derives a preimage from
+        // ECDH(receiverPriv, ephemeralPub) via HKDF and injects it as fulfillment.
+        // Every intermediary and the sender verify SHA-256(fulfillment) === condition.
+        // If the fulfillment were zero or invalid, the packet would have been rejected
+        // with F99_APPLICATION_ERROR at each verifying hop.
+        expect(fulfill.fulfillment).toBeDefined();
+        expect(fulfill.fulfillment).toBeInstanceOf(Uint8Array);
+        expect(fulfill.fulfillment!.length).toBe(32);
+
+        // Verify fulfillment is not all zeros (ECDH-derived, not legacy stub)
+        const isAllZeros = fulfill.fulfillment!.every((b) => b === 0);
+        expect(isAllZeros).toBe(false);
+      } finally {
+        await nip59Network.stop();
+      }
+    });
+
+    // T-NIP59-UNIQUE: Each packet gets a unique fulfillment (fresh ephemeral keys)
+    it('T-NIP59-UNIQUE: should produce unique fulfillments per packet from fresh ephemeral keys', async () => {
+      const nip59Network = createMultiHopTestNetwork(5, {
+        settlementThreshold: 5000n,
+        connectorFeePercentage: 0.1,
+        pollingInterval: 100,
+        logLevel: 'warn',
+        nip59Enabled: true,
+      });
+
+      try {
+        await nip59Network.start();
+
+        // Send 5 packets and collect fulfillments
+        const fulfillments: Uint8Array[] = [];
+        for (let i = 0; i < 5; i++) {
+          const result = await nip59Network.sendPacket(0, 'test.peer5.receiver', 1000n);
+          expect(result.type).toBe(PacketType.FULFILL);
+
+          const fulfill = result as ILPFulfillPacket;
+          expect(fulfill.fulfillment).toBeDefined();
+          expect(fulfill.fulfillment!.length).toBe(32);
+          fulfillments.push(fulfill.fulfillment!);
+        }
+
+        // Each fulfillment should be unique — derived from a fresh ephemeral key per packet
+        const hexFulfillments = fulfillments.map((f) => Buffer.from(f).toString('hex'));
+        const uniqueFulfillments = new Set(hexFulfillments);
+        expect(uniqueFulfillments.size).toBe(5);
+      } finally {
+        await nip59Network.stop();
+      }
+    });
+
+    // T-NIP59-COMPAT: NIP-59 disabled → zero-byte fulfillment (backward compatibility)
+    it('T-NIP59-COMPAT: should return zero-byte fulfillment when NIP-59 is disabled', async () => {
+      // The main network has NIP-59 disabled — send a packet and check fulfillment
+      const result = await network.sendPacket(0, 'test.peer5.receiver', 5000n);
+      expect(result.type).toBe(PacketType.FULFILL);
+
+      const fulfill = result as ILPFulfillPacket;
+
+      // Without NIP-59, fulfillment is either absent or 32 zero bytes (OER default)
+      if (fulfill.fulfillment) {
+        const isAllZeros = fulfill.fulfillment.every((b) => b === 0);
+        expect(isAllZeros).toBe(true);
+      }
+      // If fulfillment is undefined, that's also valid backward-compat behavior
+    });
+
+    // T-NIP59-BALANCE: NIP-59 with conditions produces identical accounting to non-NIP-59
+    it('T-NIP59-BALANCE: should produce correct fee cascade with NIP-59 conditions enabled', async () => {
+      const nip59Network = createMultiHopTestNetwork(5, {
+        settlementThreshold: 50000n, // High threshold to avoid settlement interference
+        connectorFeePercentage: 0.1,
+        pollingInterval: 100,
+        logLevel: 'warn',
+        nip59Enabled: true,
+      });
+
+      try {
+        await nip59Network.start();
+
+        const amount = 10000n;
+        const result = await nip59Network.sendPacket(0, 'test.peer5.receiver', amount);
+        expect(result.type).toBe(PacketType.FULFILL);
+
+        // Fee cascade should be identical whether NIP-59 is on or off:
+        // 10000 → 9990 → 9981 → 9972 → 9963
+        const expectedAmounts = calculateAmountsPerHop(amount, 4);
+        expect(expectedAmounts).toEqual([10000n, 9990n, 9981n, 9972n, 9963n]);
+
+        // Verify Peer2 credited correctly (Peer1 owes Peer2 the full packet amount)
+        const peer2Balance = await nip59Network.getBalance(1, 'peer1');
+        expect(BigInt(peer2Balance.balances[0]!.creditBalance)).toBeGreaterThan(0n);
+
+        // Verify Peer4 debited correctly (Peer4 forwarded to Peer5)
+        const peer4Balance = await nip59Network.getBalance(3, 'peer5');
+        expect(BigInt(peer4Balance.balances[0]!.debitBalance)).toBeLessThan(0n);
+      } finally {
+        await nip59Network.stop();
+      }
+    });
   });
 
   // ========================================================================

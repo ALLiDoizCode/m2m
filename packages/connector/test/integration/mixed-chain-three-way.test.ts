@@ -13,13 +13,19 @@
  * @packageDocumentation
  */
 
+import { randomBytes } from 'crypto';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import { sha256 } from '@noble/hashes/sha2';
+import pino from 'pino';
 import { ChainProviderRegistry } from '../../src/settlement/provider/chain-provider-registry';
+import { NIP59ClaimWrapper } from '../../src/settlement/privacy/nip59-claim-wrapper';
 import type { PaymentChannelProvider } from '../../src/settlement/provider/payment-channel-provider';
 import type {
   BlockchainType,
   MinaClaimMessage,
   EVMClaimMessage,
   SolanaClaimMessage,
+  BTPClaimMessage,
 } from '../../src/btp/btp-claim-types';
 import {
   isEVMClaim,
@@ -384,6 +390,73 @@ describe('Mixed-Chain Three-Way Settlement (Story 34.8)', () => {
 
       // And: validation passes
       expect(() => validateClaimMessage(parsed)).not.toThrow();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // NIP-59 ECDH Conditions Across All Three Chains
+  // -------------------------------------------------------------------------
+
+  describe('NIP-59 ECDH-derived conditions work for all three chain claim types', () => {
+    let wrapper: NIP59ClaimWrapper;
+    let senderPrivKey: Uint8Array;
+    let receiverPrivKey: Uint8Array;
+    let receiverPubKey: Uint8Array;
+
+    beforeEach(() => {
+      const logger = pino({ level: 'silent' });
+      wrapper = new NIP59ClaimWrapper({ nip59Enabled: true, logger });
+      senderPrivKey = randomBytes(32);
+      receiverPrivKey = randomBytes(32);
+      receiverPubKey = secp256k1.getPublicKey(receiverPrivKey, true);
+    });
+
+    it.each([
+      ['EVM', () => createEVMClaimFixture(), isEVMClaim],
+      ['Solana', () => createSolanaClaimFixture(), isSolanaClaim],
+      ['Mina', () => createMinaClaimFixture(), isMinaClaim],
+    ] as Array<[string, () => BTPClaimMessage, (c: BTPClaimMessage) => boolean]>)(
+      'should produce valid condition/fulfillment binding for %s claims',
+      (_chainName, createClaim, typeGuard) => {
+        const claim = createClaim();
+
+        // Wrap with condition derivation
+        const wrapResult = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+        expect(wrapResult).not.toBeNull();
+        expect(wrapResult!.executionCondition.length).toBe(32);
+
+        // Unwrap with preimage derivation
+        const unwrapResult = wrapper.unwrapClaimWithPreimage(wrapResult!.wrapped, receiverPrivKey);
+        expect(unwrapResult.fulfillmentPreimage.length).toBe(32);
+
+        // Verify SHA-256(preimage) === condition
+        const derivedCondition = sha256(unwrapResult.fulfillmentPreimage);
+        expect(
+          Buffer.from(derivedCondition).equals(Buffer.from(wrapResult!.executionCondition))
+        ).toBe(true);
+
+        // Verify claim type preserved through wrap/unwrap
+        expect(typeGuard(unwrapResult.claim)).toBe(true);
+        expect(unwrapResult.claim.blockchain).toBe(claim.blockchain);
+      }
+    );
+
+    it('should produce distinct conditions for EVM, Solana, and Mina claims in same session', () => {
+      const claims: BTPClaimMessage[] = [
+        createEVMClaimFixture(),
+        createSolanaClaimFixture(),
+        createMinaClaimFixture(),
+      ];
+
+      const conditions = claims.map((claim) => {
+        const result = wrapper.wrapClaimWithCondition(claim, senderPrivKey, receiverPubKey);
+        expect(result).not.toBeNull();
+        return Buffer.from(result!.executionCondition).toString('hex');
+      });
+
+      // Each condition is unique (fresh ephemeral key per wrap call)
+      const uniqueConditions = new Set(conditions);
+      expect(uniqueConditions.size).toBe(3);
     });
   });
 });

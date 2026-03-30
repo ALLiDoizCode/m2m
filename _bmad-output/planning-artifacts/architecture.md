@@ -32,6 +32,7 @@ multi-chain settlement across EVM (Base L2), Solana, and Mina Protocol.
 - **Multi-chain settlement** — Pluggable chain-provider architecture supporting EVM (Base L2), Solana, and Mina Protocol payment channels, with per-peer chain selection
 - **Per-packet self-describing claims** — Every forwarded packet carries a chain-specific signed claim (EIP-712 for EVM, Ed25519 for Solana, zk-SNARK commitments for Mina) with full on-chain context, enabling permissionless channel verification
 - **Transport privacy (NIP-59)** — Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59, hiding sender identity, claim content, and timing from BTP intermediaries
+- **ECDH-derived conditions & fulfillments** — When NIP-59 is enabled, the ephemeral key used for gift wrapping also derives an ILP execution condition via dual HKDF, cryptographically binding each fulfillment to the receiver's identity (only the holder of the receiver's private key can produce the preimage)
 - **ZK-private settlement (Mina)** — Zero-knowledge balance proofs on Mina Protocol where transferred amounts are hidden on-chain via Poseidon commitments, verified by zk-SNARK proofs
 - **Multi-deployment modes** — Library (embedded), CLI (standalone), or Docker container
 
@@ -128,10 +129,11 @@ graph TB
 3. PacketHandler queries RoutingTable for longest-prefix match
 4. AccountManager records double-entry transfer (debit sender, credit receiver)
 5. PerPacketClaimService delegates to the peer's chain provider for claim signing (EIP-712 for EVM, Ed25519 for Solana, Poseidon commitment for Mina)
-6. Optionally, the claim is wrapped via NIP-59 Gift Wrap for transport privacy
-7. PacketHandler forwards packet to next-hop peer via BTPClientManager
-8. On fulfillment, claim is persisted to SQLite; on reject, claim is voided
-9. SettlementMonitor polls balances and triggers on-chain settlement when thresholds are exceeded
+6. Optionally, the claim is wrapped via NIP-59 Gift Wrap for transport privacy; when enabled, dual HKDF derivation from the same ephemeral key produces both the encryption key and an ILP execution condition (`SHA-256(HKDF(sharedSecret, info='ilp-condition-preimage'))`)
+7. PacketHandler sets the ECDH-derived `executionCondition` on the forwarding PREPARE (or 32 zero bytes when NIP-59 is disabled)
+8. PacketHandler forwards packet + claim to next-hop peer via BTPClientManager
+9. On fulfillment return, PacketHandler verifies `SHA-256(fulfillment) === executionCondition` (skipped when condition is all zeros); claim is persisted to SQLite on success, voided on reject
+10. SettlementMonitor polls balances and triggers on-chain settlement when thresholds are exceeded
 
 ---
 
@@ -355,11 +357,13 @@ graph TD
 
 ### ILP Packets (`@toon-protocol/shared`)
 
-| Type               | Fields                                                                                | RFC      |
-| ------------------ | ------------------------------------------------------------------------------------- | -------- |
-| `ILPPreparePacket` | `destination`, `amount` (bigint), `executionCondition` (32-byte), `expiresAt`, `data` | RFC-0027 |
-| `ILPFulfillPacket` | `fulfillment` (32-byte preimage), `data`                                              | RFC-0027 |
-| `ILPRejectPacket`  | `code` (ILPErrorCode), `triggeredBy`, `message`, `data`                               | RFC-0027 |
+| Type               | Fields                                                                                                        | RFC      |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- | -------- |
+| `ILPPreparePacket` | `destination`, `amount` (bigint), `executionCondition?` (32-byte, ECDH-derived when NIP-59 enabled), `expiresAt`, `data` | RFC-0027 |
+| `ILPFulfillPacket` | `fulfillment?` (32-byte preimage, ECDH-derived when NIP-59 enabled), `data`                                   | RFC-0027 |
+| `ILPRejectPacket`  | `code` (ILPErrorCode), `triggeredBy`, `message`, `data`                                                       | RFC-0027 |
+
+Both `executionCondition` and `fulfillment` are TypeScript-optional fields. OER serialization defaults to 32 zero bytes when absent (backward compatible). When NIP-59 is enabled, the condition is derived via `SHA-256(HKDF(ECDH_shared_secret, info='ilp-condition-preimage'))` and the fulfillment is the corresponding HKDF preimage — only derivable by the receiver who holds the matching secp256k1 private key.
 
 ### BTP Claim Messages (`btp/btp-claim-types.ts`)
 
@@ -393,7 +397,7 @@ Claims are transmitted via BTP protocolData with protocol name `payment-channel-
 Key interfaces:
 
 - `ConnectorConfig` — Top-level config (nodeId, peers, routes, settlement, adminApi, deploymentMode)
-- `PeerConfig` — Peer connection (id, url, authToken, evmAddress)
+- `PeerConfig` — Peer connection (id, url, authToken, evmAddress, nip59PublicKey, nip59Enabled)
 - `RouteConfig` — Static route (prefix, nextHop, priority)
 - `SettlementConfig` — TigerBeetle accounting params (fees, credit limits, thresholds)
 - `SettlementInfraConfig` — EVM infrastructure params (rpcUrl, registryAddress, privateKey, threshold)
@@ -420,6 +424,7 @@ sequenceDiagram
     participant RT as Routing Table
     participant AM as Account Manager
     participant PPC as Per-Packet Claim Service
+    participant NIP59 as NIP-59 Wrapper
     participant BTPCM as BTP Client Manager
     participant Receiver as Next-Hop Peer
 
@@ -429,12 +434,17 @@ sequenceDiagram
     RT-->>PH: nextHop peer ID
     PH->>AM: recordTransfer(sender, receiver, amount)
     AM-->>PH: transfer recorded
-    PH->>PPC: createClaim(receiver, amount)
-    PPC-->>PH: signed EVM claim (EIP-712)
-    PH->>BTPCM: forward(packet + claim in protocolData)
+    PH->>PPC: generateClaimForPacket(peerId, amount)
+    PPC->>NIP59: wrapClaimWithCondition(claim, senderPriv, receiverPub)
+    Note over NIP59: Ephemeral ECDH → dual HKDF:<br/>encryption key + condition preimage
+    NIP59-->>PPC: { wrapped, executionCondition }
+    PPC-->>PH: { protocolData, executionCondition }
+    PH->>PH: Set forwardingPacket.executionCondition
+    PH->>BTPCM: forward(PREPARE + wrapped claim)
     BTPCM->>Receiver: ILP Prepare + Claim (BTP WebSocket)
-    Receiver-->>BTPCM: ILP Fulfill
+    Receiver-->>BTPCM: ILP Fulfill (with fulfillment preimage)
     BTPCM-->>PH: ILP Fulfill
+    PH->>PH: Verify SHA-256(fulfillment) === condition
     PH->>PPC: persistClaim(fulfilled)
     PH-->>BTPServer: ILP Fulfill
     BTPServer-->>Sender: ILP Fulfill
@@ -468,25 +478,35 @@ sequenceDiagram
 
 ### Per-Packet Self-Describing Claim Flow
 
-Every forwarded packet carries a self-describing EIP-712 signed claim. The claim always includes `chainId`, `tokenNetworkAddress`, and `tokenAddress` so that receivers can dynamically verify unknown channels on-chain.
+Every forwarded packet carries a self-describing chain-specific signed claim. The `blockchain` discriminator routes to the correct chain provider for signing (EIP-712 for EVM, Ed25519 for Solana, zk-SNARK commitment for Mina). All claims include chain-specific self-describing fields so receivers can dynamically verify unknown channels on-chain.
 
 ```mermaid
 sequenceDiagram
     participant PH as Packet Handler
     participant PPC as PerPacketClaimService
     participant CM as Channel Manager
-    participant SDK as PaymentChannelSDK
+    participant Registry as Chain Provider Registry
+    participant NIP59 as NIP-59 Wrapper
     participant DB as SQLite (claims DB)
 
-    PH->>PPC: createClaimForPacket(peerId, amount)
+    PH->>PPC: generateClaimForPacket(peerId, amount)
     PPC->>CM: getChannelForPeer(peerId, tokenId)
-    CM-->>PPC: channelId, currentNonce
+    CM-->>PPC: channelId, currentNonce, chainType
     PPC->>PPC: Build self-describing claim message
-    Note over PPC: Always includes chainId,<br/>tokenNetworkAddress, tokenAddress
-    PPC->>SDK: signBalanceProof(channelId, nonce, amount)
-    SDK-->>PPC: EIP-712 signature
-    PPC->>DB: INSERT pending claim
-    PPC-->>PH: BTP protocolData with claim JSON
+    Note over PPC: Always includes chain-specific<br/>self-describing fields
+    PPC->>Registry: signBalanceProof(chainType, channelId, nonce, amount)
+    Registry-->>PPC: chain-specific signature
+
+    alt NIP-59 Enabled
+        PPC->>NIP59: wrapClaimWithCondition(claim, senderPriv, receiverPub)
+        Note over NIP59: Ephemeral ECDH → dual HKDF derivation:<br/>giftwrap key + condition preimage
+        NIP59-->>PPC: { wrapped, executionCondition }
+        PPC->>DB: INSERT pending claim
+        PPC-->>PH: { protocolData (wrapped), executionCondition }
+    else NIP-59 Disabled
+        PPC->>DB: INSERT pending claim
+        PPC-->>PH: { protocolData (plaintext), executionCondition: undefined }
+    end
 
     alt Packet Fulfilled
         PH->>PPC: onFulfill(claimId)
@@ -567,7 +587,7 @@ interface PaymentChannelProvider {
 | `EVMPaymentChannelProvider`    | `settlement/providers/evm/`                 | EVM provider: ethers.js, EIP-712 signing, TokenNetwork contract interaction |
 | `SolanaPaymentChannelProvider` | `settlement/providers/solana/`              | Solana provider: @solana/kit v3, Ed25519 signing, PDA-based channels        |
 | `MinaPaymentChannelProvider`   | `settlement/providers/mina/`                | Mina provider: o1js, zk-SNARK proof generation, Poseidon commitments        |
-| `NIP59TransportWrapper`        | `settlement/privacy/`                       | Optional NIP-59 Gift Wrap claim wrapping for transport privacy (all chains) |
+| `NIP59ClaimWrapper`            | `settlement/privacy/`                       | NIP-59 three-layer claim wrapping + dual HKDF for ECDH-derived conditions (all chains) |
 | `ChannelManager`               | `settlement/channel-manager.ts`             | Channel lifecycle (create, deposit, close), peer-to-channel mapping         |
 | `PerPacketClaimService`        | `settlement/per-packet-claim-service.ts`    | Chain-agnostic claim signing — delegates to provider via registry           |
 | `ClaimReceiver`                | `settlement/claim-receiver.ts`              | Validates incoming claims — dispatches to correct provider for verification |
@@ -684,7 +704,70 @@ Claims can optionally be wrapped using a three-layer encryption scheme inspired 
 - ILP packet routing (amounts, destinations) — stays cleartext for fee deduction and routing
 - On-chain settlement — determined by the chain provider, not transport layer
 
+**What transport privacy enables (when active):**
+
+- **ECDH-derived conditions & fulfillments** — The ephemeral key in the gift wrap layer serves double duty: it derives both the claim encryption key and the ILP condition preimage via dual HKDF derivation (see next section). This adds packet integrity verification at zero wire overhead.
+
 Configurable per-peer via `nip59Enabled: true` in peer configuration.
+
+### ECDH-Derived Conditions & Fulfillments (When NIP-59 Enabled)
+
+When NIP-59 is active, the ephemeral key already used for gift wrapping serves double duty: a single ECDH shared secret is split via dual HKDF derivation into both the claim encryption key and an ILP condition preimage. This adds **zero additional bytes on the wire** — the preimage is implicit in the ephemeral key already transmitted.
+
+**Derivation:**
+
+```
+ephemeralPrivKey  = randomBytes(32)                    // fresh per packet
+sharedSecret      = ECDH(ephemeralPrivKey, receiverPub) // secp256k1 x-coord
+encryptionKey     = HKDF(sharedSecret, info='nip59-giftwrap')        // claim encryption
+conditionPreimage = HKDF(sharedSecret, info='ilp-condition-preimage') // fulfillment preimage
+executionCondition = SHA-256(conditionPreimage)          // ILP condition
+```
+
+**Why this is stronger than classic ILP:** In standard ILPv4, the preimage is an arbitrary shared secret — any party who learns it can produce a valid fulfillment. Here, the preimage is derived from `ECDH(receiverPrivateKey, ephemeralPublicKey)` — only the holder of the receiver's secp256k1 private key can compute it. The fulfillment is **identity-bound**, not merely knowledge-bound.
+
+**Three-role packet flow:**
+
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant I as Intermediary
+    participant R as Receiver
+
+    Note over S: Generate claim + wrap with NIP-59
+    Note over S: Dual HKDF: encryption key + preimage
+    Note over S: condition = SHA-256(preimage)
+    S->>I: PREPARE { executionCondition, wrappedClaim }
+
+    Note over I: Copy condition via packet spread
+    I->>R: PREPARE { executionCondition, wrappedClaim }
+
+    Note over R: ECDH(receiverPriv, ephemeralPub)
+    Note over R: preimage = HKDF(shared, 'ilp-condition-preimage')
+    Note over R: Verify SHA-256(preimage) === condition
+    Note over R: Process local delivery (auto-fulfill or BLS)
+    R-->>I: FULFILL { fulfillment: preimage }
+
+    Note over I: Verify SHA-256(fulfillment) === condition
+    I-->>S: FULFILL { fulfillment: preimage }
+
+    Note over S: Verify SHA-256(fulfillment) === condition
+    Note over S: Fulfillment verified — persist claim
+```
+
+**Role responsibilities:**
+
+| Role             | PREPARE path                                                           | FULFILL return path                                                       |
+| ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **Sender**       | Generate claim, wrap with `wrapClaimWithCondition()`, set condition     | Verify `SHA-256(fulfillment) === condition`; reject with F99 on mismatch  |
+| **Intermediary** | Copy condition via `{ ...packet, expiresAt }` spread (automatic)       | Verify `SHA-256(fulfillment) === condition`; reject with F99 on mismatch  |
+| **Receiver**     | Derive preimage via `unwrapClaimWithPreimage()` using node private key | Inject preimage as `fulfillment` on FULFILL before returning              |
+
+**Backward compatibility:**
+
+- When NIP-59 is disabled: `executionCondition` is undefined, OER serializes 32 zero bytes, fulfillment verification is skipped
+- Zero-byte condition = skip verification (supports legacy peers and mixed-mode networks)
+- Existing `wrapClaim()` / `unwrapClaim()` methods remain for backward compatibility
 
 ### Smart Contracts & On-Chain Programs
 
@@ -753,6 +836,14 @@ routes:
 | `security`        | SecurityConfig        | —                    | Key management backend configuration                    |
 | `performance`     | PerformanceConfig     | —                    | High-throughput optimization (batching, pooling)        |
 | `blockchain`      | BlockchainConfig      | —                    | Base L2 chain configuration                             |
+| `nip59`           | `{ enabled: boolean }`| —                    | Global NIP-59 transport privacy toggle                  |
+
+**Per-Peer NIP-59 Fields** (in `PeerConfig`):
+
+| Field            | Type    | Default     | Description                                              |
+| ---------------- | ------- | ----------- | -------------------------------------------------------- |
+| `nip59PublicKey`  | string  | —           | Peer's 33-byte compressed secp256k1 public key (hex)     |
+| `nip59Enabled`   | boolean | `false`     | Per-peer toggle for NIP-59 wrapping and ECDH conditions  |
 
 ---
 
@@ -773,6 +864,7 @@ routes:
 - **Balance proof validation** — Transferred amounts must be non-decreasing (cumulative) for EVM/Solana; commitment consistency verified via zk proof for Mina
 - **Replay protection** — Channel ID + nonce + blockchain type prevent cross-chain and within-chain replay
 - **NIP-59 unwrapping validation** — If transport privacy is enabled, Gift Wrap must decrypt successfully with valid ephemeral key before claim is processed
+- **ECDH-derived fulfillment verification** — When NIP-59 is enabled, each PREPARE carries an `executionCondition` derived from the ephemeral ECDH shared secret. On the return path, every node (sender and intermediaries) verifies `SHA-256(fulfillment) === executionCondition`. Mismatches produce an `F99_APPLICATION_ERROR` rejection. Because the preimage is derived from `ECDH(receiverPrivateKey, ephemeralPublicKey)`, only the intended receiver can produce a valid fulfillment — this is stronger than classic ILP where any party who learns the preimage can fabricate a FULFILL
 
 ### Additional Security
 
@@ -962,8 +1054,9 @@ All tests that involve claims (unit and integration) **must assume self-describi
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Multi-chain provider architecture** | XRP/Aptos removed in Epic 30. Replaced in Epic 32 with a pluggable `PaymentChannelProvider` interface. EVM (Base L2), Solana (Epic 33), and Mina Protocol (Epic 34) are supported. New chains require only implementing the provider interface and registering with `ChainProviderRegistry`. Per-peer chain selection allows heterogeneous settlement networks.                                                                                                                                                   |
 | **Per-packet self-describing claims** | Every forwarded packet carries a self-describing chain-specific signed claim. The `blockchain` discriminator field routes verification to the correct provider. EVM uses EIP-712, Solana uses Ed25519, Mina uses zk-SNARK commitments. All claims, tests, and integrations assume self-describing fields are always present.                                                                                                                                                                                      |
-| **NIP-59 transport privacy**          | Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59. Hides sender identity, claim content, and timing from BTP intermediaries. Chain-agnostic — works with any provider. Does not affect ILP packet routing or fee deduction (those operate at a separate protocol layer).                                                                                                                                                                                                    |
-| **ZK-private settlement (Mina)**      | Mina provider uses zk-SNARK proofs with Poseidon hash commitments so transferred amounts are never revealed on-chain. First payment channel implementation on Mina Protocol. Combined with NIP-59 transport wrapping, provides end-to-end privacy from BTP wire to on-chain settlement.                                                                                                                                                                                                                           |
+| **NIP-59 transport privacy**          | Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59. Hides sender identity, claim content, and timing from BTP intermediaries. Chain-agnostic — works with any provider. The ephemeral key used for gift wrapping also enables ECDH-derived conditions (see below).                                                                                                                                                                                                            |
+| **ECDH-derived conditions**           | When NIP-59 is enabled, dual HKDF derivation from the same ephemeral ECDH shared secret produces both the claim encryption key (`info='nip59-giftwrap'`) and the ILP condition preimage (`info='ilp-condition-preimage'`). Zero additional wire overhead — the preimage is implicit in the ephemeral key already transmitted. The fulfillment is identity-bound (requires receiver's private key), which is stronger than classic ILP where preimages are arbitrary shared secrets. When NIP-59 is disabled, conditions remain 32 zero bytes and verification is skipped (fully backward compatible). |
+| **ZK-private settlement (Mina)**      | Mina provider uses zk-SNARK proofs with Poseidon hash commitments so transferred amounts are never revealed on-chain. First payment channel implementation on Mina Protocol. Combined with NIP-59 transport wrapping and ECDH-derived conditions, provides end-to-end privacy and integrity from BTP wire to on-chain settlement.                                                                                                                                                                                  |
 | **Foundry (not Hardhat)**             | Faster compilation, built-in fuzzing, Solidity-native tests, better developer experience.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | **TigerBeetle optional**              | In-memory ledger with JSON snapshot persistence provides a zero-dependency fallback. TigerBeetle is recommended for production.                                                                                                                                                                                                                                                                                                                                                                                   |
 | **Library-first**                     | `ConnectorNode` is a class you instantiate in your code. CLI and Docker are wrappers around this library API.                                                                                                                                                                                                                                                                                                                                                                                                     |
