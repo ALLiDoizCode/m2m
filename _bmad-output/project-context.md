@@ -39,6 +39,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Blockchain (Mina):** o1js 2.2.0 (Mina settlement via `MinaPaymentChannelProvider` with zk-SNARK proofs)
 - **Mina zkApp:** o1js SmartContract (`packages/mina-zkapp/`) -- Poseidon commitments, zero-knowledge balance proofs
 - **Transport:** ws 8.16.0 (BTP over WebSocket, RFC-0023)
+- **Transport (Overlay):** socks-proxy-agent (SOCKS5 HTTP agent), @anyone-protocol/anyone-client (optional, managed `anon` binary) -- Epic 35 planned
 - **Transport Privacy:** NIP-59-inspired three-layer encryption (ChaCha20-Poly1305, secp256k1 ECDH, HKDF-SHA256) via @noble/ciphers 1.3.0, @noble/curves 1.9.0, @noble/hashes 1.8.0
 - **HTTP:** Express 4.18.x (admin API, health checks, explorer)
 - **Logging:** Pino 8.21.0 (structured JSON)
@@ -81,6 +82,7 @@ connector/                          # Monorepo root
 │   │   │   │   ├── mina-payment-channel-sdk.ts    # Mina SDK wrapper (Epic 34)
 │   │   │   │   └── ...             # EVM SDK, claim services, channel manager, etc.
 │   │   │   ├── test-utils/         # Mock factories, isolated test environment
+│   │   │   ├── transport/          # TransportProvider abstraction: Direct + SOCKS5/ATOR (Epic 35)
 │   │   │   ├── utils/              # Logger, connection pool, EVM RPC pool, optional-require
 │   │   │   └── wallet/             # Treasury wallet, seed management, wallet security
 │   │   └── test/
@@ -340,6 +342,41 @@ Epic 34 added full Mina protocol payment channel support -- an o1js SmartContrac
 - **Custom error:** `NIP59WrapError` -- never includes decrypted claim content in error messages
 - **Output type:** `WrappedClaim` with `ephemeralPublicKey` (hex), `encryptedPayload` (base64), randomized `timestamp`, `version: '1.0'`
 - Unit tests (~851 lines) in `nip59-claim-wrapper.test.ts`
+
+## ATOR Overlay Transport (Epic 35 — Planned)
+
+Epic 35 adds an optional SOCKS5-based transport layer enabling connectors to peer through ATOR (Anyone Protocol) or Tor `.anon` hidden services. This is a transport-layer concern orthogonal to settlement providers.
+
+### TransportProvider Interface (`transport/transport-provider.ts`)
+
+- **Interface:** `TransportProvider` with methods: `createAgent(peerUrl)`, `getExternalUrl()`, `start()`, `stop()`, `healthCheck()`
+- **DirectTransportProvider:** default implementation wrapping current direct connection behavior; `createAgent()` returns `undefined` (use default Node.js agent)
+- **SocksTransportProvider:** SOCKS5 proxy implementation using `socks-proxy-agent`; routes all outbound BTP WebSocket connections through SOCKS5 proxy
+- **Dependencies:** `socks-proxy-agent` (SOCKS5 HTTP agent), `@anyone-protocol/anyone-client` (optional, for managed `anon` binary lifecycle)
+- **Directory:** `packages/connector/src/transport/`
+
+### Critical Rules
+
+- **`socks5h://` scheme required** -- DNS must resolve through the proxy, not locally; prevents DNS leaks that expose `.anon` addresses; config validation rejects `socks5://`
+- **Fail closed, never fail open** -- if SOCKS proxy is unavailable, reject connections with explicit error; NEVER silently fall back to direct connection
+- **Never log `.anon` addresses at INFO level** -- hidden service addresses are sensitive; DEBUG only
+- **Transport is opt-in** -- default is `direct`; zero behavioral change for existing deployments
+
+### Config Extension
+
+```yaml
+transport:
+  type: "socks5"                         # "direct" (default) | "socks5"
+  socksProxy: "socks5h://127.0.0.1:9050" # required when type: "socks5"
+  externalUrl: "ws://abc123.anon/btp"    # required when type: "socks5"
+  managed: false                         # optional: start/stop anon binary via SDK
+```
+
+### Integration Points
+
+- `ConnectorNode` creates appropriate `TransportProvider` based on config; calls `start()`/`stop()` during lifecycle
+- BTP WebSocket client passes `provider.createAgent(peerUrl)` as the `agent` option to `ws`
+- Health endpoint reports transport provider health status
 
 ## Critical Implementation Rules
 

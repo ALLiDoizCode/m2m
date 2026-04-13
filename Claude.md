@@ -53,14 +53,15 @@ Run `make help` for the full target list. Deployment guides: `docs/solana-deploy
 
 ## Key Entry Points
 
-| File                                          | Purpose                                      |
-| --------------------------------------------- | -------------------------------------------- |
-| `packages/connector/src/lib.ts`               | Public API (all exports consolidated here)   |
-| `packages/connector/src/core/`                | ConnectorNode, PacketHandler, PaymentHandler |
-| `packages/connector/src/settlement/provider/` | Chain abstraction layer (Epic 32+)           |
-| `packages/connector/src/config/`              | YAML config loading + Zod validation         |
-| `packages/mina-zkapp/src/PaymentChannel.ts`   | Mina SmartContract (8 on-chain Fields)       |
-| `packages/solana-program/src/lib.rs`          | Solana program entrypoint                    |
+| File                                          | Purpose                                           |
+| --------------------------------------------- | ------------------------------------------------- |
+| `packages/connector/src/lib.ts`               | Public API (all exports consolidated here)        |
+| `packages/connector/src/core/`                | ConnectorNode, PacketHandler, PaymentHandler      |
+| `packages/connector/src/settlement/provider/` | Chain abstraction layer (Epic 32+)                |
+| `packages/connector/src/transport/`           | TransportProvider: Direct + SOCKS5/ATOR (Epic 35) |
+| `packages/connector/src/config/`              | YAML config loading + Zod validation              |
+| `packages/mina-zkapp/src/PaymentChannel.ts`   | Mina SmartContract (8 on-chain Fields)            |
+| `packages/solana-program/src/lib.rs`          | Solana program entrypoint                         |
 
 ## Default UI Library: shadcn-ui v4
 

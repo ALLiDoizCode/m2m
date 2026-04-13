@@ -102,3 +102,31 @@ epics:
         status: done
     retrospective:
       status: done
+
+  epic-35:
+    name: "ATOR Overlay Transport for Privacy-Enabled Peering"
+    status: planned
+    stories:
+      35.1:
+        name: "Define TransportProvider Interface + DirectTransportProvider"
+        status: planned
+      35.2:
+        name: "Implement SocksTransportProvider"
+        status: planned
+      35.3:
+        name: "Extend Config Schema for Transport Block"
+        status: planned
+      35.4:
+        name: "Wire TransportProvider into ConnectorNode and BTP Client"
+        status: planned
+      35.5:
+        name: "Managed ATOR Client Lifecycle (Optional)"
+        status: planned
+      35.6:
+        name: "Unit and Integration Tests"
+        status: planned
+      35.7:
+        name: "Documentation — Deployment Guide and Config Reference"
+        status: planned
+    retrospective:
+      status: pending
