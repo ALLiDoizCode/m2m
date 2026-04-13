@@ -105,7 +105,7 @@ epics:
 
   epic-35:
     name: "ATOR Overlay Transport for Privacy-Enabled Peering"
-    status: planned
+    status: in-progress
     stories:
       35.1:
         name: "Define TransportProvider Interface + DirectTransportProvider"
