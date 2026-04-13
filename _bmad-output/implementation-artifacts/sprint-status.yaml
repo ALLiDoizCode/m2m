@@ -109,7 +109,7 @@ epics:
     stories:
       35.1:
         name: "Define TransportProvider Interface + DirectTransportProvider"
-        status: planned
+        status: done
       35.2:
         name: "Implement SocksTransportProvider"
         status: planned
