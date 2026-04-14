@@ -127,6 +127,6 @@ epics:
         status: done
       35.7:
         name: "Documentation — Deployment Guide and Config Reference"
-        status: planned
+        status: done
     retrospective:
       status: pending

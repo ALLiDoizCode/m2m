@@ -592,12 +592,13 @@ npm run dev
 
 ## Documentation
 
-| Guide                                             | Description                          |
-| ------------------------------------------------- | ------------------------------------ |
-| [Configuration Examples](examples/README.md)      | YAML config schema and example files |
-| [Connector Package](packages/connector/README.md) | Implementation reference and API     |
-| [Changelog](CHANGELOG.md)                         | Version history and release notes    |
-| [Contributing](CONTRIBUTING.md)                   | Contribution guidelines              |
+| Guide                                             | Description                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| [Configuration Examples](examples/README.md)      | YAML config schema and example files                                                    |
+| [Connector Package](packages/connector/README.md) | Implementation reference and API                                                        |
+| [ATOR Overlay Transport](docs/ator-transport.md)  | Privacy transport: SOCKS5/ATOR setup, config, monitoring, and troubleshooting (Epic 35) |
+| [Changelog](CHANGELOG.md)                         | Version history and release notes                                                       |
+| [Contributing](CONTRIBUTING.md)                   | Contribution guidelines                                                                 |
 
 ## Contributing
 
