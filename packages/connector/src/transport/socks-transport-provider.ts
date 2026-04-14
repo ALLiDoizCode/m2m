@@ -20,9 +20,11 @@
  */
 
 import type http from 'http';
-import net from 'net';
 import type pino from 'pino';
 import { SocksProxyAgent } from 'socks-proxy-agent';
+import type { ManagedAnonClient } from './managed-anon-client';
+import { probeTcpPort } from './probe-tcp-port';
+import { parseSocks5hUrl } from './socks-url';
 import type { TransportProvider } from './transport-provider';
 
 /**
@@ -35,6 +37,21 @@ export interface SocksTransportProviderOptions {
   externalUrl: string;
   /** Pino logger -- a child logger with component="socks-transport-provider" is created internally. */
   logger: pino.Logger;
+  /**
+   * Optional managed `anon` binary lifecycle client (Story 35.5). When
+   * present, `start()` boots the managed client BEFORE probing the proxy,
+   * `stop()` tears it down, and `healthCheck()` requires both the managed
+   * client and the TCP probe to succeed.
+   */
+  managedClient?: ManagedAnonClient;
+  /**
+   * Optional async resolver invoked AFTER the managed client has started but
+   * BEFORE the TCP probe. Used to implement `externalUrl: 'auto'` (Story 35.5
+   * AC #8): the caller reads the hidden service `hostname` file and returns
+   * the resolved `wss://<hostname>/btp` URL, which replaces the construction-
+   * time placeholder. If the resolver throws, `start()` fails closed.
+   */
+  resolveExternalUrlOnStart?: () => Promise<string>;
 }
 
 /** Timeout for the one-shot startup TCP probe (ms). */
@@ -51,10 +68,13 @@ const HEALTH_PROBE_TIMEOUT_MS = 1000;
  */
 export class SocksTransportProvider implements TransportProvider {
   private readonly _socksProxy: string;
-  private readonly _externalUrl: string;
+  private _externalUrl: string;
   private readonly _logger: pino.Logger;
   private readonly _proxyHost: string;
   private readonly _proxyPort: number;
+  private readonly _managedClient: ManagedAnonClient | undefined;
+  private readonly _resolveExternalUrlOnStart: (() => Promise<string>) | undefined;
+  private _managedHealthy = true;
 
   /**
    * @param options - Configuration options (see {@link SocksTransportProviderOptions}).
@@ -62,8 +82,10 @@ export class SocksTransportProvider implements TransportProvider {
    * @throws {Error} If `externalUrl` is empty.
    */
   constructor(options: SocksTransportProviderOptions) {
-    const { socksProxy, externalUrl, logger } = options;
+    const { socksProxy, externalUrl, logger, managedClient, resolveExternalUrlOnStart } = options;
 
+    // Defensive pre-check so we can prefix the error with the provider name,
+    // matching the historical error surface relied on by Story 35.2 tests.
     if (!socksProxy || typeof socksProxy !== 'string') {
       throw new Error(
         'SocksTransportProvider: socksProxy must be a non-empty string starting with "socks5h://" ' +
@@ -72,29 +94,15 @@ export class SocksTransportProvider implements TransportProvider {
       );
     }
 
-    if (!socksProxy.startsWith('socks5h://')) {
-      throw new Error(
-        `SocksTransportProvider: socksProxy scheme must be "socks5h://" (got "${socksProxy.split('://')[0]}://"). ` +
-          'The "h" suffix is required to prevent DNS leaks: with socks5h, hostname resolution ' +
-          'happens at the proxy (Tor exit / ATOR), not on the local host.'
-      );
-    }
-
-    let parsed: URL;
+    let host: string;
+    let port: number;
     try {
-      // URL won't parse "socks5h://" natively -- swap to a parseable scheme for extraction only.
-      parsed = new URL(socksProxy.replace(/^socks5h:\/\//, 'http://'));
-    } catch {
+      const parsed = parseSocks5hUrl(socksProxy);
+      host = parsed.host;
+      port = parsed.port;
+    } catch (err) {
       throw new Error(
-        `SocksTransportProvider: socksProxy is not a valid URL (expected socks5h://host:port)`
-      );
-    }
-
-    const host = parsed.hostname;
-    const port = parsed.port ? Number.parseInt(parsed.port, 10) : NaN;
-    if (!host || !Number.isFinite(port) || port <= 0 || port > 65535) {
-      throw new Error(
-        'SocksTransportProvider: socksProxy must include a valid host and port (e.g., socks5h://127.0.0.1:9050)'
+        `SocksTransportProvider: ${err instanceof Error ? err.message : String(err)}`
       );
     }
 
@@ -107,6 +115,8 @@ export class SocksTransportProvider implements TransportProvider {
     this._proxyHost = host;
     this._proxyPort = port;
     this._logger = logger.child({ component: 'socks-transport-provider' });
+    this._managedClient = managedClient;
+    this._resolveExternalUrlOnStart = resolveExternalUrlOnStart;
   }
 
   /**
@@ -139,6 +149,32 @@ export class SocksTransportProvider implements TransportProvider {
    * @throws {Error} If the proxy host:port is unreachable within the probe timeout.
    */
   async start(): Promise<void> {
+    // Story 35.5 AC #1 / T-35.5-11: if a managed client is supplied, boot it
+    // BEFORE the TCP probe. The managed client is responsible for awaiting
+    // SOCKS readiness itself; the probe below is belt-and-suspenders.
+    if (this._managedClient) {
+      await this._managedClient.start();
+    }
+    // Story 35.5 AC #8: resolve `externalUrl: 'auto'` AFTER the managed client
+    // has started (so the hidden-service hostname file exists on disk) and
+    // BEFORE the TCP probe. Fail-closed on any resolver error.
+    if (this._resolveExternalUrlOnStart) {
+      try {
+        const resolved = await this._resolveExternalUrlOnStart();
+        if (!resolved || typeof resolved !== 'string') {
+          throw new Error('resolver returned a non-string value');
+        }
+        if (!resolved.startsWith('ws://') && !resolved.startsWith('wss://')) {
+          throw new Error('resolved externalUrl must start with ws:// or wss://');
+        }
+        this._externalUrl = resolved;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `SocksTransportProvider: failed to resolve externalUrl from managed hidden service (${reason})`
+        );
+      }
+    }
     try {
       await this._probeProxy(START_PROBE_TIMEOUT_MS);
     } catch (err) {
@@ -147,6 +183,7 @@ export class SocksTransportProvider implements TransportProvider {
         `SocksTransportProvider: SOCKS5 proxy unreachable at ${this._proxyHost}:${this._proxyPort} (${reason})`
       );
     }
+    this._managedHealthy = true;
     this._logger.info(
       { event: 'socks_transport_started', proxyHost: this._proxyHost, proxyPort: this._proxyPort },
       'SOCKS5 transport started'
@@ -161,6 +198,11 @@ export class SocksTransportProvider implements TransportProvider {
    */
   async stop(): Promise<void> {
     this._logger.info({ event: 'socks_transport_stopped' }, 'SOCKS5 transport stopped');
+    // Story 35.5 AC #2: after the no-op log, chain the managed client
+    // teardown. The managed client.stop() is idempotent and never throws.
+    if (this._managedClient) {
+      await this._managedClient.stop();
+    }
   }
 
   /**
@@ -170,8 +212,41 @@ export class SocksTransportProvider implements TransportProvider {
    * @returns `true` if the proxy port is reachable, `false` otherwise.
    */
   async healthCheck(): Promise<boolean> {
+    // Story 35.5 AC #5: when a managed client is present, require BOTH the
+    // managed health signal AND the TCP probe to succeed. Never throw (Story
+    // 35.2 AC #6 invariant). Emit a single WARN on the healthy->unhealthy
+    // transition with event="managed_anon_crash_detected" (no `.anon` fields).
+    let managedOk = true;
+    if (this._managedClient) {
+      try {
+        managedOk = await this._managedClient.healthCheck();
+      } catch {
+        managedOk = false;
+      }
+      if (!managedOk && this._managedHealthy) {
+        this._managedHealthy = false;
+        this._logger.warn(
+          {
+            // Spec-required event name (AC #5 / Task 2.5). The inner
+            // ManagedAnonClient also emits the same event name on its own
+            // crash detection — operators relying on log counts should filter
+            // on `component` to disambiguate source.
+            event: 'managed_anon_crash_detected',
+            proxyHost: this._proxyHost,
+            proxyPort: this._proxyPort,
+          },
+          'Managed anon client reports not running'
+        );
+      } else if (managedOk) {
+        this._managedHealthy = true;
+      }
+    }
+
     try {
       await this._probeProxy(HEALTH_PROBE_TIMEOUT_MS);
+      if (!managedOk) {
+        return false;
+      }
       this._logger.debug(
         {
           event: 'socks_transport_health_ok',
@@ -200,37 +275,6 @@ export class SocksTransportProvider implements TransportProvider {
    * always destroyed before return.
    */
   private _probeProxy(timeoutMs: number): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const socket = net.createConnection({ host: this._proxyHost, port: this._proxyPort });
-      let settled = false;
-
-      const cleanup = (): void => {
-        socket.removeAllListeners();
-        socket.destroy();
-      };
-
-      socket.setTimeout(timeoutMs);
-
-      socket.once('connect', () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve();
-      });
-
-      socket.once('timeout', () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new Error(`probe timed out after ${timeoutMs}ms`));
-      });
-
-      socket.once('error', (err: Error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(err);
-      });
-    });
+    return probeTcpPort(this._proxyHost, this._proxyPort, timeoutMs);
   }
 }

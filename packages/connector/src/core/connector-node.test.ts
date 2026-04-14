@@ -74,9 +74,36 @@ jest.mock('../transport', () => {
       return this.options.externalUrl;
     }
   }
+  const managedStartSpy = jest.fn().mockResolvedValue(undefined);
+  const managedStopSpy = jest.fn().mockResolvedValue(undefined);
+  const managedHealthSpy = jest.fn().mockResolvedValue(true);
+  const managedCtorSpy = jest.fn();
+  class ManagedAnonClient {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    constructor(public opts: any) {
+      managedCtorSpy(opts);
+    }
+    start = managedStartSpy;
+    stop = managedStopSpy;
+    healthCheck = managedHealthSpy;
+    isRunning(): boolean {
+      return true;
+    }
+  }
+  // Mock returns a rejected promise with a non-MODULE_NOT_FOUND code so the
+  // connector-node factory stays in its "wait for prewarm" branch without
+  // changing test expectations. Tests that actually need the prewarm to
+  // resolve should stub this per-test.
+  const createDefaultAnonFactory = jest.fn(() =>
+    Promise.reject(
+      Object.assign(new Error('mocked: factory not wired in unit test'), { code: 'MOCKED_TEST' })
+    )
+  );
   return {
     DirectTransportProvider,
     SocksTransportProvider,
+    ManagedAnonClient,
+    createDefaultAnonFactory,
     __spies: {
       directStartSpy,
       directStopSpy,
@@ -86,6 +113,10 @@ jest.mock('../transport', () => {
       socksStopSpy,
       socksHealthSpy,
       socksCreateAgentSpy,
+      managedStartSpy,
+      managedStopSpy,
+      managedHealthSpy,
+      managedCtorSpy,
     },
   };
 });
@@ -2050,6 +2081,7 @@ describe('ConnectorNode', () => {
     const transportModule = require('../transport') as {
       DirectTransportProvider: new (externalUrl: string) => unknown;
       SocksTransportProvider: new (options: unknown) => unknown;
+      ManagedAnonClient: new (options: unknown) => unknown;
       __spies: {
         directStartSpy: jest.Mock;
         directStopSpy: jest.Mock;
@@ -2059,6 +2091,10 @@ describe('ConnectorNode', () => {
         socksStopSpy: jest.Mock;
         socksHealthSpy: jest.Mock;
         socksCreateAgentSpy: jest.Mock;
+        managedStartSpy: jest.Mock;
+        managedStopSpy: jest.Mock;
+        managedHealthSpy: jest.Mock;
+        managedCtorSpy: jest.Mock;
       };
     };
     const spies = transportModule.__spies;
@@ -2073,6 +2109,9 @@ describe('ConnectorNode', () => {
       spies.socksStopSpy.mockResolvedValue(undefined);
       spies.socksHealthSpy.mockResolvedValue(true);
       spies.socksCreateAgentSpy.mockReturnValue({ __socks: true });
+      spies.managedStartSpy.mockResolvedValue(undefined);
+      spies.managedStopSpy.mockResolvedValue(undefined);
+      spies.managedHealthSpy.mockResolvedValue(true);
     });
 
     const socksConfig = (): ConnectorConfig =>
@@ -2405,6 +2444,71 @@ describe('ConnectorNode', () => {
         const serialized = JSON.stringify(calls);
         expect(serialized.toLowerCase()).not.toContain('.anon');
       }
+    });
+
+    // -----------------------------------------------------------------
+    // Story 35.5 — managed client lifecycle integration
+    // -----------------------------------------------------------------
+    describe('Story 35.5: managed ATOR client wiring', () => {
+      const managedSocksConfig = (): ConnectorConfig =>
+        createTestConfig({
+          transport: {
+            type: 'socks5',
+            socksProxy: 'socks5h://127.0.0.1:9050',
+            externalUrl: 'wss://abc123.anon/btp',
+            managed: true,
+            managedOptions: {
+              hiddenServiceDir: '/tmp/ator-hs-test',
+              hiddenServicePort: 443,
+              startupTimeoutMs: 5000,
+            },
+          },
+        });
+
+      it('T-35.5-07: does NOT construct ManagedAnonClient when managed=false', async () => {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        expect(spies.managedCtorSpy).not.toHaveBeenCalled();
+        expect(spies.managedStartSpy).not.toHaveBeenCalled();
+        await node.stop();
+      });
+
+      it('T-35.5-07: does NOT construct ManagedAnonClient for direct transport', async () => {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(
+          createTestConfig({ transport: { type: 'direct' } })
+        );
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        expect(spies.managedCtorSpy).not.toHaveBeenCalled();
+        await node.stop();
+      });
+
+      it('T-35.5-04/AC#7: constructs ManagedAnonClient when managed=true and passes options', async () => {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(managedSocksConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        expect(spies.managedCtorSpy).toHaveBeenCalledTimes(1);
+        const ctorArg = spies.managedCtorSpy.mock.calls[0][0] as Record<string, unknown>;
+        expect(ctorArg.socksProxy).toBe('socks5h://127.0.0.1:9050');
+        expect(ctorArg.hiddenServiceDir).toBe('/tmp/ator-hs-test');
+        expect(ctorArg.hiddenServicePort).toBe(443);
+        expect(ctorArg.startupTimeoutMs).toBe(5000);
+        expect(typeof ctorArg.anonFactory).toBe('function');
+        await node.stop();
+      });
+
+      it('SocksTransportProvider receives the managedClient via options', async () => {
+        // The mock SocksTransportProvider constructor stores its options on `this.options`
+        // (see the jest.mock at the top of this file) — we inspect that to verify
+        // _createTransportProvider wires a ManagedAnonClient instance through.
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(managedSocksConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        const provider = node.transportProvider as unknown as { options: Record<string, unknown> };
+        expect(provider.options.managedClient).toBeDefined();
+        await node.stop();
+      });
     });
   });
 });

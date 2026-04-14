@@ -108,6 +108,7 @@
   },
   "optionalDependencies": {
     "@ai-sdk/anthropic": "^1.2.12",
+    "@anyone-protocol/anyone-client": "^1.1.3",
     "@ai-sdk/openai": "^1.3.24",
     "@aws-sdk/client-kms": "^3.500.0",
     "@azure/identity": "^4.0.0",

@@ -9,6 +9,7 @@
  */
 
 import * as fs from 'fs';
+import * as path from 'path';
 import * as yaml from 'js-yaml';
 import {
   ConnectorConfig,
@@ -716,11 +717,14 @@ export class ConfigLoader {
         'Missing required field: transport.externalUrl is required when transport.type is "socks5" (got empty string)'
       );
     }
-    if (!externalUrl.startsWith('ws://') && !externalUrl.startsWith('wss://')) {
+    // Story 35.5 AC #8: allow literal "auto" for managed hidden service
+    // lookup. Requires `managed: true` AND `managedOptions.hiddenServiceDir`.
+    const isAuto = externalUrl === 'auto';
+    if (!isAuto && !externalUrl.startsWith('ws://') && !externalUrl.startsWith('wss://')) {
       // Redact `.anon` hidden-service hosts before echoing into the error.
       const safeExternal = this.sanitizeProxyForError(externalUrl);
       throw new ConfigurationError(
-        `Invalid transport.externalUrl: must start with ws:// or wss://. Got: "${safeExternal}"`
+        `Invalid transport.externalUrl: must start with ws:// or wss:// (or be the literal "auto" for managed hidden services). Got: "${safeExternal}"`
       );
     }
 
@@ -737,12 +741,133 @@ export class ConfigLoader {
       );
     }
 
-    return {
+    // --- managedOptions (Story 35.5) ---
+    const managedOptions = this.validateManagedOptions(raw.managedOptions, managed);
+
+    if (isAuto) {
+      if (!managed) {
+        throw new ConfigurationError(
+          'Invalid transport.externalUrl: "auto" requires transport.managed to be true'
+        );
+      }
+      if (!managedOptions || !managedOptions.hiddenServiceDir) {
+        throw new ConfigurationError(
+          'Invalid transport.externalUrl: "auto" requires transport.managedOptions.hiddenServiceDir to be set'
+        );
+      }
+    }
+
+    const result: Extract<TransportConfig, { type: 'socks5' }> = {
       type: 'socks5',
       socksProxy,
       externalUrl,
       managed,
     };
+    if (managedOptions) {
+      result.managedOptions = managedOptions;
+    }
+    return result;
+  }
+
+  /**
+   * Validate the optional `managedOptions` sibling of `managed` (Story 35.5).
+   *
+   * Rules:
+   * - If `managedOptions` is absent or an empty object, returns undefined.
+   * - Rejects if `managedOptions` is present while `managed !== true`.
+   * - `hiddenServiceDir` must be a non-empty string and must not contain
+   *   `..` path-traversal segments after normalisation.
+   * - Numeric options (ports, timeouts) must be finite positive integers.
+   *
+   * @private
+   */
+  private static validateManagedOptions(
+    raw: unknown,
+    managed: boolean
+  ): Extract<TransportConfig, { type: 'socks5' }>['managedOptions'] | undefined {
+    if (raw === undefined) return undefined;
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ConfigurationError(
+        `Invalid type for transport.managedOptions: expected object, got ${
+          raw === null ? 'null' : Array.isArray(raw) ? 'array' : typeof raw
+        }`
+      );
+    }
+    const rawObj = raw as Record<string, unknown>;
+    const keys = Object.keys(rawObj);
+    if (keys.length === 0) return undefined;
+
+    if (!managed) {
+      throw new ConfigurationError(
+        'Invalid config: transport.managedOptions is only permitted when transport.managed is true'
+      );
+    }
+
+    const out: NonNullable<Extract<TransportConfig, { type: 'socks5' }>['managedOptions']> = {};
+
+    if ('hiddenServiceDir' in rawObj) {
+      const v = rawObj.hiddenServiceDir;
+      if (typeof v !== 'string' || v.trim() === '') {
+        throw new ConfigurationError(
+          `Invalid type for transport.managedOptions.hiddenServiceDir: expected non-empty string, got ${typeof v}`
+        );
+      }
+      // Reject `..` path-traversal. Check the raw input as well as the
+      // normalized form, because `path.normalize` collapses `..` segments
+      // inside absolute paths (`/var/lib/../../etc` -> `/etc`) which would
+      // silently permit traversal attacks.
+      const rawSegments = v.split(/[\\/]/);
+      const normalized = path.normalize(v);
+      const normSegments = normalized.split(path.sep);
+      if (rawSegments.includes('..') || normSegments.includes('..')) {
+        throw new ConfigurationError(
+          `Invalid transport.managedOptions.hiddenServiceDir: ".." path-traversal segments are not permitted`
+        );
+      }
+      out.hiddenServiceDir = v;
+    }
+
+    const intFields: Array<
+      keyof NonNullable<Extract<TransportConfig, { type: 'socks5' }>['managedOptions']>
+    > = ['hiddenServicePort', 'startupTimeoutMs', 'stopTimeoutMs'];
+    for (const field of intFields) {
+      if (field in rawObj) {
+        const v = rawObj[field as string];
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || !Number.isInteger(v)) {
+          throw new ConfigurationError(
+            `Invalid type for transport.managedOptions.${String(field)}: expected positive integer, got ${typeof v === 'number' ? String(v) : typeof v}`
+          );
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (out as any)[field] = v;
+      }
+    }
+
+    for (const strField of ['binaryPath', 'configFilePath'] as const) {
+      if (strField in rawObj) {
+        const v = rawObj[strField];
+        if (typeof v !== 'string' || v.trim() === '') {
+          throw new ConfigurationError(
+            `Invalid type for transport.managedOptions.${strField}: expected non-empty string, got ${typeof v}`
+          );
+        }
+        // Apply the same `..` traversal defense used for hiddenServiceDir. A
+        // malicious config that points `binaryPath` at `../../../usr/bin/rm`
+        // (or `configFilePath` at an attacker-controlled file outside the
+        // deployment root) is a privilege-escalation vector once ManagedAnon
+        // spawns it.
+        const rawSegs = v.split(/[\\/]/);
+        const normSegs = path.normalize(v).split(path.sep);
+        if (rawSegs.includes('..') || normSegs.includes('..')) {
+          throw new ConfigurationError(
+            `Invalid transport.managedOptions.${strField}: ".." path-traversal segments are not permitted`
+          );
+        }
+        out[strField] = v;
+      }
+    }
+
+    return out;
   }
 
   /**

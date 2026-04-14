@@ -3,6 +3,8 @@
  * Manages all connector components and lifecycle
  */
 
+import { promises as fsPromises } from 'fs';
+import * as nodePath from 'path';
 import { Logger } from '../utils/logger';
 import { RoutingTable } from '../routing/routing-table';
 import { BTPClientManager } from '../btp/btp-client-manager';
@@ -33,7 +35,15 @@ import {
   TransportConfig,
   validateChainProviders,
 } from '../config/types';
-import { TransportProvider, DirectTransportProvider, SocksTransportProvider } from '../transport';
+import {
+  TransportProvider,
+  DirectTransportProvider,
+  SocksTransportProvider,
+  ManagedAnonClient,
+  createDefaultAnonFactory,
+  type AnonFactoryOptions,
+  type AnonSdkHandle,
+} from '../transport';
 import { PaymentHandler, createPaymentHandlerAdapter } from './payment-handler';
 import {
   PeerConfig as SettlementPeerConfig,
@@ -1540,10 +1550,202 @@ export class ConnectorNode implements HealthStatusProvider {
       return new DirectTransportProvider(externalUrl);
     }
     if (cfg.type === 'socks5') {
+      // Story 35.5: if `managed: true`, construct a ManagedAnonClient that
+      // lazy-imports the optional @anyone-protocol/anyone-client SDK and
+      // wraps it for lifecycle. Otherwise behave exactly as Story 35.2.
+      let managedClient: ManagedAnonClient | undefined;
+      let externalUrl = cfg.externalUrl;
+      if (cfg.managed === true) {
+        // Build a factory that defers SDK import until start() runs.
+        // createDefaultAnonFactory() is async and throws MODULE_NOT_FOUND if
+        // the SDK is missing; we capture that at factory-invocation time
+        // so ManagedAnonClient.start() can surface the canonical template.
+        let cachedFactory: ((opts: AnonFactoryOptions) => AnonSdkHandle) | undefined;
+        // Pre-warm the factory via `createDefaultAnonFactory()` which handles
+        // both CJS (`require()`) AND ESM-only (`ERR_REQUIRE_ESM` → dynamic
+        // `import()`) packages. This runs asynchronously; if it rejects with
+        // MODULE_NOT_FOUND we keep `cachedFactory` undefined so the synchronous
+        // `anonFactory` below can re-throw a MODULE_NOT_FOUND-shaped error and
+        // let `ManagedAnonClient.start()` emit the canonical install-guidance
+        // message.
+        let prewarmError: NodeJS.ErrnoException | undefined;
+        const prewarmPromise = createDefaultAnonFactory().then(
+          (f) => {
+            cachedFactory = f;
+          },
+          (err: unknown) => {
+            prewarmError = err as NodeJS.ErrnoException;
+          }
+        );
+        const anonFactory = (opts: AnonFactoryOptions): AnonSdkHandle => {
+          if (cachedFactory) {
+            return cachedFactory(opts);
+          }
+          if (prewarmError) {
+            if (prewarmError.code === 'MODULE_NOT_FOUND') {
+              throw prewarmError;
+            }
+            throw new Error(
+              `Failed to load optional dependency "@anyone-protocol/anyone-client": ` +
+                `${prewarmError.message ?? String(prewarmError)}`,
+              { cause: prewarmError }
+            );
+          }
+          // Pre-warm still in flight. Fall back to synchronous `require()` so
+          // we don't block the factory contract. This branch is the common
+          // case for CJS-compatible SDKs (require succeeds immediately; the
+          // async prewarm is a redundant belt-and-suspenders for ESM-only
+          // future versions).
+          try {
+            const pkg = '@anyone-protocol/anyone-client';
+            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+            const mod = require(pkg);
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const AnonCtor =
+              (mod as any)?.Anon ?? (mod as any)?.default?.Anon ?? (mod as any)?.default;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+            if (typeof AnonCtor !== 'function') {
+              throw new Error(
+                '@anyone-protocol/anyone-client did not export an `Anon` constructor'
+              );
+            }
+            cachedFactory = (o: AnonFactoryOptions) => new AnonCtor(o) as AnonSdkHandle;
+            return cachedFactory(opts);
+          } catch (err) {
+            const cause = err as NodeJS.ErrnoException;
+            // True missing-module: re-throw unchanged so ManagedAnonClient
+            // can emit the canonical install-guidance error via its own
+            // MODULE_NOT_FOUND path.
+            if (cause?.code === 'MODULE_NOT_FOUND') {
+              throw cause;
+            }
+            // ERR_REQUIRE_ESM means the package is ESM-only; the async
+            // pre-warm above handles this correctly but may not have
+            // resolved yet. Surface a descriptive error suggesting the
+            // operator wait/retry rather than misleading them with install
+            // guidance.
+            if (cause?.code === 'ERR_REQUIRE_ESM') {
+              throw new Error(
+                `@anyone-protocol/anyone-client is an ESM-only package; ` +
+                  `the async lazy-import pre-warm had not completed when the factory ` +
+                  `was invoked. This is a timing bug — please file an issue.`,
+                { cause }
+              );
+            }
+            throw new Error(
+              `Failed to load optional dependency "@anyone-protocol/anyone-client": ` +
+                `${cause?.message ?? String(err)}`,
+              { cause }
+            );
+          }
+        };
+        // Reference prewarmPromise to silence unused-variable warnings; the
+        // promise runs to completion in the background and populates
+        // cachedFactory or prewarmError.
+        void prewarmPromise;
+        managedClient = new ManagedAnonClient({
+          socksProxy: cfg.socksProxy,
+          hiddenServiceDir: cfg.managedOptions?.hiddenServiceDir,
+          hiddenServicePort: cfg.managedOptions?.hiddenServicePort,
+          binaryPath: cfg.managedOptions?.binaryPath,
+          startupTimeoutMs: cfg.managedOptions?.startupTimeoutMs,
+          stopTimeoutMs: cfg.managedOptions?.stopTimeoutMs,
+          logger: this._logger,
+          anonFactory,
+        });
+
+        // `externalUrl: 'auto'` resolution (AC #8) happens at start() time
+        // because we need the hostname file to exist. We install a resolver
+        // that the provider invokes AFTER the managed client has started and
+        // BEFORE the TCP probe; it reads the SDK-written `hostname` file and
+        // returns the final `wss://<hostname>/btp` URL.
+        //
+        // We deliberately do NOT embed `.anon` in the construction-time
+        // placeholder (AC #9 log-hygiene invariant — if the placeholder ever
+        // leaks into an error or log before resolution, it must not contain a
+        // simulated `.anon` host). Use `wss://pending.invalid/btp` instead.
+        if (externalUrl === 'auto') {
+          externalUrl = 'wss://pending.invalid/btp';
+        }
+      } else if (externalUrl === 'auto') {
+        // Defensive: schema should already reject this, but fail-closed here.
+        throw new Error(
+          '_createTransportProvider: transport.externalUrl "auto" requires managed: true'
+        );
+      }
+
+      // Build the auto-resolver if the operator asked for it. The resolver
+      // reads `${hiddenServiceDir}/hostname` (populated by `anon` on first
+      // successful start) and returns the full BTP wss:// URL. It runs
+      // AFTER managedClient.start() and BEFORE the TCP probe.
+      let resolveExternalUrlOnStart: (() => Promise<string>) | undefined;
+      if (cfg.externalUrl === 'auto') {
+        const hsDir = cfg.managedOptions?.hiddenServiceDir;
+        if (!hsDir) {
+          throw new Error(
+            '_createTransportProvider: transport.externalUrl "auto" requires managedOptions.hiddenServiceDir'
+          );
+        }
+        // The `anon` binary writes `${hsDir}/hostname` at some point after
+        // the SOCKS port binds — the exact ordering is version-dependent and
+        // not guaranteed to precede SOCKS readiness. Poll with a bounded
+        // deadline (default 30s; operators can override via
+        // managedOptions.startupTimeoutMs since it's the outer budget) to
+        // tolerate the race without hanging shutdown.
+        const hostnameReadDeadlineMs = cfg.managedOptions?.startupTimeoutMs ?? 30_000;
+        // Strict hostname validator for the contents of
+        // `${hiddenServiceDir}/hostname`. Defense against a corrupted,
+        // partially-written, or attacker-tampered hostname file producing a
+        // malformed `wss://` URL that enables request-smuggling or redirects
+        // the connector at an attacker-controlled peer. Per the ATOR / Tor
+        // hidden service address format, v3 onion addresses are 56 lowercase
+        // base32 chars followed by `.anon` (or `.onion` on upstream Tor);
+        // v2 (deprecated) was 16 chars. We accept either length and both
+        // TLDs defensively. No ports, no paths, no auth, no whitespace.
+        const HIDDEN_SERVICE_HOSTNAME_RE = /^[a-z2-7]{16}(?:[a-z2-7]{40})?\.(?:anon|onion)$/;
+        resolveExternalUrlOnStart = async (): Promise<string> => {
+          const hostnameFile = nodePath.join(hsDir, 'hostname');
+          const deadline = Date.now() + hostnameReadDeadlineMs;
+          let lastErr: unknown;
+          while (Date.now() < deadline) {
+            try {
+              const raw = await fsPromises.readFile(hostnameFile, 'utf8');
+              // Take only the first line (anon writes "<addr>\n"; be tolerant
+              // of CRLF and of the file briefly containing additional tokens
+              // during rotation).
+              const firstLine = raw.split(/\r?\n/, 1)[0]?.trim() ?? '';
+              const hostname = firstLine;
+              if (!hostname) {
+                lastErr = new Error('hostname file is empty');
+              } else if (!HIDDEN_SERVICE_HOSTNAME_RE.test(hostname)) {
+                // Do NOT include the hostname in the error message — AC #9
+                // log-hygiene: the full .anon address must never reach
+                // INFO/WARN/ERROR. Include only the length as a breadcrumb.
+                lastErr = new Error(
+                  `hostname file contents did not match the expected hidden service format ` +
+                    `(length=${hostname.length}); ignoring and retrying`
+                );
+              } else {
+                return `wss://${hostname}/btp`;
+              }
+            } catch (err) {
+              lastErr = err;
+            }
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          const reason = lastErr instanceof Error ? lastErr.message : String(lastErr ?? 'unknown');
+          throw new Error(
+            `hidden service hostname file "${hostnameFile}" did not become readable ` +
+              `within ${hostnameReadDeadlineMs}ms (last error: ${reason})`
+          );
+        };
+      }
       return new SocksTransportProvider({
         socksProxy: cfg.socksProxy,
-        externalUrl: cfg.externalUrl,
+        externalUrl,
         logger: this._logger,
+        managedClient,
+        resolveExternalUrlOnStart,
       });
     }
     // Exhaustiveness guard: if a new variant is added to TransportConfig,

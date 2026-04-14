@@ -702,3 +702,125 @@ describe('transport config: existing YAML fixtures default to direct (T-REG-01..
     }
   );
 });
+
+// ---------------------------------------------------------------------------
+// Story 35.5: managedOptions + externalUrl: 'auto'
+// ---------------------------------------------------------------------------
+
+describe('transport config: managedOptions (Story 35.5)', () => {
+  it('accepts managedOptions when managed: true (happy path)', () => {
+    const result = tryValidate({
+      transport: {
+        type: 'socks5',
+        socksProxy: 'socks5h://127.0.0.1:9050',
+        externalUrl: 'wss://abc123.anon/btp',
+        managed: true,
+        managedOptions: {
+          hiddenServiceDir: '/var/lib/connector/hs',
+          hiddenServicePort: 443,
+          startupTimeoutMs: 30000,
+          stopTimeoutMs: 5000,
+        },
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const t = result.config.transport;
+    if (!t || t.type !== 'socks5') throw new Error('expected socks5');
+    expect(t.managedOptions?.hiddenServiceDir).toBe('/var/lib/connector/hs');
+    expect(t.managedOptions?.hiddenServicePort).toBe(443);
+    expect(t.managedOptions?.startupTimeoutMs).toBe(30000);
+  });
+
+  it('rejects managedOptions when managed is false', () => {
+    const result = tryValidate({
+      transport: {
+        type: 'socks5',
+        socksProxy: 'socks5h://127.0.0.1:9050',
+        externalUrl: 'wss://abc123.anon/btp',
+        managed: false,
+        managedOptions: { hiddenServiceDir: '/tmp/x' },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect((result.error as Error).message).toMatch(
+      /managedOptions is only permitted when.*managed is true/
+    );
+  });
+
+  it('rejects .. path-traversal in hiddenServiceDir', () => {
+    const result = tryValidate({
+      transport: {
+        type: 'socks5',
+        socksProxy: 'socks5h://127.0.0.1:9050',
+        externalUrl: 'wss://abc123.anon/btp',
+        managed: true,
+        managedOptions: { hiddenServiceDir: '/var/lib/../../etc/passwd' },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect((result.error as Error).message).toMatch(/path-traversal/);
+  });
+
+  it('accepts externalUrl: "auto" when managed + hiddenServiceDir set', () => {
+    const result = tryValidate({
+      transport: {
+        type: 'socks5',
+        socksProxy: 'socks5h://127.0.0.1:9050',
+        externalUrl: 'auto',
+        managed: true,
+        managedOptions: { hiddenServiceDir: '/var/lib/connector/hs' },
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const t = result.config.transport;
+    if (!t || t.type !== 'socks5') throw new Error('expected socks5');
+    expect(t.externalUrl).toBe('auto');
+  });
+
+  it('rejects externalUrl: "auto" without hiddenServiceDir', () => {
+    const result = tryValidate({
+      transport: {
+        type: 'socks5',
+        socksProxy: 'socks5h://127.0.0.1:9050',
+        externalUrl: 'auto',
+        managed: true,
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect((result.error as Error).message).toMatch(/hiddenServiceDir/);
+  });
+
+  it('rejects externalUrl: "auto" without managed: true', () => {
+    const result = tryValidate({
+      transport: {
+        type: 'socks5',
+        socksProxy: 'socks5h://127.0.0.1:9050',
+        externalUrl: 'auto',
+        managed: false,
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect((result.error as Error).message).toMatch(/managed.*true/);
+  });
+
+  it('rejects managed: true with type: "direct"', () => {
+    // Direct branch silently discards extra fields, so managed:true should
+    // NOT be silently retained. We re-affirm the direct branch ignores it
+    // (the type assertion is the regression guard).
+    const result = tryValidate({
+      transport: {
+        type: 'direct',
+        managed: true,
+      } as unknown as Record<string, unknown>,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.transport).toEqual({ type: 'direct' });
+  });
+});

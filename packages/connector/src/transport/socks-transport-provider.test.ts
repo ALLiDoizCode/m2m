@@ -388,4 +388,211 @@ describe('SocksTransportProvider (Story 35.2)', () => {
       expect(offenders).toEqual([]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Story 35.5 -- Managed client lifecycle integration (T-35.5-11 + AC 1/2/5)
+  // These tests assert the SocksTransportProvider <-> ManagedAnonClient contract
+  // at the unit level, using a minimal fake that matches the ManagedAnonClient
+  // public shape. They run WITHOUT touching the real `@anyone-protocol/anyone-client`
+  // package.
+  // ---------------------------------------------------------------------------
+
+  describe('Story 35.5: managed client lifecycle integration', () => {
+    // Minimal duck-typed fake matching the public surface of `ManagedAnonClient`
+    // that `SocksTransportProvider` consumes (start/stop/healthCheck). Using
+    // `unknown as ManagedAnonClient` at the boundary keeps the test free of a
+    // real dependency on managed-anon-client.ts internals.
+    function makeFakeManagedClient(
+      overrides: {
+        start?: () => Promise<void>;
+        stop?: () => Promise<void>;
+        healthCheck?: () => Promise<boolean>;
+      } = {}
+    ): {
+      start: jest.Mock<Promise<void>, []>;
+      stop: jest.Mock<Promise<void>, []>;
+      healthCheck: jest.Mock<Promise<boolean>, []>;
+    } {
+      return {
+        start: jest.fn(overrides.start ?? (async () => {})),
+        stop: jest.fn(overrides.stop ?? (async () => {})),
+        healthCheck: jest.fn(overrides.healthCheck ?? (async () => true)),
+      };
+    }
+
+    // T-35.5-11 (AC #1) -----------------------------------------------------
+    it('T-35.5-11: start() awaits managedClient.start() BEFORE the TCP probe', async () => {
+      const listener = await startEphemeralListener();
+      try {
+        // Spy on `net.createConnection` (used by `probeTcpPort`) so we can
+        // anchor the probe-invocation order via `mock.invocationCallOrder`.
+        const createConnSpy = jest.spyOn(net, 'createConnection');
+
+        const managed = makeFakeManagedClient();
+        const provider = new SocksTransportProvider(
+          makeOpts({
+            socksProxy: `socks5h://127.0.0.1:${listener.port}`,
+            managedClient: managed as unknown as SocksTransportProviderOptions['managedClient'],
+          })
+        );
+
+        await provider.start();
+
+        expect(managed.start).toHaveBeenCalledTimes(1);
+        const managedOrder = managed.start.mock.invocationCallOrder[0];
+        // Filter createConnection calls targeting the probed port.
+        const relevant = createConnSpy.mock.invocationCallOrder.filter((_, i) => {
+          const arg0 = createConnSpy.mock.calls[i]?.[0] as unknown;
+          if (!arg0 || typeof arg0 !== 'object') return false;
+          return (arg0 as { port?: number }).port === listener.port;
+        });
+        expect(relevant.length).toBeGreaterThan(0);
+        for (const probeOrder of relevant) {
+          expect(managedOrder).toBeLessThan(probeOrder);
+        }
+      } finally {
+        await listener.close();
+      }
+    });
+
+    // Fail-closed (AC #3 propagation) ---------------------------------------
+    it('start() rejects and does NOT run the TCP probe when managedClient.start() rejects', async () => {
+      const listener = await startEphemeralListener();
+      try {
+        const bootError = new Error('managed boot failed');
+        const managed = makeFakeManagedClient({
+          start: async () => {
+            throw bootError;
+          },
+        });
+        const createConnSpy = jest.spyOn(net, 'createConnection');
+
+        const provider = new SocksTransportProvider(
+          makeOpts({
+            socksProxy: `socks5h://127.0.0.1:${listener.port}`,
+            managedClient: managed as unknown as SocksTransportProviderOptions['managedClient'],
+          })
+        );
+
+        await expect(provider.start()).rejects.toThrow(/managed boot failed/);
+        // The probe must not have been attempted against our ephemeral port.
+        const relevant = createConnSpy.mock.calls.filter((c) => {
+          const arg0 = c[0] as unknown;
+          return (
+            !!arg0 && typeof arg0 === 'object' && (arg0 as { port?: number }).port === listener.port
+          );
+        });
+        expect(relevant).toHaveLength(0);
+      } finally {
+        await listener.close();
+      }
+    });
+
+    // AC #2 -----------------------------------------------------------------
+    it('stop() awaits managedClient.stop() after emitting the transport-stopped log', async () => {
+      const listener = await startEphemeralListener();
+      try {
+        const managed = makeFakeManagedClient();
+        const provider = new SocksTransportProvider(
+          makeOpts({
+            socksProxy: `socks5h://127.0.0.1:${listener.port}`,
+            managedClient: managed as unknown as SocksTransportProviderOptions['managedClient'],
+          })
+        );
+        await provider.start();
+        await provider.stop();
+        expect(managed.stop).toHaveBeenCalledTimes(1);
+      } finally {
+        await listener.close();
+      }
+    });
+
+    // AC #5 -----------------------------------------------------------------
+    it('healthCheck() returns false when managedClient.healthCheck() is false (TCP probe alone is not sufficient)', async () => {
+      const listener = await startEphemeralListener();
+      try {
+        const managed = makeFakeManagedClient({
+          healthCheck: async () => false,
+        });
+        const provider = new SocksTransportProvider(
+          makeOpts({
+            socksProxy: `socks5h://127.0.0.1:${listener.port}`,
+            managedClient: managed as unknown as SocksTransportProviderOptions['managedClient'],
+          })
+        );
+        await provider.start();
+        const ok = await provider.healthCheck();
+        expect(ok).toBe(false);
+      } finally {
+        await listener.close();
+      }
+    });
+
+    // AC #5 - never throw invariant (Story 35.2 AC #6 preserved) ------------
+    it('healthCheck() never throws even when managedClient.healthCheck() throws', async () => {
+      const listener = await startEphemeralListener();
+      try {
+        const managed = makeFakeManagedClient({
+          healthCheck: async () => {
+            throw new Error('managed health blew up');
+          },
+        });
+        const provider = new SocksTransportProvider(
+          makeOpts({
+            socksProxy: `socks5h://127.0.0.1:${listener.port}`,
+            managedClient: managed as unknown as SocksTransportProviderOptions['managedClient'],
+          })
+        );
+        await provider.start();
+        await expect(provider.healthCheck()).resolves.toBe(false);
+      } finally {
+        await listener.close();
+      }
+    });
+
+    // AC #5 - single WARN on healthy->unhealthy transition ------------------
+    it('emits a single managed_anon_crash_detected WARN on the healthy->unhealthy transition', async () => {
+      const listener = await startEphemeralListener();
+      try {
+        const warnCalls: Array<Record<string, unknown>> = [];
+        const logger = pino(
+          { level: 'trace' },
+          {
+            write(chunk: string): void {
+              try {
+                const entry = JSON.parse(chunk);
+                if (entry.level === 40) warnCalls.push(entry);
+              } catch {
+                /* ignore */
+              }
+            },
+          }
+        );
+
+        let managedOk = true;
+        const managed = makeFakeManagedClient({
+          healthCheck: async () => managedOk,
+        });
+
+        const provider = new SocksTransportProvider(
+          makeOpts({
+            socksProxy: `socks5h://127.0.0.1:${listener.port}`,
+            logger,
+            managedClient: managed as unknown as SocksTransportProviderOptions['managedClient'],
+          })
+        );
+        await provider.start();
+
+        expect(await provider.healthCheck()).toBe(true);
+        managedOk = false;
+        expect(await provider.healthCheck()).toBe(false);
+        expect(await provider.healthCheck()).toBe(false);
+
+        const crash = warnCalls.filter((e) => e.event === 'managed_anon_crash_detected');
+        expect(crash).toHaveLength(1);
+      } finally {
+        await listener.close();
+      }
+    });
+  });
 }); // end SocksTransportProvider (Story 35.2)

@@ -214,10 +214,34 @@ export type TransportConfig =
       type: 'socks5';
       /** SOCKS5 proxy URL. MUST start with `socks5h://` (DNS leak prevention). */
       socksProxy: string;
-      /** Externally reachable BTP URL for this node (typically `wss://<hs>.anon/btp`). */
+      /**
+       * Externally reachable BTP URL for this node. Either a `ws://`/`wss://`
+       * URL OR the literal `"auto"` (Story 35.5) which resolves at runtime
+       * from `${managedOptions.hiddenServiceDir}/hostname` -- requires
+       * `managed === true` and `managedOptions.hiddenServiceDir` to be set.
+       */
       externalUrl: string;
       /** Whether the connector manages the proxy binary lifecycle. Defaults to false. */
       managed: boolean;
+      /**
+       * Optional managed-lifecycle tuning (Story 35.5). Only meaningful when
+       * `managed === true` -- validation rejects `managedOptions` without
+       * `managed: true`.
+       */
+      managedOptions?: {
+        /** Absolute or project-relative path to the hidden-service key dir. */
+        hiddenServiceDir?: string;
+        /** Hidden service port (maps to HS config, not the OR port). */
+        hiddenServicePort?: number;
+        /** Overall deadline for SOCKS port readiness (ms). Default 60000. */
+        startupTimeoutMs?: number;
+        /** Overall deadline for `sdk.stop()` (ms). Default 10000. */
+        stopTimeoutMs?: number;
+        /** Optional anon binary override. SDK ships a bundled binary. */
+        binaryPath?: string;
+        /** Optional anonrc config file path. */
+        configFilePath?: string;
+      };
     };
 
 /**
