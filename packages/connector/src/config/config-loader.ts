@@ -23,6 +23,7 @@ import {
   LocalDeliveryConfig,
   SettlementInfraConfig,
   ChainProviderConfigEntry,
+  TransportConfig,
 } from './types';
 import { validateEnvironment } from './environment-validator';
 
@@ -201,6 +202,7 @@ export class ConfigLoader {
       chainProviders: rawConfig.chainProviders as ChainProviderConfigEntry[] | undefined,
       deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
       nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
+      transport: this.validateTransport(rawConfig.transport),
     };
 
     // Validate environment configuration
@@ -595,5 +597,196 @@ export class ConfigLoader {
         );
       }
     }
+  }
+
+  /**
+   * Validate and Normalize the `transport` Block (Epic 35 / Story 35.3)
+   *
+   * Validates the optional `transport` block selecting between `direct`
+   * (default) and `socks5` outbound BTP transports. Returns a normalized
+   * `TransportConfig` -- callers can rely on the discriminated union being
+   * fully populated (including `managed: false` default for SOCKS5).
+   *
+   * @param raw - Unvalidated `transport` field value from the YAML input
+   * @returns Normalized `TransportConfig`
+   * @throws ConfigurationError on any schema violation
+   * @private
+   */
+  private static validateTransport(raw: unknown): TransportConfig {
+    // Absent or explicit undefined -> default to direct
+    if (raw === undefined) {
+      return { type: 'direct' };
+    }
+
+    // Reject non-objects (string, array, null, number, boolean)
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      const actualType = raw === null ? 'null' : Array.isArray(raw) ? 'array' : typeof raw;
+      throw new ConfigurationError(
+        `Invalid type for transport: expected object, got ${actualType}`
+      );
+    }
+
+    const rawTransport = raw as Record<string, unknown>;
+    const typeRaw = rawTransport.type;
+
+    // Default type to 'direct' when absent (supports `transport: {}`)
+    const type = typeRaw === undefined ? 'direct' : typeRaw;
+
+    // Reject any type not in the discriminator set.
+    // Use String() rather than JSON.stringify so nested object/array structures
+    // submitted as `type` cannot echo user-supplied content into the message.
+    if (type !== 'direct' && type !== 'socks5') {
+      const rendered = typeof typeRaw === 'string' ? `"${typeRaw}"` : `<${typeof typeRaw}>`;
+      throw new ConfigurationError(
+        `Invalid transport.type: must be one of direct, socks5, got ${rendered}`
+      );
+    }
+
+    if (type === 'direct') {
+      // AC #8: direct discards any extra SOCKS-only fields unconditionally.
+      return { type: 'direct' };
+    }
+
+    return this.validateSocks5Transport(rawTransport);
+  }
+
+  /**
+   * Validate the SOCKS5 branch of the `transport` block.
+   *
+   * Enforces:
+   * - `socksProxy` present, non-empty string, `socks5h://` scheme (case-sensitive).
+   *   Any other scheme is rejected with a DNS-leak rationale in the error message.
+   * - `externalUrl` present, non-empty string, starts with `ws://` or `wss://`.
+   * - `managed` optional boolean; defaults to `false`.
+   *
+   * **Redaction:** when the rejected `socksProxy` value contains `.anon`
+   * (paranoid case), the hidden-service host is replaced with `<redacted>`
+   * in the error message to avoid leaking hidden service addresses if the
+   * error is logged downstream (Story 35.2 Task 6.4 convention).
+   *
+   * @private
+   */
+  private static validateSocks5Transport(
+    raw: Record<string, unknown>
+  ): Extract<TransportConfig, { type: 'socks5' }> {
+    // --- socksProxy ---
+    const socksProxyRaw = raw.socksProxy;
+    if (socksProxyRaw === undefined) {
+      throw new ConfigurationError(
+        'Missing required field: transport.socksProxy is required when transport.type is "socks5"'
+      );
+    }
+    if (typeof socksProxyRaw !== 'string') {
+      throw new ConfigurationError(
+        `Invalid type for transport.socksProxy: expected string, got ${typeof socksProxyRaw}`
+      );
+    }
+    const socksProxy = socksProxyRaw.trim();
+    if (socksProxy === '') {
+      throw new ConfigurationError(
+        'Missing required field: transport.socksProxy is required when transport.type is "socks5" (got empty string)'
+      );
+    }
+    // DNS leak prevention: socks5h:// forces DNS resolution through the proxy;
+    // socks5:// resolves DNS locally and would expose .anon destinations.
+    if (!socksProxy.startsWith('socks5h://')) {
+      const safeValue = this.sanitizeProxyForError(socksProxy);
+      throw new ConfigurationError(
+        `transport.socksProxy must use the "socks5h://" scheme to prevent DNS leaks ` +
+          `(socks5h:// forces DNS resolution through the proxy; socks5:// resolves DNS ` +
+          `locally and would expose .anon destinations). Got: "${safeValue}"`
+      );
+    }
+
+    // --- externalUrl ---
+    const externalUrlRaw = raw.externalUrl;
+    if (externalUrlRaw === undefined) {
+      throw new ConfigurationError(
+        'Missing required field: transport.externalUrl is required when transport.type is "socks5"'
+      );
+    }
+    if (typeof externalUrlRaw !== 'string') {
+      throw new ConfigurationError(
+        `Invalid type for transport.externalUrl: expected string, got ${typeof externalUrlRaw}`
+      );
+    }
+    const externalUrl = externalUrlRaw.trim();
+    if (externalUrl === '') {
+      throw new ConfigurationError(
+        'Missing required field: transport.externalUrl is required when transport.type is "socks5" (got empty string)'
+      );
+    }
+    if (!externalUrl.startsWith('ws://') && !externalUrl.startsWith('wss://')) {
+      // Redact `.anon` hidden-service hosts before echoing into the error.
+      const safeExternal = this.sanitizeProxyForError(externalUrl);
+      throw new ConfigurationError(
+        `Invalid transport.externalUrl: must start with ws:// or wss://. Got: "${safeExternal}"`
+      );
+    }
+
+    // --- managed ---
+    const managedRaw = raw.managed;
+    let managed: boolean;
+    if (managedRaw === undefined) {
+      managed = false;
+    } else if (typeof managedRaw === 'boolean') {
+      managed = managedRaw;
+    } else {
+      throw new ConfigurationError(
+        `Invalid type for transport.managed: expected boolean, got ${typeof managedRaw}`
+      );
+    }
+
+    return {
+      type: 'socks5',
+      socksProxy,
+      externalUrl,
+      managed,
+    };
+  }
+
+  /**
+   * Redact sensitive substrings in a URL prior to echoing it in an error
+   * message. Two redaction rules apply, composed in order:
+   *
+   * 1. **Userinfo redaction (always):** any `user:password@` authority
+   *    component is replaced with `<redacted>@`, regardless of whether the
+   *    URL contains `.anon`. Operators sometimes paste fully-formed URLs
+   *    with embedded credentials into YAML; echoing those verbatim into a
+   *    logged error is a credential-disclosure risk.
+   *
+   * 2. **`.anon` redaction (opt-in):** when any substring of the URL
+   *    contains `.anon`, the value is treated as sensitive -- both the
+   *    authority and any path/query/fragment are redacted wholesale. This
+   *    covers:
+   *      - URL form with scheme+authority (`socks5://host.anon:9050`)
+   *      - URL with `.anon` in path (`http://safe/path/leak.anon/...`)
+   *      - Bare `host.anon:port` (no scheme, no `//`)
+   *    In all cases the result collapses to `<redacted>` (or `scheme://<redacted>`
+   *    when a safe scheme prefix can be preserved for operator debuggability).
+   *
+   * Non-`.anon` values without userinfo are returned unchanged (most
+   * misconfigurations are plain `host:port` combos that are safe to log).
+   *
+   * @private
+   */
+  private static sanitizeProxyForError(url: string): string {
+    // Rule 1: redact embedded userinfo even without .anon (credentials leak).
+    // Pattern targets scheme://userinfo@host form specifically to avoid
+    // mangling non-URL content.
+    const sanitized = url.replace(/(\/\/)[^/@\s]+@/, '$1<redacted>@');
+
+    if (!sanitized.includes('.anon')) {
+      return sanitized;
+    }
+
+    // Rule 2: .anon is present somewhere -- redact aggressively.
+    if (sanitized.includes('//')) {
+      // Preserve `scheme://` prefix for operator context, discard everything else.
+      const schemePrefix = sanitized.slice(0, sanitized.indexOf('//') + 2);
+      return `${schemePrefix}<redacted>`;
+    }
+    // Bare host:port form -- no safe substring to preserve; redact wholesale.
+    return '<redacted>';
   }
 }

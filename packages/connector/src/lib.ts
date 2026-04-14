@@ -76,6 +76,7 @@ export type {
   RemovePeerResult,
   IlpSendRequest,
   IlpSendResponse,
+  TransportConfig,
 } from './config/types';
 
 // Re-export settlement types for library consumers
