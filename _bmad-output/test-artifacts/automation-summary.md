@@ -1,133 +1,81 @@
 ---
-workflow: TA (Test Automation)
-mode: YOLO
-inputDocument: _bmad-output/implementation-artifacts/34-10-mina-local-development-infrastructure.md
-generatedFiles:
-  - packages/connector/test/integration/mina-helpers.test.ts (created - 18 tests)
 stepsCompleted:
   - step-01-preflight-and-context
   - step-02-identify-targets
   - step-03-generate-tests
-  - step-04-validate
-  - step-05-summary
-lastStep: step-05-summary
-lastSaved: '2026-03-29'
-stackDetected: backend
-framework: Jest
-language: TypeScript
-runner: ts-jest
+  - step-04-validate-and-summarize
+lastStep: step-04-validate-and-summarize
+lastSaved: '2026-04-13'
+inputDocuments:
+  - _bmad-output/implementation-artifacts/35-2-implement-sockstransportprovider.md
+  - packages/connector/src/transport/socks-transport-provider.ts
+  - packages/connector/src/transport/socks-transport-provider.test.ts
+  - packages/connector/src/transport/transport-provider.ts
+mode: yolo
+scope: Story 35.2 - SocksTransportProvider AC coverage gap fill
 ---
 
-# Test Automation Summary -- Story 34.10
+# Automation Summary: Story 35.2 (SocksTransportProvider)
 
-## Execution Mode
+**Date:** 2026-04-13
+**Mode:** YOLO / BMad-Integrated
+**Objective:** Identify any Story 35.2 acceptance criteria not covered by automated tests, and generate tests to fill those gaps.
 
-**BMad-Integrated** -- Story file provided with 8 acceptance criteria.
+## Preflight
 
-## Story Context
+- Stack detected: backend (Node.js/TypeScript, Jest 29 + ts-jest)
+- Framework verified: connector workspace Jest config + deps present
+- Mode: BMad-Integrated (story artifact provided)
 
-**Story 34.10: Mina Local Development Infrastructure**
-- Epic 34: Mina Protocol Payment Channel Provider
-- Docker Compose service for local Mina lightnet with accounts manager and archive node
-- Makefile targets, CI pipeline integration, readiness helper, lightnet test un-skipping
+## AC-to-Test Traceability (Story 35.2)
 
-## Coverage Analysis
+Test file: `packages/connector/src/transport/socks-transport-provider.test.ts` (23 cases, all passing).
 
-### Existing Tests (Pre-Automation)
+| AC | Summary | Test IDs | Covered |
+|----|---------|----------|---------|
+| AC 1 | `createAgent()` returns `SocksProxyAgent` configured with socks5h:// URL | T-35.2-01 (instance check + host/port) | YES |
+| AC 2 | `getExternalUrl()` returns configured `.anon` URL | T-35.2-02 | YES |
+| AC 3 | Constructor rejects non-`socks5h://` schemes (DNS-leak defense) | T-35.2-05, T-35.6-SEC-03 (9 cases including socks5, http, socks4, empty, non-URL, accept-valid, DNS message, no-.anon-in-error) | YES |
+| AC 4 | `start()` throws when proxy unreachable (FAIL CLOSED) | T-35.2-03, T-35.6-SEC-02 | YES |
+| AC 5 | `start()` resolves when proxy reachable | T-35.2-09 | YES |
+| AC 6 | `healthCheck()` returns true/false, never throws | T-35.2-07, T-35.2-04 | YES |
+| AC 7 | `stop()` safe no-op | T-35.2-08 + safe-after-start | YES |
+| AC 8 | Implements `TransportProvider` interface | T-35.2-10 | YES |
+| AC 9 | `createAgent()` synchronous; fresh per call | T-35.2-06, T-35.2-11 | YES |
+| AC 10 | `.anon` absent from INFO/WARN/ERROR/FATAL logs | T-35.6-SEC-05 (full-lifecycle audit) | YES |
+| AC 11 | Zero regression | Full unit suite (`npm run test:unit` → 2458 pass, 0 fail per story Debug Log) | YES |
 
-**Acceptance tests** in `story-34-10-mina-local-dev-infra.test.ts` (48 tests):
-- AC 1: Docker Compose service definition (13 tests)
-- AC 2: Funded account acquisition helpers exist (5 tests)
-- AC 3: Makefile targets mina-up/down/logs (5 tests)
-- AC 3 (isolation): Mina targets do not reference other profiles (2 tests)
-- AC 4: Lightnet test un-skipped with env gating (6 tests)
-- AC 5: Infra-up/infra-down with all three profiles (2 tests)
-- AC 6: EVM and Solana service regression (4 tests)
-- AC 7: CI pipeline Mina integration job (10 tests)
-- AC 8: Readiness helper structure (8 tests)
-- Documentation: CLAUDE.md and docker-compose comments (5 tests)
+## Gap Analysis
 
-**Integration tests** in `mina-lightnet.test.ts` (5 tests, Docker-gated):
-- Infrastructure connectivity (3 tests)
-- T-34.8-18 archive node event retrieval (1 test)
-- Account distinctness (1 test)
+**Result:** No coverage gaps.
 
-### Gaps Identified
+Every AC in `_bmad-output/implementation-artifacts/35-2-implement-sockstransportprovider.md` has at least one corresponding automated test. All test IDs listed in Task 5 of the story (T-35.2-01..11, plus T-35.6-SEC-02/03/05) are present and passing.
 
-| Gap | AC | Priority | Description |
-|-----|-----|----------|-------------|
-| T-34.10-15 timeout behavior | 8 | P1 | No unit test for waitForMinaReady() timeout with descriptive error |
-| Timeout partial failure reporting | 8 | P1 | No test for partial readiness reporting (one endpoint up, other down) |
-| waitForMinaReady eventual success | 8 | P1 | No test for retry-then-succeed behavior |
-| GraphQL invalid introspection | 8 | P1 | No test for HTTP 200 but invalid schema response |
-| acquireFundedAccount error cases | 2 | P1 | No unit test for HTTP error, missing fields, default balance |
-| releaseFundedAccount graceful degradation | 2 | P1 | No unit test for best-effort cleanup on failure |
-| releaseFundedAccount request format | 2 | P1 | No test verifying PUT method and JSON body format |
-| Constants correctness | 8 | P2 | No test verifying exported constants match story requirements |
+The AC 10 `.anon` log-audit is particularly thorough: it exercises constructor (happy + error), `createAgent` with a `.anon` peer URL, `start()` success + failure, `healthCheck()` both outcomes, and `stop()`, then asserts the serialized args of every `logger.info/warn/error/fatal` call contain no `".anon"` substring.
 
-### Tests Generated
-
-18 new tests in `mina-helpers.test.ts` across 4 describe blocks:
-
-| Block | Tests | Priority | ACs Covered |
-|-------|-------|----------|-------------|
-| Mina helper constants | 4 | P2 | 8 |
-| [T-34.10-15] waitForMinaReady() timeout behavior | 6 | P1 | 8 |
-| acquireFundedAccount() error handling | 5 | P1 | 2 |
-| releaseFundedAccount() graceful degradation | 3 | P1 | 2 |
-
-### Priority Breakdown
-
-| Priority | Count |
-|----------|-------|
-| P1 | 14 |
-| P2 | 4 |
-| **Total** | **18** |
-
-## Test Execution Results
+## Test Execution
 
 ```
+npx jest packages/connector/src/transport/socks-transport-provider.test.ts
 Test Suites: 1 passed, 1 total
-Tests:       18 passed, 18 total
-Time:        ~3.2s
+Tests:       23 passed, 23 total
+Time:        ~1 s
 ```
 
-### Regression Verification
+All assertions pass. No flakiness.
 
-```
-mina-lightnet.test.ts: 5 skipped (no MINA_INTEGRATION set) -- correct behavior
-Lint: Clean (0 errors, 0 warnings)
-```
+## Tests Generated This Run
 
-## Acceptance Criteria Coverage Matrix
+None. The existing suite already satisfies the AC-to-test mapping.
 
-| AC | Description | Pre-Existing | New Tests | Total | Status |
-|----|-------------|-------------|-----------|-------|--------|
-| 1 | Docker Compose Service | 13 | 0 | 13 | Covered |
-| 2 | Funded Account Acquisition | 5 (structural) + 4 (Docker) | 8 | 17 | Covered |
-| 3 | Makefile Targets | 7 | 0 | 7 | Covered |
-| 4 | Lightnet Test Un-Skipped | 6 | 0 | 6 | Covered |
-| 5 | Infra-Up Updated | 2 | 0 | 2 | Covered |
-| 6 | EVM/Solana Regression | 4 | 0 | 4 | Covered |
-| 7 | CI Pipeline | 10 | 0 | 10 | Covered |
-| 8 | Readiness Helper | 8 (structural) | 10 | 18 | Covered |
+## Recommendations (out of scope for 35.2)
 
-**All 8 acceptance criteria now have comprehensive test coverage.**
+1. Integration-level `.anon` log audit at `ConnectorNode` boundary -> deferred to Story 35.6.
+2. Real SOCKS5 handshake / BTP-through-Tor E2E -> deferred to Story 35.6.
+3. Future: probe-socket cleanup under `AbortSignal` if wired in Story 35.4.
 
-## Files Created
+## Status
 
-| File | Action |
-|------|--------|
-| `packages/connector/test/integration/mina-helpers.test.ts` | CREATED -- 18 unit tests for helper functions |
-
-## Definition of Done
-
-- [x] All 8 acceptance criteria covered by automated tests
-- [x] Gap analysis completed for each AC
-- [x] 18 new tests generated to fill coverage gaps
-- [x] All 18 tests pass
-- [x] No regressions in existing test suite
-- [x] Tests follow project patterns (story IDs in describe blocks, Jest conventions, TypeScript strict mode)
-- [x] Priority assigned to all new tests (14 P1, 4 P2)
-- [x] T-34.10-15 (waitForMinaReady timeout) now has dedicated behavioral test coverage
-- [x] Lint clean
+- AC coverage: 11/11 (100%)
+- Unit tests: 23/23 passing
+- Action taken this run: gap analysis only; no new tests required.

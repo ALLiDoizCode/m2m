@@ -112,7 +112,7 @@ epics:
         status: done
       35.2:
         name: "Implement SocksTransportProvider"
-        status: planned
+        status: done
       35.3:
         name: "Extend Config Schema for Transport Block"
         status: planned

@@ -8,3 +8,7 @@
 
 export { type TransportProvider } from './transport-provider';
 export { DirectTransportProvider } from './direct-transport-provider';
+export {
+  SocksTransportProvider,
+  type SocksTransportProviderOptions,
+} from './socks-transport-provider';
