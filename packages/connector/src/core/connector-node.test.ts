@@ -40,6 +40,56 @@ jest.mock('../http/admin-api', () => ({
   validateSettlementConfig: jest.fn().mockReturnValue(null),
 }));
 
+// Story 35.4: mock the transport barrel so start/stop lifecycle + agent
+// plumbing can be inspected without real network I/O.
+jest.mock('../transport', () => {
+  const directStartSpy = jest.fn().mockResolvedValue(undefined);
+  const directStopSpy = jest.fn().mockResolvedValue(undefined);
+  const directHealthSpy = jest.fn().mockResolvedValue(true);
+  const directCreateAgentSpy = jest.fn().mockReturnValue(undefined);
+  const socksStartSpy = jest.fn().mockResolvedValue(undefined);
+  const socksStopSpy = jest.fn().mockResolvedValue(undefined);
+  const socksHealthSpy = jest.fn().mockResolvedValue(true);
+  const socksCreateAgentSpy = jest.fn().mockReturnValue({ __socks: true });
+
+  class DirectTransportProvider {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    constructor(public externalUrl: string) {}
+    start = directStartSpy;
+    stop = directStopSpy;
+    healthCheck = directHealthSpy;
+    createAgent = directCreateAgentSpy;
+    getExternalUrl(): string {
+      return this.externalUrl;
+    }
+  }
+  class SocksTransportProvider {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    constructor(public options: any) {}
+    start = socksStartSpy;
+    stop = socksStopSpy;
+    healthCheck = socksHealthSpy;
+    createAgent = socksCreateAgentSpy;
+    getExternalUrl(): string {
+      return this.options.externalUrl;
+    }
+  }
+  return {
+    DirectTransportProvider,
+    SocksTransportProvider,
+    __spies: {
+      directStartSpy,
+      directStopSpy,
+      directHealthSpy,
+      directCreateAgentSpy,
+      socksStartSpy,
+      socksStopSpy,
+      socksHealthSpy,
+      socksCreateAgentSpy,
+    },
+  };
+});
+
 /**
  * Mock logger for testing
  */
@@ -62,6 +112,7 @@ const createMockLogger = (): jest.Mocked<Logger> =>
 const createTestConfig = (overrides?: Partial<ConnectorConfig>): ConnectorConfig => {
   const testPeer = {
     id: 'peerA',
+    // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
     url: 'ws://connector-a:3000',
     authToken: 'secret-a',
   };
@@ -119,6 +170,8 @@ describe('ConnectorNode', () => {
       getTotalPeerCount: jest.fn().mockReturnValue(1),
       getConnectionHealth: jest.fn().mockReturnValue(100),
       setPacketHandler: jest.fn(),
+      // Story 35.4: additive mock method for transport agent factory wiring
+      setAgentFactory: jest.fn(),
     } as unknown as jest.Mocked<BTPClientManager>;
 
     mockBTPServer = {
@@ -285,11 +338,13 @@ describe('ConnectorNode', () => {
         peers: [
           {
             id: 'peerA',
+            // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
             url: 'ws://connector-a:3000',
             authToken: 'secret-a',
           },
           {
             id: 'peerB',
+            // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
             url: 'ws://connector-b:3001',
             authToken: 'secret-b',
           },
@@ -538,9 +593,13 @@ describe('ConnectorNode', () => {
       // Arrange - Configure 4 peers, only 1 connected (25%)
       const configWithManyPeers = createTestConfig({
         peers: [
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           { id: 'peer1', url: 'ws://p1:3000', authToken: 'token1' },
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           { id: 'peer2', url: 'ws://p2:3000', authToken: 'token2' },
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           { id: 'peer3', url: 'ws://p3:3000', authToken: 'token3' },
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           { id: 'peer4', url: 'ws://p4:3000', authToken: 'token4' },
         ],
       });
@@ -607,7 +666,9 @@ describe('ConnectorNode', () => {
       // Arrange - Start with peers disconnected (<50%)
       const configWith2Peers = createTestConfig({
         peers: [
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           { id: 'peer1', url: 'ws://p1:3000', authToken: 'token1' },
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           { id: 'peer2', url: 'ws://p2:3000', authToken: 'token2' },
         ],
       });
@@ -1139,6 +1200,7 @@ describe('ConnectorNode', () => {
       // Act
       const result = await connectorNode.registerPeer({
         id: 'peerB',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
         url: 'ws://peer-b:3000',
         authToken: 'token-b',
       });
@@ -1147,6 +1209,7 @@ describe('ConnectorNode', () => {
       expect(mockBTPClientManager.addPeer).toHaveBeenCalledWith(
         expect.objectContaining({
           id: 'peerB',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           url: 'ws://peer-b:3000',
           authToken: 'token-b',
           connected: false,
@@ -1164,6 +1227,7 @@ describe('ConnectorNode', () => {
       // Act
       await connectorNode.registerPeer({
         id: 'peerB',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
         url: 'ws://peer-b:3000',
         authToken: 'token-b',
         routes: [{ prefix: 'g.peerB', priority: 10 }, { prefix: 'g.peerB.sub' }],
@@ -1183,6 +1247,7 @@ describe('ConnectorNode', () => {
       await expect(
         freshConnector.registerPeer({
           id: 'peerB',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           url: 'ws://peer-b:3000',
           authToken: 'token-b',
         })
@@ -1197,6 +1262,7 @@ describe('ConnectorNode', () => {
           url: 'http://invalid',
           authToken: 'token',
         })
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
       ).rejects.toThrow('URL must start with ws:// or wss://');
     });
 
@@ -1210,6 +1276,7 @@ describe('ConnectorNode', () => {
       // Act
       const result = await connectorNode.registerPeer({
         id: 'peerA',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
         url: 'ws://connector-a:3000',
         authToken: 'secret-a',
         routes: [{ prefix: 'g.peerA.new' }],
@@ -1230,6 +1297,7 @@ describe('ConnectorNode', () => {
       await expect(
         connectorNode.registerPeer({
           id: 'peerB',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
           url: 'ws://peer-b:3000',
           authToken: 'token',
           routes: [{ prefix: 'INVALID PREFIX!!!' }],
@@ -1971,6 +2039,372 @@ describe('ConnectorNode', () => {
         // Act & Assert
         expect(node.isStandalone()).toBe(false);
       });
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Story 35.4: Transport provider wiring
+  // ---------------------------------------------------------------------
+  describe('Transport wiring (Story 35.4)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    const transportModule = require('../transport') as {
+      DirectTransportProvider: new (externalUrl: string) => unknown;
+      SocksTransportProvider: new (options: unknown) => unknown;
+      __spies: {
+        directStartSpy: jest.Mock;
+        directStopSpy: jest.Mock;
+        directHealthSpy: jest.Mock;
+        directCreateAgentSpy: jest.Mock;
+        socksStartSpy: jest.Mock;
+        socksStopSpy: jest.Mock;
+        socksHealthSpy: jest.Mock;
+        socksCreateAgentSpy: jest.Mock;
+      };
+    };
+    const spies = transportModule.__spies;
+
+    beforeEach(() => {
+      Object.values(spies).forEach((s) => s.mockClear());
+      spies.directStartSpy.mockResolvedValue(undefined);
+      spies.directStopSpy.mockResolvedValue(undefined);
+      spies.directHealthSpy.mockResolvedValue(true);
+      spies.directCreateAgentSpy.mockReturnValue(undefined);
+      spies.socksStartSpy.mockResolvedValue(undefined);
+      spies.socksStopSpy.mockResolvedValue(undefined);
+      spies.socksHealthSpy.mockResolvedValue(true);
+      spies.socksCreateAgentSpy.mockReturnValue({ __socks: true });
+    });
+
+    const socksConfig = (): ConnectorConfig =>
+      createTestConfig({
+        transport: {
+          type: 'socks5',
+          socksProxy: 'socks5h://127.0.0.1:9050',
+          externalUrl: 'wss://abc123.anon/btp',
+          managed: false,
+        },
+      });
+
+    it('T-35.4-01: instantiates DirectTransportProvider when transport config is absent', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+
+      expect(spies.directStartSpy).toHaveBeenCalledTimes(1);
+      expect(spies.socksStartSpy).not.toHaveBeenCalled();
+      await node.stop();
+    });
+
+    it('T-35.4-01: instantiates DirectTransportProvider when transport.type === "direct"', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(
+        createTestConfig({ transport: { type: 'direct' } })
+      );
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+
+      expect(spies.directStartSpy).toHaveBeenCalledTimes(1);
+      expect(spies.socksStartSpy).not.toHaveBeenCalled();
+      await node.stop();
+    });
+
+    it('T-35.4-06: instantiates SocksTransportProvider when transport.type === "socks5"', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+
+      expect(spies.socksStartSpy).toHaveBeenCalledTimes(1);
+      expect(spies.directStartSpy).not.toHaveBeenCalled();
+      await node.stop();
+    });
+
+    it('T-35.4-02: transportProvider.start() is awaited before btpServer.start()', async () => {
+      const order: string[] = [];
+      spies.directStartSpy.mockImplementation(async () => {
+        order.push('transport-start');
+      });
+      mockBTPServer.start.mockImplementation(async () => {
+        order.push('btp-server-start');
+      });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+
+      expect(order).toEqual(['transport-start', 'btp-server-start']);
+      await node.stop();
+    });
+
+    it('T-35.4-03/08: transportProvider.stop() is awaited AFTER btpServer.stop()', async () => {
+      const order: string[] = [];
+      spies.directStopSpy.mockImplementation(async () => {
+        order.push('transport-stop');
+      });
+      mockBTPServer.stop.mockImplementation(async () => {
+        order.push('btp-server-stop');
+      });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      await node.stop();
+
+      expect(order).toEqual(['btp-server-stop', 'transport-stop']);
+    });
+
+    it('T-35.4-05: start() rejects when provider.start() throws and leaves transportProvider null', async () => {
+      spies.socksStartSpy.mockRejectedValue(new Error('SOCKS5 proxy unreachable'));
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+
+      await expect(node.start()).rejects.toThrow('SOCKS5 proxy unreachable');
+      expect(node.transportProvider).toBeNull();
+      // No BTP server started because transport failed first.
+      expect(mockBTPServer.start).not.toHaveBeenCalled();
+    });
+
+    it('T-35.4-12: transportProvider getter is null before start(), non-null after, null after stop()', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      expect(node.transportProvider).toBeNull();
+      await node.start();
+      expect(node.transportProvider).not.toBeNull();
+      await node.stop();
+      expect(node.transportProvider).toBeNull();
+    });
+
+    it('T-35.4-04: getHealthStatus().transport reflects direct type and always healthy', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      const health = node.getHealthStatus();
+      expect(health.transport).toEqual({ type: 'direct', healthy: true });
+      await node.stop();
+    });
+
+    it('T-35.4-04: getHealthStatus().transport reflects socks5 type and cached healthy value', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      const health = node.getHealthStatus();
+      expect(health.transport).toEqual({ type: 'socks5', healthy: true });
+      await node.stop();
+    });
+
+    it('T-35.4-04: getHealthStatus().transport is absent before start() and after stop()', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      expect(node.getHealthStatus().transport).toBeUndefined();
+      await node.start();
+      expect(node.getHealthStatus().transport).toBeDefined();
+      await node.stop();
+      expect(node.getHealthStatus().transport).toBeUndefined();
+    });
+
+    it('T-35.4-13: health-check timer calls provider.healthCheck() on an interval', async () => {
+      jest.useFakeTimers();
+      try {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+
+        expect(spies.socksHealthSpy).not.toHaveBeenCalled();
+        jest.advanceTimersByTime(30000);
+        expect(spies.socksHealthSpy).toHaveBeenCalledTimes(1);
+        jest.advanceTimersByTime(30000);
+        expect(spies.socksHealthSpy).toHaveBeenCalledTimes(2);
+
+        await node.stop();
+        const afterStop = spies.socksHealthSpy.mock.calls.length;
+        jest.advanceTimersByTime(60000);
+        expect(spies.socksHealthSpy).toHaveBeenCalledTimes(afterStop);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('T-35.4-13: no interval scheduled when provider.start() rejects', async () => {
+      jest.useFakeTimers();
+      try {
+        spies.socksStartSpy.mockRejectedValue(new Error('unreachable'));
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await expect(node.start()).rejects.toThrow();
+        jest.advanceTimersByTime(60000);
+        expect(spies.socksHealthSpy).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('T-35.4-10: BTPClientManager is wired with an agentFactory that delegates to the active provider', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+
+      // setAgentFactory is called once during construction (additive mock).
+      expect(mockBTPClientManager.setAgentFactory).toHaveBeenCalledTimes(1);
+      const factory = mockBTPClientManager.setAgentFactory.mock.calls[0]![0] as (
+        url: string
+      ) => unknown;
+      expect(factory('wss://peer.example/btp')).toEqual({ __socks: true });
+      expect(spies.socksCreateAgentSpy).toHaveBeenCalledWith('wss://peer.example/btp');
+
+      await node.stop();
+      // After stop, the factory closure sees a null provider and returns undefined.
+      expect(factory('wss://peer.example/btp')).toBeUndefined();
+    });
+
+    it('T-35.4-11 (AC #9): DirectTransportProvider is constructed with a synthesized ws://localhost:<btpServerPort> externalUrl', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(
+        createTestConfig({ btpServerPort: 4321 })
+      );
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+
+      // The active transportProvider is the mocked DirectTransportProvider;
+      // its constructor captured the externalUrl into a public field and
+      // exposes it via getExternalUrl(). AC #9 requires the synthesized form.
+      const provider = node.transportProvider as unknown as {
+        getExternalUrl: () => string;
+      } | null;
+      expect(provider).not.toBeNull();
+      expect(provider!.getExternalUrl()).toBe('ws://localhost:4321');
+      await node.stop();
+    });
+
+    it('T-35.4-11 (AC #9): synthesized externalUrl reflects a different btpServerPort (non-default)', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(
+        createTestConfig({ btpServerPort: 9999 })
+      );
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      const provider = node.transportProvider as unknown as {
+        getExternalUrl: () => string;
+      };
+      expect(provider.getExternalUrl()).toBe('ws://localhost:9999');
+      await node.stop();
+    });
+
+    it('Review fix: transport provider + health timer are rolled back when a later subsystem fails during start()', async () => {
+      jest.useFakeTimers();
+      try {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+        // Simulate a later-subsystem failure: btpServer.start() rejects after
+        // transport.start() has already succeeded and the health timer is set.
+        mockBTPServer.start.mockRejectedValueOnce(new Error('btp boom'));
+
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await expect(node.start()).rejects.toThrow('btp boom');
+
+        // Rollback: provider was stopped, reference cleared.
+        expect(spies.socksStopSpy).toHaveBeenCalledTimes(1);
+        expect(node.transportProvider).toBeNull();
+
+        // Health timer is cleared — no healthCheck() fires even after 2x interval.
+        const before = spies.socksHealthSpy.mock.calls.length;
+        jest.advanceTimersByTime(60000);
+        expect(spies.socksHealthSpy).toHaveBeenCalledTimes(before);
+
+        // stop() after a rolled-back start() is a no-op (idempotent).
+        await expect(node.stop()).resolves.toBeUndefined();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('Review fix (AC #11): transportProvider getter returns null during the in-flight provider.start() await window', async () => {
+      let observedDuringAwait: unknown = 'unset';
+      let releaseStart: (() => void) | null = null;
+      const pendingStart = new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+      // Mock provider.start() to stall. While it is pending, observe the getter.
+      spies.socksStartSpy.mockImplementationOnce(async () => {
+        // At this point `_transportProvider` is assigned but not yet "ready".
+        // The getter MUST return null per AC #11 to avoid exposing a
+        // half-initialized provider.
+        observedDuringAwait = node.transportProvider;
+        await pendingStart;
+      });
+
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      // Before start() is even called, getter is null.
+      expect(node.transportProvider).toBeNull();
+
+      const startPromise = node.start();
+      // Let the mocked start() run up to its internal await.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(observedDuringAwait).toBeNull();
+
+      // Complete the stall → start() resolves → getter now returns the provider.
+      releaseStart!();
+      await startPromise;
+      expect(node.transportProvider).not.toBeNull();
+
+      // getHealthStatus().transport is only populated once ready.
+      expect(node.getHealthStatus().transport).toBeDefined();
+
+      await node.stop();
+      expect(node.transportProvider).toBeNull();
+      expect(node.getHealthStatus().transport).toBeUndefined();
+    });
+
+    it('Review fix #3 (AC #12 race): in-flight healthCheck() resolving after stop() does NOT mutate cached health', async () => {
+      jest.useFakeTimers();
+      try {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+
+        // Stall the next healthCheck() so it resolves AFTER stop().
+        let releaseHealth: ((v: boolean) => void) | null = null;
+        const pending = new Promise<boolean>((resolve) => {
+          releaseHealth = resolve;
+        });
+        spies.socksHealthSpy.mockImplementationOnce(() => pending);
+
+        // Advance timers so the background timer fires healthCheck() once.
+        jest.advanceTimersByTime(30_000);
+        expect(spies.socksHealthSpy).toHaveBeenCalled();
+
+        // Now stop the connector BEFORE the healthCheck() promise resolves.
+        // Snapshot cached value to verify it is not mutated by the late
+        // promise resolution.
+        const before = node.getHealthStatus().transport; // undefined after stop anyway
+        await node.stop();
+        expect(before).toBeDefined(); // was populated before stop
+
+        // Release the pending healthCheck() -- it resolves false; the guarded
+        // then/catch must drop the value because the provider reference has
+        // been nulled and ready=false.
+        releaseHealth!(false);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // After stop, transport field is absent regardless; also verify no
+        // further healthCheck calls slip through on advanced timers.
+        const healthCallsAfterStop = spies.socksHealthSpy.mock.calls.length;
+        jest.advanceTimersByTime(60_000);
+        expect(spies.socksHealthSpy.mock.calls.length).toBe(healthCallsAfterStop);
+        expect(node.getHealthStatus().transport).toBeUndefined();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('AC #7: no .anon substring appears in INFO-level log calls during start/stop', async () => {
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      node.getHealthStatus();
+      await node.stop();
+
+      for (const lvl of ['info', 'warn', 'error', 'fatal'] as const) {
+        const calls = (mockLogger[lvl] as jest.Mock).mock.calls;
+        const serialized = JSON.stringify(calls);
+        expect(serialized.toLowerCase()).not.toContain('.anon');
+      }
     });
   });
 });

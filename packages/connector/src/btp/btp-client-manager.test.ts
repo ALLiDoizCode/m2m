@@ -32,6 +32,7 @@ const createMockLogger = (): jest.Mocked<Logger> =>
  */
 const createTestPeer = (id: string, overrides?: Partial<Peer>): Peer => ({
   id,
+  // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
   url: `ws://connector-${id}:3000`,
   authToken: `secret-${id}`,
   connected: false,
@@ -767,6 +768,72 @@ describe('BTPClientManager', () => {
 
       // Assert
       expect(connected).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Story 35.4: agentFactory forwarding + .anon redaction
+  // ---------------------------------------------------------------------
+  describe('Transport agentFactory + .anon redaction (Story 35.4)', () => {
+    const createMockBTPClient = (): jest.Mocked<BTPClient> =>
+      ({
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        sendPacket: jest.fn(),
+        get isConnected() {
+          return true;
+        },
+        on: jest.fn(),
+        setPacketHandler: jest.fn(),
+      }) as unknown as jest.Mocked<BTPClient>;
+
+    it('T-35.4-10: forwards the agentFactory to every BTPClient it constructs', async () => {
+      const factory = jest.fn().mockReturnValue(undefined);
+      const mgr = new BTPClientManager('test-node', mockLogger);
+      mgr.setAgentFactory(factory);
+      MockedBTPClient.mockImplementation(() => createMockBTPClient());
+
+      await mgr.addPeer(createTestPeer('p1'));
+      await mgr.addPeer(createTestPeer('p2'));
+      await mgr.addPeer(createTestPeer('p3'));
+
+      expect(MockedBTPClient).toHaveBeenCalledTimes(3);
+      for (const callArgs of MockedBTPClient.mock.calls) {
+        // With agentFactory set, manager calls the 5-arg constructor form:
+        //   new BTPClient(peer, nodeId, logger, undefined, factory)
+        expect(callArgs.length).toBeGreaterThanOrEqual(5);
+        expect(callArgs[4]).toBe(factory);
+      }
+    });
+
+    it('T-35.4-10: preserves the pre-Epic-35 3-arg BTPClient constructor shape when no factory is set', async () => {
+      const mgr = new BTPClientManager('test-node', mockLogger);
+      MockedBTPClient.mockImplementation(() => createMockBTPClient());
+
+      await mgr.addPeer(createTestPeer('p1'));
+      expect(MockedBTPClient).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'p1' }),
+        'test-node',
+        mockLogger
+      );
+    });
+
+    it('AC #7: .anon URLs are redacted in INFO-level log entries from addPeer', async () => {
+      const mgr = new BTPClientManager('test-node', mockLogger);
+      MockedBTPClient.mockImplementation(() => createMockBTPClient());
+      const peer: Peer = {
+        id: 'anonPeer',
+        url: 'wss://abc123.anon/btp',
+        authToken: 'secret',
+        connected: false,
+        lastSeen: new Date(),
+      };
+      await mgr.addPeer(peer);
+
+      for (const lvl of ['info', 'warn', 'error', 'fatal'] as const) {
+        const calls = (mockLogger[lvl] as jest.Mock).mock.calls;
+        expect(JSON.stringify(calls).toLowerCase()).not.toContain('.anon');
+      }
     });
   });
 });

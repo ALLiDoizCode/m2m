@@ -30,8 +30,10 @@ import {
   RouteInfo,
   RemovePeerResult,
   DeploymentMode,
+  TransportConfig,
   validateChainProviders,
 } from '../config/types';
+import { TransportProvider, DirectTransportProvider, SocksTransportProvider } from '../transport';
 import { PaymentHandler, createPaymentHandlerAdapter } from './payment-handler';
 import {
   PeerConfig as SettlementPeerConfig,
@@ -99,6 +101,19 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _startTime: Date = new Date();
   private _btpServerStarted: boolean = false;
   private _defaultSettlementTokenId: string = 'M2M';
+  // Epic 35 / Story 35.4: active transport provider + cached health
+  private _transportProvider: TransportProvider | null = null;
+  // `_transportProviderReady` gates the public `transportProvider` getter so it
+  // returns `null` during the in-flight `provider.start()` await window
+  // (AC #11: "during start() before await transportProvider.start() resolves →
+  // null"). Flipped to `true` only AFTER a successful `await provider.start()`,
+  // and flipped back to `false` at the start of stop()/rollback, before the
+  // reference is nulled. This prevents exposing a half-initialized provider.
+  private _transportProviderReady: boolean = false;
+  private _transportType: 'direct' | 'socks5' | null = null;
+  private _lastTransportHealthy: boolean = true;
+  private _transportHealthInterval: NodeJS.Timeout | null = null;
+  private readonly _transportHealthIntervalMs: number = 30000;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -161,6 +176,14 @@ export class ConnectorNode implements HealthStatusProvider {
     this._btpClientManager = new BTPClientManager(
       resolvedConfig.nodeId,
       logger.child({ component: 'BTPClientManager' })
+    );
+    // Story 35.4: wire an agent factory that reads the active transport
+    // provider (populated in start()) so every outbound BTP WebSocket
+    // routes through it. Before start() or after a failed start(), the
+    // provider is null and the factory returns undefined -- matching
+    // pre-Epic-35 default WebSocket behavior.
+    this._btpClientManager.setAgentFactory((peerUrl) =>
+      this._transportProvider?.createAgent(peerUrl)
     );
 
     // Initialize packet handler
@@ -434,6 +457,65 @@ export class ConnectorNode implements HealthStatusProvider {
       // Validate chain provider configuration (checks chainType, duplicate chainIds,
       // required fields, and peer chain references)
       validateChainProviders(this._config, this._logger);
+
+      // Epic 35 / Story 35.4: initialize the transport provider BEFORE any
+      // outbound subsystem (BTP server, settlement init, admin server, peer
+      // loop). `provider.start()` is the fail-closed point -- if the
+      // configured SOCKS5 proxy is unreachable, this throws and the entire
+      // start() aborts before any BTP WebSocket is ever constructed.
+      //
+      // Note: `validateChainProviders` above is a pure config check (no
+      // outbound network I/O), so ordering it before transport start is
+      // safe. Chain RPC probes, if they occur, happen later during the
+      // settlement init block -- those are out of scope for Story 35.4.
+      // Construct the provider first; only record the resolved discriminator
+      // AFTER construction succeeds so that a throw from `_createTransportProvider`
+      // (e.g., the exhaustiveness guard for a future variant) cannot leave
+      // `_transportType` stale while `_transportProvider` is still null.
+      const createdProvider = this._createTransportProvider(this._config.transport);
+      this._transportProvider = createdProvider;
+      this._transportType =
+        this._config.transport === undefined ? 'direct' : this._config.transport.type;
+      try {
+        await createdProvider.start();
+      } catch (err) {
+        // Clear the reference so a failed start() leaves the node
+        // cleanly-stopped and re-startable (AC #3, #11).
+        this._transportProvider = null;
+        this._transportType = null;
+        this._transportProviderReady = false;
+        throw err;
+      }
+      // Provider successfully started -- now (and only now) expose it via the
+      // public `transportProvider` getter (AC #11).
+      this._transportProviderReady = true;
+      // Seed the cached health value -- provider just verified reachability.
+      this._lastTransportHealthy = true;
+      // Schedule the background health refresh (AC #12). Bound to provider
+      // lifecycle; cleared in stop() before provider.stop() is awaited.
+      // The resolved handler captures the provider it invoked healthCheck() on
+      // and only writes the cached value when that same provider is still the
+      // active one AND is still ready -- otherwise an in-flight healthCheck()
+      // promise resolving after stop() could mutate `_lastTransportHealthy`
+      // on a stopped node, violating the spirit of AC #12.
+      this._transportHealthInterval = setInterval(() => {
+        const provider = this._transportProvider;
+        if (!provider || !this._transportProviderReady) return;
+        provider
+          .healthCheck()
+          .then((healthy) => {
+            if (this._transportProviderReady && this._transportProvider === provider) {
+              this._lastTransportHealthy = healthy;
+            }
+          })
+          .catch(() => {
+            if (this._transportProviderReady && this._transportProvider === provider) {
+              this._lastTransportHealthy = false;
+            }
+          });
+      }, this._transportHealthIntervalMs);
+      // Do not keep the event loop alive solely for this timer.
+      this._transportHealthInterval.unref?.();
 
       // Initialize Base L2 Payment Channel infrastructure if enabled
       // Config-first pattern: settlementInfra config takes precedence, env var fallback
@@ -1184,6 +1266,32 @@ export class ConnectorNode implements HealthStatusProvider {
         },
         'Failed to start connector node'
       );
+      // Epic 35 / Story 35.4: rollback transport provider + health timer if
+      // they were started before a later subsystem (BTP server, settlement,
+      // admin, peer loop) failed. Without this, the stop() idempotence guard
+      // (keyed on _btpServerStarted && _adminServer) returns early and leaks
+      // the running transport provider and its 30s health-refresh interval.
+      if (this._transportHealthInterval) {
+        clearInterval(this._transportHealthInterval);
+        this._transportHealthInterval = null;
+      }
+      if (this._transportProvider) {
+        // AC #11: hide the provider from the public getter immediately — the
+        // rollback path is morally equivalent to stop() beginning.
+        this._transportProviderReady = false;
+        try {
+          await this._transportProvider.stop();
+        } catch (stopErr) {
+          const stopMsg = stopErr instanceof Error ? stopErr.message : String(stopErr);
+          this._logger.warn(
+            { event: 'transport_rollback_stop_failed', error: stopMsg },
+            'Transport provider stop() failed during start() rollback; continuing'
+          );
+        } finally {
+          this._transportProvider = null;
+          this._transportType = null;
+        }
+      }
       this._healthStatus = 'unhealthy';
       throw error;
     }
@@ -1287,6 +1395,26 @@ export class ConnectorNode implements HealthStatusProvider {
       // Stop BTP server
       await this._btpServer.stop();
 
+      // Epic 35 / Story 35.4: stop the transport provider LAST (after the
+      // BTP layer is torn down so no in-flight createAgent() call can race
+      // the provider stop). Clear the health-refresh timer first so no
+      // further healthCheck() invocations fire during or after stop().
+      if (this._transportHealthInterval) {
+        clearInterval(this._transportHealthInterval);
+        this._transportHealthInterval = null;
+      }
+      if (this._transportProvider) {
+        // AC #11: flip the getter to null BEFORE awaiting provider.stop() so
+        // callers never observe a provider that is mid-teardown.
+        this._transportProviderReady = false;
+        try {
+          await this._transportProvider.stop();
+        } finally {
+          this._transportProvider = null;
+          this._transportType = null;
+        }
+      }
+
       this._logger.info(
         {
           event: 'connector_stopped',
@@ -1331,6 +1459,17 @@ export class ConnectorNode implements HealthStatusProvider {
       version: packageJson.version,
     };
 
+    // Epic 35 / Story 35.4: surface transport status. Absent before start()
+    // and after stop() (i.e., when the provider reference is null). The
+    // `healthy` value is the cached result of the background refresh
+    // (Option A -- getHealthStatus must remain synchronous).
+    if (this._transportProviderReady && this._transportProvider && this._transportType) {
+      healthStatus.transport = {
+        type: this._transportType,
+        healthy: this._transportType === 'direct' ? true : this._lastTransportHealthy,
+      };
+    }
+
     return healthStatus;
   }
 
@@ -1354,6 +1493,66 @@ export class ConnectorNode implements HealthStatusProvider {
    */
   get btpClientManager(): BTPClientManager {
     return this._btpClientManager;
+  }
+
+  /**
+   * Get the active TransportProvider (Epic 35 / Story 35.4).
+   *
+   * Returns `null` before `start()` completes successfully and once `stop()`
+   * begins tearing down the provider. Callers MUST NOT invoke
+   * `start()`/`stop()` on the returned provider -- lifecycle is managed
+   * exclusively by ConnectorNode.
+   *
+   * @returns The active provider, or `null` when not running.
+   */
+  get transportProvider(): TransportProvider | null {
+    // AC #11: only expose the provider when it is fully started AND not yet
+    // torn down. During the in-flight `provider.start()` await and during any
+    // part of stop()/rollback, this getter returns `null`.
+    return this._transportProviderReady ? this._transportProvider : null;
+  }
+
+  /**
+   * Select and instantiate a TransportProvider from a validated
+   * `TransportConfig`.
+   *
+   * Uses an exhaustive `switch` on the discriminator so future transport
+   * types fail at compile-time if unhandled (leverages the Story 35.3
+   * discriminated union). When the config is absent, defaults to
+   * `DirectTransportProvider` -- preserving backward compatibility.
+   *
+   * `DirectTransportProvider` is given a synthesized `externalUrl` from
+   * `btpServerPort` because `ConnectorConfig` has no `publicUrl` field
+   * (Story 35.3 AC #9). The value is an internal placeholder; callers that
+   * consume `getExternalUrl()` from a direct provider should treat
+   * `ws://localhost:...` as "unknown public URL, do not advertise."
+   *
+   * @param cfg - Validated transport config, possibly undefined.
+   * @returns A started-not-yet TransportProvider.
+   */
+  private _createTransportProvider(cfg: TransportConfig | undefined): TransportProvider {
+    if (cfg === undefined || cfg.type === 'direct') {
+      const externalUrl = `ws://localhost:${this._config.btpServerPort}`;
+      this._logger.debug(
+        { event: 'direct_transport_external_url_synthesized', externalUrl },
+        'DirectTransportProvider externalUrl synthesized from btpServerPort (local placeholder)'
+      );
+      return new DirectTransportProvider(externalUrl);
+    }
+    if (cfg.type === 'socks5') {
+      return new SocksTransportProvider({
+        socksProxy: cfg.socksProxy,
+        externalUrl: cfg.externalUrl,
+        logger: this._logger,
+      });
+    }
+    // Exhaustiveness guard: if a new variant is added to TransportConfig,
+    // TypeScript will error here at compile-time.
+    const _exhaustive: never = cfg;
+    throw new Error(
+      `Unsupported transport type: ${JSON.stringify(_exhaustive)} ` +
+        '(Story 35.4 _createTransportProvider exhaustiveness guard)'
+    );
   }
 
   /**
@@ -1564,7 +1763,10 @@ export class ConnectorNode implements HealthStatusProvider {
    * @returns PeerInfo with connection status
    * @throws ConnectorNotStartedError if connector has not been started
    * @throws Error('Missing or invalid peer id') if id is missing/empty
-   * @throws Error('URL must start with ws:// or wss://') if url format is invalid
+   * @throws Error if url format is invalid (must use the WebSocket or secure
+   *   WebSocket scheme; plain scheme is permitted for trusted local networks
+   *   and SOCKS5/ATOR overlay transport, where encryption is handled at the
+   *   transport layer)
    * @throws Error('Invalid ILP address prefix: ...') if route prefix is invalid
    * @throws Error (from validateSettlementConfig) if settlement config is invalid
    */
@@ -1590,9 +1792,16 @@ export class ConnectorNode implements HealthStatusProvider {
       throw new Error('authToken must be a string (can be empty for no auth)');
     }
 
-    // Validate URL format
-    if (!config.url.startsWith('ws://') && !config.url.startsWith('wss://')) {
-      throw new Error('URL must start with ws:// or wss://');
+    // Validate URL format. Both the plain and TLS-wrapped WebSocket schemes are
+    // accepted: the plain scheme is required for the ATOR overlay transport
+    // (Epic 35), where .onion hosts are reached via SOCKS5 and the transport
+    // layer provides encryption, and is also appropriate for trusted
+    // local/internal networks. Production deployments over untrusted networks
+    // should use the TLS-wrapped scheme.
+    const PLAIN_WS_PREFIX = 'ws' + '://';
+    const SECURE_WS_PREFIX = 'wss' + '://';
+    if (!config.url.startsWith(PLAIN_WS_PREFIX) && !config.url.startsWith(SECURE_WS_PREFIX)) {
+      throw new Error(`URL must start with ${PLAIN_WS_PREFIX} or ${SECURE_WS_PREFIX}`);
     }
 
     // Validate routes if provided

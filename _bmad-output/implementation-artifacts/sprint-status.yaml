@@ -118,7 +118,7 @@ epics:
         status: done
       35.4:
         name: "Wire TransportProvider into ConnectorNode and BTP Client"
-        status: planned
+        status: done
       35.5:
         name: "Managed ATOR Client Lifecycle (Optional)"
         status: planned

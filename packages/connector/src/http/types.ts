@@ -61,6 +61,27 @@ export interface HealthStatus {
     /** Number of active WebSocket connections */
     wsConnections: number;
   };
+
+  /**
+   * Optional transport status (Epic 35 / Story 35.4).
+   *
+   * Populated only when the connector has been started successfully and the
+   * active TransportProvider has completed its own `start()`. The `healthy`
+   * value reflects the CACHED result of the most recent background
+   * `healthCheck()` refresh (approximately every 30s) -- `getHealthStatus()`
+   * is synchronous and must not await a live probe. Absent before `start()`
+   * and after `stop()`.
+   *
+   * - `type: 'direct'` -- `healthy` is always `true`
+   * - `type: 'socks5'` -- `healthy` reflects the last SOCKS5 proxy probe
+   *   (false if the probe failed or the proxy is unreachable)
+   */
+  transport?: {
+    /** Active transport type from config. */
+    type: 'direct' | 'socks5';
+    /** Cached health probe result; false after an unexpected rejection. */
+    healthy: boolean;
+  };
 }
 
 /**

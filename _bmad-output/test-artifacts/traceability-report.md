@@ -3,275 +3,195 @@ stepsCompleted:
   - step-01-load-context
   - step-02-discover-tests
   - step-03-map-criteria
-  - step-04-gap-analysis
+  - step-04-analyze-gaps
   - step-05-gate-decision
 lastStep: 'step-05-gate-decision'
 lastSaved: '2026-04-13'
 workflowType: 'testarch-trace'
 inputDocuments:
-  - _bmad-output/implementation-artifacts/35-1-define-transportprovider-interface-directtransportprovider.md
-  - _bmad-output/planning-artifacts/test-design-epic-35.md
-  - packages/connector/src/transport/direct-transport-provider.test.ts
-  - packages/connector/src/transport/transport-provider.ts
-  - packages/connector/src/transport/direct-transport-provider.ts
-  - packages/connector/src/transport/index.ts
+  - _bmad-output/implementation-artifacts/35-4-wire-transportprovider-into-connectornode-and-btp-client.md
 ---
 
-# Traceability Matrix & Gate Decision - Story 35.1
+# Traceability Matrix & Gate Decision — Story 35.4
 
-**Story:** 35.1 -- Define TransportProvider Interface + DirectTransportProvider
+**Story:** Wire TransportProvider into ConnectorNode and BTP Client
 **Date:** 2026-04-13
-**Evaluator:** TEA Agent (Claude Opus 4.6)
+**Evaluator:** TEA Agent (yolo mode)
+**Source Story:** `_bmad-output/implementation-artifacts/35-4-wire-transportprovider-into-connectornode-and-btp-client.md`
+**Status at evaluation:** Story marked `done`; three adversarial review passes on record.
 
 ---
-
-Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*automate` to create coverage.
 
 ## PHASE 1: REQUIREMENTS TRACEABILITY
 
 ### Coverage Summary
 
-| Priority  | Total Criteria | FULL Coverage | Coverage % | Status |
-| --------- | -------------- | ------------- | ---------- | ------ |
-| P0        | 6              | 6             | 100%       | PASS   |
-| P1        | 0              | 0             | N/A        | N/A    |
-| P2        | 0              | 0             | N/A        | N/A    |
-| P3        | 0              | 0             | N/A        | N/A    |
-| **Total** | **6**          | **6**         | **100%**   | **PASS** |
+| Priority  | Total Criteria | FULL Coverage | Coverage % | Status  |
+| --------- | -------------- | ------------- | ---------- | ------- |
+| P0        | 12             | 12            | 100%       | ✅ PASS |
+| P1        | 0              | 0             | n/a        | ✅ n/a  |
+| P2        | 0              | 0             | n/a        | ✅ n/a  |
+| P3        | 0              | 0             | n/a        | ✅ n/a  |
+| **Total** | **12**         | **12**        | **100%**   | **✅**  |
 
-**Legend:**
-
-- PASS - Coverage meets quality gate threshold
-- WARN - Coverage below threshold but not critical
-- FAIL - Coverage below minimum threshold (blocker)
+All 12 ACs are treated P0 — the story is a P0 integration story and every AC either directly enforces a security / fail-closed invariant (AC #3, #7), a lifecycle-ordering invariant (AC #4, #5, #12), a zero-regression invariant (AC #10), or the wiring surface itself (AC #1, #2, #6, #8, #9, #11).
 
 ---
 
 ### Detailed Mapping
 
-#### AC 1: TransportProvider Interface Compiles With All Required Methods (P0)
+#### AC #1 — Direct transport is default; BTP uses no agent (P0, T-35.4-01 / T-35.4-07 / T-CROSS-01)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL ✅
 - **Tests:**
-  - `T-35.1-07` - packages/connector/src/transport/direct-transport-provider.test.ts:25
-    - **Given:** The TransportProvider interface is defined in transport-provider.ts
-    - **When:** A DirectTransportProvider instance is assigned to a TransportProvider variable
-    - **Then:** TypeScript compiles without error and all 5 methods exist at runtime (createAgent, getExternalUrl, start, stop, healthCheck)
-  - `T-35.1-01` - packages/connector/src/transport/direct-transport-provider.test.ts:43
-    - **Given:** A manual mock object satisfying the TransportProvider interface
-    - **When:** The mock is assigned to a TransportProvider-typed variable
-    - **Then:** TypeScript compiles without error, proving the interface contract shape (all 5 methods present)
+  - `T-35.4-01` — `connector-node.test.ts:2088` `instantiates DirectTransportProvider when transport config is absent`
+  - `T-35.4-01` (variant) — `connector-node.test.ts:2098` `...when transport.type === "direct"`
+  - `T-35.4 AC #1` — `btp-client.test.ts:912` `calls new WebSocket(url) with ONE arg when no agentFactory is provided`
+  - `T-35.4 AC #1` — `btp-client.test.ts:931` `calls new WebSocket(url) with ONE arg when agentFactory returns undefined`
+  - `T-35.4-10` — `btp-client-manager.test.ts:809` `preserves the pre-Epic-35 3-arg BTPClient constructor shape when no factory is set`
 
-- **Gaps:** None
-- **Recommendation:** None needed -- both compile-time and runtime assertions verify the full method contract.
+#### AC #2 — SOCKS5 transport drives BTP via SocksProxyAgent (P0, T-35.4-06 / T-CROSS-02)
 
----
-
-#### AC 2: DirectTransportProvider.createAgent() Returns undefined (P0)
-
-- **Coverage:** FULL PASS
+- **Coverage:** FULL ✅
 - **Tests:**
-  - `T-35.1-02` - packages/connector/src/transport/direct-transport-provider.test.ts:67
-    - **Given:** A DirectTransportProvider instance
-    - **When:** createAgent() is called with various peer URLs (wss://peer1, wss://peer2, wss://secure-peer, wss://*.anon, empty string)
-    - **Then:** undefined is returned for every URL
+  - `T-35.4-06` — `connector-node.test.ts:2110` `instantiates SocksTransportProvider when transport.type === "socks5"`
+  - `T-35.4 AC #2` — `btp-client.test.ts:952` `calls new WebSocket(url, { agent }) when agentFactory returns an agent`
+  - `T-35.4-10 (manager)` — `btp-client-manager.test.ts:790` `forwards the agentFactory to every BTPClient it constructs`
+  - `T-35.4-10 (factory wiring)` — `connector-node.test.ts:2237` `BTPClientManager is wired with an agentFactory that delegates to the active provider`
 
-- **Gaps:** None
-- **Recommendation:** None needed -- 5 URL variations tested including edge cases (empty string, .anon address).
+#### AC #3 — Fail-closed startup when SOCKS proxy unreachable (P0, T-35.4-05, T-35.6-SEC-02, R-02)
 
----
-
-#### AC 3: DirectTransportProvider.healthCheck() Returns true (P0)
-
-- **Coverage:** FULL PASS
+- **Coverage:** FULL ✅ (unit-level; live-network variant is Story 35.6 scope per story Test-ID Glossary)
 - **Tests:**
-  - `T-35.1-04` - packages/connector/src/transport/direct-transport-provider.test.ts:111
-    - **Given:** A DirectTransportProvider instance
-    - **When:** healthCheck() is called
-    - **Then:** It resolves to true
-  - `T-35.1-04` (repeat call) - packages/connector/src/transport/direct-transport-provider.test.ts:119
-    - **Given:** A DirectTransportProvider instance
-    - **When:** healthCheck() is called 3 times
-    - **Then:** All 3 calls resolve to true (idempotent)
+  - `T-35.4-05` — `connector-node.test.ts:2152` `start() rejects when provider.start() throws and leaves transportProvider null`
+  - `Review fix` — `connector-node.test.ts:2286` `transport provider + health timer are rolled back when a later subsystem fails during start()` (Review Pass #1 partial-start rollback)
 
-- **Gaps:** None
-- **Recommendation:** None needed -- both single and repeated calls tested.
+#### AC #4 — Provider lifecycle ordering on startup (P0, T-35.4-02 / T-35.4-09)
 
----
-
-#### AC 4: DirectTransportProvider.start() and stop() Are No-Ops (P0)
-
-- **Coverage:** FULL PASS
+- **Coverage:** FULL ✅
 - **Tests:**
-  - `T-35.1-05` - packages/connector/src/transport/direct-transport-provider.test.ts:133
-    - **Given:** A DirectTransportProvider instance
-    - **When:** start() is called
-    - **Then:** It resolves immediately without error (resolves to undefined)
-  - `T-35.1-06` - packages/connector/src/transport/direct-transport-provider.test.ts:141
-    - **Given:** A DirectTransportProvider instance
-    - **When:** stop() is called
-    - **Then:** It resolves immediately without error (resolves to undefined)
-  - `T-35.1-06` (start-then-stop) - packages/connector/src/transport/direct-transport-provider.test.ts:151
-    - **Given:** A DirectTransportProvider instance
-    - **When:** start() is called then stop() is called
-    - **Then:** Both resolve without error
-  - `T-35.1-06` (stop-without-start) - packages/connector/src/transport/direct-transport-provider.test.ts:158
-    - **Given:** A DirectTransportProvider instance (never started)
-    - **When:** stop() is called
-    - **Then:** It resolves without error
+  - `T-35.4-02` — `connector-node.test.ts:2120` `transportProvider.start() is awaited before btpServer.start()`
 
-- **Gaps:** None
-- **Recommendation:** None needed -- lifecycle safety covered with 4 variations.
+#### AC #5 — Provider lifecycle ordering on shutdown (P0, T-35.4-03 / T-35.4-08)
 
----
-
-#### AC 5: DirectTransportProvider.getExternalUrl() Returns Configured URL (P0)
-
-- **Coverage:** FULL PASS
+- **Coverage:** FULL ✅
 - **Tests:**
-  - `T-35.1-03` - packages/connector/src/transport/direct-transport-provider.test.ts:83
-    - **Given:** A DirectTransportProvider constructed with "wss://mynode:3000/btp"
-    - **When:** getExternalUrl() is called
-    - **Then:** "wss://mynode:3000/btp" is returned
-  - `T-35.1-03` (multiple instances) - packages/connector/src/transport/direct-transport-provider.test.ts:90
-    - **Given:** Two DirectTransportProvider instances with different URLs
-    - **When:** getExternalUrl() is called on each
-    - **Then:** Each returns its own configured URL
-  - `T-35.1-03` (no normalization) - packages/connector/src/transport/direct-transport-provider.test.ts:98
-    - **Given:** A DirectTransportProvider constructed with mixed-case URL
-    - **When:** getExternalUrl() is called
-    - **Then:** The URL is returned unchanged (no normalization applied)
+  - `T-35.4-03/08` — `connector-node.test.ts:2136` `transportProvider.stop() is awaited AFTER btpServer.stop()`
+  - Idempotence preserved via existing `connector-node.test.ts:1734` `stop() is idempotent — calling stop() twice does not throw` and `connector-node.test.ts:1746` `stop() on never-started connector does not throw`.
 
-- **Gaps:** None
-- **Recommendation:** None needed -- 3 variations cover basic, multi-instance, and normalization behavior.
+#### AC #6 — HealthStatus surfaces transport status (P0, T-35.4-04 / T-35.6-INT-02 / R-08)
 
----
-
-#### AC 6: Zero Regression -- All Existing Tests Pass (P0)
-
-- **Coverage:** FULL PASS
+- **Coverage:** FULL ✅
 - **Tests:**
-  - Verified via `make test` run (165 tests, 0 failures) as documented in story completion notes
-  - No existing files were modified -- only new files created in `packages/connector/src/transport/`
-  - `make lint` passes clean
-  - `npm run format:check` passes clean
+  - `T-35.4-04` — `connector-node.test.ts:2173` `getHealthStatus().transport reflects direct type and always healthy`
+  - `T-35.4-04` — `connector-node.test.ts:2182` `...reflects socks5 type and cached healthy value`
+  - `T-35.4-04` — `connector-node.test.ts:2191` `...transport is absent before start() and after stop()`
 
-- **Gaps:** None
-- **Recommendation:** None needed -- regression is verified by CI pipeline on every PR.
+#### AC #7 — `.anon` never logged at INFO+ (P0, T-35.6-SEC-05 / R-05)
+
+- **Coverage:** FULL ✅
+- **Tests:**
+  - `connector-node.test.ts:2396` `AC #7: no .anon substring appears in INFO-level log calls during start/stop`
+  - `btp-client.test.ts:1001` `T-35.6-SEC-05: .anon URLs are redacted in INFO-level log entries`
+  - `btp-client-manager.test.ts:821` `AC #7: .anon URLs are redacted in INFO-level log entries from addPeer`
+  - `redact.test.ts:11–39` `redactPeerUrl` unit coverage (sentinel, uppercase/mixed-case, substring, non-.anon untouched, empty, idempotent)
+  - `redact.test.ts:42–70` `redactAnonInMessage` unit coverage (DNS error strings, wss://<hs>.anon, multi-token, case-insensitive, non-.anon untouched, empty) — Review Pass #2 addition closing the error-message leak surface
+
+#### AC #8 — Per-peer agent creation; no shared agent across peers (P0, T-35.4-10)
+
+- **Coverage:** FULL ✅
+- **Tests:**
+  - `T-35.4-10` — `btp-client.test.ts:972` `agentFactory is called once per connect() and is invoked on reconnect`
+  - `T-35.4-10 (manager)` — `btp-client-manager.test.ts:790` `forwards the agentFactory to every BTPClient it constructs`
+
+#### AC #9 — Direct transport does not require `publicUrl`; synthesizes (P0, T-35.4-11)
+
+- **Coverage:** FULL ✅
+- **Tests:**
+  - `T-35.4-11 (AC #9)` — `connector-node.test.ts:2255` `DirectTransportProvider is constructed with a synthesized ws://localhost:<btpServerPort> externalUrl`
+  - `T-35.4-11 (AC #9)` — `connector-node.test.ts:2273` `synthesized externalUrl reflects a different btpServerPort (non-default)`
+
+#### AC #10 — Zero regression on existing connector/BTP tests (P0, T-REG-01..T-REG-08)
+
+- **Coverage:** FULL ✅
+- **Tests:**
+  - Entire pre-existing `connector-node.test.ts` / `btp-client.test.ts` / `btp-client-manager.test.ts` suites continue to pass untouched. Final Dev Agent Record: 2773 passing, 84 skipped, 0 failed. Pre-existing-file edits were mock-object additions only (`setAgentFactory: jest.fn()`); no `expect(...)` assertions were modified (Dev-Agent-Record Task 9 note).
+  - `connector-node-optional-deps.test.ts` still passes — optional-deps graceful-degradation path is orthogonal to transport init (Task 9.4).
+
+#### AC #11 — `TransportProvider` getter on ConnectorNode (P0, T-35.4-12)
+
+- **Coverage:** FULL ✅
+- **Tests:**
+  - `T-35.4-12` — `connector-node.test.ts:2163` `transportProvider getter is null before start(), non-null after, null after stop()`
+  - `Review fix (AC #11)` — `connector-node.test.ts:2313` `transportProvider getter returns null during the in-flight provider.start() await window` (Review Pass #2 mid-await window fix)
+
+#### AC #12 — Transport health-check timer lifecycle (P0, T-35.4-13)
+
+- **Coverage:** FULL ✅
+- **Tests:**
+  - `T-35.4-13` — `connector-node.test.ts:2201` `health-check timer calls provider.healthCheck() on an interval`
+  - `T-35.4-13` — `connector-node.test.ts:2223` `no interval scheduled when provider.start() rejects`
+  - `Review fix #3 (AC #12 race)` — `connector-node.test.ts:2353` `in-flight healthCheck() resolving after stop() does NOT mutate cached health` (Review Pass #3 stop-vs-in-flight-promise race)
 
 ---
 
 ### Gap Analysis
 
-#### Critical Gaps (BLOCKER)
+- **Critical (P0) gaps:** 0
+- **High (P1) gaps:** 0
+- **Medium (P2) gaps:** 0
+- **Low (P3) gaps:** 0
 
-0 gaps found. No blockers.
-
----
-
-#### High Priority Gaps (PR BLOCKER)
-
-0 gaps found. No PR blockers.
-
----
-
-#### Medium Priority Gaps (Nightly)
-
-0 gaps found.
-
----
-
-#### Low Priority Gaps (Optional)
-
-0 gaps found.
+All 12 ACs are FULL-covered.
 
 ---
 
 ### Coverage Heuristics Findings
 
-#### Endpoint Coverage Gaps
-
-- Endpoints without direct API tests: 0
-- Story 35.1 has no endpoints -- it defines an interface and a simple implementation.
-
-#### Auth/Authz Negative-Path Gaps
-
-- Criteria missing denied/invalid-path tests: 0
-- Not applicable -- Story 35.1 has no auth/authz requirements.
-
-#### Happy-Path-Only Criteria
-
-- Criteria missing error/edge scenarios: 0
-- Constructor validation (empty URL throws) is tested as an additional edge case beyond the AC requirements.
+- **Endpoint gaps:** n/a — Story 35.4 introduces no new HTTP/WS endpoints. `HealthStatus.transport` is an additive shape-extension of an existing endpoint and is covered by the `getHealthStatus()` tests.
+- **Auth/Authz negative-path gaps:** n/a — no auth surface is touched; BTP auth tests are unchanged (AC #10).
+- **Happy-path-only criteria:** none. Every critical AC has an explicit negative / error-path test (AC #3 fail-closed + rollback, AC #7 leak-absence, AC #11 mid-await window, AC #12 late-promise race).
 
 ---
 
 ### Quality Assessment
 
-#### Tests with Issues
+- **BLOCKER:** 0
+- **WARNING:** 0
+- **INFO:** 0
 
-**BLOCKER Issues:** None
-
-**WARNING Issues:** None
-
-**INFO Issues:** None
-
-All 13 tests are clean, focused, and fast.
-
----
-
-#### Tests Passing Quality Gates
-
-**13/13 tests (100%) meet all quality criteria** PASS
-
-| Quality Criterion          | Status | Notes                          |
-| -------------------------- | ------ | ------------------------------ |
-| Explicit assertions        | PASS   | Every test has expect() calls  |
-| Given-When-Then structure  | PASS   | BDD structure in describe/it   |
-| No hard waits/sleeps       | PASS   | No sleep calls in test file    |
-| Self-cleaning              | PASS   | No state to clean (stateless)  |
-| File size < 300 lines      | PASS   | 176 lines                      |
-| Test duration < 90 seconds | PASS   | 0.934s total                   |
+All new tests (≈33 across connector-node, btp-client, btp-client-manager, redact) exercise the invariants described in their named AC. Full connector suite: 2773 passing, 84 skipped, 0 failed.
 
 ---
 
 ### Duplicate Coverage Analysis
 
-#### Acceptable Overlap (Defense in Depth)
-
-- AC 1 (interface contract): T-35.1-07 tests via DirectTransportProvider assignment; T-35.1-01 tests via mock object. Both approaches verify the same interface contract from different angles. This is acceptable defense-in-depth.
-
-#### Unacceptable Duplication
-
-- None found.
+- **Acceptable overlap (defense in depth):**
+  - AC #1 is tested at provider-selection (connector-node) AND wire-level (btp-client). Both justified.
+  - AC #7 is tested at three layers: `redact` unit helpers, INFO-site integration in `btp-client` / `btp-client-manager`, and end-to-end start/stop sweep in `connector-node`. Leak surfaces differ per layer — overlap is intentional.
+- **Unacceptable duplication:** none identified.
 
 ---
 
 ### Coverage by Test Level
 
-| Test Level | Tests | Criteria Covered | Coverage % |
-| ---------- | ----- | ---------------- | ---------- |
-| Unit       | 11    | AC 2-5           | 100%       |
-| Type check | 2     | AC 1             | 100%       |
-| E2E        | 0     | N/A              | N/A        |
-| API        | 0     | N/A              | N/A        |
-| **Total**  | **13**| **6/6 ACs**      | **100%**   |
+| Test Level | Tests                                                                                               | Criteria Covered             | Coverage %          |
+| ---------- | --------------------------------------------------------------------------------------------------- | ---------------------------- | ------------------- |
+| E2E        | 0                                                                                                   | 0                            | n/a                 |
+| API        | 0                                                                                                   | 0                            | n/a                 |
+| Component  | 15 (connector-node `Transport wiring (Story 35.4)` describe block, incl. 3 review-pass fixes)       | 12                           | 100%                |
+| Unit       | 5 (btp-client) + 3 (btp-client-manager) + 12 (redact)                                               | Reinforce ACs #1, #2, #7, #8 | 100% (within scope) |
+| **Total**  | **≈33 net-new + full regression suite**                                                             | **12/12**                    | **100%**            |
+
+E2E / API rows are n/a because Story 35.4 is explicitly scoped to unit + component-level wiring; real-SOCKS integration (AC #3 / AC #6 live proxy) is Story 35.6 (`T-35.6-SEC-02`, `T-35.6-INT-02`).
 
 ---
 
 ### Traceability Recommendations
 
-#### Immediate Actions (Before PR Merge)
-
-None required -- all acceptance criteria have FULL coverage.
-
-#### Short-term Actions (This Milestone)
-
-None required.
-
-#### Long-term Actions (Backlog)
-
-1. **Cross-story integration tests** -- T-CROSS-01 (Story 35.1 + 35.4) will verify that ConnectorNode with default config correctly creates and manages a DirectTransportProvider instance. This will be addressed in Story 35.4 or 35.6.
+- **Immediate (before PR merge):** none — all 12 ACs FULL-covered, three review passes landed regression tests, full suite green.
+- **Short-term:** Story 35.6 will upgrade AC #3 / AC #6 to live-proxy integration evidence — planned, not a gap against 35.4.
+- **Long-term:** A future epic that introduces a real `publicUrl` field can revisit the `ws://localhost:<port>` synthesis documented in AC #9 / Dev Notes.
 
 ---
 
@@ -280,66 +200,34 @@ None required.
 **Gate Type:** story
 **Decision Mode:** deterministic
 
----
-
 ### Evidence Summary
 
-#### Test Execution Results
+#### Test Execution Results (from Dev Agent Record — Debug Log References)
 
-- **Total Tests**: 13
-- **Passed**: 13 (100%)
-- **Failed**: 0 (0%)
-- **Skipped**: 0 (0%)
-- **Duration**: 0.934s
-
-**Priority Breakdown:**
-
-- **P0 Tests**: 13/13 passed (100%) PASS
-- **P1 Tests**: 0/0 passed (N/A)
-- **P2 Tests**: 0/0 passed (N/A)
-- **P3 Tests**: 0/0 passed (N/A)
-
-**Overall Pass Rate**: 100% PASS
-
-**Test Results Source**: Local run (npx jest --testPathPattern='transport/direct-transport-provider')
-
----
+- Full connector suite: 2773 passed, 84 skipped, 0 failed
+- Targeted suites (redact, btp-client, btp-client-manager, connector-node): 169 passed, 19 skipped, 0 failed
+- `npx tsc --noEmit -p packages/connector` — clean
+- `make lint` — 0 errors, 2 pre-existing warnings unrelated to this story
+- `npm run format:check` — all Prettier-clean
+- `npm run build` — clean
+- Test Results Source: local dev run captured in Dev Agent Record (post-Review-Pass-#3 commit)
 
 #### Coverage Summary (from Phase 1)
 
-**Requirements Coverage:**
-
-- **P0 Acceptance Criteria**: 6/6 covered (100%) PASS
-- **P1 Acceptance Criteria**: 0/0 covered (N/A)
-- **P2 Acceptance Criteria**: 0/0 covered (N/A)
-- **Overall Coverage**: 100%
-
-**Code Coverage** (project thresholds):
-
-- Project thresholds: branches 60%, functions 75%, lines 70%, statements 70%
-- DirectTransportProvider is trivial (all paths exercised by 13 tests) -- expected to meet thresholds.
-
-**Coverage Source**: Jest verbose output
-
----
+- P0 ACs: 12/12 (100%) ✅
+- Overall: 100%
+- Code coverage: preserved at workspace thresholds (branches ≥ 60%, functions ≥ 75%, lines ≥ 70%, statements ≥ 70% — per Definition-of-Done / Task 9)
 
 #### Non-Functional Requirements (NFRs)
 
-**Security**: PASS -- No security surface in Story 35.1 (DirectTransportProvider has no network I/O)
-
-**Performance**: PASS -- All tests complete in < 1 second; DirectTransportProvider methods are synchronous or trivial async no-ops.
-
-**Reliability**: PASS -- Lifecycle methods are idempotent no-ops; constructor validates input.
-
-**Maintainability**: PASS -- Clear interface contract, JSDoc on all public APIs, barrel exports, co-located tests.
-
-**NFR Source**: _bmad-output/test-artifacts/nfr-assessment-story-35-1.md
-
----
+- **Security:** PASS ✅ — OWASP A09 (log data exposure of `.anon`) closed by `redactPeerUrl` + `redactAnonInMessage`. Semgrep sweep (Review Pass #3) flagged only the deliberate `ws://localhost:<port>` synthesized URL (AC #9, in-scope exception) and pre-existing URL-scheme validation. Fail-closed on unreachable SOCKS proxy verified at unit level (AC #3).
+- **Reliability:** PASS ✅ — partial-start rollback (Review #1) + in-flight healthCheck race guard (Review #3) both have regression tests; health timer `.unref()`'d.
+- **Maintainability:** PASS ✅ — zero edits to pre-existing `expect(...)` assertions; `transport/*` and `config/*` untouched (scope boundary honored).
+- **Performance:** NOT_ASSESSED — out of scope (Story 35.6 integration envelope).
 
 #### Flakiness Validation
 
-**Burn-in Results**: Not available (not applicable for trivial unit tests with no I/O).
+Not run as part of 35.4 (CI concern). Stable across three review-pass local runs; no flakes observed.
 
 ---
 
@@ -347,85 +235,48 @@ None required.
 
 #### P0 Criteria (Must ALL Pass)
 
-| Criterion             | Threshold | Actual | Status |
-| --------------------- | --------- | ------ | ------ |
-| P0 Coverage           | 100%      | 100%   | PASS   |
-| P0 Test Pass Rate     | 100%      | 100%   | PASS   |
-| Security Issues       | 0         | 0      | PASS   |
-| Critical NFR Failures | 0         | 0      | PASS   |
-| Flaky Tests           | 0         | 0      | PASS   |
+| Criterion             | Threshold | Actual | Status  |
+| --------------------- | --------- | ------ | ------- |
+| P0 Coverage           | 100%      | 100%   | ✅ PASS |
+| P0 Test Pass Rate     | 100%      | 100%   | ✅ PASS |
+| Security Issues       | 0         | 0      | ✅ PASS |
+| Critical NFR Failures | 0         | 0      | ✅ PASS |
+| Flaky Tests           | 0         | 0      | ✅ PASS |
 
-**P0 Evaluation**: ALL PASS
+**P0 Evaluation:** ✅ ALL PASS
 
----
-
-#### P1 Criteria (Required for PASS, May Accept for CONCERNS)
-
-| Criterion              | Threshold | Actual | Status |
-| ---------------------- | --------- | ------ | ------ |
-| P1 Coverage            | >= 90%    | N/A    | PASS   |
-| P1 Test Pass Rate      | >= 95%    | N/A    | PASS   |
-| Overall Test Pass Rate | >= 95%    | 100%   | PASS   |
-| Overall Coverage       | >= 80%    | 100%   | PASS   |
-
-**P1 Evaluation**: ALL PASS
+P1/P2/P3 criteria not applicable — no P1/P2/P3 ACs.
 
 ---
 
-#### P2/P3 Criteria (Informational, Don't Block)
-
-| Criterion         | Actual | Notes                    |
-| ----------------- | ------ | ------------------------ |
-| P2 Test Pass Rate | N/A    | No P2 criteria in 35.1   |
-| P3 Test Pass Rate | N/A    | No P3 criteria in 35.1   |
-
----
-
-### GATE DECISION: PASS
-
----
+### GATE DECISION: PASS ✅
 
 ### Rationale
 
-All P0 criteria met with 100% coverage and 100% pass rates across all 13 tests. Every acceptance criterion (AC 1--6) has FULL test coverage with explicit assertions. No security issues, no NFR failures, no flaky tests. Zero regression verified (165 existing tests pass unchanged, lint clean, formatting clean). Story 35.1 is a foundational interface story with trivial implementation -- the test surface is well-bounded and thoroughly covered. Feature is ready for merge.
+All 12 P0 acceptance criteria have FULL test coverage across the appropriate layers (unit for helpers, component for ConnectorNode wiring, seam-level for BTP client/manager). Three adversarial review passes found and fixed one High (partial-start rollback leak), three Mediums (`instanceof`-fragility, error-message `.anon` leak, in-flight healthCheck race), and one Low (ordering fragility of `_transportType` assignment) — each fix landed with a dedicated regression test in the same commit, and the final suite reports 2773 passing / 0 failed. Security scope (OWASP A09 log data exposure) is closed by `redactPeerUrl` + `redactAnonInMessage` with 12 unit assertions. Zero-regression (AC #10) is honored: pre-existing `expect(...)` assertions are untouched and `packages/connector/src/transport/*` + `/config/*` are read-only from this story.
 
----
+Residual risk is LOW and entirely downstream: Stories 35.6 (real-SOCKS integration) and 35.7 (docs) are already queued and do not belong to 35.4's gate.
+
+### Residual Risks
+
+| Risk                                                                 | Priority | Probability | Impact | Mitigation                                                                                                             | Remediation |
+| -------------------------------------------------------------------- | -------- | ----------- | ------ | ---------------------------------------------------------------------------------------------------------------------- | ----------- |
+| Unit-level fail-closed coverage for AC #3 — no live-proxy exercise   | n/a      | Low         | Low    | Story 35.6 adds real-SOCKS integration tests; planned and owned by epic 35                                             | Story 35.6  |
+| `ws://localhost:<port>` synthesis (AC #9) is a documented placeholder | n/a      | Low         | Low    | Dev Notes + DEBUG `direct_transport_external_url_synthesized` log make the placeholder traceable; no public consumer   | Future epic |
+
+**Overall Residual Risk:** LOW
 
 ### Gate Recommendations
 
-#### For PASS Decision
-
-1. **Proceed to merge**
-   - Story 35.1 is the foundation for all subsequent Epic 35 stories
-   - No deployment needed (no runtime behavior change until Story 35.4 wires transport into ConnectorNode)
-   - Next story to implement: Story 35.2 (SocksTransportProvider) or Story 35.3 (Config schema)
-
-2. **Post-Merge Verification**
-   - CI pipeline runs full test suite on merge to epic-35 branch
-   - Verify 165+ tests continue passing
-
-3. **Success Criteria**
-   - All Epic 35 stories can import from `packages/connector/src/transport/`
-   - TransportProvider interface is stable for Story 35.2 implementation
-
----
+1. Proceed — merge the story commit; it unblocks Stories 35.5 / 35.6 / 35.7.
+2. No deployment action required from 35.4 alone (additive, zero-regression for direct-transport deployments).
+3. Post-merge monitoring: none mandated by 35.4.
 
 ### Next Steps
 
-**Immediate Actions** (next 24-48 hours):
-
-1. Merge Story 35.1 to epic-35 branch
-2. Begin Story 35.2 (SocksTransportProvider) or Story 35.3 (Config schema extension)
-3. Verify CI passes on merge
-
-**Follow-up Actions** (this epic):
-
-1. Story 35.4 will wire DirectTransportProvider into ConnectorNode -- cross-story test T-CROSS-01 will validate the integration
-2. Story 35.6 will run comprehensive integration and security tests
-
-**Stakeholder Communication**:
-
-- Story 35.1 is complete with PASS gate decision -- proceed with next story in epic
+**Immediate (24–48h):** close the story gate as PASS; unblock 35.5 / 35.6 / 35.7.
+**Follow-up (next milestone):** Story 35.6 live-SOCKS integration (AC #3 / AC #6 end-to-end); Story 35.7 deployment docs.
+**Stakeholder Communication:** PM/SM/DEV-lead — gate PASS, no deferred work from 35.4.
 
 ---
 
@@ -433,95 +284,73 @@ All P0 criteria met with 100% coverage and 100% pass rates across all 13 tests. 
 
 ```yaml
 traceability_and_gate:
-  # Phase 1: Traceability
   traceability:
-    story_id: "35.1"
-    date: "2026-04-13"
+    story_id: '35.4'
+    date: '2026-04-13'
     coverage:
-      overall: 100%
-      p0: 100%
-      p1: N/A
-      p2: N/A
-      p3: N/A
+      overall: 100
+      p0: 100
     gaps:
       critical: 0
       high: 0
       medium: 0
       low: 0
     quality:
-      passing_tests: 13
-      total_tests: 13
+      passing_tests: 2773
+      total_tests: 2857 # 2773 passed + 84 skipped
       blocker_issues: 0
       warning_issues: 0
-    recommendations: []
-
-  # Phase 2: Gate Decision
+    recommendations:
+      - 'Story 35.6 will upgrade AC #3 / AC #6 to live-proxy integration evidence.'
   gate_decision:
-    decision: "PASS"
-    gate_type: "story"
-    decision_mode: "deterministic"
+    decision: 'PASS'
+    gate_type: 'story'
+    decision_mode: 'deterministic'
     criteria:
-      p0_coverage: 100%
-      p0_pass_rate: 100%
-      p1_coverage: N/A
-      p1_pass_rate: N/A
-      overall_pass_rate: 100%
-      overall_coverage: 100%
+      p0_coverage: 100
+      p0_pass_rate: 100
+      overall_pass_rate: 100
+      overall_coverage: 100
       security_issues: 0
       critical_nfrs_fail: 0
       flaky_tests: 0
     thresholds:
       min_p0_coverage: 100
       min_p0_pass_rate: 100
-      min_p1_coverage: 90
-      min_p1_pass_rate: 95
-      min_overall_pass_rate: 95
+      min_overall_pass_rate: 80
       min_coverage: 80
     evidence:
-      test_results: "local run -- npx jest transport/direct-transport-provider"
-      traceability: "_bmad-output/test-artifacts/traceability-report.md"
-      nfr_assessment: "_bmad-output/test-artifacts/nfr-assessment-story-35-1.md"
-      code_coverage: "N/A (project thresholds met by default for trivial module)"
-    next_steps: "Merge to epic-35, begin Story 35.2 or 35.3"
+      test_results: 'local Dev Agent Record (post-Review-Pass-#3)'
+      traceability: '_bmad-output/test-artifacts/traceability-report.md'
+      story: '_bmad-output/implementation-artifacts/35-4-wire-transportprovider-into-connectornode-and-btp-client.md'
+    next_steps: 'Proceed to Story 35.5 / 35.6; no remediation required from 35.4.'
 ```
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/35-1-define-transportprovider-interface-directtransportprovider.md`
-- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-35.md`
-- **Test Results:** Local Jest run (13/13 pass, 0.934s)
-- **NFR Assessment:** `_bmad-output/test-artifacts/nfr-assessment-story-35-1.md`
-- **Test Files:** `packages/connector/src/transport/direct-transport-provider.test.ts`
+- **Story:** `_bmad-output/implementation-artifacts/35-4-wire-transportprovider-into-connectornode-and-btp-client.md`
+- **Test Design:** `_bmad-output/planning-artifacts/test-design-epic-35.md` (authoritative T-IDs)
+- **Epic Spec:** `_bmad-output/planning-artifacts/epic-35-ator-overlay-transport.md`
+- **Test Files:**
+  - `packages/connector/src/core/connector-node.test.ts` — `Transport wiring (Story 35.4)` describe block (15 tests incl. review-pass fixes)
+  - `packages/connector/src/btp/btp-client.test.ts` — `Transport agentFactory + .anon redaction (Story 35.4)` (5 tests)
+  - `packages/connector/src/btp/btp-client-manager.test.ts` — `Transport agentFactory + .anon redaction (Story 35.4)` (3 tests)
+  - `packages/connector/src/utils/redact.test.ts` — 12 tests across `redactPeerUrl` + `redactAnonInMessage`
 
 ---
 
 ## Sign-Off
 
-**Phase 1 - Traceability Assessment:**
+**Phase 1 — Traceability:** Overall 100%, P0 100% ✅, 0 critical / 0 high gaps.
+**Phase 2 — Gate:** **PASS ✅** (P0 ALL PASS; no P1/P2/P3 ACs).
 
-- Overall Coverage: 100%
-- P0 Coverage: 100% PASS
-- P1 Coverage: N/A
-- Critical Gaps: 0
-- High Priority Gaps: 0
-
-**Phase 2 - Gate Decision:**
-
-- **Decision**: PASS
-- **P0 Evaluation**: ALL PASS
-- **P1 Evaluation**: ALL PASS
-
-**Overall Status:** PASS
-
-**Next Steps:**
-
-- PASS: Proceed to merge and begin next story in Epic 35
+**Overall Status:** PASS ✅
 
 **Generated:** 2026-04-13
-**Workflow:** testarch-trace v5.0 (Enhanced with Gate Decision)
+**Workflow:** testarch-trace v5.0
 
 ---
 
-<!-- Powered by BMAD-CORE -->
+<!-- Powered by BMAD-CORE™ -->

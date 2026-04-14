@@ -904,4 +904,117 @@ describe('BTPClient', () => {
       await expect(client.sendPacket(preparePacket)).rejects.toThrow(BTPConnectionError);
     });
   });
+
+  // ---------------------------------------------------------------------
+  // Story 35.4: agentFactory + .anon log redaction
+  // ---------------------------------------------------------------------
+  describe('Transport agentFactory + .anon redaction (Story 35.4)', () => {
+    it('T-35.4 AC #1: calls new WebSocket(url) with ONE arg when no agentFactory is provided', async () => {
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      const peer = createTestPeer('peerNoAgent', 'ws://peer.example/btp');
+      const c = new BTPClient(peer, 'test-node', mockLogger);
+
+      const connectPromise = c.connect();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      expect(WebSocket).toHaveBeenCalledWith('ws://peer.example/btp');
+      // Abort cleanly
+      mockWs.simulateOpen();
+      await new Promise((resolve) => setImmediate(resolve));
+      const authMsg = parseBTPMessage(mockWs.sentMessages[0]!);
+      mockWs.simulateMessage(serializeBTPMessage(createAuthResponse(authMsg.requestId)));
+      await connectPromise;
+      await c.disconnect();
+    });
+
+    it('T-35.4 AC #1: calls new WebSocket(url) with ONE arg when agentFactory returns undefined', async () => {
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      const peer = createTestPeer('peerDirect', 'ws://peer.example/btp');
+      const factory = jest.fn().mockReturnValue(undefined);
+      const c = new BTPClient(peer, 'test-node', mockLogger, undefined, factory);
+
+      const connectPromise = c.connect();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      expect(factory).toHaveBeenCalledWith('ws://peer.example/btp');
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      expect(WebSocket).toHaveBeenCalledWith('ws://peer.example/btp');
+      mockWs.simulateOpen();
+      await new Promise((resolve) => setImmediate(resolve));
+      const authMsg = parseBTPMessage(mockWs.sentMessages[0]!);
+      mockWs.simulateMessage(serializeBTPMessage(createAuthResponse(authMsg.requestId)));
+      await connectPromise;
+      await c.disconnect();
+    });
+
+    it('T-35.4 AC #2: calls new WebSocket(url, { agent }) when agentFactory returns an agent', async () => {
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      const peer = createTestPeer('peerSocks', 'ws://peer.example/btp');
+      const sentinel = { __agent: true } as unknown as import('http').Agent;
+      const factory = jest.fn().mockReturnValue(sentinel);
+      const c = new BTPClient(peer, 'test-node', mockLogger, undefined, factory);
+
+      const connectPromise = c.connect();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      expect(WebSocket).toHaveBeenCalledWith('ws://peer.example/btp', { agent: sentinel });
+      mockWs.simulateOpen();
+      await new Promise((resolve) => setImmediate(resolve));
+      const authMsg = parseBTPMessage(mockWs.sentMessages[0]!);
+      mockWs.simulateMessage(serializeBTPMessage(createAuthResponse(authMsg.requestId)));
+      await connectPromise;
+      await c.disconnect();
+    });
+
+    it('T-35.4-10: agentFactory is called once per connect() and is invoked on reconnect', async () => {
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      const peer = createTestPeer('peerReconnect', 'ws://peer.example/btp');
+      const factory = jest.fn().mockReturnValue(undefined);
+      const c = new BTPClient(peer, 'test-node', mockLogger, undefined, factory);
+
+      // First connect
+      const p1 = c.connect();
+      await new Promise((resolve) => setImmediate(resolve));
+      mockWs.simulateOpen();
+      await new Promise((resolve) => setImmediate(resolve));
+      const authMsg = parseBTPMessage(mockWs.sentMessages[0]!);
+      mockWs.simulateMessage(serializeBTPMessage(createAuthResponse(authMsg.requestId)));
+      await p1;
+      expect(factory).toHaveBeenCalledTimes(1);
+
+      // Disconnect + reconnect
+      await c.disconnect();
+      const p2 = c.connect();
+      await new Promise((resolve) => setImmediate(resolve));
+      mockWs.simulateOpen();
+      await new Promise((resolve) => setImmediate(resolve));
+      const authMsg2 = parseBTPMessage(mockWs.sentMessages[0]!);
+      mockWs.simulateMessage(serializeBTPMessage(createAuthResponse(authMsg2.requestId)));
+      await p2;
+      expect(factory).toHaveBeenCalledTimes(2);
+      await c.disconnect();
+    });
+
+    it('T-35.6-SEC-05: .anon URLs are redacted in INFO-level log entries', async () => {
+      const peer = createTestPeer('peerAnon', 'wss://abc123.anon/btp');
+      const c = new BTPClient(peer, 'test-node', mockLogger);
+
+      const connectPromise = c.connect();
+      await new Promise((resolve) => setImmediate(resolve));
+      mockWs.simulateOpen();
+      await new Promise((resolve) => setImmediate(resolve));
+      const authMsg = parseBTPMessage(mockWs.sentMessages[0]!);
+      mockWs.simulateMessage(serializeBTPMessage(createAuthResponse(authMsg.requestId)));
+      await connectPromise;
+
+      for (const lvl of ['info', 'warn', 'error', 'fatal'] as const) {
+        const calls = (mockLogger[lvl] as jest.Mock).mock.calls;
+        expect(JSON.stringify(calls).toLowerCase()).not.toContain('.anon');
+      }
+      await c.disconnect();
+    });
+  });
 });
