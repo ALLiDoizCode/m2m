@@ -124,7 +124,7 @@ epics:
         status: done
       35.6:
         name: "Unit and Integration Tests"
-        status: planned
+        status: done
       35.7:
         name: "Documentation — Deployment Guide and Config Reference"
         status: planned

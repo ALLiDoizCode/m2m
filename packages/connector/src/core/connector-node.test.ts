@@ -63,9 +63,15 @@ jest.mock('../transport', () => {
       return this.externalUrl;
     }
   }
+  const socksCtorSpy = jest.fn();
   class SocksTransportProvider {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    constructor(public options: any) {}
+    constructor(public options: any) {
+      // Story 35.6 T-35.6-INT-06 (AC 11): a spy on the constructor itself
+      // lets the regression anchor assert "SocksTransportProvider
+      // constructor is never called" literally, matching the AC wording.
+      socksCtorSpy(options);
+    }
     start = socksStartSpy;
     stop = socksStopSpy;
     healthCheck = socksHealthSpy;
@@ -113,6 +119,7 @@ jest.mock('../transport', () => {
       socksStopSpy,
       socksHealthSpy,
       socksCreateAgentSpy,
+      socksCtorSpy,
       managedStartSpy,
       managedStopSpy,
       managedHealthSpy,
@@ -2091,6 +2098,7 @@ describe('ConnectorNode', () => {
         socksStopSpy: jest.Mock;
         socksHealthSpy: jest.Mock;
         socksCreateAgentSpy: jest.Mock;
+        socksCtorSpy: jest.Mock;
         managedStartSpy: jest.Mock;
         managedStopSpy: jest.Mock;
         managedHealthSpy: jest.Mock;
@@ -2507,6 +2515,86 @@ describe('ConnectorNode', () => {
         await node.start();
         const provider = node.transportProvider as unknown as { options: Record<string, unknown> };
         expect(provider.options.managedClient).toBeDefined();
+        await node.stop();
+      });
+    });
+
+    // ------------------------------------------------------------------------
+    // Story 35.6 — Transport health-check interval seam + regression anchors
+    //
+    // These tests append coverage for:
+    //   - The optional 3rd ctor param `transportHealthIntervalMs` introduced
+    //     by Story 35.6 (Task 4.2) as the single production-code seam for the
+    //     mid-session proxy-failure integration test.
+    //   - T-35.6-INT-06 (AC 11): direct-mode regression anchor — verify that
+    //     when no transport block is configured, `SocksTransportProvider` is
+    //     NEVER constructed (spy-based, as required by the AC literal).
+    //   - T-35.6-INT-02 (AC 7): getHealthStatus() surfaces the transport
+    //     block shape required by the HealthStatus contract.
+    // ------------------------------------------------------------------------
+    describe('Story 35.6 — transport health interval seam + regression anchors', () => {
+      it('T-35.6-INT-03 seam: constructor accepts optional transportHealthIntervalMs', () => {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+        // Two-arg form (pre-35.6) still works.
+        const defaultNode = new ConnectorNode(testConfigPath, mockLogger);
+        expect(defaultNode).toBeDefined();
+        // Three-arg form accepts the override without throwing.
+        const tunedNode = new ConnectorNode(testConfigPath, mockLogger, {
+          transportHealthIntervalMs: 100,
+        });
+        expect(tunedNode).toBeDefined();
+        // Access the private field through an unchecked cast — no public
+        // getter exists and we do not want to introduce one for tests alone.
+        const tunedInterval = (tunedNode as unknown as { _transportHealthIntervalMs: number })
+          ._transportHealthIntervalMs;
+        const defaultInterval = (defaultNode as unknown as { _transportHealthIntervalMs: number })
+          ._transportHealthIntervalMs;
+        expect(tunedInterval).toBe(100);
+        expect(defaultInterval).toBe(30000);
+      });
+
+      it('T-35.6-INT-06 (AC 11): default config does NOT construct SocksTransportProvider', async () => {
+        // AC 11 literal: "SocksTransportProvider constructor is never called
+        // -- verify via spy". The mocked `../transport` barrel exposes
+        // `socksCtorSpy`, which fires inside the mocked class constructor.
+        // start/createAgent spies are still asserted defensively — if the
+        // constructor ever sneaks through, those paths must also stay cold.
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        expect(spies.socksCtorSpy).not.toHaveBeenCalled();
+        expect(spies.socksStartSpy).not.toHaveBeenCalled();
+        expect(spies.socksCreateAgentSpy).not.toHaveBeenCalled();
+        expect(spies.managedCtorSpy).not.toHaveBeenCalled();
+        expect(spies.directStartSpy).toHaveBeenCalledTimes(1);
+        await node.stop();
+      });
+
+      it('T-35.6-INT-02 (AC 7): getHealthStatus() includes a transport block after start()', async () => {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(createTestConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        const status = node.getHealthStatus();
+        // HealthStatus contract (src/http/types.ts) — transport block must be
+        // populated once the provider is ready. Direct transport is always
+        // reported healthy (no remote hop to probe).
+        expect(status.transport).toBeDefined();
+        expect(status.transport?.type).toBe('direct');
+        expect(status.transport?.healthy).toBe(true);
+        await node.stop();
+      });
+
+      it('T-35.6-INT-02 (AC 7): socks5 config reports transport.type=socks5 in health status', async () => {
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(socksConfig());
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        const status = node.getHealthStatus();
+        expect(status.transport?.type).toBe('socks5');
+        // Initial cached health is `true` (set at the end of a successful
+        // provider.start()); the background refresh interval is what flips
+        // it to false on proxy failure — covered by the in-process SOCKS5
+        // integration test.
+        expect(status.transport?.healthy).toBe(true);
         await node.stop();
       });
     });

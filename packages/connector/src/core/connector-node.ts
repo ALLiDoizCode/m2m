@@ -123,7 +123,12 @@ export class ConnectorNode implements HealthStatusProvider {
   private _transportType: 'direct' | 'socks5' | null = null;
   private _lastTransportHealthy: boolean = true;
   private _transportHealthInterval: NodeJS.Timeout | null = null;
-  private readonly _transportHealthIntervalMs: number = 30000;
+  // Epic 35 / Story 35.6 T-35.6-INT-03: transport health-check interval (ms).
+  // Default 30s matches Story 35.4 wiring. Optional constructor override lets
+  // integration tests shrink the cadence to sub-second so the mid-session
+  // proxy-down assertion fires in CI-acceptable time without reaching into
+  // private state. This is the ONLY production-code seam Story 35.6 introduces.
+  private readonly _transportHealthIntervalMs: number;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -139,7 +144,15 @@ export class ConnectorNode implements HealthStatusProvider {
    * @param logger - Pino logger instance
    * @throws ConfigurationError if configuration is invalid
    */
-  constructor(config: ConnectorConfig | string, logger: Logger) {
+  constructor(
+    config: ConnectorConfig | string,
+    logger: Logger,
+    opts?: { transportHealthIntervalMs?: number }
+  ) {
+    // Story 35.6: optional seam for integration tests. Default preserves
+    // pre-35.6 behavior (30s). All existing callers (2-arg form) continue to
+    // work unchanged — new arg is optional.
+    this._transportHealthIntervalMs = opts?.transportHealthIntervalMs ?? 30000;
     // Load and validate configuration
     let resolvedConfig: ConnectorConfig;
     try {
