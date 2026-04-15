@@ -130,3 +130,28 @@ epics:
         status: done
     retrospective:
       status: done
+
+  epic-36:
+    name: "Real-Binary ATOR Verification"
+    status: pending
+    stories:
+      36.1:
+        name: "Local ATOR Network Image + docker-compose"
+        status: pending
+      36.2:
+        name: "anyone-client SDK CLI Flag Audit"
+        status: pending
+      36.3:
+        name: "Real-Binary SOCKS5 Integration Test"
+        status: pending
+      36.4:
+        name: "Hidden-Service + Managed-Client Real-Binary Test"
+        status: pending
+      36.5:
+        name: "Nightly CI Workflow + System-Tor Fallback"
+        status: pending
+      36.6:
+        name: "Docs — Deployment Guide Update"
+        status: pending
+    retrospective:
+      status: pending
