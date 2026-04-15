@@ -44,24 +44,6 @@ make mina-deploy-devnet DEPLOYER_KEY=<base58-private-key>
 
 Run `make help` for the full target list. Deployment guides: `docs/solana-deployment.md`, `docs/mina-deployment.md`.
 
-## Gotchas
-
-- **Build order matters**: `packages/shared` MUST build before `packages/connector` and `packages/mina-zkapp`. The root `npm run build` script handles this, but if building individual workspaces, build shared first.
-- **Mina zkApp tsconfig**: requires `experimentalDecorators: true`, `emitDecoratorMetadata: true`, `useDefineForClassFields: false` -- without the last one, `@state` decorators silently fail.
-- **Mina proof generation is slow**: 30-120s for circuit compilation/proof generation. Provider pre-compiles during construction (fire-and-forget).
-- **o1js is optional**: the connector package never imports o1js directly; it goes through `MinaPaymentChannelSDK` with dynamic `import()`. The connector starts fine without o1js installed.
-
-## Key Entry Points
-
-| File                                          | Purpose                                      |
-| --------------------------------------------- | -------------------------------------------- |
-| `packages/connector/src/lib.ts`               | Public API (all exports consolidated here)   |
-| `packages/connector/src/core/`                | ConnectorNode, PacketHandler, PaymentHandler |
-| `packages/connector/src/settlement/provider/` | Chain abstraction layer (Epic 32+)           |
-| `packages/connector/src/config/`              | YAML config loading + Zod validation         |
-| `packages/mina-zkapp/src/PaymentChannel.ts`   | Mina SmartContract (8 on-chain Fields)       |
-| `packages/solana-program/src/lib.rs`          | Solana program entrypoint                    |
-
 ## Default UI Library: shadcn-ui v4
 
 shadcn-ui v4 is the **only** UI component library. Do not use Material-UI, Ant Design, Chakra UI, or custom components for functionality shadcn-ui already provides.

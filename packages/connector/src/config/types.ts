@@ -179,6 +179,72 @@ export interface RouteConfig {
 }
 
 /**
+ * Transport configuration discriminated union (Epic 35 / Story 35.3).
+ *
+ * Selects between direct TCP (default) and SOCKS5 overlay transport
+ * (e.g., ATOR / Tor) for outbound BTP WebSocket connections.
+ *
+ * **Discriminator:** the `type` field. TypeScript narrows `socksProxy` /
+ * `externalUrl` / `managed` into existence only when `type === 'socks5'`,
+ * so downstream code (Story 35.4) can exhaustively switch on `type` with
+ * full type safety.
+ *
+ * **Critical rules:**
+ * - `socksProxy` MUST use the `socks5h://` scheme (case-sensitive). The
+ *   `h` forces DNS resolution through the proxy; `socks5://` resolves
+ *   DNS locally and would leak `.anon` destinations.
+ * - SOCKS5 transport fails closed at the provider layer (Story 35.2) --
+ *   any error short-circuits into a BTP reject rather than falling back
+ *   to direct TCP.
+ * - `.anon` hidden-service addresses must never appear in INFO/WARN/
+ *   ERROR logs; validation errors also redact `.anon` values.
+ *
+ * @example
+ * ```yaml
+ * transport:
+ *   type: "socks5"
+ *   socksProxy: "socks5h://127.0.0.1:9050"
+ *   externalUrl: "wss://abc123.anon/btp"
+ *   managed: false
+ * ```
+ */
+export type TransportConfig =
+  | { type: 'direct' }
+  | {
+      type: 'socks5';
+      /** SOCKS5 proxy URL. MUST start with `socks5h://` (DNS leak prevention). */
+      socksProxy: string;
+      /**
+       * Externally reachable BTP URL for this node. Either a `ws://`/`wss://`
+       * URL OR the literal `"auto"` (Story 35.5) which resolves at runtime
+       * from `${managedOptions.hiddenServiceDir}/hostname` -- requires
+       * `managed === true` and `managedOptions.hiddenServiceDir` to be set.
+       */
+      externalUrl: string;
+      /** Whether the connector manages the proxy binary lifecycle. Defaults to false. */
+      managed: boolean;
+      /**
+       * Optional managed-lifecycle tuning (Story 35.5). Only meaningful when
+       * `managed === true` -- validation rejects `managedOptions` without
+       * `managed: true`.
+       */
+      managedOptions?: {
+        /** Absolute or project-relative path to the hidden-service key dir. */
+        hiddenServiceDir?: string;
+        /** Hidden service port (maps to HS config, not the OR port). */
+        hiddenServicePort?: number;
+        /** Overall deadline for SOCKS port readiness (ms). Default 60000. */
+        startupTimeoutMs?: number;
+        /** Overall deadline for `sdk.stop()` (ms). Default 10000. */
+        stopTimeoutMs?: number;
+        /** Optional anon binary override. SDK ships a bundled binary. */
+        binaryPath?: string;
+        /** Optional anonrc config file path. */
+        configFilePath?: string;
+      };
+    };
+
+/**
  * Connector Configuration Interface
  *
  * Top-level configuration for an ILP connector node.
@@ -386,6 +452,40 @@ export interface ConnectorConfig {
   nip59?: {
     enabled: boolean;
   };
+
+  /**
+   * Optional transport configuration for outbound BTP connections.
+   *
+   * Selects between direct TCP (default, zero behavioral change from prior
+   * releases) and SOCKS5 overlay transport (e.g., ATOR / Tor) for privacy-
+   * preserving peering with `.anon` hidden services.
+   *
+   * **Epic 35 / Story 35.3**: this field is schema + validation only; runtime
+   * wiring into `ConnectorNode` lives in Story 35.4.
+   *
+   * **Post-validation invariant:** `ConfigLoader.validateConfig` always
+   * populates this field with a concrete `TransportConfig` value (defaulting
+   * to `{ type: 'direct' }` when absent). The field is declared optional at
+   * the TypeScript level only for backward compatibility with call sites that
+   * construct partial `ConnectorConfig` literals in tests.
+   *
+   * **CRITICAL:** When `type: 'socks5'`, `socksProxy` MUST use the
+   * `socks5h://` scheme (not `socks5://`). The trailing `h` instructs the
+   * proxy to perform DNS resolution remotely; without it, the local resolver
+   * would leak `.anon` destinations to the network.
+   *
+   * See `docs/` (Story 35.7) for the full deployment guide.
+   *
+   * @example
+   * ```yaml
+   * transport:
+   *   type: "socks5"
+   *   socksProxy: "socks5h://127.0.0.1:9050"
+   *   externalUrl: "wss://abc123.anon/btp"
+   *   managed: false
+   * ```
+   */
+  transport?: TransportConfig;
 
   /**
    * Optional security configuration for key management

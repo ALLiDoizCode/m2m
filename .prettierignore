@@ -13,3 +13,4 @@ packages/contracts/cache
 packages/contracts/broadcast
 _bmad-output
 packages/solana-program/target
+data

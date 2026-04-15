@@ -34,6 +34,7 @@ multi-chain settlement across EVM (Base L2), Solana, and Mina Protocol.
 - **Transport privacy (NIP-59)** — Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59, hiding sender identity, claim content, and timing from BTP intermediaries
 - **ECDH-derived conditions & fulfillments** — When NIP-59 is enabled, the ephemeral key used for gift wrapping also derives an ILP execution condition via dual HKDF, cryptographically binding each fulfillment to the receiver's identity (only the holder of the receiver's private key can produce the preimage)
 - **ZK-private settlement (Mina)** — Zero-knowledge balance proofs on Mina Protocol where transferred amounts are hidden on-chain via Poseidon commitments, verified by zk-SNARK proofs
+- **Pluggable overlay transport (Epic 35)** — Optional SOCKS5-based transport via ATOR/Tor `.anon` hidden services for NAT traversal, IP privacy, and home-hosted connector operation on commodity hardware
 - **Multi-deployment modes** — Library (embedded), CLI (standalone), or Docker container
 
 ### How to Read This Document
@@ -60,12 +61,14 @@ CLI, or deployed as a Docker container.
 3. **RFC-compliant** — Core protocols follow Interledger RFCs (ILPv4, BTP, OER encoding, ILP addressing).
 4. **Multi-chain settlement** — Settlement uses a pluggable `PaymentChannelProvider` interface supporting EVM (Base L2), Solana, and Mina Protocol. New chains require only implementing the provider interface — no core settlement logic changes. Per-peer chain selection allows different peers to settle on different chains simultaneously.
 5. **Privacy-by-design** — Optional NIP-59-inspired transport privacy for claim exchange (all chains) and zk-SNARK private balance proofs on Mina Protocol where transferred amounts are hidden on-chain.
+6. **Pluggable transport** — Optional SOCKS5-based overlay transport (Epic 35) enables peering through ATOR/Tor `.anon` hidden services for NAT traversal and IP privacy. Default is direct TCP — zero behavioral change for existing deployments.
 
 ### System Diagram
 
 ```mermaid
 graph TB
     subgraph ConnectorNode
+        TransportProvider["Transport Provider<br/>(Direct or SOCKS5/ATOR)"]
         BTPServer["BTP Server<br/>(WebSocket)"]
         BTPClientManager["BTP Client Manager<br/>(Outbound connections)"]
         PacketHandler["Packet Handler<br/>(Routing + Settlement)"]
@@ -99,7 +102,8 @@ graph TB
     end
 
     PeerConnectors <-->|BTP/WebSocket| BTPServer
-    BTPClientManager -->|BTP/WebSocket| PeerConnectors
+    BTPClientManager -->|BTP/WebSocket| TransportProvider
+    TransportProvider -->|Direct or SOCKS5| PeerConnectors
     BTPServer --> PacketHandler
     PacketHandler --> RoutingTable
     PacketHandler --> BTPClientManager
@@ -277,6 +281,7 @@ For integration testing beyond local development:
 | Language                  | TypeScript                                        | ^5.3.3            |
 | Runtime                   | Node.js                                           | >=22.11.0         |
 | Transport                 | WebSocket (ws)                                    | ^8.16.0           |
+| Transport (overlay)       | socks-proxy-agent, @anyone-protocol/anyone-client | latest            |
 | HTTP                      | Express                                           | 4.18.x            |
 | EVM                       | ethers.js                                         | ^6.16.0           |
 | Logging                   | pino                                              | ^8.21.0           |
@@ -320,6 +325,7 @@ The connector source lives in `packages/connector/src/` with 17 module directori
 | CLI           | `cli/`           | Command-line interface (`connector` binary)                                                                |
 | Encoding      | `encoding/`      | OER encoding utilities (RFC-0030)                                                                          |
 | Facilitator   | `facilitator/`   | SPSP client for payment setup (RFC-0009)                                                                   |
+| Transport     | `transport/`     | `TransportProvider` abstraction: `DirectTransportProvider` (default) and `SocksTransportProvider` (ATOR/Tor SOCKS5 overlay) (Epic 35) |
 | Discovery     | `discovery/`     | `PeerDiscoveryService` for dynamic peer discovery                                                          |
 | Performance   | `performance/`   | Batching, buffering, connection pooling for high TPS                                                       |
 | Utils         | `utils/`         | Logger, optional-require, general utilities                                                                |
@@ -336,7 +342,10 @@ graph TD
     Core --> HTTP["http/"]
     Core --> Telemetry["telemetry/"]
     Core --> Security["security/"]
+    Core --> Transport["transport/"]
     Core --> Utils["utils/"]
+
+    BTP --> Transport
 
     Settlement --> Security
     Settlement --> Telemetry
@@ -837,6 +846,7 @@ routes:
 | `performance`     | PerformanceConfig     | —                    | High-throughput optimization (batching, pooling)        |
 | `blockchain`      | BlockchainConfig      | —                    | Base L2 chain configuration                             |
 | `nip59`           | `{ enabled: boolean }`| —                    | Global NIP-59 transport privacy toggle                  |
+| `transport`       | TransportConfig   | `{ type: 'direct' }` | Transport provider config: `direct` (default) or `socks5` (ATOR/Tor overlay, Epic 35) |
 
 **Per-Peer NIP-59 Fields** (in `PeerConfig`):
 
@@ -1057,6 +1067,7 @@ All tests that involve claims (unit and integration) **must assume self-describi
 | **NIP-59 transport privacy**          | Optional three-layer claim wrapping (Rumor → Seal → Gift Wrap) inspired by Nostr NIP-59. Hides sender identity, claim content, and timing from BTP intermediaries. Chain-agnostic — works with any provider. The ephemeral key used for gift wrapping also enables ECDH-derived conditions (see below).                                                                                                                                                                                                            |
 | **ECDH-derived conditions**           | When NIP-59 is enabled, dual HKDF derivation from the same ephemeral ECDH shared secret produces both the claim encryption key (`info='nip59-giftwrap'`) and the ILP condition preimage (`info='ilp-condition-preimage'`). Zero additional wire overhead — the preimage is implicit in the ephemeral key already transmitted. The fulfillment is identity-bound (requires receiver's private key), which is stronger than classic ILP where preimages are arbitrary shared secrets. When NIP-59 is disabled, conditions remain 32 zero bytes and verification is skipped (fully backward compatible). |
 | **ZK-private settlement (Mina)**      | Mina provider uses zk-SNARK proofs with Poseidon hash commitments so transferred amounts are never revealed on-chain. First payment channel implementation on Mina Protocol. Combined with NIP-59 transport wrapping and ECDH-derived conditions, provides end-to-end privacy and integrity from BTP wire to on-chain settlement.                                                                                                                                                                                  |
+| **Pluggable transport (ATOR/Tor)**    | Epic 35 adds an optional `TransportProvider` abstraction with SOCKS5 overlay support. Connectors can peer through ATOR `.anon` hidden services for NAT traversal, IP privacy, and home-hosted operation. Default is direct TCP — zero behavioral change. Fail-closed design: proxy unavailable → hard error, never silent fallback. `socks5h://` scheme enforced to prevent DNS leaks. |
 | **Foundry (not Hardhat)**             | Faster compilation, built-in fuzzing, Solidity-native tests, better developer experience.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | **TigerBeetle optional**              | In-memory ledger with JSON snapshot persistence provides a zero-dependency fallback. TigerBeetle is recommended for production.                                                                                                                                                                                                                                                                                                                                                                                   |
 | **Library-first**                     | `ConnectorNode` is a class you instantiate in your code. CLI and Docker are wrappers around this library API.                                                                                                                                                                                                                                                                                                                                                                                                     |

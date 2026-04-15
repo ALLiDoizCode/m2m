@@ -40,7 +40,7 @@ Town Connector is a production-ready Interledger Protocol (ILP) connector design
 
 ### Core Value Proposition
 
-A single npm package that provides ILP packet routing, BTP peer connectivity, multi-chain settlement (EVM, Solana, Mina Protocol) with per-packet cryptographic claims, optional transport privacy via NIP-59 Gift Wrap, double-entry accounting, and real-time observability — deployable as an embedded library or standalone service with zero external dependencies beyond Node.js.
+A single npm package that provides ILP packet routing, BTP peer connectivity, multi-chain settlement (EVM, Solana, Mina Protocol) with per-packet cryptographic claims, optional transport privacy via NIP-59 Gift Wrap, optional SOCKS5 overlay transport for privacy-enabled peering via ATOR/Tor (Epic 35), double-entry accounting, and real-time observability — deployable as an embedded library or standalone service with zero external dependencies beyond Node.js.
 
 ---
 
@@ -70,6 +70,18 @@ The Bilateral Transfer Protocol (RFC-0023) provides WebSocket-based peer-to-peer
 - Keep-alive ping/pong (30s interval, 10s timeout)
 - Automatic reconnection on connection drop
 - Per-packet claim attachment via BTP `protocolData` field
+- Optional SOCKS5 overlay transport for outbound connections (Epic 35)
+
+### 3.2.1 Overlay Transport (Epic 35)
+
+An optional `TransportProvider` abstraction enables connectors to peer through SOCKS5-compatible overlay networks such as ATOR (Anyone Protocol) or Tor. When configured, outbound BTP WebSocket connections are routed through the SOCKS5 proxy, and inbound peering uses `.anon` hidden service addresses. This enables:
+
+- **No public IP required** — hidden service protocol handles rendezvous
+- **No port forwarding** — works behind any NAT, including carrier-grade NAT
+- **IP privacy** — peers never see the operator's real IP address
+- **Home-hosted connectors** — Raspberry Pi on home WiFi becomes viable
+
+Transport is opt-in (`transport.type: "socks5"` in config). Default is `direct` — zero behavioral change for existing deployments. Fail-closed design: if the SOCKS proxy is unavailable, connections are rejected with an explicit error, never silently falling back to direct. `socks5h://` scheme is enforced to prevent DNS leaks.
 
 ### 3.3 Multi-Chain Settlement
 

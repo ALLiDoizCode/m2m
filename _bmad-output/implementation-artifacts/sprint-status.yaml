@@ -102,3 +102,56 @@ epics:
         status: done
     retrospective:
       status: done
+
+  epic-35:
+    name: "ATOR Overlay Transport for Privacy-Enabled Peering"
+    status: done
+    stories:
+      35.1:
+        name: "Define TransportProvider Interface + DirectTransportProvider"
+        status: done
+      35.2:
+        name: "Implement SocksTransportProvider"
+        status: done
+      35.3:
+        name: "Extend Config Schema for Transport Block"
+        status: done
+      35.4:
+        name: "Wire TransportProvider into ConnectorNode and BTP Client"
+        status: done
+      35.5:
+        name: "Managed ATOR Client Lifecycle (Optional)"
+        status: done
+      35.6:
+        name: "Unit and Integration Tests"
+        status: done
+      35.7:
+        name: "Documentation — Deployment Guide and Config Reference"
+        status: done
+    retrospective:
+      status: done
+
+  epic-36:
+    name: "Real-Binary ATOR Verification"
+    status: pending
+    stories:
+      36.1:
+        name: "Local ATOR Network Image + docker-compose"
+        status: pending
+      36.2:
+        name: "anyone-client SDK CLI Flag Audit"
+        status: pending
+      36.3:
+        name: "Real-Binary SOCKS5 Integration Test"
+        status: pending
+      36.4:
+        name: "Hidden-Service + Managed-Client Real-Binary Test"
+        status: pending
+      36.5:
+        name: "Nightly CI Workflow + System-Tor Fallback"
+        status: pending
+      36.6:
+        name: "Docs — Deployment Guide Update"
+        status: pending
+    retrospective:
+      status: pending

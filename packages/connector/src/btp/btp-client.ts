@@ -3,9 +3,11 @@
  * Implements RFC-0023 Bilateral Transfer Protocol client for outbound peer connections
  */
 
+import type http from 'http';
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { Logger } from '../utils/logger';
+import { redactPeerUrl, redactAnonInMessage } from '../utils/redact';
 import {
   BTPMessage,
   BTPMessageType,
@@ -30,7 +32,13 @@ import type { PacketHandler } from '../core/packet-handler';
 export interface Peer {
   /** Unique peer identifier */
   id: string;
-  /** WebSocket URL for BTP connection (e.g., "ws://connector-b:3000") */
+  /**
+   * WebSocket URL for BTP connection (plain or TLS-wrapped WebSocket scheme).
+   * Plain-WebSocket scheme is supported for trusted local networks and for the
+   * ATOR overlay transport (Epic 35), where transport-layer encryption is
+   * provided by the SOCKS5/Tor circuit rather than TLS. Production deployments
+   * over untrusted networks should use the TLS-wrapped scheme.
+   */
   url: string;
   /** Shared secret for BTP authentication */
   authToken: string;
@@ -101,6 +109,7 @@ export class BTPClient extends EventEmitter {
 
   private readonly _nodeId: string;
   private _packetHandler: PacketHandler | null = null;
+  private readonly _agentFactory?: (peerUrl: string) => http.Agent | undefined;
 
   /**
    * Create BTPClient instance
@@ -108,8 +117,18 @@ export class BTPClient extends EventEmitter {
    * @param nodeId - Local node identifier (sent in auth message)
    * @param logger - Pino logger instance
    * @param maxRetries - Maximum retry attempts (default: 5)
+   * @param agentFactory - Optional factory that returns an `http.Agent` (or
+   *   `undefined`) for outbound WebSocket connections. Invoked once per
+   *   `connect()` attempt (never cached), so SOCKS5 transports can supply a
+   *   fresh `SocksProxyAgent` each time (Epic 35 / Story 35.4).
    */
-  constructor(peer: Peer, nodeId: string, logger: Logger, maxRetries?: number) {
+  constructor(
+    peer: Peer,
+    nodeId: string,
+    logger: Logger,
+    maxRetries?: number,
+    agentFactory?: (peerUrl: string) => http.Agent | undefined
+  ) {
     super();
     this._peer = peer;
     this._nodeId = nodeId;
@@ -117,6 +136,7 @@ export class BTPClient extends EventEmitter {
     if (maxRetries !== undefined) {
       this._maxRetries = maxRetries;
     }
+    this._agentFactory = agentFactory;
   }
 
   /**
@@ -152,13 +172,22 @@ export class BTPClient extends EventEmitter {
 
     this._connectionState = 'connecting';
     this._logger.info(
-      { event: 'btp_connection_attempt', url: this._peer.url },
+      { event: 'btp_connection_attempt', url: redactPeerUrl(this._peer.url) },
       'Connecting to peer'
     );
 
     return new Promise<void>((resolve, reject) => {
       try {
-        this._ws = new WebSocket(this._peer.url);
+        // Story 35.4: invoke the agent factory (if any) per connect attempt so
+        // SOCKS5 transports get a fresh SocksProxyAgent each time. When the
+        // factory is absent or returns undefined, preserve the pre-Epic-35
+        // byte-for-byte behavior by calling `new WebSocket(url)` with no
+        // options bag -- this is the single most important regression guard.
+        const agent = this._agentFactory?.(this._peer.url);
+        this._ws =
+          agent !== undefined
+            ? new WebSocket(this._peer.url, { agent })
+            : new WebSocket(this._peer.url);
 
         // Set up event handlers
         this._ws.on('open', async () => {
@@ -170,13 +199,16 @@ export class BTPClient extends EventEmitter {
             this._peer.lastSeen = new Date();
             this._startKeepAlive();
 
-            this._logger.info({ event: 'btp_connected', url: this._peer.url }, 'Connected to peer');
+            this._logger.info(
+              { event: 'btp_connected', url: redactPeerUrl(this._peer.url) },
+              'Connected to peer'
+            );
             this.emit('connected');
             resolve();
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this._logger.error(
-              { event: 'btp_connection_error', error: errorMessage },
+              { event: 'btp_connection_error', error: redactAnonInMessage(errorMessage) },
               'Authentication failed'
             );
             this._connectionState = 'error';
@@ -190,7 +222,7 @@ export class BTPClient extends EventEmitter {
             this._logger.error(
               {
                 event: 'btp_message_error',
-                error: error instanceof Error ? error.message : String(error),
+                error: redactAnonInMessage(error instanceof Error ? error.message : String(error)),
               },
               'Error handling message'
             );
@@ -203,7 +235,7 @@ export class BTPClient extends EventEmitter {
 
         this._ws.on('error', (error: Error) => {
           this._logger.error(
-            { event: 'btp_connection_error', error: error.message },
+            { event: 'btp_connection_error', error: redactAnonInMessage(error.message) },
             'WebSocket error'
           );
           this._connectionState = 'error';
@@ -217,7 +249,7 @@ export class BTPClient extends EventEmitter {
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         this._logger.error(
-          { event: 'btp_connection_error', error: errorMessage },
+          { event: 'btp_connection_error', error: redactAnonInMessage(errorMessage) },
           'Failed to create WebSocket'
         );
         this._connectionState = 'error';
@@ -670,7 +702,7 @@ export class BTPClient extends EventEmitter {
         this._logger.error(
           {
             event: 'btp_retry_failed',
-            error: error instanceof Error ? error.message : String(error),
+            error: redactAnonInMessage(error instanceof Error ? error.message : String(error)),
           },
           'Retry failed'
         );
@@ -707,7 +739,7 @@ export class BTPClient extends EventEmitter {
       // If connection fails, retry will be triggered by close handler
       const errorMessage = error instanceof Error ? error.message : String(error);
       this._logger.error(
-        { event: 'btp_connection_error', error: errorMessage },
+        { event: 'btp_connection_error', error: redactAnonInMessage(errorMessage) },
         'Connection retry failed'
       );
     }

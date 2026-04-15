@@ -33,12 +33,15 @@ src/
   config/         # YAML config loading and Zod validation
   security/       # Key management and authentication
   telemetry/      # Metrics and observability
+  transport/      # TransportProvider: Direct + SOCKS5/ATOR overlay (Epic 35)
   utils/          # Shared utilities
   agent/          # AI agent integration
   cli/            # Command-line interface
   lib.ts          # Public API exports
   index.ts        # Re-exports from lib.ts
 ```
+
+The `transport/` directory (Epic 35) houses the `TransportProvider` abstraction used for outbound BTP WebSocket connections: `DirectTransportProvider` (default) and `SocksTransportProvider` for ATOR / Tor overlay routing. Managed `anon` binary lifecycle lives in `managed-anon-client.ts`. See [ATOR Overlay Transport deployment guide](../ator-transport.md) for setup and operations.
 
 ### packages/shared
 

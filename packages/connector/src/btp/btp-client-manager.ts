@@ -3,10 +3,12 @@
  * Manages multiple BTPClient instances for outbound peer connections
  */
 
+import type http from 'http';
 import { Logger } from '../utils/logger';
 import { BTPClient, Peer, BTPConnectionError } from './btp-client';
 import { ILPPreparePacket, ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
 import type { PacketHandler } from '../core/packet-handler';
+import { redactPeerUrl, redactAnonInMessage } from '../utils/redact';
 
 /**
  * BTPClientManager - Orchestrates multiple BTP client connections
@@ -17,6 +19,7 @@ export class BTPClientManager {
   private readonly _logger: Logger;
   private readonly _nodeId: string;
   private _packetHandler: PacketHandler | null = null;
+  private _agentFactory: ((peerUrl: string) => http.Agent | undefined) | null = null;
 
   /**
    * Create BTPClientManager instance
@@ -26,6 +29,20 @@ export class BTPClientManager {
   constructor(nodeId: string, logger: Logger) {
     this._nodeId = nodeId;
     this._logger = logger.child({ component: 'BTPClientManager' });
+  }
+
+  /**
+   * Provide an agent factory for outbound BTP connections (Story 35.4).
+   *
+   * Forwarded to every `BTPClient` created via `addPeer`. The factory is
+   * invoked once per `connect()` attempt (not cached at client construction),
+   * so SOCKS5 transports can return a fresh `SocksProxyAgent` per call.
+   *
+   * Safe to call at any time before `addPeer`. Null disables the factory
+   * (i.e., WebSockets are constructed with no options bag).
+   */
+  setAgentFactory(factory: ((peerUrl: string) => http.Agent | undefined) | null): void {
+    this._agentFactory = factory;
   }
 
   /**
@@ -47,7 +64,7 @@ export class BTPClientManager {
    */
   async addPeer(peer: Peer): Promise<void> {
     this._logger.info(
-      { event: 'btp_client_add_peer', peerId: peer.id, url: peer.url },
+      { event: 'btp_client_add_peer', peerId: peer.id, url: redactPeerUrl(peer.url) },
       'Adding peer'
     );
 
@@ -60,8 +77,13 @@ export class BTPClientManager {
       return;
     }
 
-    // Create BTPClient for peer
-    const client = new BTPClient(peer, this._nodeId, this._logger);
+    // Create BTPClient for peer. Forward agentFactory (when configured) so
+    // SOCKS5 transports can provide a fresh SocksProxyAgent per connect
+    // (Story 35.4). When no factory is set, preserve the pre-Epic-35
+    // 3-argument constructor call shape byte-for-byte (regression guard).
+    const client = this._agentFactory
+      ? new BTPClient(peer, this._nodeId, this._logger, undefined, this._agentFactory)
+      : new BTPClient(peer, this._nodeId, this._logger);
 
     // Set PacketHandler if available (for handling incoming prepare packets)
     if (this._packetHandler) {
@@ -85,7 +107,11 @@ export class BTPClientManager {
 
     client.on('error', (error: Error) => {
       this._logger.error(
-        { event: 'btp_client_error', peerId: peer.id, error: error.message },
+        {
+          event: 'btp_client_error',
+          peerId: peer.id,
+          error: redactAnonInMessage(error.message),
+        },
         'BTP client error'
       );
     });
@@ -105,7 +131,11 @@ export class BTPClientManager {
       // Client can still be used once retry succeeds
       const errorMessage = error instanceof Error ? error.message : String(error);
       this._logger.warn(
-        { event: 'btp_client_add_peer_failed', peerId: peer.id, error: errorMessage },
+        {
+          event: 'btp_client_add_peer_failed',
+          peerId: peer.id,
+          error: redactAnonInMessage(errorMessage),
+        },
         'Initial connection to peer failed (will retry in background)'
       );
       // Don't rethrow - allow connector to start even if initial connection fails
