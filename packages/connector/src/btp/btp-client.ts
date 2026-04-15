@@ -147,6 +147,36 @@ export class BTPClient extends EventEmitter {
   }
 
   /**
+   * **Test-only** escape hatch for sending a pre-serialized frame directly
+   * over the underlying WebSocket, bypassing `sendPacket()` and its ILP
+   * serialization path. Exists so integration tests (e.g., T-35.6-INT-04 in
+   * `transport-socks5.test.ts`) can exercise the full BTP client/server wire
+   * without wiring up a full ILP packet pipeline.
+   *
+   * Behavior:
+   * - Returns `false` if the socket is not connected (no throw) so tests can
+   *   fail fast with a clear assertion rather than dereferencing `null`.
+   * - Returns `true` on successful `ws.send()` enqueue (does not wait for
+   *   delivery; callers should assert on the server-side observable effect).
+   *
+   * Epic 35 retro action item #5: replaces `(client as any)._ws.send(...)`
+   * with a supported seam so internal field renames do not break INT-04.
+   * Do not use from production code.
+   *
+   * @param frame - Pre-serialized BTP frame bytes.
+   * @returns `true` if the frame was handed to the WebSocket; `false` if
+   *   there is no active connection.
+   * @internal
+   */
+  sendRawFrameForTesting(frame: Buffer): boolean {
+    if (!this._ws || this._connectionState !== 'connected') {
+      return false;
+    }
+    this._ws.send(frame);
+    return true;
+  }
+
+  /**
    * Set PacketHandler reference (to handle incoming prepare packets from server)
    * @param packetHandler - PacketHandler instance for routing incoming packets
    */

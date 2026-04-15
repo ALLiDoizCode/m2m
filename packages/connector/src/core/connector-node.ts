@@ -1717,6 +1717,14 @@ export class ConnectorNode implements HealthStatusProvider {
         // TLDs defensively. No ports, no paths, no auth, no whitespace.
         const HIDDEN_SERVICE_HOSTNAME_RE = /^[a-z2-7]{16}(?:[a-z2-7]{40})?\.(?:anon|onion)$/;
         resolveExternalUrlOnStart = async (): Promise<string> => {
+          // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
+          // Epic 35 retro action item #7 (triage close): `hsDir` is
+          // validated at config load (validateManagedOptions rejects any
+          // `..` segment before and after normalization; see
+          // config-loader.ts). The joined filename is the static literal
+          // `'hostname'` with no user input. The file is read, not written,
+          // and the contents are further validated against a strict
+          // hidden-service regex below before use. Reviewed and closed.
           const hostnameFile = nodePath.join(hsDir, 'hostname');
           const deadline = Date.now() + hostnameReadDeadlineMs;
           let lastErr: unknown;

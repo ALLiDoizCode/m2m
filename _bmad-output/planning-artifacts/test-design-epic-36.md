@@ -5,8 +5,8 @@ stepsCompleted:
   - cross-story-integration
   - regression-analysis
   - test-data-requirements
-lastSaved: '2026-04-14'
-revision: v1
+lastSaved: '2026-04-15'
+revision: v1.1
 epicRef: epic-36-real-binary-ator-verification.md
 inputDocuments:
   - _bmad-output/planning-artifacts/test-design-epic-35.md
@@ -77,6 +77,10 @@ inputDocuments:
 | R-10 | **Fail-closed behavior not re-verified at the real-binary layer**          | Medium     | Medium   | 4     | SECURITY    | T-36.3-06, T-36.3-07                      |
 | R-11 | **`ATYP=0x03` (DOMAINNAME) silently rewritten to IPv4 by a future change** | Low        | High     | 4     | SECURITY    | T-36.3-04, T-36.3-05                      |
 | R-12 | **Nightly failure artifacts not uploaded, debugging requires local repro** | Low        | Medium   | 2     | OPS         | T-36.5-08                                  |
+| R-13 | **Docs-drift between Epic 35 (`docs/ator-transport.md`) and Epic 36-verified reality** (hedges, flag surface, platform matrix, nightly badges) | High | Medium | 6 | DOCS | T-36.2-01..03, T-36.6-DOC-01..06, T-GATE-36.6-1..3 |
+| R-14 | **`anyone-client` optional-dep binary not available on macOS CI runner** (npm install fails, test suite silently skips instead of failing loudly) | Medium | High | 6 | CI/CD | T-36.5-06, T-36.2-02, T-GATE-36.5-3 |
+
+> **Note on numbering.** The epic spec uses `R-36-01..09`; this test-design retains the original `R-01..R-14` scheme from v1. Crosswalk: R-01<->R-36-01, R-02<->R-36-05, R-03<->R-36-02, R-05<->R-36-04, R-06<->R-36-03, R-08<->R-36-08, R-09 is Epic-36-specific (contract-test regression), R-12<->R-36-09, R-13 is the docs-drift carry-forward from Epic 35 retro, R-14 is the binary-availability carry-forward.
 
 ### Risk Detail: Top 5
 
@@ -489,7 +493,209 @@ Orphan processes are a resource leak and a security concern (stale SOCKS proxy e
 
 ---
 
-## 10. Open Questions for Testing
+## 10. Entry / Exit Criteria Per Story
+
+Per-story gates to determine when a story is ready to enter test execution and when it may exit to "done." These are the operational gates for per-story ATDD; epic-level exit is the union of all story exits plus the epic-level ACs from the spec.
+
+### Story 36.1 — Local ATOR Network Image + docker-compose Profile
+
+**Entry:**
+- Branch cut from `epic-35` tip (`b18c5735`)
+- `anon_0.4.10.0-beta_amd64.deb` SHA-256 recorded in a repo-committed manifest
+- Developer machine can pull `debian:bookworm-slim` and run `docker compose up -d` on existing `anvil` profile (baseline sanity)
+
+**Exit:**
+- All P0 T-36.1-* pass locally on Linux amd64 and macOS amd64 (Docker Desktop)
+- `make ator-up` cold start <= 30s to `running`; consensus ready within 60s of up
+- `make ator-down` leaves zero residual containers, networks, or volumes (asserted via `docker ps -a`, `docker volume ls`)
+- No host port collisions with `anvil` / `solana` / `mina` profiles when all are `infra-up`
+- Pinned `.deb` checksum verified during image build (build fails on mismatch)
+
+### Story 36.2 — anyone-client SDK CLI Flag Audit
+
+**Entry:**
+- Local install of `@anyone-protocol/anyone-client@1.1.3` on the audit host
+- Current `docs/ator-transport.md` content under version control as the baseline diff target
+
+**Exit:**
+- Zero matches for `consult docs.anyone.io` and `do not guess` in `docs/ator-transport.md`
+- Committed `anon --help` snapshot file exists with a diff-gate test (T-36.2-02) that fails on any upstream flag change
+- Provenance line present ("Flag surface verified against anyone-client@1.1.3 on YYYY-MM-DD")
+
+### Story 36.3 — Real-Binary SOCKS5 Integration Test
+
+**Entry:**
+- Story 36.1 exit criteria met (compose stack stable)
+- `tcpdump` available inside `hs1` container (validated by `docker exec hs1 which tcpdump`)
+- `ATOR_NIGHTLY=1` gating helper (`_ator-gate.ts`) merged
+
+**Exit:**
+- All P0 T-36.3-01..09 pass against a fresh `make ator-up` on Linux amd64 (macOS covered in 36.5)
+- Zero references to the old filenames `in-process-socks5-proxy.ts` / `transport-socks5.test.ts` anywhere in the repo
+- `socks5-contract-fixture.ts` and `socks5-contract.test.ts` file-level doc blocks explicitly state "NOT ATOR integration"
+- `ATYP=0x03` asserted on a live tcpdump capture; no `ATYP=0x01`/`0x04` observed for any `.anon` destination
+- `make test` (no `ATOR_NIGHTLY`) wall-clock unchanged from pre-36.3 baseline (+/- 5%)
+
+### Story 36.4 — Hidden-Service + Managed-Client Real-Binary Test
+
+**Entry:**
+- Stories 36.1 and 36.3 exit criteria met
+- HS key-handling decision resolved (minted per run vs committed fixture)
+- `ManagedAnonClient` health-cache interval documented and visible to test assertions
+
+**Exit:**
+- All P0 T-36.4-01..06 pass; P1 T-36.4-07..08 pass or have owning issue
+- Two-connector `.anon` rendezvous round-trip succeeds end-to-end
+- `managed_anon_crash_detected` fires within one health-interval + grace window after SIGKILL
+- Zero `.anon` substrings in any structured log field at level >= INFO (per SEC-05)
+- Zero orphan `anon` processes on host after `afterAll`; hygiene helper asserts this
+
+### Story 36.5 — Nightly CI Workflow + System-Tor Fallback Smoke
+
+**Entry:**
+- Stories 36.3 and 36.4 exit criteria met
+- GHCR / image mirror decision resolved (Open Question #1 in epic spec)
+- Repo has `workflow_dispatch` permission model configured for transport-touching PRs
+
+**Exit:**
+- At least one green run of all four matrix legs (real-binary x {ubuntu-latest, macos-14}; system-tor x {ubuntu-latest, macos-14}) post-merge
+- Workflow wall-clock <= 25 min per leg; 7-run trailing flake rate < 15% per leg
+- Failure artifact bundle (compose logs, tcpdump capture, version manifest) uploaded on any failed job
+- `workflow_dispatch` trigger invocable from PR UI; manually verified once
+
+### Story 36.6 — Documentation + Deployment-Guide Update
+
+**Entry:**
+- Stories 36.1 through 36.5 exit criteria met (content to document exists and is stable)
+- One successful nightly run linked for the Verification Status badge
+
+**Exit:**
+- Zero matches for `consult docs.anyone.io` and `do not guess` across the whole of `docs/ator-transport.md`
+- Verification Status section links to a real green nightly run with a dated badge
+- Platform Matrix section classifies each supported platform (covered / fallback-only / unsupported)
+- Every file path and CLI flag mentioned in the guide verified to exist / work verbatim
+
+---
+
+## 11. Acceptance Criteria <-> Test ID Gate Mapping
+
+Each epic-spec Gherkin AC is mapped to one or more T-IDs that must pass for the AC to be considered satisfied. Gate-level IDs (`T-GATE-*`) are used where an AC is a pure static/doc check with no runtime scenario.
+
+### Story 36.1 AC Mapping
+
+| AC (paraphrased from epic spec) | Covering Tests |
+|---|---|
+| `make ator-up` starts 7 containers within 30s | T-36.1-01 |
+| All 7 services healthy within 90s | T-36.1-05, T-36.1-06 |
+| Host process can TCP-connect to HS SOCKS5 port | T-36.1-05 |
+| `make ator-down` removes containers + named volumes | T-36.1-03 |
+| `.deb` SHA-256 matches GitHub release | T-36.1-02 |
+| `make infra-up` includes ator profile | T-GATE-36.1-1 (static compose-file check) |
+
+### Story 36.2 AC Mapping
+
+| AC | Covering Tests |
+|---|---|
+| Zero `consult docs.anyone.io` matches | T-GATE-36.2-1 (grep-gate) |
+| Zero `do not guess` matches | T-GATE-36.2-2 (grep-gate) |
+| Option A.2 flags verified against `--help` output | T-36.2-01, T-36.2-02 |
+| Provenance line present | T-GATE-36.2-3 (static check) |
+| Operator-verbatim commands succeed on anyone-client@1.1.3 | T-36.2-02 (snapshot diff) |
+
+### Story 36.3 AC Mapping
+
+| AC | Covering Tests |
+|---|---|
+| All T-36.3-01..09 pass under `make ator-test` with `ATOR_NIGHTLY=1` | T-36.3-01..09 |
+| Suite skipped when `ATOR_NIGHTLY` unset, with documented skip reason | T-REG-03 |
+| Zero `in-process-socks5-proxy` references remain | T-GATE-36.3-1 (grep-gate) |
+| `socks5-contract-fixture.ts` doc-block declares scope | T-GATE-36.3-2 (static check) |
+| SOCKS5 CONNECT fourth byte = `0x03`; no `0x01`/`0x04` for `.anon` | T-36.3-04, T-36.3-05 |
+
+### Story 36.4 AC Mapping
+
+| AC | Covering Tests |
+|---|---|
+| T-36.4-01..08 all pass under `ATOR_NIGHTLY=1` | T-36.4-01..08 |
+| `externalUrl: "auto"` resolves to `wss://<56-base32>.anon:<port>` after HSDir publish | T-36.4-02, T-36.4-03 |
+| Zero `.anon` substrings in structured log fields at INFO+ | T-36.4-04 |
+| SIGKILL of `anon` -> `managed_anon_crash_detected` within 35s; `/health` reports `transport.healthy: false` | T-36.4-05 |
+
+### Story 36.5 AC Mapping
+
+| AC | Covering Tests |
+|---|---|
+| Cron triggers both real-binary jobs (ubuntu-latest, macos-14) | T-36.5-01, T-36.5-05 |
+| Both system-tor-fallback jobs execute | T-36.5-07 (x2 matrix legs) |
+| At least one post-merge run green across all four jobs | T-GATE-36.5-1 (evidence-of-run) |
+| `workflow_dispatch` runs on transport-touching PR and becomes required check | T-36.5-02, T-GATE-36.5-2 (branch-protection review) |
+| BTP round-trip through system-tor succeeds; `SocksTransportProvider.start()` ok | T-36.5-07 |
+| Loud-failure when `anyone-client` install fails on macOS | T-GATE-36.5-3 (R-14 mitigation) |
+
+### Story 36.6 AC Mapping
+
+| AC | Covering Tests |
+|---|---|
+| Zero `consult docs.anyone.io` matches | T-GATE-36.6-1 (grep-gate) |
+| Verification Status section names pinned version + last-green link | T-36.6-DOC-02, T-GATE-36.6-2 |
+| Platform Matrix classifies each platform | T-36.6-DOC-04 |
+| Local Development Network section reproducible end-to-end | T-36.6-DOC-01, T-36.6-DOC-05 |
+| Every path + flag in guide verified | T-GATE-36.6-3 (cross-reference audit) |
+
+### Epic-Level AC Mapping (from epic spec §Epic-Level Acceptance Criteria)
+
+| Epic-level AC | Covering Tests |
+|---|---|
+| >= 1 nightly run green across all four jobs | T-GATE-36.5-1 |
+| Zero `in-process-socks5-proxy` references; fixture renamed; doc-block declares scope | T-GATE-36.3-1, T-GATE-36.3-2 |
+| Epic 35 retro gaps #1, #3, #4, #6 each have covering T-ID or pinned doc | §8 Coverage Crosswalk |
+| Zero `consult docs.anyone.io` / `do not guess` matches | T-GATE-36.2-1..2, T-GATE-36.6-1 |
+| `make test` (no `ATOR_NIGHTLY`) runtime unchanged | T-REG-03 + baseline measurement |
+
+---
+
+## 12. Traceability Table Stub
+
+Populated during per-story ATDD (one row per AC per story). Each row progresses: `NOT STARTED` -> `TEST WRITTEN (RED)` -> `IMPLEMENTED (GREEN)` -> `VERIFIED (CI GREEN)`. Epic-level trace gate at epic close requires all rows in `VERIFIED`.
+
+| Story | AC # | AC Summary | Test ID(s) | Test Level | Risk Tags | Status |
+|-------|------|-----------|------------|------------|-----------|--------|
+| 36.1 | AC1 | `make ator-up` -> 7 containers running in 30s | T-36.1-01 | integration | R-02, R-08 | NOT STARTED |
+| 36.1 | AC2 | All services healthy within 90s | T-36.1-05, T-36.1-06 | integration | R-01, R-04 | NOT STARTED |
+| 36.1 | AC3 | Host TCP-connect to HS SOCKS5 port | T-36.1-05 | integration | R-01 | NOT STARTED |
+| 36.1 | AC4 | `make ator-down` clean teardown | T-36.1-03 | integration | R-08 | NOT STARTED |
+| 36.1 | AC5 | `.deb` SHA-256 match | T-36.1-02 | static | R-05 | NOT STARTED |
+| 36.1 | AC6 | `make infra-up` includes ator | T-GATE-36.1-1 | static | -- | NOT STARTED |
+| 36.2 | AC1 | No `consult docs.anyone.io` | T-GATE-36.2-1 | grep-gate | R-13 | NOT STARTED |
+| 36.2 | AC2 | No `do not guess` | T-GATE-36.2-2 | grep-gate | R-13 | NOT STARTED |
+| 36.2 | AC3 | Option A.2 flags verified | T-36.2-01, T-36.2-02 | integration + doc | R-07 | NOT STARTED |
+| 36.2 | AC4 | Provenance line present | T-GATE-36.2-3 | static | R-07 | NOT STARTED |
+| 36.2 | AC5 | Commands succeed verbatim on 1.1.3 | T-36.2-02 | integration | R-07 | NOT STARTED |
+| 36.3 | AC1 | 36.3-01..09 pass under `ATOR_NIGHTLY=1` | T-36.3-01..09 | integration | R-01, R-02, R-10, R-11 | NOT STARTED |
+| 36.3 | AC2 | Suite skipped without `ATOR_NIGHTLY` | T-REG-03 | config | R-02 | NOT STARTED |
+| 36.3 | AC3 | No `in-process-socks5-proxy` refs | T-GATE-36.3-1 | grep-gate | R-09 | NOT STARTED |
+| 36.3 | AC4 | Fixture doc-block declares scope | T-GATE-36.3-2 | static | R-09 | NOT STARTED |
+| 36.3 | AC5 | `ATYP=0x03` asserted on wire | T-36.3-04, T-36.3-05 | integration | R-11 | NOT STARTED |
+| 36.4 | AC1 | 36.4-01..08 pass | T-36.4-01..08 | integration | R-02, R-04, R-08 | NOT STARTED |
+| 36.4 | AC2 | `externalUrl: "auto"` resolves post-HSDir | T-36.4-02, T-36.4-03 | integration | R-04 | NOT STARTED |
+| 36.4 | AC3 | No `.anon` in logs at INFO+ | T-36.4-04 | integration | security | NOT STARTED |
+| 36.4 | AC4 | SIGKILL -> crash event within 35s | T-36.4-05 | integration | security | NOT STARTED |
+| 36.5 | AC1 | Cron fires all four matrix legs | T-36.5-01, T-36.5-05, T-36.5-07 | CI | R-01, R-02 | NOT STARTED |
+| 36.5 | AC2 | >= 1 green run post-merge | T-GATE-36.5-1 | evidence | R-01 | NOT STARTED |
+| 36.5 | AC3 | `workflow_dispatch` on PR, required check | T-36.5-02, T-GATE-36.5-2 | CI | -- | NOT STARTED |
+| 36.5 | AC4 | System-tor BTP round-trip succeeds | T-36.5-07 | integration | R-03 | NOT STARTED |
+| 36.5 | AC5 | Loud failure on macOS binary unavailability | T-GATE-36.5-3 | CI | R-14 | NOT STARTED |
+| 36.6 | AC1 | No hedge strings in guide | T-GATE-36.6-1 | grep-gate | R-13 | NOT STARTED |
+| 36.6 | AC2 | Verification Status section complete | T-36.6-DOC-02, T-GATE-36.6-2 | doc | R-13 | NOT STARTED |
+| 36.6 | AC3 | Platform Matrix classifies each platform | T-36.6-DOC-04 | doc | R-06, R-13 | NOT STARTED |
+| 36.6 | AC4 | Local Dev Network reproducible | T-36.6-DOC-01, T-36.6-DOC-05 | doc | R-13 | NOT STARTED |
+| 36.6 | AC5 | Every path + flag verified | T-GATE-36.6-3 | audit | R-13 | NOT STARTED |
+
+**Trace gate rule.** At epic close, traceability PASS requires: (a) every row in `VERIFIED`, (b) every T-ID referenced in §2/§3 present in the table, (c) every Epic 35 retro gap in §8 Coverage Crosswalk either mapped here or explicitly tagged OUT OF SCOPE with rationale.
+
+---
+
+## 13. Open Questions for Testing
 
 1. **tcpdump inside container vs on host**: Capturing on `hsnode` is closest to the wire; capturing on the host bridge is simpler but adds `docker0` noise. Recommendation: install `tcpdump` in the `hsnode` image, capture to `/captures/`, copy out in `afterAll`.
 

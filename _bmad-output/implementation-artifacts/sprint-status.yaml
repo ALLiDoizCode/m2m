@@ -133,7 +133,7 @@ epics:
 
   epic-36:
     name: "Real-Binary ATOR Verification"
-    status: pending
+    status: in-progress
     stories:
       36.1:
         name: "Local ATOR Network Image + docker-compose"

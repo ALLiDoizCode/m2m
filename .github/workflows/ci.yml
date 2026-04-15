@@ -258,13 +258,29 @@ jobs:
           node-version: '22.11.0'
           cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (including optional deps)
+        # `npm ci` installs optionalDependencies by default on supported
+        # platforms; we pass --include=optional explicitly so the audit below
+        # is guaranteed to see optional packages (e.g.,
+        # @anyone-protocol/anyone-client) regardless of any future default
+        # change. Epic 35 retro action item #2.
+        run: npm ci --include=optional
 
       # Security hardening: Check for high/critical vulnerabilities (Story 16.2)
       # Currently advisory due to transitive dependency issues requiring major updates
       # Known issues: express (body-parser), aws-sdk (fast-xml-parser)
-      - name: Run npm audit
+      #
+      # Epic 35 retro action item #2: ensure optional deps are in-scope. We
+      # run audit twice: once over the full tree (default), and once
+      # explicitly including optional deps via --include=optional. The second
+      # pass is defensive — `npm audit` should already cover installed
+      # optional deps, but being explicit documents intent and survives any
+      # npm behavior change.
+      - name: Run npm audit (full tree including optional deps)
+        run: npm audit --audit-level=high --include=optional
+        continue-on-error: true
+
+      - name: Run npm audit (baseline, all installed packages)
         run: npm audit --audit-level=high
         continue-on-error: true
 

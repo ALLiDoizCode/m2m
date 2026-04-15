@@ -349,18 +349,16 @@ describe('Transport SOCKS5 integration (Story 35.6)', () => {
             ilpPacket: Buffer.alloc(0),
           } as BTPData,
         };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ws = (client as any)._ws as WebSocket | null | undefined;
-        // Defensive: if BTPClient ever renames `_ws`, this assertion fails
-        // fast with a clear message instead of the confusing `Cannot read
-        // properties of undefined (reading 'send')` NPE.
-        if (!ws) {
+        // Use the supported test seam (Epic 35 retro #5). The seam returns
+        // `false` if the socket is not connected, so a failed send here is a
+        // clear assertion instead of a private-field NPE.
+        const sent = client.sendRawFrameForTesting(serializeBTPMessage(appMessage));
+        if (!sent) {
           throw new Error(
-            'BTPClient._ws is null/undefined — private field was renamed or ' +
-              'the client did not finish connecting; update transport-socks5 test.'
+            'BTPClient.sendRawFrameForTesting returned false — client did ' +
+              'not finish connecting; update transport-socks5 test.'
           );
         }
-        ws.send(serializeBTPMessage(appMessage));
 
         await waitFor(() => btp.onMessage.mock.calls.length > 0, {
           timeout: 2000,
