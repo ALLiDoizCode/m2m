@@ -137,7 +137,7 @@ epics:
     stories:
       36.1:
         name: "Local ATOR Network Image + docker-compose"
-        status: pending
+        status: done
       36.2:
         name: "anyone-client SDK CLI Flag Audit"
         status: pending

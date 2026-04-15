@@ -11,8 +11,12 @@
 #   make mina-up       Start Mina lightnet
 #   make mina-down     Stop Mina services
 #   make mina-logs     Follow Mina logs
-#   make infra-up      Start all chains (EVM + Solana + Mina)
-#   make infra-down    Stop all chains (EVM + Solana + Mina)
+#   make ator-up       Start local ATOR network (3 DirAuth + 3 relay + 1 HS)
+#   make ator-down     Stop + volume-purge ATOR network
+#   make ator-logs     Follow ATOR docker compose logs
+#   make ator-test     Run real-binary ATOR integration suite (36.3/36.4 land tests)
+#   make infra-up      Start all chains (EVM + Solana + Mina + ATOR)
+#   make infra-down    Stop all chains (EVM + Solana + Mina + ATOR; preserves volumes)
 
 services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -152,3 +156,224 @@ services:
       timeout: 10s
       retries: 10
       start_period: 120s
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # ATOR Testnet — 3 DirAuth + 3 relay + 1 HS (Epic 36, Story 36.1)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Pinned anon v0.4.10.0-beta installed from the official Debian .deb.
+  # Network is internal:true — relays cannot egress to the public internet;
+  # the only host-visible port is hs1's SOCKS5 listener (default 127.0.0.1:9150).
+  # Shared DirAuthority lines (identical across every anon service so each sees
+  # the same 3-of-3 quorum). The 40-char fingerprints below are placeholders;
+  # the entrypoint does NOT pin a specific identity — anon mints identities on
+  # first start inside the named volume, and NoFingerprint mode is used for the
+  # DirAuthority lines via the "bridge"-free form: "<addr>:<dirport> <orport> <fp>".
+  # For a test network with TestingTorNetwork=1 the fingerprint check is relaxed
+  # on first-vote so the placeholder fingerprint works until identities stabilise.
+  dirauth1:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment: &anon-dirauth-env
+      ANON_ROLE: dirauth
+      NICKNAME: dirauth1
+      ORPORT: '9001'
+      DIRPORT: '9030'
+      CONTROL_PORT: '9051'
+      IDENTITY_SEED: dirauth1-seed-do-not-use-in-production
+      DIRAUTH1_LINE: 'DirAuthority dirauth1 orport=9001 no-v2 v3ident=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA dirauth1:9030 0000000000000000000000000000000000000000'
+      DIRAUTH2_LINE: 'DirAuthority dirauth2 orport=9001 no-v2 v3ident=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB dirauth2:9030 1111111111111111111111111111111111111111'
+      DIRAUTH3_LINE: 'DirAuthority dirauth3 orport=9001 no-v2 v3ident=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC dirauth3:9030 2222222222222222222222222222222222222222'
+    volumes:
+      - ator_dirauth1:/var/lib/anon
+    networks:
+      - ator_net
+    restart: unless-stopped
+    healthcheck:
+      # Healthy = dirauth's control port is accepting TCP (process is up and
+      # listening). A stronger readiness signal (cached-consensus present) is
+      # left to test-layer polling; start_period gives anon time to boot.
+      test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  dirauth2:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment:
+      <<: *anon-dirauth-env
+      NICKNAME: dirauth2
+      IDENTITY_SEED: dirauth2-seed-do-not-use-in-production
+    volumes:
+      - ator_dirauth2:/var/lib/anon
+    networks:
+      - ator_net
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  dirauth3:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment:
+      <<: *anon-dirauth-env
+      NICKNAME: dirauth3
+      IDENTITY_SEED: dirauth3-seed-do-not-use-in-production
+    volumes:
+      - ator_dirauth3:/var/lib/anon
+    networks:
+      - ator_net
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  relay1:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment: &anon-relay-env
+      ANON_ROLE: relay
+      NICKNAME: relay1
+      ORPORT: '9001'
+      DIRPORT: '9030'
+      CONTROL_PORT: '9051'
+      DIRAUTH1_LINE: 'DirAuthority dirauth1 orport=9001 no-v2 v3ident=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA dirauth1:9030 0000000000000000000000000000000000000000'
+      DIRAUTH2_LINE: 'DirAuthority dirauth2 orport=9001 no-v2 v3ident=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB dirauth2:9030 1111111111111111111111111111111111111111'
+      DIRAUTH3_LINE: 'DirAuthority dirauth3 orport=9001 no-v2 v3ident=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC dirauth3:9030 2222222222222222222222222222222222222222'
+    volumes:
+      - ator_relay1:/var/lib/anon
+    networks:
+      - ator_net
+    depends_on:
+      dirauth1: { condition: service_healthy }
+      dirauth2: { condition: service_healthy }
+      dirauth3: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  relay2:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment:
+      <<: *anon-relay-env
+      NICKNAME: relay2
+    volumes:
+      - ator_relay2:/var/lib/anon
+    networks:
+      - ator_net
+    depends_on:
+      dirauth1: { condition: service_healthy }
+      dirauth2: { condition: service_healthy }
+      dirauth3: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  relay3:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment:
+      <<: *anon-relay-env
+      NICKNAME: relay3
+    volumes:
+      - ator_relay3:/var/lib/anon
+    networks:
+      - ator_net
+    depends_on:
+      dirauth1: { condition: service_healthy }
+      dirauth2: { condition: service_healthy }
+      dirauth3: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  hs1:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment:
+      ANON_ROLE: hs
+      NICKNAME: hs1
+      ORPORT: '9001'
+      DIRPORT: '9030'
+      CONTROL_PORT: '9051'
+      SOCKS_PORT: '9050'
+      HIDDEN_SERVICE_PORT: '5000'
+      DIRAUTH1_LINE: 'DirAuthority dirauth1 orport=9001 no-v2 v3ident=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA dirauth1:9030 0000000000000000000000000000000000000000'
+      DIRAUTH2_LINE: 'DirAuthority dirauth2 orport=9001 no-v2 v3ident=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB dirauth2:9030 1111111111111111111111111111111111111111'
+      DIRAUTH3_LINE: 'DirAuthority dirauth3 orport=9001 no-v2 v3ident=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC dirauth3:9030 2222222222222222222222222222222222222222'
+    volumes:
+      - ator_hs1:/var/lib/anon
+    ports:
+      # SOCKS5 — default 9150 to avoid collision with system-tor 9050 (R-008).
+      # Override with ATOR_HS_SOCKS_PORT env var at compose time.
+      - '127.0.0.1:${ATOR_HS_SOCKS_PORT:-9150}:9050'
+    networks:
+      - ator_net
+    depends_on:
+      relay1: { condition: service_healthy }
+      relay2: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 9050 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+networks:
+  ator_net:
+    driver: bridge
+    # internal:true — relays and HS cannot reach the public internet.
+    # The only host-visible exposure is hs1's SOCKS port mapping above.
+    internal: true
+
+volumes:
+  ator_dirauth1:
+  ator_dirauth2:
+  ator_dirauth3:
+  ator_relay1:
+  ator_relay2:
+  ator_relay3:
+  ator_hs1:

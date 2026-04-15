@@ -1,0 +1,35 @@
+# torrc template — Relay role (guard/middle/exit-flag-bearing) on internal-only network
+# Variables substituted by entrypoint.sh via envsubst:
+#   ${NICKNAME} ${ORPORT} ${DIRPORT} ${CONTROL_PORT}
+#   ${DIRAUTH1_LINE} ${DIRAUTH2_LINE} ${DIRAUTH3_LINE}
+Nickname ${NICKNAME}
+DataDirectory /var/lib/anon
+ContactInfo test@local
+Log notice stdout
+RunAsDaemon 0
+
+TestingTorNetwork 1
+AssumeReachable 1
+ProtocolWarnings 1
+
+ORPort ${ORPORT}
+DirPort ${DIRPORT}
+# ControlPort bound to localhost only — defense-in-depth (see torrc.dirauth).
+ControlPort 127.0.0.1:${CONTROL_PORT}
+CookieAuthentication 1
+SocksPort 0
+
+# Exit flag-bearing relay.
+# ExitPolicy "accept *:*" is cosmetic here — the docker network is declared internal:true
+# which physically prevents egress. The accept policy causes anon to advertise the Exit
+# flag so circuit-builder logic that requires one still succeeds.
+ExitRelay 1
+ExitPolicy accept *:*
+
+# Sane test bandwidth so descriptor publication is fast
+BandwidthRate 100 MBytes
+BandwidthBurst 200 MBytes
+
+${DIRAUTH1_LINE}
+${DIRAUTH2_LINE}
+${DIRAUTH3_LINE}
