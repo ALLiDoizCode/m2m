@@ -1,165 +1,123 @@
 ---
-stepsCompleted:
-  - step-01-preflight-and-context
-  - step-02-identify-targets
-  - step-03-generate-tests
-  - step-04-validate-and-summarize
-lastStep: step-04-validate-and-summarize
-lastSaved: '2026-04-13'
-inputDocuments:
-  - _bmad-output/implementation-artifacts/35-2-implement-sockstransportprovider.md
-  - packages/connector/src/transport/socks-transport-provider.ts
-  - packages/connector/src/transport/socks-transport-provider.test.ts
-  - packages/connector/src/transport/transport-provider.ts
-mode: yolo
-scope: Story 35.2 - SocksTransportProvider AC coverage gap fill
+stepsCompleted: ['step-01-preflight-and-context', 'step-02-identify-targets', 'step-03-generate-tests', 'step-04-validate-and-summarize']
+lastStep: 'step-04-validate-and-summarize'
+lastSaved: '2026-04-15'
+story: '36.2'
+artifact: '_bmad-output/implementation-artifacts/36-2-anyone-client-sdk-cli-flag-audit.md'
+mode: 'yolo'
 ---
 
-# Automation Summary: Story 35.2 (SocksTransportProvider)
+# Story 36.2 Automation Coverage Summary
 
-**Date:** 2026-04-13
-**Mode:** YOLO / BMad-Integrated
-**Objective:** Identify any Story 35.2 acceptance criteria not covered by automated tests, and generate tests to fill those gaps.
+## Coverage Assessment (pre-automation)
 
-## Preflight
+| AC    | Covered before this run                                                           | File                                                                        |
+| ----- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| AC 1  | Yes — hedge-regex assertion                                                       | `test/acceptance/story-36-2-anyone-client-sdk-cli-flag-audit.test.ts`       |
+| AC 2  | Yes — `do not guess` count assertion                                              | same                                                                        |
+| AC 3  | Yes — Option A.2 disambiguation + key-flag + snapshot-link assertions             | same                                                                        |
+| AC 4  | Yes — provenance regex + resolved-version equality + non-future date              | same                                                                        |
+| AC 5  | Yes — snapshot existence, header shape, trailing newline, no abs paths, no ANSI   | same                                                                        |
+| AC 6  | Yes — snapshot-diff gate (integration) + canary-hint static check (acceptance)   | `test/integration/story-36-2-anon-cli-snapshot.test.ts` + acceptance file   |
+| AC 7  | Yes — `[story 35.5]` / `[story 36.2]` / `[operator-only]` tokens + option names   | acceptance file                                                             |
+| AC 8  | Yes — Option B presence, audit date, Option A.2 back-link                         | acceptance file                                                             |
+| AC 9  | Partial — static "no source tagged Story 36.2" tripwire + CHANGELOG tracer        | acceptance file (shell-level git-log check remains Task 7.5 manual)         |
+| AC 10 | **GAP — excluded from acceptance suite as "shell-level, Task 7.6"**               | —                                                                           |
 
-- Stack detected: backend (Node.js/TypeScript, Jest 29 + ts-jest)
-- Framework verified: connector workspace Jest config + deps present
-- Mode: BMad-Integrated (story artifact provided)
+## Gap Identified
 
-## AC-to-Test Traceability (Story 35.2)
+**AC 10 (Operator-verbatim smoke)** had zero automated coverage. The acceptance
+test file explicitly excluded it (see the header comment "AC 10
+operator-verbatim command smoke → shell-level, Task 7.6"). Story completion
+recorded AC 10 evidence in Completion Notes as a one-shot dev-run, but nothing
+in CI would catch a regression where a documented operator command stopped
+being syntactically valid on an SDK bump — the very drift class Epic 36 exists
+to prevent.
 
-Test file: `packages/connector/src/transport/socks-transport-provider.test.ts` (23 cases, all passing).
+## Test Added
 
-| AC | Summary | Test IDs | Covered |
-|----|---------|----------|---------|
-| AC 1 | `createAgent()` returns `SocksProxyAgent` configured with socks5h:// URL | T-35.2-01 (instance check + host/port) | YES |
-| AC 2 | `getExternalUrl()` returns configured `.anon` URL | T-35.2-02 | YES |
-| AC 3 | Constructor rejects non-`socks5h://` schemes (DNS-leak defense) | T-35.2-05, T-35.6-SEC-03 (9 cases including socks5, http, socks4, empty, non-URL, accept-valid, DNS message, no-.anon-in-error) | YES |
-| AC 4 | `start()` throws when proxy unreachable (FAIL CLOSED) | T-35.2-03, T-35.6-SEC-02 | YES |
-| AC 5 | `start()` resolves when proxy reachable | T-35.2-09 | YES |
-| AC 6 | `healthCheck()` returns true/false, never throws | T-35.2-07, T-35.2-04 | YES |
-| AC 7 | `stop()` safe no-op | T-35.2-08 + safe-after-start | YES |
-| AC 8 | Implements `TransportProvider` interface | T-35.2-10 | YES |
-| AC 9 | `createAgent()` synchronous; fresh per call | T-35.2-06, T-35.2-11 | YES |
-| AC 10 | `.anon` absent from INFO/WARN/ERROR/FATAL logs | T-35.6-SEC-05 (full-lifecycle audit) | YES |
-| AC 11 | Zero regression | Full unit suite (`npm run test:unit` → 2458 pass, 0 fail per story Debug Log) | YES |
+**New file:** `packages/connector/test/integration/story-36-2-operator-command-smoke.test.ts`
 
-## Gap Analysis
+Three `it()` blocks, each invoking a documented command from
+`docs/ator-transport.md` §Option A.2 "Example commands" block verbatim via
+`spawnSync` with `NO_COLOR=1` and a 10 s timeout:
 
-**Result:** No coverage gaps.
+1. `anyone-proxy --help` — asserts the CLI is reachable, exit status is
+   non-null (no daemon hang), and some output was produced.
+2. `anyone-client --help` — asserts non-zero exit and either the
+   `ERR_PARSE_ARGS_UNKNOWN_OPTION` fingerprint or a proper usage screen on
+   exit-0 (future-proof: if the SDK ships real `--help` support the test
+   still passes; the snapshot-diff gate catches the behavior change).
+3. `anyone-client --bogus-flag` — the exact recipe the docs show for
+   "validate flag syntax without starting the daemon"; asserts non-zero
+   exit with the `parseArgs` rejection fingerprint.
 
-Every AC in `_bmad-output/implementation-artifacts/35-2-implement-sockstransportprovider.md` has at least one corresponding automated test. All test IDs listed in Task 5 of the story (T-35.2-01..11, plus T-35.6-SEC-02/03/05) are present and passing.
+### Design decisions mirrored from the sibling integration file
 
-The AC 10 `.anon` log-audit is particularly thorough: it exercises constructor (happy + error), `createAgent` with a `.anon` peer URL, `start()` success + failure, `healthCheck()` both outcomes, and `stop()`, then asserts the serialized args of every `logger.info/warn/error/fatal` call contain no `".anon"` substring.
+- Identical R-14 capability probe (`require.resolve(...)` → `describeIfSdk`)
+  so the suite skips explicitly on optional-dep-missing CI legs rather than
+  silently passing.
+- Identical CLI-path resolution (walk up from the SDK's installed
+  `package.json`) so npm workspace hoisting doesn't break the probe.
+- Explicit `test.skip` fallthrough when SDK is absent so the CI log shows
+  the skip reason rather than "0 tests" for the file.
+- `NO_COLOR=1` + 10 s `spawnSync` timeout to prevent daemon-boot hangs.
 
-## Test Execution
+### Deliberately NOT invoked
+
+- Bare `npx anyone-proxy` (starts a real SOCKS5 daemon).
+- `anyone-client -s 9050 -o 9001 -v` (starts the full client daemon).
+  Both belong to Story 36.3's real-binary integration scope — AC 10
+  explicitly forbids booting the real daemon as a syntactic-validity proof.
+
+## Validation
+
+- `npx jest --config packages/connector/jest.config.js --testPathPattern 'story-36-2-operator-command-smoke'`
+  → **3 passed, 0 failed** (1.2 s).
+- Lint-safe (mirrors existing `eslint-disable` directives from the sibling
+  integration test; same code patterns).
+
+## Pre-existing issue observed (out of scope)
+
+`packages/connector/test/integration/story-36-2-anon-cli-snapshot.test.ts`
+is currently **failing deterministically** (5/5 runs) for the `anyone-proxy`
+case on the current checkout. The diff is blank-line structural:
 
 ```
-npx jest packages/connector/src/transport/socks-transport-provider.test.ts
-Test Suites: 1 passed, 1 total
-Tests:       23 passed, 23 total
-Time:        ~1 s
+--- expected (committed) ---
+[proxychains] config file found: ...
+                                         ← extra blank
+[proxychains] preloading ...
 ```
 
-All assertions pass. No flakiness.
+The committed snapshot has an extra blank line between the first two
+`[proxychains]` lines that the live output does not produce. The story's
+Dev Agent Record claims "15/15 pass after continuation-line fold", but the
+current normalization does not dedupe blank lines. This is pre-existing
+unrelated to Story 36.2's AC 10 gap and is **not** addressed here; flag to
+the story author / reviewer.
 
-## Tests Generated This Run
+## Files changed in this run
 
-None. The existing suite already satisfies the AC-to-test mapping.
+Created:
 
-## Recommendations (out of scope for 35.2)
+- `packages/connector/test/integration/story-36-2-operator-command-smoke.test.ts`
+- `_bmad-output/test-artifacts/automation-summary.md` (this file — overwritten)
 
-1. Integration-level `.anon` log audit at `ConnectorNode` boundary -> deferred to Story 35.6.
-2. Real SOCKS5 handshake / BTP-through-Tor E2E -> deferred to Story 35.6.
-3. Future: probe-socket cleanup under `AbortSignal` if wired in Story 35.4.
+Modified: none.
+Deleted: none.
 
-## Status
+## Step Summary
 
-- AC coverage: 11/11 (100%)
-- Unit tests: 23/23 passing
-- Action taken this run: gap analysis only; no new tests required.
-
----
-
-# Automation Summary: Story 36.1 (Local ATOR Network Image + docker-compose Profile)
-
-**Date:** 2026-04-15
-**Mode:** YOLO / BMad-Integrated
-**Story:** `_bmad-output/implementation-artifacts/36-1-local-ator-network-image-docker-compose.md`
-**Objective:** Identify any Story 36.1 acceptance criteria not covered by automated tests, and generate tests to fill those gaps.
-
-## Preflight
-
-- Stack detected: backend (Node.js/TypeScript monorepo, Jest acceptance suite)
-- Framework verified: `packages/connector/jest.acceptance.config.js` present; `test/acceptance/` harness established (precedent: stories 33.9 / 34.10)
-- Mode: BMad-Integrated (story + ATDD checklist already present at `_bmad-output/test-artifacts/atdd-checklist-36-1.md`)
-- Existing artifact: `packages/connector/test/acceptance/story-36-1-ator-local-network.test.ts` (805 lines, 126 tests)
-
-## AC-to-Test Traceability (Story 36.1, 14 ACs)
-
-| AC    | Nature             | Covered by automation? | Location / Notes                                                                         |
-| ----- | ------------------ | ---------------------- | ---------------------------------------------------------------------------------------- |
-| AC 1  | Static (compose)   | ✅ 49 tests            | `docker-compose.yml ator profile — 7 services, pinned image` describe block             |
-| AC 2  | Static (Dockerfile)| ✅ 11 tests            | `docker/ator/Dockerfile — pinned .deb with SHA-256 verification` describe block         |
-| AC 2  | Runtime (build)    | ⊘ Shell-level only     | `docker build`, image-size < 200 MB — dev shell checklist (per story Testing Standards)  |
-| AC 3  | Static (scripts)   | ✅ 12 tests            | `entrypoint.sh` (8) + `torrc templates — one per role` (4)                              |
-| AC 4  | Static (torrc)     | ✅ 7 tests             | `torrc.dirauth — DirAuth quorum configuration` describe block                           |
-| AC 4  | Runtime (consensus)| ⊘ Shell-level only     | "consensus published within 60s" — dev shell checklist                                   |
-| AC 5  | Static (torrc+dep) | ✅ 9 tests             | `torrc.relay` (5) + `dependency ordering` (4)                                           |
-| AC 5  | Runtime (discovery)| ⊘ Shell-level only     | "relays visible in consensus within 90s" — dev shell checklist                           |
-| AC 6  | Static (torrc+exp) | ✅ 9 tests             | `torrc.hs` (4) + `hs1 host exposure + port hygiene` (5)                                 |
-| AC 6  | Runtime (hostname) | ⊘ Shell-level only     | "hostname file populated within 120s" — dev shell checklist                              |
-| AC 7  | Static (Makefile)  | ✅ 8 tests             | `Makefile ator-up / ator-down / ator-logs / ator-test targets` describe block            |
-| AC 8  | Runtime (teardown) | ⊘ Shell-level only     | Zero residual containers/volumes/networks after `ator-down` — dev shell checklist        |
-| AC 9  | Static (Makefile)  | ✅ 2 tests             | `infra-up / infra-down include --profile ator` describe block                           |
-| AC 10 | Static (Makefile)  | ✅ 5 tests             | `make help lists the new ATOR targets` describe block                                   |
-| AC 11 | Static (compose)   | ✅ 5+1 tests           | `hs1 host exposure + port hygiene` + cross-profile port disjointness                    |
-| AC 12 | Static (checksums) | ✅ 7 tests             | `docker/ator/checksums.txt — provenance + sha256sum -c compatible` describe block       |
-| AC 13 | Static (regression)| ✅ 2 tests + 4 regress | `CHANGELOG + scope bright-line` + `pre-existing profiles unchanged`                     |
-| AC 14 | Static (Dockerfile)| ✅ 1 test              | `multi-arch posture is explicit in Dockerfile` describe block                           |
-
-**Total automated coverage:** 126 tests / 126 passing across the 14 ACs at the static-asset level.
-
-## Gap Analysis
-
-The ATDD checklist at `_bmad-output/test-artifacts/atdd-checklist-36-1.md` already enumerates the coverage matrix and declares that every statically-verifiable AC slice is covered by jest assertions. Re-running the suite against the current tree confirms **all 126 tests pass** (RED→GREEN complete; see Test Execution Evidence below).
-
-The deliberately-unautomated slices (marked ⊘) are the runtime timing smokes that the story's Testing Standards Summary explicitly scopes to dev shell-level validation, not jest tests:
-
-- AC 4 — consensus published within 60s
-- AC 5 — relays visible in consensus within 90s
-- AC 6 — hs1 `/var/lib/anon/hs/hostname` populated within 120s
-- AC 7 — `make ator-up` exits 0 within 30s
-- AC 8 — `make ator-down` produces zero residual containers / volumes / networks
-- AC 2 — `docker build` exit 0 + image < 200 MB + `anon --version` string match
-- AC 14 — `docker build --platform linux/arm64` succeed-or-fail-fast posture
-
-These are reproducibly enumerated in the ATDD checklist's "Shell-Level Validation Checklist" section. Per story scope (AC 13 bright-line) the jest-level real-binary integration tests are carried by Stories 36.3, 36.4, and 36.5 (nightly CI). Adding them here would violate AC 13.
-
-**Conclusion:** no automation gaps remain that can legitimately be filled within Story 36.1's scope. All 14 ACs are either fully automated (static) or explicitly deferred (runtime) per the story's own Testing Standards.
-
-## Test Execution Evidence
-
-```text
-Command: cd packages/connector && npx jest --config jest.acceptance.config.js \
-         test/acceptance/story-36-1-ator-local-network.test.ts
-
-Test Suites: 1 passed, 1 total
-Tests:       126 passed, 126 total
-Snapshots:   0 total
-Time:        ~1.9 s
-```
-
-## Status
-
-- AC static coverage: 14/14 (100%)
-- Automated tests: 126/126 passing
-- Action taken this run: gap analysis only; existing suite already covers every statically-verifiable AC slice. No new tests added (adding more would duplicate the ATDD output or violate AC 13 scope bright-line).
-
-## Recommendations (deferred to later stories per epic plan)
-
-1. Runtime timing smokes (AC 4/5/6/7/8) → shell-level dev checklist already in `atdd-checklist-36-1.md`; authoritative CI automation lands in Story 36.5.
-2. Real-binary SOCKS5 jest suite (`transport-ator-real-binary.test.ts`) → Story 36.3.
-3. Real-binary HS + managed-client jest suite (`transport-ator-hidden-service.test.ts`) → Story 36.4.
-4. `anon --help` snapshot-diff gate → Story 36.2.
+- **Status:** Complete — AC 10 gap filled; all 10 ACs now have at least one automated gate.
+- **Duration:** ~10 minutes (single-pass YOLO, no iteration cycles).
+- **What changed:** One new integration test file covering AC 10 (three `spawnSync`-based command smoke checks). Automation summary doc updated.
+- **Key decisions:**
+  - Filled gap as a **new integration test file**, not as additional `it()` blocks inside the existing snapshot-diff test — keeps responsibilities separate (snapshot drift vs operator-command syntactic validity) and matches the story's own classification of AC 10 as a shell-level concern promoted into integration.
+  - Mirrored R-14 skip semantics, CLI resolution, `NO_COLOR=1` env, and 10 s timeout from the sibling snapshot test so the two integration files behave identically on optional-dep-missing legs.
+  - Kept AC 10 assertions future-proof: if a future SDK adds real `--help` support the test still passes (exit 0 + usage screen accepted), while the snapshot-diff gate catches the behavior change and forces a re-audit.
+- **Issues found & fixed:** None fixed in this run. **Found** a pre-existing deterministic failure in `story-36-2-anon-cli-snapshot.test.ts` (blank-line dedupe gap in `normalize()`) that contradicts the Dev Agent Record's "15/15 pass" claim; flagged in this summary for story author.
+- **Remaining concerns:**
+  - AC 9's git-log file-list check (Task 7.5) remains manual; no in-jest path to the story-start SHA. The acceptance file's "source tagged Story 36.2" tripwire is the best asymmetric guard available.
+  - Pre-existing `story-36-2-anon-cli-snapshot.test.ts` failure should be triaged by the story author before the epic closes.
+- **Migrations:** None. The new file is additive; no changes to jest config, no changes to `package.json`, no changes to CI config. `testMatch: '**/*.test.ts'` already discovers the new file.

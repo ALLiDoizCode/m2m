@@ -139,6 +139,7 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ### Added
 
 - **36-1:** Local ATOR network image + `docker-compose` `ator` profile (3 DirAuth + 3 relay + 1 HS on pinned `anon v0.4.10.0-beta` .deb) with `make ator-up` / `ator-down` / `ator-logs` / `ator-test` targets
+- **36-2:** Audit @anyone-protocol/anyone-client CLI flag surface; replace "consult docs.anyone.io" hedges in docs/ator-transport.md with verified flag tables; add --help snapshot diff gate.
 - **btp:** RFC-0023 compliant no-auth connection support with `BTP_ALLOW_NOAUTH` flag
   - **Default mode:** Permissionless network deployment with ILP-layer gating
   - Support both permissionless networks (no-auth BTP - default) and private networks (authenticated BTP)

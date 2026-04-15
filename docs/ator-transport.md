@@ -17,8 +17,8 @@ Default transport remains direct TCP -- existing deployments that do not opt int
 
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-  - [Option A: External anon (or system tor)](#option-a-external-anon-or-system-tor)
-  - [Option B: Managed anon via @anyone-protocol/anyone-client](#option-b-managed-anon-via-anyone-protocolanyone-client)
+  - [External anon, or system tor (Opt A)](#option-a-external-anon-or-system-tor)
+  - [Managed anon via @anyone-protocol/anyone-client (Opt B)](#option-b-managed-anon-via-anyone-protocolanyone-client)
 - [Connector Configuration](#connector-configuration)
   - [transport Block Reference](#transport-block-reference)
   - [Example A -- Direct Transport (Default)](#example-a----direct-transport-default)
@@ -58,17 +58,76 @@ The operator runs the SOCKS5 proxy themselves. The connector only talks to it ov
 
 ```bash
 # Option A.1: install anon via the official distribution.
-# See https://docs.anyone.io for current install packages per distro.
+# See https://docs.anyone.io for distro install packages (background reference).
 # Expected outcome: `anon` process listening on SOCKS5 port (default 9050).
 
 # Option A.2: install the Anyone Protocol SDK locally and run its bundled
-# proxy binary directly. The package exposes two CLIs -- `anyone-proxy` and
-# `anyone-client` -- and ships the `anon` binary under its own
-# `node_modules/@anyone-protocol/anyone-client/` tree. Consult
-# https://docs.anyone.io for the current CLI flags; do not guess.
+# proxy binary directly. The package exposes TWO CLIs -- pick the one that
+# matches what you want to do:
+#
+#   anyone-proxy   -- experimental SOCKS5 daemon wrapper (proxychains-backed).
+#                     Start this when you want a running SOCKS5 endpoint on a
+#                     specific port and nothing else.
+#   anyone-client  -- process orchestrator around the bundled `anon` binary.
+#                     Use this when you want richer control: OR port, control
+#                     port, custom anonrc, and the `anon` binary lifecycle.
+#
+# The connector's managed-client code path (see below) does NOT shell out to
+# either CLI -- it imports the SDK and calls the `Anon` constructor directly.
+# These CLIs are for operators who want to run the proxy outside the connector.
 npm install @anyone-protocol/anyone-client
-npx anyone-proxy --help   # verify the flag for the SOCKS port on your version
 ```
+
+**Flag surface (`anyone-proxy`, pinned SDK):**
+
+| Flag           | Type / form         | Effect                                                           | Provenance      |
+| -------------- | ------------------- | ---------------------------------------------------------------- | --------------- |
+| `--socks-port` | `--socks-port 9050` | SOCKS5 bind port for the proxychains-wrapped `anon` process.     | [operator-only] |
+| (forwarded...) | any other args      | Forwarded verbatim to proxychains / `anon`; unknown flags error. | [operator-only] |
+
+**Flag surface (`anyone-client`, pinned SDK -- uses `node:util.parseArgs`):**
+
+| Flag                     | Short | Type   | Effect                                                                      | Provenance      |
+| ------------------------ | ----- | ------ | --------------------------------------------------------------------------- | --------------- |
+| `--socksPort <n>`        | `-s`  | int    | SOCKS5 bind port (default `9050`). Maps to `Anon({ socksPort })`.           | [story 35.5]    |
+| `--orPort <n>`           | `-o`  | int    | OR port (default `9001`). Connector sets this to `0` programmatically.      | [story 35.5]    |
+| `--controlPort <n>`      | `-c`  | int    | Control port (default `9051`). Not invoked from connector code.             | [operator-only] |
+| `--verbose`              | `-v`  | bool   | Enables `displayLog` on the spawned `Anon`. Maps to `Anon({ displayLog })`. | [story 35.5]    |
+| `--config <path>`        | `-f`  | string | Path to anonrc. Maps to `Anon({ configFilePath })`.                         | [story 35.5]    |
+| `--binaryPath <path>`    | `-b`  | string | Override for the `anon` executable. Maps to `Anon({ binaryPath })`.         | [story 35.5]    |
+| `--agree`                | --    | bool   | Auto-accept upstream terms (non-interactive installs).                      | [operator-only] |
+| `--termsFilePath <path>` | `-t`  | string | Path to an accepted-terms marker file (for `--agree` flows).                | [operator-only] |
+
+Flags consumed by the managed-client code path -- `binaryPath`, `configFilePath`, `hiddenServiceDir`, `hiddenServicePort`, `socksPort` -- were introduced by [story 35.5]. The flag-surface audit itself was done by [story 36.2]. See `packages/connector/src/transport/managed-anon-client.ts` `_buildFactoryOptions()` for the exact SDK options the connector passes programmatically; note that `hiddenServiceDir` / `hiddenServicePort` are SDK-programmatic options only and are NOT exposed as CLI flags on `anyone-client` at the pinned version.
+
+**Settings NOT exposed as CLI flags (anonrc-only at the pinned SDK version):** `data-dir` (the `anon` data directory) and `log-level` (verbosity beyond the boolean `--verbose` / `-v` toggle) are controlled via the anonrc file referenced by `--config` / `-f`, not as direct flags on `anyone-client`. Operators who need to override the data-dir or raise the log-level beyond `--verbose`'s notice-level default must edit their anonrc and pass it via `--config <path>`. This gap was confirmed during the [story 36.2] audit against `@anyone-protocol/anyone-client@1.1.3`; if a future SDK bump adds `--data-dir` / `--log-level` as first-class CLI flags, update this table and the committed `--help` snapshots in the same PR. [operator-only]
+
+**Syntactic-validity note (`--help` is not honored by either CLI):**
+
+- `anyone-proxy --help` is intercepted by proxychains before the SDK sees it; exit code `0` with a proxychains "can't load process '--help'" message. Not a usage screen.
+- `anyone-client --help` throws `ERR_PARSE_ARGS_UNKNOWN_OPTION` from `node:util.parseArgs` and exits `1`. Again, not a usage screen.
+
+Byte-for-byte transcripts of both invocations at the pinned SDK version are committed at `docs/ator-transport/anyone-proxy-help.txt` and `docs/ator-transport/anyone-client-help.txt`; the snapshot-diff gate at `packages/connector/test/integration/story-36-2-anon-cli-snapshot.test.ts` fails CI if either output drifts silently on an SDK bump.
+
+**Example commands:**
+
+```bash
+# Start the SOCKS5 proxy on the default port (9050)
+npx anyone-proxy
+
+# Start the SOCKS5 proxy on a custom port
+npx anyone-proxy --socks-port 9150
+
+# Start the full client with custom SOCKS + OR ports and verbose logging
+npx anyone-client -s 9050 -o 9001 -v
+
+# Validate flag syntax without starting the daemon (exits non-zero on typos)
+npx anyone-client --bogus-flag   # exits 1: ERR_PARSE_ARGS_UNKNOWN_OPTION
+```
+
+> Flag surface verified against @anyone-protocol/anyone-client@1.1.3 on 2026-04-15.
+
+See `docs/ator-transport/anyone-proxy-help.txt` and `docs/ator-transport/anyone-client-help.txt` for the full flag surface as of the audit.
 
 **With system tor (fallback on platforms where the bundled anon binary is unavailable -- Epic 35 R-005):**
 
@@ -96,6 +155,8 @@ npm install @anyone-protocol/anyone-client
 ```
 
 The SDK ships a bundled `anon` binary for supported platforms. On unsupported platforms the SDK's `start()` fails with an `ENOENT`-shaped error; fall back to Option A with system `tor` or a distro-packaged `anon`.
+
+**See also (flag overrides):** When you need to override `managedOptions.binaryPath` or `managedOptions.configFilePath` from connector config, consult the flag table in §Option A.2 above for the equivalent `anyone-client` CLI surface -- the `-b` / `--binaryPath` and `-f` / `--config` flags there correspond 1:1 to the same SDK options the connector passes programmatically. That section's flag surface was verified against `@anyone-protocol/anyone-client@1.1.3` on 2026-04-15.
 
 **Managed-client lifecycle (Story 35.5):**
 
