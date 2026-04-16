@@ -69,6 +69,12 @@ fi
 if [ "${ROLE}" = "hs" ]; then
   mkdir -p /var/lib/anon/hs
   chmod 0700 /var/lib/anon/hs
+  # Start a TCP echo server on the hidden-service backend port so that
+  # connections arriving through the .anon rendezvous (HiddenServicePort)
+  # have something to connect to. Used by Story 36.4 T-36.4-03/08 tests.
+  # fork = accept multiple connections; the process runs in the background
+  # alongside the anon binary and is reaped when the container stops.
+  socat TCP-LISTEN:"${HIDDEN_SERVICE_PORT}",fork,reuseaddr EXEC:/bin/cat &
 fi
 
 # Signal-forwarding wrapper — mirrors infra/solana/entrypoint.sh pattern:

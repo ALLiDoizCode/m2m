@@ -29,10 +29,11 @@ ExitPolicy reject *:*
 BandwidthRate 100 MBytes
 BandwidthBurst 200 MBytes
 
-# Hidden service — points to an in-container echo server placeholder on 127.0.0.1:5000.
-# Stories 36.3 / 36.4 will dial in from the host via the SOCKS port.
+# Hidden service — points to an in-container echo server placeholder on
+# 127.0.0.1:${HIDDEN_SERVICE_PORT}. Stories 36.3 / 36.4 dial in from the
+# host via the SOCKS port.
 HiddenServiceDir /var/lib/anon/hs
-HiddenServicePort 5000 127.0.0.1:5000
+HiddenServicePort ${HIDDEN_SERVICE_PORT} 127.0.0.1:${HIDDEN_SERVICE_PORT}
 
 ${DIRAUTH1_LINE}
 ${DIRAUTH2_LINE}

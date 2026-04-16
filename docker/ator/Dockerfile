@@ -22,6 +22,7 @@ RUN set -eux; \
         curl \
         gettext-base \
         netcat-openbsd \
+        socat \
     ; \
     rm -rf /var/lib/apt/lists/*
 
