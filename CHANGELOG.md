@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **36-3:** Real-binary ATOR SOCKS5 integration test suite (Story 36.3) — new env-gated jest suite (`transport-ator-real-binary.test.ts`) that drives `SocksTransportProvider` through a real `anon v0.4.10.0-beta` circuit stood up by the `make ator-up` stack. Runs only under `ATOR_NIGHTLY=1` via `make ator-test`; silently skipped under `make test`.
+
+### Changed
+
+- **36-3:** Renamed in-process SOCKS5 fixture + contract test to clarify scope vs real-binary coverage (Story 36.3). `test/helpers/in-process-socks5-proxy.ts` → `test/helpers/socks5-contract-fixture.ts`; `test/integration/transport-socks5.test.ts` → `test/integration/socks5-contract.test.ts`. Import sites and scope-disclaimer JSDoc updated accordingly.
+
 ## [2.4.0](https://github.com/toon-protocol/connector/compare/v2.3.0...v2.4.0) (2026-03-30)
 
 ### Features

@@ -1,5 +1,10 @@
 /**
- * Transport SOCKS5 integration tests (Epic 35 / Story 35.6).
+ * SOCKS5 protocol contract test, NOT ATOR integration — see
+ * transport-ator-real-binary.test.ts for real-binary coverage.
+ *
+ * Transport SOCKS5 protocol-contract tests (originally Epic 35 / Story 35.6;
+ * renamed in Epic 36 / Story 36.3 to clarify scope vs the new real-binary
+ * integration suite at transport-ator-real-binary.test.ts).
  *
  *   | Test ID          | AC  | What it verifies                                              |
  *   |------------------|-----|---------------------------------------------------------------|
@@ -25,7 +30,7 @@
  * arbitrary bidirectional traffic (not just the handshake), which is the
  * security-invariant question the epic actually needs answered.
  *
- * @module test/integration/transport-socks5.test
+ * @module test/integration/socks5-contract.test
  */
 
 import * as net from 'net';
@@ -40,10 +45,21 @@ import type { PacketHandler } from '../../src/core/packet-handler';
 import type { Logger } from '../../src/utils/logger';
 import { BTPMessageType, type BTPMessage, type BTPData } from '../../src/btp/btp-types';
 import { serializeBTPMessage } from '../../src/btp/btp-message-parser';
-import { startSocks5Proxy } from '../helpers/in-process-socks5-proxy';
+import * as fs from 'fs';
+import { startSocks5Proxy } from '../helpers/socks5-contract-fixture';
 import { waitFor } from '../helpers/wait-for';
 
 // jest.config.js already sets a 30s default testTimeout; no per-file override needed.
+
+// Story 36.3 T-36.3-11 (AC 14): static gate proving the scope-disclaimer
+// JSDoc is present and has not drifted. Catches rename/scope regressions
+// before the suite hits the wire.
+describe('T-36.3-11: scope-disclaimer self-check (contract tier)', () => {
+  it('socks5-contract.test.ts JSDoc contains the contract-vs-integration disclaimer', () => {
+    const thisFile = fs.readFileSync(__filename, 'utf8');
+    expect(thisFile).toContain('SOCKS5 protocol contract test, NOT ATOR integration');
+  });
+});
 
 async function startWsServer(): Promise<{ port: number; stop: () => Promise<void> }> {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -356,7 +372,7 @@ describe('Transport SOCKS5 integration (Story 35.6)', () => {
         if (!sent) {
           throw new Error(
             'BTPClient.sendRawFrameForTesting returned false — client did ' +
-              'not finish connecting; update transport-socks5 test.'
+              'not finish connecting; update socks5-contract test.'
           );
         }
 

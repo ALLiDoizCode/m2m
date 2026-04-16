@@ -1,12 +1,16 @@
 /**
- * Unit tests for the in-process SOCKS5 proxy test helper (Story 35.6 Task 2.5).
+ * SOCKS5 protocol contract test, NOT ATOR integration — see
+ * transport-ator-real-binary.test.ts for real-binary coverage.
+ *
+ * Unit tests for the SOCKS5 contract-fixture helper (originally Story 35.6
+ * Task 2.5; renamed in Epic 36 / Story 36.3).
  *
  * Uses raw SOCKS5 framing (RFC 1928) rather than an npm client so the helper
  * is tested end-to-end without adding dev-deps.
  */
 
 import * as net from 'net';
-import { startSocks5Proxy } from './in-process-socks5-proxy';
+import { startSocks5Proxy } from './socks5-contract-fixture';
 
 async function startEchoServer(): Promise<{ port: number; stop: () => Promise<void> }> {
   const server = net.createServer((socket) => {

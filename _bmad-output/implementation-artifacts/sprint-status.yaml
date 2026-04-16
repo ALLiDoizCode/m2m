@@ -143,7 +143,7 @@ epics:
         status: done
       36.3:
         name: "Real-Binary SOCKS5 Integration Test"
-        status: pending
+        status: done
       36.4:
         name: "Hidden-Service + Managed-Client Real-Binary Test"
         status: pending

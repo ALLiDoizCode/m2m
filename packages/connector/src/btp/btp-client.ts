@@ -150,7 +150,7 @@ export class BTPClient extends EventEmitter {
    * **Test-only** escape hatch for sending a pre-serialized frame directly
    * over the underlying WebSocket, bypassing `sendPacket()` and its ILP
    * serialization path. Exists so integration tests (e.g., T-35.6-INT-04 in
-   * `transport-socks5.test.ts`) can exercise the full BTP client/server wire
+   * `socks5-contract.test.ts`) can exercise the full BTP client/server wire
    * without wiring up a full ILP packet pipeline.
    *
    * Behavior:
