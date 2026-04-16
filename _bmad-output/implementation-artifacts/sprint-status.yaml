@@ -149,7 +149,7 @@ epics:
         status: done
       36.5:
         name: "Nightly CI Workflow + System-Tor Fallback"
-        status: pending
+        status: done
       36.6:
         name: "Docs — Deployment Guide Update"
         status: pending

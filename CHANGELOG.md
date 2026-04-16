@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **36-5:** Nightly CI workflow (`nightly-ator.yml`) + system-tor fallback smoke test (Story 36.5) -- runs real-binary ATOR suite and system-tor fallback on Linux + macOS nightly at 04:00 UTC. Platform matrix documented in `docs/ator-transport.md`.
 - **36-4:** Hidden-service + managed-client real-binary ATOR test suite (Story 36.4) — new env-gated jest suite (`transport-ator-hidden-service.test.ts`) that exercises the managed `anon` lifecycle and `.anon` hidden-service rendezvous end-to-end against the real binary under `make ator-test`. Adds socat echo server to hs1 container for HS rendezvous tests.
 - **36-3:** Real-binary ATOR SOCKS5 integration test suite (Story 36.3) — new env-gated jest suite (`transport-ator-real-binary.test.ts`) that drives `SocksTransportProvider` through a real `anon v0.4.10.0-beta` circuit stood up by the `make ator-up` stack. Runs only under `ATOR_NIGHTLY=1` via `make ator-test`; silently skipped under `make test`.
 

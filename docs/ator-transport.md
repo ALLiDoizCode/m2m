@@ -568,3 +568,18 @@ Cross-check matrix for reviewers:
 | Managed-client lifecycle (SDK start, port probe, fail-closed) | `packages/connector/src/transport/managed-anon-client.ts` (Story 35.5 AC1/AC5)         |
 
 If you need a deeper walkthrough of any specific invariant, the story files in `_bmad-output/implementation-artifacts/` (35.1 through 35.6) each summarize what shipped and link back to the relevant tests.
+
+---
+
+## Platform Matrix
+
+Nightly CI coverage for ATOR transport verification. Workflow file: `.github/workflows/nightly-ator.yml` (Story 36.5).
+
+| Platform                   | Real-Binary Coverage           | System-Tor Fallback                    | Notes                                                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ubuntu-latest` (x86_64)   | Nightly CI (`real-binary` job) | Nightly CI (`system-tor-fallback` job) | Primary CI platform. Docker `anon` image runs natively.                                                                                                                                                                                        |
+| `macos-14` (Apple Silicon) | Nightly CI (`real-binary` job) | Nightly CI (`system-tor-fallback` job) | Docker runs `amd64` image under Rosetta emulation (~20% latency penalty). Skipped gracefully if Docker is unavailable.                                                                                                                         |
+| `arm64` (native Linux)     | **Not covered**                | **Not covered**                        | GitHub-hosted native arm64 Linux runners are not available on the free tier. The `anon` Docker image is built for `amd64`. Rosetta emulation on macOS provides partial arm64 coverage. Native arm64 CI is deferred to Epic 36 retro follow-up. |
+| Windows                    | **Not supported**              | **Not supported**                      | Out of scope per Epic 36 §Out of Scope. The `anon` binary does not ship Windows builds.                                                                                                                                                        |
+
+The nightly workflow runs at 04:00 UTC daily and is also invocable via `gh workflow run nightly-ator --ref <branch>` for manual transport-touching PR verification. It is **not** added to the required PR status checks.
