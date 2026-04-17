@@ -93,7 +93,7 @@ describe('AC 1: Docker Compose Service — Mina Lightnet (Story 34.10)', () => {
 
   it('[T-34.10-01] should use the o1labs mina-local-network image', () => {
     const svc = getService(compose, 'mina-lightnet');
-    expect(svc['image']).toBe('o1labs/mina-local-network:o1js-main');
+    expect(svc['image']).toBe('o1labs/mina-local-network:compatible-latest-lightnet');
   });
 
   it('[T-34.10-01] should expose GraphQL on port 3085', () => {

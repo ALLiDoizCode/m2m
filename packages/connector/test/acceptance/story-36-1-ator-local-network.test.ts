@@ -405,7 +405,10 @@ describe('AC 6: torrc.hs — hidden service + client + relay (Story 36.1)', () =
   });
 
   it('should map HiddenServicePort 5000 to 127.0.0.1:5000', () => {
-    expect(content).toMatch(/^HiddenServicePort\s+5000\s+127\.0\.0\.1:5000/m);
+    // torrc.hs uses envsubst template variables; accept either literal 5000 or ${HIDDEN_SERVICE_PORT}
+    expect(content).toMatch(
+      /^HiddenServicePort\s+(\$\{HIDDEN_SERVICE_PORT\}|5000)\s+127\.0\.0\.1:(\$\{HIDDEN_SERVICE_PORT\}|5000)/m
+    );
   });
 
   it('should also act as a relay (ORPort declared) per AC 6 combined-role requirement', () => {

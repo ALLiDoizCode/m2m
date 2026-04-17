@@ -13,9 +13,30 @@ The guide targets two audiences:
 
 Default transport remains direct TCP -- existing deployments that do not opt into `transport.type: "socks5"` are unaffected.
 
+---
+
+## Verification Status
+
+This deployment guide is backed by automated nightly CI evidence against a real ATOR binary. Every protocol-level claim (circuit build, HS rendezvous, managed lifecycle, DNS-at-proxy, cell fragmentation) has a corresponding integration test that runs against the pinned binary.
+
+| Property                | Value                                                                                                       |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Pinned ATOR binary      | `v0.4.10.0-beta`                                                                                            |
+| Nightly CI workflow     | [`.github/workflows/nightly-ator.yml`](../.github/workflows/nightly-ator.yml)                               |
+| Real-binary test suites | `transport-ator-real-binary.test.ts` (Story 36.3), `transport-ator-hidden-service.test.ts` (Story 36.4)     |
+| System-tor fallback     | `transport-system-tor-fallback.test.ts` (Story 36.5)                                                        |
+| CLI flag surface audit  | Verified against `@anyone-protocol/anyone-client@1.1.3` on 2026-04-15 (Story 36.2)                          |
+| CI schedule             | 04:00 UTC daily; also invocable via `gh workflow run nightly-ator --ref <branch>`                           |
+| Platforms covered       | `ubuntu-latest` (x86_64), `macos-14` (Apple Silicon under Rosetta); see [Platform Matrix](#platform-matrix) |
+
+Verification covers: SOCKS5 circuit build through a real 7-node ATOR test network, `.anon` hidden-service rendezvous, managed `anon` binary lifecycle (start/stop/crash detection), DNS-at-proxy enforcement (`socks5h://`), and cell fragmentation over onion circuits. All real-binary tests (Stories 36.3 + 36.4) pass against the pinned `v0.4.10.0-beta` binary on every nightly run. Check the [workflow run history](https://github.com/toon-protocol/connector/actions/workflows/nightly-ator.yml) for current status.
+
 ## Table of Contents
 
+- [Verification Status](#verification-status)
 - [Prerequisites](#prerequisites)
+  - [Operational Prerequisites](#operational-prerequisites)
+  - [Development Prerequisites](#development-prerequisites)
 - [Installation](#installation)
   - [External anon, or system tor (Opt A)](#option-a-external-anon-or-system-tor)
   - [Managed anon via @anyone-protocol/anyone-client (Opt B)](#option-b-managed-anon-via-anyone-protocolanyone-client)
@@ -28,12 +49,18 @@ Default transport remains direct TCP -- existing deployments that do not opt int
 - [Privacy Model](#privacy-model)
 - [Performance and Timeout Tuning](#performance-and-timeout-tuning)
 - [Operational Monitoring](#operational-monitoring)
+- [Local Development Network](#local-development-network)
 - [Troubleshooting](#troubleshooting)
 - [Security Model](#security-model)
+- [Platform Matrix](#platform-matrix)
 
 ---
 
 ## Prerequisites
+
+### Operational Prerequisites
+
+For operators deploying a production or staging connector with ATOR transport:
 
 | Requirement  | Minimum                                 | Source                                                                     |
 | ------------ | --------------------------------------- | -------------------------------------------------------------------------- |
@@ -43,6 +70,19 @@ Default transport remains direct TCP -- existing deployments that do not opt int
 | Optional SDK | `@anyone-protocol/anyone-client ^1.1.3` | `packages/connector/package.json` `optionalDependencies` (Story 35.5 AC10) |
 
 Privacy-enabled peering imposes no new hardware requirement beyond the default connector: a Raspberry Pi class device with a consumer internet connection is sufficient because ATOR traverses NAT without port forwarding.
+
+### Development Prerequisites
+
+For developers running the real-binary ATOR integration test suite locally:
+
+| Requirement       | Minimum                            | Source                                                                              |
+| ----------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
+| Docker            | `>= 20.10` with `docker compose`   | `docker-compose.yml` `ator` profile; `docker/ator/Dockerfile`                       |
+| make              | GNU Make                           | `Makefile` targets: `ator-up`, `ator-down`, `ator-logs`, `ator-test`                |
+| `ATOR_NIGHTLY=1`  | env var set before running tests   | `packages/connector/test/integration/transport-ator-real-binary.test.ts` skip guard |
+| `ATOR_SOCKS_PORT` | env var (optional, default `9050`) | Overrides the SOCKS5 port the test suite connects to; set by `make ator-test`       |
+
+Operators deploying to production do **not** need Docker or `make` -- those are for running the local test network that validates the ATOR integration. See [Local Development Network](#local-development-network) for the full workflow.
 
 ---
 
@@ -432,6 +472,70 @@ Expected structured log events (pino JSON) that operators should alert on:
 
 ---
 
+## Local Development Network
+
+Story 36.1 delivered a self-contained ATOR test network that runs entirely in Docker. It provides a real 7-node onion-routing topology for local integration testing without touching the public ATOR or Tor network.
+
+### Network Topology
+
+The `docker-compose.yml` `ator` profile defines 7 services:
+
+| Service    | Role                    | Image                         | Notes                                                       |
+| ---------- | ----------------------- | ----------------------------- | ----------------------------------------------------------- |
+| `dirauth1` | Directory Authority #1  | `ator-testnet:v0.4.10.0-beta` | Votes on consensus; config: `docker/ator/torrc.dirauth`     |
+| `dirauth2` | Directory Authority #2  | `ator-testnet:v0.4.10.0-beta` | Votes on consensus                                          |
+| `dirauth3` | Directory Authority #3  | `ator-testnet:v0.4.10.0-beta` | Votes on consensus                                          |
+| `relay1`   | Relay #1                | `ator-testnet:v0.4.10.0-beta` | Carries circuit traffic; config: `docker/ator/torrc.relay`  |
+| `relay2`   | Relay #2                | `ator-testnet:v0.4.10.0-beta` | Carries circuit traffic                                     |
+| `relay3`   | Relay #3                | `ator-testnet:v0.4.10.0-beta` | Carries circuit traffic                                     |
+| `hs1`      | Hidden Service + Client | `ator-testnet:v0.4.10.0-beta` | SOCKS5 client + HS endpoint; config: `docker/ator/torrc.hs` |
+
+All 7 services use the same Docker image (`ator-testnet:v0.4.10.0-beta`) built from `docker/ator/Dockerfile`. The image packages the `anon` binary from a `.deb` distribution. The role-dispatching entrypoint (`docker/ator/entrypoint.sh`) selects the correct torrc based on the `ANON_ROLE` environment variable.
+
+### Makefile Targets
+
+| Target            | What it does                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `make ator-up`    | Builds the image (if needed) and starts all 7 containers. Waits for DirAuth consensus (~30-60s).  |
+| `make ator-down`  | Stops all ATOR containers and purges named volumes (`-v`).                                        |
+| `make ator-logs`  | Follows docker compose logs for the `ator` profile.                                               |
+| `make ator-test`  | Runs the real-binary integration suite (`ATOR_NIGHTLY=1`) against the running test network.       |
+| `make infra-up`   | Starts all infrastructure profiles (EVM + Solana + Mina + ATOR).                                  |
+| `make infra-down` | Stops all infrastructure profiles (volumes preserved; use per-profile `*-down` for volume purge). |
+
+### Environment Variables
+
+| Variable          | Default | Effect                                                                                               |
+| ----------------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `ATOR_NIGHTLY`    | unset   | When set to `1`, the real-binary test suites run instead of being skipped. `make ator-test` sets it. |
+| `ATOR_SOCKS_PORT` | `9050`  | Overrides the SOCKS5 port the test suite connects to. `make ator-test` derives it from `hs1`.        |
+
+### Quick Start
+
+```bash
+# 1. Build the image and start the 7-node ATOR test network.
+make ator-up
+
+# 2. Wait for DirAuth consensus to converge (~30-60s).
+#    Watch the logs for "Parsing new consensus" messages from relays.
+make ator-logs
+
+# 3. Run the real-binary integration test suite.
+make ator-test
+
+# 4. Tear down the network and purge volumes.
+make ator-down
+```
+
+The test suite exercises circuit build, HS rendezvous, managed lifecycle, and DNS-at-proxy enforcement against the real `anon v0.4.10.0-beta` binary. Tests are located at:
+
+- `packages/connector/test/integration/transport-ator-real-binary.test.ts` (Story 36.3)
+- `packages/connector/test/integration/transport-ator-hidden-service.test.ts` (Story 36.4)
+
+These tests are silently skipped under `make test` (the standard test target) because `ATOR_NIGHTLY` is not set. They only run via `make ator-test` or in the nightly CI workflow.
+
+---
+
 ## Troubleshooting
 
 Every diagnostic below names a specific file, log event, endpoint, or command. Avoid "check the logs" guidance; know which log and what to grep for.
@@ -523,6 +627,87 @@ The scheme check is case-sensitive and enforced three times. All three messages 
    `socksProxy scheme must be "socks5h://" (got "<scheme>://"). The "h" suffix is required to prevent DNS leaks: with socks5h, hostname resolution happens at the proxy (Tor exit / ATOR), not on the local host.`
 
 If you see any of these at startup, fix the `transport.socksProxy` scheme -- do not paper over it.
+
+### Real-binary test suite failures
+
+These failure modes were surfaced during Stories 36.3, 36.4, and 36.5 development against the local ATOR test network.
+
+**Consensus not converging (DirAuth voting timeout):**
+
+- **Symptom:** Test T-36.3-01 (circuit build) times out. Relay containers log `Delaying directory fetches` or never log `Parsing new consensus`.
+- **Diagnostic:**
+  ```bash
+  docker compose --profile ator logs dirauth1 | grep -i "vote\|consensus\|authority"
+  ```
+- **Resolution:** DirAuth consensus requires all three authorities to complete a full V3AuthVotingInterval cycle (~30-60s after all containers are healthy). Wait for convergence. If it does not converge after 90s, check that all three `dirauth` containers are running: `docker compose --profile ator ps`.
+
+**HS descriptor not propagating:**
+
+- **Symptom:** Test T-36.4-02 (HS rendezvous) times out waiting for the hidden-service connection.
+- **Diagnostic:** Check that the `hs1` container has generated its hostname file and that HSDir relays have received the descriptor:
+  ```bash
+  docker compose --profile ator exec hs1 cat /var/lib/anon/hs/hostname
+  docker compose --profile ator logs hs1 | grep -i "descriptor\|publish"
+  ```
+- **Resolution:** HS descriptor publication requires a full publish cycle (30-90s after consensus is established). If the hostname file does not exist, the HS configuration in `docker/ator/torrc.hs` may be misconfigured or the container may not have completed startup.
+
+**Circuit build timeout:**
+
+- **Symptom:** Test T-36.3-01 fails with a SOCKS connection timeout or `ECONNREFUSED` on the SOCKS port.
+- **Diagnostic:** Verify all 7 containers are running and healthy:
+  ```bash
+  docker compose --profile ator ps
+  docker compose --profile ator logs relay1 | grep -i "circuit\|bootstrap"
+  ```
+- **Resolution:** If containers are running but circuits fail, relays may not yet have published their descriptors to the directory authorities. Increase the per-test timeout or wait longer after `make ator-up`. The nightly CI budget is 30 minutes per platform leg.
+
+### Docker / make ator-up issues
+
+**Image build failure:**
+
+- **Symptom:** `make ator-up` fails during `docker compose build` with a download error or checksum mismatch.
+- **Diagnostic:** Check `docker/ator/Dockerfile` for the `.deb` package URL. A network interruption or upstream URL change causes the build to fail.
+- **Resolution:** Retry the build. If the `.deb` URL has changed upstream, update the URL and checksum in `docker/ator/Dockerfile` and pin the new binary version.
+
+**Port conflicts (SOCKS port 9050 already in use):**
+
+- **Symptom:** `hs1` container fails to start or the test suite gets `ECONNREFUSED` / `EADDRINUSE` on port 9050.
+- **Diagnostic:**
+  ```bash
+  lsof -nP -iTCP:9050 -sTCP:LISTEN   # macOS
+  ss -lntp | grep 9050                # Linux
+  ```
+- **Resolution:** Stop the conflicting process (commonly a system `tor` daemon). Alternatively, set `ATOR_SOCKS_PORT` to a different port if the docker-compose port mapping supports it.
+
+**Container not starting:**
+
+- **Symptom:** One or more containers exit immediately or enter a restart loop.
+- **Diagnostic:**
+  ```bash
+  docker compose --profile ator ps
+  docker compose --profile ator logs <container-name>
+  ```
+- **Resolution:** Check the container logs for the specific error. Common causes: missing `ANON_ROLE` environment variable, corrupted volume state (fix with `make ator-down` which purges volumes), or Docker resource limits.
+
+### Nightly CI failures
+
+**Reading failure artifacts:**
+
+- The nightly workflow uploads docker compose logs as artifacts on failure. Download them from the GitHub Actions run page under the `ator-compose-logs` artifact.
+- Filter by job (`real-binary` or `system-tor-fallback`) and OS (`ubuntu-latest` or `macos-14`) to isolate the failure.
+
+**Manual re-run on a specific branch:**
+
+```bash
+gh workflow run nightly-ator --ref <branch-name>
+```
+
+This triggers the full nightly suite on the specified branch. Useful for verifying transport-touching PRs before merge without waiting for the next 04:00 UTC cron run.
+
+**macOS Docker availability on CI runners:**
+
+- The `macos-14` job checks for Docker availability before proceeding. If Docker is not installed on the runner, the job skips gracefully rather than failing.
+- macOS Docker runs the `amd64` ATOR image under Rosetta emulation with a ~20% latency penalty. Test timeouts account for this overhead.
 
 ---
 

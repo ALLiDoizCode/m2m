@@ -152,6 +152,6 @@ epics:
         status: done
       36.6:
         name: "Docs — Deployment Guide Update"
-        status: pending
+        status: done
     retrospective:
       status: pending

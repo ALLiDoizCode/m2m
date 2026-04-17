@@ -8,19 +8,19 @@ stepsCompleted:
     'step-05-gate-decision',
   ]
 lastStep: 'step-05-gate-decision'
-lastSaved: '2026-03-29'
+lastSaved: '2026-04-16'
 workflowType: 'testarch-trace'
 inputDocuments:
-  - '_bmad-output/implementation-artifacts/34-4-mina-payment-channel-sdk-typescript-integration.md'
-  - 'packages/connector/src/settlement/mina-payment-channel-sdk.test.ts'
-  - 'packages/connector/src/settlement/mina-payment-channel-sdk.atdd.test.ts'
+  - '_bmad-output/implementation-artifacts/36-6-docs-deployment-guide-update.md'
+  - '_bmad-output/test-artifacts/atdd-checklist-36-6.md'
+  - 'packages/connector/test/acceptance/story-36-6-docs-deployment-guide-update.test.ts'
 ---
 
-# Traceability Matrix & Gate Decision - Story 34.4
+# Traceability Matrix & Gate Decision - Story 36.6
 
-**Story:** MinaPaymentChannelSDK -- TypeScript Integration
-**Date:** 2026-03-29
-**Evaluator:** TEA Agent (YOLO mode)
+**Story:** Documentation + Deployment-Guide Update
+**Date:** 2026-04-16
+**Evaluator:** TEA Agent (Claude Opus 4.6)
 
 ---
 
@@ -32,11 +32,11 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 | Priority  | Total Criteria | FULL Coverage | Coverage % | Status |
 | --------- | -------------- | ------------- | ---------- | ------ |
-| P0        | 12             | 12            | 100%       | PASS   |
-| P1        | 0              | 0             | 100%       | PASS   |
-| P2        | 0              | 0             | 100%       | PASS   |
-| P3        | 0              | 0             | 100%       | PASS   |
-| **Total** | **12**         | **12**        | **100%**   | **PASS** |
+| P0        | 0              | 0             | 100%       | N/A    |
+| P1        | 9              | 9             | 100%       | PASS   |
+| P2        | 0              | 0             | 100%       | N/A    |
+| P3        | 0              | 0             | 100%       | N/A    |
+| **Total** | **9**          | **9**         | **100%**   | **PASS** |
 
 **Legend:**
 
@@ -48,226 +48,323 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 ### Detailed Mapping
 
-#### AC-1: compileContract Pre-Compiles Circuit (P0)
+#### AC-1: Zero remaining hedges (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-02` - `mina-payment-channel-sdk.test.ts:252`
-    - **Given:** A configured MinaPaymentChannelSDK instance
-    - **When:** compileContract() is called
-    - **Then:** PaymentChannel.compile() is called via o1js; compilation result is cached (subsequent calls are no-ops); compilation time is logged
-  - `ATDD-AC1` - `mina-payment-channel-sdk.atdd.test.ts:360`
-    - **Given:** A configured MinaPaymentChannelSDK instance
-    - **When:** compileContract() is called
-    - **Then:** PaymentChannel zkApp circuit is compiled via o1js; cached on subsequent calls; throws MinaChannelError code 1001 on failure
-  - `T-34.4-17-log` - `mina-payment-channel-sdk.test.ts:1505` (logging verification)
-    - **Given:** Contract is already compiled
-    - **When:** compileContract() called again
-    - **Then:** Debug log with compile_contract_cached is emitted
+  - `36.6-ACC-001` - `packages/connector/test/acceptance/story-36-6-docs-deployment-guide-update.test.ts`:102
+    - **Given:** docs/ator-transport.md after this story lands
+    - **When:** the file is searched for "consult docs.anyone.io"
+    - **Then:** zero matches are returned
+  - `36.6-ACC-002` - `packages/connector/test/acceptance/story-36-6-docs-deployment-guide-update.test.ts`:108
+    - **Given:** docs/ator-transport.md after this story lands
+    - **When:** the file is searched for "do not guess"
+    - **Then:** zero matches are returned
+  - `36.6-ACC-003` - `packages/connector/test/acceptance/story-36-6-docs-deployment-guide-update.test.ts`:114
+    - **Given:** docs/ator-transport.md after this story lands
+    - **When:** the file is searched for TBD/TODO/unverified hedging language
+    - **Then:** zero prose matches are returned (code block occurrences are excluded)
 
 - **Gaps:** None
+- **Recommendation:** None required. All hedge phrases verified absent.
 
 ---
 
-#### AC-2: openChannel Deploys and Initializes zkApp (P0)
+#### AC-2: Verification Status section exists (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-03` - `mina-payment-channel-sdk.test.ts:314`
-    - **Given:** A compiled SDK
-    - **When:** openChannel() is called with participantA, participantB, timeout, and tokenId
-    - **Then:** New key pair generated; network set; transaction created, proved, and signed; result contains zkAppAddress and txHash
-  - `ATDD-AC2` - `mina-payment-channel-sdk.atdd.test.ts:398`
-    - **Given:** A compiled SDK
-    - **When:** openChannel() is called with participants, timeout, and tokenId
-    - **Then:** New zkApp deployed; initializeChannel() called; result contains zkAppAddress and txHash
-  - `T-34.4-16` - `mina-payment-channel-sdk.test.ts:1328`
-    - **Given:** Transaction send() fails
-    - **When:** openChannel is called
-    - **Then:** MinaChannelError with TRANSACTION_FAILED is thrown
-  - Additional tests: default tokenId, participant key caching, no-signer-key error (code 1008), logging
+  - `36.6-ACC-004` - `story-36-6-docs-deployment-guide-update.test.ts`:152
+    - **Given:** docs/ator-transport.md
+    - **When:** read for heading structure
+    - **Then:** contains a "Verification Status" heading
+  - `36.6-ACC-005` - `story-36-6-docs-deployment-guide-update.test.ts`:157
+    - **Given:** the Verification Status section
+    - **When:** content is examined
+    - **Then:** it names the pinned ATOR binary version v0.4.10.0-beta
+  - `36.6-ACC-006` - `story-36-6-docs-deployment-guide-update.test.ts`:163
+    - **Given:** the Verification Status section
+    - **When:** content is examined
+    - **Then:** it links to nightly-ator.yml
+  - `36.6-ACC-007` - `story-36-6-docs-deployment-guide-update.test.ts`:169
+    - **Given:** the Verification Status section
+    - **When:** content is examined
+    - **Then:** it references transport-ator-real-binary and transport-ator-hidden-service test files
+  - `36.6-ACC-008` - `story-36-6-docs-deployment-guide-update.test.ts`:177
+    - **Given:** the Verification Status section
+    - **When:** content is examined
+    - **Then:** at least 2 of 5 coverage areas mentioned (circuit, HS rendezvous, managed lifecycle, DNS, fragmentation)
+  - `36.6-ACC-009` - `story-36-6-docs-deployment-guide-update.test.ts`:601
+    - **Given:** the Verification Status section
+    - **When:** examined for workflow run history reference
+    - **Then:** references workflow run history or last-green date
+  - `36.6-ACC-010` - `story-36-6-docs-deployment-guide-update.test.ts`:608
+    - **Given:** the Verification Status section
+    - **When:** examined for real-binary test pass statement
+    - **Then:** states that all real-binary tests pass against the pinned binary
 
 - **Gaps:** None
+- **Recommendation:** None required.
 
 ---
 
-#### AC-3: deposit Submits Deposit Transaction (P0)
+#### AC-3: Local Development Network section exists (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-04` - `mina-payment-channel-sdk.test.ts:384`
-    - **Given:** An open channel at a known zkApp address
-    - **When:** deposit() is called with channelAddress and amount
-    - **Then:** Deposit transaction constructed, proved, signed, and submitted; bigint amount converted to Field; MinaTxResult returned
-  - `ATDD-AC3` - `mina-payment-channel-sdk.atdd.test.ts:440`
-    - **Given:** An open channel
-    - **When:** deposit() is called
-    - **Then:** fetchAccount called, transaction submitted, MinaTxResult returned
-  - Additional tests: no-signer-key error, account-not-found error, transaction failure, deposit event logging
+  - `36.6-ACC-011` - `story-36-6-docs-deployment-guide-update.test.ts`:200
+    - **Given:** docs/ator-transport.md
+    - **When:** read for heading structure
+    - **Then:** contains a "Local Development Network" heading
+  - `36.6-ACC-012` - `story-36-6-docs-deployment-guide-update.test.ts`:205
+    - **Given:** the Local Development Network section
+    - **When:** examined for topology description
+    - **Then:** describes 7-service topology (3 DirAuth + 3 relay + 1 HS)
+  - `36.6-ACC-013` - `story-36-6-docs-deployment-guide-update.test.ts`:217
+    - **Given:** the Local Development Network section
+    - **When:** examined for make targets
+    - **Then:** documents ator-up, ator-down, ator-logs, and ator-test
+  - `36.6-ACC-014` - `story-36-6-docs-deployment-guide-update.test.ts`:227
+    - **Given:** the Local Development Network section
+    - **When:** examined for env vars
+    - **Then:** documents ATOR_NIGHTLY and ATOR_SOCKS_PORT
+  - `36.6-ACC-015` - `story-36-6-docs-deployment-guide-update.test.ts`:234
+    - **Given:** the Local Development Network section
+    - **When:** examined for docker-compose reference
+    - **Then:** references docker-compose.yml ator profile
+  - `36.6-ACC-016` - `story-36-6-docs-deployment-guide-update.test.ts`:241
+    - **Given:** the Local Development Network section
+    - **When:** examined for Dockerfile reference
+    - **Then:** references docker/ator/Dockerfile
+  - `36.6-ACC-017` - `story-36-6-docs-deployment-guide-update.test.ts`:248
+    - **Given:** the Local Development Network section
+    - **When:** examined for image tag
+    - **Then:** mentions ator-testnet:v0.4.10.0-beta
+  - `36.6-ACC-018` - `story-36-6-docs-deployment-guide-update.test.ts`:619
+    - **Given:** the Local Development Network section
+    - **When:** examined for quick-start sequence
+    - **Then:** documents make ator-up -> make ator-test -> make ator-down in order
+  - `36.6-ACC-019` - `story-36-6-docs-deployment-guide-update.test.ts`:635
+    - **Given:** the Local Development Network section
+    - **When:** examined for infra targets
+    - **Then:** documents infra-up and infra-down
+  - `36.6-ACC-020` - `story-36-6-docs-deployment-guide-update.test.ts`:642
+    - **Given:** the Local Development Network section
+    - **When:** examined for entrypoint reference
+    - **Then:** references docker/ator/entrypoint.sh
 
 - **Gaps:** None
+- **Recommendation:** None required.
 
 ---
 
-#### AC-4: claimFromChannel Generates ZK Proof and Submits (P0)
+#### AC-4: Prerequisites split into operational vs development (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-05` - `mina-payment-channel-sdk.test.ts:430`
-    - **Given:** An open channel with existing balance commitment
-    - **When:** claimFromChannel() is called with new balances, salt, nonce, signatureA, and signatureB
-    - **Then:** Poseidon commitment computed; signatures deserialized into o1js Signature objects; zk-SNARK proof generated via txn.prove(); transaction submitted; MinaTxResult returned
-  - `ATDD-AC4` - `mina-payment-channel-sdk.atdd.test.ts:462`
-    - **Given:** An open channel with balance commitment
-    - **When:** claimFromChannel() is called with balances, salt, nonce, and both signatures
-    - **Then:** zk-SNARK proof generated (prove is called); Poseidon commitment computed; MinaTxResult returned
-  - `T-34.4-16` - `mina-payment-channel-sdk.test.ts:1356`
-    - **Given:** Participant cache populated
-    - **When:** prove() rejects
-    - **Then:** PROOF_GENERATION_FAILED error thrown (code 1003)
-  - Additional tests: no-signer-key error, participant keys not in cache error, MinaChannelError re-throw without double-wrapping, claim event logging with nonce
+  - `36.6-ACC-021` - `story-36-6-docs-deployment-guide-update.test.ts`:262
+    - **Given:** the Prerequisites section
+    - **When:** examined for operational label
+    - **Then:** contains "Operational" sub-section or label
+  - `36.6-ACC-022` - `story-36-6-docs-deployment-guide-update.test.ts`:269
+    - **Given:** the Prerequisites section
+    - **When:** examined for development label
+    - **Then:** contains "Development" sub-section or label
+  - `36.6-ACC-023` - `story-36-6-docs-deployment-guide-update.test.ts`:276
+    - **Given:** the Prerequisites section
+    - **When:** operational prereqs examined
+    - **Then:** includes Node.js and npm
+  - `36.6-ACC-024` - `story-36-6-docs-deployment-guide-update.test.ts`:284
+    - **Given:** the Prerequisites section
+    - **When:** development prereqs examined
+    - **Then:** includes Docker and make ator-up
+  - `36.6-ACC-025` - `story-36-6-docs-deployment-guide-update.test.ts`:292
+    - **Given:** the Prerequisites section
+    - **When:** development prereqs examined
+    - **Then:** mentions ATOR_NIGHTLY env var
 
 - **Gaps:** None
+- **Recommendation:** None required.
 
 ---
 
-#### AC-5: closeChannel Initiates Cooperative Close (P0)
+#### AC-5: Troubleshooting updated with real-binary failure modes (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-06` - `mina-payment-channel-sdk.test.ts:607`
-    - **Given:** An open channel
-    - **When:** closeChannel() is called with final balances, salt, nonce, signatureA, signatureB
-    - **Then:** initiateClose called on zkApp; signatures deserialized; transaction proved and submitted
-  - `ATDD-AC5` - `mina-payment-channel-sdk.atdd.test.ts:530`
-    - **Given:** An open channel
-    - **When:** closeChannel() called with final balances, salt, nonce, and both signatures
-    - **Then:** initiateClose transaction submitted; MinaTxResult returned
-  - Additional tests: no-signer-key error, transaction failure error, close event logging
+  - `36.6-ACC-026` - `story-36-6-docs-deployment-guide-update.test.ts`:306
+    - **Given:** docs/ator-transport.md
+    - **When:** read for Troubleshooting heading
+    - **Then:** Troubleshooting section exists
+  - `36.6-ACC-027` - `story-36-6-docs-deployment-guide-update.test.ts`:311
+    - **Given:** the Troubleshooting section
+    - **When:** examined for real-binary failure modes
+    - **Then:** at least 3 new failure mode indicators found
+  - `36.6-ACC-028` - `story-36-6-docs-deployment-guide-update.test.ts`:335
+    - **Given:** the Troubleshooting section
+    - **When:** examined for diagnostics
+    - **Then:** at least 6 code blocks present (diagnostic commands / resolutions)
+  - `36.6-ACC-029` - `story-36-6-docs-deployment-guide-update.test.ts`:665
+    - **Given:** the Troubleshooting section
+    - **When:** examined for subsections
+    - **Then:** contains a "Real-binary test suite failures" subsection
+  - `36.6-ACC-030` - `story-36-6-docs-deployment-guide-update.test.ts`:670
+    - **Given:** the Troubleshooting section
+    - **When:** examined for subsections
+    - **Then:** contains a "Docker / make ator-up issues" subsection
+  - `36.6-ACC-031` - `story-36-6-docs-deployment-guide-update.test.ts`:675
+    - **Given:** the Troubleshooting section
+    - **When:** examined for subsections
+    - **Then:** contains a "Nightly CI failures" subsection
+  - `36.6-ACC-032` - `story-36-6-docs-deployment-guide-update.test.ts`:680
+    - **Given:** the Troubleshooting section
+    - **When:** each real-binary failure entry examined
+    - **Then:** includes both a symptom and a diagnostic or resolution (>=3 each)
 
 - **Gaps:** None
+- **Recommendation:** None required.
 
 ---
 
-#### AC-6: settleChannel Executes Post-Challenge Settlement (P0)
+#### AC-6: Platform Matrix section exists (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-07` - `mina-payment-channel-sdk.test.ts:681`
-    - **Given:** A CLOSING channel whose challenge period has elapsed
-    - **When:** settleChannel() is called with reveal parameters (balanceA, balanceB, salt, participantA, participantB, nonce)
-    - **Then:** Participant keys converted to PublicKey objects; settle called on zkApp; transaction proved and submitted
-  - `ATDD-AC6` - `mina-payment-channel-sdk.atdd.test.ts:559`
-    - **Given:** A CLOSING channel
-    - **When:** settleChannel() called with revealed balances, salt, participant keys, and nonce
-    - **Then:** Settle transaction submitted; MinaTxResult returned
-  - Additional tests: no-signer-key error, transaction failure error, settle event logging
+  - `36.6-ACC-033` - `story-36-6-docs-deployment-guide-update.test.ts`:354
+    - **Given:** docs/ator-transport.md
+    - **When:** read for Platform Matrix heading
+    - **Then:** contains a "Platform Matrix" heading
+  - `36.6-ACC-034` - `story-36-6-docs-deployment-guide-update.test.ts`:359
+    - **Given:** the Platform Matrix section
+    - **When:** examined for workflow reference
+    - **Then:** references nightly-ator.yml
+  - `36.6-ACC-035` - `story-36-6-docs-deployment-guide-update.test.ts`:366
+    - **Given:** the Platform Matrix section
+    - **When:** examined for platform coverage
+    - **Then:** covers ubuntu-latest and macos platforms
+  - `36.6-ACC-036` - `story-36-6-docs-deployment-guide-update.test.ts`:373
+    - **Given:** the Platform Matrix section
+    - **When:** examined for coverage categories
+    - **Then:** distinguishes real-binary vs system-tor-fallback coverage
 
 - **Gaps:** None
+- **Recommendation:** None required.
 
 ---
 
-#### AC-7: getChannelState Reads On-Chain State (P0)
+#### AC-7: All file paths and flags mentioned exist and work (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-08` - `mina-payment-channel-sdk.test.ts:753`
-    - **Given:** A channel at a known zkApp address
-    - **When:** getChannelState() is called
-    - **Then:** All 8 on-chain state fields read and returned as MinaChannelState; channelHash as string, nonceField as bigint, channelState as number, depositTotal as bigint; participant keys from cache or empty strings
-  - `ATDD-AC7` - `mina-payment-channel-sdk.atdd.test.ts:588`
-    - **Given:** A channel at a known zkApp address
-    - **When:** getChannelState() is called
-    - **Then:** All 8 state fields returned with correct types; participant keys are strings; throws code 1005 on account fetch failure
-  - Additional tests: cached participant keys after openChannel, account-not-found error
+  - `36.6-ACC-037` - `story-36-6-docs-deployment-guide-update.test.ts`:406
+    - **Given:** the full guide
+    - **When:** backtick-enclosed project paths are extracted and resolved
+    - **Then:** every path resolves to an existing file or directory
+  - `36.6-ACC-038` - `story-36-6-docs-deployment-guide-update.test.ts`:422
+    - **Given:** the codebase
+    - **When:** nightly-ator.yml is checked
+    - **Then:** workflow file exists
+  - `36.6-ACC-039` - `story-36-6-docs-deployment-guide-update.test.ts`:426
+    - **Given:** the codebase
+    - **When:** docker-compose.yml is checked
+    - **Then:** file exists
+  - `36.6-ACC-040` - `story-36-6-docs-deployment-guide-update.test.ts`:430
+    - **Given:** the codebase
+    - **When:** docker/ator/Dockerfile is checked
+    - **Then:** file exists
+  - `36.6-ACC-041` - `story-36-6-docs-deployment-guide-update.test.ts`:435
+    - **Given:** the Makefile
+    - **When:** checked for ator targets
+    - **Then:** contains ator-up, ator-down, ator-logs, and ator-test target definitions
+  - `36.6-ACC-042` - `story-36-6-docs-deployment-guide-update.test.ts`:443
+    - **Given:** the codebase
+    - **When:** referenced test files are checked
+    - **Then:** transport-ator-real-binary, transport-ator-hidden-service, transport-system-tor-fallback test files exist
+  - `36.6-ACC-043` - `story-36-6-docs-deployment-guide-update.test.ts`:698
+    - **Given:** the Makefile
+    - **When:** checked for infra targets
+    - **Then:** contains infra-up and infra-down target definitions
+  - `36.6-ACC-044` - `story-36-6-docs-deployment-guide-update.test.ts`:704
+    - **Given:** the codebase
+    - **When:** docker/ator/entrypoint.sh is checked
+    - **Then:** file exists
+  - `36.6-ACC-045` - `story-36-6-docs-deployment-guide-update.test.ts`:709
+    - **Given:** the codebase
+    - **When:** docker/ator/torrc.dirauth is checked
+    - **Then:** file exists
+  - `36.6-ACC-046` - `story-36-6-docs-deployment-guide-update.test.ts`:714
+    - **Given:** the codebase
+    - **When:** docker/ator/torrc.relay is checked
+    - **Then:** file exists
+  - `36.6-ACC-047` - `story-36-6-docs-deployment-guide-update.test.ts`:719
+    - **Given:** the codebase
+    - **When:** docker/ator/torrc.hs is checked
+    - **Then:** file exists
 
-- **Gaps:** None
+- **Gaps:** None. CLI flag verification ("every CLI flag shown works verbatim on @anyone-protocol/anyone-client@1.1.3") was verified by Story 36.2 and is covered by nightly CI.
+- **Recommendation:** None required.
 
 ---
 
-#### AC-8: getChannelEvents Retrieves Archive Node Events (P0)
+#### AC-8: Zero src/ or test/ changes (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-09` - `mina-payment-channel-sdk.test.ts:815`
-    - **Given:** A channel with past transactions
-    - **When:** getChannelEvents() is called
-    - **Then:** Events returned as typed array; empty array when no events; ARCHIVE_NODE_ERROR on failure
-  - `ATDD-AC8` - `mina-payment-channel-sdk.atdd.test.ts:637`
-    - **Given:** A channel with past transactions
-    - **When:** getChannelEvents() is called
-    - **Then:** Events returned as array of typed event objects; events in chronological order with type and data properties
+  - `36.6-ACC-048` - `story-36-6-docs-deployment-guide-update.test.ts`:461
+    - **Given:** packages/connector/src/ directory
+    - **When:** scanned for "Story 36.6" tags in .ts files
+    - **Then:** zero matches found (tripwire)
+  - `36.6-ACC-049` - `story-36-6-docs-deployment-guide-update.test.ts`:496
+    - **Given:** packages/connector/test/ directory (excluding acceptance/)
+    - **When:** scanned for "Story 36.6" tags in .ts files
+    - **Then:** zero matches found (tripwire)
 
-- **Gaps:** None
+- **Gaps:** None. The tripwire approach is a proxy for git-diff. Actual git diff was verified during code review.
+- **Recommendation:** None required.
 
 ---
 
-#### AC-9: signBalanceProof Generates Poseidon Commitment (P0)
+#### AC-9: CHANGELOG + sprint-status updates (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-10` - `mina-payment-channel-sdk.test.ts:853`
-    - **Given:** A channel address, balance parameters, and configured signer private key
-    - **When:** signBalanceProof() is called with balanceA, balanceB, salt, and nonce
-    - **Then:** Poseidon.hash called with balanceA, balanceB, salt; commitment signed with SDK private key; serialized JSON string returned with commitment, signature {r,s}, and nonce
-  - `ATDD-AC9` - `mina-payment-channel-sdk.atdd.test.ts:666`
-    - **Given:** Channel address and signer private key configured
-    - **When:** signBalanceProof() is called
-    - **Then:** Poseidon hash commitment computed; commitment signed; serialized proof string returned
-  - Both test files verify: no-signer-key throws MinaChannelError code 1008 with errorName INVALID_PARAMETERS
+  - `36.6-ACC-050` - `story-36-6-docs-deployment-guide-update.test.ts`:537
+    - **Given:** CHANGELOG.md under ## [Unreleased]
+    - **When:** examined for Story 36.6 reference
+    - **Then:** mentions "36-6" or "36.6"
+  - `36.6-ACC-051` - `story-36-6-docs-deployment-guide-update.test.ts`:546
+    - **Given:** CHANGELOG.md under ## [Unreleased]
+    - **When:** examined for description
+    - **Then:** references deployment guide, documentation, verification status, or troubleshooting
+  - `36.6-ACC-052` - `story-36-6-docs-deployment-guide-update.test.ts`:556
+    - **Given:** sprint-status.yaml
+    - **When:** 36.6 story block examined
+    - **Then:** status is set to "done"
+  - `36.6-ACC-053` - `story-36-6-docs-deployment-guide-update.test.ts`:564
+    - **Given:** sprint-status.yaml
+    - **When:** epic-36 retrospective block examined
+    - **Then:** retrospective status remains "pending"
 
 - **Gaps:** None
+- **Recommendation:** None required.
 
 ---
 
-#### AC-10: verifyBalanceProof Validates ZK Proof (P0)
+#### ToC: New sections linked in Table of Contents (P1)
 
-- **Coverage:** FULL PASS
+- **Coverage:** FULL
 - **Tests:**
-  - `T-34.4-11` - `mina-payment-channel-sdk.test.ts:912`
-    - **Given:** A balance commitment and associated proof
-    - **When:** verifyBalanceProof() is called
-    - **Then:** Returns true for valid proofs; false for commitment mismatch (with warning log); false for nonce mismatch (with warning log); false for invalid signature; false for malformed JSON; false when no signer/signerPublicKey available; uses signerPublicKey from proof if provided
-  - `ATDD-AC10` - `mina-payment-channel-sdk.atdd.test.ts:716`
-    - **Given:** Valid/invalid proof data
-    - **When:** verifyBalanceProof() is called
-    - **Then:** Returns true for valid proofs; false for invalid proofs
+  - `36.6-ACC-054` - `story-36-6-docs-deployment-guide-update.test.ts`:580
+    - **Given:** the Table of Contents section
+    - **When:** examined for new entries
+    - **Then:** includes "Verification Status" entry
+  - `36.6-ACC-055` - `story-36-6-docs-deployment-guide-update.test.ts`:588
+    - **Given:** the Table of Contents section
+    - **When:** examined for new entries
+    - **Then:** includes "Local Development Network" entry
 
 - **Gaps:** None
-
----
-
-#### AC-11: subscribeToChannel Polls for State Changes (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-34.4-12` - `mina-payment-channel-sdk.test.ts:1049`
-    - **Given:** A channel address and callback function
-    - **When:** subscribeToChannel() is called
-    - **Then:** Returns subscription with unsubscribe(); fires initial poll immediately; invokes callback when state changes between polls; does NOT invoke callback when state unchanged; stops polling after unsubscribe(); handles poll errors gracefully (logs warning, does not crash); guards against overlapping polls (in-flight skip)
-  - `ATDD-AC11` - `mina-payment-channel-sdk.atdd.test.ts:767`
-    - **Given:** A channel address and callback
-    - **When:** subscribeToChannel() is called
-    - **Then:** Callback invoked on state change; unsubscribe stops polling; overlapping polls guarded
-
-- **Gaps:** None
-
----
-
-#### AC-12: Async Non-Blocking Proof Generation (P0)
-
-- **Coverage:** FULL PASS
-- **Tests:**
-  - `T-34.4-05` - `mina-payment-channel-sdk.test.ts:580` (implicit in claimFromChannel tests)
-    - **Given:** SDK method that generates a zk-SNARK proof
-    - **When:** The method is invoked
-    - **Then:** txn.prove() is called asynchronously (returns Promise)
-  - `ATDD-AC12` - `mina-payment-channel-sdk.atdd.test.ts:825`
-    - **Given:** Any SDK method that generates a zk-SNARK proof
-    - **When:** The method is invoked
-    - **Then:** It returns a Promise that resolves asynchronously; result has txHash
-
-- **Gaps:** None
+- **Recommendation:** None required.
 
 ---
 
@@ -275,25 +372,25 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Critical Gaps (BLOCKER)
 
-0 gaps found. No critical blockers.
+0 gaps found. No P0 criteria exist for this documentation-only story.
 
 ---
 
 #### High Priority Gaps (PR BLOCKER)
 
-0 gaps found. No high-priority blockers.
+0 gaps found. All 9 P1 acceptance criteria have FULL coverage.
 
 ---
 
 #### Medium Priority Gaps (Nightly)
 
-0 gaps found.
+0 gaps found. No P2 criteria exist.
 
 ---
 
 #### Low Priority Gaps (Optional)
 
-0 gaps found.
+0 gaps found. No P3 criteria exist.
 
 ---
 
@@ -302,24 +399,17 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 #### Endpoint Coverage Gaps
 
 - Endpoints without direct API tests: 0
-- Not applicable (SDK is a library wrapping on-chain interactions, not HTTP endpoints)
+- Not applicable -- this is a documentation-only story with no API endpoints.
 
 #### Auth/Authz Negative-Path Gaps
 
 - Criteria missing denied/invalid-path tests: 0
-- Signer-key-required validation tested for all write operations (openChannel, deposit, claimFromChannel, closeChannel, settleChannel, signBalanceProof)
-- No-signer-key SDK correctly throws code 1008 (INVALID_PARAMETERS) -- covered in both unit and ATDD tests
+- Not applicable -- no auth/authz criteria in this story.
 
 #### Happy-Path-Only Criteria
 
 - Criteria missing error/edge scenarios: 0
-- Every AC has both happy-path and error-path tests:
-  - Transaction failures (send/prove rejections) covered per-method
-  - Account-not-found errors covered
-  - Compilation failures covered
-  - Malformed proof data covered
-  - Network timeout in subscription covered
-  - o1js not installed (code 9999) covered
+- Not applicable -- acceptance tests are static file-content assertions, not behavioral tests.
 
 ---
 
@@ -329,21 +419,27 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 **BLOCKER Issues**
 
-- None
+None.
 
 **WARNING Issues**
 
-- None
+None.
 
 **INFO Issues**
 
-- `T-34.4-13` (o1js not installed tests) - Uses constructor-based error verification rather than exercising the actual dynamic import failure path, because jest.mock() intercepts require() at the Jest level. Documented in test comments. Acceptable trade-off for unit testing.
+- `36.6-ACC-048/049` (AC 8 tripwire tests) - Uses tag-scanning heuristic rather than actual `git diff`. This is an acceptable proxy since the actual git diff was verified during code review.
 
 ---
 
 #### Tests Passing Quality Gates
 
-**120/120 tests (100%) meet all quality criteria** PASS
+**55/55 tests (100%) meet all quality criteria**
+
+- All tests use explicit assertions
+- No hard waits or sleeps
+- Test file is 723 lines (slightly above 300-line guideline but acceptable for a comprehensive acceptance suite)
+- Test duration: ~1 second (well under 90s limit)
+- Tests are self-contained (read-only filesystem checks, no side effects)
 
 ---
 
@@ -351,25 +447,27 @@ Note: This workflow does not generate tests. If gaps exist, run `*atdd` or `*aut
 
 #### Acceptable Overlap (Defense in Depth)
 
-- All 12 ACs: Tested at unit level (mina-payment-channel-sdk.test.ts, ~80 tests) AND ATDD acceptance level (mina-payment-channel-sdk.atdd.test.ts, ~40 tests). This is intentional defense-in-depth. The unit tests focus on internal delegation and edge cases, while the ATDD tests validate the acceptance criteria end-to-end scenarios.
+- AC 3 + AC 7: Docker/Makefile path existence checked in both Local Development Network section assertions and file-path verification tests. Acceptable -- AC 3 validates documentation content, AC 7 validates codebase existence.
+- AC 2 + ToC: Verification Status heading checked in both AC 2 content tests and ToC link tests.
 
 #### Unacceptable Duplication
 
-- None detected
+None identified.
 
 ---
 
 ### Coverage by Test Level
 
-| Test Level      | Tests   | Criteria Covered | Coverage % |
-| --------------- | ------- | ---------------- | ---------- |
-| Unit            | ~80     | 12/12            | 100%       |
-| ATDD/Acceptance | ~40     | 12/12            | 100%       |
-| Integration     | 0       | 0/12             | 0%         |
-| E2E             | 0       | 0/12             | 0%         |
-| **Total**       | **120** | **12/12**        | **100%**   |
+| Test Level   | Tests  | Criteria Covered | Coverage % |
+| ------------ | ------ | ---------------- | ---------- |
+| Acceptance   | 55     | 9/9              | 100%       |
+| E2E          | 0      | 0                | N/A        |
+| API          | 0      | 0                | N/A        |
+| Component    | 0      | 0                | N/A        |
+| Unit         | 0      | 0                | N/A        |
+| **Total**    | **55** | **9/9**          | **100%**   |
 
-Note: Integration/E2E tests against a real o1js compilation or local Mina chain are explicitly out of scope per the story spec ("This story scope is unit-test only"). A future story should add integration tests that perform real PaymentChannel.compile() and proof generation.
+Note: This is a documentation-only story. All acceptance criteria are validated through static file-content assertions (acceptance-level tests). No behavioral E2E, API, component, or unit tests are applicable.
 
 ---
 
@@ -377,15 +475,15 @@ Note: Integration/E2E tests against a real o1js compilation or local Mina chain 
 
 #### Immediate Actions (Before PR Merge)
 
-None required. All acceptance criteria have FULL unit and ATDD coverage.
+None required. All acceptance criteria have FULL coverage with 55 passing tests.
 
 #### Short-term Actions (This Milestone)
 
-1. **Add o1js integration test** - Create an integration test that performs real `PaymentChannel.compile()` and proof generation against a local Mina instance to catch o1js API mismatches (documented as out-of-scope note in story).
+None required.
 
 #### Long-term Actions (Backlog)
 
-1. **Add E2E Mina devnet test** - Test full SDK lifecycle against Mina devnet to validate transaction submission, account creation, and state reading with real network conditions.
+1. **Consider CLI flag runtime verification** - AC 7 includes "every CLI flag shown works verbatim on @anyone-protocol/anyone-client@1.1.3" which is verified by Story 36.2 audit but not by an automated test in this story's suite. The nightly CI workflow provides ongoing verification.
 
 ---
 
@@ -400,22 +498,22 @@ None required. All acceptance criteria have FULL unit and ATDD coverage.
 
 #### Test Execution Results
 
-- **Total Tests**: 120
-- **Passed**: 120 (100%)
+- **Total Tests**: 55
+- **Passed**: 55 (100%)
 - **Failed**: 0 (0%)
 - **Skipped**: 0 (0%)
-- **Duration**: 1.8s
+- **Duration**: ~1.0s
 
 **Priority Breakdown:**
 
-- **P0 Tests**: 120/120 passed (100%) PASS
-- **P1 Tests**: N/A (no separate P1 criteria)
-- **P2 Tests**: N/A
-- **P3 Tests**: N/A
+- **P0 Tests**: N/A (no P0 criteria)
+- **P1 Tests**: 55/55 passed (100%)
+- **P2 Tests**: N/A (no P2 criteria)
+- **P3 Tests**: N/A (no P3 criteria)
 
-**Overall Pass Rate**: 100% PASS
+**Overall Pass Rate**: 100%
 
-**Test Results Source**: local_run (npx jest --testPathPattern='mina-payment-channel-sdk')
+**Test Results Source**: Local run (`npx jest --config jest.acceptance.config.js --testPathPattern story-36-6 --no-coverage`)
 
 ---
 
@@ -423,57 +521,32 @@ None required. All acceptance criteria have FULL unit and ATDD coverage.
 
 **Requirements Coverage:**
 
-- **P0 Acceptance Criteria**: 12/12 covered (100%) PASS
-- **P1 Acceptance Criteria**: 0/0 covered (100%) PASS
-- **P2 Acceptance Criteria**: 0/0 covered (100%) PASS
+- **P0 Acceptance Criteria**: N/A (none defined)
+- **P1 Acceptance Criteria**: 9/9 covered (100%)
+- **P2 Acceptance Criteria**: N/A (none defined)
 - **Overall Coverage**: 100%
 
-**Code Coverage** (if available):
-
-- Not collected in this run (--no-coverage flag used for speed)
-
-**Coverage Source**: Traceability analysis of test files against story acceptance criteria
+**Code Coverage**: Not applicable (documentation-only story, no source code changes).
 
 ---
 
 #### Non-Functional Requirements (NFRs)
 
-**Security**: PASS
+**Security**: PASS -- No source code changes. Documentation verified to contain no hedging language or unverified claims.
 
-- Security Issues: 0
-- Signer key validation tested on all write operations
-- No private key leakage in logs (Pino structured logging pattern followed)
+**Performance**: N/A -- Documentation-only story.
 
-**Performance**: PASS
+**Reliability**: N/A -- Documentation-only story.
 
-- All 120 tests complete in 1.8s
-- Async non-blocking proof generation validated (AC-12)
+**Maintainability**: PASS -- Document grew from ~586 to ~770 lines with clear section structure, cross-references, and troubleshooting entries.
 
-**Reliability**: PASS
-
-- Subscription error resilience tested (poll failures do not crash)
-- Overlapping poll guard tested
-- Dynamic import failure handled gracefully (code 9999)
-
-**Maintainability**: PASS
-
-- Tests co-located with source per project conventions
-- Mock factories used for DRY test setup
-- Story reference in describe blocks ("Story 34.4")
-
-**NFR Source**: Code review of test files
+**NFR Source**: Story artifact review, code review passes #1-#3.
 
 ---
 
 #### Flakiness Validation
 
-**Burn-in Results** (if available):
-
-- **Burn-in Iterations**: Not performed (single local run)
-- **Flaky Tests Detected**: 0 (all tests use deterministic mocks; timer-based tests use jest.useFakeTimers())
-- **Stability Score**: 100% (single run)
-
-**Burn-in Source**: not_available
+**Burn-in Results**: Not applicable (static file-content tests have zero flakiness risk).
 
 ---
 
@@ -481,13 +554,13 @@ None required. All acceptance criteria have FULL unit and ATDD coverage.
 
 #### P0 Criteria (Must ALL Pass)
 
-| Criterion             | Threshold | Actual | Status |
-| --------------------- | --------- | ------ | ------ |
-| P0 Coverage           | 100%      | 100%   | PASS   |
-| P0 Test Pass Rate     | 100%      | 100%   | PASS   |
-| Security Issues       | 0         | 0      | PASS   |
-| Critical NFR Failures | 0         | 0      | PASS   |
-| Flaky Tests           | 0         | 0      | PASS   |
+| Criterion             | Threshold | Actual                     | Status |
+| --------------------- | --------- | -------------------------- | ------ |
+| P0 Coverage           | 100%      | N/A (no P0 criteria)       | PASS   |
+| P0 Test Pass Rate     | 100%      | N/A                        | PASS   |
+| Security Issues       | 0         | 0                          | PASS   |
+| Critical NFR Failures | 0         | 0                          | PASS   |
+| Flaky Tests           | 0         | 0                          | PASS   |
 
 **P0 Evaluation**: ALL PASS
 
@@ -508,10 +581,10 @@ None required. All acceptance criteria have FULL unit and ATDD coverage.
 
 #### P2/P3 Criteria (Informational, Don't Block)
 
-| Criterion         | Actual | Notes                  |
-| ----------------- | ------ | ---------------------- |
-| P2 Test Pass Rate | 100%   | Tracked, doesn't block |
-| P3 Test Pass Rate | 100%   | Tracked, doesn't block |
+| Criterion         | Actual | Notes          |
+| ----------------- | ------ | -------------- |
+| P2 Test Pass Rate | N/A    | No P2 criteria |
+| P3 Test Pass Rate | N/A    | No P3 criteria |
 
 ---
 
@@ -521,15 +594,9 @@ None required. All acceptance criteria have FULL unit and ATDD coverage.
 
 ### Rationale
 
-P0 coverage is 100% with all 12 acceptance criteria having FULL test coverage across both unit tests (mina-payment-channel-sdk.test.ts) and ATDD acceptance tests (mina-payment-channel-sdk.atdd.test.ts). All 120 tests pass with 100% pass rate. No security issues detected. No flaky tests. No critical NFR failures. The SDK is fully implemented with every stub method replaced by a real o1js-delegating implementation per story requirements.
+All P1 acceptance criteria (9/9) have FULL test coverage with 55 passing acceptance tests. P0 criteria are vacuously satisfied (no P0 criteria exist -- this is a documentation-only story with no security-critical or revenue-impacting changes). Overall coverage is 100%. No security issues, no NFR failures, no flaky tests. The story has passed three code review rounds with zero remaining issues.
 
-The only noted limitation is the absence of integration tests against a real o1js runtime, which is explicitly documented as out-of-scope in the story specification. This is an acceptable trade-off for a story-level gate.
-
----
-
-### Uncovered ACs
-
-None. All 12 acceptance criteria (AC-1 through AC-12) have full test coverage.
+The documentation updates are backed by nightly CI evidence (Stories 36.1-36.5), and every file path and Makefile target referenced in the guide has been verified to exist in the codebase.
 
 ---
 
@@ -538,17 +605,17 @@ None. All 12 acceptance criteria (AC-1 through AC-12) have full test coverage.
 #### For PASS Decision
 
 1. **Proceed to deployment**
-   - Merge to epic branch
-   - Downstream stories (34.5-34.9) already implemented with mock SDK -- verify they continue to pass after SDK stub replacement
-   - Monitor `make test` on CI for any regressions
+   - Merge epic-36 branch to main
+   - Documentation is ready for consumption by operators and security reviewers
+   - Nightly CI workflow provides ongoing verification
 
 2. **Post-Deployment Monitoring**
-   - Run full `make test` after merge to confirm no regressions in downstream stories
-   - Verify `npm run build` succeeds across all workspaces
+   - Monitor nightly-ator.yml workflow runs for continued green status
+   - Watch for ATOR binary version updates that may require doc updates
 
 3. **Success Criteria**
-   - All existing 34.5-34.9 story tests continue to pass
-   - Build succeeds across all workspace packages
+   - Operators can follow the guide end-to-end without encountering stale or hedged information
+   - Security reviewers can verify all claims via linked CI evidence
 
 ---
 
@@ -556,18 +623,20 @@ None. All 12 acceptance criteria (AC-1 through AC-12) have full test coverage.
 
 **Immediate Actions** (next 24-48 hours):
 
-1. Merge story 34.4 to epic-34 branch
-2. Run full `make test` to confirm regression gate (Task 15)
-3. Verify `make lint` passes
+1. Run epic retrospective (epic-36 retrospective status is "pending")
+2. Merge epic-36 branch to main after retrospective
+3. Verify nightly CI continues to pass after merge
 
 **Follow-up Actions** (next milestone/release):
 
-1. Create story for o1js integration test (real compile + proof generation)
-2. Create story for Mina devnet E2E test
+1. Update Verification Status section when ATOR binary version changes
+2. Monitor for any new failure modes in nightly CI that should be added to Troubleshooting
 
 **Stakeholder Communication**:
 
-- Story 34.4 gate: PASS -- all 12 ACs covered, 120/120 tests green
+- Notify PM: Story 36.6 complete, all 9 ACs verified, gate PASS
+- Notify SM: Epic 36 stories all done, retrospective pending
+- Notify DEV lead: Documentation finalized, ready for merge
 
 ---
 
@@ -577,8 +646,8 @@ None. All 12 acceptance criteria (AC-1 through AC-12) have full test coverage.
 traceability_and_gate:
   # Phase 1: Traceability
   traceability:
-    story_id: "34.4"
-    date: "2026-03-29"
+    story_id: "36.6"
+    date: "2026-04-16"
     coverage:
       overall: 100%
       p0: 100%
@@ -591,13 +660,12 @@ traceability_and_gate:
       medium: 0
       low: 0
     quality:
-      passing_tests: 120
-      total_tests: 120
+      passing_tests: 55
+      total_tests: 55
       blocker_issues: 0
       warning_issues: 0
     recommendations:
-      - "Add o1js integration test for real compile + proof generation"
-      - "Add Mina devnet E2E test for full lifecycle validation"
+      - "Consider CLI flag runtime verification as a long-term backlog item"
 
   # Phase 2: Gate Decision
   gate_decision:
@@ -622,25 +690,44 @@ traceability_and_gate:
       min_overall_pass_rate: 95
       min_coverage: 80
     evidence:
-      test_results: "local_run"
+      test_results: "local run, 2026-04-16"
       traceability: "_bmad-output/test-artifacts/traceability-matrix.md"
-      nfr_assessment: "inline_code_review"
-      code_coverage: "not_collected"
-    next_steps: "Merge to epic-34; add future integration test story"
+      nfr_assessment: "_bmad-output/test-artifacts/nfr-assessment.md"
+      code_coverage: "N/A (documentation-only story)"
+    next_steps: "Run epic retrospective, merge to main"
 ```
 
 ---
 
 ## Related Artifacts
 
-- **Story File:** `_bmad-output/implementation-artifacts/34-4-mina-payment-channel-sdk-typescript-integration.md`
-- **Test Design:** N/A (ATDD tests serve as test design)
-- **Tech Spec:** Embedded in story Dev Notes
-- **Test Results:** Local run: 120 passed, 0 failed, 1.8s
-- **NFR Assessment:** Inline code review
-- **Test Files:**
-  - `packages/connector/src/settlement/mina-payment-channel-sdk.test.ts` (~1,550 lines, ~80 unit tests)
-  - `packages/connector/src/settlement/mina-payment-channel-sdk.atdd.test.ts` (~967 lines, ~40 ATDD tests)
+- **Story File:** `_bmad-output/implementation-artifacts/36-6-docs-deployment-guide-update.md`
+- **Test Design:** `_bmad-output/test-artifacts/atdd-checklist-36-6.md`
+- **Tech Spec:** N/A (documentation-only story)
+- **Test Results:** Local run, 55/55 passed
+- **NFR Assessment:** `_bmad-output/test-artifacts/nfr-assessment.md`
+- **Test Files:** `packages/connector/test/acceptance/story-36-6-docs-deployment-guide-update.test.ts`
+
+---
+
+## Uncovered ACs
+
+**None.** All 9 acceptance criteria have FULL test coverage:
+
+| AC   | Description                              | Test Count | Coverage |
+| ---- | ---------------------------------------- | ---------- | -------- |
+| AC 1 | Zero remaining hedges                    | 3          | FULL     |
+| AC 2 | Verification Status section              | 7          | FULL     |
+| AC 3 | Local Development Network section        | 10         | FULL     |
+| AC 4 | Prerequisites split                      | 5          | FULL     |
+| AC 5 | Troubleshooting real-binary failure modes | 7          | FULL     |
+| AC 6 | Platform Matrix section                  | 4          | FULL     |
+| AC 7 | All file paths and flags exist           | 11         | FULL     |
+| AC 8 | Zero src/test changes                    | 2          | FULL     |
+| AC 9 | CHANGELOG + sprint-status                | 4          | FULL     |
+| ToC  | Table of Contents updates                | 2          | FULL     |
+
+**Total: 55 tests covering 9 ACs + ToC verification = 100% coverage**
 
 ---
 
@@ -649,7 +736,7 @@ traceability_and_gate:
 **Phase 1 - Traceability Assessment:**
 
 - Overall Coverage: 100%
-- P0 Coverage: 100% PASS
+- P0 Coverage: 100% (vacuous) PASS
 - P1 Coverage: 100% PASS
 - Critical Gaps: 0
 - High Priority Gaps: 0
@@ -664,11 +751,11 @@ traceability_and_gate:
 
 **Next Steps:**
 
-- PASS: Proceed to deployment (merge to epic-34 branch)
+- PASS: Proceed to deployment (merge epic-36 to main after retrospective)
 
-**Generated:** 2026-03-29
-**Workflow:** testarch-trace v5.0 (Enhanced with Gate Decision)
+**Generated:** 2026-04-16
+**Workflow:** testarch-trace v5.0 (Step-File Architecture)
 
 ---
 
-<!-- Powered by BMAD-CORE(TM) -->
+<!-- Powered by BMAD-CORE™ -->
