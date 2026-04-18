@@ -47,7 +47,7 @@ import { exec as execCb } from 'child_process';
 import { createHash } from 'crypto';
 import { promisify } from 'util';
 import pino from 'pino';
-import { SocksProxyAgent } from 'socks-proxy-agent';
+import { SocksClient } from 'socks';
 import { SocksTransportProvider } from '../../src/transport/socks-transport-provider';
 import { largeBtpPayload } from '../fixtures/large-btp-message';
 
@@ -200,61 +200,16 @@ async function socksConnect(
   port: number,
   timeoutMs: number
 ): Promise<net.Socket> {
-  return new Promise<net.Socket>((resolve, reject) => {
-    const agent = new SocksProxyAgent(proxyUrl);
-    let lastErr: Error | undefined;
-    let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
-      reject(
-        new Error(
-          `socksConnect timeout after ${timeoutMs}ms` +
-            (lastErr ? ` (last socks error: ${lastErr.message})` : '')
-        )
-      );
-    }, timeoutMs);
-    // The agent's callback-style createConnection is what ws and http use
-    // under the hood; we invoke it directly to avoid spinning up a full
-    // HTTP request.
-    const anyAgent = agent as unknown as {
-      createConnection?: (
-        opts: { host: string; port: number },
-        cb: (err: Error | null, sock?: net.Socket) => void
-      ) => void;
-    };
-    if (typeof anyAgent.createConnection !== 'function') {
-      clearTimeout(timer);
-      settled = true;
-      reject(new Error('SocksProxyAgent has no createConnection'));
-      return;
-    }
-    anyAgent.createConnection({ host, port }, (err, sock) => {
-      if (err) {
-        lastErr = err;
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          reject(err);
-        }
-      } else if (sock) {
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          resolve(sock);
-        } else {
-          // Timeout already fired and rejected — destroy the socket so it
-          // doesn't leak (the caller has no handle to clean it up).
-          sock.destroy();
-        }
-      } else {
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          reject(new Error('socksConnect: no socket and no error'));
-        }
-      }
-    });
+  const parsed = new URL(proxyUrl.replace(/^socks5h:\/\//, 'http://'));
+  const proxyHost = parsed.hostname;
+  const proxyPort = Number(parsed.port);
+  const { socket } = await SocksClient.createConnection({
+    proxy: { host: proxyHost, port: proxyPort, type: 5 },
+    command: 'connect',
+    destination: { host, port },
+    timeout: timeoutMs,
   });
+  return socket;
 }
 
 // ----------------------------------------------------------------------------
@@ -610,7 +565,7 @@ describeRealBinary(`Real-binary ATOR SOCKS5 integration (Story 36.3, ${SKIP_REAS
         // container (static by anon config), not the host-side dynamic port
         // `ATOR_SOCKS_PORT`. Do not substitute one for the other here.
         const { stdout } = await exec(
-          `docker exec hs1 sh -c "tcpdump -c 1 -s 0 -xx -i lo 'tcp dst port 9050'"`
+          `docker compose exec -T hs1 sh -c "tcpdump -c 1 -s 0 -xx -i lo 'tcp dst port 9050'"`
         );
         // tcpdump -xx prints each frame as multiple lines of the form
         //   0x0000:  4500 003c ...

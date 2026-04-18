@@ -26,7 +26,7 @@ fi
 
 : "${SOCKS_PORT:=0}"
 : "${HIDDEN_SERVICE_PORT:=0}"
-export NICKNAME ORPORT DIRPORT CONTROL_PORT SOCKS_PORT HIDDEN_SERVICE_PORT
+export NICKNAME ORPORT DIRPORT CONTROL_PORT SOCKS_PORT HIDDEN_SERVICE_PORT MY_IP
 
 SHARED="/shared"
 FP_DIR="${SHARED}/fingerprints"
@@ -52,12 +52,18 @@ if [ "${ROLE}" = "hs" ]; then
   chmod 0700 /var/lib/anon/hs
 fi
 
+# Resolve our own IP on the Docker network (needed for gencert and keygen)
+MY_IP=$(getent hosts "${NICKNAME}" | awk '{print $1}' | head -1)
+if [ -z "${MY_IP}" ]; then
+  MY_IP=$(hostname -i 2>/dev/null | awk '{print $1}')
+fi
+echo "[entrypoint] resolved ${NICKNAME} → ${MY_IP}"
+
 # Build a minimal torrc for key generation (no DirAuthority lines needed).
-# Use Address 127.0.0.1 — Docker DNS is not available during keygen.
 KEYGEN_TORRC="/tmp/torrc.keygen"
 cat > "${KEYGEN_TORRC}" <<KEYGEN_EOF
 Nickname ${NICKNAME}
-Address 127.0.0.1
+Address ${MY_IP}
 DataDirectory /var/lib/anon
 TestingTorNetwork 1
 AssumeReachable 1
@@ -84,7 +90,7 @@ if [ "${ROLE}" = "dirauth" ] && [ ! -f /var/lib/anon/keys/authority_identity_key
     -i /var/lib/anon/keys/authority_identity_key \
     -s /var/lib/anon/keys/authority_signing_key \
     -c /var/lib/anon/keys/authority_certificate \
-    -a "127.0.0.1:${DIRPORT}" \
+    -a "${MY_IP}:${DIRPORT}" \
     -m 12 \
     --passphrase-fd 0 2>&1
 fi
@@ -109,12 +115,6 @@ fi
 V3IDENT=""
 if [ "${ROLE}" = "dirauth" ] && [ -f /var/lib/anon/keys/authority_certificate ]; then
   V3IDENT=$(grep '^fingerprint ' /var/lib/anon/keys/authority_certificate | awk '{print $2}' | tr -d ' ')
-fi
-
-# Resolve our own IP on the Docker network
-MY_IP=$(getent hosts "${NICKNAME}" | awk '{print $1}' | head -1)
-if [ -z "${MY_IP}" ]; then
-  MY_IP=$(hostname -i 2>/dev/null | awk '{print $1}')
 fi
 
 # Write fingerprint info for DirAuth nodes to the shared volume

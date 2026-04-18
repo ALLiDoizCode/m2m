@@ -124,6 +124,7 @@ ator-test:
 	fi; \
 	echo "ATOR_SOCKS_PORT=$$HOST_PORT"; \
 	ATOR_NIGHTLY=1 ATOR_SOCKS_PORT=$$HOST_PORT \
+	ECHO_HOST=hs1 WSS_ECHO_HOST=hs1 ECHO_PORT=5000 WSS_ECHO_PORT=5000 \
 		npm run test:integration -w packages/connector -- --passWithNoTests --testPathPattern 'transport-ator-'
 
 # Local Blockchain — All Chains (EVM + Solana + Mina + ATOR)

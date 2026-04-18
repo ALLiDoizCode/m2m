@@ -48,6 +48,7 @@ import { Writable } from 'stream';
 import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
 import pino from 'pino';
+import { SocksClient } from 'socks';
 import { SocksTransportProvider } from '../../src/transport/socks-transport-provider';
 import { ManagedAnonClient } from '../../src/transport/managed-anon-client';
 import type { AnonFactoryOptions, AnonSdkHandle } from '../../src/transport/managed-anon-client';
@@ -152,10 +153,8 @@ async function tcpProbe(host: string, port: number, timeoutMs: number): Promise<
 }
 
 /**
- * Drive a SOCKS5 CONNECT through `SocksProxyAgent`. Returns the underlying
- * `net.Socket` once the agent has finished the SOCKS handshake (or rejects
- * with the library's error). Uses the `settled` flag pattern from Story 36.3
- * to prevent socket leaks on timeout races.
+ * Drive a SOCKS5 CONNECT through `SocksClient`. Returns the underlying
+ * `net.Socket` once the SOCKS handshake completes.
  */
 async function socksConnect(
   proxyUrl: string,
@@ -163,54 +162,16 @@ async function socksConnect(
   port: number,
   timeoutMs: number
 ): Promise<net.Socket> {
-  return new Promise<net.Socket>((resolve, reject) => {
-    /* eslint-disable @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports */
-    const { SocksProxyAgent: SPA } =
-      require('socks-proxy-agent') as typeof import('socks-proxy-agent');
-    /* eslint-enable @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports */
-    const agent = new SPA(proxyUrl);
-    let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
-      reject(new Error(`socksConnect timeout after ${timeoutMs}ms to ${host}:${port}`));
-    }, timeoutMs);
-    const anyAgent = agent as unknown as {
-      createConnection?: (
-        opts: { host: string; port: number },
-        cb: (err: Error | null, sock?: net.Socket) => void
-      ) => void;
-    };
-    if (typeof anyAgent.createConnection !== 'function') {
-      clearTimeout(timer);
-      settled = true;
-      reject(new Error('SocksProxyAgent has no createConnection'));
-      return;
-    }
-    anyAgent.createConnection({ host, port }, (err, sock) => {
-      if (err) {
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          reject(err);
-        }
-      } else if (sock) {
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          resolve(sock);
-        } else {
-          // Timeout already fired -- destroy the socket so it doesn't leak.
-          sock.destroy();
-        }
-      } else {
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          reject(new Error('socksConnect: no socket and no error'));
-        }
-      }
-    });
+  const parsed = new URL(proxyUrl.replace(/^socks5h:\/\//, 'http://'));
+  const proxyHost = parsed.hostname;
+  const proxyPort = Number(parsed.port);
+  const { socket } = await SocksClient.createConnection({
+    proxy: { host: proxyHost, port: proxyPort, type: 5 },
+    command: 'connect',
+    destination: { host, port },
+    timeout: timeoutMs,
   });
+  return socket;
 }
 
 /**
@@ -352,10 +313,15 @@ describeRealBinary(
     function realAnonFactory(opts: AnonFactoryOptions): AnonSdkHandle {
       // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const AnonModule = require('@anyone-protocol/anyone-client');
-      const AnonCtor = AnonModule.Anon ?? AnonModule.default?.Anon ?? AnonModule.default;
+      const AnonCtor =
+        AnonModule.Process ??
+        AnonModule.Anon ??
+        AnonModule.default?.Process ??
+        AnonModule.default?.Anon ??
+        AnonModule.default;
       if (typeof AnonCtor !== 'function') {
         throw new Error(
-          'Real anonFactory: @anyone-protocol/anyone-client did not export Anon constructor'
+          'Real anonFactory: @anyone-protocol/anyone-client did not export Process or Anon constructor'
         );
       }
       return new AnonCtor(opts) as AnonSdkHandle;
@@ -505,7 +471,7 @@ describeRealBinary(
         );
 
         // Hostname must match .anon base32 pattern
-        expect(hostname).toMatch(/^[a-z2-7]{56}\.anon$/);
+        expect(hostname).toMatch(/^[a-z2-7]{56}\.anyone$/);
 
         // Construct provider with externalUrl: 'auto' + resolver.
         // The provider uses PROXY_URL (docker stack SOCKS port) for outbound
@@ -525,7 +491,7 @@ describeRealBinary(
 
         await provider.start();
         const resolvedUrl = provider.getExternalUrl();
-        expect(resolvedUrl).toMatch(/^wss:\/\/[a-z2-7]{56}\.anon:\d+\/btp$/);
+        expect(resolvedUrl).toMatch(/^wss:\/\/[a-z2-7]{56}\.anyone:\d+\/btp$/);
         // hsDir cleanup handled by afterAll via makeTempHsDir registration
       });
     });
@@ -538,10 +504,10 @@ describeRealBinary(
       it("Alice connects to Bob's .anon hidden service through SOCKS proxy", async () => {
         // Read Bob's .anon hostname from the hs1 container
         const { stdout: hsHostname } = await execCompose(
-          'docker exec hs1 cat /var/lib/anon/hs/hostname'
+          'docker compose exec -T hs1 cat /var/lib/anon/hs/hostname'
         );
         const bobAnon = hsHostname.trim();
-        expect(bobAnon).toMatch(/^[a-z2-7]{56}\.anon$/);
+        expect(bobAnon).toMatch(/^[a-z2-7]{56}\.anyone$/);
 
         // Alice: create a SocksTransportProvider pointed at the ator stack's SOCKS port
         const aliceProvider = trackProvider(
@@ -752,10 +718,10 @@ describeRealBinary(
       it('ILP PREPARE->FULFILL round-trip completes within RENDEZVOUS_ROUNDTRIP_BUDGET_MS', async () => {
         // Read Bob's .anon hostname from the hs1 container
         const { stdout: hsHostname } = await execCompose(
-          'docker exec hs1 cat /var/lib/anon/hs/hostname'
+          'docker compose exec -T hs1 cat /var/lib/anon/hs/hostname'
         );
         const bobAnon = hsHostname.trim();
-        expect(bobAnon).toMatch(/^[a-z2-7]{56}\.anon$/);
+        expect(bobAnon).toMatch(/^[a-z2-7]{56}\.anyone$/);
 
         // Alice connects to Bob through the .anon rendezvous.
         // HS circuit establishment can take most of the budget, so use a
@@ -821,7 +787,7 @@ describeRealBinary(
     // -----------------------------------------------------------------------
     describe('T-36.4-04: log hygiene -- no .anon hostnames at INFO+', () => {
       it('zero .anon hostname matches in structured log entries at level >= INFO (30)', () => {
-        const ANON_HOSTNAME_RE = /[a-z2-7]{16,56}\.anon/;
+        const ANON_HOSTNAME_RE = /[a-z2-7]{16,56}\.anyone/;
         const leaks: Array<{ level: number; preview: string }> = [];
 
         for (const entry of logBuffer) {

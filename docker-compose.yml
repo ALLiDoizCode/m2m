@@ -337,6 +337,8 @@ services:
       CONTROL_PORT: '9051'
       SOCKS_PORT: '9050'
       HIDDEN_SERVICE_PORT: '5000'
+    cap_add:
+      - NET_RAW
     volumes:
       - ator_hs1:/var/lib/anon
       - ator_shared:/shared

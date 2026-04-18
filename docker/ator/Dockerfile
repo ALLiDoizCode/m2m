@@ -21,8 +21,10 @@ RUN set -eux; \
         ca-certificates \
         curl \
         gettext-base \
+        libcap2-bin \
         netcat-openbsd \
         socat \
+        tcpdump \
     ; \
     rm -rf /var/lib/apt/lists/*
 
@@ -74,7 +76,8 @@ RUN set -eux; \
     groupadd --system --gid 1000 anon; \
     useradd  --system --uid 1000 --gid anon --home-dir /var/lib/anon --shell /usr/sbin/nologin anon; \
     mkdir -p /shared; \
-    chown -R anon:anon /etc/anon /var/lib/anon /shared
+    chown -R anon:anon /etc/anon /var/lib/anon /shared; \
+    setcap cap_net_raw+ep /usr/bin/tcpdump
 
 # State volume — named-volume friendly; identity keys and descriptors live here
 VOLUME ["/var/lib/anon"]

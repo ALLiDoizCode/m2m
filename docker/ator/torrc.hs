@@ -3,7 +3,7 @@
 #   ${NICKNAME} ${ORPORT} ${DIRPORT} ${CONTROL_PORT} ${SOCKS_PORT} ${HIDDEN_SERVICE_PORT}
 #   ${DIRAUTH1_LINE} ${DIRAUTH2_LINE} ${DIRAUTH3_LINE}
 Nickname ${NICKNAME}
-Address ${NICKNAME}
+Address ${MY_IP}
 DataDirectory /var/lib/anon
 ContactInfo test-hs@local
 Log notice stdout
