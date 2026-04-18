@@ -108,6 +108,10 @@ export interface MultiHopTestOptions {
   nip59Enabled?: boolean;
   /** Transport config template applied to every peer (default: direct) */
   transport?: TransportConfig;
+  /** Per-peer chain IDs — allows each peer to reference a different chain.
+   *  Array length must equal peerCount. All chains must resolve to registered
+   *  providers in the connector's ChainProviderRegistry. */
+  perPeerChainIds?: string[];
 }
 
 // ============================================================================
@@ -176,6 +180,7 @@ export function createMultiHopTestNetwork(
     logLevel = 'warn',
     nip59Enabled = false,
     transport,
+    perPeerChainIds,
   } = options;
 
   const configs: ConnectorConfig[] = [];
@@ -196,7 +201,7 @@ export function createMultiHopTestNetwork(
         url: `ws://localhost:${portBase + i - 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i - 1],
-        chain: `evm:${ANVIL_CHAIN_ID}`,
+        chain: perPeerChainIds?.[i - 1] ?? `evm:${ANVIL_CHAIN_ID}`,
         ...(nip59Enabled ? { nip59PublicKey: PEER_NIP59_PUBKEYS[i - 1] } : {}),
       });
     }
@@ -208,7 +213,7 @@ export function createMultiHopTestNetwork(
         url: `ws://localhost:${portBase + i + 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i + 1],
-        chain: `evm:${ANVIL_CHAIN_ID}`,
+        chain: perPeerChainIds?.[i + 1] ?? `evm:${ANVIL_CHAIN_ID}`,
         ...(nip59Enabled ? { nip59PublicKey: PEER_NIP59_PUBKEYS[i + 1] } : {}),
       });
     }
