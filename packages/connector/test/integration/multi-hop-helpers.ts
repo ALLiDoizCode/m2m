@@ -17,7 +17,12 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 import { hexToBytes } from '@noble/hashes/utils';
 import { ConnectorNode } from '../../src/core/connector-node';
 import { createLogger } from '../../src/utils/logger';
-import type { ConnectorConfig, PeerAccountBalance, SendPacketParams } from '../../src/config/types';
+import type {
+  ConnectorConfig,
+  PeerAccountBalance,
+  SendPacketParams,
+  TransportConfig,
+} from '../../src/config/types';
 import type { ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
 
 // ============================================================================
@@ -101,6 +106,8 @@ export interface MultiHopTestOptions {
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   /** Enable NIP-59 claim wrapping (default: false) */
   nip59Enabled?: boolean;
+  /** Transport config template applied to every peer (default: direct) */
+  transport?: TransportConfig;
 }
 
 // ============================================================================
@@ -168,6 +175,7 @@ export function createMultiHopTestNetwork(
     portBase = 10000 + Math.floor(Math.random() * 40000),
     logLevel = 'warn',
     nip59Enabled = false,
+    transport,
   } = options;
 
   const configs: ConnectorConfig[] = [];
@@ -271,6 +279,14 @@ export function createMultiHopTestNetwork(
         },
       ],
       ...(nip59Enabled ? { nip59: { enabled: true } } : {}),
+      ...(transport
+        ? {
+            transport:
+              transport.type === 'socks5'
+                ? { ...transport, externalUrl: `ws://localhost:${btpServerPort}` }
+                : transport,
+          }
+        : {}),
       settlementInfra: {
         enabled: true,
         privateKey: PEER_PRIVATE_KEYS[i],
