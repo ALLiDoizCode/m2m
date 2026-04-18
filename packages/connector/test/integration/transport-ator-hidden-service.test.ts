@@ -96,9 +96,10 @@ const PROXY_URL = ATOR_SOCKS_PORT
 
 // Managed-client tests (T-36.4-01/02/05/06/07) spawn their OWN `anon` binary
 // on the host, which must bind to a DIFFERENT SOCKS port than the docker hs1
-// container already occupying ATOR_SOCKS_PORT.  Port 0 = ephemeral binding;
-// the SDK reports the actual port via `getSOCKSPort()` after start.
-const MANAGED_PROXY_URL = 'socks5h://127.0.0.1:0';
+// container already occupying ATOR_SOCKS_PORT. Use a random high port to avoid
+// collisions (the SDK's getSOCKSPort() doesn't report ephemeral ports).
+const MANAGED_SOCKS_PORT = 19050 + Math.floor(Math.random() * 1000);
+const MANAGED_PROXY_URL = `socks5h://127.0.0.1:${MANAGED_SOCKS_PORT}`;
 
 const SKIP_REASON = 'requires ATOR_NIGHTLY=1 and docker compose --profile ator';
 
@@ -298,10 +299,19 @@ describeRealBinary(
       return c;
     }
 
-    /** Create a temp directory and register it for cleanup in afterAll. */
+    /** Create a temp directory and register it for cleanup in afterAll. Pre-write
+     *  an anonrc with testnet DirAuthority lines so the managed binary bootstraps
+     *  against the local Docker network instead of the public one. */
     function makeTempHsDir(prefix: string): string {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
       tempDirsToClean.push(dir);
+      if (testnetDirAuthLines) {
+        fs.writeFileSync(
+          path.join(dir, 'anonrc'),
+          `AgreeToTerms 1\nTestingTorNetwork 1\nAssumeReachable 1\n${testnetDirAuthLines}\n`,
+          { encoding: 'utf8' }
+        );
+      }
       return dir;
     }
 
@@ -327,6 +337,8 @@ describeRealBinary(
       return new AnonCtor(opts) as AnonSdkHandle;
     }
 
+    let testnetDirAuthLines = '';
+
     beforeAll(async () => {
       if (!ATOR_SOCKS_PORT) {
         throw new Error(
@@ -344,8 +356,48 @@ describeRealBinary(
             '`make ator-up` first and verify hs1 is healthy.'
         );
       }
+      // Read DirAuthority lines from the running Docker testnet so the host-side
+      // managed anon binary joins the local network instead of the public one.
+      try {
+        const { stdout } = await execCompose(
+          "docker compose exec -T dirauth1 grep '^DirAuthority' /etc/anon/torrc"
+        );
+        testnetDirAuthLines = stdout.trim();
+      } catch {
+        // If we can't read DirAuth lines, managed-client tests will bootstrap
+        // against the public network (slower, may timeout).
+      }
       // Create a temporary directory for hidden service keys.
       tempHsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ator-hs-test-'));
+      if (testnetDirAuthLines) {
+        fs.writeFileSync(
+          path.join(tempHsDir, 'anonrc'),
+          `AgreeToTerms 1\nTestingTorNetwork 1\nAssumeReachable 1\n${testnetDirAuthLines}\n`,
+          { encoding: 'utf8' }
+        );
+      }
+    });
+
+    afterEach(async () => {
+      // Stop managed clients between tests so the SDK singleton doesn't
+      // reject subsequent start() calls with "already running."
+      while (createdManagedClients.length > 0) {
+        const c = createdManagedClients.pop()!;
+        try {
+          await c.stop();
+        } catch {
+          // swallow
+        }
+      }
+      // Belt-and-suspenders: kill any orphan anon processes left by a
+      // slow/failed stop(). The SDK detects "already running" via global
+      // process check, so we must ensure zero anon processes between tests.
+      try {
+        await execCompose('pkill -x anon || true');
+      } catch {
+        // swallow
+      }
+      await new Promise((r) => setTimeout(r, 500));
     });
 
     afterAll(async () => {
@@ -353,14 +405,6 @@ describeRealBinary(
       for (const p of createdProviders) {
         try {
           await p.stop();
-        } catch {
-          // swallow
-        }
-      }
-      // Clean up managed clients
-      for (const c of createdManagedClients) {
-        try {
-          await c.stop();
         } catch {
           // swallow
         }

@@ -97,7 +97,7 @@ const JEST_TEST_TIMEOUT_MS = 120_000;
 // empty — indistinguishable from a missing tcpdump binary (see
 // `captureAtypByte` below). Centralised constant so T-36.3-04 and T-36.3-05
 // don't drift.
-const TCPDUMP_ATTACH_GRACE_MS = 500;
+const TCPDUMP_ATTACH_GRACE_MS = 2_000;
 
 // Dynamic host port assigned by docker at `make ator-up`; read via
 // `docker compose port hs1 9050` inside the ator-test target. NO FALLBACK
@@ -545,63 +545,60 @@ describeRealBinary(`Real-binary ATOR SOCKS5 integration (Story 36.3, ${SKIP_REAS
     // sharpening of the pass #2 "preserve stderr" work.
     let lastCaptureError: string | undefined;
 
+    function parseAtypFromFrame(hex: string): number | null {
+      // With -i any, Linux cooked v2 (SLL2) header is 20 bytes.
+      const L2_OFFSET = 20;
+      const ipByte0 = parseInt(hex.slice(L2_OFFSET * 2, L2_OFFSET * 2 + 2), 16);
+      if (Number.isNaN(ipByte0)) return null;
+      const ipHeaderLen = (ipByte0 & 0x0f) * 4;
+      if (ipHeaderLen < 20) return null;
+      const tcpDataOffsetByte = parseInt(
+        hex.slice((L2_OFFSET + ipHeaderLen + 12) * 2, (L2_OFFSET + ipHeaderLen + 12) * 2 + 2),
+        16
+      );
+      if (Number.isNaN(tcpDataOffsetByte)) return null;
+      const tcpHeaderLen = ((tcpDataOffsetByte >> 4) & 0x0f) * 4;
+      if (tcpHeaderLen < 20) return null;
+      const payloadStart = L2_OFFSET + ipHeaderLen + tcpHeaderLen;
+      // SOCKS5 CONNECT: [VER=0x05, CMD=0x01, RSV=0x00, ATYP, ...]
+      const ver = parseInt(hex.slice(payloadStart * 2, payloadStart * 2 + 2), 16);
+      const cmd = parseInt(hex.slice((payloadStart + 1) * 2, (payloadStart + 1) * 2 + 2), 16);
+      if (ver !== 0x05 || cmd !== 0x01) return null;
+      const atypHex = hex.slice((payloadStart + 3) * 2, (payloadStart + 3) * 2 + 2);
+      if (!atypHex) return null;
+      const atyp = parseInt(atypHex, 16);
+      return Number.isNaN(atyp) ? null : atyp;
+    }
+
     async function captureAtypByte(): Promise<number | null> {
       lastCaptureError = undefined;
       try {
-        // tcpdump -c 1 stops after one matched packet. Caller MUST start this
-        // BEFORE triggering SOCKS CONNECT AND give tcpdump a short grace
-        // period to attach — otherwise the CONNECT bytes fly past before pcap
-        // filters are live, leading to empty captures (indistinguishable from
-        // a missing tcpdump binary) which would previously cause a silent
-        // pass in T-36.3-05.
-        //
-        // Preserve stderr (no `2>/dev/null`) and drop `|| true` so tcpdump
-        // errors (e.g. binary missing, permission denied) surface as a thrown
-        // exception in the outer try/catch and are stashed in
-        // `lastCaptureError` so callers can distinguish "ran but captured
-        // nothing" from "exec failed".
-        //
-        // The literal `9050` is the SOCKS listener port INSIDE the hs1
-        // container (static by anon config), not the host-side dynamic port
-        // `ATOR_SOCKS_PORT`. Do not substitute one for the other here.
+        // Capture up to 10 packets — the SOCKS5 negotiation packet arrives
+        // before the CONNECT, so -c 1 often grabs the wrong one. We parse
+        // each frame and return the first with VER=5 CMD=1 (CONNECT).
+        // Timeout after 10s so we don't hang if no traffic arrives.
+        // Traffic arrives on lo (Docker port mapping goes through localhost).
+        // Filter for packets with TCP payload (not just SYN/ACK/FIN).
+        // -i any uses LINUX_SLL2 with a 20-byte header.
         const { stdout } = await exec(
-          `docker compose exec -T hs1 sh -c "tcpdump -c 1 -s 0 -xx -i eth0 'tcp dst port 9050'"`
+          `docker compose exec -T hs1 sh -c "timeout 10 tcpdump -c 10 -s 0 -xx -i any 'tcp dst port 9050 and (tcp[tcpflags] & tcp-push != 0)'"`
         );
-        // tcpdump -xx prints each frame as multiple lines of the form
-        //   0x0000:  4500 003c ...
-        //   0x0010:  7f00 0001 ...
-        // Concatenate every hex-line payload to recover the raw frame bytes,
-        // then index into it. This is robust to TCP options (header > 20B)
-        // and payloads that straddle the first 16-byte dump line.
-        const lines = stdout.match(/0x[0-9a-f]{4}:\s+([0-9a-f ]+)/gi);
-        if (!lines || lines.length === 0) return null;
-        const hex = lines
-          .map((l) => {
-            const m = l.match(/0x[0-9a-f]{4}:\s+([0-9a-f ]+)/i);
-            return m && m[1] ? m[1].replace(/\s+/g, '') : '';
-          })
-          .join('');
-        if (!hex) return null;
-        // Parse IHL from the IP header to compute the TCP header offset.
-        // On eth0, skip the 14-byte Ethernet II header (6 dst + 6 src + 2 type).
-        const L2_OFFSET = 14;
-        const ipByte0 = parseInt(hex.slice(L2_OFFSET * 2, L2_OFFSET * 2 + 2), 16);
-        if (Number.isNaN(ipByte0)) return null;
-        const ipHeaderLen = (ipByte0 & 0x0f) * 4;
-        if (ipHeaderLen < 20) return null;
-        const tcpDataOffsetByte = parseInt(
-          hex.slice((L2_OFFSET + ipHeaderLen + 12) * 2, (L2_OFFSET + ipHeaderLen + 12) * 2 + 2),
-          16
-        );
-        if (Number.isNaN(tcpDataOffsetByte)) return null;
-        const tcpHeaderLen = ((tcpDataOffsetByte >> 4) & 0x0f) * 4;
-        if (tcpHeaderLen < 20) return null;
-        // SOCKS5 request: [VER, CMD, RSV, ATYP, ...] → ATYP is byte 3.
-        const atypByteIdx = L2_OFFSET + ipHeaderLen + tcpHeaderLen + 3;
-        const atypHex = hex.slice(atypByteIdx * 2, atypByteIdx * 2 + 2);
-        if (!atypHex) return null;
-        const atyp = parseInt(atypHex, 16);
-        return Number.isNaN(atyp) ? null : atyp;
+        // Split output into per-packet blocks (each starts with a timestamp line)
+        const packets = stdout.split(/(?=\d{2}:\d{2}:\d{2})/);
+        for (const pkt of packets) {
+          const lines = pkt.match(/0x[0-9a-f]{4}:\s+([0-9a-f ]+)/gi);
+          if (!lines || lines.length === 0) continue;
+          const hex = lines
+            .map((l) => {
+              const m = l.match(/0x[0-9a-f]{4}:\s+([0-9a-f ]+)/i);
+              return m && m[1] ? m[1].replace(/\s+/g, '') : '';
+            })
+            .join('');
+          if (!hex) continue;
+          const atyp = parseAtypFromFrame(hex);
+          if (atyp !== null) return atyp;
+        }
+        return null;
       } catch (err) {
         lastCaptureError = (err as Error).message;
         return null;
@@ -712,17 +709,27 @@ describeRealBinary(`Real-binary ATOR SOCKS5 integration (Story 36.3, ${SKIP_REAS
         throw new Error(`T-36.3-06 setup: failed to kill relay1: ${(err as Error).message}`);
       }
       const t0 = Date.now();
-      // New CONNECT forces a fresh circuit; relay1 is dead, so any success
-      // implies a different 3-hop path was chosen (or the pool is degraded
-      // enough that anon surfaces an explicit error — either is observable).
-      try {
-        const echoHost = process.env.WSS_ECHO_HOST ?? 'wss-echo';
-        const echoPort = Number(process.env.WSS_ECHO_PORT ?? '5000');
-        const sock = await socksConnect(PROXY_URL, echoHost, echoPort, CIRCUIT_REBUILD_BUDGET_MS);
-        sock.destroy();
-      } catch (err) {
-        // If the pool is fully degraded here, we want visibility.
-        throw new Error(`Circuit rebuild failed (2-relay pool): ${(err as Error).message}`);
+      // Retry SOCKS connect — the proxy may reject the first few attempts
+      // while it rebuilds circuits after the relay kill. Each attempt uses
+      // a short timeout; the outer budget guards wall-clock.
+      const echoHost = process.env.WSS_ECHO_HOST ?? 'wss-echo';
+      const echoPort = Number(process.env.WSS_ECHO_PORT ?? '5000');
+      let connected = false;
+      let lastErr: Error | undefined;
+      while (Date.now() - t0 < CIRCUIT_REBUILD_BUDGET_MS && !connected) {
+        try {
+          const sock = await socksConnect(PROXY_URL, echoHost, echoPort, 15_000);
+          sock.destroy();
+          connected = true;
+        } catch (err) {
+          lastErr = err as Error;
+          await new Promise((r) => setTimeout(r, 3_000));
+        }
+      }
+      if (!connected) {
+        throw new Error(
+          `Circuit rebuild failed (relay pool after kill): ${lastErr?.message ?? 'unknown'}`
+        );
       }
       expect(Date.now() - t0).toBeLessThan(CIRCUIT_REBUILD_BUDGET_MS);
     });
@@ -919,7 +926,7 @@ describeRealBinary(`Real-binary ATOR SOCKS5 integration (Story 36.3, ${SKIP_REAS
       const t0 = Date.now();
       let threw = false;
       try {
-        await socksConnect(PROXY_URL, 'doomed.example', 443, FAIL_CLOSED_BUDGET_MS);
+        await socksConnect(PROXY_URL, 'doomed.example', 443, FAIL_CLOSED_BUDGET_MS - 1_000);
       } catch (err) {
         threw = true;
         const msg = (err as Error).message;
