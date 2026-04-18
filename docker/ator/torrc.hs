@@ -3,12 +3,14 @@
 #   ${NICKNAME} ${ORPORT} ${DIRPORT} ${CONTROL_PORT} ${SOCKS_PORT} ${HIDDEN_SERVICE_PORT}
 #   ${DIRAUTH1_LINE} ${DIRAUTH2_LINE} ${DIRAUTH3_LINE}
 Nickname ${NICKNAME}
+Address ${NICKNAME}
 DataDirectory /var/lib/anon
 ContactInfo test-hs@local
 Log notice stdout
 RunAsDaemon 0
 
 TestingTorNetwork 1
+AgreeToTerms 1
 AssumeReachable 1
 ProtocolWarnings 1
 

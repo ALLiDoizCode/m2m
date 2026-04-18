@@ -3,6 +3,7 @@
 #   ${NICKNAME} ${ORPORT} ${DIRPORT} ${CONTROL_PORT}
 #   ${DIRAUTH1_LINE} ${DIRAUTH2_LINE} ${DIRAUTH3_LINE}
 Nickname ${NICKNAME}
+Address ${NICKNAME}
 DataDirectory /var/lib/anon
 ContactInfo test-dirauth@local
 Log notice stdout
@@ -10,6 +11,7 @@ RunAsDaemon 0
 
 # Non-live test network — required for short voting intervals and self-signed auth
 TestingTorNetwork 1
+AgreeToTerms 1
 V3AuthVotingInterval 20 seconds
 V3AuthVoteDelay 4 seconds
 V3AuthDistDelay 4 seconds

@@ -46,7 +46,8 @@ RUN set -eux; \
     grep "  ${DEB_FILE}\$" /tmp/checksums.txt > /tmp/checksum.active; \
     sha256sum -c /tmp/checksum.active; \
     apt-get update; \
-    apt-get install -y --no-install-recommends "/tmp/${DEB_FILE}"; \
+    echo 'anon anon/terms boolean true' | debconf-set-selections; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "/tmp/${DEB_FILE}"; \
     rm -f "/tmp/${DEB_FILE}" /tmp/checksums.txt /tmp/checksum.active; \
     # Purge curl (no longer needed at runtime); keep ca-certificates, gettext-base, netcat
     apt-get purge -y --auto-remove curl; \
@@ -72,7 +73,8 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 RUN set -eux; \
     groupadd --system --gid 1000 anon; \
     useradd  --system --uid 1000 --gid anon --home-dir /var/lib/anon --shell /usr/sbin/nologin anon; \
-    chown -R anon:anon /etc/anon /var/lib/anon
+    mkdir -p /shared; \
+    chown -R anon:anon /etc/anon /var/lib/anon /shared
 
 # State volume — named-volume friendly; identity keys and descriptors live here
 VOLUME ["/var/lib/anon"]

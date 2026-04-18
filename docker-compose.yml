@@ -163,13 +163,10 @@ services:
   # Pinned anon v0.4.10.0-beta installed from the official Debian .deb.
   # Network is internal:true — relays cannot egress to the public internet;
   # the only host-visible port is hs1's SOCKS5 listener (default 127.0.0.1:9150).
-  # Shared DirAuthority lines (identical across every anon service so each sees
-  # the same 3-of-3 quorum). The 40-char fingerprints below are placeholders;
-  # the entrypoint does NOT pin a specific identity — anon mints identities on
-  # first start inside the named volume, and NoFingerprint mode is used for the
-  # DirAuthority lines via the "bridge"-free form: "<addr>:<dirport> <orport> <fp>".
-  # For a test network with TestingTorNetwork=1 the fingerprint check is relaxed
-  # on first-vote so the placeholder fingerprint works until identities stabilise.
+  # DirAuthority lines are built dynamically by the entrypoint via a shared
+  # volume — each DirAuth generates its keys on first start, writes its
+  # fingerprint to /shared/fingerprints/<nickname>.fp, and all nodes wait
+  # until all 3 are present before constructing the real DirAuthority lines.
   dirauth1:
     image: ator-testnet:v0.4.10.0-beta
     build:
@@ -183,11 +180,9 @@ services:
       DIRPORT: '9030'
       CONTROL_PORT: '9051'
       IDENTITY_SEED: dirauth1-seed-do-not-use-in-production
-      DIRAUTH1_LINE: 'DirAuthority dirauth1 orport=9001 no-v2 v3ident=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA dirauth1:9030 0000000000000000000000000000000000000000'
-      DIRAUTH2_LINE: 'DirAuthority dirauth2 orport=9001 no-v2 v3ident=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB dirauth2:9030 1111111111111111111111111111111111111111'
-      DIRAUTH3_LINE: 'DirAuthority dirauth3 orport=9001 no-v2 v3ident=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC dirauth3:9030 2222222222222222222222222222222222222222'
     volumes:
       - ator_dirauth1:/var/lib/anon
+      - ator_shared:/shared
     networks:
       - ator_net
     restart: unless-stopped
@@ -213,6 +208,7 @@ services:
       IDENTITY_SEED: dirauth2-seed-do-not-use-in-production
     volumes:
       - ator_dirauth2:/var/lib/anon
+      - ator_shared:/shared
     networks:
       - ator_net
     restart: unless-stopped
@@ -235,6 +231,7 @@ services:
       IDENTITY_SEED: dirauth3-seed-do-not-use-in-production
     volumes:
       - ator_dirauth3:/var/lib/anon
+      - ator_shared:/shared
     networks:
       - ator_net
     restart: unless-stopped
@@ -257,11 +254,9 @@ services:
       ORPORT: '9001'
       DIRPORT: '9030'
       CONTROL_PORT: '9051'
-      DIRAUTH1_LINE: 'DirAuthority dirauth1 orport=9001 no-v2 v3ident=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA dirauth1:9030 0000000000000000000000000000000000000000'
-      DIRAUTH2_LINE: 'DirAuthority dirauth2 orport=9001 no-v2 v3ident=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB dirauth2:9030 1111111111111111111111111111111111111111'
-      DIRAUTH3_LINE: 'DirAuthority dirauth3 orport=9001 no-v2 v3ident=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC dirauth3:9030 2222222222222222222222222222222222222222'
     volumes:
       - ator_relay1:/var/lib/anon
+      - ator_shared:/shared
     networks:
       - ator_net
     depends_on:
@@ -287,6 +282,7 @@ services:
       NICKNAME: relay2
     volumes:
       - ator_relay2:/var/lib/anon
+      - ator_shared:/shared
     networks:
       - ator_net
     depends_on:
@@ -312,6 +308,7 @@ services:
       NICKNAME: relay3
     volumes:
       - ator_relay3:/var/lib/anon
+      - ator_shared:/shared
     networks:
       - ator_net
     depends_on:
@@ -340,17 +337,16 @@ services:
       CONTROL_PORT: '9051'
       SOCKS_PORT: '9050'
       HIDDEN_SERVICE_PORT: '5000'
-      DIRAUTH1_LINE: 'DirAuthority dirauth1 orport=9001 no-v2 v3ident=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA dirauth1:9030 0000000000000000000000000000000000000000'
-      DIRAUTH2_LINE: 'DirAuthority dirauth2 orport=9001 no-v2 v3ident=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB dirauth2:9030 1111111111111111111111111111111111111111'
-      DIRAUTH3_LINE: 'DirAuthority dirauth3 orport=9001 no-v2 v3ident=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC dirauth3:9030 2222222222222222222222222222222222222222'
     volumes:
       - ator_hs1:/var/lib/anon
+      - ator_shared:/shared
     ports:
       # SOCKS5 — default 9150 to avoid collision with system-tor 9050 (R-008).
       # Override with ATOR_HS_SOCKS_PORT env var at compose time.
       - '127.0.0.1:${ATOR_HS_SOCKS_PORT:-9150}:9050'
     networks:
       - ator_net
+      - ator_host
     depends_on:
       relay1: { condition: service_healthy }
       relay2: { condition: service_healthy }
@@ -365,9 +361,13 @@ services:
 networks:
   ator_net:
     driver: bridge
-    # internal:true — relays and HS cannot reach the public internet.
-    # The only host-visible exposure is hs1's SOCKS port mapping above.
+    # internal:true — relays and HS cannot egress to the public internet.
     internal: true
+  ator_host:
+    driver: bridge
+    # Non-internal network for hs1's host-facing SOCKS port publishing.
+    # hs1 joins both ator_net (internal, for relay traffic) and ator_host
+    # (non-internal, so Docker can publish port 9150 to the host).
 
 volumes:
   ator_dirauth1:
@@ -376,4 +376,5 @@ volumes:
   ator_relay1:
   ator_relay2:
   ator_relay3:
+  ator_shared:
   ator_hs1:
