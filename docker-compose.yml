@@ -323,6 +323,32 @@ services:
       retries: 5
       start_period: 30s
 
+  relay4:
+    image: ator-testnet:v0.4.10.0-beta
+    build:
+      context: ./docker/ator
+      dockerfile: Dockerfile
+    profiles: [ator]
+    environment:
+      <<: *anon-relay-env
+      NICKNAME: relay4
+    volumes:
+      - ator_relay4:/var/lib/anon
+      - ator_shared:/shared
+    networks:
+      - ator_net
+    depends_on:
+      dirauth1: { condition: service_healthy }
+      dirauth2: { condition: service_healthy }
+      dirauth3: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   hs1:
     image: ator-testnet:v0.4.10.0-beta
     build:
@@ -378,5 +404,6 @@ volumes:
   ator_relay1:
   ator_relay2:
   ator_relay3:
+  ator_relay4:
   ator_shared:
   ator_hs1:

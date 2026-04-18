@@ -565,7 +565,7 @@ describeRealBinary(`Real-binary ATOR SOCKS5 integration (Story 36.3, ${SKIP_REAS
         // container (static by anon config), not the host-side dynamic port
         // `ATOR_SOCKS_PORT`. Do not substitute one for the other here.
         const { stdout } = await exec(
-          `docker compose exec -T hs1 sh -c "tcpdump -c 1 -s 0 -xx -i lo 'tcp dst port 9050'"`
+          `docker compose exec -T hs1 sh -c "tcpdump -c 1 -s 0 -xx -i eth0 'tcp dst port 9050'"`
         );
         // tcpdump -xx prints each frame as multiple lines of the form
         //   0x0000:  4500 003c ...
@@ -583,21 +583,21 @@ describeRealBinary(`Real-binary ATOR SOCKS5 integration (Story 36.3, ${SKIP_REAS
           .join('');
         if (!hex) return null;
         // Parse IHL from the IP header to compute the TCP header offset.
-        // byte 0 of the frame is the IP version+IHL nibble on `lo` (no L2).
-        // TCP data offset is at byte (ipHeaderLen + 12) high nibble × 4.
-        const ipByte0 = parseInt(hex.slice(0, 2), 16);
+        // On eth0, skip the 14-byte Ethernet II header (6 dst + 6 src + 2 type).
+        const L2_OFFSET = 14;
+        const ipByte0 = parseInt(hex.slice(L2_OFFSET * 2, L2_OFFSET * 2 + 2), 16);
         if (Number.isNaN(ipByte0)) return null;
         const ipHeaderLen = (ipByte0 & 0x0f) * 4;
         if (ipHeaderLen < 20) return null;
         const tcpDataOffsetByte = parseInt(
-          hex.slice((ipHeaderLen + 12) * 2, (ipHeaderLen + 12) * 2 + 2),
+          hex.slice((L2_OFFSET + ipHeaderLen + 12) * 2, (L2_OFFSET + ipHeaderLen + 12) * 2 + 2),
           16
         );
         if (Number.isNaN(tcpDataOffsetByte)) return null;
         const tcpHeaderLen = ((tcpDataOffsetByte >> 4) & 0x0f) * 4;
         if (tcpHeaderLen < 20) return null;
         // SOCKS5 request: [VER, CMD, RSV, ATYP, ...] → ATYP is byte 3.
-        const atypByteIdx = ipHeaderLen + tcpHeaderLen + 3;
+        const atypByteIdx = L2_OFFSET + ipHeaderLen + tcpHeaderLen + 3;
         const atypHex = hex.slice(atypByteIdx * 2, atypByteIdx * 2 + 2);
         if (!atypHex) return null;
         const atyp = parseInt(atypHex, 16);
