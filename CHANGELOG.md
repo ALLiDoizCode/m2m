@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0](https://github.com/toon-protocol/connector/compare/v2.5.0...v3.0.0) (2026-04-19)
+
+### ⚠ BREAKING CHANGES
+
+- **settlement:** settlementInfra config removed; use chainProviders with EVM entry.
+  SettlementInfraConfig type no longer exported from @toon-protocol/connector.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
+### Features
+
+- **36.1:** local ATOR test-network image + docker-compose profile ([792df77](https://github.com/toon-protocol/connector/commit/792df77dd22d43e664b4501bf3b425bc5f3fd5a7)), closes [#3](https://github.com/toon-protocol/connector/issues/3)
+- **36.2:** anyone-client SDK CLI flag audit for docs/ator-transport.md ([c01232d](https://github.com/toon-protocol/connector/commit/c01232d74b46c2f17d20e74f2789d84584f0ff96))
+- **36.3:** story complete ([5897a5b](https://github.com/toon-protocol/connector/commit/5897a5bd4f6e0bfa5723fda8ababf5a6305ea50e))
+- **36.4:** story complete ([c430924](https://github.com/toon-protocol/connector/commit/c4309243a48824583e3e731e7d62760700b7c455)), closes [#2](https://github.com/toon-protocol/connector/issues/2)
+- **36.5:** story complete ([62d0bd8](https://github.com/toon-protocol/connector/commit/62d0bd8ecfa52630ac4a030c345552d2d53d4ae4))
+- **36.6:** story complete ([efbf64d](https://github.com/toon-protocol/connector/commit/efbf64d6f46ccb8baefef039a51fe005f2a163cc))
+- **ator:** cross-chain ILP e2e test through SOCKS5 transport ([07e15f2](https://github.com/toon-protocol/connector/commit/07e15f2ae2903ee97029f8de649d21c24affc04c))
+- **ator:** multi-hop ILP e2e test through SOCKS5 transport ([3fce4a2](https://github.com/toon-protocol/connector/commit/3fce4a2e5b04c7b2d3fd8eb8864e45b516810ec2))
+- **ator:** public Anyone proxy e2e test — live network verification ([79d0ef1](https://github.com/toon-protocol/connector/commit/79d0ef1a081762e315d31fd17ace95e3c5be4dae))
+- **ator:** real ATOR + SDK multi-hop e2e tests, expose DirAuth/relay ports ([46f5289](https://github.com/toon-protocol/connector/commit/46f52894d258a095c1269e3fb8ee6c3f50d2f9d4))
+- **settlement:** remove settlementInfra, wire ChannelManager to chainProviders[evm] ([7109fdf](https://github.com/toon-protocol/connector/commit/7109fdf2641ee696590c3429ddd1b5de4f8eaebb))
+
+### Bug Fixes
+
+- **ator:** fix test failures — consensus, SOCKS, TLD, SDK API ([561cfe4](https://github.com/toon-protocol/connector/commit/561cfe4e030e5cf0f400a304bb70d43729345609))
+- **ator:** make ATOR testnet bootstrap work with real key exchange ([5eeb8d7](https://github.com/toon-protocol/connector/commit/5eeb8d75fa0a2cc34a068c9b187633f09b046cf5))
+- **ator:** real ATOR multi-hop e2e — host connectivity + peerHost option ([2120ec9](https://github.com/toon-protocol/connector/commit/2120ec986ae2b57d6ba0d23f95ed3446b09ec81e))
+- **ator:** SDK autoTermsAgreement, tcpdump multi-packet, relay retry ([81eadf4](https://github.com/toon-protocol/connector/commit/81eadf4b583810f54de57d443f1ca93cb0080b01))
+- **ator:** SDK test uses public network only, remove broken local testnet path ([5e2da98](https://github.com/toon-protocol/connector/commit/5e2da98a235127a8ba2da720b129e122eeb8351f))
+- **ator:** tcpdump interface, add 4th relay for circuit rebuild test ([d452207](https://github.com/toon-protocol/connector/commit/d45220798e6ed3730de1a2acd232450ab112f6f8))
+- **settlement:** update connector-node tests for new openChannel error message ([80af624](https://github.com/toon-protocol/connector/commit/80af624619bcab9ae11f1119174215865c890d43))
+- **settlement:** update optional-deps tests to use chainProviders instead of env vars ([94a4f02](https://github.com/toon-protocol/connector/commit/94a4f023d7134cded457a16b712fb567a2417607))
+
 ## [Unreleased]
 
 ### Added
