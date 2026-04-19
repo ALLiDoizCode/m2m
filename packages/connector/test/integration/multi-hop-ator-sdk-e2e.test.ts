@@ -38,13 +38,16 @@ import { PacketType } from '@toon-protocol/shared';
 import pino from 'pino';
 
 const execAsync = promisify(execCb);
-const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..');
 
-const ATOR_NIGHTLY = process.env.ATOR_NIGHTLY === '1';
 const ATOR_PUBLIC = process.env.ATOR_PUBLIC === '1';
 const EVM_INTEGRATION = process.env.EVM_INTEGRATION === 'true';
 
-const RUN_TEST = (ATOR_NIGHTLY || ATOR_PUBLIC) && EVM_INTEGRATION;
+// SDK binary bootstraps against the public Anyone network.
+// Local testnet mode is not supported: Docker port mapping causes
+// DirAuth descriptor/address mismatches that prevent bootstrap.
+// For local testnet testing, use multi-hop-ator-real-e2e.test.ts
+// which uses the Docker SOCKS port directly.
+const RUN_TEST = ATOR_PUBLIC && EVM_INTEGRATION;
 const describeSDK = RUN_TEST ? describe : describe.skip;
 
 jest.setTimeout(300_000);
@@ -77,49 +80,14 @@ describeSDK('Multi-Hop ATOR SDK E2E (3-Peer, SDK-Managed Binary)', () => {
 
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ator-sdk-e2e-'));
 
-    // Write anonrc with testnet DirAuthority lines if using local testnet
-    if (ATOR_NIGHTLY) {
-      try {
-        const { stdout } = await execAsync(
-          "docker compose exec -T dirauth1 grep '^DirAuthority' /etc/anon/torrc",
-          { cwd: REPO_ROOT }
-        );
-        // Rewrite DirAuthority lines to use host-mapped ports
-        // Docker internal: DirAuthority dirauth1 orport=9001 v3ident=... 192.168.x.y:9030 FP
-        // Host-mapped: DirAuthority dirauth1 orport=19001 v3ident=... 127.0.0.1:19030 FP
-        const hostLines = stdout
-          .trim()
-          .split('\n')
-          .map((line, idx) => {
-            const orportMap = [19001, 19002, 19003];
-            const dirportMap = [19030, 19031, 19032];
-            return line
-              .replace(/orport=\d+/, `orport=${orportMap[idx]}`)
-              .replace(/\d+\.\d+\.\d+\.\d+:\d+/, `127.0.0.1:${dirportMap[idx]}`);
-          })
-          .join('\n');
-
-        fs.writeFileSync(
-          path.join(tempDir, 'anonrc'),
-          `AgreeToTerms 1\nTestingTorNetwork 1\nAssumeReachable 1\n${hostLines}\n`,
-          { encoding: 'utf8' }
-        );
-      } catch (err) {
-        throw new Error(
-          `Failed to read DirAuthority lines from Docker testnet: ${(err as Error).message}. ` +
-            'Is `make ator-up` running?'
-        );
-      }
-    } else {
-      // Public network mode — just agree to terms
-      fs.writeFileSync(path.join(tempDir, 'anonrc'), 'AgreeToTerms 1\n', { encoding: 'utf8' });
-    }
+    // Public network mode — agree to terms, bootstrap against real Anyone network
+    fs.writeFileSync(path.join(tempDir, 'anonrc'), 'AgreeToTerms 1\n', { encoding: 'utf8' });
 
     // Create ManagedAnonClient using the SDK
     managedClient = new ManagedAnonClient({
       socksProxy: `socks5h://127.0.0.1:${SDK_SOCKS_PORT}`,
       hiddenServiceDir: tempDir,
-      startupTimeoutMs: ATOR_PUBLIC ? 120_000 : 90_000,
+      startupTimeoutMs: 120_000,
       logger,
       anonFactory: realAnonFactory,
     });
@@ -141,7 +109,7 @@ describeSDK('Multi-Hop ATOR SDK E2E (3-Peer, SDK-Managed Binary)', () => {
         externalUrl: 'ws://placeholder',
         managed: false,
       },
-      peerHost: 'host.docker.internal',
+      peerHost: 'localhost',
       startupDelayMs: 3_000,
       connectionWaitMs: 90_000,
     });
