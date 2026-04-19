@@ -183,13 +183,14 @@ services:
     volumes:
       - ator_dirauth1:/var/lib/anon
       - ator_shared:/shared
+    ports:
+      - '127.0.0.1:${ATOR_DA1_ORPORT:-19001}:9001'
+      - '127.0.0.1:${ATOR_DA1_DIRPORT:-19030}:9030'
     networks:
       - ator_net
+      - ator_host
     restart: unless-stopped
     healthcheck:
-      # Healthy = dirauth's control port is accepting TCP (process is up and
-      # listening). A stronger readiness signal (cached-consensus present) is
-      # left to test-layer polling; start_period gives anon time to boot.
       test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
       interval: 15s
       timeout: 5s
@@ -209,8 +210,12 @@ services:
     volumes:
       - ator_dirauth2:/var/lib/anon
       - ator_shared:/shared
+    ports:
+      - '127.0.0.1:${ATOR_DA2_ORPORT:-19002}:9001'
+      - '127.0.0.1:${ATOR_DA2_DIRPORT:-19031}:9030'
     networks:
       - ator_net
+      - ator_host
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
@@ -232,8 +237,12 @@ services:
     volumes:
       - ator_dirauth3:/var/lib/anon
       - ator_shared:/shared
+    ports:
+      - '127.0.0.1:${ATOR_DA3_ORPORT:-19003}:9001'
+      - '127.0.0.1:${ATOR_DA3_DIRPORT:-19032}:9030'
     networks:
       - ator_net
+      - ator_host
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'nc -z localhost 9051 || exit 1']
@@ -257,8 +266,11 @@ services:
     volumes:
       - ator_relay1:/var/lib/anon
       - ator_shared:/shared
+    ports:
+      - '127.0.0.1:${ATOR_R1_ORPORT:-19011}:9001'
     networks:
       - ator_net
+      - ator_host
     depends_on:
       dirauth1: { condition: service_healthy }
       dirauth2: { condition: service_healthy }
@@ -283,8 +295,11 @@ services:
     volumes:
       - ator_relay2:/var/lib/anon
       - ator_shared:/shared
+    ports:
+      - '127.0.0.1:${ATOR_R2_ORPORT:-19012}:9001'
     networks:
       - ator_net
+      - ator_host
     depends_on:
       dirauth1: { condition: service_healthy }
       dirauth2: { condition: service_healthy }
@@ -309,8 +324,11 @@ services:
     volumes:
       - ator_relay3:/var/lib/anon
       - ator_shared:/shared
+    ports:
+      - '127.0.0.1:${ATOR_R3_ORPORT:-19013}:9001'
     networks:
       - ator_net
+      - ator_host
     depends_on:
       dirauth1: { condition: service_healthy }
       dirauth2: { condition: service_healthy }
@@ -335,8 +353,11 @@ services:
     volumes:
       - ator_relay4:/var/lib/anon
       - ator_shared:/shared
+    ports:
+      - '127.0.0.1:${ATOR_R4_ORPORT:-19014}:9001'
     networks:
       - ator_net
+      - ator_host
     depends_on:
       dirauth1: { condition: service_healthy }
       dirauth2: { condition: service_healthy }
