@@ -410,8 +410,6 @@ services:
 networks:
   ator_net:
     driver: bridge
-    # internal:true — relays and HS cannot egress to the public internet.
-    internal: true
   ator_host:
     driver: bridge
     # Non-internal network for hs1's host-facing SOCKS port publishing.

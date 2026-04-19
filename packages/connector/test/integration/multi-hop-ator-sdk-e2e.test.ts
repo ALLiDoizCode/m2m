@@ -141,6 +141,9 @@ describeSDK('Multi-Hop ATOR SDK E2E (3-Peer, SDK-Managed Binary)', () => {
         externalUrl: 'ws://placeholder',
         managed: false,
       },
+      peerHost: 'host.docker.internal',
+      startupDelayMs: 3_000,
+      connectionWaitMs: 90_000,
     });
 
     await network.start();

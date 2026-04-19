@@ -112,6 +112,15 @@ export interface MultiHopTestOptions {
    *  Array length must equal peerCount. All chains must resolve to registered
    *  providers in the connector's ChainProviderRegistry. */
   perPeerChainIds?: string[];
+  /** Delay between peer startups in ms (default: 500). Increase for high-latency
+   *  transports like ATOR where BTP connections go through onion circuits. */
+  startupDelayMs?: number;
+  /** Timeout for waiting for all BTP connections in ms (default: 30000). */
+  connectionWaitMs?: number;
+  /** Hostname for peer BTP URLs (default: 'localhost'). Set to
+   *  'host.docker.internal' when BTP connections route through a Docker-hosted
+   *  SOCKS proxy so the exit relay can reach the host machine. */
+  peerHost?: string;
 }
 
 // ============================================================================
@@ -181,6 +190,9 @@ export function createMultiHopTestNetwork(
     nip59Enabled = false,
     transport,
     perPeerChainIds,
+    startupDelayMs = 500,
+    connectionWaitMs = 30_000,
+    peerHost = 'localhost',
   } = options;
 
   const configs: ConnectorConfig[] = [];
@@ -198,7 +210,7 @@ export function createMultiHopTestNetwork(
     if (i > 0) {
       peerConfigs.push({
         id: `peer${i}`,
-        url: `ws://localhost:${portBase + i - 1}`,
+        url: `ws://${peerHost}:${portBase + i - 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i - 1],
         chain: perPeerChainIds?.[i - 1] ?? `evm:${ANVIL_CHAIN_ID}`,
@@ -210,7 +222,7 @@ export function createMultiHopTestNetwork(
     if (i < peerCount - 1) {
       peerConfigs.push({
         id: `peer${i + 2}`,
-        url: `ws://localhost:${portBase + i + 1}`,
+        url: `ws://${peerHost}:${portBase + i + 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i + 1],
         chain: perPeerChainIds?.[i + 1] ?? `evm:${ANVIL_CHAIN_ID}`,
@@ -330,14 +342,13 @@ export function createMultiHopTestNetwork(
         peers[i] = node;
         await node.start();
 
-        // Small delay between startups to avoid BTP race conditions
         if (i > 0) {
-          await sleep(500);
+          await sleep(startupDelayMs);
         }
       }
 
       // Phase 3: Wait for all BTP connections to be established
-      await waitForAllConnections(peers, peerCount, 30_000);
+      await waitForAllConnections(peers, peerCount, connectionWaitMs);
     },
 
     async stop(): Promise<void> {

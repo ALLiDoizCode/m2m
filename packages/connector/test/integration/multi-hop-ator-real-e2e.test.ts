@@ -54,6 +54,9 @@ describeReal('Multi-Hop Real ATOR E2E (3-Peer, Real Onion Circuits)', () => {
         externalUrl: 'ws://placeholder',
         managed: false,
       },
+      peerHost: 'host.docker.internal',
+      startupDelayMs: 3_000,
+      connectionWaitMs: 90_000,
     });
 
     await network.start();
