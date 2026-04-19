@@ -20,6 +20,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **36-3:** Renamed in-process SOCKS5 fixture + contract test to clarify scope vs real-binary coverage (Story 36.3). `test/helpers/in-process-socks5-proxy.ts` → `test/helpers/socks5-contract-fixture.ts`; `test/integration/transport-socks5.test.ts` → `test/integration/socks5-contract.test.ts`. Import sites and scope-disclaimer JSDoc updated accordingly.
 
+## [2.5.0](https://github.com/toon-protocol/connector/compare/v2.4.0...v2.5.0) (2026-04-15)
+
+### Features
+
+- **35-1:** story complete — TransportProvider interface and DirectTransportProvider ([5ddc40c](https://github.com/toon-protocol/connector/commit/5ddc40cf6fa516845864760cb6b02ad3f1639ebd))
+- **35.2:** story complete — SocksTransportProvider for ATOR overlay transport ([64b5d20](https://github.com/toon-protocol/connector/commit/64b5d20451feabcc21be844a17f79caa6b990168))
+- **35.3:** story complete — transport config block schema ([4eb1561](https://github.com/toon-protocol/connector/commit/4eb1561699b63894a920816180198cd709dfe1bb))
+- **35.4:** story complete — wire TransportProvider into ConnectorNode and BTPClient ([25bb2c3](https://github.com/toon-protocol/connector/commit/25bb2c32c63ea6d0e03233f0fa32b07899f2006f))
+- **35.5:** story complete — managed ATOR client lifecycle ([bd56e66](https://github.com/toon-protocol/connector/commit/bd56e6640e39d5d4e7cb3a154dcba106dbff2ef2))
+- **35.6:** story complete — unit and integration tests for ATOR transport ([1fdbb20](https://github.com/toon-protocol/connector/commit/1fdbb20119bca71b49377d56b55f5d3da5d3f694))
+- **35.7:** story complete — ATOR transport deployment guide and config reference ([ab751e2](https://github.com/toon-protocol/connector/commit/ab751e2cc212f01f507d2872767473432aa573e9))
+- **epic-35:** add ATOR overlay transport epic — planning artifacts and doc updates ([ad8ae65](https://github.com/toon-protocol/connector/commit/ad8ae653963742df1dd84f0e5a7246766f6d190f))
+
+### Bug Fixes
+
+- **deps:** sync package-lock.json with @anyone-protocol/anyone-client ([19aca96](https://github.com/toon-protocol/connector/commit/19aca967ea13a33bb15c9964bf32032f5445c4f7))
+
 ## [2.4.0](https://github.com/toon-protocol/connector/compare/v2.3.0...v2.4.0) (2026-03-30)
 
 ### Features
