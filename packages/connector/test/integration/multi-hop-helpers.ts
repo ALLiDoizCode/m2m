@@ -293,6 +293,14 @@ export function createMultiHopTestNetwork(
           rpcUrl,
           registryAddress,
           keyId: PEER_PRIVATE_KEYS[i]!,
+          tokenAddress,
+          settlementOptions: {
+            threshold: settlementThreshold.toString(),
+            pollingIntervalMs: pollingInterval,
+            settlementTimeoutSecs: 3600,
+            initialDepositMultiplier: 2,
+            ledgerSnapshotPath: `./data/ledger-test-peer${i + 1}-${portBase}.json`,
+          },
         },
       ],
       ...(nip59Enabled ? { nip59: { enabled: true } } : {}),
@@ -304,18 +312,6 @@ export function createMultiHopTestNetwork(
                 : transport,
           }
         : {}),
-      settlementInfra: {
-        enabled: true,
-        privateKey: PEER_PRIVATE_KEYS[i],
-        rpcUrl,
-        registryAddress,
-        tokenAddress,
-        threshold: settlementThreshold.toString(),
-        pollingIntervalMs: pollingInterval,
-        settlementTimeoutSecs: 3600,
-        initialDepositMultiplier: 2,
-        ledgerSnapshotPath: `./data/ledger-test-peer${i + 1}-${portBase}.json`,
-      },
     };
 
     configs.push(config);

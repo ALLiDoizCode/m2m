@@ -792,6 +792,7 @@ describe('[T-32.8-08] AC 6: Config-driven registry initialization', () => {
         rpcUrl: 'http://localhost:8545',
         registryAddress: '0x1234567890123456789012345678901234567890',
         keyId: '8453',
+        tokenAddress: '0x5678000000000000000000000000000000000001',
       },
     ];
 
@@ -818,6 +819,7 @@ describe('[T-32.8-08] AC 6: Config-driven registry initialization', () => {
         rpcUrl: 'http://localhost:8545',
         registryAddress: '0x1234567890123456789012345678901234567890',
         keyId: '8453',
+        tokenAddress: '0x5678000000000000000000000000000000000001',
       },
     ];
 

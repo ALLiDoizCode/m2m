@@ -68,7 +68,6 @@ export type {
   LocalDeliveryRequest,
   LocalDeliveryResponse,
   SendPacketParams,
-  SettlementInfraConfig,
   PeerRegistrationRequest,
   PeerInfo,
   PeerAccountBalance,

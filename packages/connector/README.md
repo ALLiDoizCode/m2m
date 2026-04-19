@@ -141,20 +141,20 @@ const node = new ConnectorNode(config: ConnectorConfig | string, logger: Logger)
 
 ### Optional Fields
 
-| Field             | Type                    | Default       | Description                                    |
-| ----------------- | ----------------------- | ------------- | ---------------------------------------------- |
-| `deploymentMode`  | `DeploymentMode`        | inferred      | `'embedded'` \| `'standalone'`                 |
-| `healthCheckPort` | `number`                | `8080`        | HTTP health endpoint port                      |
-| `logLevel`        | `string`                | `'info'`      | `'debug'` \| `'info'` \| `'warn'` \| `'error'` |
-| `adminApi`        | `AdminApiConfig`        | disabled      | Admin REST API settings                        |
-| `localDelivery`   | `LocalDeliveryConfig`   | disabled      | HTTP forwarding to BLS                         |
-| `settlement`      | `SettlementConfig`      | —             | TigerBeetle accounting config                  |
-| `settlementInfra` | `SettlementInfraConfig` | —             | EVM settlement infrastructure                  |
-| `blockchain`      | `BlockchainConfig`      | —             | Multi-chain EVM config (Base, Arbitrum)        |
-| `security`        | `SecurityConfig`        | —             | Key management backend                         |
-| `performance`     | `PerformanceConfig`     | —             | Batching, pooling, parallelization             |
-| `explorer`        | `ExplorerConfig`        | enabled:3001  | Explorer UI settings                           |
-| `mode`            | `string`                | `'connector'` | `'connector'` \| `'gateway'`                   |
+| Field             | Type                         | Default       | Description                                          |
+| ----------------- | ---------------------------- | ------------- | ---------------------------------------------------- |
+| `deploymentMode`  | `DeploymentMode`             | inferred      | `'embedded'` \| `'standalone'`                       |
+| `healthCheckPort` | `number`                     | `8080`        | HTTP health endpoint port                            |
+| `logLevel`        | `string`                     | `'info'`      | `'debug'` \| `'info'` \| `'warn'` \| `'error'`       |
+| `adminApi`        | `AdminApiConfig`             | disabled      | Admin REST API settings                              |
+| `localDelivery`   | `LocalDeliveryConfig`        | disabled      | HTTP forwarding to BLS                               |
+| `settlement`      | `SettlementConfig`           | —             | TigerBeetle accounting config                        |
+| `chainProviders`  | `ChainProviderConfigEntry[]` | —             | Multi-chain settlement providers (EVM, Solana, Mina) |
+| `blockchain`      | `BlockchainConfig`           | —             | Multi-chain EVM config (Base, Arbitrum)              |
+| `security`        | `SecurityConfig`             | —             | Key management backend                               |
+| `performance`     | `PerformanceConfig`          | —             | Batching, pooling, parallelization                   |
+| `explorer`        | `ExplorerConfig`             | enabled:3001  | Explorer UI settings                                 |
+| `mode`            | `string`                     | `'connector'` | `'connector'` \| `'gateway'`                         |
 
 ### PeerConfig
 
@@ -388,7 +388,7 @@ npx connector validate config.yaml  # Validate config file
 
 **Classes:** `ConnectorNode`, `ConfigLoader`, `ConfigurationError`, `ConnectorNotStartedError`, `RoutingTable`, `PacketHandler`, `BTPServer`, `BTPClient`, `BTPClientManager`, `AdminServer`, `AccountManager`, `SettlementMonitor`, `UnifiedSettlementExecutor`, `IlpSendHandler`
 
-**Types:** `ConnectorConfig`, `PeerConfig`, `RouteConfig`, `SettlementConfig`, `SettlementInfraConfig`, `LocalDeliveryConfig`, `LocalDeliveryHandler`, `LocalDeliveryRequest`, `LocalDeliveryResponse`, `SendPacketParams`, `PeerRegistrationRequest`, `PeerInfo`, `PeerAccountBalance`, `RouteInfo`, `RemovePeerResult`, `IlpSendRequest`, `IlpSendResponse`, `AdminSettlementConfig`, `ChannelOpenOptions`, `ChannelMetadata`, `PaymentRequest`, `PaymentResponse`, `PaymentHandler`, `PacketSenderFn`, `IsReadyFn`, `ILPPreparePacket`, `ILPFulfillPacket`, `ILPRejectPacket`
+**Types:** `ConnectorConfig`, `PeerConfig`, `RouteConfig`, `SettlementConfig`, `LocalDeliveryConfig`, `LocalDeliveryHandler`, `LocalDeliveryRequest`, `LocalDeliveryResponse`, `SendPacketParams`, `PeerRegistrationRequest`, `PeerInfo`, `PeerAccountBalance`, `RouteInfo`, `RemovePeerResult`, `IlpSendRequest`, `IlpSendResponse`, `AdminSettlementConfig`, `ChannelOpenOptions`, `ChannelMetadata`, `PaymentRequest`, `PaymentResponse`, `PaymentHandler`, `PacketSenderFn`, `IsReadyFn`, `ILPPreparePacket`, `ILPFulfillPacket`, `ILPRejectPacket`
 
 **Utilities:** `createLogger`, `createPaymentHandlerAdapter`, `computeFulfillmentFromData`, `computeConditionFromData`, `validateIlpSendRequest`, `generatePaymentId`, `mapRejectCode`, `validateResponseData`, `REJECT_CODE_MAP`
 

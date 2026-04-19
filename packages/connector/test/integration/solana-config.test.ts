@@ -101,6 +101,7 @@ describe('[T-33.7-09] Config-driven: Solana provider from config via ChainProvid
         rpcUrl: 'http://127.0.0.1:8545',
         registryAddress: '0x1234567890123456789012345678901234567890',
         keyId: 'evm-key',
+        tokenAddress: '0x5678000000000000000000000000000000000001',
       },
       {
         chainType: 'solana',

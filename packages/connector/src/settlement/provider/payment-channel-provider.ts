@@ -240,8 +240,19 @@ export interface EVMProviderConfig {
   rpcUrl: string;
   /** TokenNetworkRegistry contract address */
   registryAddress: string;
-  /** Key identifier for signing operations */
+  /** Key identifier for signing operations (raw private key for env backend) */
   keyId: string;
+  /** M2M token contract address */
+  tokenAddress: string;
+  /** Optional settlement tuning parameters */
+  settlementOptions?: {
+    threshold?: string;
+    settlementTimeoutSecs?: number;
+    initialDepositMultiplier?: number;
+    pollingIntervalMs?: number;
+    ledgerSnapshotPath?: string;
+    ledgerPersistIntervalMs?: number;
+  };
 }
 
 /**

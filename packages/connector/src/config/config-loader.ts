@@ -22,7 +22,6 @@ import {
   SecurityConfig,
   AdminApiConfig,
   LocalDeliveryConfig,
-  SettlementInfraConfig,
   ChainProviderConfigEntry,
   TransportConfig,
 } from './types';
@@ -166,6 +165,14 @@ export class ConfigLoader {
 
     const rawConfig = raw as Record<string, unknown>;
 
+    // Migration guard: reject removed settlementInfra config
+    if ('settlementInfra' in rawConfig) {
+      throw new ConfigurationError(
+        '"settlementInfra" has been removed. Use "chainProviders" with an EVM entry instead. ' +
+          'Configure chainProviders with chainType "evm", rpcUrl, registryAddress, keyId, and tokenAddress.'
+      );
+    }
+
     // Validate required fields and structure
     this.validateRequiredFields(rawConfig);
     this.validatePeers(rawConfig.peers as PeerConfig[]);
@@ -193,7 +200,6 @@ export class ConfigLoader {
       blockchain,
       // Pass through optional fields from input object
       settlement: rawConfig.settlement as SettlementConfig | undefined,
-      settlementInfra: rawConfig.settlementInfra as SettlementInfraConfig | undefined,
       security: rawConfig.security as SecurityConfig | undefined,
       adminApi: rawConfig.adminApi as AdminApiConfig | undefined,
       localDelivery: rawConfig.localDelivery as LocalDeliveryConfig | undefined,

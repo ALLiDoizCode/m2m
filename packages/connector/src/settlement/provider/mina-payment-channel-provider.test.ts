@@ -1027,6 +1027,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         rpcUrl: 'http://localhost:8545',
         registryAddress: '0x123',
         keyId: 'key-1',
+        tokenAddress: '0x5678000000000000000000000000000000000001',
       };
 
       expect(() => factory(evmConfig)).toThrow(/non-Mina/);

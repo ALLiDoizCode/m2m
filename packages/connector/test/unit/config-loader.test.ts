@@ -860,4 +860,33 @@ describe('ConfigLoader', () => {
       expect(config.blockchain!.arbitrum!.chainId).toBe(42161);
     });
   });
+
+  describe('validateConfig - settlementInfra migration guard', () => {
+    it('should throw ConfigurationError when settlementInfra is present in config', () => {
+      const raw = {
+        nodeId: 'test-node',
+        btpServerPort: 3000,
+        peers: [{ id: 'peer1', url: 'ws://peer1:3001', authToken: 'secret' }],
+        routes: [{ prefix: 'g.peer1', nextHop: 'peer1' }],
+        settlementInfra: {
+          enabled: true,
+          rpcUrl: 'http://localhost:8545',
+        },
+      };
+
+      expect(() => ConfigLoader.validateConfig(raw)).toThrow(ConfigurationError);
+      expect(() => ConfigLoader.validateConfig(raw)).toThrow('"settlementInfra" has been removed');
+    });
+
+    it('should not throw when config has no settlementInfra', () => {
+      const raw = {
+        nodeId: 'test-node',
+        btpServerPort: 3000,
+        peers: [{ id: 'peer1', url: 'ws://peer1:3001', authToken: 'secret' }],
+        routes: [{ prefix: 'g.peer1', nextHop: 'peer1' }],
+      };
+
+      expect(() => ConfigLoader.validateConfig(raw)).not.toThrow(ConfigurationError);
+    });
+  });
 });

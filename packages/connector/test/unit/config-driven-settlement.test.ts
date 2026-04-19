@@ -3,7 +3,7 @@
  *
  * Validates that two ConnectorNode instances with distinct Anvil keypairs
  * can operate independently in a single process using only
- * ConnectorConfig.settlementInfra and PeerConfig.evmAddress —
+ * ConnectorConfig.chainProviders[evm] and PeerConfig.evmAddress —
  * with zero process.env mutation.
  */
 
@@ -45,7 +45,7 @@ interface TestConnectorConfigOptions {
 }
 
 /**
- * Creates a complete ConnectorConfig with inline settlementInfra fields
+ * Creates a complete ConnectorConfig with chainProviders[evm]
  * and PeerConfig.evmAddress for config-driven settlement testing.
  */
 function createTestConnectorConfig(options: TestConnectorConfigOptions): ConnectorConfig {
@@ -57,19 +57,24 @@ function createTestConnectorConfig(options: TestConnectorConfigOptions): Connect
     adminApi: { enabled: false },
     peers: options.peers,
     routes: [],
-    settlementInfra: {
-      enabled: true,
-      privateKey: options.privateKey,
-      rpcUrl: 'http://localhost:8545',
-      registryAddress: '0x' + '1'.repeat(40),
-      tokenAddress: '0x' + '2'.repeat(40),
-      threshold: '1000000',
-      pollingIntervalMs: 60000,
-      settlementTimeoutSecs: 86400,
-      initialDepositMultiplier: 1,
-      ledgerSnapshotPath: options.ledgerSnapshotPath,
-      ledgerPersistIntervalMs: 60000,
-    },
+    chainProviders: [
+      {
+        chainType: 'evm',
+        chainId: 'evm:31337',
+        rpcUrl: 'http://localhost:8545',
+        registryAddress: '0x' + '1'.repeat(40),
+        keyId: options.privateKey,
+        tokenAddress: '0x' + '2'.repeat(40),
+        settlementOptions: {
+          threshold: '1000000',
+          pollingIntervalMs: 60000,
+          settlementTimeoutSecs: 86400,
+          initialDepositMultiplier: 1,
+          ledgerSnapshotPath: options.ledgerSnapshotPath,
+          ledgerPersistIntervalMs: 60000,
+        },
+      },
+    ],
   };
 }
 
@@ -136,7 +141,7 @@ describe('Config-Driven Settlement (Epic 29)', () => {
   });
 
   describe('Test Helper', () => {
-    it('should create valid ConnectorConfig with settlementInfra', () => {
+    it('should create valid ConnectorConfig with chainProviders[evm]', () => {
       const config = createTestConnectorConfig({
         nodeId: 'helper-test-node',
         btpServerPort: 50000,
@@ -164,15 +169,24 @@ describe('Config-Driven Settlement (Epic 29)', () => {
       expect(config.peers).toHaveLength(1);
       expect(config.peers[0]!.evmAddress).toBe(ANVIL_ACCOUNT_1.address);
 
-      // Verify settlementInfra
-      expect(config.settlementInfra).toBeDefined();
-      expect(config.settlementInfra!.enabled).toBe(true);
-      expect(config.settlementInfra!.privateKey).toBe(ANVIL_ACCOUNT_0.privateKey);
-      expect(config.settlementInfra!.rpcUrl).toBe('http://localhost:8545');
-      expect(config.settlementInfra!.registryAddress).toBe('0x' + '1'.repeat(40));
-      expect(config.settlementInfra!.tokenAddress).toBe('0x' + '2'.repeat(40));
-      expect(config.settlementInfra!.threshold).toBe('1000000');
-      expect(config.settlementInfra!.ledgerSnapshotPath).toBe('/tmp/helper-test-ledger.json');
+      // Verify chainProviders[evm]
+      expect(config.chainProviders).toBeDefined();
+      expect(config.chainProviders).toHaveLength(1);
+      const evmProvider = config.chainProviders![0]!;
+      expect(evmProvider.chainType).toBe('evm');
+      expect(evmProvider.chainId).toBe('evm:31337');
+      expect((evmProvider as unknown as Record<string, unknown>).rpcUrl).toBe(
+        'http://localhost:8545'
+      );
+      expect((evmProvider as unknown as Record<string, unknown>).registryAddress).toBe(
+        '0x' + '1'.repeat(40)
+      );
+      expect((evmProvider as unknown as Record<string, unknown>).tokenAddress).toBe(
+        '0x' + '2'.repeat(40)
+      );
+      expect((evmProvider as unknown as Record<string, unknown>).keyId).toBe(
+        ANVIL_ACCOUNT_0.privateKey
+      );
     });
 
     it('should generate unique ports and paths per connector', () => {
@@ -196,13 +210,15 @@ describe('Config-Driven Settlement (Epic 29)', () => {
       expect(configA.btpServerPort).not.toBe(configB.btpServerPort);
       expect(configA.healthCheckPort).not.toBe(configB.healthCheckPort);
 
-      // Paths are unique
-      expect(configA.settlementInfra!.ledgerSnapshotPath).not.toBe(
-        configB.settlementInfra!.ledgerSnapshotPath
-      );
+      // Snapshot paths are unique
+      const evmA = configA.chainProviders![0]! as unknown as Record<string, unknown>;
+      const evmB = configB.chainProviders![0]! as unknown as Record<string, unknown>;
+      const optsA = evmA.settlementOptions as unknown as Record<string, unknown>;
+      const optsB = evmB.settlementOptions as unknown as Record<string, unknown>;
+      expect(optsA.ledgerSnapshotPath).not.toBe(optsB.ledgerSnapshotPath);
 
-      // Private keys are distinct
-      expect(configA.settlementInfra!.privateKey).not.toBe(configB.settlementInfra!.privateKey);
+      // Private keys (keyId) are distinct
+      expect(evmA.keyId).not.toBe(evmB.keyId);
     });
   });
 
@@ -245,8 +261,8 @@ describe('Config-Driven Settlement (Epic 29)', () => {
       connectorB = new ConnectorNode(configB, silentLogger);
 
       // Both connectors should start without throwing
-      // Settlement infra may or may not fully initialize (depends on Anvil/ethers availability)
-      // but the config-driven path is exercised regardless
+      // EVM settlement may or may not fully initialize (depends on Anvil/ethers availability)
+      // but the chainProviders-driven path is exercised regardless
       await connectorA.start();
       await connectorB.start();
 

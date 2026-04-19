@@ -73,6 +73,7 @@ import { InMemoryLedgerClient } from '../settlement/in-memory-ledger-client';
 import { PerPacketClaimService } from '../settlement/per-packet-claim-service';
 import { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
 import { EVMPaymentChannelProvider } from '../settlement/provider/evm-payment-channel-provider';
+import type { EVMProviderConfig } from '../settlement/provider/payment-channel-provider';
 import {
   SENT_CLAIMS_TABLE_SCHEMA,
   SENT_CLAIMS_INDEXES,
@@ -540,20 +541,34 @@ export class ConnectorNode implements HealthStatusProvider {
       // Do not keep the event loop alive solely for this timer.
       this._transportHealthInterval.unref?.();
 
-      // Initialize Base L2 Payment Channel infrastructure if enabled
-      // Config-first pattern: settlementInfra config takes precedence, env var fallback
-      const settlementEnabled =
-        this._config.settlementInfra?.enabled ?? process.env.SETTLEMENT_ENABLED === 'true';
-      const baseRpcUrl = this._config.settlementInfra?.rpcUrl ?? process.env.BASE_L2_RPC_URL;
-      const registryAddress =
-        this._config.settlementInfra?.registryAddress ?? process.env.TOKEN_NETWORK_REGISTRY;
-      const m2mTokenAddress =
-        this._config.settlementInfra?.tokenAddress ?? process.env.M2M_TOKEN_ADDRESS;
-      const treasuryPrivateKey =
-        this._config.settlementInfra?.privateKey ?? process.env.TREASURY_EVM_PRIVATE_KEY;
+      // Initialize EVM Payment Channel infrastructure from chainProviders
+      const evmProviderConfig = this._config.chainProviders?.find((p) => p.chainType === 'evm') as
+        | (EVMProviderConfig & { chainId: string })
+        | undefined;
+
+      // Warn if legacy settlement env vars are set
+      const legacySettlementVars = [
+        'BASE_L2_RPC_URL',
+        'SETTLEMENT_ENABLED',
+        'TOKEN_NETWORK_REGISTRY',
+        'M2M_TOKEN_ADDRESS',
+        'TREASURY_EVM_PRIVATE_KEY',
+      ];
+      const detectedLegacyVars = legacySettlementVars.filter((v) => process.env[v]);
+      if (detectedLegacyVars.length > 0) {
+        this._logger.warn(
+          { event: 'legacy_env_vars_detected', vars: detectedLegacyVars },
+          'Detected legacy settlement env vars -- these are no longer used. Configure chainProviders with an EVM entry instead.'
+        );
+      }
+
+      const baseRpcUrl = evmProviderConfig?.rpcUrl;
+      const registryAddress = evmProviderConfig?.registryAddress;
+      const m2mTokenAddress = evmProviderConfig?.tokenAddress;
+      const treasuryPrivateKey = evmProviderConfig?.keyId;
 
       if (
-        settlementEnabled &&
+        evmProviderConfig &&
         baseRpcUrl &&
         registryAddress &&
         m2mTokenAddress &&
@@ -643,7 +658,6 @@ export class ConnectorNode implements HealthStatusProvider {
               continue;
             }
 
-            // Build per-chain config with settlementInfra fallbacks
             const chainRpcUrl = chain.config.rpcUrl;
             const chainRegistryAddress = chain.config.registryAddress ?? registryAddress;
             const chainPrivateKey = chain.config.privateKey ?? treasuryPrivateKey;
@@ -711,10 +725,9 @@ export class ConnectorNode implements HealthStatusProvider {
 
           // Initialize ChannelManager with TigerBeetle accounting if configured
           const defaultSettlementTimeout =
-            this._config.settlementInfra?.settlementTimeoutSecs ?? 86400;
+            evmProviderConfig.settlementOptions?.settlementTimeoutSecs ?? 86400;
           const initialDepositMultiplier =
-            this._config.settlementInfra?.initialDepositMultiplier ??
-            parseInt(process.env.INITIAL_DEPOSIT_MULTIPLIER ?? '1', 10);
+            evmProviderConfig.settlementOptions?.initialDepositMultiplier ?? 1;
 
           // Initialize TigerBeetle AccountManager if configured (Story 19.1-19.2)
           // When TigerBeetle is unavailable, falls back to mock AccountManager (graceful degradation)
@@ -819,11 +832,8 @@ export class ConnectorNode implements HealthStatusProvider {
           // Extract peer IDs from peerIdToAddressMap (includes all known peers in the network)
           const peerIds = Array.from(peerIdToAddressMap.keys());
 
-          // Build settlement threshold configuration
-          // Use settlementThreshold from config or default to 1M (1,000,000)
-          // Note: threshold is typed as string in SettlementInfraConfig (YAML/JSON cannot represent BigInt)
           const settlementThreshold = BigInt(
-            this._config.settlementInfra?.threshold ?? process.env.SETTLEMENT_THRESHOLD ?? '1000000'
+            evmProviderConfig.settlementOptions?.threshold ?? '1000000'
           );
 
           this._logger.info(
@@ -1091,7 +1101,7 @@ export class ConnectorNode implements HealthStatusProvider {
           if (accountManager) {
             const settlementConfig: SettlementConfig = {
               connectorFeePercentage: this._config.settlement?.connectorFeePercentage ?? 0.1,
-              enableSettlement: settlementEnabled,
+              enableSettlement: true,
               tigerBeetleClusterId: tigerBeetleClusterId ? parseInt(tigerBeetleClusterId, 10) : 0,
               tigerBeetleReplicas: tigerBeetleReplicas
                 ? tigerBeetleReplicas.split(',').map((s) => s.trim())
@@ -1820,13 +1830,12 @@ export class ConnectorNode implements HealthStatusProvider {
    * @private
    */
   private async _createInMemoryAccountManager(): Promise<AccountManager> {
+    const evmProvider = this._config.chainProviders?.find((p) => p.chainType === 'evm') as
+      | (EVMProviderConfig & { chainId: string })
+      | undefined;
     const snapshotPath =
-      this._config.settlementInfra?.ledgerSnapshotPath ??
-      process.env.LEDGER_SNAPSHOT_PATH ??
-      './data/ledger-snapshot.json';
-    const persistIntervalMs =
-      this._config.settlementInfra?.ledgerPersistIntervalMs ??
-      parseInt(process.env.LEDGER_PERSIST_INTERVAL_MS || '30000', 10);
+      evmProvider?.settlementOptions?.ledgerSnapshotPath ?? './data/ledger-snapshot.json';
+    const persistIntervalMs = evmProvider?.settlementOptions?.ledgerPersistIntervalMs ?? 30000;
 
     let inMemoryClient: InMemoryLedgerClient;
 
@@ -2332,7 +2341,9 @@ export class ConnectorNode implements HealthStatusProvider {
     }
 
     if (!this._channelManager) {
-      throw new Error('Settlement infrastructure not enabled');
+      throw new Error(
+        'No EVM chain provider configured -- openChannel requires a chainProviders entry with chainType: "evm"'
+      );
     }
 
     // Validate peer exists
@@ -2397,7 +2408,9 @@ export class ConnectorNode implements HealthStatusProvider {
     }
 
     if (!this._channelManager) {
-      throw new Error('Settlement infrastructure not enabled');
+      throw new Error(
+        'No EVM chain provider configured -- openChannel requires a chainProviders entry with chainType: "evm"'
+      );
     }
 
     const metadata = this._channelManager.getChannelById(channelId);
