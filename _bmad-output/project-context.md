@@ -165,7 +165,7 @@ Epic 32 introduced a chain-agnostic settlement architecture enabling multi-chain
 - New `chainProviders` array in `ConnectorConfig` for multi-chain provider configuration
 - `ChainProviderConfigEntry` = `ProviderConfig & { chainId: string }`
 - Per-peer `chain` field on `PeerConfig` references a registered provider's `chainId`
-- Legacy `settlementInfra` field deprecated; auto-creates EVM provider for backward compatibility
+- `settlementInfra` config removed; `chainProviders[evm]` is the only config path for EVM settlement
 - Zod-based validation: rejects unknown chainType, duplicate chainId, peer referencing unregistered chain
 
 ### Integration Tests (Story 32.8)
@@ -564,7 +564,7 @@ Epic 35 delivered an optional SOCKS5-based transport layer enabling connectors t
 - **Optional dependencies pattern** -- many packages are `optionalDependencies`; use dynamic `require()` with try-catch or the project's `optional-require` utility
 - **YAML config is the source of truth** -- network topology, peers, routes, chain providers, and settlement config all come from YAML; never hardcode topology
 - **ILP addresses are hierarchical** -- dot-separated format (e.g., `g.alice.wallet.USD`); validate with `isValidILPAddress()` from shared package
-- **Backward compatibility** -- legacy `settlementInfra` config auto-creates EVM provider; per-peer `chain` field is optional (defaults to legacy behavior when absent)
+- **chainProviders is the only settlement config** -- `settlementInfra` has been removed; a migration guard throws if detected. `EVMProviderConfig` includes `tokenAddress` (required) and `settlementOptions` (optional). Per-peer `chain` field is optional (defaults to primary EVM provider when absent)
 - **Solana PDA seeds matter** -- channel PDAs derived from `["channel", sender, receiver, mint]`; changing seed order or contents produces a different address and will fail on-chain validation
 - **Solana signature payload** -- Ed25519 signatures sign `(channel_pda ++ nonce_le ++ amount_le)` as raw bytes; must match the on-chain `processor.rs` verification exactly -- any mismatch causes `InvalidSignature` error
 - **Solana instruction discriminators** -- each instruction has a 1-byte discriminator (e.g., `OpenChannel=0`, `Deposit=1`); must match between `instruction.rs` (Rust) and `solana-payment-channel-sdk.ts` (TypeScript) -- desync causes `InvalidInstruction` error

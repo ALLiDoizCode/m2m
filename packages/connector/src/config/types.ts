@@ -120,7 +120,6 @@ export interface PeerConfig {
 
   /**
    * Chain reference linking peer to a registered provider's chainId (e.g., 'evm:8453').
-   * When absent, defaults to auto-created EVM provider from settlementInfra.
    */
   chain?: string;
 
@@ -338,24 +337,7 @@ export interface ConnectorConfig {
   settlement?: SettlementConfig;
 
   /**
-   * Optional EVM settlement infrastructure configuration
-   * Configures private key, RPC URL, contract addresses, deposit params, and ledger persistence
-   * Distinct from `settlement` which configures TigerBeetle accounting parameters
-   * When absent, consuming code falls back to process.env values
-   *
-   * @deprecated Use `chainProviders` for multi-chain configuration.
-   * When `chainProviders` is present, this field is ignored.
-   *
-   * **Coexistence strategy:** `settlementInfra` remains functional for single-EVM
-   * deployments. `connector-node.ts` auto-creates an EVMPaymentChannelProvider from
-   * `settlementInfra` when `chainProviders` is absent. New deployments should use
-   * `chainProviders` exclusively. `settlementInfra` will be removed in a future major version.
-   */
-  settlementInfra?: SettlementInfraConfig;
-
-  /**
    * Optional multi-chain provider configuration.
-   * When present, replaces `settlementInfra` for provider initialization.
    * Each entry configures a chain-specific payment channel provider.
    *
    * @example
@@ -792,103 +774,6 @@ export interface SettlementConfig {
    * Defaults to threshold monitoring disabled if not specified
    */
   thresholds?: SettlementThresholdConfig;
-}
-
-/**
- * Settlement Infrastructure Configuration Interface
- *
- * Configures EVM settlement infrastructure parameters for payment channel
- * operations. Maps to environment variables currently read in ConnectorNode.start().
- * All fields are optional — when absent, the consuming code (Story 29.2) falls
- * back to process.env values.
- *
- * This is distinct from `SettlementConfig` which configures TigerBeetle accounting
- * parameters (cluster ID, replicas, fees, credit limits, thresholds).
- * `SettlementInfraConfig` configures the EVM layer: private key, RPC URL,
- * contract addresses, deposit parameters, and ledger persistence.
- *
- * @example
- * ```typescript
- * const settlementInfra: SettlementInfraConfig = {
- *   enabled: true,
- *   rpcUrl: 'http://anvil:8545',
- *   registryAddress: '0x1234...',
- *   tokenAddress: '0x5678...',
- *   threshold: '1000000',
- *   pollingIntervalMs: 30000,
- * };
- * ```
- */
-export interface SettlementInfraConfig {
-  /**
-   * Feature flag for EVM settlement infrastructure
-   * When false, settlement infrastructure is not initialized
-   * Replaces `SETTLEMENT_ENABLED` env var
-   */
-  enabled?: boolean;
-
-  /**
-   * Treasury EVM private key for signing settlement transactions
-   * Replaces `TREASURY_EVM_PRIVATE_KEY` env var
-   *
-   * **Sensitive — do not log or serialize in plaintext.**
-   */
-  privateKey?: string;
-
-  /**
-   * Base L2 RPC endpoint URL for settlement transactions
-   * Replaces `BASE_L2_RPC_URL` env var
-   */
-  rpcUrl?: string;
-
-  /**
-   * Token network registry contract address
-   * Replaces `TOKEN_NETWORK_REGISTRY` env var
-   */
-  registryAddress?: string;
-
-  /**
-   * M2M token contract address
-   * Replaces `M2M_TOKEN_ADDRESS` env var
-   */
-  tokenAddress?: string;
-
-  /**
-   * Settlement threshold as string (parsed to BigInt by consumer)
-   * Typed as string because YAML/JSON configs cannot represent BigInt natively
-   * Replaces `SETTLEMENT_THRESHOLD` env var
-   */
-  threshold?: string;
-
-  /**
-   * Settlement polling interval in milliseconds
-   * Replaces `SETTLEMENT_POLLING_INTERVAL` env var
-   */
-  pollingIntervalMs?: number;
-
-  /**
-   * Default settlement timeout in seconds
-   * Replaces hardcoded 86400 value in connector-node.ts
-   */
-  settlementTimeoutSecs?: number;
-
-  /**
-   * Initial deposit multiplier for payment channel funding
-   * Replaces `INITIAL_DEPOSIT_MULTIPLIER` env var
-   */
-  initialDepositMultiplier?: number;
-
-  /**
-   * File path for in-memory ledger snapshot persistence
-   * Replaces `LEDGER_SNAPSHOT_PATH` env var
-   */
-  ledgerSnapshotPath?: string;
-
-  /**
-   * Ledger snapshot persistence interval in milliseconds
-   * Replaces `LEDGER_PERSIST_INTERVAL_MS` env var
-   */
-  ledgerPersistIntervalMs?: number;
 }
 
 /**
@@ -1848,7 +1733,7 @@ const KNOWN_CHAIN_TYPES: ReadonlySet<string> = new Set<string>(['evm', 'solana',
 
 /** Required fields per chain type for runtime validation of YAML-loaded configs. */
 const REQUIRED_FIELDS_BY_CHAIN_TYPE: Record<string, readonly string[]> = {
-  evm: ['rpcUrl', 'registryAddress', 'keyId'],
+  evm: ['rpcUrl', 'registryAddress', 'keyId', 'tokenAddress'],
   solana: ['rpcUrl', 'programId', 'keyId'],
   mina: ['graphqlUrl', 'zkAppAddress'],
 };
@@ -1868,28 +1753,18 @@ interface ValidationLogger {
  * 1. Each entry's `chainType` is a known BlockchainType ('evm' | 'solana' | 'mina').
  * 2. No duplicate `chainId` values across entries.
  * 3. Per-chain-type required fields are present (runtime check for YAML-loaded configs).
- * 4. Each peer's `chain` field (if present) references a `chainId` in `chainProviders`
- *    or is covered by legacy `settlementInfra`.
- * 5. Logs a deprecation warning when `settlementInfra` is used without `chainProviders`.
+ * 4. Each peer's `chain` field (if present) references a `chainId` in `chainProviders`.
  *
- * When `chainProviders` is absent or empty, validation passes (legacy mode).
+ * When `chainProviders` is absent or empty, validation passes silently.
  *
  * @param config - The ConnectorConfig to validate
- * @param logger - Optional logger for deprecation warnings
+ * @param logger - Optional logger for warnings
  * @throws {Error} If validation fails
  */
-export function validateChainProviders(config: ConnectorConfig, logger?: ValidationLogger): void {
+export function validateChainProviders(config: ConnectorConfig, _logger?: ValidationLogger): void {
   const entries = config.chainProviders;
 
-  // If chainProviders is absent/empty, check for legacy deprecation warning
   if (!entries || entries.length === 0) {
-    if (config.settlementInfra && logger) {
-      logger.warn(
-        { event: 'config_deprecation' },
-        'settlementInfra is deprecated. Migrate to chainProviders configuration.'
-      );
-    }
-    // Legacy mode — no further validation needed for chainProviders
     return;
   }
 

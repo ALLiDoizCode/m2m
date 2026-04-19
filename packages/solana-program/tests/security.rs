@@ -932,8 +932,7 @@ async fn test_deposit_overflow_past_u64_max() {
         "deposit_a should not be corrupted after overflow rejection"
     );
     assert_eq!(
-        final_account.data[STATE_FIELD_OFFSET],
-        STATE_OPENED,
+        final_account.data[STATE_FIELD_OFFSET], STATE_OPENED,
         "Channel should remain in Opened state after overflow rejection"
     );
 }

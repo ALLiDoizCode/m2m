@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@toon-protocol/connector)](https://www.npmjs.com/package/@toon-protocol/connector)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
-> ILP connector node for AI agent payment networks. Routes packets, tracks balances, settles on-chain.
+> Multi-chain ILP connector for AI agent payment networks. Routes packets, tracks balances, settles on EVM, Solana, and Mina. Supports ATOR overlay transport for privacy-enabled peering from any network.
 
 See the [root README](../../README.md) for conceptual overview, network architecture, and Docker deployment.
 
@@ -141,20 +141,20 @@ const node = new ConnectorNode(config: ConnectorConfig | string, logger: Logger)
 
 ### Optional Fields
 
-| Field             | Type                    | Default       | Description                                    |
-| ----------------- | ----------------------- | ------------- | ---------------------------------------------- |
-| `deploymentMode`  | `DeploymentMode`        | inferred      | `'embedded'` \| `'standalone'`                 |
-| `healthCheckPort` | `number`                | `8080`        | HTTP health endpoint port                      |
-| `logLevel`        | `string`                | `'info'`      | `'debug'` \| `'info'` \| `'warn'` \| `'error'` |
-| `adminApi`        | `AdminApiConfig`        | disabled      | Admin REST API settings                        |
-| `localDelivery`   | `LocalDeliveryConfig`   | disabled      | HTTP forwarding to BLS                         |
-| `settlement`      | `SettlementConfig`      | —             | TigerBeetle accounting config                  |
-| `settlementInfra` | `SettlementInfraConfig` | —             | EVM settlement infrastructure                  |
-| `blockchain`      | `BlockchainConfig`      | —             | Multi-chain EVM config (Base, Arbitrum)        |
-| `security`        | `SecurityConfig`        | —             | Key management backend                         |
-| `performance`     | `PerformanceConfig`     | —             | Batching, pooling, parallelization             |
-| `explorer`        | `ExplorerConfig`        | enabled:3001  | Explorer UI settings                           |
-| `mode`            | `string`                | `'connector'` | `'connector'` \| `'gateway'`                   |
+| Field             | Type                         | Default       | Description                                          |
+| ----------------- | ---------------------------- | ------------- | ---------------------------------------------------- |
+| `deploymentMode`  | `DeploymentMode`             | inferred      | `'embedded'` \| `'standalone'`                       |
+| `healthCheckPort` | `number`                     | `8080`        | HTTP health endpoint port                            |
+| `logLevel`        | `string`                     | `'info'`      | `'debug'` \| `'info'` \| `'warn'` \| `'error'`       |
+| `adminApi`        | `AdminApiConfig`             | disabled      | Admin REST API settings                              |
+| `localDelivery`   | `LocalDeliveryConfig`        | disabled      | HTTP forwarding to BLS                               |
+| `settlement`      | `SettlementConfig`           | —             | TigerBeetle accounting config                        |
+| `chainProviders`  | `ChainProviderConfigEntry[]` | —             | Multi-chain settlement providers (EVM, Solana, Mina) |
+| `transport`       | `TransportConfig`            | direct        | Network transport: `direct` or `socks5` (ATOR)       |
+| `security`        | `SecurityConfig`             | —             | Key management backend                               |
+| `performance`     | `PerformanceConfig`          | —             | Batching, pooling, parallelization                   |
+| `explorer`        | `ExplorerConfig`             | enabled:3001  | Explorer UI settings                                 |
+| `mode`            | `string`                     | `'connector'` | `'connector'` \| `'gateway'`                         |
 
 ### PeerConfig
 
@@ -293,43 +293,114 @@ High-performance double-entry accounting. Falls back to in-memory if connection 
 | `TIGERBEETLE_CLUSTER_ID` | Yes      | TigerBeetle cluster identifier    |
 | `TIGERBEETLE_REPLICAS`   | Yes      | Comma-separated replica addresses |
 
-## Settlement Infrastructure
+## Multi-Chain Settlement via `chainProviders`
 
-EVM payment channels on Base L2 (and optionally Arbitrum):
+Settlement is configured through the `chainProviders` array. Each entry connects the connector to a specific chain for payment channel operations. The connector supports EVM (Base L2), Solana, and Mina simultaneously — each peer's `chain` field determines which provider handles its settlement.
 
-| Variable                      | Description                                                   |
-| ----------------------------- | ------------------------------------------------------------- |
-| `SETTLEMENT_ENABLED`          | Enable automatic settlement (default: `true`)                 |
-| `SETTLEMENT_THRESHOLD`        | Balance threshold to trigger settlement                       |
-| `SETTLEMENT_POLLING_INTERVAL` | Polling frequency in ms (default: `30000`)                    |
-| `BASE_L2_RPC_URL`             | Base L2 RPC endpoint                                          |
-| `EVM_PRIVATE_KEY`             | Private key (dev only — use KMS in production)                |
-| `M2M_TOKEN_ADDRESS`           | ERC-20 token contract                                         |
-| `TOKEN_NETWORK_REGISTRY`      | Payment channel registry contract                             |
-| `KEY_BACKEND`                 | Key management: `env` \| `aws-kms` \| `gcp-kms` \| `azure-kv` |
-| `NETWORK_MODE`                | Auto-configure chain settings: `testnet` \| `mainnet`         |
-
-### Multi-Chain Support
-
-Configure per-chain settings via `blockchain` config:
+### EVM Example (Base L2)
 
 ```typescript
 const config: ConnectorConfig = {
-  // ...
-  blockchain: {
-    base: {
-      enabled: true,
-      rpcUrl: 'https://mainnet.base.org',
-      chainId: 8453,
+  // ...required fields...
+  chainProviders: [
+    {
+      chainType: 'evm',
+      chainId: 'evm:8453',
+      rpcUrl: 'https://base-mainnet.g.alchemy.com/v2/YOUR_KEY',
+      registryAddress: '0x...', // Payment channel registry contract
+      tokenAddress: '0x...', // ERC-20 token contract
+      keyId: '0x...', // Private key (dev) or KMS key reference
+      settlementOptions: {
+        // Optional tuning
+        threshold: '1000000',
+        settlementTimeoutSecs: 86400,
+        pollingIntervalMs: 30000,
+      },
     },
-    arbitrum: {
-      enabled: true,
-      rpcUrl: 'https://arb1.arbitrum.io/rpc',
-      chainId: 42161,
-    },
-  },
+  ],
 };
 ```
+
+### Multi-Chain Example (EVM + Solana + Mina)
+
+```yaml
+chainProviders:
+  - chainType: evm
+    chainId: evm:8453
+    rpcUrl: https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+    registryAddress: '0x...'
+    tokenAddress: '0x...'
+    keyId: '0x...'
+
+  - chainType: solana
+    chainId: solana:mainnet
+    rpcUrl: https://api.mainnet-beta.solana.com
+    programId: 'YourProgram...'
+    keyId: '/path/to/keypair.json'
+
+  - chainType: mina
+    chainId: mina:mainnet
+    graphqlUrl: https://proxy.minaprotocol.com/graphql
+    zkAppAddress: 'B62q...'
+    keyId: 'EKE...'
+```
+
+Settlement is **optional** — you can run a connector without `chainProviders` for testing or private networks. Chain SDKs are loaded lazily, so you only need dependencies for chains you actually use.
+
+### Key Management
+
+| `keyId` Format       | Backend         | Use Case               |
+| -------------------- | --------------- | ---------------------- |
+| `0x...` (hex string) | Raw private key | Local development only |
+| `aws-kms://...`      | AWS KMS         | Production             |
+| `gcp-kms://...`      | GCP Cloud KMS   | Production             |
+| `azure-kv://...`     | Azure Key Vault | Production             |
+
+### Migrating from `settlementInfra`
+
+The `settlementInfra` config block was removed in v2.3.0. If your config still uses it, the connector will print a descriptive error at startup explaining the migration. The mapping is:
+
+| Old (`settlementInfra`) | New (`chainProviders[evm]`)      |
+| ----------------------- | -------------------------------- |
+| `rpcUrl`                | `rpcUrl`                         |
+| `registryAddress`       | `registryAddress`                |
+| `tokenAddress`          | `tokenAddress`                   |
+| `privateKey`            | `keyId`                          |
+| `enabled: true`         | Presence of the entry enables it |
+
+Legacy environment variables (`BASE_L2_RPC_URL`, `SETTLEMENT_ENABLED`, `TOKEN_NETWORK_REGISTRY`, `M2M_TOKEN_ADDRESS`, `TREASURY_EVM_PRIVATE_KEY`) are no longer read. If detected at startup, the connector logs a warning directing you to use `chainProviders`.
+
+## Transport Configuration
+
+By default, connectors peer over direct TCP WebSocket connections. For network-level privacy or to run from a home network without port forwarding, enable ATOR overlay transport.
+
+ATOR (Anyone Protocol) is an incentivized onion-routing network. When enabled, all outbound BTP traffic is tunneled through ATOR circuits. Inbound peering works through `.anon` hidden services — no open ports or special router configuration needed.
+
+### Direct Transport (Default)
+
+No configuration required. Existing deployments are unaffected.
+
+### ATOR/SOCKS5 Transport
+
+```yaml
+transport:
+  type: socks5
+  socksUrl: socks5h://127.0.0.1:9050 # Must use socks5h:// (DNS at proxy)
+  managed: true # Auto-start/stop the ATOR binary
+  hiddenService:
+    enabled: true # Accept inbound via .anon address
+    hostname: your-address.anon # Assigned on first start
+    virtualPort: 3000
+```
+
+Two modes are supported:
+
+- **Managed** (`managed: true`) — The connector starts and monitors the ATOR binary automatically. Best for most operators, especially on home networks.
+- **External** (`managed: false`) — You run `anon` or system `tor` yourself. Point `socksUrl` at its SOCKS5 port.
+
+The `socks5h://` scheme (note the `h`) is required — it routes DNS through the proxy to prevent leaks.
+
+See the full [ATOR Transport Guide](../../docs/ator-transport.md) for monitoring, performance tuning, hidden-service setup, and troubleshooting.
 
 ## Explorer UI
 
@@ -388,7 +459,7 @@ npx connector validate config.yaml  # Validate config file
 
 **Classes:** `ConnectorNode`, `ConfigLoader`, `ConfigurationError`, `ConnectorNotStartedError`, `RoutingTable`, `PacketHandler`, `BTPServer`, `BTPClient`, `BTPClientManager`, `AdminServer`, `AccountManager`, `SettlementMonitor`, `UnifiedSettlementExecutor`, `IlpSendHandler`
 
-**Types:** `ConnectorConfig`, `PeerConfig`, `RouteConfig`, `SettlementConfig`, `SettlementInfraConfig`, `LocalDeliveryConfig`, `LocalDeliveryHandler`, `LocalDeliveryRequest`, `LocalDeliveryResponse`, `SendPacketParams`, `PeerRegistrationRequest`, `PeerInfo`, `PeerAccountBalance`, `RouteInfo`, `RemovePeerResult`, `IlpSendRequest`, `IlpSendResponse`, `AdminSettlementConfig`, `ChannelOpenOptions`, `ChannelMetadata`, `PaymentRequest`, `PaymentResponse`, `PaymentHandler`, `PacketSenderFn`, `IsReadyFn`, `ILPPreparePacket`, `ILPFulfillPacket`, `ILPRejectPacket`
+**Types:** `ConnectorConfig`, `PeerConfig`, `RouteConfig`, `SettlementConfig`, `LocalDeliveryConfig`, `LocalDeliveryHandler`, `LocalDeliveryRequest`, `LocalDeliveryResponse`, `SendPacketParams`, `PeerRegistrationRequest`, `PeerInfo`, `PeerAccountBalance`, `RouteInfo`, `RemovePeerResult`, `IlpSendRequest`, `IlpSendResponse`, `AdminSettlementConfig`, `ChannelOpenOptions`, `ChannelMetadata`, `PaymentRequest`, `PaymentResponse`, `PaymentHandler`, `PacketSenderFn`, `IsReadyFn`, `ILPPreparePacket`, `ILPFulfillPacket`, `ILPRejectPacket`
 
 **Utilities:** `createLogger`, `createPaymentHandlerAdapter`, `computeFulfillmentFromData`, `computeConditionFromData`, `validateIlpSendRequest`, `generatePaymentId`, `mapRejectCode`, `validateResponseData`, `REJECT_CODE_MAP`
 
@@ -399,7 +470,8 @@ src/
 ├── core/       # ConnectorNode, PacketHandler, payment handler, local delivery
 ├── btp/        # BTP server and client (WebSocket peers)
 ├── routing/    # Routing table and prefix matching
-├── settlement/ # EVM settlement, payment channels, account manager
+├── settlement/ # Multi-chain settlement, payment channels, account manager
+├── transport/  # Transport providers (direct TCP, SOCKS5/ATOR overlay)
 ├── http/       # Admin API, health endpoints, ILP send handler
 ├── explorer/   # Embedded telemetry UI server and event store
 ├── wallet/     # HD wallet derivation for EVM keys

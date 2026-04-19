@@ -165,16 +165,19 @@ describe('ConnectorNode — minimal dependency startup', () => {
         new Error('ethers is required for EVM settlement. Install it with: npm install ethers')
       );
 
-      const config = createMinimalConfig();
+      const config = createMinimalConfig({
+        chainProviders: [
+          {
+            chainType: 'evm',
+            chainId: 'evm:31337',
+            rpcUrl: 'http://localhost:8545',
+            registryAddress: '0x1234567890123456789012345678901234567890',
+            keyId: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+            tokenAddress: '0x1234567890123456789012345678901234567890',
+          },
+        ],
+      });
       (ConfigLoader.validateConfig as jest.Mock).mockReturnValue(config);
-
-      // Enable settlement via env to trigger ethers import
-      process.env.SETTLEMENT_ENABLED = 'true';
-      process.env.BASE_L2_RPC_URL = 'http://localhost:8545';
-      process.env.TOKEN_NETWORK_REGISTRY = '0x1234567890123456789012345678901234567890';
-      process.env.M2M_TOKEN_ADDRESS = '0x1234567890123456789012345678901234567890';
-      process.env.TREASURY_EVM_PRIVATE_KEY =
-        '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
       const node = new ConnectorNode(config, mockLogger);
       // start() should NOT throw — settlement failure is logged but connector continues
@@ -248,16 +251,21 @@ describe('ConnectorNode — minimal dependency startup', () => {
           }) as unknown as TigerBeetleClient
       );
 
-      const config = createMinimalConfig();
+      const config = createMinimalConfig({
+        chainProviders: [
+          {
+            chainType: 'evm',
+            chainId: 'evm:31337',
+            rpcUrl: 'http://localhost:8545',
+            registryAddress: '0x1234567890123456789012345678901234567890',
+            keyId: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+            tokenAddress: '0x1234567890123456789012345678901234567890',
+          },
+        ],
+      });
       (ConfigLoader.validateConfig as jest.Mock).mockReturnValue(config);
 
-      // Enable TigerBeetle + settlement to trigger the init path
-      process.env.SETTLEMENT_ENABLED = 'true';
-      process.env.BASE_L2_RPC_URL = 'http://localhost:8545';
-      process.env.TOKEN_NETWORK_REGISTRY = '0x1234567890123456789012345678901234567890';
-      process.env.M2M_TOKEN_ADDRESS = '0x1234567890123456789012345678901234567890';
-      process.env.TREASURY_EVM_PRIVATE_KEY =
-        '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+      // Enable TigerBeetle to trigger the init path
       process.env.TIGERBEETLE_CLUSTER_ID = '0';
       process.env.TIGERBEETLE_REPLICAS = 'localhost:3000';
 

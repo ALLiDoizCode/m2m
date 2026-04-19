@@ -7,10 +7,10 @@
  * Tests cover:
  * - T-32.7-01: chainProviders section accepts array of valid provider configs (AC 1)
  * - T-32.7-02: Per-peer chain field references registered provider chainId (AC 2)
- * - T-32.7-03: Legacy config auto-creates EVM provider (AC 3)
+ * - T-32.7-03: Migration guard rejects removed settlementInfra config
  * - T-32.7-04: Validation rejects unknown chainType (AC 5)
  * - T-32.7-05: Validation rejects peer referencing unregistered chain (AC 7)
- * - T-32.7-06: Deprecation warning logged when legacy settlementInfra used (AC 3)
+ * - T-32.7-06: tokenAddress required for EVM providers
  * - T-32.7-07: settlementPreference accepts chain-specific values (AC 4)
  * - T-32.7-08: Duplicate chainId in chainProviders rejected (AC 6)
  * - T-32.7-09: EVM config entry validates required fields (AC 1)
@@ -60,6 +60,7 @@ describe('chainProviders configuration (T-32.7-01)', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
         {
           chainType: 'evm',
@@ -67,6 +68,7 @@ describe('chainProviders configuration (T-32.7-01)', () => {
           rpcUrl: 'https://arb1.arbitrum.io/rpc',
           registryAddress: '0xabcdef1234567890abcdef1234567890abcdef12',
           keyId: 'evm-arb-key',
+          tokenAddress: '0x5678000000000000000000000000000000000002',
         },
       ],
     };
@@ -90,6 +92,7 @@ describe('chainProviders configuration (T-32.7-01)', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
         {
           chainType: 'solana',
@@ -132,6 +135,7 @@ describe('Per-peer chain field (T-32.7-02)', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
       ],
       peers: [
@@ -173,28 +177,34 @@ describe('Per-peer chain field (T-32.7-02)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-32.7-03: Legacy config auto-creates EVM provider
+// T-32.7-03: Migration guard rejects removed settlementInfra config
 // ---------------------------------------------------------------------------
 
-describe('Legacy config backward compatibility (T-32.7-03)', () => {
-  it('should accept legacy config with no chainProviders (only settlementInfra)', () => {
-    // Given a config with settlementInfra but no chainProviders
+describe('Config without settlementInfra (T-32.7-03)', () => {
+  it('should accept config with no chainProviders', () => {
     const config: ConnectorConfig = {
       ...baseConfig,
-      settlementInfra: {
-        enabled: true,
-        rpcUrl: 'http://anvil:8545',
-        registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
-        privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-        tokenAddress: '0x5678000000000000000000000000000000000001',
-      },
     };
 
-    // Then the config should be valid (no chainProviders needed)
     expect(config.chainProviders).toBeUndefined();
-    expect(config.settlementInfra?.enabled).toBe(true);
+    expect(() => validateChainProviders(config)).not.toThrow();
+  });
 
-    // And validateChainProviders should not throw (legacy mode is valid)
+  it('should accept config with chainProviders[evm] including tokenAddress', () => {
+    const config: ConnectorConfig = {
+      ...baseConfig,
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: 'evm:8453',
+          rpcUrl: 'http://anvil:8545',
+          registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
+          keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
+        },
+      ],
+    };
+
     expect(() => validateChainProviders(config)).not.toThrow();
   });
 });
@@ -238,6 +248,7 @@ describe('Validation rejects unregistered chain reference (T-32.7-05)', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
       ],
       peers: [
@@ -255,66 +266,61 @@ describe('Validation rejects unregistered chain reference (T-32.7-05)', () => {
     expect(() => validateChainProviders(config)).toThrow(/unregistered chain|not found|evm:42161/i);
   });
 
-  it('should not throw when peer has no chain field and legacy settlementInfra is present', () => {
-    // Given a config with no chainProviders but settlementInfra present
-    // and a peer without a chain field
+  it('should not throw when peer has no chain field and no chainProviders', () => {
     const config: ConnectorConfig = {
       ...baseConfig,
-      settlementInfra: {
-        enabled: true,
-        rpcUrl: 'http://anvil:8545',
-        registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
-        privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-        tokenAddress: '0x5678000000000000000000000000000000000001',
-      },
       peers: [
         {
           id: 'connector-a',
           url: 'ws://connector-a:3000',
           authToken: 'secret-a',
-          // No chain field - defaults to legacy settlementInfra
         },
       ],
     };
 
-    // When validation runs, then it should not throw (peer is covered by legacy path)
     expect(() => validateChainProviders(config)).not.toThrow();
   });
 });
 
 // ---------------------------------------------------------------------------
-// T-32.7-06: Deprecation warning logged when legacy settlementInfra used
+// T-32.7-06: tokenAddress required for EVM providers
 // ---------------------------------------------------------------------------
 
-describe('Deprecation warning for legacy settlementInfra (T-32.7-06)', () => {
-  it('should log deprecation warning when settlementInfra is used without chainProviders', () => {
-    // Given a config using legacy settlementInfra without chainProviders
+describe('tokenAddress required for EVM providers (T-32.7-06)', () => {
+  it('should throw error when EVM config is missing tokenAddress', () => {
+    const config = {
+      ...baseConfig,
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: 'evm:8453',
+          rpcUrl: 'https://mainnet.base.org',
+          registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
+          keyId: 'evm-treasury-key',
+          // tokenAddress: MISSING
+        },
+      ],
+    } as unknown as ConnectorConfig;
+
+    expect(() => validateChainProviders(config)).toThrow(/tokenAddress/i);
+  });
+
+  it('should pass validation when EVM config includes tokenAddress', () => {
     const config: ConnectorConfig = {
       ...baseConfig,
-      settlementInfra: {
-        enabled: true,
-        rpcUrl: 'http://anvil:8545',
-        registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
-        privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-        tokenAddress: '0x5678000000000000000000000000000000000001',
-      },
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: 'evm:8453',
+          rpcUrl: 'https://mainnet.base.org',
+          registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
+          keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
+        },
+      ],
     };
 
-    // When the config is processed with a logger
-    const mockLogger = {
-      warn: jest.fn(),
-      info: jest.fn(),
-      debug: jest.fn(),
-      error: jest.fn(),
-    };
-
-    // Then a deprecation warning should be logged
-    validateChainProviders(config, mockLogger);
-
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'config_deprecation' }),
-      expect.stringContaining('settlementInfra is deprecated')
-    );
+    expect(() => validateChainProviders(config)).not.toThrow();
   });
 });
 
@@ -394,6 +400,7 @@ describe('Duplicate chainId validation (T-32.7-08)', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
         {
           chainType: 'evm',
@@ -401,6 +408,7 @@ describe('Duplicate chainId validation (T-32.7-08)', () => {
           rpcUrl: 'https://other-rpc.base.org',
           registryAddress: '0xabcdef1234567890abcdef1234567890abcdef12',
           keyId: 'evm-other-key',
+          tokenAddress: '0x5678000000000000000000000000000000000002',
         },
       ],
     };
@@ -557,6 +565,7 @@ describe('EVM config missing chainId validation', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
       ],
     } as unknown as ConnectorConfig;
@@ -584,6 +593,7 @@ describe('ChainProviderConfigEntry type compilation (T-32.7-10)', () => {
       rpcUrl: 'https://mainnet.base.org',
       registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
       keyId: 'evm-treasury-key',
+      tokenAddress: '0x5678000000000000000000000000000000000001',
     };
 
     // Then it should satisfy ChainProviderConfigEntry constraints
@@ -636,6 +646,7 @@ describe('AC 1: validateChainProviders passes for valid multi-provider configs',
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
         {
           chainType: 'evm',
@@ -643,6 +654,7 @@ describe('AC 1: validateChainProviders passes for valid multi-provider configs',
           rpcUrl: 'https://arb1.arbitrum.io/rpc',
           registryAddress: '0xabcdef1234567890abcdef1234567890abcdef12',
           keyId: 'evm-arb-key',
+          tokenAddress: '0x5678000000000000000000000000000000000002',
         },
       ],
     };
@@ -660,6 +672,7 @@ describe('AC 1: validateChainProviders passes for valid multi-provider configs',
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
         {
           chainType: 'solana',
@@ -725,6 +738,7 @@ describe('AC 2: multiple peers with different chain fields pass validation', () 
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
         {
           chainType: 'evm',
@@ -732,6 +746,7 @@ describe('AC 2: multiple peers with different chain fields pass validation', () 
           rpcUrl: 'https://arb1.arbitrum.io/rpc',
           registryAddress: '0xabcdef1234567890abcdef1234567890abcdef12',
           keyId: 'evm-arb-key',
+          tokenAddress: '0x5678000000000000000000000000000000000002',
         },
       ],
       peers: [
@@ -771,6 +786,7 @@ describe('AC 3: backward compatibility — peers without chain field when chainP
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
       ],
       peers: [
@@ -788,17 +804,10 @@ describe('AC 3: backward compatibility — peers without chain field when chainP
     expect(config.peers[0]!.chain).toBeUndefined();
   });
 
-  it('should treat empty chainProviders array as legacy mode', () => {
+  it('should treat empty chainProviders array as no-op', () => {
     const config: ConnectorConfig = {
       ...baseConfig,
       chainProviders: [],
-      settlementInfra: {
-        enabled: true,
-        rpcUrl: 'http://anvil:8545',
-        registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
-        privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-        tokenAddress: '0x5678000000000000000000000000000000000001',
-      },
     };
 
     const mockLogger = {
@@ -808,12 +817,9 @@ describe('AC 3: backward compatibility — peers without chain field when chainP
       error: jest.fn(),
     };
 
-    // Empty chainProviders should behave like absent — trigger deprecation warning
+    // Empty chainProviders should pass silently with no warnings
     validateChainProviders(config, mockLogger);
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'config_deprecation' }),
-      expect.stringContaining('settlementInfra is deprecated')
-    );
+    expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 });
 
@@ -897,6 +903,7 @@ describe('AC 5/6: additional validation edge cases', () => {
           rpcUrl: 'https://rpc.example.com',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'key-1',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
         {
           chainType: 'solana',
@@ -923,6 +930,7 @@ describe('AC 7: peer chain reference edge cases', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
       ],
       peers: [
@@ -956,6 +964,7 @@ describe('AC 7: peer chain reference edge cases', () => {
           rpcUrl: 'https://mainnet.base.org',
           registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
           keyId: 'evm-treasury-key',
+          tokenAddress: '0x5678000000000000000000000000000000000001',
         },
       ],
       peers: [
@@ -980,17 +989,15 @@ describe('AC 7: peer chain reference edge cases', () => {
 });
 
 describe('Bare config with no settlement configuration', () => {
-  it('should pass validation when neither chainProviders nor settlementInfra is present', () => {
-    // Given a config with no settlement configuration at all
+  it('should pass validation when no chainProviders is present', () => {
     const config: ConnectorConfig = {
       ...baseConfig,
     };
 
-    // Then validation should pass (no chain config to validate)
     expect(() => validateChainProviders(config)).not.toThrow();
   });
 
-  it('should not log deprecation warning when neither chainProviders nor settlementInfra is present', () => {
+  it('should not log warnings when no chainProviders is present', () => {
     const config: ConnectorConfig = {
       ...baseConfig,
     };
@@ -1003,7 +1010,6 @@ describe('Bare config with no settlement configuration', () => {
     };
 
     validateChainProviders(config, mockLogger);
-    // No settlementInfra means no deprecation warning
     expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 });
@@ -1017,6 +1023,7 @@ describe('ChainProviderConfigEntry type assignability', () => {
       rpcUrl: 'https://mainnet.base.org',
       registryAddress: '0x1234567890abcdef1234567890abcdef12345678',
       keyId: 'evm-treasury-key',
+      tokenAddress: '0x5678000000000000000000000000000000000001',
     };
     expect(entry.chainId).toBe('evm:8453');
     expect(entry.chainType).toBe('evm');

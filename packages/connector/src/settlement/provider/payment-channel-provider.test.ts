@@ -339,6 +339,7 @@ describe('ProviderConfig discriminated union (T-32.1-06)', () => {
       rpcUrl: 'https://mainnet.base.org',
       registryAddress: '0x1234567890123456789012345678901234567890',
       keyId: 'evm-key-1',
+      tokenAddress: '0x5678000000000000000000000000000000000001',
     };
 
     expect(config.chainType).toBe('evm');
@@ -375,7 +376,13 @@ describe('ProviderConfig discriminated union (T-32.1-06)', () => {
 
   it('should narrow ProviderConfig via chainType discriminator', () => {
     const configs: ProviderConfig[] = [
-      { chainType: 'evm', rpcUrl: 'https://rpc.example.com', registryAddress: '0x123', keyId: 'k' },
+      {
+        chainType: 'evm',
+        rpcUrl: 'https://rpc.example.com',
+        registryAddress: '0x123',
+        keyId: 'k',
+        tokenAddress: '0x5678000000000000000000000000000000000001',
+      },
       { chainType: 'solana', rpcUrl: 'https://sol.example.com', programId: 'prog1', keyId: 'k' },
       { chainType: 'mina', graphqlUrl: 'https://mina.example.com', zkAppAddress: 'zkApp1' },
     ];

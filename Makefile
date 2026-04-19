@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs ator-up ator-down ator-logs ator-test infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -31,9 +31,15 @@ help:
 	@echo "  make mina-down            Stop Mina lightnet"
 	@echo "  make mina-logs            Follow Mina docker compose logs"
 	@echo ""
+	@echo "Local Blockchain (ATOR):"
+	@echo "  make ator-up              Start local ATOR network (3 DirAuth + 3 relay + 1 HS)"
+	@echo "  make ator-down            Stop ATOR network + purge named volumes (-v)"
+	@echo "  make ator-logs            Follow ATOR docker compose logs"
+	@echo "  make ator-test            Run real-binary ATOR integration suite (requires ator-up)"
+	@echo ""
 	@echo "Local Blockchain (All Chains):"
-	@echo "  make infra-up             Start all chains (EVM + Solana + Mina)"
-	@echo "  make infra-down           Stop all chains (EVM + Solana + Mina)"
+	@echo "  make infra-up             Start all chains (EVM + Solana + Mina + ATOR)"
+	@echo "  make infra-down           Stop all chains (EVM + Solana + Mina + ATOR; volumes preserved)"
 	@echo ""
 	@echo "Solana Program:"
 	@echo "  make solana-build         Build Solana payment channel program"
@@ -98,12 +104,37 @@ mina-down:
 mina-logs:
 	docker compose --profile mina logs -f
 
-# Local Blockchain — All Chains (EVM + Solana + Mina)
+# Local Blockchain — ATOR (3 DirAuth + 3 relay + 1 HS; pinned anon v0.4.10.0-beta)
+ator-up:
+	docker compose --profile ator up -d
+
+ator-down:
+	docker compose --profile ator down -v
+
+ator-logs:
+	docker compose --profile ator logs -f
+
+# make ator-test — requires `make ator-up` to have run first (does NOT auto-bring-up).
+# Exits 0 with "no tests found" until 36.3/36.4 land the real-binary jest suites.
+ator-test:
+	@HOST_PORT="$$(docker compose port hs1 9050 2>/dev/null | awk -F: '{print $$2}')"; \
+	if [ -z "$$HOST_PORT" ]; then \
+		echo "ERROR: hs1 SOCKS port not reachable — run 'make ator-up' first" >&2; \
+		exit 1; \
+	fi; \
+	echo "ATOR_SOCKS_PORT=$$HOST_PORT"; \
+	ATOR_NIGHTLY=1 ATOR_SOCKS_PORT=$$HOST_PORT \
+	ECHO_HOST=hs1 WSS_ECHO_HOST=hs1 ECHO_PORT=5000 WSS_ECHO_PORT=5000 \
+		npm run test:integration -w packages/connector -- --passWithNoTests --testPathPattern 'transport-ator-'
+
+# Local Blockchain — All Chains (EVM + Solana + Mina + ATOR)
+# infra-down intentionally does NOT pass -v (preserves existing per-profile volumes).
+# Use per-profile *-down for volume purge (e.g. `make ator-down` removes ATOR volumes).
 infra-up:
-	docker compose --profile evm --profile solana --profile mina up -d
+	docker compose --profile evm --profile solana --profile mina --profile ator up -d
 
 infra-down:
-	docker compose --profile evm --profile solana --profile mina down
+	docker compose --profile evm --profile solana --profile mina --profile ator down
 
 # Solana Payment Channel Program
 solana-build:

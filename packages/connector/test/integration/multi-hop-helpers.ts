@@ -17,7 +17,12 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 import { hexToBytes } from '@noble/hashes/utils';
 import { ConnectorNode } from '../../src/core/connector-node';
 import { createLogger } from '../../src/utils/logger';
-import type { ConnectorConfig, PeerAccountBalance, SendPacketParams } from '../../src/config/types';
+import type {
+  ConnectorConfig,
+  PeerAccountBalance,
+  SendPacketParams,
+  TransportConfig,
+} from '../../src/config/types';
 import type { ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
 
 // ============================================================================
@@ -101,6 +106,21 @@ export interface MultiHopTestOptions {
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   /** Enable NIP-59 claim wrapping (default: false) */
   nip59Enabled?: boolean;
+  /** Transport config template applied to every peer (default: direct) */
+  transport?: TransportConfig;
+  /** Per-peer chain IDs — allows each peer to reference a different chain.
+   *  Array length must equal peerCount. All chains must resolve to registered
+   *  providers in the connector's ChainProviderRegistry. */
+  perPeerChainIds?: string[];
+  /** Delay between peer startups in ms (default: 500). Increase for high-latency
+   *  transports like ATOR where BTP connections go through onion circuits. */
+  startupDelayMs?: number;
+  /** Timeout for waiting for all BTP connections in ms (default: 30000). */
+  connectionWaitMs?: number;
+  /** Hostname for peer BTP URLs (default: 'localhost'). Set to
+   *  'host.docker.internal' when BTP connections route through a Docker-hosted
+   *  SOCKS proxy so the exit relay can reach the host machine. */
+  peerHost?: string;
 }
 
 // ============================================================================
@@ -168,6 +188,11 @@ export function createMultiHopTestNetwork(
     portBase = 10000 + Math.floor(Math.random() * 40000),
     logLevel = 'warn',
     nip59Enabled = false,
+    transport,
+    perPeerChainIds,
+    startupDelayMs = 500,
+    connectionWaitMs = 30_000,
+    peerHost = 'localhost',
   } = options;
 
   const configs: ConnectorConfig[] = [];
@@ -185,10 +210,10 @@ export function createMultiHopTestNetwork(
     if (i > 0) {
       peerConfigs.push({
         id: `peer${i}`,
-        url: `ws://localhost:${portBase + i - 1}`,
+        url: `ws://${peerHost}:${portBase + i - 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i - 1],
-        chain: `evm:${ANVIL_CHAIN_ID}`,
+        chain: perPeerChainIds?.[i - 1] ?? `evm:${ANVIL_CHAIN_ID}`,
         ...(nip59Enabled ? { nip59PublicKey: PEER_NIP59_PUBKEYS[i - 1] } : {}),
       });
     }
@@ -197,10 +222,10 @@ export function createMultiHopTestNetwork(
     if (i < peerCount - 1) {
       peerConfigs.push({
         id: `peer${i + 2}`,
-        url: `ws://localhost:${portBase + i + 1}`,
+        url: `ws://${peerHost}:${portBase + i + 1}`,
         authToken: '', // Empty string → BTP no-auth mode (BTP_ALLOW_NOAUTH=true by default)
         evmAddress: PEER_EVM_ADDRESSES[i + 1],
-        chain: `evm:${ANVIL_CHAIN_ID}`,
+        chain: perPeerChainIds?.[i + 1] ?? `evm:${ANVIL_CHAIN_ID}`,
         ...(nip59Enabled ? { nip59PublicKey: PEER_NIP59_PUBKEYS[i + 1] } : {}),
       });
     }
@@ -268,21 +293,25 @@ export function createMultiHopTestNetwork(
           rpcUrl,
           registryAddress,
           keyId: PEER_PRIVATE_KEYS[i]!,
+          tokenAddress,
+          settlementOptions: {
+            threshold: settlementThreshold.toString(),
+            pollingIntervalMs: pollingInterval,
+            settlementTimeoutSecs: 3600,
+            initialDepositMultiplier: 2,
+            ledgerSnapshotPath: `./data/ledger-test-peer${i + 1}-${portBase}.json`,
+          },
         },
       ],
       ...(nip59Enabled ? { nip59: { enabled: true } } : {}),
-      settlementInfra: {
-        enabled: true,
-        privateKey: PEER_PRIVATE_KEYS[i],
-        rpcUrl,
-        registryAddress,
-        tokenAddress,
-        threshold: settlementThreshold.toString(),
-        pollingIntervalMs: pollingInterval,
-        settlementTimeoutSecs: 3600,
-        initialDepositMultiplier: 2,
-        ledgerSnapshotPath: `./data/ledger-test-peer${i + 1}-${portBase}.json`,
-      },
+      ...(transport
+        ? {
+            transport:
+              transport.type === 'socks5'
+                ? { ...transport, externalUrl: `ws://localhost:${btpServerPort}` }
+                : transport,
+          }
+        : {}),
     };
 
     configs.push(config);
@@ -309,14 +338,13 @@ export function createMultiHopTestNetwork(
         peers[i] = node;
         await node.start();
 
-        // Small delay between startups to avoid BTP race conditions
         if (i > 0) {
-          await sleep(500);
+          await sleep(startupDelayMs);
         }
       }
 
       // Phase 3: Wait for all BTP connections to be established
-      await waitForAllConnections(peers, peerCount, 30_000);
+      await waitForAllConnections(peers, peerCount, connectionWaitMs);
     },
 
     async stop(): Promise<void> {

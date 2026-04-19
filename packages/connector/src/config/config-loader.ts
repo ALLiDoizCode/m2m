@@ -22,7 +22,6 @@ import {
   SecurityConfig,
   AdminApiConfig,
   LocalDeliveryConfig,
-  SettlementInfraConfig,
   ChainProviderConfigEntry,
   TransportConfig,
 } from './types';
@@ -166,6 +165,14 @@ export class ConfigLoader {
 
     const rawConfig = raw as Record<string, unknown>;
 
+    // Migration guard: reject removed settlementInfra config
+    if ('settlementInfra' in rawConfig) {
+      throw new ConfigurationError(
+        '"settlementInfra" has been removed. Use "chainProviders" with an EVM entry instead. ' +
+          'Configure chainProviders with chainType "evm", rpcUrl, registryAddress, keyId, and tokenAddress.'
+      );
+    }
+
     // Validate required fields and structure
     this.validateRequiredFields(rawConfig);
     this.validatePeers(rawConfig.peers as PeerConfig[]);
@@ -193,7 +200,6 @@ export class ConfigLoader {
       blockchain,
       // Pass through optional fields from input object
       settlement: rawConfig.settlement as SettlementConfig | undefined,
-      settlementInfra: rawConfig.settlementInfra as SettlementInfraConfig | undefined,
       security: rawConfig.security as SecurityConfig | undefined,
       adminApi: rawConfig.adminApi as AdminApiConfig | undefined,
       localDelivery: rawConfig.localDelivery as LocalDeliveryConfig | undefined,
@@ -203,7 +209,7 @@ export class ConfigLoader {
       chainProviders: rawConfig.chainProviders as ChainProviderConfigEntry[] | undefined,
       deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
       nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
-      transport: this.validateTransport(rawConfig.transport),
+      transport: this.validateTransport(rawConfig.transport, environment),
     };
 
     // Validate environment configuration
@@ -613,7 +619,7 @@ export class ConfigLoader {
    * @throws ConfigurationError on any schema violation
    * @private
    */
-  private static validateTransport(raw: unknown): TransportConfig {
+  private static validateTransport(raw: unknown, environment?: Environment): TransportConfig {
     // Absent or explicit undefined -> default to direct
     if (raw === undefined) {
       return { type: 'direct' };
@@ -648,7 +654,7 @@ export class ConfigLoader {
       return { type: 'direct' };
     }
 
-    return this.validateSocks5Transport(rawTransport);
+    return this.validateSocks5Transport(rawTransport, environment);
   }
 
   /**
@@ -668,7 +674,8 @@ export class ConfigLoader {
    * @private
    */
   private static validateSocks5Transport(
-    raw: Record<string, unknown>
+    raw: Record<string, unknown>,
+    environment?: Environment
   ): Extract<TransportConfig, { type: 'socks5' }> {
     // --- socksProxy ---
     const socksProxyRaw = raw.socksProxy;
@@ -726,6 +733,29 @@ export class ConfigLoader {
       throw new ConfigurationError(
         `Invalid transport.externalUrl: must start with ws:// or wss:// (or be the literal "auto" for managed hidden services). Got: "${safeExternal}"`
       );
+    }
+
+    // Epic 35 retro action item #6: fail fast when the externalUrl is a
+    // loopback placeholder in production. `ws://localhost`, `ws://127.0.0.1`,
+    // `ws://[::1]`, and `wss://` variants are never a valid externally-
+    // reachable BTP URL for a real deployment. Allowing them to pass in
+    // production would ship a footgun operators must remember to override at
+    // runtime. Validate at config load so the problem surfaces loudly.
+    //
+    // Only enforced when environment === 'production' so local dev and
+    // integration tests can continue to use loopback addresses.
+    if (!isAuto && environment === 'production') {
+      const loopbackHostRe =
+        /^wss?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|\[0{0,4}:0{0,4}:0{0,4}:0{0,4}:0{0,4}:0{0,4}:0{0,4}:0{0,4}1\])(?::\d+)?(?:\/|$)/i;
+      if (loopbackHostRe.test(externalUrl)) {
+        throw new ConfigurationError(
+          `Invalid transport.externalUrl for production environment: ` +
+            `loopback host (localhost / 127.0.0.1 / ::1) is never externally ` +
+            `reachable. Set transport.externalUrl to this node's real public ` +
+            `ws://|wss:// URL (or "auto" with managed hidden service). ` +
+            `Got: "${externalUrl}"`
+        );
+      }
     }
 
     // --- managed ---

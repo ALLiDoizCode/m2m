@@ -93,7 +93,7 @@ describe('AC 1: Docker Compose Service — Mina Lightnet (Story 34.10)', () => {
 
   it('[T-34.10-01] should use the o1labs mina-local-network image', () => {
     const svc = getService(compose, 'mina-lightnet');
-    expect(svc['image']).toBe('o1labs/mina-local-network:o1js-main');
+    expect(svc['image']).toBe('o1labs/mina-local-network:compatible-latest-lightnet');
   });
 
   it('[T-34.10-01] should expose GraphQL on port 3085', () => {
@@ -327,14 +327,20 @@ describe('AC 5: Infra-Up includes all three profiles (Story 34.10)', () => {
   });
 
   it('[T-34.10-06] should define infra-up target starting evm, solana, and mina profiles', () => {
+    // Regex allows additional --profile <name> tokens to appear after mina (e.g.,
+    // Story 36.1 appended --profile ator). The assertion is that evm+solana+mina
+    // are composed together into a single `up -d`; we do not forbid more profiles.
     expect(makefileContent).toMatch(
-      /infra-up:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\s+--profile\s+mina\s+up\s+-d/
+      /infra-up:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\s+--profile\s+mina\b[\s\S]*?up\s+-d/
     );
   });
 
   it('[T-34.10-07] should define infra-down target stopping all three profiles', () => {
+    // Regex allows additional --profile <name> tokens to appear after mina (e.g.,
+    // Story 36.1 appended --profile ator). The assertion is evm+solana+mina are
+    // all torn down together; we do not forbid more profiles.
     expect(makefileContent).toMatch(
-      /infra-down:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\s+--profile\s+mina\s+down/
+      /infra-down:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\s+--profile\s+mina\b[\s\S]*?\bdown\b/
     );
   });
 });

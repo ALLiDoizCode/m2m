@@ -866,6 +866,7 @@ describe('createEVMProviderFactory (T-32.3-13)', () => {
       rpcUrl: 'https://mainnet.base.org',
       registryAddress: '0xRegistryAddress',
       keyId: '8453',
+      tokenAddress: '0x5678000000000000000000000000000000000001',
     };
 
     const provider: PaymentChannelProvider = factory(config);
@@ -900,6 +901,7 @@ describe('createEVMProviderFactory (T-32.3-13)', () => {
       rpcUrl: 'https://mainnet.base.org',
       registryAddress: '0xRegistryAddress',
       keyId: '8453',
+      tokenAddress: '0x5678000000000000000000000000000000000001',
     };
 
     const provider = factory(config);
@@ -1096,6 +1098,7 @@ describe('input validation', () => {
       rpcUrl: 'https://mainnet.base.org',
       registryAddress: '0xRegistryAddress',
       keyId: '../etc/passwd',
+      tokenAddress: '0x5678000000000000000000000000000000000001',
     };
 
     expect(() => factory(config)).toThrow(/invalid keyId/i);

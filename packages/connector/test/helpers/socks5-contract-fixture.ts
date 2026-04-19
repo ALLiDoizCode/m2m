@@ -1,5 +1,10 @@
 /**
- * Minimal in-process SOCKS5 proxy for tests (Epic 35 / Story 35.6).
+ * SOCKS5 protocol contract test, NOT ATOR integration — see
+ * transport-ator-real-binary.test.ts for real-binary coverage.
+ *
+ * Minimal in-process SOCKS5 proxy for tests (originally Epic 35 / Story 35.6;
+ * renamed in Epic 36 / Story 36.3 to make the scope explicit vs the new
+ * real-binary integration suite).
  *
  * Implements just enough of RFC 1928 to let integration tests tunnel BTP
  * WebSocket traffic through a controllable proxy without installing any new
@@ -18,7 +23,7 @@
  * hook so the DNS-leak test (T-35.6-SEC-01) can assert that the ATOR-side
  * DNS-resolution path is exercised with a non-resolvable hostname.
  *
- * @module test/helpers/in-process-socks5-proxy
+ * @module test/helpers/socks5-contract-fixture
  */
 
 import { createServer, Server, Socket, connect as netConnect } from 'net';

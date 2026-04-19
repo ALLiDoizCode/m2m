@@ -54,7 +54,7 @@ export function parseSocks5hUrl(socksProxy: string): ParsedSocks5Url {
 
   const host = parsed.hostname;
   const port = parsed.port ? Number.parseInt(parsed.port, 10) : NaN;
-  if (!host || !Number.isFinite(port) || port <= 0 || port > 65535) {
+  if (!host || !Number.isFinite(port) || port < 0 || port > 65535) {
     throw new Error(
       'socksProxy must include a valid host and port (e.g., socks5h://127.0.0.1:9050)'
     );

@@ -66,6 +66,8 @@ export interface AnonFactoryOptions {
   hiddenServiceDir?: string;
   /** Optional hidden service port (native SDK passthrough if supported). */
   hiddenServicePort?: number;
+  /** Accept the Anyone Protocol terms of service non-interactively. */
+  autoTermsAgreement?: boolean;
 }
 
 /**
@@ -345,6 +347,7 @@ export class ManagedAnonClient {
       socksPort: this._socksPort,
       orPort: 0,
       binaryPath: this._opts.binaryPath,
+      autoTermsAgreement: true,
     };
     if (this._opts.hiddenServiceDir) {
       // Surface both native (if SDK supports it) and config-file (fallback)
@@ -372,6 +375,7 @@ export class ManagedAnonClient {
           const anonrc =
             `# Written by ManagedAnonClient (Epic 35 / Story 35.5) on first boot.\n` +
             `# Edit freely — ManagedAnonClient will NOT overwrite this file on subsequent starts.\n` +
+            `AgreeToTerms 1\n` +
             `SocksPort ${this._socksPort}\n` +
             `HiddenServiceDir ${this._opts.hiddenServiceDir}\n` +
             (this._opts.hiddenServicePort !== undefined

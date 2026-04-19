@@ -1,6 +1,6 @@
 # Connector
 
-[![Version](https://img.shields.io/badge/version-1.20.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)](CHANGELOG.md)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3.3-blue.svg)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -58,8 +58,13 @@ Connectors handle three critical tasks:
 │  └──────────┘ └──────────┘ └──────────┘        │
 │                                                  │
 │  ┌──────────────────────────────────────────┐   │
-│  │  Settlement (optional)                    │   │
-│  │  • Base L2 (EVM)                          │   │
+│  │  Settlement (optional, multi-chain)       │   │
+│  │  • EVM (Base L2)  • Solana  • Mina       │   │
+│  └──────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────┐   │
+│  │  Transport                                │   │
+│  │  • Direct TCP (default)                   │   │
+│  │  • ATOR overlay (onion-routed, opt-in)    │   │
 │  └──────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────┘
                        │
@@ -285,32 +290,27 @@ routes:
 
 ### Configuration Sections
 
-| Section         | Purpose                                      | When to Use                   |
-| --------------- | -------------------------------------------- | ----------------------------- |
-| `nodeId`        | Unique identifier for this connector         | Always required               |
-| `btpServerPort` | WebSocket port for incoming peer connections | Always required               |
-| `peers`         | Other connectors to connect to               | Define your network topology  |
-| `routes`        | Routing table (which prefixes go where)      | Map address prefixes to peers |
-| `localDelivery` | Forward packets to external HTTP server      | Standalone mode only          |
-| `settlement`    | On-chain settlement settings                 | When using payment channels   |
-| `explorer`      | Real-time telemetry UI                       | Development and debugging     |
-| `security`      | Rate limiting, IP allowlists                 | Production deployments        |
-| `performance`   | Timeouts, buffer sizes                       | Performance tuning            |
+| Section          | Purpose                                      | When to Use                   |
+| ---------------- | -------------------------------------------- | ----------------------------- |
+| `nodeId`         | Unique identifier for this connector         | Always required               |
+| `btpServerPort`  | WebSocket port for incoming peer connections | Always required               |
+| `peers`          | Other connectors to connect to               | Define your network topology  |
+| `routes`         | Routing table (which prefixes go where)      | Map address prefixes to peers |
+| `localDelivery`  | Forward packets to external HTTP server      | Standalone mode only          |
+| `chainProviders` | Multi-chain settlement (EVM, Solana, Mina)   | When using payment channels   |
+| `transport`      | Network transport (direct or ATOR/SOCKS5)    | Privacy or home-network peers |
+| `explorer`       | Real-time telemetry UI                       | Development and debugging     |
+| `security`       | Rate limiting, IP allowlists                 | Production deployments        |
+| `performance`    | Timeouts, buffer sizes                       | Performance tuning            |
 
-**Environment Variables:**
-
-Sensitive values (private keys, RPC URLs) are loaded from `.env`:
+**Getting Started with Config:**
 
 ```bash
-# Generate .env interactively
+# Generate a config interactively
 npx connector setup
-
-# Key environment variables:
-EVM_PRIVATE_KEY=0x...
-EVM_RPC_URL=https://base-sepolia.g.alchemy.com/v2/...
 ```
 
-See [`examples/`](examples/) for full configuration examples (linear topology, mesh, hub-spoke).
+All chain-specific settings (RPC URLs, contract addresses, private keys) go in the `chainProviders` array in your config file. See [`examples/`](examples/) for full configuration examples (linear topology, mesh, hub-spoke).
 
 ## Settlement: Batching Thousands of Payments into One Transaction
 
@@ -333,12 +333,47 @@ On-chain (slow, costs gas):
 | Chain       | Why Use It                                            | Settlement Type        |
 | ----------- | ----------------------------------------------------- | ---------------------- |
 | **Base L2** | Ethereum ecosystem, ERC-20 tokens, DeFi composability | Payment channels (EVM) |
+| **Solana**  | Sub-second finality, low fees                         | Payment channels (SPL) |
+| **Mina**    | Zero-knowledge proofs, succinct blockchain            | zkApp payment channels |
 
-Settlement is **optional**. You can run a connector without on-chain settlement for testing or private networks. The EVM settlement SDK is bundled and loaded lazily, so there's nothing extra to install.
+Settlement is **optional**. You can run a connector without on-chain settlement for testing or private networks. Chain SDKs are loaded lazily — you only need dependencies for chains you actually use.
+
+### Configuring Settlement with `chainProviders`
+
+All settlement is configured through the `chainProviders` array. Each entry tells the connector how to connect to a specific chain:
+
+```yaml
+chainProviders:
+  - chainType: evm
+    chainId: evm:8453
+    rpcUrl: https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+    registryAddress: '0x...'
+    tokenAddress: '0x...'
+    keyId: '0x...'
+    settlementOptions: # Optional tuning
+      threshold: '1000000'
+      settlementTimeoutSecs: 86400
+
+  - chainType: solana
+    chainId: solana:mainnet
+    rpcUrl: https://api.mainnet-beta.solana.com
+    programId: 'YourProgram...'
+    keyId: '/path/to/keypair.json'
+
+  - chainType: mina
+    chainId: mina:mainnet
+    graphqlUrl: https://proxy.minaprotocol.com/graphql
+    zkAppAddress: 'B62q...'
+    keyId: 'EKE...'
+```
+
+Each peer's `chain` field determines which provider handles settlement for that peer. You can run EVM, Solana, and Mina peers in the same network — the connector routes settlement to the right chain automatically.
+
+> **Migrating from `settlementInfra`?** The legacy `settlementInfra` config block was removed in v2.3.0. If your config still uses it, the connector will print a clear error message explaining how to move your settings into `chainProviders`. See the [connector package README](packages/connector/README.md) for the full migration guide.
 
 ### Payment Channels: How They Work
 
-A payment channel is a smart contract that holds funds in escrow. Both parties can update the balance off-chain by signing claims. Only the final balance is submitted on-chain.
+A payment channel is a smart contract (or zkApp, or Solana program) that holds funds in escrow. Both parties can update the balance off-chain by signing claims. Only the final balance is submitted on-chain.
 
 ```
 1. Open channel:
@@ -355,6 +390,50 @@ A payment channel is a smart contract that holds funds in escrow. Both parties c
 ```
 
 **Key benefit:** One on-chain transaction per channel lifecycle, unlimited off-chain transactions.
+
+## ATOR Overlay Transport: Run a Peer from Anywhere
+
+By default, connectors peer over direct TCP WebSocket connections. For operators who want **network-level privacy** — or who need to run a peer from a home network without exposing ports — the connector supports **ATOR overlay transport**.
+
+[ATOR](https://anyone.io) (Anyone Protocol) is an incentivized onion-routing network based on Tor. When enabled, the connector tunnels all outbound BTP traffic through ATOR circuits and can accept inbound connections via a `.anon` hidden service. This means:
+
+- **No port forwarding required.** Your home router doesn't need any special configuration. The hidden service handles inbound connections through the overlay network.
+- **IP address stays private.** Peers see a `.anon` address, not your home IP. Traffic is onion-routed through multiple relays.
+- **NAT traversal built in.** Works behind carrier-grade NAT, double NAT, and restrictive firewalls — anywhere that can make an outbound TCP connection.
+
+This makes it practical to run a connector on a Raspberry Pi, a laptop, or any machine on a home network without the operational overhead of VPNs, dynamic DNS, or firewall rules.
+
+### How It Works
+
+```
+Your home network                          ATOR overlay
+┌───────────────────┐                    ┌─────────────┐
+│  Connector        │── outbound TCP ──►│  3+ relays   │──► Peer's connector
+│  (no open ports)  │◄── .anon HS ──────│  (encrypted) │◄── Peer connects to you
+└───────────────────┘                    └─────────────┘
+```
+
+Transport is opt-in. Add a `transport` block to your config to enable it:
+
+```yaml
+transport:
+  type: socks5
+  socksUrl: socks5h://127.0.0.1:9050 # ATOR SOCKS5 proxy
+  managed: true # Auto-start/stop the ATOR binary
+  hiddenService:
+    enabled: true # Accept inbound via .anon address
+    hostname: your-address.anon # Assigned on first start
+    virtualPort: 3000
+```
+
+There are two ways to run ATOR:
+
+- **Managed mode** — The connector starts and monitors the ATOR binary automatically. Recommended for most operators.
+- **External mode** — You run `anon` (or system `tor`) yourself and point the connector at its SOCKS5 port. Useful for shared infrastructure or custom configurations.
+
+Both modes enforce `socks5h://` (DNS resolution at the proxy) to prevent DNS leaks.
+
+See the full [ATOR Transport Guide](docs/ator-transport.md) for configuration examples, monitoring, performance tuning, and troubleshooting.
 
 ## Deployment Modes
 
@@ -453,12 +532,13 @@ Perfect for development and debugging. Disable in production.
 │  │ Table    │ │ Peers    │ │ Accounts │    │
 │  └──────────┘ └──────────┘ └──────────┘    │
 │  ┌──────────────────────────────────────┐   │
-│  │  Settlement (optional)               │   │
+│  │  Settlement (optional, multi-chain)  │   │
 │  └──────────┬───────────────────────────┘   │
 └─────────────┼───────────────────────────────┘
               │
       ┌───────▼────────┐
-      │ Base L2 (EVM)  │
+      │ EVM / Solana / │
+      │ Mina           │
       └────────────────┘
 ```
 
@@ -539,17 +619,15 @@ docker-compose logs -f tigerbeetle
 
 Configure connectors using environment variables (see `.env.example` for full list):
 
-| Variable             | Purpose                       | Default |
-| -------------------- | ----------------------------- | ------- |
-| `NODE_ID`            | Connector identifier          | —       |
-| `BTP_PORT`           | BTP WebSocket server port     | `4000`  |
-| `HEALTH_CHECK_PORT`  | HTTP health endpoint port     | `8080`  |
-| `EXPLORER_PORT`      | Explorer UI port              | `5173`  |
-| `LOG_LEVEL`          | Logging verbosity             | `info`  |
-| `NETWORK_MODE`       | Auto-configure chain settings | —       |
-| `EVM_PRIVATE_KEY`    | Ethereum wallet private key   | —       |
-| `BASE_L2_RPC_URL`    | Base L2 RPC endpoint          | —       |
-| `SETTLEMENT_ENABLED` | Enable on-chain settlement    | `true`  |
+| Variable            | Purpose                   | Default |
+| ------------------- | ------------------------- | ------- |
+| `NODE_ID`           | Connector identifier      | —       |
+| `BTP_PORT`          | BTP WebSocket server port | `4000`  |
+| `HEALTH_CHECK_PORT` | HTTP health endpoint port | `8080`  |
+| `EXPLORER_PORT`     | Explorer UI port          | `5173`  |
+| `LOG_LEVEL`         | Logging verbosity         | `info`  |
+
+Chain-specific settings (RPC URLs, private keys, contract addresses) are configured in `chainProviders` in the config file, not as environment variables.
 
 ### Troubleshooting
 
@@ -592,13 +670,15 @@ npm run dev
 
 ## Documentation
 
-| Guide                                             | Description                                                                             |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| [Configuration Examples](examples/README.md)      | YAML config schema and example files                                                    |
-| [Connector Package](packages/connector/README.md) | Implementation reference and API                                                        |
-| [ATOR Overlay Transport](docs/ator-transport.md)  | Privacy transport: SOCKS5/ATOR setup, config, monitoring, and troubleshooting (Epic 35) |
-| [Changelog](CHANGELOG.md)                         | Version history and release notes                                                       |
-| [Contributing](CONTRIBUTING.md)                   | Contribution guidelines                                                                 |
+| Guide                                             | Description                                                       |
+| ------------------------------------------------- | ----------------------------------------------------------------- |
+| [Configuration Examples](examples/README.md)      | YAML config schema and example files                              |
+| [Connector Package](packages/connector/README.md) | Implementation reference, API, and `chainProviders` config        |
+| [ATOR Overlay Transport](docs/ator-transport.md)  | Privacy transport: setup, config, monitoring, and troubleshooting |
+| [Solana Deployment](docs/solana-deployment.md)    | Solana program deployment and devnet testing                      |
+| [Mina Deployment](docs/mina-deployment.md)        | Mina zkApp deployment and lightnet testing                        |
+| [Changelog](CHANGELOG.md)                         | Version history and release notes                                 |
+| [Contributing](CONTRIBUTING.md)                   | Contribution guidelines                                           |
 
 ## Contributing
 

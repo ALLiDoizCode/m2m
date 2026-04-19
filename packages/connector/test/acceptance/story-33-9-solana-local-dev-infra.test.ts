@@ -276,14 +276,20 @@ describe('AC 5: Infra-Up / Infra-Down Convenience Targets (Story 33.9)', () => {
   });
 
   it('[T-33.9-06] should define infra-up target starting evm and solana profiles', () => {
+    // Regex allows additional --profile <name> tokens after solana (e.g. Stories
+    // 34.10 and 36.1 append --profile mina and --profile ator). The assertion is
+    // that evm+solana are composed together into a single `up -d`.
     expect(makefileContent).toMatch(
-      /infra-up:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\s+up\s+-d/
+      /infra-up:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\b[\s\S]*?up\s+-d/
     );
   });
 
   it('[T-33.9-07] should define infra-down target stopping all profiles', () => {
+    // Regex allows additional --profile <name> tokens after solana (e.g. Stories
+    // 34.10 and 36.1 append --profile mina and --profile ator). The assertion is
+    // that evm+solana are torn down together.
     expect(makefileContent).toMatch(
-      /infra-down:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\s+down/
+      /infra-down:[\s\S]*?docker\s+compose\s+--profile\s+evm\s+--profile\s+solana\b[\s\S]*?\bdown\b/
     );
   });
 });

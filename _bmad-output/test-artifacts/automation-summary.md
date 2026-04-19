@@ -1,81 +1,125 @@
 ---
-stepsCompleted:
-  - step-01-preflight-and-context
-  - step-02-identify-targets
-  - step-03-generate-tests
-  - step-04-validate-and-summarize
-lastStep: step-04-validate-and-summarize
-lastSaved: '2026-04-13'
-inputDocuments:
-  - _bmad-output/implementation-artifacts/35-2-implement-sockstransportprovider.md
-  - packages/connector/src/transport/socks-transport-provider.ts
-  - packages/connector/src/transport/socks-transport-provider.test.ts
-  - packages/connector/src/transport/transport-provider.ts
-mode: yolo
-scope: Story 35.2 - SocksTransportProvider AC coverage gap fill
+stepsCompleted: ['step-01-preflight-and-context', 'step-02-identify-targets', 'step-03-generate-tests', 'step-04-validate-and-summarize']
+lastStep: 'step-04-validate-and-summarize'
+lastSaved: '2026-04-15'
+story: '36.3'
+artifact: '_bmad-output/implementation-artifacts/36-3-real-binary-socks5-integration-test.md'
+mode: 'yolo'
 ---
 
-# Automation Summary: Story 35.2 (SocksTransportProvider)
+# Story 36.3 Automation Coverage Summary
 
-**Date:** 2026-04-13
-**Mode:** YOLO / BMad-Integrated
-**Objective:** Identify any Story 35.2 acceptance criteria not covered by automated tests, and generate tests to fill those gaps.
+## Coverage Assessment (pre-automation)
 
-## Preflight
+| AC    | Covered before this run                                                              | File                                                               |
+| ----- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| AC 1  | Yes — env-gated describe + file-level JSDoc disclaimer                               | `test/integration/transport-ator-real-binary.test.ts`             |
+| AC 2  | N/A — requires live docker stack (infra test, not jest)                              | `make ator-test`                                                   |
+| AC 3  | Partial — skip happens; no assertion of gate semantics or no-TCP-when-off            | same                                                               |
+| AC 4  | Yes — gated T-36.3-01 block                                                          | same                                                               |
+| AC 5  | Yes — gated T-36.3-02 block                                                          | same                                                               |
+| AC 6  | Partial — scheme-reject existed but GATED + no `net.Socket` spy belt-and-suspenders | same                                                               |
+| AC 7  | Yes — gated T-36.3-04 block                                                          | same                                                               |
+| AC 8  | Yes — gated T-36.3-05 block                                                          | same                                                               |
+| AC 9  | Yes — gated T-36.3-06 block                                                          | same                                                               |
+| AC 10 | Yes — gated T-36.3-07 block (last-in-suite + afterAll restore)                       | same                                                               |
+| AC 11 | Yes — gated T-36.3-08 (small + ≥8KB large-frame)                                    | same                                                               |
+| AC 12 | Yes — gated T-36.3-09 (stop + throw-during-test)                                    | same                                                               |
+| AC 13 | Partial — files renamed; JSDoc disclaimer asserted; **no grep audit gate**           | `test/integration/socks5-contract.test.ts` (disclaimer only)      |
+| AC 14 | Yes — static disclaimer self-checks on both sides                                    | both suites                                                        |
+| AC 15 | N/A — enforced by code review / git diff                                             | —                                                                  |
+| AC 16 | N/A — CHANGELOG + sprint-status, reviewer-owned                                      | —                                                                  |
 
-- Stack detected: backend (Node.js/TypeScript, Jest 29 + ts-jest)
-- Framework verified: connector workspace Jest config + deps present
-- Mode: BMad-Integrated (story artifact provided)
+## Gaps Identified
 
-## AC-to-Test Traceability (Story 35.2)
+Three concrete coverage gaps that could be filled by ungated jest tests (i.e., run under every `make test`, no `ATOR_NIGHTLY` required):
 
-Test file: `packages/connector/src/transport/socks-transport-provider.test.ts` (23 cases, all passing).
+1. **AC 6 scheme-reject must be ungated + belt-and-suspenders.** The story AC explicitly states "this sub-case runs even on a degraded stack because it asserts fail-closed BEFORE any network activity (it is the only case in the suite that does not require a healthy circuit)." The pre-existing scheme-reject test was *inside* `describeRealBinary`, so it ran ONLY under `ATOR_NIGHTLY=1`. Also missing: the `net.Socket` spy belt-and-suspenders the AC calls for ("NO TCP connection to the SOCKS port is ever opened").
 
-| AC | Summary | Test IDs | Covered |
-|----|---------|----------|---------|
-| AC 1 | `createAgent()` returns `SocksProxyAgent` configured with socks5h:// URL | T-35.2-01 (instance check + host/port) | YES |
-| AC 2 | `getExternalUrl()` returns configured `.anon` URL | T-35.2-02 | YES |
-| AC 3 | Constructor rejects non-`socks5h://` schemes (DNS-leak defense) | T-35.2-05, T-35.6-SEC-03 (9 cases including socks5, http, socks4, empty, non-URL, accept-valid, DNS message, no-.anon-in-error) | YES |
-| AC 4 | `start()` throws when proxy unreachable (FAIL CLOSED) | T-35.2-03, T-35.6-SEC-02 | YES |
-| AC 5 | `start()` resolves when proxy reachable | T-35.2-09 | YES |
-| AC 6 | `healthCheck()` returns true/false, never throws | T-35.2-07, T-35.2-04 | YES |
-| AC 7 | `stop()` safe no-op | T-35.2-08 + safe-after-start | YES |
-| AC 8 | Implements `TransportProvider` interface | T-35.2-10 | YES |
-| AC 9 | `createAgent()` synchronous; fresh per call | T-35.2-06, T-35.2-11 | YES |
-| AC 10 | `.anon` absent from INFO/WARN/ERROR/FATAL logs | T-35.6-SEC-05 (full-lifecycle audit) | YES |
-| AC 11 | Zero regression | Full unit suite (`npm run test:unit` → 2458 pass, 0 fail per story Debug Log) | YES |
+2. **AC 3 belt-and-suspenders.** The AC calls out an optional "spy on `net.connect` / `child_process.spawn`" check. At minimum, a static guard asserting the env-gate expression and `describe.skip` conditional pattern is load-bearing in the file.
 
-## Gap Analysis
+3. **AC 13 grep audit.** The AC requires "a case-sensitive grep is performed for the string `in-process-socks5-proxy` → zero matches returned." Nothing in jest was asserting this, so a future accidental reintroduction of the old name via a copy-paste or a regenerated doc block would pass CI silently.
 
-**Result:** No coverage gaps.
+## Tests Added
 
-Every AC in `_bmad-output/implementation-artifacts/35-2-implement-sockstransportprovider.md` has at least one corresponding automated test. All test IDs listed in Task 5 of the story (T-35.2-01..11, plus T-35.6-SEC-02/03/05) are present and passing.
+All additions are in the existing file `packages/connector/test/integration/transport-ator-real-binary.test.ts`, placed OUTSIDE the `describeRealBinary` block so they run unconditionally:
 
-The AC 10 `.anon` log-audit is particularly thorough: it exercises constructor (happy + error), `createAgent` with a `.anon` peer URL, `start()` success + failure, `healthCheck()` both outcomes, and `stop()`, then asserts the serialized args of every `logger.info/warn/error/fatal` call contain no `".anon"` substring.
+### 1. `T-36.3-03 (AC 6): socks5:// scheme reject — SEC-03, network-free`
 
-## Test Execution
+Two `it()` blocks under a dedicated describe:
+
+- Installs a `jest.spyOn(net.Socket.prototype, 'connect')` spy in `beforeEach`; replaces with a no-op that counts calls and immediately emits `error` on any invocation — guarantees no real TCP is attempted even under a future regression.
+- **Test 1:** `expect(() => new SocksTransportProvider({ socksProxy: 'socks5://...' }))` throws `/socks5h/i` AND `socketConnectCount === 0`.
+- **Test 2:** same property via `try/catch` — proves the rejection is synchronous-within-construction, not deferred to a later tick.
+
+### 2. `AC 3: real-binary suite is silently skipped when ATOR_NIGHTLY is unset`
+
+Three `it()` blocks:
+
+- **Test 1:** Reads the test file's own contents and asserts the guard expression `/process\.env\.ATOR_NIGHTLY\s*===\s*'1'/` AND the conditional `/REAL_BINARY\s*\?\s*describe\s*:\s*describe\.skip/` are both present — load-bearing patterns that MUST remain verbatim.
+- **Test 2:** Re-evaluates `process.env.ATOR_NIGHTLY === '1'` in the test scope and asserts it matches the `REAL_BINARY` module constant. Drift between the module-load evaluation and runtime semantics fails fast.
+- **Test 3:** Reads the repo `Makefile` and asserts both `ATOR_NIGHTLY=1` and `docker compose port hs1 9050` appear — the dynamic-port invocation contract (AC 3's explicit NOTE about dynamic host-port) cannot silently break.
+
+### 3. `AC 13: zero stale references to pre-rename filenames in runtime code`
+
+Two `it()` blocks driving a `grep -r` via `child_process.exec` over `packages/connector/`:
+
+- Excludes `node_modules`, `dist`, `coverage`, and **this test file itself** (self-reference filter — the test legitimately names the old strings in its assertion literals).
+- **Test 1:** zero matches for `in-process-socks5-proxy`.
+- **Test 2:** zero matches for `transport-socks5.test`.
+
+## Validation
 
 ```
-npx jest packages/connector/src/transport/socks-transport-provider.test.ts
-Test Suites: 1 passed, 1 total
-Tests:       23 passed, 23 total
-Time:        ~1 s
+npx jest --config packages/connector/jest.config.js \
+  packages/connector/test/integration/transport-ator-real-binary.test.ts
 ```
 
-All assertions pass. No flakiness.
+- **Test Suites: 1 passed, 1 total**
+- **Tests: 13 skipped, 8 passed, 21 total** (1.6 s)
+- 8 passing = the 1 pre-existing ungated disclaimer + 7 new ungated tests.
+- 13 skipped = the `describeRealBinary` gated tests (correct behavior with `ATOR_NIGHTLY` unset).
+- `npx eslint packages/connector/test/integration/transport-ator-real-binary.test.ts` → clean.
 
-## Tests Generated This Run
+## Design decisions
 
-None. The existing suite already satisfies the AC-to-test mapping.
+- **Placed new tests in the existing real-binary file**, outside the gated block, rather than creating a new test file. Rationale: the new tests are directly *about* the properties of the real-binary suite (its gate, its scheme-reject subcase, its sibling rename), and co-locating them keeps the AC→test mapping trivial. No new jest config entry; existing `**/*.test.ts` discovery picks them up (AC 15 compliance preserved).
+- **Spy on `net.Socket.prototype.connect`, not `net.connect`.** The latter is a readonly module export and `jest.spyOn` can't replace it. The former is the real choke-point any SOCKS library eventually hits, so the spy is actually stricter than the AC's example.
+- **AC 13 grep uses the local file's `__filename` for self-exclusion** rather than a path-pattern skip — robust to future directory reorganizations.
+- **AC 3 Makefile check is non-blocking if `Makefile` isn't found** (guarded by `fs.existsSync`) so a repo-layout refactor doesn't flake the test. The runtime `beforeAll` inside the gated block is the stronger enforcement point.
 
-## Recommendations (out of scope for 35.2)
+## What this run did NOT do
 
-1. Integration-level `.anon` log audit at `ConnectorNode` boundary -> deferred to Story 35.6.
-2. Real SOCKS5 handshake / BTP-through-Tor E2E -> deferred to Story 35.6.
-3. Future: probe-socket cleanup under `AbortSignal` if wired in Story 35.4.
+- Did not touch `packages/connector/src/**` (AC 15 bright-line preserved).
+- Did not add a new jest project / config entry (AC 15).
+- Did not modify the existing gated tests (they cover AC 4, 5, 7–12 correctly under `ATOR_NIGHTLY=1`).
+- Did not attempt to exercise AC 2 (requires live docker — deferred per story's Completion Notes to the nightly CI wiring in Story 36.5, with optional `docker/ator/Dockerfile` + `docker-compose.yml` sidecar edits flagged as follow-up).
+- Did not change the `socks5-contract.test.ts` disclaimer check (already covered).
 
-## Status
+## Files changed in this run
 
-- AC coverage: 11/11 (100%)
-- Unit tests: 23/23 passing
-- Action taken this run: gap analysis only; no new tests required.
+Modified:
+
+- `packages/connector/test/integration/transport-ator-real-binary.test.ts` — three new describe blocks (7 new tests) placed outside the gated block; no changes to pre-existing gated tests.
+- `_bmad-output/test-artifacts/automation-summary.md` — this file (overwritten with Story 36.3 coverage summary).
+
+Created: none.
+Deleted: none.
+
+## Step Summary
+
+- **Status:** Complete — three concrete ungated coverage gaps filled (AC 3, AC 6 scheme-reject, AC 13 grep audit). All 16 ACs now have at least one automated gate or an explicit N/A justification (AC 2 requires live infra; AC 15/16 are reviewer/code-review owned).
+- **Duration:** ~15 minutes (single-pass YOLO, one iteration cycle to fix `net.connect` spyOn-readonly error and grep self-hit).
+- **What changed:** 7 new `it()` blocks across 3 new describe blocks in the existing real-binary test file. No source changes, no jest config changes, no new test files.
+- **Key decisions:**
+  - Co-located new tests with the real-binary file (shared subject matter, no new config entry — AC 15 compliant).
+  - Used `net.Socket.prototype.connect` spy (stricter than the AC's `net.connect` example, and actually spyOn-able).
+  - Self-excluded `__filename` in the AC 13 grep rather than path-pattern filtering — robust to future reorganizations.
+  - Made the Makefile check tolerant of repo-layout changes (guarded by `fs.existsSync`).
+- **Issues found & fixed:**
+  - Initial `jest.spyOn(net, 'connect')` failed because `net.connect` is a read-only module export; switched to `net.Socket.prototype.connect`.
+  - Initial AC 13 grep test self-matched the test file's assertion strings; added `__filename` exclusion.
+- **Remaining concerns:**
+  - **AC 2 (real end-to-end execution of the gated suite) is still unexercised.** The deferred `docker/ator/Dockerfile` (tcpdump) + `docker-compose.yml` (wss-echo sidecar) edits are prerequisites; Story 36.5 nightly CI wiring will be the first time the real-binary path is exercised unless a thin follow-up story lands first. Flagged in the Dev Agent Record by the implementing dev.
+  - The gated tests in `describeRealBinary` have NOT been run green against a live stack in this automation pass — they compile and skip cleanly, which is what AC 1 / AC 3 demand, but their correctness against a real circuit is provable only under `make ator-up && make ator-test`.
+- **Migrations:** None. All additions are jest-discovered by the existing `**/*.test.ts` pattern. No changes to `jest.config.js`, `jest.acceptance.config.js`, `package.json`, or CI config.

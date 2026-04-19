@@ -212,6 +212,7 @@ describe('fromConfig factory (T-32.2-06)', () => {
         rpcUrl: 'https://mainnet.base.org',
         registryAddress: '0x123',
         keyId: 'key-1',
+        tokenAddress: '0x5678000000000000000000000000000000000001',
       },
     ];
 
@@ -241,6 +242,7 @@ describe('fromConfig factory (T-32.2-06)', () => {
         rpcUrl: 'https://mainnet.base.org',
         registryAddress: '0x123',
         keyId: 'key-1',
+        tokenAddress: '0x5678000000000000000000000000000000000001',
       },
       {
         chainType: 'solana',

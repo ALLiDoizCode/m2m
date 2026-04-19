@@ -1581,7 +1581,9 @@ describe('ConnectorNode', () => {
           chain: 'evm:base:8453',
           peerAddress: '0x' + 'ab'.repeat(20),
         })
-      ).rejects.toThrow('Settlement infrastructure not enabled');
+      ).rejects.toThrow(
+        'No EVM chain provider configured -- openChannel requires a chainProviders entry with chainType: "evm"'
+      );
     });
 
     it('throws if peer not registered', async () => {
@@ -1724,7 +1726,7 @@ describe('ConnectorNode', () => {
     it('throws if settlement infrastructure not enabled', async () => {
       // _channelManager is null by default
       await expect(connectorNode.getChannelState('0xchannel123')).rejects.toThrow(
-        'Settlement infrastructure not enabled'
+        'No EVM chain provider configured -- openChannel requires a chainProviders entry with chainType: "evm"'
       );
     });
 
