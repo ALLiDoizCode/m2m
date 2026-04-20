@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1](https://github.com/toon-protocol/connector/compare/v3.1.0...v3.1.1) (2026-04-20)
+
+### Bug Fixes
+
+- **deploy:** point production compose + README at toon-protocol GHCR ([0844452](https://github.com/toon-protocol/connector/commit/0844452e99d3ed3a9bc9755ff7354bd3ab11e4df))
+
 ## [3.1.0](https://github.com/toon-protocol/connector/compare/v3.0.0...v3.1.0) (2026-04-20)
 
 ### Features
