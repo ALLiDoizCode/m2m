@@ -762,6 +762,27 @@ jobs:
           echo "✓ Docker image pushed to GHCR"
           echo "  Tags: ${{ steps.meta.outputs.tags }}"
 
+      # Make the package public so operators can `docker pull` the image
+      # referenced in docker-compose.prod.yml without authenticating to GHCR.
+      # GHCR defaults new container packages to PRIVATE regardless of the
+      # linked repository's visibility, so this PATCH is required on first
+      # publish. Idempotent on subsequent runs.
+      #
+      # Fails soft (continue-on-error) — if the visibility patch fails (e.g.
+      # first run creating the package races with the API), the image is
+      # still published and the next run will set it. Surfacing the failure
+      # as a non-blocking warning avoids holding up the CI pipeline.
+      - name: Set container package visibility to public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            "/orgs/${{ github.repository_owner }}/packages/container/connector" \
+            -f visibility=public \
+            && echo "✓ Package visibility set to public" \
+            || echo "::warning::Could not set package visibility — may need manual fix in GHCR UI"
+
   # Performance benchmark job (main branch only)
   performance-benchmark:
     name: Performance Benchmark
