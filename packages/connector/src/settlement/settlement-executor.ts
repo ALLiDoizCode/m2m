@@ -35,6 +35,7 @@ import type {
   BalanceProofParams,
 } from './provider/payment-channel-provider';
 import type { ChannelManager } from './channel-manager';
+import type { ClaimReceiver } from './claim-receiver';
 
 /**
  * Configuration interface for SettlementExecutor
@@ -94,6 +95,7 @@ export class SettlementExecutor extends EventEmitter {
   private readonly logger: Logger;
   private readonly boundHandleSettlement: (event: SettlementTriggerEvent) => void;
   private perPacketClaimService: PerPacketClaimService | null = null;
+  private claimReceiver: ClaimReceiver | null = null;
   private channelManager: ChannelManager | null = null;
 
   /**
@@ -156,6 +158,17 @@ export class SettlementExecutor extends EventEmitter {
   setPerPacketClaimService(service: PerPacketClaimService): void {
     this.perPacketClaimService = service;
     this.logger.info('PerPacketClaimService set for on-chain settlement');
+  }
+
+  /**
+   * Set ClaimReceiver so the executor can resolve claims received over BTP when
+   * this node is the claimer (credit side) calling claimFromChannel on-chain.
+   *
+   * @param receiver - ClaimReceiver instance
+   */
+  setClaimReceiver(receiver: ClaimReceiver): void {
+    this.claimReceiver = receiver;
+    this.logger.info('ClaimReceiver set for on-chain settlement');
   }
 
   /**
@@ -506,7 +519,16 @@ export class SettlementExecutor extends EventEmitter {
     amount: bigint,
     provider: PaymentChannelProvider
   ): Promise<void> {
-    const latestClaim = this.perPacketClaimService?.getLatestClaim(channelId);
+    // claimFromChannel is invoked by the CREDIT side: we redeem using the
+    // peer's signed balance proof received over BTP. Prefer ClaimReceiver
+    // (received claims) and fall back to PerPacketClaimService (sent claims)
+    // only for edge cases where this node also sent claims on the same channel.
+    const receivedClaim = this.claimReceiver
+      ? await this.claimReceiver.getLatestVerifiedClaimForChannel(peerId, channelId)
+      : null;
+    const sentClaim = this.perPacketClaimService?.getLatestClaim(channelId) ?? null;
+    const latestClaim = receivedClaim ?? sentClaim;
+
     if (!latestClaim || !isEVMClaim(latestClaim)) {
       this.logger.error(
         { channelId, peerId },

@@ -17,6 +17,11 @@ V3AuthVoteDelay 4 seconds
 V3AuthDistDelay 4 seconds
 AssumeReachable 1
 ProtocolWarnings 1
+# Single /24 bridge network with only 4 relays — disable same-/16 path
+# restriction and conflux multi-path circuits so clients and hidden
+# services can build circuits. See docker/ator/torrc.hs for rationale.
+EnforceDistinctSubnets 0
+ConfluxEnabled 0
 
 # DirAuth identity
 AuthoritativeDirectory 1

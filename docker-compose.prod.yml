@@ -1,0 +1,90 @@
+# =============================================================================
+# Connector — Production Deployment (standalone connector + BLS)
+# =============================================================================
+# Tier-3 security posture: connector admin API is NOT published on the host,
+# gated by IP allowlist in config/connector.prod.yaml, reachable only from the
+# BLS over the compose bridge network. See README → "Production Deployment".
+#
+# Usage:
+#   # 1. Customize config/connector.prod.yaml (peers, routes, optional ATOR).
+#   # 2. Start the stack:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+#   # 3. Verify health:
+#   docker compose -f docker-compose.prod.yml ps
+#   curl http://127.0.0.1:3100/health    # BLS is the only host-exposed port
+#
+#   # 4. Tear down (preserves the connector data volume):
+#   docker compose -f docker-compose.prod.yml down
+#
+# =============================================================================
+
+services:
+  # ── Connector ──────────────────────────────────────────────────────────────
+  # Pulls the published image by default. To build locally from source,
+  # comment `image:` and uncomment `build:`.
+  connector:
+    image: ghcr.io/alldoizcode/connector:latest
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE: /app/config/connector.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./config/connector.prod.yaml:/app/config/connector.yaml:ro
+      - connector_data:/app/data
+    # Admin API port (8081) is intentionally NOT published. The BLS reaches
+    # it via compose DNS; external callers cannot. If you need to expose it,
+    # also set `adminApi.apiKey` in the config and restrict `allowedIPs`.
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:8080/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - app_net
+
+  # ── BLS (Business Logic Server) ────────────────────────────────────────────
+  # Sample implementation from scripts/standalone-e2e/bls.js that fulfills
+  # every inbound packet. REPLACE this with your real BLS — mount your own
+  # script, or swap the image for your application container entirely.
+  #
+  # Interface contract:
+  #   - POST /handle-packet    — accept/reject inbound packets
+  #   - GET  /health           — return 200 when ready
+  #   - (optional) POST to http://connector:8081/admin/ilp/send to originate
+  #     outbound packets. The allowlist accepts calls from this container.
+  bls:
+    image: node:22-alpine
+    restart: unless-stopped
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+      CONNECTOR_ADMIN_URL: http://connector:8081
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    ports:
+      # BLS is the only host-exposed port — tests/tools hit it on 127.0.0.1.
+      # Change 3100 to any free host port you prefer.
+      - '127.0.0.1:3100:3100'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      connector:
+        condition: service_healthy
+    networks:
+      - app_net
+
+networks:
+  app_net:
+    driver: bridge
+
+volumes:
+  connector_data:

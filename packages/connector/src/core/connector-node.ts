@@ -1084,6 +1084,12 @@ export class ConnectorNode implements HealthStatusProvider {
                 this._settlementMonitor.start();
               }
 
+              // Wire to SettlementExecutor so claimFromChannel can source the
+              // peer's signed balance proof from received claims, not just
+              // locally-sent ones. Without this, the credit-side settlement
+              // path has no claim to submit on-chain.
+              this._settlementExecutor?.setClaimReceiver(claimReceiver);
+
               this._logger.info(
                 { event: 'claim_receiver_enabled' },
                 'ClaimReceiver wired to BTP server and SettlementMonitor'

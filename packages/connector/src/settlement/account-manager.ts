@@ -843,8 +843,12 @@ export class AccountManager {
    * console.log(newBalance.creditBalance); // 0n
    */
   async recordSettlement(peerId: string, tokenId: string, amount: bigint): Promise<void> {
-    // Get peer account IDs
-    const accountPair = this.getPeerAccountPair(peerId, tokenId);
+    // Ensure peer accounts exist before posting the settlement transfer.
+    // getPeerAccountPair only derives IDs; if packet flow never triggered
+    // ensurePeerAccounts (e.g., inbound receiver in standalone mode where
+    // packets terminate at the BLS without outbound forwarding), the ledger
+    // would reject the transfer with "Debit account not found".
+    const accountPair = await this.ensurePeerAccounts(peerId, tokenId);
 
     this._logger.debug(
       {

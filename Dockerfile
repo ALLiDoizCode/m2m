@@ -22,6 +22,7 @@ COPY tsconfig.base.json ./
 # Copy workspace package.json files to preserve monorepo structure
 COPY packages/connector/package.json ./packages/connector/
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
 
 # Install all dependencies (including devDependencies for TypeScript compilation)
 # Use npm ci for reproducible builds
@@ -31,12 +32,17 @@ RUN npm ci --workspaces --ignore-scripts
 # Copy TypeScript configuration and source code
 COPY packages/connector/tsconfig.json ./packages/connector/
 COPY packages/shared/tsconfig.json ./packages/shared/
+COPY packages/mina-zkapp/tsconfig.json ./packages/mina-zkapp/
 COPY packages/connector/src ./packages/connector/src
 COPY packages/shared/src ./packages/shared/src
+COPY packages/mina-zkapp/src ./packages/mina-zkapp/src
 
 # Build all packages (TypeScript compilation)
-# Build shared first, then connector (dependency order)
-RUN npm run build --workspace=@toon-protocol/shared && npm run build --workspace=@toon-protocol/connector
+# Build shared and mina-zkapp before connector — connector imports both via
+# dynamic import but its tsc step still needs their .d.ts files on disk.
+RUN npm run build --workspace=@toon-protocol/shared \
+ && npm run build --workspace=@toon-protocol/mina-zkapp \
+ && npm run build --workspace=@toon-protocol/connector
 
 # ============================================
 # Stage 2: Runtime
@@ -53,6 +59,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/connector/package.json ./packages/connector/
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
 
 # Install production dependencies only (excludes devDependencies like TypeScript)
 # This significantly reduces image size
@@ -73,6 +80,7 @@ RUN apk add --no-cache jq && \
 # Only copy dist directories, not source code
 COPY --from=builder /app/packages/connector/dist ./packages/connector/dist
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/mina-zkapp/dist ./packages/mina-zkapp/dist
 
 # Install wget for health check (minimal package, available in Alpine)
 # Used by Docker HEALTHCHECK to query HTTP health endpoint
