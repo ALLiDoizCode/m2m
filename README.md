@@ -577,7 +577,7 @@ The production stack runs a single connector and your BLS on an isolated Docker 
 ```bash
 # Option A: Pull the published image (recommended for deployments).
 # Images are published to GHCR on every push to main.
-docker pull ghcr.io/alldoizcode/connector:latest
+docker pull ghcr.io/toon-protocol/connector:latest
 
 # Option B: Build locally from source. Uncomment the `build:` block in
 # docker-compose.prod.yml and comment out the `image:` line.

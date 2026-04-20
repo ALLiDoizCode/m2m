@@ -24,7 +24,7 @@ services:
   # Pulls the published image by default. To build locally from source,
   # comment `image:` and uncomment `build:`.
   connector:
-    image: ghcr.io/alldoizcode/connector:latest
+    image: ghcr.io/toon-protocol/connector:latest
     # build:
     #   context: .
     #   dockerfile: Dockerfile
