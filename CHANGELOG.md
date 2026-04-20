@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0](https://github.com/toon-protocol/connector/compare/v3.0.0...v3.1.0) (2026-04-20)
+
+### Features
+
+- **standalone:** comprehensive standalone-mode E2E coverage + production stack ([fbc963a](https://github.com/toon-protocol/connector/commit/fbc963a1b17868956b809b5d9678ce93deab6ce7))
+
 ## [3.0.0](https://github.com/toon-protocol/connector/compare/v2.5.0...v3.0.0) (2026-04-19)
 
 ### ⚠ BREAKING CHANGES
