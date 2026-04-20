@@ -407,14 +407,334 @@ services:
       retries: 10
       start_period: 60s
 
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Standalone Mode E2E — 2 connector containers + 2 BLS containers
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Proves the connector Docker image boots with deploymentMode: standalone,
+  # peers over BTP across the compose network, forwards packets via
+  # /admin/ilp/send, and delivers to a BLS over HTTP /handle-packet.
+  # Only the admin API ports are published to the host so the test harness
+  # can drive assertions.
+  standalone-bls1:
+    image: node:22-alpine
+    profiles: [standalone-e2e]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    ports:
+      - '127.0.0.1:13101:3100'
+    networks:
+      - standalone_net
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  standalone-bls2:
+    image: node:22-alpine
+    profiles: [standalone-e2e]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    ports:
+      - '127.0.0.1:13102:3100'
+    networks:
+      - standalone_net
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  standalone-peer1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [standalone-e2e]
+    environment:
+      CONFIG_FILE: /app/config/peer1.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ./scripts/standalone-e2e/peer1.yaml:/app/config/peer1.yaml:ro
+    ports:
+      - '127.0.0.1:18081:8081' # admin API
+      - '127.0.0.1:18080:8080' # health
+    depends_on:
+      standalone-bls1:
+        condition: service_healthy
+    networks:
+      - standalone_net
+
+  standalone-peer2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [standalone-e2e]
+    environment:
+      CONFIG_FILE: /app/config/peer2.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ./scripts/standalone-e2e/peer2.yaml:/app/config/peer2.yaml:ro
+    ports:
+      - '127.0.0.1:28081:8081' # admin API
+      - '127.0.0.1:28080:8080' # health
+    depends_on:
+      standalone-bls2:
+        condition: service_healthy
+    networks:
+      - standalone_net
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Standalone + Public ATOR E2E — single connector container + BLS,
+  # transport pointed at a real public Anyone proxy URL.
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Proves the connector Docker image boots with `deploymentMode: standalone`
+  # AND `transport.type: socks5` against real public infrastructure. We do NOT
+  # attempt peer-to-peer routing through the public network (would require
+  # hidden services, out of scope for this test). Instead we assert the
+  # transport probe succeeds at startup, admin API is reachable, and local
+  # delivery still works with the SOCKS5 transport configured.
+  #
+  # ${ATOR_CONFIG_DIR} is set by the Jest harness after it probes and picks a
+  # reachable public proxy, then writes the peer config into that tmp dir.
+  standalone-ator-bls:
+    image: node:22-alpine
+    profiles: [standalone-ator-public]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    ports:
+      - '127.0.0.1:13103:3100'
+    networks:
+      - standalone_ator_net
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  standalone-ator-peer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [standalone-ator-public]
+    environment:
+      CONFIG_FILE: /app/config/peer.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ${ATOR_CONFIG_DIR:-./scripts/standalone-e2e}/peer-ator.yaml:/app/config/peer.yaml:ro
+    ports:
+      - '127.0.0.1:18083:8081' # admin API
+      - '127.0.0.1:18082:8080' # health
+    depends_on:
+      standalone-ator-bls:
+        condition: service_healthy
+    networks:
+      - standalone_ator_net
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Standalone + Public ATOR Peer-to-Peer — full production topology
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Two anon sidecars on the public Anyone network, each hosting a hidden
+  # service that forwards to an adjacent standalone connector container's
+  # BTP port. Connectors dial each other over the public ATOR network via
+  # `.anon` rendezvous — this is the real deal, not SOCKS5 egress.
+  #
+  # The test harness starts the sidecars first (`docker compose up -d
+  # standalone-p2p-sidecar-a standalone-p2p-sidecar-b`), waits for each
+  # hostname file on the shared volume, renders connector configs with the
+  # peer `.anon` URLs into ${ATOR_P2P_CONFIG_DIR}, then starts the rest.
+  # Each peer cluster (sidecar + connector + bls) shares a single network
+  # namespace via `network_mode: service:<sidecar>`. This makes the anon HS
+  # target `127.0.0.1:3000` — no compose-DNS chicken-and-egg between sidecar
+  # startup and connector startup. The sidecar service OWNS the namespace and
+  # declares the `ports` + `networks` blocks; its cluster-mates inherit them.
+  standalone-p2p-sidecar-a:
+    image: ator-public-sidecar:v0.4.10.0-beta
+    build:
+      context: ./docker/ator-public-sidecar
+      dockerfile: Dockerfile
+    profiles: [standalone-ator-p2p]
+    environment:
+      NICKNAME: peer-a
+      TARGET_PORT: '3000'
+    volumes:
+      - standalone_p2p_shared:/shared
+      - standalone_p2p_sidecar_a_data:/var/lib/anon
+    networks:
+      - standalone_p2p_net
+    # Ports published on the sidecar's namespace — connector and bls bind
+    # inside the SAME namespace so these forward to them directly.
+    ports:
+      - '127.0.0.1:18091:8081' # connector-a admin API
+      - '127.0.0.1:18090:8080' # connector-a health
+      - '127.0.0.1:13301:3100' # bls-a (for /received introspection from test)
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 9050 || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 180s
+
+  standalone-p2p-sidecar-b:
+    image: ator-public-sidecar:v0.4.10.0-beta
+    build:
+      context: ./docker/ator-public-sidecar
+      dockerfile: Dockerfile
+    profiles: [standalone-ator-p2p]
+    environment:
+      NICKNAME: peer-b
+      TARGET_PORT: '3000'
+    volumes:
+      - standalone_p2p_shared:/shared
+      - standalone_p2p_sidecar_b_data:/var/lib/anon
+    networks:
+      - standalone_p2p_net
+    ports:
+      - '127.0.0.1:28091:8081' # connector-b admin API
+      - '127.0.0.1:28090:8080' # connector-b health
+      - '127.0.0.1:13302:3100' # bls-b
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 9050 || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 180s
+
+  standalone-p2p-bls-a:
+    image: node:22-alpine
+    profiles: [standalone-ator-p2p]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    network_mode: service:standalone-p2p-sidecar-a
+    depends_on:
+      standalone-p2p-sidecar-a:
+        condition: service_started
+
+  standalone-p2p-bls-b:
+    image: node:22-alpine
+    profiles: [standalone-ator-p2p]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    network_mode: service:standalone-p2p-sidecar-b
+    depends_on:
+      standalone-p2p-sidecar-b:
+        condition: service_started
+
+  standalone-p2p-connector-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [standalone-ator-p2p]
+    environment:
+      CONFIG_FILE: /app/config/peer.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ${ATOR_P2P_CONFIG_DIR:-./scripts/standalone-e2e}/peer-p2p-a.yaml:/app/config/peer.yaml:ro
+    network_mode: service:standalone-p2p-sidecar-a
+    depends_on:
+      standalone-p2p-sidecar-a:
+        condition: service_healthy
+
+  standalone-p2p-connector-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [standalone-ator-p2p]
+    environment:
+      CONFIG_FILE: /app/config/peer.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ${ATOR_P2P_CONFIG_DIR:-./scripts/standalone-e2e}/peer-p2p-b.yaml:/app/config/peer.yaml:ro
+    network_mode: service:standalone-p2p-sidecar-b
+    depends_on:
+      standalone-p2p-sidecar-b:
+        condition: service_healthy
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Tier-3 admin-API allowlist demo — BLS + connector in separate
+  # containers on one compose network. Admin port is NOT published to
+  # the host. BLS reaches admin API via compose DNS; the connector
+  # accepts the call because the BLS's source IP falls in the docker
+  # bridge CIDR allowlist.
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  standalone-allowlist-bls:
+    image: node:22-alpine
+    profiles: [standalone-allowlist]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+      CONNECTOR_ADMIN_URL: http://standalone-allowlist-connector:8081
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    ports:
+      # Only the BLS is reachable from the host (test harness drives it).
+      # The connector's admin port is intentionally NOT published.
+      - '127.0.0.1:13401:3100'
+    networks:
+      - standalone_allowlist_net
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  standalone-allowlist-connector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [standalone-allowlist]
+    environment:
+      CONFIG_FILE: /app/config/peer.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ./scripts/standalone-e2e/peer-allowlist.yaml:/app/config/peer.yaml:ro
+    # Admin API port (8081) is intentionally NOT in `ports:` — the allowlist
+    # is a defense-in-depth layer on TOP of not publishing, not a replacement.
+    depends_on:
+      standalone-allowlist-bls:
+        condition: service_healthy
+    networks:
+      - standalone_allowlist_net
+
 networks:
   ator_net:
     driver: bridge
   ator_host:
     driver: bridge
-    # Non-internal network for hs1's host-facing SOCKS port publishing.
-    # hs1 joins both ator_net (internal, for relay traffic) and ator_host
-    # (non-internal, so Docker can publish port 9150 to the host).
+  standalone_net:
+    driver: bridge
+  standalone_ator_net:
+    driver: bridge
+  standalone_p2p_net:
+    driver: bridge
+  standalone_allowlist_net:
+    driver: bridge
 
 volumes:
   ator_dirauth1:
@@ -426,3 +746,6 @@ volumes:
   ator_relay4:
   ator_shared:
   ator_hs1:
+  standalone_p2p_shared:
+  standalone_p2p_sidecar_a_data:
+  standalone_p2p_sidecar_b_data:

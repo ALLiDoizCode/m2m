@@ -13,6 +13,13 @@ TestingTorNetwork 1
 AgreeToTerms 1
 AssumeReachable 1
 ProtocolWarnings 1
+# The local testnet has all relays on a single /24 bridge (192.168.117.0/24)
+# with only 4 non-authority relays. Default path-selection constraints
+# refuse to build circuits because (a) same-/16 subnet restriction excludes
+# every candidate and (b) conflux multi-path circuits cannot find enough
+# diverse relays. Disable both so HS rendezvous / descriptor upload work.
+EnforceDistinctSubnets 0
+ConfluxEnabled 0
 
 # Ports
 ORPort ${ORPORT}

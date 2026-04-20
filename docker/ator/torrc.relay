@@ -13,6 +13,11 @@ TestingTorNetwork 1
 AgreeToTerms 1
 AssumeReachable 1
 ProtocolWarnings 1
+# Single /24 bridge network with only 4 relays — disable same-/16 path
+# restriction and conflux multi-path circuits. See docker/ator/torrc.hs
+# for the full rationale.
+EnforceDistinctSubnets 0
+ConfluxEnabled 0
 
 ORPort ${ORPORT}
 DirPort ${DIRPORT}

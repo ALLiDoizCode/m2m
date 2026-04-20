@@ -1032,4 +1032,46 @@ export class ClaimReceiver extends EventEmitter {
       return null;
     }
   }
+
+  /**
+   * Retrieve latest verified, unredeemed claim for a (peerId, channelId) pair
+   * without specifying blockchain.
+   *
+   * Used by SettlementExecutor when triggering on-chain claimFromChannel — the
+   * receiver of packets accumulates credit and needs the sender's latest signed
+   * claim to redeem. Channel IDs are globally unique, so the blockchain is
+   * implicit in the row returned.
+   *
+   * @param peerId - Peer ID (claim sender)
+   * @param channelId - Channel identifier
+   * @returns Latest verified, unredeemed claim or null if none found
+   */
+  async getLatestVerifiedClaimForChannel(
+    peerId: string,
+    channelId: string
+  ): Promise<BTPClaimMessage | null> {
+    try {
+      const stmt = this.db.prepare(`
+        SELECT claim_data
+        FROM received_claims
+        WHERE peer_id = ?
+          AND channel_id = ?
+          AND verified = 1
+          AND redeemed_at IS NULL
+        ORDER BY received_at DESC
+        LIMIT 1
+      `);
+
+      const row = stmt.get(peerId, channelId) as { claim_data: string } | undefined;
+
+      if (!row) {
+        return null;
+      }
+
+      return JSON.parse(row.claim_data) as BTPClaimMessage;
+    } catch (error) {
+      this.logger.error({ error }, 'Failed to query latest verified claim for channel');
+      return null;
+    }
+  }
 }

@@ -559,88 +559,397 @@ Perfect for development and debugging. Disable in production.
 
 ## Docker Deployment
 
-The fastest way to experiment with connectors is using Docker. Several compose files are provided at the project root:
+The simplest production-ready topology is a **standalone connector paired with your Business Logic Server (BLS)**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships this pattern out of the box.
 
-| Compose File                            | Purpose                                  |
-| --------------------------------------- | ---------------------------------------- |
-| `docker-compose.yml`                    | Base multi-node network with TigerBeetle |
-| `docker-compose-dev.yml`                | Development setup                        |
-| `docker-compose-production.yml`         | Production deployment                    |
-| `docker-compose-e2e-no-tigerbeetle.yml` | E2E tests with in-memory ledger          |
-| `docker-compose-evm-test.yml`           | EVM settlement testing                   |
-| `docker-compose-base-e2e-test.yml`      | Base L2 E2E testing                      |
+Two compose files ship at the repo root:
 
-### Quick Start: Development Network
+| Compose file              | Purpose                                                                                                                                                                                                                          |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker-compose.prod.yml` | **Production deployment.** Connector + BLS, secure by default.                                                                                                                                                                   |
+| `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, ATOR testnet, and the standalone-mode E2E test profiles (`standalone-e2e`, `standalone-ator-public`, `standalone-ator-p2p`, `standalone-allowlist`). Not for production use. |
 
-```bash
-# 1. Build the connector image
-docker build -t connector .
+### Production Deployment: Standalone Connector + BLS
 
-# 2. Start the development network
-docker-compose -f docker-compose-dev.yml up -d
+The production stack runs a single connector and your BLS on an isolated Docker bridge network. The admin API is reachable only from the BLS container — it is **not** published to the host interface.
 
-# 3. Check status
-docker-compose -f docker-compose-dev.yml ps
-
-# 4. View logs
-docker-compose -f docker-compose-dev.yml logs -f
-```
-
-### Production Deployment
+**Step 1 — Pull the image** (or build locally)
 
 ```bash
-# 1. Copy .env.example and configure
-cp .env.example .env
-# Edit .env with your settings (RPC URLs, private keys, etc.)
+# Option A: Pull the published image (recommended for deployments).
+# Images are published to GHCR on every push to main.
+docker pull ghcr.io/alldoizcode/connector:latest
 
-# 2. Start production network
-docker-compose -f docker-compose-production.yml up -d
-
-# 3. Check health
-docker-compose -f docker-compose-production.yml ps
+# Option B: Build locally from source. Uncomment the `build:` block in
+# docker-compose.prod.yml and comment out the `image:` line.
+docker compose -f docker-compose.prod.yml build
 ```
 
-### TigerBeetle (High-Performance Ledger)
+**Step 2 — Customize the config**
 
-The base `docker-compose.yml` includes [TigerBeetle](https://tigerbeetle.com) for production-grade double-entry accounting:
+Edit [`config/connector.prod.yaml`](config/connector.prod.yaml) to set your node ID, peers, and routes. The template ships Tier-3 security defaults:
+
+```yaml
+# config/connector.prod.yaml (excerpt)
+nodeId: prod-connector
+deploymentMode: standalone
+
+adminApi:
+  enabled: true
+  host: 0.0.0.0 # inside container only; not published to host
+  port: 8081
+  allowedIPs:
+    - 172.16.0.0/12 # docker user-defined-bridge pool
+    - 192.168.0.0/16 # fallback
+
+localDelivery:
+  enabled: true
+  handlerUrl: http://bls:3100 # compose-DNS resolves to sibling container
+
+peers: []
+routes: []
+```
+
+**Step 3 — Start the stack**
 
 ```bash
-# Start network with TigerBeetle
-docker-compose up -d
+docker compose -f docker-compose.prod.yml up -d
 
-# Check status (including TigerBeetle)
-docker-compose ps
+# Verify both containers are healthy:
+docker compose -f docker-compose.prod.yml ps
 
-# View TigerBeetle logs
-docker-compose logs -f tigerbeetle
+# The BLS health endpoint is the only host-exposed port:
+curl http://127.0.0.1:3100/health
 ```
 
-### Docker Environment Variables
+**Step 4 — Verify the BLS can call the admin API**
 
-Configure connectors using environment variables (see `.env.example` for full list):
+```bash
+# The BLS container drives admin calls over the compose network:
+curl -X POST http://127.0.0.1:3100/trigger-admin-send \
+  -H 'Content-Type: application/json' \
+  -d '{"destination":"test.prod-connector.self","amount":"0"}'
+# → {"accepted":false,"code":"F02","message":"No route to destination: ..."}
+# (F02 is expected with an empty routes list — it proves the admin API accepted
+# the call from the BLS but had nowhere to forward it.)
 
-| Variable            | Purpose                   | Default |
-| ------------------- | ------------------------- | ------- |
-| `NODE_ID`           | Connector identifier      | —       |
-| `BTP_PORT`          | BTP WebSocket server port | `4000`  |
-| `HEALTH_CHECK_PORT` | HTTP health endpoint port | `8080`  |
-| `EXPLORER_PORT`     | Explorer UI port          | `5173`  |
-| `LOG_LEVEL`         | Logging verbosity         | `info`  |
+# Direct access to the admin API from the host is refused:
+curl -m 2 http://127.0.0.1:8081/admin/peers
+# → (no response; port is not published)
+```
 
-Chain-specific settings (RPC URLs, private keys, contract addresses) are configured in `chainProviders` in the config file, not as environment variables.
+**Step 5 — Tear down**
+
+```bash
+docker compose -f docker-compose.prod.yml down           # preserves the connector data volume
+docker compose -f docker-compose.prod.yml down --volumes  # wipes the data volume too
+```
+
+### Writing Your Own BLS
+
+The compose file ships a minimal BLS (`scripts/standalone-e2e/bls.js`) that fulfills every inbound packet — fine for smoke-testing, not for production. Your real BLS is a plain HTTP server that speaks two endpoints. Any language works: if it can serve HTTP + JSON, it can be a BLS.
+
+#### The HTTP contract
+
+**`GET /health`** — return any 200 response when ready. Used by docker compose healthchecks and by the connector.
+
+**`POST /handle-packet`** — the connector posts here for every inbound packet addressed to your agent.
+
+_Request body_ (simplified shape from [`packages/connector/src/core/payment-handler.ts`](packages/connector/src/core/payment-handler.ts)):
+
+```json
+{
+  "paymentId": "base64url-16-bytes",
+  "destination": "test.my-agent.user-42",
+  "amount": "1000",
+  "expiresAt": "2026-04-20T18:42:00.000Z",
+  "data": "base64-encoded-app-data-optional",
+  "isTransit": false
+}
+```
+
+- `amount` is a **string** — amounts can exceed JS safe integer range, so never parse as `number`
+- `data` is optional; base64 of up to 32 KB of application payload
+- `isTransit: true` means it's a pass-through notification at an intermediate hop — your response is **ignored**; treat as fire-and-forget
+
+_Response body_ — accept:
+
+```json
+{ "accept": true, "data": "base64-optional-echo-payload" }
+```
+
+_Response body_ — reject:
+
+```json
+{
+  "accept": false,
+  "rejectReason": {
+    "code": "insufficient_funds",
+    "message": "Balance 42 < required 1000"
+  }
+}
+```
+
+Your business `code` is auto-mapped to an ILP error code by the connector:
+
+| Your `code`          | → ILP | Meaning                     |
+| -------------------- | ----- | --------------------------- |
+| `insufficient_funds` | `T04` | try again later             |
+| `expired`            | `R00` | packet expired              |
+| `invalid_request`    | `F00` | permanent malformed request |
+| `invalid_amount`     | `F03` | amount not accepted         |
+| `unexpected_payment` | `F06` | no reason to pay us         |
+| `application_error`  | `F99` | generic application reject  |
+| `internal_error`     | `T00` | server broke                |
+| `timeout`            | `T00` | operation timed out         |
+| _(anything else)_    | `F99` | fallback                    |
+
+#### Minimal Node.js BLS (drop-in replacement)
+
+Create a `bls/` directory alongside `docker-compose.prod.yml`:
+
+```text
+bls/
+├── Dockerfile
+├── package.json
+└── server.js
+```
+
+`bls/server.js`:
+
+```javascript
+import express from 'express';
+
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+
+app.get('/health', (_req, res) => res.json({ status: 'healthy' }));
+
+app.post('/handle-packet', async (req, res) => {
+  const { paymentId, destination, amount, data, isTransit } = req.body;
+  console.log(
+    `[BLS] ${isTransit ? 'transit' : 'deliver'} ${amount} → ${destination} (${paymentId})`
+  );
+
+  // Your business logic here. Return accept:true/false based on whatever
+  // invariants your application enforces (balance checks, whitelists, etc.).
+  if (BigInt(amount) > 100_000n) {
+    return res.json({
+      accept: false,
+      rejectReason: { code: 'invalid_amount', message: 'amount exceeds limit' },
+    });
+  }
+
+  // Optionally echo app data back in the fulfill packet:
+  res.json({ accept: true, data });
+});
+
+// Optional: originate outbound packets via the connector's admin API.
+app.post('/send', async (req, res) => {
+  const adminRes = await fetch(`${process.env.CONNECTOR_ADMIN_URL}/admin/ilp/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      destination: req.body.destination,
+      amount: req.body.amount,
+      data: req.body.data ?? '',
+    }),
+  });
+  res.status(adminRes.status).send(await adminRes.text());
+});
+
+app.listen(Number(process.env.PORT ?? 3100), '0.0.0.0', () =>
+  console.log(`BLS listening on :${process.env.PORT ?? 3100}`)
+);
+```
+
+`bls/package.json`:
+
+```json
+{
+  "name": "my-bls",
+  "type": "module",
+  "dependencies": { "express": "^4.19.0" }
+}
+```
+
+`bls/Dockerfile`:
+
+```dockerfile
+FROM node:22-alpine
+WORKDIR /app
+COPY package.json .
+RUN npm install --omit=dev
+COPY server.js .
+EXPOSE 3100
+CMD ["node", "server.js"]
+```
+
+#### Minimal Python BLS (Flask)
+
+If you prefer Python, the contract is identical:
+
+`bls/app.py`:
+
+```python
+import os
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.get('/health')
+def health():
+    return {'status': 'healthy'}
+
+@app.post('/handle-packet')
+def handle_packet():
+    body = request.get_json()
+    amount = int(body['amount'])   # amount is a string; parse carefully
+    destination = body['destination']
+    print(f"[BLS] {amount} → {destination} ({body['paymentId']})")
+
+    if amount > 100_000:
+        return jsonify(accept=False, rejectReason={
+            'code': 'invalid_amount', 'message': 'amount exceeds limit'
+        })
+    return jsonify(accept=True, data=body.get('data'))
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 3100)))
+```
+
+`bls/Dockerfile`:
+
+```dockerfile
+FROM python:3.12-alpine
+WORKDIR /app
+RUN pip install --no-cache-dir flask
+COPY app.py .
+EXPOSE 3100
+CMD ["python", "app.py"]
+```
+
+#### Wire it into `docker-compose.prod.yml`
+
+Replace the sample BLS block with your own:
+
+```yaml
+services:
+  bls:
+    build: ./bls # your Dockerfile above
+    restart: unless-stopped
+    environment:
+      PORT: '3100'
+      CONNECTOR_ADMIN_URL: http://connector:8081 # compose DNS, same bridge net
+    ports:
+      - '127.0.0.1:3100:3100' # loopback only
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      connector:
+        condition: service_healthy
+    networks:
+      - app_net
+```
+
+Everything else in the compose file stays as-is — same network, same allowlist picks up your BLS's bridge-subnet IP automatically, same admin API reachable at `http://connector:8081`.
+
+#### Run it
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+
+# Health check your BLS:
+curl http://127.0.0.1:3100/health
+
+# Drive a test packet from your BLS through the connector:
+curl -X POST http://127.0.0.1:3100/send \
+  -H 'Content-Type: application/json' \
+  -d '{"destination":"test.peer-b.user","amount":"10"}'
+
+# Follow BLS logs to see inbound `/handle-packet` calls:
+docker compose -f docker-compose.prod.yml logs -f bls
+```
+
+That's the whole integration. The connector handles ILP routing, settlement, claim validation, transport, and admin APIs. Your BLS handles the part that matters to your application: _what do we do with this payment?_
+
+### Enabling ATOR Transport (Public Anyone Network)
+
+Route the connector's BTP WebSocket traffic through the public Anyone Protocol network for sender-side anonymity. This uses SOCKS5 egress against the public Anyone proxies — no additional containers required.
+
+**Step 1 — Uncomment the transport block** in `config/connector.prod.yaml`:
+
+```yaml
+transport:
+  type: socks5
+  managed: false
+  socksProxy: socks5h://5.78.181.0:9052
+  externalUrl: ws://placeholder
+```
+
+**Step 2 — Restart the connector**
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --force-recreate connector
+
+# Verify transport is live + healthy:
+curl -s http://127.0.0.1:3100/health
+# The connector's health endpoint (inside its container) will report:
+#   transport: { type: 'socks5', healthy: true }
+# once the SOCKS5 probe to the public proxy succeeds.
+```
+
+**Changing regions / using your own proxy.** The `socksProxy` field takes any `socks5h://host:port` URL. The Anyone team publishes three public proxies (Oregon, Nürnberg, Warsaw) — swap the URL to the one geographically closest to your connector:
+
+```yaml
+# Option A — Oregon, USA
+socksProxy: socks5h://5.78.181.0:9052
+
+# Option B — Nürnberg, Germany
+socksProxy: socks5h://157.90.113.23:9052
+
+# Option C — Warsaw, Poland
+socksProxy: socks5h://57.128.249.250:9052
+
+# Option D — Your own anon-client sidecar
+socksProxy: socks5h://my-anon-sidecar:9050
+```
+
+The authoritative list of public proxies is at <https://docs.anyone.io/connect/public-proxies>. If a proxy becomes unavailable, pick another from that page and restart the connector.
+
+**Peer-to-peer ATOR routing** (both ends of a BTP link anonymized via hidden services) is a more advanced topology — see `docker compose --profile standalone-ator-p2p` in [`docker-compose.yml`](docker-compose.yml) and [`test/integration/standalone-ator-public-p2p-container-e2e.test.ts`](packages/connector/test/integration/standalone-ator-public-p2p-container-e2e.test.ts) for a working reference implementation.
 
 ### Troubleshooting
 
 ```bash
-# Check container logs
-docker-compose logs connector-a
+# Follow logs:
+docker compose -f docker-compose.prod.yml logs -f connector
+docker compose -f docker-compose.prod.yml logs -f bls
 
-# Stop and remove data (WARNING: deletes all balances)
-docker-compose down -v
+# Rebuild from source after local changes:
+docker compose -f docker-compose.prod.yml build --no-cache connector
 
-# Rebuild from scratch
-docker build --no-cache -t connector .
+# Exec into the running connector (image runs as non-root user 'node'):
+docker compose -f docker-compose.prod.yml exec connector sh
 ```
+
+### Security Posture Summary
+
+The production compose ships secure-by-default:
+
+| Concern                       | Default behavior                                                 |
+| ----------------------------- | ---------------------------------------------------------------- |
+| Admin API reachable on host   | **No** — port 8081 is not published                              |
+| Admin API reachable cross-net | **No** — `allowedIPs` restricts callers to docker bridge subnets |
+| Packet-delivery BLS exposed   | Loopback only — `127.0.0.1:3100`                                 |
+| Connector runs as root        | **No** — image runs as non-root user `node` (uid 1000)           |
+| Secrets in YAML               | None in the template — `apiKey` is commented out by default      |
+
+If your deployment publishes the admin API (e.g., behind a reverse proxy), you **must** additionally set `adminApi.apiKey` in the config and inject the value from a secrets manager — do not commit keys to the YAML.
 
 ## Development
 

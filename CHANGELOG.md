@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **standalone-mode E2E suite (epic-36 addendum):** 25 new passing integration tests across 8 files covering the full standalone deployment-mode matrix:
+  - `standalone-smoke-e2e.test.ts` (4 tests) — admin API + BTP + local-delivery HTTP surface, in-process
+  - `standalone-settlement-e2e.test.ts` (5 tests) — `chainProviders[evm]`-only settlement + on-chain `claimFromChannel`
+  - `standalone-multihop-e2e.test.ts` (5 tests) — 3-peer linear chain routing via admin API
+  - `standalone-claim-gate-e2e.test.ts` (2 tests) — F06 inbound-claim-validation gate still fires in standalone mode
+  - `standalone-container-e2e.test.ts` (3 tests) — two connector containers + two BLS containers across compose-DNS bridge
+  - `standalone-ator-public-container-e2e.test.ts` (3 tests) — container boots with `transport: socks5` against a live public Anyone proxy
+  - `standalone-ator-public-p2p-container-e2e.test.ts` (3 tests) — peer-to-peer ILP routing via hidden-service rendezvous on the **real public ATOR network**
+  - `standalone-admin-allowlist-e2e.test.ts` (3 tests) — Tier-3 security topology: BLS → admin API via bridge + `allowedIPs`, admin port unpublished
+  - `standalone-ator-hs-local-e2e.test.ts` (scaffolded, double-gated skip) — local-testnet HS rendezvous; blocked by relay-descriptor bridge-IP routing, documented in-file
+- **Production deployment stack:** `docker-compose.prod.yml` at repo root, `config/connector.prod.yaml` template with Tier-3 defaults + commented ATOR section, complete rewrite of the README `## Docker Deployment` section covering standalone + BLS deployment, ATOR enablement with public-proxy list (+ instructions for swapping regions), BLS-writing guide (HTTP contract + Node.js + Python examples), and security-posture summary.
+- **`@toon-protocol/connector` API additions (additive, non-breaking):**
+  - `ClaimReceiver.getLatestVerifiedClaimForChannel(peerId, channelId)` — resolves a received claim without requiring the caller to know the blockchain discriminator.
+  - `SettlementExecutor.setClaimReceiver(receiver)` — wires the claim-receiver for receiver-side `claimFromChannel` invocations.
+- **ATOR public-network Docker sidecar:** `docker/ator-public-sidecar/` (Dockerfile + entrypoint + pinned checksums) for peer-to-peer HS topology; pinned `anon v0.4.10.0-beta`.
+- **Make targets:** `standalone-test`, `standalone-test-docker`, `standalone-test-ator-public`, `standalone-test-ator-p2p`, `standalone-test-allowlist`.
+- **CI jobs:** `standalone-e2e` + `standalone-container-e2e` on `ci.yml` (main-branch pushes); `standalone-ator-public` + `standalone-ator-p2p` on `nightly-ator.yml`.
+
+### Fixed
+
+- **Settlement receiver-side claim resolution:** `SettlementExecutor.settleViaExistingChannel` previously pulled the balance proof from `PerPacketClaimService` (sender-side sent claims). `claimFromChannel` is invoked by the CREDIT side redeeming a peer's signed proof received over BTP, so this path always returned `null` and threw _"No per-packet claim available for settlement."_ Now prefers `ClaimReceiver.getLatestVerifiedClaimForChannel` (received claims), falling back to sent claims only when no received claim exists.
+- **`AccountManager.recordSettlement` idempotency:** the settlement transfer failed with _"Debit account not found"_ whenever the peer's ledger accounts hadn't been pre-created by prior packet flow (common in standalone receivers that never forward outbound). Now calls `ensurePeerAccounts` (idempotent) before posting the transfer.
+- **`ManagedAnonClient` SDK compatibility:** the default factory only resolved `mod.Anon`, but `@anyone-protocol/anyone-client@1.1.x` exports `mod.Process`. Factory now tries `Process → Anon → default` in order. Separately, the SDK's `createAnonConfigFile` reads `options.configFile` but `ManagedAnonClient` was setting `options.configFilePath` — the custom anonrc (with `TestingTorNetwork` + DirAuthority lines) was silently ignored, forcing fallback to public ATOR even when a testnet anonrc had been pre-written. Both property names are now set.
+- **Dockerfile `mina-zkapp` inclusion:** the production image build failed with `Cannot find module '@toon-protocol/mina-zkapp'` because only `shared` + `connector` packages were copied. Builder and runtime stages now include `packages/mina-zkapp` so the image builds cleanly.
+
+### Changed
+
+- **ATOR local testnet torrc tuning:** `docker/ator/torrc.{dirauth,hs,relay}` gain `EnforceDistinctSubnets 0` and `ConfluxEnabled 0` — the single-/24 testnet bridge with only 4 non-authority relays cannot satisfy default path-selection constraints, so HS descriptor upload and rendezvous circuits now build in the local testnet.
+- **`.gitignore`:** added `packages/connector/data/ledger-*.json` and `packages/connector/terms-agreement` so transient test-runtime artifacts stop accumulating in the repo.
+
 - **36-6:** Deployment guide update with Verification Status, Local Development Network, prerequisites split (operational vs development), and real-binary troubleshooting entries (Story 36.6)
 - **36-5:** Nightly CI workflow (`nightly-ator.yml`) + system-tor fallback smoke test (Story 36.5) -- runs real-binary ATOR suite and system-tor fallback on Linux + macOS nightly at 04:00 UTC. Platform matrix documented in `docs/ator-transport.md`.
 - **36-4:** Hidden-service + managed-client real-binary ATOR test suite (Story 36.4) — new env-gated jest suite (`transport-ator-hidden-service.test.ts`) that exercises the managed `anon` lifecycle and `.anon` hidden-service rendezvous end-to-end against the real binary under `make ator-test`. Adds socat echo server to hs1 container for HS rendezvous tests.

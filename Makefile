@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs ator-up ator-down ator-logs ator-test infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs ator-up ator-down ator-logs ator-test standalone-test standalone-test-docker standalone-test-ator-public standalone-test-ator-p2p standalone-test-allowlist infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -14,6 +14,11 @@ help:
 	@echo "Testing:"
 	@echo "  make test                 Run all tests"
 	@echo "  make test-unit            Run unit tests only"
+	@echo "  make standalone-test      Run standalone-mode E2E (smoke + settlement; requires anvil-up)"
+	@echo "  make standalone-test-docker Run container-based standalone E2E (builds image + docker compose)"
+	@echo "  make standalone-test-ator-public Run container-based standalone + public ATOR proxy E2E"
+	@echo "  make standalone-test-ator-p2p    Run peer-to-peer ILP via public ATOR hidden services (SLOW)"
+	@echo "  make standalone-test-allowlist   Run Tier-3 admin-API allowlist E2E (BLS + connector in separate containers)"
 	@echo "  make lint                 Run linter"
 	@echo ""
 	@echo "Local Blockchain (EVM):"
@@ -65,6 +70,52 @@ test:
 # Run unit tests only
 test-unit:
 	npm run test:unit --workspace=packages/connector
+
+# Run standalone-mode E2E suite (smoke + settlement).
+# Requires `make anvil-up` to have run first (settlement test hits real Anvil).
+standalone-test:
+	@if ! curl -s -o /dev/null -X POST http://localhost:8545 -H "Content-Type: application/json" \
+		-d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'; then \
+		echo "ERROR: Anvil not reachable on :8545 — run 'make anvil-up' first" >&2; \
+		exit 1; \
+	fi
+	EVM_INTEGRATION=true npm run test:standalone --workspace=packages/connector
+
+# Run container-based standalone E2E — builds the connector Docker image,
+# brings up the compose stack (2 connector containers + 2 BLS containers),
+# exercises the admin API + BTP + local delivery across container boundaries.
+# The test itself owns compose lifecycle; we only need docker available.
+standalone-test-docker:
+	docker compose --profile standalone-e2e build
+	STANDALONE_DOCKER=true npm run test:standalone-docker --workspace=packages/connector
+
+# Run container-based standalone + public ATOR E2E — single connector container
+# configured with transport=socks5 pointing at a live public Anyone proxy.
+# Requires outbound internet (reaches real Anyone exit nodes).
+# Gated behind STANDALONE_DOCKER=true + ATOR_PUBLIC=1 (set by this target).
+standalone-test-ator-public:
+	docker compose --profile standalone-ator-public build
+	STANDALONE_DOCKER=true ATOR_PUBLIC=1 npm run test:standalone-ator-public --workspace=packages/connector
+
+# Run peer-to-peer ILP over PUBLIC ATOR with two connector containers,
+# each with its own anon sidecar hosting a hidden service. Proves the
+# highest-fidelity standalone topology: container boundaries, anon binary,
+# real public network, real HS rendezvous.
+#
+# SLOW (~3-7 minutes wall clock, public HS descriptor propagation dominates)
+# and flaky by nature (public network). Nightly-dispatch only — do NOT add
+# to PR CI. Gates: STANDALONE_DOCKER=1 + ATOR_PUBLIC_P2P=1.
+standalone-test-ator-p2p:
+	docker compose --profile standalone-ator-p2p build
+	STANDALONE_DOCKER=1 ATOR_PUBLIC_P2P=1 npm run test:standalone-ator-p2p --workspace=packages/connector
+
+# Run Tier-3 admin-API allowlist E2E — BLS + connector in separate containers
+# on one compose bridge network. Admin port NOT published to host; BLS
+# reaches it via compose DNS; connector's `allowedIPs` accepts bridge subnet.
+# Zero-secret "local BLS" topology; cheap and deterministic.
+standalone-test-allowlist:
+	docker compose --profile standalone-allowlist build
+	STANDALONE_DOCKER=true npm run test:standalone-allowlist --workspace=packages/connector
 
 # Run linter
 lint:

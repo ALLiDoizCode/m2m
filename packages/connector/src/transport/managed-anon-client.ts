@@ -383,7 +383,12 @@ export class ManagedAnonClient {
               : '');
           await fsp.writeFile(anonrcPath, anonrc, { encoding: 'utf8', flag: 'wx' });
         }
+        // The `@anyone-protocol/anyone-client` v1.1.x SDK reads this as
+        // `options.configFile`; older/newer surfaces used `configFilePath`.
+        // Set both so the anonrc actually reaches the anon binary regardless
+        // of the SDK version pinned at install time.
         opts.configFilePath = anonrcPath;
+        (opts as AnonFactoryOptions & { configFile?: string }).configFile = anonrcPath;
       } catch (err) {
         this._logger.debug(
           { event: 'managed_anon_anonrc_write_failed', error: (err as Error).message },
@@ -455,10 +460,14 @@ export async function createDefaultAnonFactory(): Promise<
       throw wrapped;
     }
   }
-  const AnonCtor = mod?.Anon ?? mod?.default?.Anon ?? mod?.default;
+  // v1.1.x of `@anyone-protocol/anyone-client` exports `Process`; earlier and
+  // newer surface expose `Anon`. Accept both so the default factory works
+  // across the SDK versions pinned in peer/optionalDependencies.
+  const AnonCtor =
+    mod?.Process ?? mod?.Anon ?? mod?.default?.Process ?? mod?.default?.Anon ?? mod?.default;
   if (typeof AnonCtor !== 'function') {
     throw new Error(
-      '@anyone-protocol/anyone-client did not export an `Anon` constructor; ' +
+      '@anyone-protocol/anyone-client did not export a `Process` or `Anon` constructor; ' +
         'SDK surface may have changed.'
     );
   }

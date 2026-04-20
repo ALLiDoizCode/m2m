@@ -1,0 +1,79 @@
+# =============================================================================
+# Connector — Production Config Template (standalone + BLS)
+# =============================================================================
+# Bind-mounted into the `connector` service at /app/config/connector.yaml.
+# Edit freely — the connector reads the file on startup.
+#
+# This template matches the Tier-3 security posture:
+#   - Connector and BLS run in separate containers on one compose network
+#   - Admin API binds inside the container but is NOT published to the host
+#   - `allowedIPs` gates the admin API to docker bridge subnets
+#   - No API key required (loopback-equivalent via network isolation)
+#
+# If you expose the admin API on the public internet (e.g., via a published
+# port or reverse proxy), you MUST also set `adminApi.apiKey` and narrow
+# `allowedIPs`. See README → "Production Deployment" for guidance.
+# =============================================================================
+
+nodeId: prod-connector
+btpServerPort: 3000
+healthCheckPort: 8080
+environment: production
+deploymentMode: standalone
+logLevel: info
+
+# ── Admin REST API ──────────────────────────────────────────────────────────
+# Endpoints under /admin/* — POST /admin/ilp/send is a money-moving API.
+# Keep the port unpublished AND use allowlist; belt-and-braces.
+adminApi:
+  enabled: true
+  host: 0.0.0.0               # binding inside the container only
+  port: 8081
+  allowedIPs:
+    - 172.16.0.0/12           # docker user-defined-bridge default pool
+    - 192.168.0.0/16          # fallback when 172.16/12 is occupied
+  # apiKey: ${ADMIN_API_KEY}  # TODO: uncomment + set via secret manager
+                              # when exposing the admin API off-host.
+
+# ── Local delivery (connector → BLS) ────────────────────────────────────────
+# BLS service runs as a sibling container on the same compose network.
+# The compose `bls` hostname resolves to that container's bridge IP.
+localDelivery:
+  enabled: true
+  handlerUrl: http://bls:3100
+  timeout: 30000
+
+# ── ATOR overlay transport (OPTIONAL) ───────────────────────────────────────
+# Uncomment this block to route BTP WebSocket traffic through the PUBLIC
+# Anyone Protocol network (SOCKS5 egress). No additional containers needed —
+# the connector dials the proxy directly.
+#
+# Public proxies maintained by the Anyone team (as of 2026-04):
+#   - 5.78.181.0:9052         Oregon, USA
+#   - 157.90.113.23:9052      Nürnberg, Germany
+#   - 57.128.249.250:9052     Warsaw, Poland
+# Authoritative list: https://docs.anyone.io/connect/public-proxies
+#
+# To change regions, swap the `socksProxy` URL. For a private deployment,
+# run your own `anon-client` and point `socksProxy` at it.
+#
+# transport:
+#   type: socks5
+#   managed: false
+#   socksProxy: socks5h://5.78.181.0:9052
+#   externalUrl: ws://placeholder
+
+# ── Peers ───────────────────────────────────────────────────────────────────
+# Add peer connectors here. Example:
+#   peers:
+#     - id: partner-connector
+#       url: wss://connector.partner.example/btp
+#       authToken: ''
+peers: []
+
+# ── Routes ──────────────────────────────────────────────────────────────────
+# Add ILP routing entries. Example: forward all `test.example.*` to `peer-b`.
+#   routes:
+#     - prefix: test.example
+#       nextHop: partner-connector
+routes: []
