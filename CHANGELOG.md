@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.2](https://github.com/toon-protocol/connector/compare/v3.1.1...v3.1.2) (2026-04-22)
+
+### Bug Fixes
+
+- **tests:** resolve E2E and integration test failures for Epic 38 HTTP surface coverage ([508025e](https://github.com/toon-protocol/connector/commit/508025e4a3638c7b9cad75fa14fc442ae0e24370))
+
 ## [3.1.1](https://github.com/toon-protocol/connector/compare/v3.1.0...v3.1.1) (2026-04-20)
 
 ### Bug Fixes
