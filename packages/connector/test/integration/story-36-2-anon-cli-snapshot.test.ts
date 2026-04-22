@@ -232,8 +232,21 @@ function normalize(s: string): string {
       /bin\/(android|darwin|ios|linux|win32)\/(x64|arm64|arm|ia32)\//g,
       'bin/<PLATFORM>/<ARCH>/'
     )
-    // proxychains shared-library extension
-    .replace(/libproxychains4\.(dylib|so|dll)/g, 'libproxychains4.<EXT>')
+    // proxychains/anon-proxy shared-library extension (SDK renamed libproxychains4 -> libanon-proxy)
+    // Normalize both real extensions and placeholder format to a canonical <EXT> form
+    .replace(/lib(?:proxychains4|anon-proxy)\.so\.\d+/g, 'libanon-proxy.<EXT>')
+    .replace(/lib(?:proxychains4|anon-proxy)\.(dylib|dll)/g, 'libanon-proxy.<EXT>')
+    // Also handle old snapshot placeholder format (libproxychains4.<EXT>) for backwards compatibility
+    .replace(/libproxychains4\.<EXT>/g, 'libanon-proxy.<EXT>')
+    // Normalize proxychains error message format (SDK version changed message structure)
+    .replace(
+      /proxychains: can't load process '--help'\. \(hint: it's probably a typo\): No such file or directory/,
+      'proxychains: cannot load --help: No such file or directory'
+    )
+    .replace(
+      /proxychains can't load process\.+\.+: No such file or directory/,
+      'proxychains: cannot load --help: No such file or directory'
+    )
     // Node.js vX.Y.Z marker
     .replace(/Node\.js v\d+\.\d+\.\d+/g, 'Node.js v<VERSION>')
     // Node.js FORCE_COLOR warning (transient env issue, not part of CLI surface)
@@ -257,7 +270,11 @@ function normalize(s: string): string {
     // Strip Node.js version-specific diagnostic frames that appear in one version
     // but not another. These lines carry no semantic signal for flag-surface audit.
     .replace(/^ +at TracingChannel\.traceSync.*$/gm, '') // Node 22 diagnostic channel
-    .replace(/^ +at Function\.executeUserEntryPoint.*$/gm, '') // Node 20 entry point
+    .replace(/^ +at Function\.executeUserEntryPoint.*$/gm, '') // Node 20+ entry point
+    .replace(/^ +at Module\._extensions\.\.js.*$/gm, '') // Node internal module loader
+    .replace(/^ +at Module\.load.*$/gm, '') // Module.load variant
+    .replace(/^ +at Function\..*\.runMain.*$/gm, '') // runMain variants
+    .replace(/^ +at Object\.\.js.*$/gm, '') // Object..js (Node internal)
     // Any remaining user-home prefix that survived
     .replace(/\/(Users|home|root|builds)\/[^/\s)]+/g, '<HOME>');
 

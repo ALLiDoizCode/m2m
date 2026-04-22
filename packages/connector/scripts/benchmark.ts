@@ -203,30 +203,43 @@ export async function runBenchmark(
 
 /**
  * Parse command line arguments
+ * Supports both flag format (--duration 10) and positional format (10)
  */
 function parseArgs(): Partial<BenchmarkConfig> {
   const args = process.argv.slice(2);
   const config: Partial<BenchmarkConfig> = {};
 
-  for (let i = 0; i < args.length; i += 2) {
-    const key = args[i];
-    const value = args[i + 1];
+  // Detect if arguments are positional (no -- prefix) or flag format
+  const usePositional = args.length > 0 && args[0] && !args[0].startsWith('--');
 
-    if (!value) continue;
+  if (usePositional) {
+    // Positional format: [duration, targetTps, threshold]
+    // Example: ts-node benchmark.ts 10 10000 5000
+    if (args[0] !== undefined) config.durationSeconds = parseInt(args[0], 10);
+    if (args[1] !== undefined) config.targetTps = parseInt(args[1], 10);
+    if (args[2] !== undefined) config.tpsThreshold = parseInt(args[2], 10);
+  } else {
+    // Flag format: --duration 10 --target-tps 10000 --threshold 5000
+    for (let i = 0; i < args.length; i += 2) {
+      const key = args[i] as string | undefined;
+      const value = args[i + 1] as string | undefined;
 
-    switch (key) {
-      case '--duration':
-        config.durationSeconds = parseInt(value, 10);
-        break;
-      case '--target-tps':
-        config.targetTps = parseInt(value, 10);
-        break;
-      case '--threshold':
-        config.tpsThreshold = parseInt(value, 10);
-        break;
-      case '--output':
-        config.outputFile = value;
-        break;
+      if (!key || !value) continue;
+
+      switch (key) {
+        case '--duration':
+          config.durationSeconds = parseInt(value, 10);
+          break;
+        case '--target-tps':
+          config.targetTps = parseInt(value, 10);
+          break;
+        case '--threshold':
+          config.tpsThreshold = parseInt(value, 10);
+          break;
+        case '--output':
+          config.outputFile = value;
+          break;
+      }
     }
   }
 
