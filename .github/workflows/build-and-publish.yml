@@ -14,7 +14,7 @@ on:
         default: 'true'
         type: boolean
       publish_npm:
-        description: 'Publish npm package to GitHub Packages'
+        description: 'Publish npm package to npmjs.com'
         required: false
         default: 'true'
         type: boolean
@@ -165,7 +165,7 @@ jobs:
           echo '' >> $GITHUB_STEP_SUMMARY
           echo '**Registry:** GHCR' >> $GITHUB_STEP_SUMMARY
 
-  # Publish npm package to GitHub Packages
+  # Publish npm package to npmjs.com
   npm:
     name: Publish npm Package
     runs-on: ubuntu-latest
@@ -173,7 +173,6 @@ jobs:
     if: github.event.inputs.publish_npm != 'false'
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout code
@@ -188,13 +187,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          registry-url: 'https://npm.pkg.github.com'
+          registry-url: 'https://registry.npmjs.org'
           scope: '@toon-protocol'
 
       - name: Configure npm authentication
         run: |
-          echo '@toon-protocol:registry=https://npm.pkg.github.com' > .npmrc
-          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
+          echo '//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}' > .npmrc
 
       - name: Install dependencies
         run: npm ci
@@ -202,7 +200,7 @@ jobs:
       - name: Rebuild for production
         run: npm run build
 
-      - name: Publish to GitHub Packages
+      - name: Publish to npm
         run: |
           cd packages/connector
           npm publish --access public
@@ -213,9 +211,14 @@ jobs:
           echo '' >> $GITHUB_STEP_SUMMARY
           echo '**Package:** `@toon-protocol/connector`' >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
-          echo '**Registry:** GitHub Packages (npm.pkg.github.com)' >> $GITHUB_STEP_SUMMARY
+          echo '**Registry:** npmjs.com' >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
           echo '**Version:** `${{ needs.build.outputs.version }}`' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '### Install Package' >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'npm install @toon-protocol/connector@${{ needs.build.outputs.version }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
   # Create GitHub Release for version tags
   release:
