@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1](https://github.com/toon-protocol/connector/compare/v3.2.0...v3.2.1) (2026-04-22)
+
+### Bug Fixes
+
+- **benchmark:** handle npm workspace argument forwarding ([acb74e6](https://github.com/toon-protocol/connector/commit/acb74e622952e813cfee43081604fd80116cef33))
+- update CLI snapshot normalization for @anyone-protocol/anyone-client SDK changes ([ffbc690](https://github.com/toon-protocol/connector/commit/ffbc690dda5959137cd10581907d3e6539d5be06))
+
 ## [3.2.0](https://github.com/toon-protocol/connector/compare/v3.1.2...v3.2.0) (2026-04-22)
 
 ### Features
