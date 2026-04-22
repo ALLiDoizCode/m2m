@@ -184,17 +184,17 @@ jobs:
         with:
           name: build-artifacts
 
-      - name: Restore pnpm lock file
-        uses: actions/cache@v4
-        with:
-          path: pnpm-lock.yaml
-          key: pnpm-lock-${{ hashFiles('**/pnpm-lock.yaml') }}
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          registry-url: https://npm.pkg.github.com
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@toon-protocol'
+
+      - name: Configure npm authentication
+        run: |
+          echo '@toon-protocol:registry=https://npm.pkg.github.com' > .npmrc
+          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
 
       - name: Install dependencies
         run: npm ci
@@ -205,7 +205,7 @@ jobs:
       - name: Publish to GitHub Packages
         run: |
           cd packages/connector
-          npm publish --access public --registry https://npm.pkg.github.com/
+          npm publish --access public
 
       - name: npm publish summary
         run: |
