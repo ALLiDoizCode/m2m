@@ -524,6 +524,31 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
   },
 
   /**
+   * GET /admin/earnings.json
+   * Per-peer per-asset earnings snapshot and recent claims ticker
+   */
+  {
+    path: '/earnings.json',
+    method: 'GET',
+    server: 'AdminServer',
+    mountPrefix: '/admin',
+    authModel: 'X-Api-Key',
+    successStatus: 200,
+    failureModes: [
+      { status: 401, description: 'Missing or invalid X-Api-Key' },
+      { status: 403, description: 'IP not in allowlist' },
+      { status: 503, description: 'AccountManager or ClaimReceiver not wired' },
+    ],
+    requestContract: 'none',
+    responseContract:
+      'AdminEarningsJsonResponse { peers: AdminEarningsJsonPeer[]; connectorFees: AdminEarningsConnectorFee[]; recentClaims: AdminEarningsRecentClaim[]; ... } (all types exported from http/admin-api.ts)',
+    owningModule: 'http/admin-api.ts',
+    relatedStories: ['37.4', '37.7', '37.8'],
+    operationalNotes:
+      'Cache-Control: no-store. Dashboard polls at ~0.2 Hz. claimsSentTotal requires SentClaimsQueries (Story 37.7). Outbound-only peers surface with claimsReceivedTotal=0. connectorFees derived from incoming volume x fee percentage (approximation).',
+  },
+
+  /**
    * GET /admin/metrics.json
    * JSON projection of per-peer ILP metrics (dashboard)
    */

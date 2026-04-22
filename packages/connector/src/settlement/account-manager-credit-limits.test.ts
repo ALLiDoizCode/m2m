@@ -11,6 +11,8 @@ import { AccountManager, AccountManagerConfig } from './account-manager';
 import { ILedgerClient } from './ledger-client';
 import { CreditLimitConfig } from '../config/types';
 import pino from 'pino';
+import { InMemoryLedgerClient } from './in-memory-ledger-client';
+import { AccountLedgerCodes } from './types';
 
 describe('AccountManager Credit Limit Enforcement', () => {
   let accountManager: AccountManager;
@@ -134,13 +136,18 @@ describe('AccountManager Credit Limit Enforcement', () => {
       // Mock createAccountsBatch to succeed (accounts may need to be created)
       mockLedgerClient.createAccountsBatch.mockResolvedValue(undefined);
 
-      // Mock getAccountsBatch to return current balance
+      // Mock getAccountsBatch to return current balance. Under the MVP
+      // self-balancing transfer scheme, inbound volume shows up as
+      // `credits_posted` on the CREDIT account (ids[1]), not the debit
+      // account. Mirroring the real ledger's behaviour here so this test
+      // catches regressions in checkCreditLimit (post-37.5 fix reads
+      // creditBalance, not debitBalance).
       mockLedgerClient.getAccountsBatch.mockImplementation(async (ids: bigint[]) => {
         const resultMap = new Map();
-        // First account (debit) has balance of 800n
-        resultMap.set(ids[0], { debits: 800n, credits: 0n, balance: 800n });
-        // Second account (credit) has balance of 0n
-        resultMap.set(ids[1], { debits: 0n, credits: 0n, balance: 0n });
+        // Debit account: always ≤ 0 under current scheme (-800 here)
+        resultMap.set(ids[0], { debits: 800n, credits: 0n, balance: -800n });
+        // Credit account: carries the cumulative volume signal (+800)
+        resultMap.set(ids[1], { debits: 0n, credits: 800n, balance: 800n });
         return resultMap;
       });
 
@@ -383,11 +390,12 @@ describe('AccountManager Credit Limit Enforcement', () => {
       // Mock createAccountsBatch to succeed
       mockLedgerClient.createAccountsBatch.mockResolvedValue(undefined);
 
-      // Mock getAccountsBatch to return balance exceeding limit
+      // Mock getAccountsBatch to return balance exceeding limit (volume
+      // carried on credit account per actual ledger semantics; see 37.5).
       mockLedgerClient.getAccountsBatch.mockImplementation(async (ids: bigint[]) => {
         const resultMap = new Map();
-        resultMap.set(ids[0], { debits: 900n, credits: 0n, balance: 900n });
-        resultMap.set(ids[1], { debits: 0n, credits: 0n, balance: 0n });
+        resultMap.set(ids[0], { debits: 900n, credits: 0n, balance: -900n });
+        resultMap.set(ids[1], { debits: 0n, credits: 900n, balance: 900n });
         return resultMap;
       });
 
@@ -414,11 +422,12 @@ describe('AccountManager Credit Limit Enforcement', () => {
       // Mock createAccountsBatch to succeed
       mockLedgerClient.createAccountsBatch.mockResolvedValue(undefined);
 
-      // Mock getAccountsBatch to return balance exceeding limit
+      // Mock getAccountsBatch to return balance exceeding limit (volume
+      // carried on credit account per actual ledger semantics; see 37.5).
       mockLedgerClient.getAccountsBatch.mockImplementation(async (ids: bigint[]) => {
         const resultMap = new Map();
-        resultMap.set(ids[0], { debits: 900n, credits: 0n, balance: 900n });
-        resultMap.set(ids[1], { debits: 0n, credits: 0n, balance: 0n });
+        resultMap.set(ids[0], { debits: 900n, credits: 0n, balance: -900n });
+        resultMap.set(ids[1], { debits: 0n, credits: 900n, balance: 900n });
         return resultMap;
       });
 
@@ -454,5 +463,125 @@ describe('AccountManager Credit Limit Enforcement', () => {
       // Assert: Returns false
       expect(wouldExceed).toBe(false);
     });
+  });
+});
+
+/**
+ * Story 37.5 — Real-ledger regression suite.
+ *
+ * These tests do NOT mock `getAccountsBatch`; they seed volume via a real
+ * `InMemoryLedgerClient` + `recordPacketTransfers()` and verify `checkCreditLimit`
+ * trips against the actual ledger arithmetic. Prior to 37.5 the credit-limit
+ * guard was silently disabled under the real ledger's `balance = credits - debits`
+ * formula because `checkCreditLimit` read `debitBalance` (always ≤ 0 under the
+ * MVP self-balancing scheme) and compared it to a positive limit.
+ */
+describe('AccountManager Credit Limits — Real Ledger (Story 37.5 regression)', () => {
+  let realLedger: import('./in-memory-ledger-client').InMemoryLedgerClient;
+  let realAccountManager: AccountManager;
+  let silentLogger: pino.Logger;
+
+  beforeEach(async () => {
+    silentLogger = pino({ level: 'silent' });
+    realLedger = new InMemoryLedgerClient(
+      { snapshotPath: `/tmp/credit-limit-37-5-${Date.now()}-${Math.random()}.json` },
+      silentLogger
+    );
+    await realLedger.initialize();
+
+    realAccountManager = new AccountManager(
+      {
+        nodeId: 'test-connector',
+        defaultLedger: AccountLedgerCodes.DEFAULT_LEDGER,
+        creditLimits: { defaultLimit: 1000n },
+      },
+      realLedger,
+      silentLogger
+    );
+  });
+
+  afterEach(async () => {
+    await realLedger.close();
+  });
+
+  it('[AC 1] trips the limit after real inbound packet volume seeded via recordPacketTransfers', async () => {
+    // Arrange: peer-a has sent us 800n inbound volume via a real packet-forward.
+    await realAccountManager.recordPacketTransfers(
+      'peer-a', // fromPeer
+      'peer-downstream', // toPeer (unused for this assertion but required)
+      'M2M',
+      800n,
+      800n,
+      1n,
+      2n,
+      AccountLedgerCodes.DEFAULT_LEDGER,
+      1
+    );
+
+    // Act: propose a packet that would bring the total to 1100 (over the 1000 limit).
+    const violation = await realAccountManager.checkCreditLimit('peer-a', 'M2M', 300n);
+
+    // Assert: the limit trips.
+    expect(violation).not.toBeNull();
+    expect(violation!.peerId).toBe('peer-a');
+    expect(violation!.currentBalance).toBe(800n);
+    expect(violation!.requestedAmount).toBe(300n);
+    expect(violation!.creditLimit).toBe(1000n);
+    expect(violation!.wouldExceedBy).toBe(100n);
+  });
+
+  it('[AC 1] allows a packet that keeps the peer below the limit', async () => {
+    await realAccountManager.recordPacketTransfers(
+      'peer-b',
+      'peer-downstream',
+      'M2M',
+      500n,
+      500n,
+      3n,
+      4n,
+      AccountLedgerCodes.DEFAULT_LEDGER,
+      1
+    );
+
+    const violation = await realAccountManager.checkCreditLimit('peer-b', 'M2M', 300n);
+    expect(violation).toBeNull();
+  });
+
+  it('[AC 2] settlement drain reduces the limit-applicable balance', async () => {
+    // Seed 800n of inbound volume.
+    await realAccountManager.recordPacketTransfers(
+      'peer-c',
+      'peer-downstream',
+      'M2M',
+      800n,
+      800n,
+      5n,
+      6n,
+      AccountLedgerCodes.DEFAULT_LEDGER,
+      1
+    );
+
+    // Drain 400n via a recorded settlement. The symmetric reverse-transfer
+    // should reduce credit-account balance from 800 → 400.
+    await realAccountManager.recordSettlement('peer-c', 'M2M', 400n);
+
+    // 400 + 400 = 800 ≤ 1000 → no violation.
+    const below = await realAccountManager.checkCreditLimit('peer-c', 'M2M', 400n);
+    expect(below).toBeNull();
+
+    // 400 + 700 = 1100 > 1000 → violation.
+    const above = await realAccountManager.checkCreditLimit('peer-c', 'M2M', 700n);
+    expect(above).not.toBeNull();
+    expect(above!.currentBalance).toBe(400n);
+    expect(above!.wouldExceedBy).toBe(100n);
+  });
+
+  it('[AC 1] zero-activity peer below limit for any amount ≤ limit', async () => {
+    // New peer, no packets yet.
+    const violation = await realAccountManager.checkCreditLimit('fresh-peer', 'M2M', 1000n);
+    expect(violation).toBeNull();
+
+    const over = await realAccountManager.checkCreditLimit('fresh-peer', 'M2M', 1001n);
+    expect(over).not.toBeNull();
   });
 });
