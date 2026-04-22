@@ -44,6 +44,27 @@ make mina-deploy-devnet DEPLOYER_KEY=<base58-private-key>
 
 Run `make help` for the full target list. Deployment guides: `docs/solana-deployment.md`, `docs/mina-deployment.md`.
 
+## Testing Guidelines
+
+**Never use mocks.** All tests must use real implementations.
+
+**E2E and Integration Tests:** Always run against local Docker containers (Anvil, Solana test validator, Mina lightnet). Use the local infrastructure commands:
+
+```bash
+make infra-up      # Start all chain containers
+make anvil-up      # Start EVM container only
+make solana-up     # Start Solana container only
+make mina-up       # Start Mina container only
+
+# Run tests against live containers
+npm run test:e2e
+npm run test:integration
+
+make infra-down    # Stop all containers
+```
+
+Mock-free testing ensures the connector works correctly with actual blockchain behavior, catching real-world issues like gas estimation failures, nonce conflicts, and protocol-level edge cases.
+
 ## Default UI Library: shadcn-ui v4
 
 shadcn-ui v4 is the **only** UI component library. Do not use Material-UI, Ant Design, Chakra UI, or custom components for functionality shadcn-ui already provides.
@@ -53,6 +74,44 @@ shadcn-ui v4 is the **only** UI component library. Do not use Material-UI, Ant D
 ## Playwright MCP -- Browser Verification
 
 Use Playwright MCP tools (`mcp__playwright__browser_*`) after UI changes. Prefer `browser_snapshot` over `take_screenshot` for interaction. Use `console_messages` and `network_requests` to debug.
+
+## Development Workflow Rules
+
+### Stop-the-Line Policy (AG3)
+
+From Epic 37 retrospective: **Nightly HTTP-surface E2E red = stop-the-line.**
+
+**Policy:**
+
+1. **Triage must begin within 24 hours** of a failed nightly workflow run
+2. **No merges to main while nightly is red** — PR merges are blocked until the nightly suite passes
+3. **Escalation path:**
+   - Hour 0-4: Engineer on-call investigates, checks compose logs in Artifacts
+   - Hour 4-8: If root cause not identified, escalate to team lead
+   - Hour 8-24: If not resolved, emergency team sync + consider rollback
+
+**Workflow:**
+
+- Nightly workflow: `.github/workflows/nightly-http-surface.yml`
+- Scheduled: 04:00 UTC daily
+- Manual trigger: `workflow_dispatch` via Actions UI
+- Failure notifications: GitHub UI (red X), job summary with escalation steps
+
+**Reproduction commands:**
+
+```bash
+# Run the full HTTP-surface suite locally
+make infra-up
+npm run test:admin-surface --workspace=packages/connector
+npm run test:cross-surface --workspace=packages/connector
+npm run test:packet-flow --workspace=packages/connector
+make infra-down
+```
+
+**Why this matters:**
+The `/metrics` endpoint returned 404 in every deployed image since inception — undetected until Town's integration test caught it. This policy ensures parallel-surface drift cannot ship undetected.
+
+---
 
 ## Interledger RFC Skill Activation
 

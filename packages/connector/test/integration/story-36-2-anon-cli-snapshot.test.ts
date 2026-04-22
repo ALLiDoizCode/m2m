@@ -236,6 +236,12 @@ function normalize(s: string): string {
     .replace(/libproxychains4\.(dylib|so|dll)/g, 'libproxychains4.<EXT>')
     // Node.js vX.Y.Z marker
     .replace(/Node\.js v\d+\.\d+\.\d+/g, 'Node.js v<VERSION>')
+    // Node.js FORCE_COLOR warning (transient env issue, not part of CLI surface)
+    .replace(
+      /\(node:\d+\) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set\.\n/g,
+      ''
+    )
+    .replace(/\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n/g, '')
     // Absolute monorepo root in stack frames: anything up to /node_modules/
     .replace(/\/[A-Za-z0-9_./ -]+?\/node_modules\//g, '<REPO>/node_modules/')
     // Relative traversal to node_modules (e.g. ../../node_modules/...) also canonicalize
