@@ -502,6 +502,60 @@ export class AccountManager {
   }
 
   /**
+   * Query raw volume totals for a peer-token combination.
+   *
+   * Returns the underlying `debits_posted` and `credits_posted` counters from
+   * each side of the peer's account pair. These counters are monotonically
+   * increasing with cumulative packet-forward volume and are *decreased* only
+   * by `recordSettlement()` drains.
+   *
+   * This method is the source of truth for the Story 37.4 earnings projection.
+   * It intentionally bypasses the `getAccountBalance()` `netBalance` field, which
+   * carries legacy sign/semantic quirks from the MVP self-balancing transfer
+   * scheme (see `recordPacketTransfers()` for details). Use this method when the
+   * caller cares about per-direction cumulative volume; use `getAccountBalance`
+   * when the caller cares about the (signed) net-of-settlement figure.
+   *
+   * Returned fields:
+   * - `incomingVolume` = debitAccount.debits_posted - debitAccount.credits_posted
+   *   Amount the peer has sent to us through packet forwards that has NOT yet
+   *   been offset by settlement. Rises on each inbound forward; falls on settle.
+   * - `outgoingVolume` = creditAccount.credits_posted - creditAccount.debits_posted
+   *   Amount we have forwarded to the peer that has NOT yet been settled.
+   *   Rises on each outbound forward; falls on settle.
+   *
+   * Both values are non-negative in normal operation (monotonic rise, then drain
+   * to zero via settlement). Negative values indicate an accounting anomaly.
+   *
+   * @param peerId - Peer connector ID
+   * @param tokenId - Token identifier
+   * @returns Raw cumulative volume totals for both accounts
+   */
+  async getPeerVolumeTotals(
+    peerId: string,
+    tokenId: string
+  ): Promise<{ incomingVolume: bigint; outgoingVolume: bigint }> {
+    const accountPair = this.getPeerAccountPair(peerId, tokenId);
+
+    const balances = await this._ledgerClient.getAccountsBatch([
+      accountPair.debitAccountId,
+      accountPair.creditAccountId,
+    ]);
+
+    const debitAccount = balances.get(accountPair.debitAccountId);
+    const creditAccount = balances.get(accountPair.creditAccountId);
+
+    // debitAccount accumulates `incoming` on its debits_posted side (see
+    // recordPacketTransfers). creditAccount accumulates `outgoing` on its
+    // credits_posted side. Subtract the opposite counter to net out any
+    // settlement reversals posted by recordSettlement().
+    const incomingVolume = (debitAccount?.debits ?? 0n) - (debitAccount?.credits ?? 0n);
+    const outgoingVolume = (creditAccount?.credits ?? 0n) - (creditAccount?.debits ?? 0n);
+
+    return { incomingVolume, outgoingVolume };
+  }
+
+  /**
    * Record settlement transfers for an ILP packet forward
    *
    * Creates two TigerBeetle transfers atomically:
@@ -680,10 +734,20 @@ export class AccountManager {
     // Query current balance from TigerBeetle
     const balance = await this.getAccountBalance(peerId, tokenId);
 
-    // Calculate balance after proposed transfer
-    // Credit balance = amount peer owes us (accounts receivable)
-    // We're checking if peer's debt would exceed our limit
-    const balanceAfter = balance.debitBalance + amount;
+    // Story 37.5 fix: use `creditBalance` (monotonic-increasing with inbound volume),
+    // not `debitBalance`. Under the current self-balancing transfer scheme the
+    // in-memory ledger returns `debitBalance = credits_posted - debits_posted` on
+    // the debit account, which is always ≤ 0 for any inbound-active peer — so the
+    // previous `balance.debitBalance + amount <= limit` guard never tripped. The
+    // `creditBalance` field grows by `incomingAmount` on every inbound packet
+    // (credits_posted on the credit account) and matches `settlement-api.ts`'s
+    // existing convention of treating creditBalance as "peer owes us."
+    //
+    // Known limitation (not fixed here): for peers that are ALSO destinations
+    // of our outbound forwards, `creditBalance` is inflated by the outbound
+    // amount too, so this guard over-triggers for bidirectional peers. Proper
+    // direction-split accounting is tracked in story 37.6 (ConnectorFee refactor).
+    const balanceAfter = balance.creditBalance + amount;
 
     // Check if balance after transfer would exceed limit
     if (balanceAfter <= limit) {
@@ -692,7 +756,7 @@ export class AccountManager {
         {
           peerId,
           tokenId,
-          currentBalance: balance.debitBalance.toString(),
+          currentBalance: balance.creditBalance.toString(),
           amount: amount.toString(),
           balanceAfter: balanceAfter.toString(),
           limit: limit.toString(),
@@ -707,7 +771,7 @@ export class AccountManager {
     const violation: CreditLimitViolation = {
       peerId,
       tokenId,
-      currentBalance: balance.debitBalance,
+      currentBalance: balance.creditBalance,
       requestedAmount: amount,
       creditLimit: limit,
       wouldExceedBy,
@@ -718,7 +782,7 @@ export class AccountManager {
       {
         peerId,
         tokenId,
-        currentBalance: balance.debitBalance.toString(),
+        currentBalance: balance.creditBalance.toString(),
         requestedAmount: amount.toString(),
         creditLimit: limit.toString(),
         wouldExceedBy: wouldExceedBy.toString(),
