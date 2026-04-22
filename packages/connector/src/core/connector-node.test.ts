@@ -223,6 +223,8 @@ describe('ConnectorNode', () => {
       setLocalDeliveryHandler: jest.fn(),
       setLocalDelivery: jest.fn(),
       handlePreparePacket: jest.fn(),
+      // Story 37.2: ILP observability metrics
+      setIlpMetrics: jest.fn(),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {
@@ -309,9 +311,13 @@ describe('ConnectorNode', () => {
       connectorNode = new ConnectorNode(testConfigPath, mockLogger);
 
       // Assert
+      // Story 37.2: HealthServer now receives config with metricsMiddleware
       expect(HealthServer).toHaveBeenCalledWith(
         expect.anything(), // child logger
-        connectorNode // ConnectorNode implements HealthStatusProvider
+        connectorNode, // ConnectorNode implements HealthStatusProvider
+        expect.objectContaining({
+          metricsMiddleware: expect.any(Function),
+        })
       );
     });
 

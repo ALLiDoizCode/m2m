@@ -1236,7 +1236,7 @@ describe('Admin API Balance and Settlement State Endpoints (Story 21.3)', () => 
     mockBTPClientManager = {
       addPeer: jest.fn().mockResolvedValue(undefined),
       removePeer: jest.fn().mockResolvedValue(undefined),
-      getPeerIds: jest.fn().mockReturnValue([]),
+      getPeerIds: jest.fn().mockReturnValue(['peer-b', 'peer-big']),
       getPeerStatus: jest.fn().mockReturnValue(new Map()),
       isConnected: jest.fn().mockReturnValue(false),
       getConnectedPeers: jest.fn().mockReturnValue([]),
@@ -1345,17 +1345,32 @@ describe('Admin API Balance and Settlement State Endpoints (Story 21.3)', () => 
       expect(mockAccountManager.getAccountBalance).toHaveBeenCalledWith('peer-b', 'M2M');
     });
 
-    it('should return 200 with zero balances for unknown peer (TigerBeetle semantics)', async () => {
+    // Story 37.1: unknown peer and known-but-idle peer must be distinguishable.
+    it('should return 404 for an unregistered peer (Story 37.1 AC 1)', async () => {
+      // getPeerIds is mocked to ['peer-b', 'peer-big'] in the outer beforeEach;
+      // 'unknown-peer' is not in that list.
+      const res = await request(app).get('/admin/balances/unknown-peer');
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Not found');
+      expect(res.body.peerId).toBe('unknown-peer');
+      expect(res.body.message).toContain('unknown-peer');
+      // Ledger must not be queried for unregistered peers.
+      expect(mockAccountManager.getAccountBalance).not.toHaveBeenCalled();
+    });
+
+    it('should return 200 with zero balances for a known but idle peer (Story 37.1 AC 2)', async () => {
+      // peer-b IS registered (see outer beforeEach getPeerIds mock) but has no ledger activity yet.
       mockAccountManager.getAccountBalance.mockResolvedValue({
         debitBalance: 0n,
         creditBalance: 0n,
         netBalance: 0n,
       });
 
-      const res = await request(app).get('/admin/balances/unknown-peer');
+      const res = await request(app).get('/admin/balances/peer-b');
 
       expect(res.status).toBe(200);
-      expect(res.body.peerId).toBe('unknown-peer');
+      expect(res.body.peerId).toBe('peer-b');
       expect(res.body.balances[0].debitBalance).toBe('0');
       expect(res.body.balances[0].creditBalance).toBe('0');
       expect(res.body.balances[0].netBalance).toBe('0');

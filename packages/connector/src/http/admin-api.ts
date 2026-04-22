@@ -48,6 +48,7 @@ import type { ClaimReceiver } from '../settlement/claim-receiver';
 import type { BlockchainType } from '../btp/btp-claim-types';
 import { IlpSendHandler } from './ilp-send-handler';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
+import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 
 /**
  * Admin API Configuration
@@ -104,6 +105,9 @@ export interface AdminAPIConfig {
 
   /** Default settlement token ID resolved from on-chain ERC-20 symbol (e.g. 'M2M') */
   defaultSettlementTokenId?: string;
+
+  /** Optional metrics registry for ILP observability (Story 37.2). When provided, enables GET /admin/metrics.json endpoint. */
+  metricsRegistry?: IlpMetricsRegistry;
 }
 
 /**
@@ -170,6 +174,34 @@ export interface BalanceResponse {
     creditBalance: string;
     netBalance: string;
   }>;
+}
+
+/**
+ * GET /admin/metrics.json response — per-peer ILP counter snapshot.
+ * Shape locked in response doc §9.4.
+ */
+export interface AdminMetricsJsonPeer {
+  peerId: string;
+  connected: boolean;
+  packetsForwarded: number;
+  packetsRejected: number;
+  bytesSent: number;
+  lastPacketAt: string | null;
+}
+
+/**
+ * GET /admin/metrics.json response — top-level aggregate + peer list.
+ * Shape locked in response doc §9.4.
+ */
+export interface AdminMetricsJsonResponse {
+  uptimeSeconds: number;
+  aggregate: {
+    packetsForwarded: number;
+    packetsRejected: number;
+    bytesSent: number;
+  };
+  peers: AdminMetricsJsonPeer[];
+  timestamp: string;
 }
 
 /**
@@ -327,6 +359,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     packetSender,
     isReady,
     defaultSettlementTokenId,
+    metricsRegistry,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -1402,6 +1435,20 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       const peerId = req.params.peerId as string;
       const tokenId = (req.query.tokenId as string) || (defaultSettlementTokenId ?? 'M2M');
 
+      // Story 37.1: Distinguish unknown peer (404) from known-but-idle peer (200 zeros).
+      // Without this guard, account-manager.ts:441 returns zeroed balances for any peerId
+      // because it deterministically derives TigerBeetle account IDs and defaults missing
+      // ledger entries to 0n, collapsing both cases into an identical 200 response.
+      const registeredPeers = btpClientManager.getPeerIds();
+      if (!registeredPeers.includes(peerId)) {
+        res.status(404).json({
+          error: 'Not found',
+          peerId,
+          message: `Peer '${peerId}' not found`,
+        });
+        return;
+      }
+
       const balance = await accountManager.getAccountBalance(peerId, tokenId);
 
       const response = {
@@ -1516,6 +1563,82 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
    */
   const ilpSendHandler = new IlpSendHandler(packetSender ?? null, isReady ?? null, log);
   router.post('/ilp/send', ilpSendHandler.handle.bind(ilpSendHandler));
+
+  /**
+   * GET /admin/metrics.json
+   * JSON projection of per-peer ILP counters from the metrics registry.
+   * Story 37.3 — mirrors the Prometheus counters in a dashboard-friendly format.
+   */
+  router.get('/metrics.json', async (_req: Request, res: Response) => {
+    try {
+      if (!metricsRegistry) {
+        res.status(503).json({
+          error: 'Service Unavailable',
+          message: 'Metrics not enabled',
+        });
+        return;
+      }
+
+      // `btpClientManager.getPeerIds()` is the authoritative peer set: peers removed via
+      // POST/DELETE /admin/peers disappear from this response immediately, even if their
+      // counter labels persist in the registry. The snapshot is used only to read current
+      // counter values; a peer appearing in the snapshot but not in getPeerIds() is a
+      // removed peer and is intentionally dropped. Idle peers (registered but zero
+      // activity) still appear because getPeerIds() includes them (AC 3).
+      const livePeerIds = btpClientManager.getPeerIds();
+      const peerSnapshots = await metricsRegistry.snapshotPeers();
+      const snapshotByPeer = new Map(peerSnapshots.map((s) => [s.peerId, s]));
+
+      // Build per-peer entries
+      const peerStatus = btpClientManager.getPeerStatus();
+      const peers = [...livePeerIds].sort().map((peerId) => {
+        const snap = snapshotByPeer.get(peerId);
+        const lastPacketAt =
+          snap && snap.lastPacketAtUnixSeconds > 0
+            ? new Date(snap.lastPacketAtUnixSeconds * 1000).toISOString()
+            : null;
+        return {
+          peerId,
+          connected: peerStatus.get(peerId) ?? false,
+          packetsForwarded: snap?.packetsForwarded ?? 0,
+          packetsRejected: snap?.packetsRejected ?? 0,
+          bytesSent: snap?.bytesSent ?? 0,
+          lastPacketAt,
+        } satisfies AdminMetricsJsonPeer;
+      });
+
+      // Aggregate rollup
+      const aggregate = peers.reduce(
+        (acc, p) => ({
+          packetsForwarded: acc.packetsForwarded + p.packetsForwarded,
+          packetsRejected: acc.packetsRejected + p.packetsRejected,
+          bytesSent: acc.bytesSent + p.bytesSent,
+        }),
+        { packetsForwarded: 0, packetsRejected: 0, bytesSent: 0 }
+      );
+
+      // Dashboard polls at 1 Hz; prevent proxies / browsers from caching stale data.
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        uptimeSeconds: Math.floor(process.uptime()),
+        aggregate,
+        peers,
+        timestamp: new Date().toISOString(),
+      } satisfies AdminMetricsJsonResponse);
+    } catch (error) {
+      log.error(
+        {
+          event: 'admin_api_metrics_error',
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to generate metrics.json'
+      );
+      res.status(500).json({
+        error: 'Internal server error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
 
   return router;
 }

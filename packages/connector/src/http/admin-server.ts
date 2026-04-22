@@ -25,6 +25,7 @@ import type { AccountManager } from '../settlement/account-manager';
 import type { SettlementMonitor } from '../settlement/settlement-monitor';
 import type { ClaimReceiver } from '../settlement/claim-receiver';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
+import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 import { requireOptional } from '../utils/optional-require';
 
 /**
@@ -69,6 +70,7 @@ export class AdminServer {
     defaultSettlementTokenId?: string;
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
+    metricsRegistry?: IlpMetricsRegistry;
   };
 
   /**
@@ -96,6 +98,7 @@ export class AdminServer {
     defaultSettlementTokenId?: string;
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
+    metricsRegistry?: IlpMetricsRegistry;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -126,6 +129,7 @@ export class AdminServer {
       defaultSettlementTokenId,
       packetSender,
       isReady,
+      metricsRegistry,
     } = this._options;
 
     this._app = express();
@@ -148,6 +152,7 @@ export class AdminServer {
       defaultSettlementTokenId,
       packetSender,
       isReady,
+      metricsRegistry,
     });
 
     this._app.use('/admin', adminRouter);
