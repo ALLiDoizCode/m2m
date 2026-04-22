@@ -1049,6 +1049,120 @@ describe('SolanaPaymentChannelSDK - Unit Tests (Story 33.4)', () => {
       ).not.toThrow();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // getMintMetadata (Story 37.8)
+  // -------------------------------------------------------------------------
+
+  describe('getMintMetadata (Story 37.8)', () => {
+    let sdk: SolanaPaymentChannelSDK;
+    let logger: pino.Logger;
+
+    beforeEach(() => {
+      logger = createMockLogger();
+      sdk = new SolanaPaymentChannelSDK('http://localhost:8899', TEST_PROGRAM_ID, logger);
+    });
+
+    function mockGetAccountInfo(returnValue: unknown): {
+      mockGetAccountInfo: jest.Mock;
+      mockSend: jest.Mock;
+    } {
+      const mockSend = jest.fn().mockResolvedValue(returnValue);
+      const mockGetAccountInfo = jest.fn().mockReturnValue({ send: mockSend });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (sdk as any)._rpc = {
+        getAccountInfo: mockGetAccountInfo,
+      };
+      return { mockGetAccountInfo, mockSend };
+    }
+
+    it('returns decimals from a parsed SPL mint account (T-37.8-01)', async () => {
+      mockGetAccountInfo({
+        value: {
+          data: {
+            program: 'spl-token',
+            parsed: {
+              info: { decimals: 6 },
+              type: 'mint',
+            },
+          },
+        },
+      });
+
+      const result = await sdk.getMintMetadata(TEST_TOKEN_MINT);
+
+      expect(result).toEqual({ assetCode: TEST_TOKEN_MINT, assetScale: 6 });
+    });
+
+    it('returns decimals=0 for a mint with zero decimals (T-37.8-02)', async () => {
+      mockGetAccountInfo({
+        value: {
+          data: {
+            program: 'spl-token',
+            parsed: {
+              info: { decimals: 0 },
+              type: 'mint',
+            },
+          },
+        },
+      });
+
+      const result = await sdk.getMintMetadata(TEST_TOKEN_MINT);
+
+      expect(result).toEqual({ assetCode: TEST_TOKEN_MINT, assetScale: 0 });
+    });
+
+    it('returns fallback when mint account does not exist (T-37.8-03)', async () => {
+      mockGetAccountInfo({ value: null });
+
+      const result = await sdk.getMintMetadata(TEST_TOKEN_MINT);
+
+      expect(result).toEqual({ assetCode: TEST_TOKEN_MINT, assetScale: 0 });
+    });
+
+    it('returns fallback when parsed data is missing decimals (T-37.8-04)', async () => {
+      mockGetAccountInfo({
+        value: {
+          data: {
+            program: 'spl-token',
+            parsed: {
+              info: {},
+              type: 'mint',
+            },
+          },
+        },
+      });
+
+      const result = await sdk.getMintMetadata(TEST_TOKEN_MINT);
+
+      expect(result).toEqual({ assetCode: TEST_TOKEN_MINT, assetScale: 0 });
+    });
+
+    it('returns fallback when parsed data shape is unexpected (T-37.8-05)', async () => {
+      mockGetAccountInfo({
+        value: {
+          data: 'unexpected-string-format',
+        },
+      });
+
+      const result = await sdk.getMintMetadata(TEST_TOKEN_MINT);
+
+      expect(result).toEqual({ assetCode: TEST_TOKEN_MINT, assetScale: 0 });
+    });
+
+    it('returns fallback and never throws on RPC error (T-37.8-06)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (sdk as any)._rpc = {
+        getAccountInfo: jest.fn().mockReturnValue({
+          send: jest.fn().mockRejectedValue(new Error('503 Service Unavailable')),
+        }),
+      };
+
+      const result = await sdk.getMintMetadata(TEST_TOKEN_MINT);
+
+      expect(result).toEqual({ assetCode: TEST_TOKEN_MINT, assetScale: 0 });
+    });
+  });
 });
 
 // ============================================================================

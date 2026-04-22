@@ -25,6 +25,7 @@ import type { AccountManager } from '../settlement/account-manager';
 import type { SettlementMonitor } from '../settlement/settlement-monitor';
 import type { ClaimReceiver } from '../settlement/claim-receiver';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
+import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 import { requireOptional } from '../utils/optional-require';
 
 /**
@@ -66,9 +67,16 @@ export class AdminServer {
     accountManager?: AccountManager;
     settlementMonitor?: SettlementMonitor;
     claimReceiver?: ClaimReceiver;
+    sentClaimsQueries?: import('../settlement/sent-claims-queries').SentClaimsQueries;
     defaultSettlementTokenId?: string;
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
+    metricsRegistry?: IlpMetricsRegistry;
+    resolveTokenMetadata?: (
+      blockchain: 'evm' | 'solana' | 'mina',
+      tokenAddress: string
+    ) => Promise<{ assetCode: string; assetScale: number }>;
+    connectorFeePercentage?: number;
   };
 
   /**
@@ -93,9 +101,16 @@ export class AdminServer {
     accountManager?: AccountManager;
     settlementMonitor?: SettlementMonitor;
     claimReceiver?: ClaimReceiver;
+    sentClaimsQueries?: import('../settlement/sent-claims-queries').SentClaimsQueries;
     defaultSettlementTokenId?: string;
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
+    metricsRegistry?: IlpMetricsRegistry;
+    resolveTokenMetadata?: (
+      blockchain: 'evm' | 'solana' | 'mina',
+      tokenAddress: string
+    ) => Promise<{ assetCode: string; assetScale: number }>;
+    connectorFeePercentage?: number;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -123,9 +138,13 @@ export class AdminServer {
       accountManager,
       settlementMonitor,
       claimReceiver,
+      sentClaimsQueries,
       defaultSettlementTokenId,
       packetSender,
       isReady,
+      metricsRegistry,
+      resolveTokenMetadata,
+      connectorFeePercentage,
     } = this._options;
 
     this._app = express();
@@ -145,9 +164,13 @@ export class AdminServer {
       accountManager,
       settlementMonitor,
       claimReceiver,
+      sentClaimsQueries,
       defaultSettlementTokenId,
       packetSender,
       isReady,
+      metricsRegistry,
+      resolveTokenMetadata,
+      connectorFeePercentage,
     });
 
     this._app.use('/admin', adminRouter);

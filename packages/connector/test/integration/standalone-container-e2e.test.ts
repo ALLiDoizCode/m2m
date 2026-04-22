@@ -33,6 +33,68 @@
  * @packageDocumentation
  */
 
+/**
+ * ============================================================================
+ * INVENTORY COVERAGE MATRIX — Story 38.6 Backfill
+ * ============================================================================
+ *
+ * This file is the ORIGINAL container E2E test (v0 topology with two connectors
+ * peered over BTP). Story 38.6 adds assertions to complete HTTP-surface coverage
+ * alignment with docs/admin-api-inventory.md (23 endpoints).
+ *
+ * COVERAGE BY THIS FILE (standalone-container-e2e.test.ts):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Health Endpoints (unauthenticated):
+ *   • GET /health              (HealthServer peer1:18080, peer2:28080)
+ *   • GET /health/live         (HealthServer peer1:18080, peer2:28080)
+ *   • GET /health/ready        (HealthServer peer1:18080, peer2:28080)
+ *   • GET /health              (AdminServer peer1:18081, peer2:28081)
+ *
+ * Metrics Endpoints:
+ *   • GET /metrics             (HealthServer peer1:18080) — Prometheus format
+ *
+ * Admin API Endpoints (with X-Api-Key):
+ *   • GET /admin/peers         (used in beforeAll to verify BTP peering)
+ *   • POST /admin/ilp/send     (packet forwarding test)
+ *
+ * COVERAGE BY OTHER EPIC 38 TEST FILES (cross-references):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * admin-api-surface-e2e.test.ts (Story 38.2):
+ *   • All AdminServer CRUD endpoints (peers, routes, channels, balances)
+ *   • All HealthServer /health variants (comprehensive)
+ *   • GET /admin/metrics.json
+ *   • GET /admin/settlement/states
+ *
+ * admin-api-cross-surface-invariants.test.ts (Story 38.3):
+ *   • Cross-surface peer state consistency (peer-existence invariant group)
+ *   • Channel state invariants across endpoints (channel-state group)
+ *
+ * admin-api-packet-flow-invariants.test.ts (Story 38.4):
+ *   • Packet-flow counter consistency (packet-counters invariant group)
+ *   • /metrics ↔ /admin/metrics.json counter alignment
+ *
+ * NOT COVERED IN THIS TOPOLOGY (documented rationale):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * • POST /settlement/execute — requires settlement auth token configuration
+ * • GET /settlement/status/:peerId — requires active settlement flow
+ * • Full channel lifecycle tests — require on-chain settlement infra (EVM/Solana/Mina)
+ *
+ * These require special topology not available in the standalone-e2e Docker
+ * profile (no settlement infrastructure, no auth token setup).
+ *
+ * COMBINED COVERAGE VERIFICATION:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Together, the four test files provide 100% coverage of all feasible endpoints
+ * in the 23-endpoint inventory. This satisfies AG2 (every endpoint has at least
+ * one real-process integration test) for Epic 38.
+ *
+ * References:
+ *   • Inventory doc: docs/admin-api-inventory.md
+ *   • Inventory manifest: packages/connector/src/http/admin-api-inventory.ts
+ *   • Story 38.6 spec: _bmad-output/implementation-artifacts/38-6-backfill-*.md
+ * ============================================================================
+ */
+
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -54,6 +116,8 @@ const PROFILE_ARGS = ['compose', '--profile', 'standalone-e2e'];
 
 const PEER1_ADMIN = 'http://127.0.0.1:18081';
 const PEER2_ADMIN = 'http://127.0.0.1:28081';
+const PEER1_HEALTH = 'http://127.0.0.1:18080';
+const PEER2_HEALTH = 'http://127.0.0.1:28080';
 const BLS1_RECEIVED = 'http://127.0.0.1:13101/received';
 const BLS2_RECEIVED = 'http://127.0.0.1:13102/received';
 
@@ -98,6 +162,15 @@ async function getJson<T>(url: string): Promise<T> {
     throw new Error(`GET ${url} returned ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+async function getText(url: string): Promise<{ text: string; contentType: string | null }> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`GET ${url} returned ${response.status}`);
+  }
+  const text = await response.text();
+  return { text, contentType: response.headers.get('content-type') };
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<{ status: number; body: T }> {
@@ -147,10 +220,94 @@ describeDocker('Standalone Mode Container E2E (Docker compose)', () => {
   });
 
   it('both connector containers report standalone mode via /health', async () => {
-    const res1 = await fetch('http://127.0.0.1:18080/health');
-    const res2 = await fetch('http://127.0.0.1:28080/health');
+    const res1 = await fetch(`${PEER1_HEALTH}/health`);
+    const res2 = await fetch(`${PEER2_HEALTH}/health`);
     expect(res1.status).toBe(200);
     expect(res2.status).toBe(200);
+
+    // Verify response body shape (AC 1 extended)
+    const body1 = (await res1.json()) as { status: string; mode?: string; timestamp?: string };
+    const body2 = (await res2.json()) as { status: string; mode?: string; timestamp?: string };
+    expect(body1.status).toBe('healthy');
+    expect(body2.status).toBe('healthy');
+    if (body1.mode) expect(body1.mode).toBe('standalone');
+    if (body2.mode) expect(body2.mode).toBe('standalone');
+  });
+
+  it('HealthServer /health/live and /health/ready return 200 (AC 1)', async () => {
+    // HealthServer /health/live (liveness probes) — always 200 unless crashed
+    const live1 = await fetch(`${PEER1_HEALTH}/health/live`);
+    const live2 = await fetch(`${PEER2_HEALTH}/health/live`);
+    expect(live1.status).toBe(200);
+    expect(live2.status).toBe(200);
+
+    const liveBody1 = (await live1.json()) as { status: string; timestamp?: string };
+    const liveBody2 = (await live2.json()) as { status: string; timestamp?: string };
+    expect(liveBody1.status).toBe('alive');
+    expect(liveBody2.status).toBe('alive');
+
+    // HealthServer /health/ready (readiness probes) — 200 when dependencies ready
+    const ready1 = await fetch(`${PEER1_HEALTH}/health/ready`);
+    const ready2 = await fetch(`${PEER2_HEALTH}/health/ready`);
+    expect(ready1.status).toBe(200);
+    expect(ready2.status).toBe(200);
+
+    const readyBody1 = (await ready1.json()) as { status: string; peersConnected?: number };
+    const readyBody2 = (await ready2.json()) as { status: string; peersConnected?: number };
+    expect(readyBody1.status).toBe('ready');
+    expect(readyBody2.status).toBe('ready');
+    // peersConnected should be 1 (each peer has 1 BTP connection in this topology)
+    if (readyBody1.peersConnected !== undefined) {
+      expect(readyBody1.peersConnected).toBeGreaterThanOrEqual(1);
+    }
+    if (readyBody2.peersConnected !== undefined) {
+      expect(readyBody2.peersConnected).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('AdminServer /health returns 200 on both peers (AC 1)', async () => {
+    // AdminServer has its own /health at root (NOT /admin/health)
+    const adminHealth1 = await fetch(`${PEER1_ADMIN}/health`);
+    const adminHealth2 = await fetch(`${PEER2_ADMIN}/health`);
+    expect(adminHealth1.status).toBe(200);
+    expect(adminHealth2.status).toBe(200);
+
+    const body1 = (await adminHealth1.json()) as {
+      status: string;
+      service?: string;
+      nodeId?: string;
+      timestamp?: string;
+    };
+    const body2 = (await adminHealth2.json()) as {
+      status: string;
+      service?: string;
+      nodeId?: string;
+      timestamp?: string;
+    };
+    expect(body1.status).toBe('healthy');
+    expect(body2.status).toBe('healthy');
+    if (body1.service) expect(body1.service).toBe('admin-api');
+    if (body2.service) expect(body2.service).toBe('admin-api');
+  });
+
+  it('Prometheus /metrics endpoint returns valid metrics (AC 2)', async () => {
+    // GET /metrics on HealthServer returns Prometheus exposition format
+    const { text, contentType } = await getText(`${PEER1_HEALTH}/metrics`);
+
+    // Verify Prometheus text format
+    expect(contentType).toContain('text/plain');
+
+    // Verify presence of at least one toon_ prefixed metric
+    expect(text).toContain('toon_');
+
+    // Verify specific metric families mentioned in inventory
+    expect(text).toContain('toon_build_info');
+    expect(text).toContain('toon_packets_forwarded_total');
+    expect(text).toContain('toon_packets_rejected_total');
+
+    // Verify Prometheus exposition format (TYPE and HELP lines)
+    expect(text).toContain('# TYPE');
+    expect(text).toContain('# HELP');
   });
 
   it('POST /admin/ilp/send → BTP → container BLS /handle-packet fulfills', async () => {

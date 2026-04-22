@@ -32,6 +32,7 @@ import { sha256 } from '@noble/hashes/sha2';
 import type { PerPacketClaimService } from '../settlement/per-packet-claim-service';
 import type { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import { deserializeWrappedClaim } from '../settlement/privacy/nip59-claim-wrapper';
+import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 
 /**
  * Packet validation result
@@ -148,6 +149,15 @@ export class PacketHandler {
    * Node secp256k1 private key for receiver-side ECDH preimage derivation (optional)
    */
   private _nodePrivateKey: Uint8Array | null = null;
+
+  /**
+   * ILP observability metrics registry (Story 37.2 — Epic 37).
+   *
+   * Null until `setIlpMetrics()` is called by ConnectorNode during wiring. When null,
+   * all instrumentation calls are no-ops — keeps this optional so existing test
+   * harnesses that construct PacketHandler without metrics continue to work.
+   */
+  private ilpMetrics: IlpMetricsRegistry | null = null;
 
   /**
    * Creates a new PacketHandler instance
@@ -285,6 +295,20 @@ export class PacketHandler {
   setNip59Wrapper(wrapper: NIP59ClaimWrapper, nodePrivateKey: Uint8Array): void {
     this._nip59Wrapper = wrapper;
     this._nodePrivateKey = nodePrivateKey;
+  }
+
+  /**
+   * Set the ILP observability metrics registry (Story 37.2 — Epic 37).
+   *
+   * Called by ConnectorNode after the HealthServer / metrics middleware are wired.
+   * After this call, `handlePreparePacket` emits per-peer packet / byte counters
+   * and lastPacketAt gauge updates consumed by:
+   *   - GET /metrics (Prometheus scrape)
+   *   - GET /admin/metrics.json (Story 37.3 dashboard endpoint)
+   */
+  setIlpMetrics(metrics: IlpMetricsRegistry): void {
+    this.ilpMetrics = metrics;
+    this.logger.info({ event: 'ilp_metrics_enabled' }, 'ILP observability metrics enabled');
   }
 
   /**
@@ -867,6 +891,9 @@ export class PacketHandler {
       'Packet received'
     );
 
+    // Story 37.2: record inbound attribution (no-op when sourcePeerId is 'unknown').
+    this.ilpMetrics?.recordInbound(sourcePeerId, packet.data.byteLength);
+
     // Validate packet
     const validation = this.validatePacket(packet);
     if (!validation.isValid) {
@@ -881,6 +908,7 @@ export class PacketHandler {
         },
         'Packet rejected'
       );
+      this.ilpMetrics?.recordPreRoutingReject('validation_failed');
       return this.generateReject(validation.errorCode!, validation.errorMessage!, this.nodeId);
     }
 
@@ -908,6 +936,7 @@ export class PacketHandler {
         },
         'Packet rejected'
       );
+      this.ilpMetrics?.recordPreRoutingReject('no_route');
       return this.generateReject(
         ILPErrorCode.F02_UNREACHABLE,
         `No route to destination: ${packet.destination}`,
@@ -1031,6 +1060,7 @@ export class PacketHandler {
         },
         'Packet rejected'
       );
+      this.ilpMetrics?.recordPreRoutingReject('expiry_too_short');
       return this.generateReject(
         ILPErrorCode.R00_TRANSFER_TIMED_OUT,
         'Insufficient time remaining for forwarding',
@@ -1093,6 +1123,7 @@ export class PacketHandler {
           'Packet rejected: credit limit exceeded'
         );
 
+        this.ilpMetrics?.recordPreRoutingReject('credit_limit_exceeded');
         return this.generateReject(
           ILPErrorCode.T04_INSUFFICIENT_LIQUIDITY,
           `Credit limit exceeded: peer ${fromPeerId} would owe ${creditLimitViolation.wouldExceedBy} units over limit of ${creditLimitViolation.creditLimit}`,
@@ -1126,6 +1157,7 @@ export class PacketHandler {
             },
             'Packet rejected due to settlement failure'
           );
+          this.ilpMetrics?.recordPreRoutingReject('settlement_recording_failed');
           return this.generateReject(
             ILPErrorCode.T00_INTERNAL_ERROR,
             'Settlement recording failed',
@@ -1210,6 +1242,7 @@ export class PacketHandler {
           },
           'Per-packet claim service not configured'
         );
+        this.ilpMetrics?.recordPreRoutingReject('claim_generation_failed');
         return this.generateReject(
           ILPErrorCode.T00_INTERNAL_ERROR,
           'Per-packet claim service not configured',
@@ -1232,6 +1265,7 @@ export class PacketHandler {
             },
             'No payment channel available for peer'
           );
+          this.ilpMetrics?.recordPreRoutingReject('claim_generation_failed');
           return this.generateReject(
             ILPErrorCode.T00_INTERNAL_ERROR,
             'No payment channel available for peer',
@@ -1258,6 +1292,7 @@ export class PacketHandler {
           },
           'Claim generation failed'
         );
+        this.ilpMetrics?.recordPreRoutingReject('claim_generation_failed');
         return this.generateReject(
           ILPErrorCode.T00_INTERNAL_ERROR,
           'Claim generation failed',
@@ -1266,8 +1301,14 @@ export class PacketHandler {
       }
     }
 
-    // Forward to next hop via BTP and return response
-    const response = await this.forwardToNextHop(
+    // Forward to next hop via BTP and return response.
+    // Story 37.2: `response` is mutable so that fulfillment-verification failures below
+    // transform the outcome in-place, and the single end-of-method instrumentation block
+    // sees the final (possibly transformed) response. Previously this block had two
+    // early `return this.generateReject(...)` paths; those have been rewritten to
+    // reassign `response` and fall through, so metrics attribution happens in exactly
+    // one place for every non-pre-routing outcome.
+    let response: ILPFulfillPacket | ILPRejectPacket = await this.forwardToNextHop(
       forwardingPacket,
       nextHop,
       correlationId,
@@ -1290,30 +1331,41 @@ export class PacketHandler {
           },
           'FULFILL missing fulfillment but execution condition is present'
         );
-        return this.generateReject(
+        response = this.generateReject(
           ILPErrorCode.F99_APPLICATION_ERROR,
           'Fulfillment does not match execution condition',
           this.nodeId
         );
+      } else {
+        const expectedCondition = sha256(new Uint8Array(fulfillmentBytes));
+        if (
+          !Buffer.from(expectedCondition).equals(Buffer.from(forwardingPacket.executionCondition))
+        ) {
+          this.logger.error(
+            {
+              correlationId,
+              event: 'fulfillment_verification_failed',
+              peerId: nextHop,
+            },
+            'Fulfillment does not match execution condition'
+          );
+          response = this.generateReject(
+            ILPErrorCode.F99_APPLICATION_ERROR,
+            'Fulfillment does not match execution condition',
+            this.nodeId
+          );
+        }
       }
-      const expectedCondition = sha256(new Uint8Array(fulfillmentBytes));
-      if (
-        !Buffer.from(expectedCondition).equals(Buffer.from(forwardingPacket.executionCondition))
-      ) {
-        this.logger.error(
-          {
-            correlationId,
-            event: 'fulfillment_verification_failed',
-            peerId: nextHop,
-          },
-          'Fulfillment does not match execution condition'
-        );
-        return this.generateReject(
-          ILPErrorCode.F99_APPLICATION_ERROR,
-          'Fulfillment does not match execution condition',
-          this.nodeId
-        );
-      }
+    }
+
+    // Story 37.2: per-peer forward-outcome attribution. `bytesSent` uses the forwarding
+    // packet's data byteLength as a proxy for wire bytes — BTP/ILP framing adds a small
+    // constant overhead we intentionally ignore here for simplicity and stability.
+    const outBytes = forwardingPacket.data.byteLength;
+    if (response.type === PacketType.FULFILL) {
+      this.ilpMetrics?.recordForwardFulfill(nextHop, outBytes);
+    } else {
+      this.ilpMetrics?.recordForwardReject(nextHop, outBytes);
     }
 
     this.logger.info(

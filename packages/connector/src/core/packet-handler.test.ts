@@ -883,10 +883,12 @@ describe('PacketHandler', () => {
 
     it('should use HTTP path when no function handler set but HTTP LocalDeliveryClient enabled (backward compat)', async () => {
       // Arrange - set up HTTP local delivery, no function handler
+      // Use a short timeout (100ms) so the request fails fast in the test environment
+      // rather than timing out after >5s (which would exceed Jest's test timeout)
       handler.setLocalDelivery({
         enabled: true,
         handlerUrl: 'http://connector:3100',
-        timeout: 5000,
+        timeout: 100,
       });
       // Do NOT set function handler
 

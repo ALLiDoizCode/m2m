@@ -115,6 +115,8 @@ describe('ConnectorNode — minimal dependency startup', () => {
       setLocalDelivery: jest.fn(),
       setLocalDeliveryHandler: jest.fn(),
       handlePreparePacket: jest.fn(),
+      // Story 37.2: ILP observability metrics
+      setIlpMetrics: jest.fn(),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {

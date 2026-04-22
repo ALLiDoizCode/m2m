@@ -58,6 +58,7 @@ import {
 } from '../config/config-loader';
 import { HealthServer } from '../http/health-server';
 import { AdminServer } from '../http/admin-server';
+import { IlpMetricsRegistry } from '../observability/metrics-registry';
 import { HealthStatus, HealthStatusProvider } from '../http/types';
 import { PaymentChannelSDK } from '../settlement/payment-channel-sdk';
 import { ChannelManager } from '../settlement/channel-manager';
@@ -109,6 +110,7 @@ export class ConnectorNode implements HealthStatusProvider {
   private _inMemoryLedgerClient: InMemoryLedgerClient | null = null;
   private readonly _settlementPeers: Map<string, SettlementPeerConfig> = new Map();
   private _healthStatus: 'healthy' | 'unhealthy' | 'starting' = 'starting';
+  private readonly _ilpMetrics!: IlpMetricsRegistry;
   private readonly _startTime: Date = new Date();
   private _btpServerStarted: boolean = false;
   private _defaultSettlementTokenId: string = 'M2M';
@@ -246,8 +248,21 @@ export class ConnectorNode implements HealthStatusProvider {
     // Link PacketHandler to BTPClientManager for incoming packet handling (resolves circular dependency)
     this._btpClientManager.setPacketHandler(this._packetHandler);
 
-    // Initialize health server
-    this._healthServer = new HealthServer(logger.child({ component: 'HealthServer' }), this);
+    // Story 37.2: Initialize ILP observability metrics registry and wire through.
+    // - Create scoped registry (not global prom-client default, for test isolation)
+    // - Register configured peers so idle peers appear in /metrics output
+    // - Pass middleware to HealthServer so GET /metrics actually serves data
+    // - Wire registry into PacketHandler for counter attribution
+    this._ilpMetrics = new IlpMetricsRegistry({ collectDefaults: false });
+    for (const peer of resolvedConfig.peers) {
+      this._ilpMetrics.registerPeer(peer.id);
+    }
+    this._packetHandler.setIlpMetrics(this._ilpMetrics);
+
+    // Initialize health server with metrics middleware
+    this._healthServer = new HealthServer(logger.child({ component: 'HealthServer' }), this, {
+      metricsMiddleware: this._ilpMetrics.createMetricsMiddleware(),
+    });
 
     this._logger.info(
       {
@@ -1182,6 +1197,7 @@ export class ConnectorNode implements HealthStatusProvider {
           defaultSettlementTokenId: this._defaultSettlementTokenId,
           packetSender: (params) => this.sendPacket(params),
           isReady: () => this._btpServerStarted,
+          metricsRegistry: this._ilpMetrics,
         });
 
         await this._adminServer.start();
@@ -2076,6 +2092,10 @@ export class ConnectorNode implements HealthStatusProvider {
         lastSeen: new Date(),
       };
       await this._btpClientManager.addPeer(peer);
+      // Story 37.2/37.3: prime metrics labels so runtime-added peers appear in both
+      // the Prometheus scrape (with zero counters) and /admin/metrics.json before
+      // their first packet.
+      this._ilpMetrics.registerPeer(config.id);
       this._logger.info(
         { event: 'peer_registered', peerId: config.id, url: config.url },
         `Registered peer: ${config.id}`
@@ -2153,6 +2173,11 @@ export class ConnectorNode implements HealthStatusProvider {
 
     // Remove BTP peer
     await this._btpClientManager.removePeer(peerId);
+    // Story 37.2/37.3: drop peer from the metrics "known peers" set so it stops
+    // being surfaced as idle in Prometheus scrapes. Historical counter totals
+    // are preserved internally but no longer exposed via /admin/metrics.json
+    // (which uses btpClientManager.getPeerIds() as the authoritative set).
+    this._ilpMetrics.unregisterPeer(peerId);
     this._logger.info({ event: 'peer_removed', peerId }, `Removed peer: ${peerId}`);
 
     // Remove settlement config

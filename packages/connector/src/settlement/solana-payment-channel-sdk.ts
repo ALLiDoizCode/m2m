@@ -927,6 +927,76 @@ export class SolanaPaymentChannelSDK {
   // -------------------------------------------------------------------------
 
   /**
+   * Fetch SPL mint metadata (decimals + raw mint address as symbol).
+   *
+   * Uses `getAccountInfo` with `encoding: 'jsonParsed'` so the Solana RPC
+   * parses the SPL Token mint account on the server side and returns
+   * `{ parsed: { info: { decimals, supply, mintAuthority } } }`.
+   *
+   * Solana SPL mints do not carry a standard on-chain symbol string —
+   * Metaplex Token Metadata Program adds that at a derived PDA, but is
+   * out of scope for this helper. Returns the raw mint address as
+   * `assetCode`; dashboard can display it in truncated form.
+   *
+   * Never throws: on any RPC or parse failure returns the raw-address
+   * fallback so the caller (admin API earnings endpoint) stays up.
+   *
+   * @param mintAddress - Base58 SPL mint address
+   * @returns `{ assetCode, assetScale }` — assetScale is the mint's decimals
+   *   (0 on failure). Story 37.8.
+   */
+  async getMintMetadata(mintAddress: string): Promise<{ assetCode: string; assetScale: number }> {
+    const fallback = { assetCode: mintAddress, assetScale: 0 };
+    try {
+      const accountInfo = await this._rpc
+        .getAccountInfo(address(mintAddress), { encoding: 'jsonParsed' })
+        .send();
+
+      if (!accountInfo.value) {
+        this._logger.warn(
+          { event: 'spl_mint_not_found', mintAddress },
+          'SPL mint account not found on-chain; using raw-address fallback'
+        );
+        return fallback;
+      }
+
+      // jsonParsed returns `data: { program: 'spl-token', parsed: { info: {...}, type: 'mint' } }`.
+      const data = accountInfo.value.data as unknown;
+      if (
+        data &&
+        typeof data === 'object' &&
+        'parsed' in data &&
+        data.parsed &&
+        typeof data.parsed === 'object' &&
+        'info' in data.parsed &&
+        data.parsed.info &&
+        typeof data.parsed.info === 'object' &&
+        'decimals' in data.parsed.info &&
+        typeof (data.parsed.info as { decimals: unknown }).decimals === 'number'
+      ) {
+        const decimals = (data.parsed.info as { decimals: number }).decimals;
+        return { assetCode: mintAddress, assetScale: decimals };
+      }
+
+      this._logger.warn(
+        { event: 'spl_mint_unparseable', mintAddress },
+        'SPL mint account parsed data missing decimals; using raw-address fallback'
+      );
+      return fallback;
+    } catch (err) {
+      this._logger.warn(
+        {
+          event: 'spl_mint_rpc_failed',
+          mintAddress,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'SPL mint RPC lookup failed; using raw-address fallback'
+      );
+      return fallback;
+    }
+  }
+
+  /**
    * Fetch and deserialize on-chain channel state.
    *
    * @param channelPDA - Base58 channel PDA address

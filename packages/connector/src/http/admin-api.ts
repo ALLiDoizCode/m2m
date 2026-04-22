@@ -45,9 +45,11 @@ import type { PaymentChannelSDK } from '../settlement/payment-channel-sdk';
 import type { AccountManager } from '../settlement/account-manager';
 import type { SettlementMonitor } from '../settlement/settlement-monitor';
 import type { ClaimReceiver } from '../settlement/claim-receiver';
+import type { SentClaimsQueries } from '../settlement/sent-claims-queries';
 import type { BlockchainType } from '../btp/btp-claim-types';
 import { IlpSendHandler } from './ilp-send-handler';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
+import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 
 /**
  * Admin API Configuration
@@ -96,6 +98,15 @@ export interface AdminAPIConfig {
   /** Optional ClaimReceiver for payment channel claim queries */
   claimReceiver?: ClaimReceiver;
 
+  /**
+   * Optional sent-claims queries (Story 37.7). Exposes read helpers over the
+   * `sent_claims` SQLite table. When provided, /admin/earnings.json populates
+   * `claimsSentTotal` and the outbound side of the `recentClaims` ticker.
+   * When absent, the endpoint falls back to `claimsSentTotal = "0"` and an
+   * inbound-only ticker (37.4 behaviour).
+   */
+  sentClaimsQueries?: SentClaimsQueries;
+
   /** Optional callback for sending ILP packets via ConnectorNode.sendPacket() */
   packetSender?: PacketSenderFn;
 
@@ -104,6 +115,43 @@ export interface AdminAPIConfig {
 
   /** Default settlement token ID resolved from on-chain ERC-20 symbol (e.g. 'M2M') */
   defaultSettlementTokenId?: string;
+
+  /** Optional metrics registry for ILP observability (Story 37.2). When provided, enables GET /admin/metrics.json endpoint. */
+  metricsRegistry?: IlpMetricsRegistry;
+
+  /**
+   * Optional on-chain token metadata resolver (Story 37.4).
+   *
+   * Called by GET /admin/earnings.json to resolve raw token identifiers
+   * (ERC-20 address, SPL program ID, Mina token ID) into human-friendly
+   * (assetCode, assetScale) pairs via on-chain `symbol()`/`decimals()` reads.
+   *
+   * Implementations should cache results — the endpoint calls this once per
+   * distinct asset per request and the dashboard polls at ~0.2 Hz.
+   *
+   * Resolver must return a fallback (raw address as code, scale 0) for tokens
+   * whose metadata cannot be resolved on-chain rather than throwing. Throwing
+   * degrades the entire endpoint response; returning a fallback keeps the
+   * dashboard alive with raw integer amounts.
+   */
+  resolveTokenMetadata?: (
+    blockchain: 'evm' | 'solana' | 'mina',
+    tokenAddress: string
+  ) => Promise<{ assetCode: string; assetScale: number }>;
+
+  /**
+   * Optional connector fee percentage (e.g. 0.1 = 0.1%) used by /admin/earnings.json
+   * to compute approximate cumulative fee revenue per asset (Story 37.4).
+   *
+   * Formula: sum(incomingVolume per peer per asset) * connectorFeePercentage / 100.
+   *
+   * This is an approximation: it is derived from the TB ledger's incoming-volume
+   * raw counter times the globally-configured fee rate. It does not require
+   * (and does not provide) a dedicated ConnectorFee TigerBeetle account — see
+   * the follow-up story for that refactor. When this field is omitted or
+   * zero, the endpoint returns an empty `connectorFees` array.
+   */
+  connectorFeePercentage?: number;
 }
 
 /**
@@ -170,6 +218,80 @@ export interface BalanceResponse {
     creditBalance: string;
     netBalance: string;
   }>;
+}
+
+/**
+ * GET /admin/earnings.json response — per-peer per-asset earnings row (Story 37.4).
+ *
+ * Cumulative amounts are expressed as decimal-string bigints (JSON-safe for any
+ * asset scale). `claimsReceivedTotal` tracks value the peer has sent us (they
+ * are paying); `claimsSentTotal` tracks value we have forwarded to the peer
+ * (they are earning). Both reduce to zero as on-chain settlements drain the
+ * underlying TB counters.
+ */
+export interface AdminEarningsByAsset {
+  assetCode: string;
+  assetScale: number;
+  claimsReceivedTotal: string;
+  claimsSentTotal: string;
+  netBalance: string;
+  lastClaimAt: string | null;
+}
+
+export interface AdminEarningsJsonPeer {
+  peerId: string;
+  byAsset: AdminEarningsByAsset[];
+}
+
+export interface AdminEarningsConnectorFee {
+  assetCode: string;
+  assetScale: number;
+  total: string;
+}
+
+export interface AdminEarningsRecentClaim {
+  peerId: string;
+  assetCode: string;
+  assetScale: number;
+  amount: string;
+  direction: 'inbound' | 'outbound';
+  at: string;
+}
+
+export interface AdminEarningsJsonResponse {
+  uptimeSeconds: number;
+  peers: AdminEarningsJsonPeer[];
+  connectorFees: AdminEarningsConnectorFee[];
+  recentClaims: AdminEarningsRecentClaim[];
+  timestamp: string;
+}
+
+/**
+ * GET /admin/metrics.json response — per-peer ILP counter snapshot.
+ * Shape locked in response doc §9.4.
+ */
+export interface AdminMetricsJsonPeer {
+  peerId: string;
+  connected: boolean;
+  packetsForwarded: number;
+  packetsRejected: number;
+  bytesSent: number;
+  lastPacketAt: string | null;
+}
+
+/**
+ * GET /admin/metrics.json response — top-level aggregate + peer list.
+ * Shape locked in response doc §9.4.
+ */
+export interface AdminMetricsJsonResponse {
+  uptimeSeconds: number;
+  aggregate: {
+    packetsForwarded: number;
+    packetsRejected: number;
+    bytesSent: number;
+  };
+  peers: AdminMetricsJsonPeer[];
+  timestamp: string;
 }
 
 /**
@@ -324,9 +446,13 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     accountManager,
     settlementMonitor,
     claimReceiver,
+    sentClaimsQueries,
     packetSender,
     isReady,
     defaultSettlementTokenId,
+    metricsRegistry,
+    resolveTokenMetadata,
+    connectorFeePercentage,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -1402,6 +1528,20 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       const peerId = req.params.peerId as string;
       const tokenId = (req.query.tokenId as string) || (defaultSettlementTokenId ?? 'M2M');
 
+      // Story 37.1: Distinguish unknown peer (404) from known-but-idle peer (200 zeros).
+      // Without this guard, account-manager.ts:441 returns zeroed balances for any peerId
+      // because it deterministically derives TigerBeetle account IDs and defaults missing
+      // ledger entries to 0n, collapsing both cases into an identical 200 response.
+      const registeredPeers = btpClientManager.getPeerIds();
+      if (!registeredPeers.includes(peerId)) {
+        res.status(404).json({
+          error: 'Not found',
+          peerId,
+          message: `Peer '${peerId}' not found`,
+        });
+        return;
+      }
+
       const balance = await accountManager.getAccountBalance(peerId, tokenId);
 
       const response = {
@@ -1516,6 +1656,409 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
    */
   const ilpSendHandler = new IlpSendHandler(packetSender ?? null, isReady ?? null, log);
   router.post('/ilp/send', ilpSendHandler.handle.bind(ilpSendHandler));
+
+  /**
+   * GET /admin/metrics.json
+   * JSON projection of per-peer ILP counters from the metrics registry.
+   * Story 37.3 — mirrors the Prometheus counters in a dashboard-friendly format.
+   */
+  router.get('/metrics.json', async (_req: Request, res: Response) => {
+    try {
+      if (!metricsRegistry) {
+        res.status(503).json({
+          error: 'Service Unavailable',
+          message: 'Metrics not enabled',
+        });
+        return;
+      }
+
+      // `btpClientManager.getPeerIds()` is the authoritative peer set: peers removed via
+      // POST/DELETE /admin/peers disappear from this response immediately, even if their
+      // counter labels persist in the registry. The snapshot is used only to read current
+      // counter values; a peer appearing in the snapshot but not in getPeerIds() is a
+      // removed peer and is intentionally dropped. Idle peers (registered but zero
+      // activity) still appear because getPeerIds() includes them (AC 3).
+      const livePeerIds = btpClientManager.getPeerIds();
+      const peerSnapshots = await metricsRegistry.snapshotPeers();
+      const snapshotByPeer = new Map(peerSnapshots.map((s) => [s.peerId, s]));
+
+      // Build per-peer entries
+      const peerStatus = btpClientManager.getPeerStatus();
+      const peers = [...livePeerIds].sort().map((peerId) => {
+        const snap = snapshotByPeer.get(peerId);
+        const lastPacketAt =
+          snap && snap.lastPacketAtUnixSeconds > 0
+            ? new Date(snap.lastPacketAtUnixSeconds * 1000).toISOString()
+            : null;
+        return {
+          peerId,
+          connected: peerStatus.get(peerId) ?? false,
+          packetsForwarded: snap?.packetsForwarded ?? 0,
+          packetsRejected: snap?.packetsRejected ?? 0,
+          bytesSent: snap?.bytesSent ?? 0,
+          lastPacketAt,
+        } satisfies AdminMetricsJsonPeer;
+      });
+
+      // Aggregate rollup
+      const aggregate = peers.reduce(
+        (acc, p) => ({
+          packetsForwarded: acc.packetsForwarded + p.packetsForwarded,
+          packetsRejected: acc.packetsRejected + p.packetsRejected,
+          bytesSent: acc.bytesSent + p.bytesSent,
+        }),
+        { packetsForwarded: 0, packetsRejected: 0, bytesSent: 0 }
+      );
+
+      // Dashboard polls at 1 Hz; prevent proxies / browsers from caching stale data.
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        uptimeSeconds: Math.floor(process.uptime()),
+        aggregate,
+        peers,
+        timestamp: new Date().toISOString(),
+      } satisfies AdminMetricsJsonResponse);
+    } catch (error) {
+      log.error(
+        {
+          event: 'admin_api_metrics_error',
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to generate metrics.json'
+      );
+      res.status(500).json({
+        error: 'Internal server error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  /**
+   * GET /admin/earnings.json
+   *
+   * Per-peer per-asset earnings projection for the Townhouse node-operator
+   * dashboard (Story 37.4). Sources:
+   *   - Per-asset cumulative volume: AccountManager.getPeerVolumeTotals()
+   *     reads raw TigerBeetle `debits_posted` / `credits_posted` counters
+   *     bypassing the legacy self-balancing `netBalance` quirks.
+   *   - Asset inventory per peer: ClaimReceiver.getAssetsForPeer() returns
+   *     distinct (blockchain, tokenAddress) pairs observed in verified claims,
+   *     merged with the configured settlement token for each peer so that
+   *     idle peers with no claim history still appear (AC 3).
+   *   - Asset metadata (assetCode/assetScale): the injected
+   *     `resolveTokenMetadata` resolver performs an on-chain lookup
+   *     (ERC-20 symbol()/decimals() on EVM, SPL mint metadata on Solana,
+   *     zkApp token lookup on Mina) with in-closure caching.
+   *   - Connector fee revenue: approximate — sum(incomingVolume) * feePct.
+   *     A dedicated fee-ledger account is a deliberate follow-up; see story
+   *     37.4 dev-notes.
+   *   - recentClaims ring: ClaimReceiver.getRecentClaims() ORDER BY ts DESC.
+   *
+   * Peer set: authoritative via `btpClientManager.getPeerIds()`, consistent
+   * with /metrics.json (D1 in 37.3 review).
+   */
+  router.get('/earnings.json', async (_req: Request, res: Response) => {
+    try {
+      if (!accountManager || !claimReceiver) {
+        res.status(503).json({
+          error: 'Service Unavailable',
+          message: 'Earnings subsystem not enabled (accountManager or claimReceiver missing)',
+        });
+        return;
+      }
+
+      // Per-request metadata resolver: default to raw-address fallback when the
+      // operator did not inject an on-chain resolver. The fallback satisfies
+      // the AdminEarningsByAsset shape (assetCode is non-null, assetScale is a
+      // finite number) but yields raw integer amounts on the dashboard.
+      const metadataFallback = async (
+        _chain: 'evm' | 'solana' | 'mina',
+        tokenAddress: string
+      ): Promise<{ assetCode: string; assetScale: number }> => ({
+        assetCode: tokenAddress || 'UNKNOWN',
+        assetScale: 0,
+      });
+      const resolve = resolveTokenMetadata ?? metadataFallback;
+
+      // Per-request cache keyed by `${blockchain}:${tokenAddress}`. Dashboard
+      // polls at ~0.2 Hz so each request does at most one RPC per distinct
+      // asset. The injected resolver is expected to cache across requests;
+      // this cache is only for intra-request dedup.
+      const metaCache = new Map<string, { assetCode: string; assetScale: number }>();
+      const resolveCached = async (
+        blockchain: 'evm' | 'solana' | 'mina',
+        tokenAddress: string
+      ): Promise<{ assetCode: string; assetScale: number }> => {
+        const key = `${blockchain}:${tokenAddress}`;
+        const hit = metaCache.get(key);
+        if (hit) return hit;
+        let meta: { assetCode: string; assetScale: number };
+        try {
+          meta = await resolve(blockchain, tokenAddress);
+        } catch (err) {
+          log.warn(
+            {
+              event: 'admin_api_earnings_metadata_failed',
+              blockchain,
+              tokenAddress,
+              error: err instanceof Error ? err.message : String(err),
+            },
+            'Token metadata lookup failed; using raw-address fallback'
+          );
+          meta = await metadataFallback(blockchain, tokenAddress);
+        }
+        metaCache.set(key, meta);
+        return meta;
+      };
+
+      const livePeerIds = [...btpClientManager.getPeerIds()].sort();
+
+      // Per-peer entries. Assets = union of three sources:
+      //   - chain-verified inbound claims (received_claims DB)
+      //   - chain-verified outbound claims (sent_claims DB) — when wired
+      //   - configured settlement tokens (idle-peer completeness)
+      // This merge guarantees inbound-only, outbound-only, and bidirectional
+      // peers all surface with the right byAsset rows.
+      //
+      // When `sentClaimsQueries` is not provided the endpoint degrades to the
+      // 37.4 behaviour (claimsSentTotal = "0", inbound-only ticker).
+      const peersOut: AdminEarningsJsonPeer[] = [];
+      const incomingTotalByAsset = new Map<string, bigint>();
+      void accountManager; // reachability check; also keeps the 503 guard honest
+      for (const peerId of livePeerIds) {
+        // 1. Chain-verified inbound by asset (latest-nonce per channel, summed).
+        const inboundByAsset = await claimReceiver.getCumulativeInboundByAsset(peerId);
+
+        // 2. Chain-verified outbound by asset (empty map if queries not wired).
+        const outboundByAsset = sentClaimsQueries
+          ? await sentClaimsQueries.getCumulativeOutboundByAsset(peerId)
+          : new Map<
+              string,
+              {
+                blockchain: 'evm' | 'solana' | 'mina';
+                tokenAddress: string;
+                total: bigint;
+                lastAt: number;
+              }
+            >();
+
+        // 3. Configured settlement tokens (idle-peer completeness).
+        const peerConfig = settlementPeers?.get(peerId);
+        const configuredTokens = new Set<string>();
+        if (peerConfig?.tokenAddress) configuredTokens.add(peerConfig.tokenAddress);
+        for (const t of peerConfig?.settlementTokens ?? []) configuredTokens.add(t);
+
+        // 4. Merge asset keys from all three sources.
+        const assetKeys = new Set<string>([...inboundByAsset.keys(), ...outboundByAsset.keys()]);
+        const configuredBlockchain: 'evm' | 'solana' | 'mina' =
+          peerConfig?.settlementPreference === 'solana'
+            ? 'solana'
+            : peerConfig?.settlementPreference === 'mina'
+              ? 'mina'
+              : 'evm';
+        for (const t of configuredTokens) assetKeys.add(`${configuredBlockchain}:${t}`);
+
+        // 5. Resolve metadata + build rows per asset.
+        const byAsset: AdminEarningsByAsset[] = [];
+        for (const key of assetKeys) {
+          const sepIdx = key.indexOf(':');
+          const blockchain = key.substring(0, sepIdx) as 'evm' | 'solana' | 'mina';
+          const tokenAddress = key.substring(sepIdx + 1);
+          const meta = await resolveCached(blockchain, tokenAddress);
+          const inbound = inboundByAsset.get(key);
+          const outbound = outboundByAsset.get(key);
+          const received = inbound?.total ?? 0n;
+          const sent = outbound?.total ?? 0n;
+          // lastClaimAt = max of inbound + outbound timestamps across this asset.
+          const lastInbound = inbound?.lastAt ?? 0;
+          const lastOutbound = outbound?.lastAt ?? 0;
+          const lastAtMax = Math.max(lastInbound, lastOutbound);
+          const lastAt = lastAtMax > 0 ? lastAtMax : null;
+
+          byAsset.push({
+            assetCode: meta.assetCode,
+            assetScale: meta.assetScale,
+            claimsReceivedTotal: received.toString(),
+            claimsSentTotal: sent.toString(),
+            // netBalance > 0 → we owe the peer (they've earned from us);
+            // netBalance < 0 → peer owes us.
+            netBalance: (sent - received).toString(),
+            lastClaimAt: lastAt ? new Date(lastAt).toISOString() : null,
+          });
+
+          // Fees accrue on inbound volume only (we collect fees when a peer
+          // pays us to forward), so aggregate only the received side.
+          const feeKey = `${meta.assetCode}|${meta.assetScale}`;
+          incomingTotalByAsset.set(feeKey, (incomingTotalByAsset.get(feeKey) ?? 0n) + received);
+        }
+
+        peersOut.push({ peerId, byAsset });
+      }
+
+      // 5. connectorFees — approximate: sum(inbound claim amounts across peers)
+      // * feePct. Returns [] when fee percentage is unset or zero. This is a
+      // stop-gap: a dedicated ConnectorFee TigerBeetle account is a deliberate
+      // follow-up (see story 37.4 dev-notes).
+      const connectorFees: AdminEarningsConnectorFee[] = [];
+      const feePct = connectorFeePercentage ?? 0;
+      if (feePct > 0) {
+        // Basis points = feePct * 100 (so 1% → 100 bp). Divisor = 10_000
+        // (100 percent * 100 bp per percent).
+        const basisPoints = BigInt(Math.round(feePct * 100));
+        for (const [key, incomingSum] of incomingTotalByAsset) {
+          if (incomingSum === 0n) continue;
+          const sepIdx = key.lastIndexOf('|');
+          const assetCode = key.substring(0, sepIdx);
+          const assetScale = parseInt(key.substring(sepIdx + 1), 10);
+          const total = (incomingSum * basisPoints) / 10_000n;
+          connectorFees.push({ assetCode, assetScale, total: total.toString() });
+        }
+      }
+
+      // 6. recentClaims ring buffer, newest first, max 50. Merges inbound +
+      // outbound (when sentClaimsQueries is wired). Each claim's amount is
+      // the per-claim delta on its channel+direction (this cumulative minus
+      // the prior cumulative on the same channel+direction — inbound and
+      // outbound cumulatives are independent lineages).
+      //
+      // Algorithm:
+      //   (a) fetch up to 50 newest-first from each source
+      //   (b) tag with direction, merge, sort by ts DESC, truncate to 50
+      //   (c) walk oldest-first tracking (bc, channel, direction) prior
+      //       cumulative to compute deltas
+      //   (d) reverse back to newest-first for the response
+      const inboundRaw = await claimReceiver.getRecentClaims(50);
+      const outboundRaw = sentClaimsQueries ? await sentClaimsQueries.getRecentSentClaims(50) : [];
+
+      type Parsed = {
+        peerId: string;
+        blockchain: 'evm' | 'solana' | 'mina';
+        channelId: string;
+        tokenAddress: string;
+        cumulative: bigint;
+        direction: 'inbound' | 'outbound';
+        at: number;
+        meta: { assetCode: string; assetScale: number };
+      };
+
+      // Extract (tokenAddress, cumulative) from a claim payload (variant-aware).
+      const extractClaim = (
+        blockchain: 'evm' | 'solana' | 'mina',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        c: any
+      ): { tokenAddress: string; cumulative: bigint } => {
+        if (blockchain === 'evm') {
+          let cum = 0n;
+          try {
+            cum = BigInt(c.transferredAmount ?? '0');
+          } catch {
+            cum = 0n;
+          }
+          return { tokenAddress: c.tokenAddress ?? '', cumulative: cum };
+        }
+        if (blockchain === 'solana') {
+          let cum = 0n;
+          try {
+            cum = BigInt(c.transferredAmount ?? '0');
+          } catch {
+            cum = 0n;
+          }
+          return { tokenAddress: c.programId ?? '', cumulative: cum };
+        }
+        // mina: commitment, not plaintext amount
+        return { tokenAddress: c.tokenId ?? '', cumulative: 0n };
+      };
+
+      const parsed: Parsed[] = [];
+      for (const row of inboundRaw) {
+        const blockchain = row.blockchain as 'evm' | 'solana' | 'mina';
+        const { tokenAddress, cumulative } = extractClaim(blockchain, row.claimData);
+        const meta = tokenAddress
+          ? await resolveCached(blockchain, tokenAddress)
+          : { assetCode: 'UNKNOWN', assetScale: 0 };
+        parsed.push({
+          peerId: row.peerId,
+          blockchain,
+          channelId: row.channelId,
+          tokenAddress,
+          cumulative,
+          direction: 'inbound',
+          at: row.receivedAt,
+          meta,
+        });
+      }
+      for (const row of outboundRaw) {
+        const blockchain = row.blockchain as 'evm' | 'solana' | 'mina';
+        const { tokenAddress, cumulative } = extractClaim(blockchain, row.claimData);
+        const meta = tokenAddress
+          ? await resolveCached(blockchain, tokenAddress)
+          : { assetCode: 'UNKNOWN', assetScale: 0 };
+        parsed.push({
+          peerId: row.peerId,
+          blockchain,
+          channelId: row.channelId,
+          tokenAddress,
+          cumulative,
+          direction: 'outbound',
+          at: row.sentAt,
+          meta,
+        });
+      }
+
+      // Sort by ts DESC across both directions; keep at most 50.
+      parsed.sort((a, b) => b.at - a.at);
+      const topN = parsed.slice(0, 50);
+
+      // Walk oldest-first to compute per-channel+direction deltas.
+      const priorByChannel = new Map<string, bigint>();
+      const withDeltas: Array<AdminEarningsRecentClaim & { _sortKey: number }> = [];
+      for (let i = topN.length - 1; i >= 0; i--) {
+        const p = topN[i];
+        if (!p) continue;
+        const chanKey = `${p.blockchain}:${p.channelId}:${p.direction}`;
+        const prior = priorByChannel.get(chanKey) ?? 0n;
+        const delta = p.cumulative - prior;
+        priorByChannel.set(chanKey, p.cumulative);
+
+        withDeltas.push({
+          peerId: p.peerId,
+          assetCode: p.meta.assetCode,
+          assetScale: p.meta.assetScale,
+          amount: delta.toString(),
+          direction: p.direction,
+          at: new Date(p.at).toISOString(),
+          _sortKey: p.at,
+        });
+      }
+      // Restore newest-first ordering (AC 5).
+      withDeltas.sort((a, b) => b._sortKey - a._sortKey);
+      const recentClaims: AdminEarningsRecentClaim[] = withDeltas.map(({ _sortKey, ...rest }) => {
+        void _sortKey;
+        return rest;
+      });
+
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        uptimeSeconds: Math.floor(process.uptime()),
+        peers: peersOut,
+        connectorFees,
+        recentClaims,
+        timestamp: new Date().toISOString(),
+      } satisfies AdminEarningsJsonResponse);
+    } catch (error) {
+      log.error(
+        {
+          event: 'admin_api_earnings_error',
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to generate earnings.json'
+      );
+      res.status(500).json({
+        error: 'Internal server error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
 
   return router;
 }

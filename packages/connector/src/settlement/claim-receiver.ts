@@ -1034,6 +1034,222 @@ export class ClaimReceiver extends EventEmitter {
   }
 
   /**
+   * Earnings projection row for /admin/earnings.json (Story 37.4).
+   *
+   * Represents a single persisted claim, shaped for the dashboard's
+   * `recentClaims[]` ticker. Keeps the DB row's raw numeric strings so the
+   * caller can convert to decimal-string bigints without a second parse.
+   */
+  // no typedef here — inline return shapes are exported via the admin-api types
+
+  /**
+   * Return the most recent verified claims across all peers and channels,
+   * newest first.
+   *
+   * Used by GET /admin/earnings.json to populate the `recentClaims` ring
+   * buffer. Caller is responsible for extracting delta amounts from the
+   * cumulative claim values — this method returns the raw persisted payload.
+   *
+   * @param limit - Maximum number of rows to return (default 50)
+   * @returns Array of raw DB rows, ordered by received_at DESC
+   */
+  async getRecentClaims(limit: number = 50): Promise<
+    Array<{
+      messageId: string;
+      peerId: string;
+      blockchain: BlockchainType;
+      channelId: string;
+      claimData: BTPClaimMessage;
+      receivedAt: number;
+    }>
+  > {
+    try {
+      const stmt = this.db.prepare(`
+        SELECT message_id, peer_id, blockchain, channel_id, claim_data, received_at
+        FROM received_claims
+        WHERE verified = 1
+        ORDER BY received_at DESC
+        LIMIT ?
+      `);
+
+      const rows = stmt.all(limit) as Array<{
+        message_id: string;
+        peer_id: string;
+        blockchain: string;
+        channel_id: string;
+        claim_data: string;
+        received_at: number;
+      }>;
+
+      return rows.map((row) => ({
+        messageId: row.message_id,
+        peerId: row.peer_id,
+        blockchain: row.blockchain as BlockchainType,
+        channelId: row.channel_id,
+        claimData: JSON.parse(row.claim_data) as BTPClaimMessage,
+        receivedAt: row.received_at,
+      }));
+    } catch (error) {
+      this.logger.error({ error }, 'Failed to query recent claims');
+      return [];
+    }
+  }
+
+  /**
+   * Return the timestamp (epoch millis) of the latest verified claim for a
+   * peer + blockchain, or null if none.
+   *
+   * Used to populate the `lastClaimAt` field per peer×asset in the earnings
+   * projection.
+   *
+   * @param peerId - Peer connector ID
+   * @param blockchain - Blockchain family (evm | solana | mina)
+   */
+  async getLastClaimAt(peerId: string, blockchain: BlockchainType): Promise<number | null> {
+    try {
+      const stmt = this.db.prepare(`
+        SELECT MAX(received_at) AS last_at
+        FROM received_claims
+        WHERE peer_id = ? AND blockchain = ? AND verified = 1
+      `);
+      const row = stmt.get(peerId, blockchain) as { last_at: number | null } | undefined;
+      return row?.last_at ?? null;
+    } catch (error) {
+      this.logger.error({ error, peerId, blockchain }, 'Failed to query last claim timestamp');
+      return null;
+    }
+  }
+
+  /**
+   * Compute cumulative inbound claim amounts per (blockchain, tokenAddress)
+   * for a peer.
+   *
+   * For each distinct channel owned by the peer, takes the claim with the
+   * highest `nonce` (the peer's latest signed cumulative balance proof)
+   * and sums the `transferredAmount` values across channels belonging to
+   * the same asset.
+   *
+   * This is the earnings endpoint's authoritative source for "how much has
+   * this peer paid us" — cryptographically verified, ledger-independent,
+   * chain-derived. Unlike the TB raw counters it cleanly isolates inbound
+   * direction (we never sign a claim on the peer's behalf, so only inbound
+   * claims land in this table).
+   *
+   * @param peerId - Peer connector ID
+   * @returns Map keyed by `${blockchain}:${tokenAddress}` with cumulative
+   *   amount (bigint) and latest claim timestamp (epoch ms).
+   */
+  async getCumulativeInboundByAsset(
+    peerId: string
+  ): Promise<
+    Map<string, { blockchain: BlockchainType; tokenAddress: string; total: bigint; lastAt: number }>
+  > {
+    const out = new Map<
+      string,
+      { blockchain: BlockchainType; tokenAddress: string; total: bigint; lastAt: number }
+    >();
+
+    try {
+      // Claims are stored with (message_id, peer_id, blockchain, channel_id, claim_data, ...).
+      // We need the latest-nonce claim per channel, so we fetch all verified
+      // rows for the peer and reduce in JS. For realistic peer volumes (< 100k
+      // channels per peer) this is fine; if it ever becomes hot, denormalize
+      // nonce + token_address + transferred_amount into columns.
+      const stmt = this.db.prepare(`
+        SELECT blockchain, channel_id, claim_data, received_at
+        FROM received_claims
+        WHERE peer_id = ? AND verified = 1
+      `);
+      const rows = stmt.all(peerId) as Array<{
+        blockchain: string;
+        channel_id: string;
+        claim_data: string;
+        received_at: number;
+      }>;
+
+      // Group by channel, keep max-nonce claim per channel.
+      const latestByChannel = new Map<
+        string,
+        {
+          blockchain: BlockchainType;
+          tokenAddress: string;
+          amount: bigint;
+          nonce: number;
+          receivedAt: number;
+        }
+      >();
+      for (const row of rows) {
+        let claim: BTPClaimMessage;
+        try {
+          claim = JSON.parse(row.claim_data) as BTPClaimMessage;
+        } catch {
+          continue;
+        }
+        let tokenAddress = '';
+        let amount = 0n;
+        let nonce = 0;
+        if (isEVMClaim(claim)) {
+          tokenAddress = claim.tokenAddress ?? '';
+          try {
+            amount = BigInt(claim.transferredAmount ?? '0');
+          } catch {
+            amount = 0n;
+          }
+          nonce = claim.nonce ?? 0;
+        } else if (isSolanaClaim(claim)) {
+          tokenAddress = claim.programId;
+          try {
+            amount = BigInt(claim.transferredAmount ?? '0');
+          } catch {
+            amount = 0n;
+          }
+          nonce = claim.nonce ?? 0;
+        } else if (isMinaClaim(claim)) {
+          // Mina claims carry a balance commitment, not a plaintext amount.
+          // Report cumulative as 0 until a commitment-decoding path ships.
+          tokenAddress = claim.tokenId ?? '';
+          amount = 0n;
+          nonce = claim.nonce ?? 0;
+        }
+        if (!tokenAddress) continue;
+
+        const key = `${row.blockchain}:${row.channel_id}`;
+        const existing = latestByChannel.get(key);
+        if (!existing || nonce > existing.nonce) {
+          latestByChannel.set(key, {
+            blockchain: row.blockchain as BlockchainType,
+            tokenAddress,
+            amount,
+            nonce,
+            receivedAt: row.received_at,
+          });
+        }
+      }
+
+      // Sum across channels into asset buckets.
+      for (const entry of latestByChannel.values()) {
+        const assetKey = `${entry.blockchain}:${entry.tokenAddress}`;
+        const bucket = out.get(assetKey);
+        if (bucket) {
+          bucket.total += entry.amount;
+          if (entry.receivedAt > bucket.lastAt) bucket.lastAt = entry.receivedAt;
+        } else {
+          out.set(assetKey, {
+            blockchain: entry.blockchain,
+            tokenAddress: entry.tokenAddress,
+            total: entry.amount,
+            lastAt: entry.receivedAt,
+          });
+        }
+      }
+    } catch (error) {
+      this.logger.error({ error, peerId }, 'Failed to compute cumulative inbound claims');
+    }
+
+    return out;
+  }
+
+  /**
    * Retrieve latest verified, unredeemed claim for a (peerId, channelId) pair
    * without specifying blockchain.
    *
