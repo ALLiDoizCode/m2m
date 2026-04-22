@@ -240,6 +240,18 @@ function normalize(s: string): string {
     .replace(/\/[A-Za-z0-9_./ -]+?\/node_modules\//g, '<REPO>/node_modules/')
     // Relative traversal to node_modules (e.g. ../../node_modules/...) also canonicalize
     .replace(/(?:\.\.\/)+node_modules\//g, '<REPO>/node_modules/')
+    // Normalize stack trace indentation: Node.js 22+ uses 6-space indent for
+    // first frame and 8-space for subsequent frames; earlier versions use 2-space.
+    // Normalize ALL stack trace indentation to 2 spaces. Node.js 22+ uses
+    // 6/8 spaces, earlier versions use 2 spaces, some have 0 spaces. Apply
+    // generic pattern first, then explicit patterns for known Node 22 formats.
+    .replace(/^ +at /gm, '  at ') // Generic: any spaces -> 2 spaces
+    .replace(/^ {6}at /gm, '  at ') // Explicit: 6 spaces -> 2 spaces (Node 22 first frame)
+    .replace(/^ {8}at /gm, '  at ') // Explicit: 8 spaces -> 2 spaces (Node 22 subsequent)
+    // Strip Node.js version-specific diagnostic frames that appear in one version
+    // but not another. These lines carry no semantic signal for flag-surface audit.
+    .replace(/^ +at TracingChannel\.traceSync.*$/gm, '') // Node 22 diagnostic channel
+    .replace(/^ +at Function\.executeUserEntryPoint.*$/gm, '') // Node 20 entry point
     // Any remaining user-home prefix that survived
     .replace(/\/(Users|home|root|builds)\/[^/\s)]+/g, '<HOME>');
 
