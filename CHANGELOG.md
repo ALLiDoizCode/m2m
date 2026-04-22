@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0](https://github.com/toon-protocol/connector/compare/v3.1.2...v3.2.0) (2026-04-22)
+
+### Features
+
+- add epic-37 implementation artifacts and earnings endpoints ([2c47d51](https://github.com/toon-protocol/connector/commit/2c47d5119b0e38aaab0d5c23b4424e342b45f768))
+- add getRecentClaims and getCumulativeInboundByAsset to ClaimReceiver ([1684ff0](https://github.com/toon-protocol/connector/commit/1684ff07133f36073341b48b9640ce7dd1675381))
+- add sentClaimsQueries, resolveTokenMetadata, connectorFeePercentage to AdminAPIConfig ([014c5d0](https://github.com/toon-protocol/connector/commit/014c5d0be34bff410f4b173c5854341b02116965))
+- **metrics:** wire prom-client + per-peer counters (Epic 37) ([325f668](https://github.com/toon-protocol/connector/commit/325f668b4d8f3a0f43809f235d067b40713094c0))
+
+### Bug Fixes
+
+- add npm authentication for GitHub Packages ([06cfc2c](https://github.com/toon-protocol/connector/commit/06cfc2ce2b5e6c13bdf86929ad47c470072c5d02))
+- publish npm to npmjs.com using NPM_TOKEN secret ([e0fac09](https://github.com/toon-protocol/connector/commit/e0fac098359ddee7b9cb141cfb15f1f03b7481e5))
+- reduce timeout in flaky packet-handler test ([85946fa](https://github.com/toon-protocol/connector/commit/85946fab04eb8624cb6127e1f19371dbab2d4158))
+- resolve lint errors and add earnings.json to admin API inventory ([155f326](https://github.com/toon-protocol/connector/commit/155f3265e72615be62868688a883bd5f94ed13ad))
+- **settlement:** restore solana mint metadata and credit limit checks ([e7b03bd](https://github.com/toon-protocol/connector/commit/e7b03bd7e028c1c8fde5b2f964e073052923f55e))
+
 ## [3.1.2](https://github.com/toon-protocol/connector/compare/v3.1.1...v3.1.2) (2026-04-22)
 
 ### Bug Fixes
