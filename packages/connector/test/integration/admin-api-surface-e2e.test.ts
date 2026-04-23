@@ -437,6 +437,24 @@ describeDocker('Admin API Surface E2E (every inventoried endpoint)', () => {
     });
   });
 
+  describe('AdminServer /admin/earnings.json endpoint', () => {
+    it('GET /admin/earnings.json returns 503 in standalone mode (AccountManager/ClaimReceiver not wired)', async () => {
+      const entry = ADMIN_API_INVENTORY.find(
+        (e) => e.server === 'AdminServer' && e.path === '/earnings.json' && e.method === 'GET'
+      )!;
+      markTested(entry);
+
+      const { status, body } = await getJson<{
+        error: string;
+        message: string;
+      }>(`${BASE_URL.AdminServer}/admin/earnings.json`);
+
+      expect(status).toBe(503);
+      expect(body.error).toBe('Service Unavailable');
+      expect(body.message).toContain('Earnings subsystem not enabled');
+    });
+  });
+
   describe('AdminServer /admin/channels endpoints (503 expected — no ChannelManager)', () => {
     it('GET /admin/channels returns 503 (ChannelManager not configured)', async () => {
       const entry = ADMIN_API_INVENTORY.find(

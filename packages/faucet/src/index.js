@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { ethers } from 'ethers';
+import { ethers, NonceManager } from 'ethers';
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -32,8 +32,8 @@ app.use(express.static('public'));
 
 // Setup provider and wallets
 const provider = new ethers.JsonRpcProvider(RPC_URL);
-const ethWallet = new ethers.Wallet(ETH_PRIVATE_KEY, provider);
-const tokenWallet = new ethers.Wallet(TOKEN_PRIVATE_KEY, provider);
+const ethWallet = new NonceManager(new ethers.Wallet(ETH_PRIVATE_KEY, provider));
+const tokenWallet = new NonceManager(new ethers.Wallet(TOKEN_PRIVATE_KEY, provider));
 
 // Token contract instance (will be set after deployment)
 let tokenContract = null;
@@ -107,70 +107,84 @@ app.get('/api/info', async (req, res) => {
   }
 });
 
-// Request tokens
-app.post('/api/request', async (req, res) => {
-  try {
-    const { address } = req.body;
+// ---------------------------------------------------------------------------
+// Request serialization queue
+//
+// All /api/request calls are processed one at a time.  Each handler appends
+// itself to the tail of the promise chain and only begins execution after the
+// previous handler has fully resolved (including on-chain tx confirmation).
+// This guarantees sequential nonce assignment even when many test workers
+// fire concurrent HTTP requests at the faucet.
+// ---------------------------------------------------------------------------
+let requestQueue = Promise.resolve();
 
-    // Validate address
-    if (!address || !isValidAddress(address)) {
-      return res.status(400).json({
-        error: 'Invalid Ethereum address',
+// Core logic extracted so it can be enqueued without capturing `req`/`res`
+// inside the chain (avoids accidental closure-over-mutable-variable bugs).
+async function handleFaucetRequest(address, res) {
+  // Check if token contract is ready
+  if (!tokenContract) {
+    const initialized = await initTokenContract();
+    if (!initialized) {
+      res.status(503).json({
+        error: 'Token contract not yet deployed',
+        message: 'Please wait for contract deployment to complete',
       });
+      return;
     }
+  }
 
-    // Check if token contract is ready
-    if (!tokenContract) {
-      const initialized = await initTokenContract();
-      if (!initialized) {
-        return res.status(503).json({
-          error: 'Token contract not yet deployed',
-          message: 'Please wait for contract deployment to complete',
+  console.log(`💧 Faucet request for ${address}`);
+
+  // Send ETH
+  const ethTx = await ethWallet.sendTransaction({
+    to: address,
+    value: ethers.parseEther(ETH_AMOUNT),
+  });
+  console.log(`  📤 Sending ${ETH_AMOUNT} ETH: ${ethTx.hash}`);
+
+  // Send tokens
+  const tokenAmount = ethers.parseUnits(TOKEN_AMOUNT, tokenDecimals);
+  const tokenTx = await tokenContract.transfer(address, tokenAmount);
+  console.log(`  📤 Sending ${TOKEN_AMOUNT} ${tokenSymbol}: ${tokenTx.hash}`);
+
+  // Wait for confirmations before the next queued request starts
+  await ethTx.wait();
+  await tokenTx.wait();
+
+  console.log(`  ✅ Faucet request completed for ${address}`);
+
+  res.json({
+    success: true,
+    transactions: {
+      eth: { hash: ethTx.hash, amount: ETH_AMOUNT },
+      token: { hash: tokenTx.hash, amount: TOKEN_AMOUNT, symbol: tokenSymbol },
+    },
+  });
+}
+
+// Request tokens
+app.post('/api/request', (req, res) => {
+  const { address } = req.body;
+
+  // Validate address before enqueuing
+  if (!address || !isValidAddress(address)) {
+    res.status(400).json({ error: 'Invalid Ethereum address' });
+    return;
+  }
+
+  // Append to the serialization queue; errors are caught per-entry so a
+  // single failure never stalls the queue for subsequent requests.
+  requestQueue = requestQueue
+    .then(() => handleFaucetRequest(address, res))
+    .catch((error) => {
+      console.error('❌ Faucet request failed:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Faucet request failed',
+          message: error.message,
         });
       }
-    }
-
-    console.log(`💧 Faucet request for ${address}`);
-
-    // Send ETH
-    const ethTx = await ethWallet.sendTransaction({
-      to: address,
-      value: ethers.parseEther(ETH_AMOUNT),
     });
-    console.log(`  📤 Sending ${ETH_AMOUNT} ETH: ${ethTx.hash}`);
-
-    // Send tokens
-    const tokenAmount = ethers.parseUnits(TOKEN_AMOUNT, tokenDecimals);
-    const tokenTx = await tokenContract.transfer(address, tokenAmount);
-    console.log(`  📤 Sending ${TOKEN_AMOUNT} ${tokenSymbol}: ${tokenTx.hash}`);
-
-    // Wait for confirmations
-    await ethTx.wait();
-    await tokenTx.wait();
-
-    console.log(`  ✅ Faucet request completed for ${address}`);
-
-    res.json({
-      success: true,
-      transactions: {
-        eth: {
-          hash: ethTx.hash,
-          amount: ETH_AMOUNT,
-        },
-        token: {
-          hash: tokenTx.hash,
-          amount: TOKEN_AMOUNT,
-          symbol: tokenSymbol,
-        },
-      },
-    });
-  } catch (error) {
-    console.error('❌ Faucet request failed:', error);
-    res.status(500).json({
-      error: 'Faucet request failed',
-      message: error.message,
-    });
-  }
 });
 
 // Start server

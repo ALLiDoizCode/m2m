@@ -1615,12 +1615,16 @@ export interface RemovePeerResult {
  * @property destination - Valid ILP address (RFC-0015 format)
  * @property amount - Non-negative integer string (smallest currency unit)
  * @property data - Base64-encoded application data (max 64KB decoded)
+ * @property expiresAt - Expiry timestamp (ISO 8601). If not provided, defaults to now + 30s
+ * @property condition - Optional execution condition (base64, 32 bytes). If provided, fulfillment must satisfy this condition
  * @property timeoutMs - Optional timeout in milliseconds (default: 30000)
  */
 export interface IlpSendRequest {
   destination: string;
   amount: string;
   data: string;
+  expiresAt?: string;
+  condition?: string;
   timeoutMs?: number;
 }
 
@@ -1633,12 +1637,14 @@ export interface IlpSendRequest {
  * @property code - ILP error code (when accepted=false)
  * @property message - Human-readable error message (when accepted=false)
  * @property data - Base64-encoded response data (optional)
+ * @property fulfillment - Base64-encoded fulfillment preimage (32 bytes), present when packet is fulfilled
  */
 export interface IlpSendResponse {
   accepted: boolean;
   code?: string;
   message?: string;
   data?: string;
+  fulfillment?: string;
 }
 
 export interface AdminApiConfig {

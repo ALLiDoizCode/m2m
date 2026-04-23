@@ -153,10 +153,37 @@ export async function acquireFundedAccount(): Promise<MinaFundedAccount> {
     );
   }
 
+  // The accounts manager omits the balance field; query it directly from the
+  // GraphQL node. Mina balances are returned in nanomina (1 MINA = 1e9 nanomina).
+  let balance = data.balance ?? '0';
+  if (!data.balance) {
+    try {
+      const balanceRes = await fetch(MINA_GRAPHQL_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: `{ account(publicKey: "${data.pk}") { balance { total } } }`,
+        }),
+      });
+      if (balanceRes.ok) {
+        const balanceData = (await balanceRes.json()) as {
+          data?: { account?: { balance?: { total?: string } } };
+        };
+        const nanomina = balanceData?.data?.account?.balance?.total;
+        if (nanomina) {
+          // Convert nanomina → whole MINA (truncate)
+          balance = String(Math.floor(Number(nanomina) / 1_000_000_000));
+        }
+      }
+    } catch {
+      // Best-effort; leave balance as '0' if unreachable
+    }
+  }
+
   return {
     publicKey: data.pk,
     privateKey: data.sk,
-    balance: data.balance ?? '0',
+    balance,
   };
 }
 

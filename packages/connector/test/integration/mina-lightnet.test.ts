@@ -181,7 +181,7 @@ describeMina('Mina Lightnet E2E Integration Tests (Story 34.8)', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: `{
-            __type(name: "Query") {
+            __type(name: "query") {
               fields {
                 name
               }
