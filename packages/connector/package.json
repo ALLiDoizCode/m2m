@@ -1,6 +1,6 @@
 {
   "name": "@toon-protocol/connector",
-  "version": "3.2.0",
+  "version": "3.3.2",
   "description": "Multi-chain ILP connector with EVM, Solana, and Mina settlement",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
@@ -46,7 +46,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "build:publish": "npm run build || true",
+    "build:publish": "npm run build",
     "start": "node dist/main.js",
     "test": "jest",
     "test:coverage": "jest --coverage",

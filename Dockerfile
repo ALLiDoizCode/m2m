@@ -27,7 +27,7 @@ COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
 # Install all dependencies (including devDependencies for TypeScript compilation)
 # Use npm ci for reproducible builds
 # Use --ignore-scripts to skip prepare script (git hooks not needed in Docker builds)
-RUN npm ci --workspaces --ignore-scripts
+RUN npm install --ignore-scripts
 
 # Copy TypeScript configuration and source code
 COPY packages/connector/tsconfig.json ./packages/connector/
@@ -40,9 +40,11 @@ COPY packages/mina-zkapp/src ./packages/mina-zkapp/src
 # Build all packages (TypeScript compilation)
 # Build shared and mina-zkapp before connector — connector imports both via
 # dynamic import but its tsc step still needs their .d.ts files on disk.
-RUN npm run build --workspace=@toon-protocol/shared \
- && npm run build --workspace=@toon-protocol/mina-zkapp \
- && npm run build --workspace=@toon-protocol/connector
+# Use direct cd instead of --workspace to avoid npm workspace resolution
+# issues when not all workspace dirs have package.json (contracts, solana-program).
+RUN cd packages/shared && npm run build && \
+    cd ../mina-zkapp && npm run build && \
+    cd ../connector && npm run build
 
 # ============================================
 # Stage 2: Runtime
@@ -68,7 +70,7 @@ COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
 RUN apk add --no-cache jq && \
     jq 'del(.scripts.prepare)' package.json > package.json.tmp && \
     mv package.json.tmp package.json && \
-    npm ci --workspaces --omit=dev --ignore-scripts && \
+    npm install --omit=dev --ignore-scripts && \
     cd packages/connector && \
     LIBSQL_VERSION=$(npm ls libsql --json 2>/dev/null | jq -r '.dependencies.libsql.version // .dependencies["@libsql/client"].dependencies.libsql.version // "0.4.7"') && \
     (npm install "@libsql/linux-arm64-musl@${LIBSQL_VERSION}" --no-save 2>/dev/null || \

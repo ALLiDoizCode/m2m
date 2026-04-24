@@ -123,6 +123,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: build-artifacts
+          path: packages/connector
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -199,6 +200,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: build-artifacts
+          path: packages/connector
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -207,20 +209,18 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@toon-protocol'
 
-      - name: Configure npm authentication
-        run: |
-          echo '//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}' > .npmrc
-
       - name: Install dependencies
-        run: npm ci
-
-      - name: Rebuild for production
-        run: npm run build
+        run: npm install --prefer-offline
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/connector
-          npm publish --access public
+          # Artifacts already contain built dist/; skip prepublishOnly rebuild
+          npm publish --access public --ignore-scripts
 
       - name: npm publish summary
         run: |
