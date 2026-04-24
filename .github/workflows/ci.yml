@@ -126,7 +126,7 @@ jobs:
       - name: Run mina-zkapp tests in serial isolation (WASM memory)
         run: |
           echo "Running mina-zkapp tests with reduced parallelism to avoid WASM OOM..."
-          NODE_OPTIONS='--max-old-space-size=8192' npm test --workspace=packages/mina-zkapp -- --runInBand --maxWorkers=1 --ci --verbose
+          NODE_OPTIONS='--max-old-space-size=8192' npm test --workspace=packages/mina-zkapp -- --runInBand --ci --verbose
         env:
           CI: true
           NODE_ENV: test
