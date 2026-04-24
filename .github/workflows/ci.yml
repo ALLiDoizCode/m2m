@@ -112,11 +112,21 @@ jobs:
           npm run build --workspace=packages/mina-zkapp
           test -d packages/mina-zkapp/dist && echo "✓ Mina zkApp package ready" || exit 1
 
-      - name: Run unit tests with coverage
+      - name: Run unit tests with coverage (excluding mina-zkapp)
         run: |
           echo "Running unit tests across all workspaces..."
           echo "Using npx to ensure jest is found..."
-          npm run test:unit --workspaces --if-present -- --coverage --ci --verbose
+          npm run test:unit --workspace=packages/connector -- --coverage --ci --verbose
+          npm test --workspace=packages/shared -- --ci --verbose
+          npm test --workspace=tools/send-packet -- --ci --verbose
+        env:
+          CI: true
+          NODE_ENV: test
+
+      - name: Run mina-zkapp tests in serial isolation (WASM memory)
+        run: |
+          echo "Running mina-zkapp tests with reduced parallelism to avoid WASM OOM..."
+          NODE_OPTIONS='--max-old-space-size=8192' npm test --workspace=packages/mina-zkapp -- --runInBand --ci --verbose
         env:
           CI: true
           NODE_ENV: test
@@ -656,6 +666,15 @@ jobs:
 
       - name: Build connector image for standalone-e2e profile
         run: docker compose --profile standalone-e2e build
+
+      - name: Smoke test /metrics endpoint in Docker image (AG3 stop-the-line)
+        run: |
+          docker compose --profile standalone-e2e up -d --wait
+          sleep 5
+          curl -sf http://127.0.0.1:18080/metrics | grep -q 'toon_packets_forwarded_total' || (echo "ERROR: /metrics missing toon_packets_forwarded_total" && exit 1)
+          curl -sf http://127.0.0.1:18080/metrics | grep -q '# HELP' || (echo "ERROR: /metrics missing HELP lines" && exit 1)
+          echo "✓ /metrics endpoint returns valid Prometheus data"
+          docker compose --profile standalone-e2e down --volumes
 
       - name: Run container-based standalone E2E
         run: npm run test:standalone-docker --workspace=packages/connector

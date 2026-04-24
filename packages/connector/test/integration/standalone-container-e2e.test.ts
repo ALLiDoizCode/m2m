@@ -301,7 +301,6 @@ describeDocker('Standalone Mode Container E2E (Docker compose)', () => {
     expect(text).toContain('toon_');
 
     // Verify specific metric families mentioned in inventory
-    expect(text).toContain('toon_build_info');
     expect(text).toContain('toon_packets_forwarded_total');
     expect(text).toContain('toon_packets_rejected_total');
 

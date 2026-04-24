@@ -64,6 +64,23 @@ jobs:
           echo $VERSION
           echo 'version='$VERSION >> $GITHUB_OUTPUT
 
+      - name: Verify npm version matches Docker image tag
+        run: |
+          NPM_VERSION=$(node -p "require('./packages/connector/package.json').version")
+          echo "npm version: $NPM_VERSION"
+          echo "Docker tag: ${{ steps.version.outputs.version }}"
+          # For tagged releases, the Docker tag (v3.2.0) should match npm version (3.2.0)
+          if [ "${{ steps.version.outputs.version }}" != "latest" ]; then
+            DOCKER_TAG="${{ steps.version.outputs.version }}"
+            # Strip 'v' prefix for comparison
+            NORMALIZED_DOCKER_TAG="${DOCKER_TAG#v}"
+            if [ "$NPM_VERSION" != "$NORMALIZED_DOCKER_TAG" ]; then
+              echo "ERROR: Version mismatch! npm=$NPM_VERSION, docker=$NORMALIZED_DOCKER_TAG"
+              exit 1
+            fi
+            echo "✓ Version sync validated: $NPM_VERSION"
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

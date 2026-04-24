@@ -12,7 +12,6 @@
  * @packageDocumentation
  */
 
-import { ethers } from 'ethers';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { hexToBytes } from '@noble/hashes/utils';
 import { ConnectorNode } from '../../src/core/connector-node';
@@ -43,9 +42,6 @@ export const REGISTRY_ADDRESS = '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512';
 
 /** MockERC20 (USDC) token address (deterministic from DeployLocal.s.sol) */
 export const TOKEN_ADDRESS = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
-
-/** Anvil Account 0 (deployer) private key — holds all minted USDC tokens */
-const DEPLOYER_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 /**
  * Anvil deterministic private keys for accounts 2-6.
@@ -457,26 +453,68 @@ export async function waitForAnvilReady(timeoutMs: number = 30_000): Promise<voi
   throw new Error(`Faucet not ready after ${timeoutMs}ms`);
 }
 
+/** Minimum USDC balance (in wei) before we bother calling the faucet. */
+const MIN_USDC_BALANCE = BigInt('10000') * BigInt(10 ** 18);
+
 /**
- * Fund peer accounts with USDC tokens directly via ethers.js.
- * ETH is not needed — Anvil accounts 2-6 already have 10,000 ETH from genesis.
- * Tokens are transferred sequentially from the deployer (Account 0).
+ * Return the ERC-20 token balance for `address` by calling `eth_call` directly.
+ * Avoids importing ethers, keeping this helper dependency-free for balance checks.
+ */
+async function getTokenBalance(address: string): Promise<bigint> {
+  const selector = '0x70a08231'; // balanceOf(address)
+  const calldata = selector + address.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  const response = await fetch(ANVIL_RPC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'eth_call',
+      params: [{ to: TOKEN_ADDRESS, data: calldata }, 'latest'],
+      id: 1,
+    }),
+  });
+  const data = (await response.json()) as { result?: string };
+  return data.result ? BigInt(data.result) : 0n;
+}
+
+/**
+ * Fund peer accounts with USDC tokens via the local faucet HTTP API.
+ *
+ * Accounts that already hold the minimum balance are skipped — this prevents
+ * unnecessary faucet calls (which hit a finite deployer supply) and avoids
+ * the nonce race that arises when multiple Jest workers call the faucet
+ * simultaneously for accounts that are already fully funded.
  */
 export async function fundPeerAccounts(addresses: string[]): Promise<void> {
-  const provider = new ethers.JsonRpcProvider(ANVIL_RPC_URL, undefined, {
-    cacheTimeout: -1,
-  });
-  const deployer = new ethers.Wallet(DEPLOYER_PRIVATE_KEY, provider);
-  const token = new ethers.Contract(
-    TOKEN_ADDRESS,
-    ['function transfer(address to, uint256 amount) returns (bool)'],
-    deployer
-  );
-  const amount = ethers.parseUnits('10000', 18); // 10,000 USDC
-
   for (const address of addresses) {
-    const tx = await token.getFunction('transfer')(address, amount);
-    await tx.wait();
+    // Skip if the account is already sufficiently funded
+    const balance = await getTokenBalance(address);
+    if (balance >= MIN_USDC_BALANCE) {
+      continue;
+    }
+
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await fetch(`${FAUCET_URL}/api/request`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address }),
+        });
+        if (response.ok) {
+          lastError = undefined;
+          break;
+        }
+        const err = (await response.json().catch(() => ({}))) as { message?: string };
+        lastError = new Error(
+          `Faucet funding failed for ${address}: ${err.message ?? response.statusText}`
+        );
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+      }
+      if (attempt < 2) await sleep(1000 * (attempt + 1));
+    }
+    if (lastError) throw lastError;
   }
 }
 

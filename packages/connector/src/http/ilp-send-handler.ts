@@ -147,12 +147,30 @@ export class IlpSendHandler {
       const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const rawDataBytes = Buffer.from(request.data, 'base64');
 
+      // Determine expiry: use request.expiresAt if provided, otherwise default to now + timeoutMs
+      let expiresAt: Date;
+      if (request.expiresAt) {
+        expiresAt = new Date(request.expiresAt);
+        // Validate the expiry is in the future
+        if (expiresAt.getTime() <= Date.now()) {
+          res.status(400).json({
+            error: 'Bad request',
+            message: 'expiresAt must be in the future',
+          });
+          return;
+        }
+      } else {
+        expiresAt = new Date(Date.now() + timeoutMs);
+      }
+
       // Construct SendPacketParams
       const params: SendPacketParams = {
         destination: request.destination,
         amount: BigInt(request.amount),
-        expiresAt: new Date(Date.now() + timeoutMs),
+        expiresAt: expiresAt,
         data: rawDataBytes,
+        // Note: condition is handled at the protocol level for conditional transfers
+        // The connector validates fulfillment against execution condition when forwarding
       };
 
       // Send packet with timeout
@@ -174,6 +192,11 @@ export class IlpSendHandler {
           accepted: true,
           data: response.data.length > 0 ? response.data.toString('base64') : undefined,
         };
+        // Include fulfillment if present (may be undefined for auto-fulfill without NIP-59)
+        const fulfillmentBytes = (response as ILPFulfillPacket).fulfillment;
+        if (fulfillmentBytes && fulfillmentBytes.length > 0) {
+          fulfillResponse.fulfillment = Buffer.from(fulfillmentBytes).toString('base64');
+        }
         this._logger.info(
           { destination: request.destination, amount: request.amount },
           'ILP packet fulfilled'

@@ -181,7 +181,7 @@ ator-test:
 # Local Blockchain — All Chains (EVM + Solana + Mina + ATOR)
 # infra-down intentionally does NOT pass -v (preserves existing per-profile volumes).
 # Use per-profile *-down for volume purge (e.g. `make ator-down` removes ATOR volumes).
-infra-up:
+infra-up: solana-build
 	docker compose --profile evm --profile solana --profile mina --profile ator up -d
 
 infra-down:
