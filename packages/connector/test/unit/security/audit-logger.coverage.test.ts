@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type */
+
 import { AuditLogger, createAuditLogger } from '../../../src/security/audit-logger';
 
 const mockLogger = {

@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import { SentClaimsQueries } from '../../../src/settlement/sent-claims-queries';
 import type { Database } from 'better-sqlite3';
 

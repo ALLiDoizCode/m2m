@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type */
+
 /**
  * BTP Server Branch Coverage Tests - Part 3
  * Tests: handleWebSocketMessage() - authenticated routing, authenticatePeer(), handleMessage()

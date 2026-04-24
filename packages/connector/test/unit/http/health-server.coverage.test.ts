@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type */
+
 import { HealthServer } from '../../../src/http/health-server';
 import type { Request, Response } from 'express';
 

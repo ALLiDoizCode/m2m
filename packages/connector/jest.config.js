@@ -34,15 +34,17 @@ module.exports = {
     '!src/routing/packet-worker.ts', // Placeholder/TODO
   ],
   // Coverage thresholds — staged approach to 90%
-  // Current: 87% statements / 79% branches / 85% functions / 88% lines (connector package)
-  // Remaining gaps: large files (connector-node.ts, admin-api.ts, packet-handler.ts)
-  // Phase 2 target: 90% across all metrics (requires additional test writing for large files)
+  // Current: 91.8% statements / 84.3% branches / 87.2% functions / 91.8% lines (connector package)
+  // Achieved: packet-handler.ts, peer-discovery-service.ts, settlement-executor.ts at 100%
+  // Admin-api.ts at 90.1% branches (3 unreachable dead-code spots remain)
+  // connector-node.ts at 80.6% branches (large orchestration file, 2,530 lines)
+  // Phase 2 target: 90% across all metrics
   coverageThreshold: {
     global: {
-      branches: 78,
-      functions: 83,
-      lines: 87,
-      statements: 87,
+      branches: 82,
+      functions: 85,
+      lines: 90,
+      statements: 90,
     },
   },
   moduleFileExtensions: ['ts', 'js', 'json'],

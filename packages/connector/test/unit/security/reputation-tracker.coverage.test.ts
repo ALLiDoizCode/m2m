@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type */
+
 import { ReputationTracker } from '../../../src/security/reputation-tracker';
 
 const mockLogger = {

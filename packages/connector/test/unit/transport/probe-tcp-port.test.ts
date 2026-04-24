@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type, @typescript-eslint/ban-types, no-console */
+
 import net from 'net';
 import { probeTcpPort, waitForTcpPort } from '../../../src/transport/probe-tcp-port';
 

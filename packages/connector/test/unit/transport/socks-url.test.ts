@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import { parseSocks5hUrl } from '../../../src/transport/socks-url';
 
 describe('parseSocks5hUrl', () => {

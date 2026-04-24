@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type, @typescript-eslint/ban-types, no-console */
+
 /**
  * Config-Driven Settlement Integration Test (Epic 29, Story 29.3)
  *

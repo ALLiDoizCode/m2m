@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type */
+
 /**
  * Comprehensive Branch-Coverage Tests for PaymentChannelSDK
  *

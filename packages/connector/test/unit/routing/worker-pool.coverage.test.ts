@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type */
 import pino from 'pino';
 import { WorkerPool } from '../../../src/routing/worker-pool';
 import { Worker } from 'worker_threads';

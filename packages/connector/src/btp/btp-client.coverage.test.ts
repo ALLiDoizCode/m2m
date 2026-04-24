@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires, @typescript-eslint/explicit-function-return-type */
+
 /**
  * Branch coverage tests for BTPClient
  * Targets uncovered branches in WebSocket reconnection/error paths,
