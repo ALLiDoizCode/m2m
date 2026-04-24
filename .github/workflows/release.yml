@@ -137,3 +137,77 @@ jobs:
           echo "Version: ${{ steps.tag.outputs.tag }}"
           echo "Docker tags: ${{ steps.meta.outputs.tags }}"
           echo "=========================================="
+
+  # Publish npm package on release
+  npm-release:
+    name: Publish npm Package
+    runs-on: ubuntu-latest
+    needs: [release]
+    # Only run if release job succeeded and not a dry run
+    if: github.event.inputs.dry_run != 'true'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: tag
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LATEST_TAG" ]; then
+            echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "Found tag: $LATEST_TAG"
+          else
+            echo "No tags found, skipping npm publish"
+            echo "tag=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node.js
+        if: steps.tag.outputs.tag != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@toon-protocol'
+
+      - name: Install dependencies
+        if: steps.tag.outputs.tag != ''
+        run: npm ci
+
+      - name: Build packages
+        if: steps.tag.outputs.tag != ''
+        run: npm run build
+
+      - name: Publish to npm
+        if: steps.tag.outputs.tag != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd packages/connector
+          # Extract version from tag (strip v prefix)
+          VERSION=$(echo "${{ steps.tag.outputs.tag }}" | sed 's/^v//')
+          # Verify package.json version matches tag
+          NPM_VERSION=$(node -p "require('./package.json').version")
+          if [ "$NPM_VERSION" != "$VERSION" ]; then
+            echo "ERROR: Version mismatch! package.json=$NPM_VERSION, tag=$VERSION"
+            exit 1
+          fi
+          echo "Publishing @toon-protocol/connector@$VERSION to npm..."
+          npm publish --access public
+          echo "✓ Published @toon-protocol/connector@$VERSION"
+
+      - name: npm publish summary
+        if: steps.tag.outputs.tag != ''
+        run: |
+          echo "## npm Publish Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Package:** \`@toon-protocol/connector\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** npmjs.com" >> $GITHUB_STEP_SUMMARY
