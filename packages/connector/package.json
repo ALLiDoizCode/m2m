@@ -46,7 +46,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "build:publish": "npm run build || true",
+    "build:publish": "npm run build",
     "start": "node dist/main.js",
     "test": "jest",
     "test:coverage": "jest --coverage",
