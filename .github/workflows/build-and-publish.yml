@@ -214,13 +214,11 @@ jobs:
       - name: Install dependencies
         run: npm install --prefer-offline
 
-      - name: Rebuild for production
-        run: npm run build
-
       - name: Publish to npm
         run: |
           cd packages/connector
-          npm publish --access public
+          # Artifacts already contain built dist/; skip prepublishOnly rebuild
+          npm publish --access public --ignore-scripts
 
       - name: npm publish summary
         run: |
