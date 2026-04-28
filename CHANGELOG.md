@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.2](https://github.com/toon-protocol/connector/compare/v3.3.1...v3.3.2) (2026-04-28)
+
+### Bug Fixes
+
+- **connector:** map F02 unreachable and F04 insufficient destination amount ([0391843](https://github.com/toon-protocol/connector/commit/0391843d990fda2999cb6890b5667944ceab266f))
+
 ## [3.3.1](https://github.com/toon-protocol/connector/compare/v3.3.0...v3.3.1) (2026-04-24)
 
 ### Bug Fixes
