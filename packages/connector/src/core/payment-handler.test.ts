@@ -62,8 +62,10 @@ describe('mapRejectCode', () => {
   it('should map known business codes to ILP codes', () => {
     expect(mapRejectCode('insufficient_funds')).toBe('T04');
     expect(mapRejectCode('expired')).toBe('R00');
+    expect(mapRejectCode('unreachable')).toBe('F02');
     expect(mapRejectCode('invalid_request')).toBe('F00');
     expect(mapRejectCode('invalid_amount')).toBe('F03');
+    expect(mapRejectCode('insufficient_destination_amount')).toBe('F04');
     expect(mapRejectCode('unexpected_payment')).toBe('F06');
     expect(mapRejectCode('application_error')).toBe('F99');
     expect(mapRejectCode('internal_error')).toBe('T00');
@@ -81,8 +83,10 @@ describe('REJECT_CODE_MAP', () => {
     expect(Object.keys(REJECT_CODE_MAP)).toEqual([
       'insufficient_funds',
       'expired',
+      'unreachable',
       'invalid_request',
       'invalid_amount',
+      'insufficient_destination_amount',
       'unexpected_payment',
       'application_error',
       'internal_error',
