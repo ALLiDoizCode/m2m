@@ -74,19 +74,43 @@ export type PaymentHandler = (request: PaymentRequest) => Promise<PaymentRespons
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Map business logic reject codes to ILP error codes.
- * Copied from @toon-protocol/connector to avoid cross-package dependency.
+ * Semantic reject codes accepted from external `PaymentHandler` callbacks.
+ *
+ * Published vocabulary for `rejectReason.code`. Adding a new code requires
+ * both extending this union and adding the matching wire-code entry to
+ * `REJECT_CODE_MAP` — the `satisfies` constraint on the map enforces
+ * parity at compile time.
+ */
+export type AcceptedSemanticCode =
+  | 'insufficient_funds'
+  | 'expired'
+  | 'unreachable'
+  | 'invalid_request'
+  | 'invalid_amount'
+  | 'insufficient_destination_amount'
+  | 'unexpected_payment'
+  | 'application_error'
+  | 'internal_error'
+  | 'timeout';
+
+/**
+ * Map business reject codes to ILP wire codes (RFC 0027).
+ *
+ * Consumed by `mapRejectCode()` to translate `rejectReason.code` from
+ * `PaymentHandler` callbacks. Unknown keys fall through to `F99`.
  */
 export const REJECT_CODE_MAP: Record<string, string> = {
   insufficient_funds: 'T04',
   expired: 'R00',
+  unreachable: 'F02',
   invalid_request: 'F00',
   invalid_amount: 'F03',
+  insufficient_destination_amount: 'F04',
   unexpected_payment: 'F06',
   application_error: 'F99',
   internal_error: 'T00',
   timeout: 'T00',
-};
+} satisfies Record<AcceptedSemanticCode, string>;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Utilities
