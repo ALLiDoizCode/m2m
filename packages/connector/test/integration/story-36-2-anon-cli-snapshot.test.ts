@@ -275,6 +275,11 @@ function normalize(s: string): string {
     .replace(/^ +at Module\.load.*$/gm, '') // Module.load variant
     .replace(/^ +at Function\..*\.runMain.*$/gm, '') // runMain variants
     .replace(/^ +at Object\.\.js.*$/gm, '') // Object..js (Node internal)
+    // Catch-all for Node CJS module-loader internals frames. Node patch versions
+    // shuffle these (e.g. 22.x renamed Module._load → Function._load and dropped
+    // intermediate frames). Stripping the entire family by source path keeps the
+    // gate Node-version-agnostic — only flag-surface drift trips it.
+    .replace(/^ +at [^(]+\(node:internal\/modules\/(?:cjs\/loader|run_main):[^)]+\)\s*$/gm, '')
     // Any remaining user-home prefix that survived
     .replace(/\/(Users|home|root|builds)\/[^/\s)]+/g, '<HOME>');
 
