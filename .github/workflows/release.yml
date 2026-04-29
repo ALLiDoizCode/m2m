@@ -149,10 +149,16 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout code
+      # Check out main's tip, NOT the workflow trigger SHA. semantic-release in
+      # the `release` job pushes a `chore(release): X.Y.Z [skip ci]` commit that
+      # bumps packages/connector/package.json. Without `ref: main`, this job
+      # would read the pre-release package.json and try to publish the stale
+      # version — which 403s when that version is already on npm.
+      - name: Checkout code (main's tip — post semantic-release commit)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Get latest tag
         id: tag
@@ -196,6 +202,15 @@ jobs:
           if [ "$NPM_VERSION" != "$VERSION" ]; then
             echo "ERROR: Version mismatch! package.json=$NPM_VERSION, tag=$VERSION"
             exit 1
+          fi
+          # Idempotency: skip publish if this version is already on npm.
+          # release.yml runs on every push to main — including chore/docs/test
+          # commits where semantic-release decides not to bump. Without this
+          # guard, those runs would attempt to re-publish the prior version
+          # and fail with E403.
+          if npm view "@toon-protocol/connector@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "@toon-protocol/connector@$VERSION already published — skipping (no-op)"
+            exit 0
           fi
           echo "Publishing @toon-protocol/connector@$VERSION to npm..."
           npm publish --access public
