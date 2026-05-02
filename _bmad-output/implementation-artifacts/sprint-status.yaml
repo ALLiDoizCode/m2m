@@ -35,7 +35,7 @@ epics:
 
   epic-33:
     name: "Solana Payment Channel Provider"
-    status: in-progress
+    status: done
     stories:
       33.1:
         name: "Solana Payment Channel Program — Channel Lifecycle"
@@ -155,3 +155,271 @@ epics:
         status: done
     retrospective:
       status: pending
+
+  epic-37:
+    name: "Admin API Observability for Townhouse Dashboard"
+    status: done
+    stories:
+      37.1:
+        name: "Balances Endpoint — 404 on Unknown Peer"
+        status: done
+      37.2:
+        name: "Wire prom-client + Per-Peer ILP Counters + /metrics Middleware"
+        status: done
+      37.3:
+        name: "GET /admin/metrics.json — JSON Projection for Dashboard"
+        status: done
+      37.4:
+        name: "GET /admin/earnings.json — Per-Peer Earnings Projection for Townhouse Dashboard"
+        status: done
+      37.5:
+        name: "Fix AccountManager.checkCreditLimit Sign Mismatch (Bug)"
+        status: done
+      37.6:
+        name: "Dedicated ConnectorFee TigerBeetle Account with Proper Cross-Peer Double-Entry"
+        status: done
+      37.7:
+        name: "Outbound claimsSentTotal via sent_claims Wiring"
+        status: done
+      37.8:
+        name: "On-Chain Token Metadata for Solana and Mina"
+        status: done
+      37.9:
+        name: "Denormalize nonce and token_address Columns on received_claims (Nice-to-Have)"
+        status: done
+    retrospective:
+      status: done
+
+  epic-38:
+    name: "ILP-over-HTTP Transport + RFC 9421 HTTP Message Signatures"
+    status: backlog
+    stories:
+      38.1:
+        name: "HttpPeerTransport — RFC 0035 ILP-over-HTTP egress + ingress"
+        status: backlog
+      38.2:
+        name: "RFC 9421 signer module"
+        status: backlog
+      38.3:
+        name: "RFC 9421 verifier middleware"
+        status: backlog
+      38.4:
+        name: "JWKS provider + /.well-known/http-message-signatures-directory"
+        status: backlog
+      38.5:
+        name: "KMS integration for org-tier identity"
+        status: backlog
+      38.6:
+        name: "Per-instance ephemeral key generator + lifecycle"
+        status: backlog
+      38.7:
+        name: "Replay cache (bloom + Redis)"
+        status: backlog
+      38.8:
+        name: "Content-Digest + JCS body canonicalisation"
+        status: backlog
+      38.9:
+        name: "Apply RFC 9421 to admin API"
+        status: backlog
+      38.10:
+        name: "Apply RFC 9421 to peer ILP-over-HTTP egress"
+        status: backlog
+      38.11:
+        name: "Apply RFC 9421 to connector → BLS local delivery"
+        status: backlog
+      38.12:
+        name: "Stop-the-line + nightly HTTP-surface CI extension"
+        status: backlog
+      38.13:
+        name: "Migration telemetry + flip-default decision protocol (Epic 43 slice)"
+        status: backlog
+    retrospective:
+      status: optional
+
+  epic-39:
+    name: "TOON Local Delivery Pipeline"
+    status: backlog
+    stories:
+      39.1:
+        name: "SQLite migration + local_delivery_nonces schema"
+        status: backlog
+      39.2:
+        name: "toon-config-schema strict zod schema"
+        status: backlog
+      39.3:
+        name: "toon-config-provider with fs.watch + snapshot"
+        status: backlog
+      39.4:
+        name: "toon-event-verifier Schnorr verify"
+        status: backlog
+      39.5:
+        name: "nonce-store three-phase commit"
+        status: backlog
+      39.6:
+        name: "nonce-store-pruner 60-second sweep"
+        status: backlog
+      39.7:
+        name: "pricing computeCost (full event JSON byte length)"
+        status: backlog
+      39.8:
+        name: "payment-headers X-TOON-* builder"
+        status: backlog
+      39.9:
+        name: "LocalDeliveryClient v2 envelope mode"
+        status: backlog
+      39.10:
+        name: "Wire pre-stages into LocalDeliveryClient"
+        status: backlog
+      39.11:
+        name: "Admin API — GET /admin/api/nodes/:pubkey/channels"
+        status: backlog
+      39.12:
+        name: "acceptance.strfry.spec.ts — single binary acceptance test"
+        status: backlog
+      39.13:
+        name: "Concurrency, hot-reload, idempotency, crash-recovery test suite"
+        status: backlog
+      39.14:
+        name: "Operator documentation update"
+        status: backlog
+      39.15:
+        name: "Deprecate BLS terminology — rename to app/handler across code, docs, config"
+        status: backlog
+      39.16:
+        name: "v1↔v2 envelope mixed-bilateral test + flip-default protocol (Epic 43 slice)"
+        status: backlog
+    retrospective:
+      status: optional
+
+  epic-40:
+    name: "Passkey-PRF Identity Root"
+    status: backlog
+    stories:
+      40.1:
+        name: "WebAuthn RP setup with SimpleWebAuthn"
+        status: backlog
+      40.2:
+        name: "PRF extension request + result handling"
+        status: backlog
+      40.3:
+        name: "Server-side PRF salt provisioning"
+        status: backlog
+      40.4:
+        name: "HKDF derivation library with domain-separated info"
+        status: backlog
+      40.5:
+        name: "Derived-key encrypted-at-rest storage"
+        status: backlog
+      40.6:
+        name: "Enforce ≥ 2 passkeys at registration"
+        status: backlog
+      40.7:
+        name: "Seed-phrase fallback (BIP-39)"
+        status: backlog
+      40.8:
+        name: "FIDO MDS3 service"
+        status: backlog
+      40.9:
+        name: "Wire derived Ed25519 into RFC 9421 client"
+        status: backlog
+      40.10:
+        name: "Wire derived secp256k1 into BTP claim signer"
+        status: backlog
+      40.11:
+        name: "Wire derived chain keys into settlement signers (EVM/Solana/Mina)"
+        status: backlog
+      40.12:
+        name: "Operator migration: seed-phrase → passkey-PRF"
+        status: backlog
+    retrospective:
+      status: optional
+
+  epic-41:
+    name: "TownHub Discovery via Nostr"
+    status: backlog
+    stories:
+      41.1:
+        name: "kind:30400 event schema + builder"
+        status: backlog
+      41.2:
+        name: "Publisher — emit on startup + on .anon change"
+        status: backlog
+      41.3:
+        name: "Consumer — relay subscription manager"
+        status: backlog
+      41.4:
+        name: "Cache — persistent storage + restart survival"
+        status: backlog
+      41.5:
+        name: "ILP-prefix resolver"
+        status: backlog
+      41.6:
+        name: "Reachability probe + health state machine"
+        status: backlog
+      41.7:
+        name: "Operator UI — discover available nodes"
+        status: backlog
+      41.8:
+        name: "Relay configuration + per-relay backoff"
+        status: backlog
+      41.9:
+        name: "Discovery coexists with direct peering — opt-in/opt-out reversibility test"
+        status: backlog
+    retrospective:
+      status: optional
+
+  epic-42:
+    name: "Home-Hosting Acceptance End-to-End"
+    status: backlog
+    stories:
+      42.1:
+        name: "Containerised Pi-class CI environment"
+        status: backlog
+      42.2:
+        name: "End-to-end acceptance test"
+        status: backlog
+      42.3:
+        name: "Solana + Mina parity tests"
+        status: backlog
+      42.4:
+        name: "connector home-init operator script"
+        status: backlog
+      42.5:
+        name: "docs/operators/home-hosting.md reference deployment guide"
+        status: backlog
+      42.6:
+        name: "Performance baseline + ratchet metric in nightly CI"
+        status: backlog
+      42.7:
+        name: "Rollback drills (failure-mode coverage)"
+        status: backlog
+      42.8:
+        name: "Existing-operator upgrade acceptance test"
+        status: backlog
+    retrospective:
+      status: optional
+
+  epic-43:
+    name: "Migration & Cross-Version Compatibility"
+    status: backlog
+    stories:
+      43.1:
+        name: "Migration telemetry instrumentation"
+        status: backlog
+      43.2:
+        name: "Cross-version compatibility test matrix"
+        status: backlog
+      43.3:
+        name: "On-chain identity migration tooling"
+        status: backlog
+      43.4:
+        name: "Unified operator migration playbook"
+        status: backlog
+      43.5:
+        name: "Rollback procedures with explicit triggers"
+        status: backlog
+      43.6:
+        name: "Sunset & deprecation timeline + CI lint"
+        status: backlog
+    retrospective:
+      status: optional
