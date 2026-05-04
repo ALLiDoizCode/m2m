@@ -722,6 +722,137 @@ services:
     networks:
       - standalone_allowlist_net
 
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Two-Home ATOR over LOCAL testnet — peer-to-peer over `make ator-up`
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Mirrors `standalone-ator-p2p` but joins the LOCAL ATOR testnet instead
+  # of the public Anyone network. Sidesteps the Phase 3b host-side blocker
+  # (relay descriptors advertise internal bridge IPs unreachable from the
+  # host) by running the sidecars + connectors INSIDE `ator_net` where the
+  # internal IPs are the right ones — see the annotation in
+  # packages/connector/test/integration/standalone-ator-hs-local-e2e.test.ts:69-71.
+  #
+  # Prereq: `make ator-up` must already be running (provides DirAuths +
+  # relays + the shared fingerprint volume that the sidecars consume).
+  #
+  # Usage: `make two-home-ator-local-up && make two-home-ator-local-verify`
+  two-home-local-sidecar-a:
+    image: ator-public-sidecar:v0.4.10.0-beta
+    build:
+      context: ./docker/ator-public-sidecar
+      dockerfile: Dockerfile
+    profiles: [two-home-ator-local]
+    environment:
+      NICKNAME: home-a
+      TARGET_PORT: '3000'
+      ANON_NETWORK: testnet-local
+    volumes:
+      - ator_shared:/shared            # DirAuth fingerprints from `ator` profile
+      - two_home_local_a_data:/var/lib/anon
+    networks:
+      # Both networks: DirAuths/relays advertise their ator_host IPs in
+      # fingerprints (172.20.0.x); ator_net is the secondary bridge they
+      # also share. Joining only one would leave DirAuth IPs unreachable.
+      - ator_net
+      - ator_host
+    ports:
+      - '127.0.0.1:18190:8080'         # connector-a health
+      - '127.0.0.1:18191:8081'         # connector-a admin
+      - '127.0.0.1:13311:3100'         # bls-a /received
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 9050 || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 120s
+
+  two-home-local-sidecar-b:
+    image: ator-public-sidecar:v0.4.10.0-beta
+    build:
+      context: ./docker/ator-public-sidecar
+      dockerfile: Dockerfile
+    profiles: [two-home-ator-local]
+    environment:
+      NICKNAME: home-b
+      TARGET_PORT: '3000'
+      ANON_NETWORK: testnet-local
+    volumes:
+      - ator_shared:/shared
+      - two_home_local_b_data:/var/lib/anon
+    networks:
+      - ator_net
+      - ator_host
+    ports:
+      - '127.0.0.1:18290:8080'
+      - '127.0.0.1:18291:8081'
+      - '127.0.0.1:13312:3100'
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 9050 || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 120s
+
+  two-home-local-bls-a:
+    image: node:22-alpine
+    profiles: [two-home-ator-local]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    network_mode: service:two-home-local-sidecar-a
+    depends_on:
+      two-home-local-sidecar-a:
+        condition: service_started
+
+  two-home-local-bls-b:
+    image: node:22-alpine
+    profiles: [two-home-ator-local]
+    command: ['node', '/app/bls.js']
+    environment:
+      PORT: '3100'
+    volumes:
+      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+    network_mode: service:two-home-local-sidecar-b
+    depends_on:
+      two-home-local-sidecar-b:
+        condition: service_started
+
+  two-home-local-connector-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [two-home-ator-local]
+    environment:
+      CONFIG_FILE: /app/config/peer.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ${TWO_HOME_LOCAL_CONFIG_DIR:-./scripts/standalone-e2e}/peer-two-home-a.yaml:/app/config/peer.yaml:ro
+    network_mode: service:two-home-local-sidecar-a
+    depends_on:
+      two-home-local-sidecar-a:
+        condition: service_healthy
+
+  two-home-local-connector-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [two-home-ator-local]
+    environment:
+      CONFIG_FILE: /app/config/peer.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ${TWO_HOME_LOCAL_CONFIG_DIR:-./scripts/standalone-e2e}/peer-two-home-b.yaml:/app/config/peer.yaml:ro
+    network_mode: service:two-home-local-sidecar-b
+    depends_on:
+      two-home-local-sidecar-b:
+        condition: service_healthy
+
 networks:
   ator_net:
     driver: bridge
@@ -749,3 +880,5 @@ volumes:
   standalone_p2p_shared:
   standalone_p2p_sidecar_a_data:
   standalone_p2p_sidecar_b_data:
+  two_home_local_a_data:
+  two_home_local_b_data:

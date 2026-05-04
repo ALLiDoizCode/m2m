@@ -178,6 +178,33 @@ ator-test:
 	ECHO_HOST=hs1 WSS_ECHO_HOST=hs1 ECHO_PORT=5000 WSS_ECHO_PORT=5000 \
 		npm run test:integration -w packages/connector -- --passWithNoTests --testPathPattern 'transport-ator-'
 
+# Two-Home ATOR (LOCAL testnet) — peer-to-peer over `make ator-up`.
+# Two anon sidecars on the local testnet (joined to ator_net so they can
+# reach relays at internal bridge IPs, sidestepping the Phase 3b host-side
+# blocker), each hosting a hidden service that forwards to an adjacent
+# standalone connector container's BTP port.
+#
+# Prereq: `make ator-up` must be running first (provides DirAuths + relays
+# + the shared fingerprint volume the sidecars consume).
+#
+# Companion script for hostname resolution + peer registration + verify:
+#   tools/two-home-ator-handshake/docker-local-verify.sh
+two-home-ator-local-up:
+	@if ! docker compose --profile ator ps --status running --quiet | grep -q .; then \
+		echo "ERROR: 'make ator-up' must be running first" >&2; exit 1; \
+	fi
+	docker compose --profile two-home-ator-local build
+	docker compose --profile two-home-ator-local up -d --wait
+
+two-home-ator-local-down:
+	docker compose --profile two-home-ator-local down --volumes
+
+two-home-ator-local-logs:
+	docker compose --profile two-home-ator-local logs -f
+
+two-home-ator-local-verify:
+	./tools/two-home-ator-handshake/docker-local-verify.sh
+
 # Local Blockchain — All Chains (EVM + Solana + Mina + ATOR)
 # infra-down intentionally does NOT pass -v (preserves existing per-profile volumes).
 # Use per-profile *-down for volume purge (e.g. `make ator-down` removes ATOR volumes).
