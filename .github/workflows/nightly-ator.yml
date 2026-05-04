@@ -341,3 +341,64 @@ jobs:
       - name: Tear down stack
         if: always()
         run: docker compose --profile standalone-ator-p2p down --volumes || true
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Two-home ATOR over LOCAL testnet (offline, deterministic)
+  # Two anon sidecars on the local testnet (joined to ator_net + ator_host so
+  # they reach DirAuths/relays at internal bridge IPs), each hosting a hidden
+  # service that forwards to an adjacent connector container's BTP port.
+  # No internet required — fully self-contained. Sidesteps the host-side
+  # blocker documented at standalone-ator-hs-local-e2e.test.ts:69-71 and is
+  # the missing CI gate that lets us catch HS-rendezvous regressions without
+  # public-network flakiness.
+  # ---------------------------------------------------------------------------
+  two-home-ator-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build connector + sidecar images
+        run: |
+          docker compose --profile ator build
+          docker compose --profile two-home-ator-local build
+
+      - name: Bring up local ATOR testnet
+        run: docker compose --profile ator up -d --wait
+
+      - name: Bring up two-home stack
+        run: docker compose --profile two-home-ator-local up -d --wait
+
+      - name: Run two-home verification
+        run: ./tools/two-home-ator-handshake/docker-local-verify.sh
+        env:
+          CI: true
+
+      - name: Capture compose logs on failure
+        if: failure()
+        run: |
+          {
+            echo "=== ator profile ==="
+            docker compose --profile ator logs --no-color || true
+            echo "=== two-home-ator-local profile ==="
+            docker compose --profile two-home-ator-local logs --no-color || true
+          } > /tmp/two-home-ator-local-logs.txt
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-home-ator-local-logs-${{ github.run_number }}
+          path: /tmp/two-home-ator-local-logs.txt
+          retention-days: 7
+
+      - name: Tear down stacks
+        if: always()
+        run: |
+          docker compose --profile two-home-ator-local down --volumes || true
+          docker compose --profile ator down --volumes || true

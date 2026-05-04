@@ -84,6 +84,7 @@
     "prepublishOnly": "npm run build:publish && npm test"
   },
   "dependencies": {
+    "@anyone-protocol/anyone-client": "^1.1.3",
     "@noble/ciphers": "^1.3.0",
     "@noble/curves": "^1.9.0",
     "@noble/hashes": "^1.8.0",
@@ -119,7 +120,6 @@
   "optionalDependencies": {
     "@ai-sdk/anthropic": "^1.2.12",
     "@ai-sdk/openai": "^1.3.24",
-    "@anyone-protocol/anyone-client": "^1.1.3",
     "@aws-sdk/client-kms": "^3.500.0",
     "@azure/identity": "^4.0.0",
     "@azure/keyvault-keys": "^4.8.0",
