@@ -1,0 +1,38 @@
+# Bootstrap config for two-home-local-connector-a.
+# Mirrors scripts/standalone-e2e/peer-p2p-a.yaml shape but for the LOCAL
+# testnet variant (driven by the two-home-ator-local compose profile).
+#
+# The peer's .anon URL is unknown at boot — it's published by the sidecar
+# 30-90s after anon bootstraps onto the local testnet. The verify script
+# (tools/two-home-ator-handshake/docker-local-verify.sh) reads both .anon
+# hostnames and registers each peer via POST /admin/peers at runtime.
+nodeId: home-a
+btpServerPort: 3000
+healthCheckPort: 8080
+environment: development
+deploymentMode: standalone
+logLevel: warn
+
+adminApi:
+  enabled: true
+  port: 8081
+  host: 0.0.0.0
+
+localDelivery:
+  enabled: true
+  handlerUrl: http://127.0.0.1:3100
+  timeout: 30000
+
+transport:
+  type: socks5
+  managed: false
+  socksProxy: socks5h://127.0.0.1:9050
+  externalUrl: ws://home-a.invalid/btp
+
+peers: []
+
+routes:
+  - prefix: test.home-a
+    nextHop: home-a
+  - prefix: test.home-b
+    nextHop: home-b
