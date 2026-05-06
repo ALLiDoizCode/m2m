@@ -154,7 +154,27 @@ jobs:
             echo $tag >> tags.txt
           done
 
-      - name: Build and push Docker image
+      # Build the image into the local Docker daemon first so the smoke test
+      # can exercise it before we publish. issue #54: 3.3.3 shipped without
+      # better-sqlite3's compiled .node binary, silently degrading payment
+      # channels — the smoke test below is the regression gate.
+      - name: Build Docker image (load locally)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          push: false
+          tags: connector:smoke-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Smoke-test native bindings in built image
+        run: |
+          docker run --rm --entrypoint node connector:smoke-test \
+            -e "require('better-sqlite3'); require('libsql'); console.log('native bindings OK')"
+
+      - name: Push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
