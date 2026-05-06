@@ -1136,12 +1136,27 @@ export class ConnectorNode implements HealthStatusProvider {
             );
           }
         } catch (error) {
-          // Log error but continue without payment channels (graceful degradation)
           const errorMessage = error instanceof Error ? error.message : String(error);
+          // Missing native SQLite modules are deployment defects (e.g. Docker
+          // image built without compiled bindings), not runtime issues. Fail
+          // closed so operators see the failure at startup instead of silently
+          // running in routing-only mode and rejecting paid traffic later. The
+          // pattern matches requireOptional()'s canonical message format.
+          const isMissingNativeDep = /^(better-sqlite3|libsql) is required for /.test(errorMessage);
           this._logger.error(
-            { event: 'payment_channel_init_failed', error: errorMessage },
-            'Failed to initialize payment channel infrastructure (connector continues without channels)'
+            {
+              event: isMissingNativeDep
+                ? 'payment_channel_init_aborted'
+                : 'payment_channel_init_failed',
+              error: errorMessage,
+            },
+            isMissingNativeDep
+              ? 'Payment channel native dependency missing — connector startup aborted'
+              : 'Failed to initialize payment channel infrastructure (connector continues without channels)'
           );
+          if (isMissingNativeDep) {
+            throw error;
+          }
         }
       } else {
         this._logger.info(

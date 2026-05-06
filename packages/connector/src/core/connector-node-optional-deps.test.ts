@@ -201,6 +201,47 @@ describe('ConnectorNode — minimal dependency startup', () => {
       expect(errorMsg).toContain('ethers');
       expect(errorMsg).toContain('npm install ethers');
     });
+
+    // Regression test for issue #54: 3.3.3 image shipped without compiled
+    // better-sqlite3 native bindings, silently degrading payment channels to
+    // routing-only mode. Missing native SQLite deps must abort startup so the
+    // failure is visible to operators immediately.
+    it('should fail-closed at startup when better-sqlite3 native binding is missing', async () => {
+      (requireOptional as jest.Mock).mockImplementation(async (pkg: string) => {
+        if (pkg === 'ethers') {
+          return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
+        }
+        if (pkg === 'better-sqlite3') {
+          throw new Error(
+            'better-sqlite3 is required for per-packet claims persistence. Install it with: npm install better-sqlite3'
+          );
+        }
+        return {};
+      });
+
+      const config = createMinimalConfig({
+        chainProviders: [
+          {
+            chainType: 'evm',
+            chainId: 'evm:31337',
+            rpcUrl: 'http://localhost:8545',
+            registryAddress: '0x1234567890123456789012345678901234567890',
+            keyId: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+            tokenAddress: '0x1234567890123456789012345678901234567890',
+          },
+        ],
+      });
+      (ConfigLoader.validateConfig as jest.Mock).mockReturnValue(config);
+
+      const node = new ConnectorNode(config, mockLogger);
+      await expect(node.start()).rejects.toThrow(/better-sqlite3 is required/);
+
+      const abortLog = mockLogger.error.mock.calls.find(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (call) => (call[0] as any)?.event === 'payment_channel_init_aborted'
+      );
+      expect(abortLog).toBeDefined();
+    });
   });
 
   describe('express error messages', () => {
