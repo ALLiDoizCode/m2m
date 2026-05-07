@@ -148,15 +148,20 @@ jobs:
           EXPECTED="${{ steps.tag.outputs.tag }}"
           EXPECTED="${EXPECTED#v}"
           IMAGE="ghcr.io/${{ github.repository_owner }}/connector:${EXPECTED}"
-          ACTUAL=$(docker buildx imagetools inspect "$IMAGE" \
+          IMAGE_REPO="${IMAGE%%:*}"
+          # Multi-platform images return a manifest index where .Image is nil;
+          # resolve the linux/amd64 sub-manifest by digest and inspect that.
+          AMD64_DIGEST=$(docker buildx imagetools inspect "$IMAGE" --raw \
+            | jq -r '.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux") | .digest')
+          ACTUAL=$(docker buildx imagetools inspect "${IMAGE_REPO}@${AMD64_DIGEST}" \
             --format '{{ index .Image.Config.Labels "org.opencontainers.image.version" }}')
           if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Image label mismatch on $IMAGE"
+            echo "::error::Image label mismatch on $IMAGE (amd64)"
             echo "  expected org.opencontainers.image.version: $EXPECTED"
             echo "  actual   org.opencontainers.image.version: $ACTUAL"
             exit 1
           fi
-          echo "✓ Verified $IMAGE carries org.opencontainers.image.version=$EXPECTED"
+          echo "✓ Verified $IMAGE (amd64) carries org.opencontainers.image.version=$EXPECTED"
 
       - name: Release summary
         if: steps.tag.outputs.tag != ''
