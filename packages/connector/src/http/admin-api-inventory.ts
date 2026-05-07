@@ -575,6 +575,35 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
   },
 
   /**
+   * GET /admin/hs-hostname
+   * Hidden-service hostname for the connector's `.anyone` descriptor.
+   */
+  {
+    path: '/hs-hostname',
+    method: 'GET',
+    server: 'AdminServer',
+    mountPrefix: '/admin',
+    authModel: 'X-Api-Key',
+    successStatus: 200,
+    failureModes: [
+      { status: 401, description: 'Missing or invalid X-Api-Key' },
+      { status: 403, description: 'IP not in allowlist' },
+      {
+        status: 503,
+        description:
+          'anon-disabled: ManagedAnonClient not constructed OR no hiddenServiceDir configured',
+      },
+    ],
+    requestContract: 'none',
+    responseContract:
+      'AdminHsHostnameResponse { hostname: string | null; publishedAt: string | null } (http/admin-api.ts) — 503 body is { error: "anon-disabled" }',
+    owningModule: 'http/admin-api.ts + transport/managed-anon-client.ts',
+    relatedStories: ['38.1'],
+    operationalNotes:
+      'Cache-Control: no-store. Townhouse hs-up polls every ~2-3s during the 30-90s bootstrap window; Retry-After: 3 set on the bootstrap-window response. Hostname is stable for the connector process lifetime — key rotation requires a restart.',
+  },
+
+  /**
    * GET /health (AdminServer)
    * Health check for the admin server itself (separate from HealthServer)
    */

@@ -50,6 +50,7 @@ import type { BlockchainType } from '../btp/btp-claim-types';
 import { IlpSendHandler } from './ilp-send-handler';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
+import type { ManagedAnonClient } from '../transport/managed-anon-client';
 
 /**
  * Admin API Configuration
@@ -118,6 +119,13 @@ export interface AdminAPIConfig {
 
   /** Optional metrics registry for ILP observability (Story 37.2). When provided, enables GET /admin/metrics.json endpoint. */
   metricsRegistry?: IlpMetricsRegistry;
+
+  /**
+   * Optional managed anon client (Story 38.1). When provided AND configured
+   * for a hidden service, enables `GET /admin/hs-hostname`. Otherwise that
+   * endpoint returns 503 `{ error: "anon-disabled" }`.
+   */
+  managedAnonClient?: ManagedAnonClient;
 
   /**
    * Optional on-chain token metadata resolver (Story 37.4).
@@ -295,6 +303,22 @@ export interface AdminMetricsJsonResponse {
 }
 
 /**
+ * GET /admin/hs-hostname response (Story 38.1).
+ *
+ * Both fields are `null` until the anon process publishes the v3 hidden-service
+ * descriptor (~30–90s after connector start). Once published, they are stable
+ * for the connector process lifetime — key rotation requires a restart.
+ *
+ * When the connector has no hidden service configured (no `ManagedAnonClient`
+ * at all, or one constructed without `hiddenServiceDir`), the endpoint returns
+ * 503 with `{ error: "anon-disabled" }` instead of this shape.
+ */
+export interface AdminHsHostnameResponse {
+  hostname: string | null;
+  publishedAt: string | null;
+}
+
+/**
  * GET /admin/settlement/states response item
  */
 export interface SettlementStateResponse {
@@ -451,6 +475,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     isReady,
     defaultSettlementTokenId,
     metricsRegistry,
+    managedAnonClient,
     resolveTokenMetadata,
     connectorFeePercentage,
   } = config;
@@ -1731,6 +1756,30 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  });
+
+  /**
+   * GET /admin/hs-hostname
+   *
+   * Story 38.1 — exposes the connector's `.anyone` hidden-service hostname so
+   * the Townhouse host CLI can read it without `docker exec`-ing into the
+   * container. Returns nulls during the 30–90s post-boot window; 503 with
+   * `{ error: "anon-disabled" }` when no hidden service is configured.
+   */
+  router.get('/hs-hostname', (_req: Request, res: Response) => {
+    if (!managedAnonClient || !managedAnonClient.isHiddenServiceConfigured()) {
+      res.set('Cache-Control', 'no-store');
+      res.status(503).json({ error: 'anon-disabled' });
+      return;
+    }
+    const snapshot = managedAnonClient.getHostnameSnapshot();
+    res.set('Cache-Control', 'no-store');
+    if (snapshot.hostname === null) {
+      // Townhouse polls every ~2–3s during the bootstrap window; hint the
+      // cadence so naive clients can back off if they prefer.
+      res.set('Retry-After', '3');
+    }
+    res.json(snapshot satisfies AdminHsHostnameResponse);
   });
 
   /**

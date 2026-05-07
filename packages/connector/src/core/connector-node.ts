@@ -116,6 +116,10 @@ export class ConnectorNode implements HealthStatusProvider {
   private _defaultSettlementTokenId: string = 'M2M';
   // Epic 35 / Story 35.4: active transport provider + cached health
   private _transportProvider: TransportProvider | null = null;
+  // Story 38.1: reference to the constructed ManagedAnonClient (when the
+  // transport is `socks5` with `managed: true`), used by the admin server to
+  // serve `GET /admin/hs-hostname`. `null` for direct or non-managed transports.
+  private _managedAnonClient: ManagedAnonClient | null = null;
   // `_transportProviderReady` gates the public `transportProvider` getter so it
   // returns `null` during the in-flight `provider.start()` await window
   // (AC #11: "during start() before await transportProvider.start() resolves →
@@ -1213,6 +1217,7 @@ export class ConnectorNode implements HealthStatusProvider {
           packetSender: (params) => this.sendPacket(params),
           isReady: () => this._btpServerStarted,
           metricsRegistry: this._ilpMetrics,
+          managedAnonClient: this._managedAnonClient ?? undefined,
         });
 
         await this._adminServer.start();
@@ -1713,6 +1718,9 @@ export class ConnectorNode implements HealthStatusProvider {
           logger: this._logger,
           anonFactory,
         });
+        // Story 38.1: stash the reference so the admin server can serve
+        // `GET /admin/hs-hostname` once both subsystems are up.
+        this._managedAnonClient = managedClient;
 
         // `externalUrl: 'auto'` resolution (AC #8) happens at start() time
         // because we need the hostname file to exist. We install a resolver

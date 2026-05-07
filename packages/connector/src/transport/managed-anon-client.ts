@@ -22,7 +22,7 @@
  * @module transport/managed-anon-client
  */
 
-import { promises as fsp } from 'fs';
+import { promises as fsp, watch as fsWatch, type FSWatcher } from 'fs';
 import path from 'path';
 import type pino from 'pino';
 import { probeTcpPort, waitForTcpPort } from './probe-tcp-port';
@@ -99,6 +99,24 @@ export interface ManagedAnonClientOptions {
 const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
 const DEFAULT_STOP_TIMEOUT_MS = 10_000;
 
+/** Hostname-watch fallback poll interval (ms). */
+const HOSTNAME_POLL_INTERVAL_MS = 2_000;
+/** Maximum total time the fallback poll runs before giving up (ms). */
+const HOSTNAME_POLL_MAX_DURATION_MS = 5 * 60 * 1_000;
+
+/**
+ * Snapshot of the cached hidden-service hostname.
+ *
+ * `hostname` is `null` until the anon process publishes the v3 descriptor and
+ * writes `${hiddenServiceDir}/hostname`. Once read, both fields are stable for
+ * the lifetime of the `ManagedAnonClient` instance — there is no SIGHUP-style
+ * re-read; key rotation is a process-restart event.
+ */
+export interface HostnameSnapshot {
+  hostname: string | null;
+  publishedAt: string | null;
+}
+
 /**
  * Managed wrapper around the `Anon` SDK. See module documentation for the
  * full security contract.
@@ -117,6 +135,22 @@ export class ManagedAnonClient {
   private _started = false;
   private _lastHealthyFlag = true;
   private _consecutiveProbeFailures = 0;
+  /** Cached hostname read from `${hiddenServiceDir}/hostname` (trimmed). */
+  private _hostname: string | null = null;
+  /** ISO-8601 timestamp set on the first successful hostname read. */
+  private _publishedAt: string | null = null;
+  /** Active fs.watch handle for the hidden-service directory; closed on read or stop. */
+  private _hostnameWatcher: FSWatcher | undefined;
+  /** Active fallback-poll timer; cleared on read or stop. */
+  private _hostnamePollTimer: NodeJS.Timeout | undefined;
+  /** Wall-clock deadline (ms since epoch) at which the fallback poll gives up. */
+  private _hostnamePollDeadlineMs = 0;
+  /**
+   * Set to true by `_cleanupHostnameWatch()` to short-circuit any in-flight
+   * `_tryReadHostname()` chain or pending poll re-arm. Cleared on each
+   * `_startHostnameWatch()` so the client can be restarted.
+   */
+  private _hostnameWatchStopped = false;
 
   constructor(options: ManagedAnonClientOptions) {
     this._opts = options;
@@ -205,6 +239,21 @@ export class ManagedAnonClient {
     this._started = true;
     this._lastHealthyFlag = true;
     this._logger.info({ event: 'managed_anon_started', socksPort }, 'Managed anon client started');
+
+    // Kick off the hostname watcher in the background. Failures here are
+    // non-fatal: the connector's transport is already up, the admin endpoint
+    // simply reports `hostname: null` until detection succeeds.
+    if (this._opts.hiddenServiceDir) {
+      this._startHostnameWatch().catch((err: unknown) => {
+        this._logger.warn(
+          {
+            event: 'managed_anon_hostname_watch_setup_failed',
+            errorMessage: (err as Error)?.message ?? String(err),
+          },
+          'Hostname watch setup failed; admin /hs-hostname will report null'
+        );
+      });
+    }
   }
 
   /**
@@ -212,6 +261,10 @@ export class ManagedAnonClient {
    * is logged at WARN and the reference is cleared.
    */
   async stop(): Promise<void> {
+    // Always clean up hostname watch resources, even on the idempotent path,
+    // in case start() set them up but a prior stop() left them lingering.
+    this._cleanupHostnameWatch();
+
     const sdk = this._sdk;
     if (!sdk || !this._started) {
       // Idempotent no-op.
@@ -332,6 +385,163 @@ export class ManagedAnonClient {
       }
     }
     return ok;
+  }
+
+  /**
+   * True iff this client was constructed with a `hiddenServiceDir` (i.e. a
+   * hidden service is configured to publish a `.anyone` descriptor).
+   *
+   * Returns false when only a plain SOCKS proxy is wired up — in that case
+   * there is nothing to expose via the admin `/hs-hostname` endpoint.
+   */
+  isHiddenServiceConfigured(): boolean {
+    return this._opts.hiddenServiceDir !== undefined && this._opts.hiddenServiceDir.length > 0;
+  }
+
+  /**
+   * Snapshot of the hidden-service hostname.
+   *
+   * Returns `{ hostname: null, publishedAt: null }` until the anon process
+   * publishes the v3 descriptor (~30–90s after `start()`). Once read, the
+   * cached values are stable for the process lifetime — there is no SIGHUP
+   * re-read; key rotation requires a connector restart.
+   */
+  getHostnameSnapshot(): HostnameSnapshot {
+    return { hostname: this._hostname, publishedAt: this._publishedAt };
+  }
+
+  /**
+   * Begin watching `${hiddenServiceDir}/hostname` for first publish.
+   *
+   * Strategy: try an immediate read (fast path for restarts where the file
+   * already exists), then set up `fs.watch` on the directory. If `fs.watch`
+   * is unavailable (ENOSYS on some Docker overlay filesystems, or any error
+   * during setup), fall back to a bounded poll. Stops watching as soon as a
+   * non-empty hostname is read.
+   */
+  private async _startHostnameWatch(): Promise<void> {
+    const dir = this._opts.hiddenServiceDir;
+    if (!dir) return;
+
+    // Reset the stopped flag so a restart after stop() rearms the watcher.
+    this._hostnameWatchStopped = false;
+
+    if (await this._tryReadHostname()) return;
+
+    try {
+      this._hostnameWatcher = fsWatch(dir, { persistent: false });
+      this._hostnameWatcher.on('change', (_event, filename) => {
+        if (filename && filename.toString() !== 'hostname') return;
+        void this._tryReadHostname();
+      });
+      this._hostnameWatcher.on('error', (err: Error) => {
+        this._logger.debug(
+          { event: 'managed_anon_hostname_watch_error', errorMessage: err.message },
+          'fs.watch on hidden-service dir errored; relying on fallback poll'
+        );
+      });
+    } catch (err) {
+      // ENOSYS / EPERM / unsupported filesystem — fall through to polling.
+      this._logger.debug(
+        {
+          event: 'managed_anon_hostname_watch_unavailable',
+          errorMessage: (err as Error).message,
+        },
+        'fs.watch unavailable; using bounded fallback poll for hostname detection'
+      );
+    }
+
+    // Always arm the fallback poll alongside fs.watch. If the watcher fires
+    // first, the poll is a no-op (it short-circuits once `_hostname` is set);
+    // if the watcher never fires (unsupported FS, missed event), the poll
+    // catches it within HOSTNAME_POLL_INTERVAL_MS.
+    this._hostnamePollDeadlineMs = Date.now() + HOSTNAME_POLL_MAX_DURATION_MS;
+    this._scheduleHostnamePoll();
+  }
+
+  private _scheduleHostnamePoll(): void {
+    if (this._hostnameWatchStopped) return;
+    if (this._hostname !== null) return;
+    if (Date.now() >= this._hostnamePollDeadlineMs) {
+      this._logger.warn(
+        {
+          event: 'managed_anon_hostname_poll_giveup',
+          maxDurationMs: HOSTNAME_POLL_MAX_DURATION_MS,
+        },
+        'Gave up waiting for hidden-service hostname publish; admin /hs-hostname will continue to report null until restart'
+      );
+      this._cleanupHostnameWatch();
+      return;
+    }
+    this._hostnamePollTimer = setTimeout(() => {
+      void this._tryReadHostname().then((found) => {
+        if (!found) this._scheduleHostnamePoll();
+      });
+    }, HOSTNAME_POLL_INTERVAL_MS);
+    // Avoid keeping the Node event loop alive solely for this timer.
+    if (typeof this._hostnamePollTimer.unref === 'function') {
+      this._hostnamePollTimer.unref();
+    }
+  }
+
+  /**
+   * Read `${hiddenServiceDir}/hostname` once. On success, cache the trimmed
+   * value, set `publishedAt`, log at info, and tear down the watcher/timer.
+   * Returns true iff a non-empty hostname was cached.
+   */
+  private async _tryReadHostname(): Promise<boolean> {
+    if (this._hostnameWatchStopped) return false;
+    if (this._hostname !== null) return true;
+    const dir = this._opts.hiddenServiceDir;
+    if (!dir) return false;
+    const hostnameFile = path.join(dir, 'hostname');
+    try {
+      const raw = await fsp.readFile(hostnameFile, 'utf8');
+      // Re-check the stopped flag — `stop()` may have run while readFile was
+      // in flight. Without this guard a late read could populate the cache
+      // after the client is supposed to be torn down.
+      if (this._hostnameWatchStopped) return false;
+      const trimmed = raw.trim();
+      if (trimmed.length === 0) return false;
+      this._hostname = trimmed;
+      this._publishedAt = new Date().toISOString();
+      this._logger.info(
+        { event: 'managed_anon_hostname_published', publishedAt: this._publishedAt },
+        'Hidden-service hostname published'
+      );
+      this._cleanupHostnameWatch();
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'EISDIR') {
+        this._logger.debug(
+          {
+            event: 'managed_anon_hostname_read_error',
+            code,
+            errorMessage: (err as Error).message,
+          },
+          'Hostname file read failed (treating as not-yet-published)'
+        );
+      }
+      return false;
+    }
+  }
+
+  private _cleanupHostnameWatch(): void {
+    this._hostnameWatchStopped = true;
+    if (this._hostnameWatcher) {
+      try {
+        this._hostnameWatcher.close();
+      } catch {
+        // Ignore: closing a watcher may throw on some platforms if it's
+        // already been closed; harmless during shutdown.
+      }
+      this._hostnameWatcher = undefined;
+    }
+    if (this._hostnamePollTimer) {
+      clearTimeout(this._hostnamePollTimer);
+      this._hostnamePollTimer = undefined;
+    }
   }
 
   /**

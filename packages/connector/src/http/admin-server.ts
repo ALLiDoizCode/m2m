@@ -26,6 +26,7 @@ import type { SettlementMonitor } from '../settlement/settlement-monitor';
 import type { ClaimReceiver } from '../settlement/claim-receiver';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
+import type { ManagedAnonClient } from '../transport/managed-anon-client';
 import { requireOptional } from '../utils/optional-require';
 
 /**
@@ -72,6 +73,7 @@ export class AdminServer {
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
     metricsRegistry?: IlpMetricsRegistry;
+    managedAnonClient?: ManagedAnonClient;
     resolveTokenMetadata?: (
       blockchain: 'evm' | 'solana' | 'mina',
       tokenAddress: string
@@ -106,6 +108,7 @@ export class AdminServer {
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
     metricsRegistry?: IlpMetricsRegistry;
+    managedAnonClient?: ManagedAnonClient;
     resolveTokenMetadata?: (
       blockchain: 'evm' | 'solana' | 'mina',
       tokenAddress: string
@@ -143,6 +146,7 @@ export class AdminServer {
       packetSender,
       isReady,
       metricsRegistry,
+      managedAnonClient,
       resolveTokenMetadata,
       connectorFeePercentage,
     } = this._options;
@@ -169,6 +173,7 @@ export class AdminServer {
       packetSender,
       isReady,
       metricsRegistry,
+      managedAnonClient,
       resolveTokenMetadata,
       connectorFeePercentage,
     });
@@ -237,6 +242,7 @@ export class AdminServer {
                 'GET /admin/settlement/states',
                 'GET /admin/channels/:channelId/claims',
                 'POST /admin/ilp/send',
+                'GET /admin/hs-hostname',
               ],
             },
             `Admin API server started on ${host}:${port}`
