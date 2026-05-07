@@ -639,13 +639,15 @@ describe('ClaimReceiver', () => {
         signerAddress: claim.signerAddress,
       });
 
-      // Verify channel registered
+      // Verify channel registered with the resolved provider's canonical
+      // chainId so subsequent claims hit the known-channel lookup path.
       expect(mockChannelManager.registerExternalChannel).toHaveBeenCalledWith({
         channelId: mockChannelId,
         peerId: 'peer-new',
         tokenAddress: mockTokenAddress,
         tokenNetworkAddress: mockTokenNetworkAddress,
         chainId: 31337,
+        chain: 'evm:31337',
         status: 'open',
       });
 
@@ -1369,6 +1371,213 @@ describe('ClaimReceiver', () => {
         null,
         null
       );
+    });
+  });
+
+  // Issue #56: registry key format can differ between admin-opened channels
+  // (e.g. `evm:base:31337` set by the Admin API) and the numeric form a
+  // self-describing claim from an externally-opened channel carries
+  // (`evm:31337`). Either side may be the registered key depending on the
+  // operator's YAML, so resolveProvider must tolerate both directions.
+  describe('chain-key lookup fallback (issue #56)', () => {
+    const mockChannelId = '0x' + 'a'.repeat(64);
+    const mockSignerAddress = '0x' + 'c'.repeat(40);
+    const mockTokenNetworkAddress = '0x' + 'e'.repeat(40);
+    const mockTokenAddress = '0x' + 'f'.repeat(40);
+
+    function makeClaim(overrides: Partial<EVMClaimMessage> = {}): EVMClaimMessage {
+      return {
+        version: '1.0',
+        blockchain: 'evm',
+        messageId: 'evm-issue-56-1',
+        timestamp: '2026-03-07T12:00:00.000Z',
+        senderId: 'peer-bob',
+        channelId: mockChannelId,
+        nonce: 1,
+        transferredAmount: '1000000000000000000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0x' + 'b'.repeat(130),
+        signerAddress: mockSignerAddress,
+        chainId: 31337,
+        tokenNetworkAddress: mockTokenNetworkAddress,
+        tokenAddress: mockTokenAddress,
+        ...overrides,
+      };
+    }
+
+    function makeBTPMessage(claim: EVMClaimMessage): BTPMessage {
+      return {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [
+            {
+              protocolName: 'payment-channel-claim',
+              contentType: 1,
+              data: Buffer.from(JSON.stringify(claim), 'utf8'),
+            },
+          ],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+    }
+
+    function makeReceiverWithRegisteredChainId(
+      providerChainId: string,
+      knownChannelChain?: string
+    ): {
+      receiver: ClaimReceiver;
+      handler: () => (peerId: string, message: BTPMessage) => void;
+      provider: jest.Mocked<PaymentChannelProvider>;
+      registry: jest.Mocked<
+        Pick<ChainProviderRegistry, 'getProvider' | 'getProviderForPeer' | 'getAllProviders'>
+      >;
+      channelManager: jest.Mocked<ChannelManager>;
+    } {
+      const provider = createMockProvider();
+      // Override the provider's chainId to match the operator-configured form.
+      Object.defineProperty(provider, 'chainId', { value: providerChainId, writable: false });
+      provider.getChannelState.mockResolvedValue({
+        channelId: mockChannelId,
+        status: 'opened' as const,
+        participants: [mockSignerAddress, '0x' + 'd'.repeat(40)],
+        deposit: 10000n,
+      });
+      provider.verifyBalanceProof.mockResolvedValue(true);
+
+      const registry = {
+        getProvider: jest
+          .fn()
+          .mockImplementation((_chainType: string, chainId: string) =>
+            chainId === providerChainId ? provider : undefined
+          ),
+        getProviderForPeer: jest.fn().mockReturnValue(provider),
+        getAllProviders: jest.fn().mockReturnValue([provider]),
+      } as jest.Mocked<
+        Pick<ChainProviderRegistry, 'getProvider' | 'getProviderForPeer' | 'getAllProviders'>
+      >;
+
+      const channelManager = {
+        getChannelById: jest.fn().mockReturnValue(
+          knownChannelChain
+            ? {
+                channelId: mockChannelId,
+                peerId: 'peer-bob',
+                tokenId: mockTokenAddress,
+                tokenAddress: mockTokenAddress,
+                chain: knownChannelChain,
+                createdAt: new Date(),
+                lastActivityAt: new Date(),
+                status: 'open',
+              }
+            : null
+        ),
+        registerExternalChannel: jest.fn().mockReturnValue({
+          channelId: mockChannelId,
+          peerId: 'peer-bob',
+          tokenId: mockTokenAddress,
+          tokenAddress: mockTokenAddress,
+          chain: providerChainId,
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          status: 'open',
+        }),
+      } as unknown as jest.Mocked<ChannelManager>;
+
+      let captured: ((peerId: string, message: BTPMessage) => void) | null = null;
+      const btpServer = {
+        onMessage: jest.fn((h) => {
+          captured = h;
+        }),
+      } as unknown as jest.Mocked<BTPServer>;
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        registry as unknown as ChainProviderRegistry,
+        mockLogger,
+        channelManager
+      );
+      receiver.registerWithBTPServer(btpServer);
+
+      return {
+        receiver,
+        handler: () => captured!,
+        provider,
+        registry,
+        channelManager,
+      };
+    }
+
+    it('resolves provider via numeric-id suffix when registry is keyed evm:<network>:<id>', async () => {
+      // Operator YAML uses `chainProviders[].chainId = 'evm:base:31337'` —
+      // matches the Admin API's `evm:<network>:<chainId>` form.
+      const { handler, provider, channelManager } =
+        makeReceiverWithRegisteredChainId('evm:base:31337');
+      mockStatement.get.mockReturnValue(undefined);
+
+      // Externally-opened channel: claim arrives with numeric chainId only.
+      await handler()('peer-bob', makeBTPMessage(makeClaim()));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Suffix match resolves the registered provider despite key-format
+      // mismatch — getChannelState is reached, channel registers as known.
+      expect(provider.getChannelState).toHaveBeenCalledWith(mockChannelId);
+      expect(channelManager.registerExternalChannel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: mockChannelId,
+          chainId: 31337,
+          // Persisted with the resolved provider's canonical chainId so the
+          // next claim hits the known-channel exact-match path directly.
+          chain: 'evm:base:31337',
+        })
+      );
+    });
+
+    it('resolves provider for known channel stored as evm:<network>:<id> when registry is keyed evm:<id>', async () => {
+      // Mirror direction: registered key is `evm:31337`, but the channel
+      // metadata persisted by the Admin API uses `evm:base:31337`.
+      const { handler, provider } = makeReceiverWithRegisteredChainId(
+        'evm:31337',
+        'evm:base:31337'
+      );
+      mockStatement.get.mockReturnValue(undefined);
+
+      await handler()('peer-bob', makeBTPMessage(makeClaim()));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Known-channel exact lookup misses (`evm:base:31337` not registered),
+      // self-describing chainId direct lookup hits (`evm:31337` is registered).
+      // Provider resolves; signature path runs; claim verifies.
+      expect(provider.verifyBalanceProof).toHaveBeenCalled();
+      expect(mockStatement.run).toHaveBeenCalledWith(
+        'evm-issue-56-1',
+        'peer-bob',
+        'evm',
+        mockChannelId,
+        expect.any(String),
+        1,
+        expect.any(Number),
+        null,
+        null
+      );
+    });
+
+    it('falls back to chainType-only match when no key form matches', async () => {
+      // Edge case: operator-registered key `evm:weird-alias:31337` doesn't
+      // contain the numeric chainId at all. Suffix match misses, but the
+      // chainType fallback still resolves since there's exactly one EVM
+      // provider.
+      const { handler, provider } = makeReceiverWithRegisteredChainId('evm:weird-alias');
+      mockStatement.get.mockReturnValue(undefined);
+
+      await handler()('peer-bob', makeBTPMessage(makeClaim()));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(provider.getChannelState).toHaveBeenCalledWith(mockChannelId);
     });
   });
 

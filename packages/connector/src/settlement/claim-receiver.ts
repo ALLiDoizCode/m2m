@@ -287,62 +287,71 @@ export class ClaimReceiver extends EventEmitter {
   /**
    * Resolve the appropriate PaymentChannelProvider for a claim message.
    *
-   * For known channels, uses the channel's chain metadata to look up the provider.
-   * For unknown channels (dynamic verification), constructs a chain key from the
-   * claim's self-describing fields.
+   * Tolerates registry-key format variation between known-channel metadata
+   * (e.g. `evm:base:31337`, set by the admin API) and the numeric form a
+   * remote-signed claim carries (`evm:31337`). Lookup order, per blockchain:
+   *   1. Exact match on the known channel's `chain` (if registered).
+   *   2. Exact match on `<blockchain>:<numeric-id>` from the self-describing
+   *      claim fields (chainId / cluster / network).
+   *   3. Suffix match: any registered provider whose `chainId` ends with
+   *      `:<numeric-id>` — covers the `evm:base:31337` ⇄ `31337` case.
+   *   4. Fallback: first registered provider for this `chainType`.
    *
    * @param claim - The validated BTP claim message
    * @returns The matching provider, or undefined if none found
    * @private
    */
   private resolveProvider(claim: BTPClaimMessage): PaymentChannelProvider | undefined {
-    // EVM claims: try known channel first, then self-describing fields
     if (isEVMClaim(claim)) {
-      if (this.channelManager) {
-        const knownChannel = this.channelManager.getChannelById(claim.channelId);
-        if (knownChannel && knownChannel.chain) {
-          return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
-        }
-      }
-
-      if (claim.chainId !== undefined) {
-        const chainKey = `${claim.blockchain}:${claim.chainId}`;
-        return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
-      }
+      const known = this.channelManager?.getChannelById(claim.channelId);
+      return this.lookupProvider(claim.blockchain, known?.chain, claim.chainId);
     }
 
-    // Solana claims: try known channel first, then cluster-based lookup
     if (isSolanaClaim(claim)) {
-      if (this.channelManager) {
-        const knownChannel = this.channelManager.getChannelById(claim.channelAccount);
-        if (knownChannel && knownChannel.chain) {
-          return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
-        }
-      }
-
-      if (claim.cluster !== undefined) {
-        const chainKey = `${claim.blockchain}:${claim.cluster}`;
-        return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
-      }
+      const known = this.channelManager?.getChannelById(claim.channelAccount);
+      return this.lookupProvider(claim.blockchain, known?.chain, claim.cluster);
     }
 
-    // Mina claims: try known channel first, then network-based lookup
     if (isMinaClaim(claim)) {
-      if (this.channelManager) {
-        const knownChannel = this.channelManager.getChannelById(claim.zkAppAddress);
-        if (knownChannel && knownChannel.chain) {
-          return this.chainProviderRegistry.getProvider(claim.blockchain, knownChannel.chain);
-        }
-      }
-      if (claim.network !== undefined) {
-        const chainKey = `${claim.blockchain}:${claim.network}`;
-        return this.chainProviderRegistry.getProvider(claim.blockchain, chainKey);
-      }
+      const known = this.channelManager?.getChannelById(claim.zkAppAddress);
+      return this.lookupProvider(claim.blockchain, known?.chain, claim.network);
     }
 
-    // Fallback: try the first registered provider for this blockchain type
-    const allProviders = this.chainProviderRegistry.getAllProviders();
-    return allProviders.find((p) => p.chainType === claim.blockchain);
+    // Unreachable: the three type guards above are exhaustive over BTPClaimMessage.
+    return undefined;
+  }
+
+  /**
+   * Try a sequence of registry lookup strategies and return the first hit.
+   * See `resolveProvider` for the documented strategy order.
+   *
+   * @private
+   */
+  private lookupProvider(
+    blockchain: BlockchainType,
+    knownChain: string | undefined,
+    selfDescribingId: string | number | undefined
+  ): PaymentChannelProvider | undefined {
+    if (knownChain) {
+      const exact = this.chainProviderRegistry.getProvider(blockchain, knownChain);
+      if (exact) return exact;
+    }
+
+    if (selfDescribingId !== undefined) {
+      const direct = this.chainProviderRegistry.getProvider(
+        blockchain,
+        `${blockchain}:${selfDescribingId}`
+      );
+      if (direct) return direct;
+
+      const suffix = `:${selfDescribingId}`;
+      const suffixHit = this.chainProviderRegistry
+        .getAllProviders()
+        .find((p) => p.chainType === blockchain && p.chainId.endsWith(suffix));
+      if (suffixHit) return suffixHit;
+    }
+
+    return this.chainProviderRegistry.getAllProviders().find((p) => p.chainType === blockchain);
   }
 
   /**
@@ -503,13 +512,17 @@ export class ClaimReceiver extends EventEmitter {
         };
       }
 
-      // Register channel in ChannelManager
+      // Register channel in ChannelManager. Persist the resolved provider's
+      // canonical chainId (e.g. `evm:base:31337`) when it differs from the
+      // numeric form derived from the claim, so subsequent lookups hit the
+      // exact known-channel path instead of falling back to suffix match.
       this.channelManager.registerExternalChannel({
         channelId: claim.channelId,
         peerId,
         tokenAddress: claim.tokenAddress,
         tokenNetworkAddress: claim.tokenNetworkAddress,
         chainId: claim.chainId,
+        chain: provider.chainId,
         status: 'open',
       });
 
