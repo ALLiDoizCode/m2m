@@ -8,10 +8,10 @@ recommended pinning strategy for downstream consumers.
 
 Each release publishes two artifacts:
 
-| Artifact        | Location                                                       |
-| --------------- | -------------------------------------------------------------- |
-| npm package     | `@toon-protocol/connector` on npmjs.com                        |
-| Container image | `ghcr.io/toon-protocol/connector` on GitHub Container Registry |
+| Artifact        | Location                                                       | Architectures                                                      |
+| --------------- | -------------------------------------------------------------- | ------------------------------------------------------------------ |
+| npm package     | `@toon-protocol/connector` on npmjs.com                        | n/a (pure JS)                                                      |
+| Container image | `ghcr.io/toon-protocol/connector` on GitHub Container Registry | `linux/amd64`, `linux/arm64` (from the first release after PR #62) |
 
 Releases are cut by [semantic-release](https://github.com/semantic-release/semantic-release)
 on every push to `main`, when the conventional-commit history warrants a version
