@@ -134,7 +134,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
 
       # Post-publish assertion (issue #61): verify the image we just pushed
       # carries the correct `org.opencontainers.image.version` label. Catches
