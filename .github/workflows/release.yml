@@ -136,6 +136,28 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64
 
+      # Post-publish assertion (issue #61): verify the image we just pushed
+      # carries the correct `org.opencontainers.image.version` label. Catches
+      # the entire class of "tag says X but content says Y" bugs — e.g. the
+      # trigger-SHA `git describe` corruption fixed in #60. Without this,
+      # silent tag-pointer overwrites can ship undetected.
+      - name: Verify pushed image version label matches tag
+        if: steps.tag.outputs.tag != ''
+        run: |
+          set -euo pipefail
+          EXPECTED="${{ steps.tag.outputs.tag }}"
+          EXPECTED="${EXPECTED#v}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/connector:${EXPECTED}"
+          ACTUAL=$(docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ index .Image.Config.Labels "org.opencontainers.image.version" }}')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Image label mismatch on $IMAGE"
+            echo "  expected org.opencontainers.image.version: $EXPECTED"
+            echo "  actual   org.opencontainers.image.version: $ACTUAL"
+            exit 1
+          fi
+          echo "✓ Verified $IMAGE carries org.opencontainers.image.version=$EXPECTED"
+
       - name: Release summary
         if: steps.tag.outputs.tag != ''
         run: |
