@@ -75,10 +75,18 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout code
+      # Check out main's tip, NOT the workflow trigger SHA. semantic-release in
+      # the `release` job pushes a `chore(release): X.Y.Z [skip ci]` commit that
+      # creates the new vX.Y.Z tag on a child of the trigger SHA. Without
+      # `ref: main`, `git describe --tags --abbrev=0` walks ancestors of the
+      # trigger SHA and returns the *previous* tag — silently overwriting that
+      # tag's image on GHCR with the new release's content. Mirrors the fix
+      # already applied to `npm-release` below.
+      - name: Checkout code (main's tip — post semantic-release commit)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Get latest tag
         id: tag
