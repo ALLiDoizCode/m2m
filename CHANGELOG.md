@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0](https://github.com/toon-protocol/connector/compare/v3.4.2...v3.5.0) (2026-05-07)
+
+### Features
+
+- **connector:** add GET /admin/hs-hostname endpoint ([#58](https://github.com/toon-protocol/connector/issues/58)) ([d92c885](https://github.com/toon-protocol/connector/commit/d92c8856a844b4ea6bb0d837c009bec19c514f07))
+
 ## [3.4.2](https://github.com/toon-protocol/connector/compare/v3.4.1...v3.4.2) (2026-05-07)
 
 ### Bug Fixes
