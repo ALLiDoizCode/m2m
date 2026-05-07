@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1](https://github.com/toon-protocol/connector/compare/v3.5.0...v3.5.1) (2026-05-07)
+
+### Bug Fixes
+
+- **ci:** fix imagetools verify for multi-arch manifest index ([b854f04](https://github.com/toon-protocol/connector/commit/b854f04cd9ecdf6d1ce69cfe3feca0719eef14c2)), closes [#25518750342](https://github.com/toon-protocol/connector/issues/25518750342) [#63](https://github.com/toon-protocol/connector/issues/63)
+
 ## [Unreleased]
 
 ### Build
