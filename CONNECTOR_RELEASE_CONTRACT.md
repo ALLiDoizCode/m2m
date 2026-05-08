@@ -34,6 +34,41 @@ merged (i.e. the first release cut from a connector main containing the
 - **npm package, version stability:** `@toon-protocol/connector@X.Y.Z` is
   immutable on npmjs.com per npm's package-management rules.
 
+## Supply-chain signing
+
+Starting from the first release after PR [#<num>](https://github.com/toon-protocol/connector/pull/<num>), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
+
+### Verifying a release image
+
+```bash
+# Connector
+DIGEST=$(docker buildx imagetools inspect ghcr.io/toon-protocol/connector:<tag> \
+  --format '{{ json .Manifest }}' | jq -r '.digest')
+
+cosign verify "ghcr.io/toon-protocol/connector@${DIGEST}" \
+  --certificate-identity-regexp \
+    'https://github\.com/toon-protocol/connector/\.github/workflows/(build-and-publish|release)\.yml@.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+
+# ATOR sidecar (narrower regex — only build-and-publish.yml signs the sidecar)
+SIDECAR_DIGEST=$(docker buildx imagetools inspect ghcr.io/toon-protocol/ator-sidecar:<tag> \
+  --format '{{ json .Manifest }}' | jq -r '.digest')
+
+cosign verify "ghcr.io/toon-protocol/ator-sidecar@${SIDECAR_DIGEST}" \
+  --certificate-identity-regexp \
+    'https://github\.com/toon-protocol/connector/\.github/workflows/build-and-publish\.yml@.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+```
+
+Expected output: `Verification for ... -- The following checks were performed: ... certificate identity is ...` and exit 0.
+
+### Notes
+
+- Signatures cover the **multi-arch manifest index digest** (not per-platform sub-manifests). Verifying against the index digest is sufficient; `docker pull <image>@<index-digest>` resolves to the correct per-platform sub-manifest at pull time.
+- Each signature is **automatically published to the [Sigstore Rekor transparency log](https://rekor.sigstore.dev)**. `cosign verify` consults the log automatically — no separate flag is needed.
+- The signing certificate's SAN encodes the exact workflow path (e.g. `https://github.com/toon-protocol/connector/.github/workflows/build-and-publish.yml@refs/tags/v3.6.0`). The `--certificate-identity-regexp` flag is required; omitting identity flags causes cosign to reject the verification — by design.
+- The `(build-and-publish|release)\.yml` regex tolerates both signers: `release.yml` fires on the merge-commit-to-main and `build-and-publish.yml` fires on the tag push. Both produce valid signatures on the same digest.
+
 ## Recommended pinning strategy
 
 For maximum supply-chain integrity, **pin by content digest** rather than by
@@ -44,9 +79,7 @@ ghcr.io/toon-protocol/connector@sha256:<digest>
 ```
 
 Digest pinning gives byte-for-byte reproducibility regardless of any future
-tag-pointer changes (re-tagging, deletion, or registry compromise). Cosign
-signing of release artifacts (tracked in townhouse Story 44.3) makes this
-pinning strategy verifiable end-to-end.
+tag-pointer changes (re-tagging, deletion, or registry compromise). Combined with [Supply-chain signing](#supply-chain-signing), digest pinning is verifiable end-to-end.
 
 For non-production use where tag mutability is acceptable, semver tags
 (`:3.5.1`, `:3.5`, `:3`, `:latest`) are produced by `docker/metadata-action`
@@ -117,5 +150,5 @@ Two mechanisms guard against future tag-vs-content drift:
   `docker-release` `ref: main` fix
 - PR [#48](https://github.com/toon-protocol/connector/pull/48) — earlier
   `npm-release` fix for the same class of bug
-- Townhouse Story 44.3 — cosign signing of release artifacts
+- [PR #<num> — cosign keyless OIDC signing](https://github.com/toon-protocol/connector/pull/<num>) (Story 44.3)
 - Townhouse Story 44.4 — downstream consumer-facing release contract
