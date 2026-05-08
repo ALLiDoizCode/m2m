@@ -120,12 +120,15 @@ and follow standard semver-tag floating semantics.
 Downstream consumers (notably `toon-protocol/town`'s townhouse package)
 learn about new connector releases via:
 
-1. **GitHub UI subscription** — _preferred_: `Watch → Custom → Releases`
-   on `toon-protocol/connector`. Releases-only is a UI-side filter the
-   REST API does not expose.
-2. **`gh` CLI subscription** — _fallback_: `gh api -X PUT
-/repos/toon-protocol/connector/subscription -f subscribed=true -f
-ignored=false` subscribes to all repository events, not just releases.
+1. **GitHub UI subscription** — preferred: `Watch → Custom → Releases` on
+   `toon-protocol/connector`. Releases-only is a UI-side filter the REST API does
+   not expose.
+2. **`gh` CLI subscription** — fallback: subscribes to all repository events
+   (not releases-only):
+   ```
+   gh api -X PUT /repos/toon-protocol/connector/subscription \
+     -f subscribed=true -f ignored=false
+   ```
 
 Automated subscription (e.g. a GitHub Actions cron polling `gh release
 view` and opening a digest-bump PR into townhouse) is OUT OF SCOPE for
