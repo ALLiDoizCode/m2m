@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- Codify `/admin/*` semver discipline in `CONNECTOR_RELEASE_CONTRACT.md` (Story 44.4 / PR #<num>)
+- Codify `/admin/*` semver discipline in `CONNECTOR_RELEASE_CONTRACT.md` (Story 44.4 / PR #67)
 
 ### Added
 
