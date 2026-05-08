@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Nightly ATOR CI workflow (`.github/workflows/nightly-ator.yml`): real-binary + system-tor fallback smoke test on Linux and macOS; nightly at 04:00 UTC + `workflow_dispatch` (Story 36.5)
+
 ### Build
 
 - Multi-arch image: `linux/amd64,linux/arm64` published for both `connector` and `ator-sidecar` images starting from the next release after this PR. The smoke-test step in `build-and-publish.yml` remains `linux/amd64` only (`load: true` is incompatible with multi-platform builds).
