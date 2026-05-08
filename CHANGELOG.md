@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.1](https://github.com/toon-protocol/connector/compare/v3.6.0...v3.6.1) (2026-05-08)
+
+### Bug Fixes
+
+- **docs:** reformat Staying current gh CLI command as code block ([f74ba4f](https://github.com/toon-protocol/connector/commit/f74ba4f55e4bf56937551f70ba1865421d183005))
+
 ## [3.6.0](https://github.com/toon-protocol/connector/compare/v3.5.1...v3.6.0) (2026-05-08)
 
 ### Features
