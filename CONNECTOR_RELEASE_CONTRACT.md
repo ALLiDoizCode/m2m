@@ -17,6 +17,8 @@ Releases are cut by [semantic-release](https://github.com/semantic-release/seman
 on every push to `main`, when the conventional-commit history warrants a version
 bump. The release pipeline is defined in `.github/workflows/release.yml`.
 
+Multi-arch images (`linux/amd64` + `linux/arm64`) ship from the first release after PR [#63](https://github.com/toon-protocol/connector/pull/63); adding architectures is a build-only change (no semver bump). Removing an architecture is a breaking change requiring a MAJOR bump.
+
 ## Stability guarantees
 
 For releases cut **after** PR [#60](https://github.com/toon-protocol/connector/pull/60)
@@ -34,9 +36,37 @@ merged (i.e. the first release cut from a connector main containing the
 - **npm package, version stability:** `@toon-protocol/connector@X.Y.Z` is
   immutable on npmjs.com per npm's package-management rules.
 
+## API stability
+
+The connector's HTTP admin API surface (everything under `/admin/*`) follows
+strict semver discipline. The rules below tell consumers what kind of
+version bump to expect for any change.
+
+| Change                                     | Bump  | Example                  |
+| ------------------------------------------ | ----- | ------------------------ |
+| `/admin/*` field addition                  | MINOR | `v3.3.x → v3.4.0`        |
+| `/admin/*` field rename or removal         | MAJOR | `v3.x → v4.0`            |
+| `/admin/*` endpoint addition               | MINOR | `v3.3.x → v3.4.0`        |
+| `/admin/*` endpoint rename or removal      | MAJOR | `v3.x → v4.0`            |
+| ILP packet wire-format change              | MAJOR | `v3.x → v4.0`            |
+| Image architecture addition (e.g. `arm64`) | none  | build-only change        |
+| Image architecture removal                 | MAJOR | breaks pinning consumers |
+
+### Townhouse pin discipline
+
+Townhouse pins the connector image **by digest** in
+`packages/townhouse/dist/image-manifest.json` (built by the publish
+workflow — Story 45.1). Each MINOR connector release triggers a manual
+digest-pin bump in townhouse, gated on the contract canary
+(`pnpm --filter @toon-protocol/sdk test:integration -- tests/integration/connector-contract.test.ts`)
+passing at the new digest. Patch releases (`vX.Y.z → vX.Y.z+1`) do not
+require a townhouse bump unless the patch fixes a behavior townhouse
+actively relied on being broken. Major bumps require a deliberate
+townhouse migration cycle and a CONNECTOR_MIGRATION.md row.
+
 ## Supply-chain signing
 
-Starting from the first release after PR [#66](https://github.com/toon-protocol/connector/pull/<num>), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
+Starting from the first release after PR [#66](https://github.com/toon-protocol/connector/pull/66), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
 
 ### Verifying a release image
 
@@ -84,6 +114,25 @@ tag-pointer changes (re-tagging, deletion, or registry compromise). Combined wit
 For non-production use where tag mutability is acceptable, semver tags
 (`:3.5.1`, `:3.5`, `:3`, `:latest`) are produced by `docker/metadata-action`
 and follow standard semver-tag floating semantics.
+
+## Staying current
+
+Downstream consumers (notably `toon-protocol/town`'s townhouse package)
+learn about new connector releases via:
+
+1. **GitHub UI subscription** — preferred: `Watch → Custom → Releases` on
+   `toon-protocol/connector`. Releases-only is a UI-side filter the REST API does
+   not expose.
+2. **`gh` CLI subscription** — fallback: subscribes to all repository events
+   (not releases-only):
+   ```
+   gh api -X PUT /repos/toon-protocol/connector/subscription \
+     -f subscribed=true -f ignored=false
+   ```
+
+Automated subscription (e.g. a GitHub Actions cron polling `gh release
+view` and opening a digest-bump PR into townhouse) is OUT OF SCOPE for
+v1 and tracked as Open Thread #2 in the Townhouse HS-Mode v1 epic.
 
 ## Historical tag corruption (releases prior to first post-#60 release)
 
@@ -142,6 +191,18 @@ Two mechanisms guard against future tag-vs-content drift:
    `org.opencontainers.image.version` equals the tag. Any mismatch fails the
    workflow run.
 
+3. **Town mirror drift detection:** The doc body is mirrored at
+   `packages/sdk/CONNECTOR_RELEASE_CONTRACT.md` in `toon-protocol/town`.
+   The town copy prepends a 3-line comment header; verify body equivalence with:
+
+   ```bash
+   diff CONNECTOR_RELEASE_CONTRACT.md \
+        <(tail -n +4 /path/to/town/packages/sdk/CONNECTOR_RELEASE_CONTRACT.md)
+   ```
+
+   Expected output: empty. Any diff is a drift defect — open a follow-up PR in
+   both repos to restore equivalence.
+
 ## References
 
 - Issue [#61](https://github.com/toon-protocol/connector/issues/61) — historical
@@ -150,5 +211,5 @@ Two mechanisms guard against future tag-vs-content drift:
   `docker-release` `ref: main` fix
 - PR [#48](https://github.com/toon-protocol/connector/pull/48) — earlier
   `npm-release` fix for the same class of bug
-- [PR #66 — cosign keyless OIDC signing](https://github.com/toon-protocol/connector/pull/<num>) (Story 44.3)
+- [PR #66 — cosign keyless OIDC signing](https://github.com/toon-protocol/connector/pull/66) (Story 44.3)
 - Townhouse Story 44.4 — downstream consumer-facing release contract

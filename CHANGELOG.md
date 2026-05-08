@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Codify `/admin/*` semver discipline in `CONNECTOR_RELEASE_CONTRACT.md` (Story 44.4 / PR #67)
+
 ### Added
 
 - Nightly ATOR CI workflow (`.github/workflows/nightly-ator.yml`): real-binary + system-tor fallback smoke test on Linux and macOS; nightly at 04:00 UTC + `workflow_dispatch` (Story 36.5)
