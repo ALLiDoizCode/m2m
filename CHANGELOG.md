@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Build
 
+- Cosign-signed images via keyless OIDC for `connector` and `ator-sidecar` (Story 44.3 / PR #66)
 - Multi-arch image: `linux/amd64,linux/arm64` published for both `connector` and `ator-sidecar` images starting from the next release after this PR. The smoke-test step in `build-and-publish.yml` remains `linux/amd64` only (`load: true` is incompatible with multi-platform builds).
 
 ## [3.5.0](https://github.com/toon-protocol/connector/compare/v3.4.2...v3.5.0) (2026-05-07)
