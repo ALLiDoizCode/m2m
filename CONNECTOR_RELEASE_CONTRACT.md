@@ -36,7 +36,7 @@ merged (i.e. the first release cut from a connector main containing the
 
 ## Supply-chain signing
 
-Starting from the first release after PR [#<num>](https://github.com/toon-protocol/connector/pull/<num>), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
+Starting from the first release after PR [#66](https://github.com/toon-protocol/connector/pull/<num>), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
 
 ### Verifying a release image
 
@@ -150,5 +150,5 @@ Two mechanisms guard against future tag-vs-content drift:
   `docker-release` `ref: main` fix
 - PR [#48](https://github.com/toon-protocol/connector/pull/48) — earlier
   `npm-release` fix for the same class of bug
-- [PR #<num> — cosign keyless OIDC signing](https://github.com/toon-protocol/connector/pull/<num>) (Story 44.3)
+- [PR #66 — cosign keyless OIDC signing](https://github.com/toon-protocol/connector/pull/<num>) (Story 44.3)
 - Townhouse Story 44.4 — downstream consumer-facing release contract
