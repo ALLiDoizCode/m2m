@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Codify `/admin/*` semver discipline in `CONNECTOR_RELEASE_CONTRACT.md` (Story 44.4 / PR #67)
+- Polish `CONNECTOR_RELEASE_CONTRACT.md` follow-up — fix PR #62 → #63 reference, pin cosign opener to `v3.6.0`, correct "Two/Three mechanisms" lede, anchor town-mirror diff cwd, add `bash` language hint, add RFC-0027 reference (Story 44.4 round-2 review patches)
 
 ### Added
 
