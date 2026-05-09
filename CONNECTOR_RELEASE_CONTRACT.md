@@ -11,7 +11,7 @@ Each release publishes two artifacts:
 | Artifact        | Location                                                       | Architectures                                                      |
 | --------------- | -------------------------------------------------------------- | ------------------------------------------------------------------ |
 | npm package     | `@toon-protocol/connector` on npmjs.com                        | n/a (pure JS)                                                      |
-| Container image | `ghcr.io/toon-protocol/connector` on GitHub Container Registry | `linux/amd64`, `linux/arm64` (from the first release after PR #62) |
+| Container image | `ghcr.io/toon-protocol/connector` on GitHub Container Registry | `linux/amd64`, `linux/arm64` (from the first release after PR #63) |
 
 Releases are cut by [semantic-release](https://github.com/semantic-release/semantic-release)
 on every push to `main`, when the conventional-commit history warrants a version
@@ -66,7 +66,7 @@ townhouse migration cycle and a CONNECTOR_MIGRATION.md row.
 
 ## Supply-chain signing
 
-Starting from the first release after PR [#66](https://github.com/toon-protocol/connector/pull/66), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
+Starting from `v3.6.0` (cut after PR [#66](https://github.com/toon-protocol/connector/pull/66) merged), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
 
 ### Verifying a release image
 
@@ -125,7 +125,7 @@ learn about new connector releases via:
    not expose.
 2. **`gh` CLI subscription** — fallback: subscribes to all repository events
    (not releases-only):
-   ```
+   ```bash
    gh api -X PUT /repos/toon-protocol/connector/subscription \
      -f subscribed=true -f ignored=false
    ```
@@ -178,7 +178,7 @@ guarantees in [Stability guarantees](#stability-guarantees) apply.
 
 ## Verification
 
-Two mechanisms guard against future tag-vs-content drift:
+Three mechanisms guard against future tag-vs-content drift:
 
 1. **Pre-publish (issue [#61](https://github.com/toon-protocol/connector/issues/61) /
    PR [#60](https://github.com/toon-protocol/connector/pull/60)):** the
@@ -190,14 +190,15 @@ Two mechanisms guard against future tag-vs-content drift:
    manifest with `docker buildx imagetools inspect` and asserts that
    `org.opencontainers.image.version` equals the tag. Any mismatch fails the
    workflow run.
-
 3. **Town mirror drift detection:** The doc body is mirrored at
    `packages/sdk/CONNECTOR_RELEASE_CONTRACT.md` in `toon-protocol/town`.
-   The town copy prepends a 3-line comment header; verify body equivalence with:
+   The town copy prepends a 3-line comment header; verify body equivalence
+   from the `toon-protocol/connector` repo root (with `toon-protocol/town`
+   cloned alongside as a sibling directory, e.g. `../town`):
 
    ```bash
    diff CONNECTOR_RELEASE_CONTRACT.md \
-        <(tail -n +4 /path/to/town/packages/sdk/CONNECTOR_RELEASE_CONTRACT.md)
+        <(tail -n +4 ../town/packages/sdk/CONNECTOR_RELEASE_CONTRACT.md)
    ```
 
    Expected output: empty. Any diff is a drift defect — open a follow-up PR in
@@ -213,3 +214,4 @@ Two mechanisms guard against future tag-vs-content drift:
   `npm-release` fix for the same class of bug
 - [PR #66 — cosign keyless OIDC signing](https://github.com/toon-protocol/connector/pull/66) (Story 44.3)
 - Townhouse Story 44.4 — downstream consumer-facing release contract
+- [Interledger Protocol V4 (RFC 0027)](https://github.com/interledger/rfcs/blob/master/0027-interledger-protocol-4/0027-interledger-protocol-4.md) — defines the ILP packet wire format referenced by the MAJOR-bump rule in [API stability](#api-stability)
