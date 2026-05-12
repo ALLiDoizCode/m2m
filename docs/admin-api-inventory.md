@@ -107,22 +107,61 @@ The settlement router has its own body-based `authToken` validation (if configur
 
 #### Peer Management
 
-| Method   | Path                   | Auth      | Status | Request                   | Response                                     |
-| -------- | ---------------------- | --------- | ------ | ------------------------- | -------------------------------------------- |
-| `GET`    | `/admin/peers`         | X-Api-Key | 200    | none                      | `Array<{ id, url, connected, settlement? }>` |
-| `POST`   | `/admin/peers`         | X-Api-Key | 201    | `AddPeerRequest`          | `{ id, connected }`                          |
-| `DELETE` | `/admin/peers/:peerId` | X-Api-Key | 204    | none                      | none                                         |
-| `PUT`    | `/admin/peers/:peerId` | X-Api-Key | 200    | `Partial<AddPeerRequest>` | `{ id, connected, settlement? }`             |
+| Method   | Path                   | Auth      | Status    | Request                   | Response                                                 |
+| -------- | ---------------------- | --------- | --------- | ------------------------- | -------------------------------------------------------- |
+| `GET`    | `/admin/peers`         | X-Api-Key | 200       | none                      | `Array<{ id, url, connected, transport?, settlement? }>` |
+| `POST`   | `/admin/peers`         | X-Api-Key | 201 / 200 | `AddPeerRequest`          | `{ id, url, connected, transport? }`                     |
+| `DELETE` | `/admin/peers/:peerId` | X-Api-Key | 204       | none                      | none                                                     |
+| `PUT`    | `/admin/peers/:peerId` | X-Api-Key | 200       | `Partial<AddPeerRequest>` | `{ id, connected, settlement? }`                         |
+
+`POST /admin/peers` returns **201** for new peers and **200** for idempotent
+re-registration of an existing peer ID (never 409).
+
+**`AddPeerRequest.transport`** (optional, `'direct' | 'socks5'`) overrides the
+connector-level `transport.type` for outbound BTP dial on this peer. When
+omitted, the peer inherits the connector default. A request with
+`transport: 'socks5'` against a connector whose `transport.type !== 'socks5'`
+is rejected with HTTP 400.
+
+**Re-registration cannot change a peer's live transport** (Decision 7 in the
+per-peer-transport tech spec). A POST against an existing peer ID is a no-op
+for the BTP client: the response payload's `transport` field reflects the
+**live** value read from the existing peer, NOT the requested one. To change
+a peer's transport, `DELETE` then `POST`.
+
+**`PUT /admin/peers/:peerId`** does NOT accept the `transport` field (or any
+peer-identity field — `id` / `url` / `authToken`). Any such fields in the
+body are silently ignored.
 
 **Failure Modes:**
 
 - `400` — Invalid body, missing fields, invalid ILP address
+- `400` — Invalid `transport` value, or `transport: 'socks5'` requested on a
+  connector whose `transport.type !== 'socks5'`
 - `401` — Missing/invalid X-Api-Key
 - `403` — IP not in allowlist
 - `404` — Peer not found (DELETE, PUT, GET balances), nextHop peer not found (POST /routes)
-- `409` — Peer ID already exists
 
-**Related Stories:** 6.4, 37.1
+**Curl Examples:**
+
+```bash
+# Register a Docker-sibling peer over direct WS while the connector itself is
+# configured with transport.type: 'socks5':
+curl -X POST http://127.0.0.1:8081/admin/peers \
+  -H 'Content-Type: application/json' -H 'X-Api-Key: <key>' \
+  -d '{"id":"sibling","url":"ws://docker-sibling:3000","authToken":"",
+       "transport":"direct"}'
+# → 201 { peer: { id: "sibling", url: "...", connected: true, transport: "direct" }, ... }
+
+# Same request on a transport.type: 'direct' connector → 400:
+curl -X POST http://127.0.0.1:8081/admin/peers \
+  -H 'Content-Type: application/json' -H 'X-Api-Key: <key>' \
+  -d '{"id":"bad","url":"ws://x:3000","authToken":"","transport":"socks5"}'
+# → 400 { error: "Bad request",
+#         message: "transport: 'socks5' requires connector-level transport.type 'socks5'" }
+```
+
+**Related Stories:** 6.4, 37.1, per-peer-transport-selection
 
 **Cross-Surface Group:** `peer-existence` (with GET /admin/balances/:peerId, GET /metrics, GET /admin/metrics.json)
 

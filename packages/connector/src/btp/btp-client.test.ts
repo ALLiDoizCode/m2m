@@ -937,8 +937,8 @@ describe('BTPClient', () => {
       const connectPromise = c.connect();
       await new Promise((resolve) => setImmediate(resolve));
 
-      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
-      expect(factory).toHaveBeenCalledWith('ws://peer.example/btp');
+      // Factory now receives the full Peer (per-peer transport dispatch).
+      expect(factory).toHaveBeenCalledWith(peer);
       // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
       expect(WebSocket).toHaveBeenCalledWith('ws://peer.example/btp');
       mockWs.simulateOpen();

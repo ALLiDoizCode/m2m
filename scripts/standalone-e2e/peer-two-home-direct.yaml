@@ -1,0 +1,26 @@
+# Direct-only sibling connector for the `two-home-ator-local` profile.
+# Per the per-peer-transport tech spec (Task 12), this service provides a
+# direct-reachable BTP endpoint on the shared `ator_net` Docker network so
+# Townhouse Story 46.4's heterogeneous-fleet E2E can prove that an apex
+# connector configured with `transport.type: socks5` still reaches a sibling
+# peer over plain WS when the peer is registered with `transport: 'direct'`.
+#
+# Intentionally minimal — no SOCKS5 transport block, no peers, no routes.
+# Exists purely to accept inbound BTP from the apex two-home connectors.
+nodeId: direct-sibling
+btpServerPort: 3000
+healthCheckPort: 8080
+environment: development
+deploymentMode: standalone
+logLevel: warn
+
+adminApi:
+  enabled: true
+  port: 8081
+  host: 0.0.0.0
+
+transport:
+  type: direct
+
+peers: []
+routes: []

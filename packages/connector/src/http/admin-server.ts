@@ -79,7 +79,9 @@ export class AdminServer {
       tokenAddress: string
     ) => Promise<{ assetCode: string; assetScale: number }>;
     connectorFeePercentage?: number;
+    transportType?: 'direct' | 'socks5';
   };
+  private readonly _transportType: 'direct' | 'socks5';
 
   /**
    * Create AdminServer instance
@@ -114,11 +116,19 @@ export class AdminServer {
       tokenAddress: string
     ) => Promise<{ assetCode: string; assetScale: number }>;
     connectorFeePercentage?: number;
+    /**
+     * Connector-level transport discriminator. Forwarded to the admin
+     * router for `POST /admin/peers { transport: 'socks5' }` validation.
+     * Defaults to `'direct'` when omitted, matching pre-Epic-35 behavior
+     * (H7 — explicit default for callers that omit the field).
+     */
+    transportType?: 'direct' | 'socks5';
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
     this._config = options.config;
     this._logger = options.logger.child({ component: 'AdminServer' });
+    this._transportType = options.transportType ?? 'direct';
   }
 
   /**
@@ -176,6 +186,7 @@ export class AdminServer {
       managedAnonClient,
       resolveTokenMetadata,
       connectorFeePercentage,
+      transportType: this._transportType,
     });
 
     this._app.use('/admin', adminRouter);

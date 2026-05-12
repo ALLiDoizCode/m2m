@@ -853,6 +853,43 @@ services:
       two-home-local-sidecar-b:
         condition: service_healthy
 
+  # Per-peer-transport selection (Story 46.4 unblock): direct-only sibling
+  # peer on the shared `ator_net` Docker network. The two-home apex
+  # connectors register this service via POST /admin/peers with
+  # `transport: 'direct'` to prove that a SOCKS5-global apex can still host
+  # plain-WS sibling peers without forcing every dial through `anon`.
+  #
+  # NOTE: explicit `networks: [ator_net]` — do NOT use `network_mode:
+  # service:two-home-local-sidecar-*`. That pattern is used by the apex
+  # connectors because they share a namespace with their sidecars; this
+  # peer has no sidecar of its own and joins `ator_net` directly. Other
+  # services on `ator_net` reach this peer via Docker DNS at the service
+  # name (`ws://two-home-local-direct-peer:3000`).
+  two-home-local-direct-peer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [two-home-ator-local]
+    environment:
+      CONFIG_FILE: /app/config/peer.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ${TWO_HOME_LOCAL_CONFIG_DIR:-./scripts/standalone-e2e}/peer-two-home-direct.yaml:/app/config/peer.yaml:ro
+    networks:
+      - ator_net
+    ports:
+      - '127.0.0.1:18390:8081'         # admin
+      - '127.0.0.1:18391:8080'         # health
+    # Healthcheck on the admin API port so dependents can `depends_on:
+    # condition: service_healthy` instead of racing the BTP server bind.
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 8081 || exit 1']
+      interval: 3s
+      timeout: 2s
+      retries: 30
+      start_period: 15s
+
 networks:
   ator_net:
     driver: bridge

@@ -53,6 +53,9 @@ describe('Admin API Peer Endpoints (Story 20.4)', () => {
       isConnected: jest.fn().mockReturnValue(false),
       getConnectedPeers: jest.fn().mockReturnValue([]),
       getClientForPeer: jest.fn(),
+      // Per-peer transport selection: additive mock for the new accessor
+      // used by GET /admin/peers + the re-reg POST response payload.
+      getPeerTransport: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<BTPClientManager>;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

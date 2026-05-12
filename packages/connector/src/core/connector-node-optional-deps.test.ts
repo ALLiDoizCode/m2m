@@ -108,6 +108,8 @@ describe('ConnectorNode — minimal dependency startup', () => {
       setPacketHandler: jest.fn(),
       // Story 35.4: additive mock method for transport agent factory wiring
       setAgentFactory: jest.fn(),
+      // Per-peer transport selection: additive mock for new accessor.
+      getPeerTransport: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<BTPClientManager>;
 
     mockPacketHandler = {

@@ -46,6 +46,13 @@ export interface Peer {
   connected: boolean;
   /** Timestamp of last successful communication */
   lastSeen: Date;
+  /**
+   * Per-peer override of the connector-level transport — when omitted, the
+   * connector's global `transport.type` is used. Identical enum to
+   * `TransportConfig.type` so future transport kinds extend both surfaces
+   * in lockstep (Decision 1).
+   */
+  transport?: 'direct' | 'socks5';
 }
 
 /**
@@ -109,7 +116,7 @@ export class BTPClient extends EventEmitter {
 
   private readonly _nodeId: string;
   private _packetHandler: PacketHandler | null = null;
-  private readonly _agentFactory?: (peerUrl: string) => http.Agent | undefined;
+  private readonly _agentFactory?: (peer: Peer) => http.Agent | undefined;
 
   /**
    * Create BTPClient instance
@@ -118,16 +125,25 @@ export class BTPClient extends EventEmitter {
    * @param logger - Pino logger instance
    * @param maxRetries - Maximum retry attempts (default: 5)
    * @param agentFactory - Optional factory that returns an `http.Agent` (or
-   *   `undefined`) for outbound WebSocket connections. Invoked once per
-   *   `connect()` attempt (never cached), so SOCKS5 transports can supply a
-   *   fresh `SocksProxyAgent` each time (Epic 35 / Story 35.4).
+   *   `undefined`) for outbound WebSocket connections. Receives the full
+   *   `Peer` (not just the URL) so per-peer transport dispatch can branch
+   *   on `peer.transport`. Invoked once per `connect()` attempt (never
+   *   cached), so SOCKS5 transports can supply a fresh `SocksProxyAgent`
+   *   each time (Epic 35 / Story 35.4; per-peer dispatch via this story).
+   *
+   *   **The factory MAY throw synchronously.** The per-peer dispatch
+   *   closure in `ConnectorNode` throws when a peer requests `'socks5'`
+   *   but no SOCKS5 provider is wired (defense-in-depth — AC-11 in the
+   *   per-peer-transport tech spec). `connect()`'s outer `try/catch` at
+   *   the agent-factory call site catches this throw and rejects with a
+   *   `BTPConnectionError` rather than silently direct-dialing.
    */
   constructor(
     peer: Peer,
     nodeId: string,
     logger: Logger,
     maxRetries?: number,
-    agentFactory?: (peerUrl: string) => http.Agent | undefined
+    agentFactory?: (peer: Peer) => http.Agent | undefined
   ) {
     super();
     this._peer = peer;
@@ -144,6 +160,17 @@ export class BTPClient extends EventEmitter {
    */
   get isConnected(): boolean {
     return this._connectionState === 'connected';
+  }
+
+  /**
+   * Get the per-peer transport override for this client, or `undefined`
+   * when the peer inherits the connector-level default. Canonical
+   * accessor — admin/SDK surfaces must read transport via this getter
+   * (or `BTPClientManager.getPeerTransport`) rather than reaching into
+   * private fields.
+   */
+  getTransport(): 'direct' | 'socks5' | undefined {
+    return this._peer.transport;
   }
 
   /**
@@ -209,11 +236,13 @@ export class BTPClient extends EventEmitter {
     return new Promise<void>((resolve, reject) => {
       try {
         // Story 35.4: invoke the agent factory (if any) per connect attempt so
-        // SOCKS5 transports get a fresh SocksProxyAgent each time. When the
-        // factory is absent or returns undefined, preserve the pre-Epic-35
-        // byte-for-byte behavior by calling `new WebSocket(url)` with no
-        // options bag -- this is the single most important regression guard.
-        const agent = this._agentFactory?.(this._peer.url);
+        // SOCKS5 transports get a fresh SocksProxyAgent each time. Receives
+        // the full `Peer` so per-peer transport dispatch (this story) can
+        // read `peer.transport`. When the factory is absent or returns
+        // undefined, preserve the pre-Epic-35 byte-for-byte behavior by
+        // calling `new WebSocket(url)` with no options bag -- this is the
+        // single most important regression guard.
+        const agent = this._agentFactory?.(this._peer);
         this._ws =
           agent !== undefined
             ? new WebSocket(this._peer.url, { agent })

@@ -129,6 +129,14 @@ export interface PeerConfig {
    * wrapped in three-layer NIP-59 encryption for transport privacy.
    */
   nip59PublicKey?: string;
+
+  /**
+   * Per-peer override of the connector-level transport — when omitted, the
+   * connector's global `transport.type` is used. A peer with `transport:
+   * 'socks5'` on a `transport.type !== 'socks5'` connector is rejected at
+   * config-load time (ConfigurationError).
+   */
+  transport?: 'direct' | 'socks5';
 }
 
 /**
@@ -1563,6 +1571,12 @@ export interface PeerRegistrationRequest {
   }>;
   /** Optional settlement configuration */
   settlement?: AdminSettlementConfig;
+  /**
+   * Per-peer override of the connector-level transport — when omitted, the
+   * connector's global `transport.type` is used. `'socks5'` on a connector
+   * with `transport.type !== 'socks5'` is rejected at registration time.
+   */
+  transport?: 'direct' | 'socks5';
 }
 
 /** Response from ConnectorNode.registerPeer() and listPeers() */
@@ -1577,6 +1591,12 @@ export interface PeerInfo {
   routeCount: number;
   /** Settlement config if configured */
   settlement?: Record<string, unknown>;
+  /**
+   * Effective per-peer transport. `undefined` when the peer inherits the
+   * connector-level default (legacy peers loaded before the field existed
+   * in YAML, or peers registered without an explicit `transport` field).
+   */
+  transport?: 'direct' | 'socks5';
 }
 
 /** Response from ConnectorNode.getBalance() */

@@ -160,6 +160,18 @@ export interface AdminAPIConfig {
    * zero, the endpoint returns an empty `connectorFees` array.
    */
   connectorFeePercentage?: number;
+
+  /**
+   * Connector-level transport discriminator (`'direct' | 'socks5'`).
+   * Used to validate `POST /admin/peers { transport: ... }`: a peer
+   * requesting `'socks5'` on a connector with `transportType !== 'socks5'`
+   * is rejected with HTTP 400. Defaults to `'direct'` when omitted.
+   *
+   * Intentionally narrowed to the discriminator only — the admin API
+   * has no business reading the full `TransportConfig` (proxy URL,
+   * managed-lifecycle options, …).
+   */
+  transportType?: 'direct' | 'socks5';
 }
 
 /**
@@ -197,6 +209,23 @@ export interface AddPeerRequest {
    * ```
    */
   settlement?: AdminSettlementConfig;
+
+  /**
+   * Per-peer override of the connector-level transport.
+   *
+   * - `'direct'` — dial the peer URL with no SOCKS5 proxy, regardless of the
+   *   connector-level `transport.type`.
+   * - `'socks5'` — dial the peer URL via the connector's configured SOCKS5
+   *   proxy. Requires `config.transport.type === 'socks5'` on the connector,
+   *   otherwise the request is rejected with HTTP 400.
+   * - Omitted — inherit the connector-level `transport.type` (back-compat).
+   *
+   * Re-registration cannot change a peer's live transport: a re-registration
+   * POST with a different `transport` value returns 200 with the original
+   * (live) transport in the response payload. Use `DELETE` + `POST` to change.
+   * PUT `/admin/peers/:peerId` does NOT accept this field.
+   */
+  transport?: 'direct' | 'socks5';
 }
 
 /**
@@ -478,6 +507,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     managedAnonClient,
     resolveTokenMetadata,
     connectorFeePercentage,
+    transportType = 'direct',
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -577,6 +607,11 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
           connected: peerStatus.get(peerId) ?? false,
           ilpAddresses,
           routeCount: peerRoutes.length,
+          // Per-peer transport override (`undefined` for peers that inherit
+          // the connector-level default — e.g. legacy peers loaded before
+          // the field existed in YAML, or peers registered without an
+          // explicit `transport` field).
+          transport: btpClientManager.getPeerTransport(peerId),
         };
 
         // Include settlement info if available
@@ -649,6 +684,30 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         return;
       }
 
+      // Validate per-peer transport BEFORE the idempotent-re-reg short-circuit
+      // so a re-reg POST with `transport: 'socks5'` against a direct-global
+      // connector returns 400, not 200. Error strings must be byte-identical
+      // to the corresponding errors thrown by ConnectorNode.registerPeer() so
+      // AC-4 can assert it cross-surface.
+      if (
+        body.transport !== undefined &&
+        body.transport !== 'direct' &&
+        body.transport !== 'socks5'
+      ) {
+        res.status(400).json({
+          error: 'Bad request',
+          message: `Invalid transport: must be 'direct' or 'socks5' (got '${body.transport}')`,
+        });
+        return;
+      }
+      if (body.transport === 'socks5' && transportType !== 'socks5') {
+        res.status(400).json({
+          error: 'Bad request',
+          message: "transport: 'socks5' requires connector-level transport.type 'socks5'",
+        });
+        return;
+      }
+
       // Check if peer already exists (idempotent re-registration)
       const existingPeers = btpClientManager.getPeerIds();
       const isUpdate = existingPeers.includes(body.id);
@@ -690,17 +749,30 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
           authToken: body.authToken,
           connected: false,
           lastSeen: new Date(),
+          transport: body.transport,
         };
 
         await btpClientManager.addPeer(peer);
 
         log.info(
-          { event: 'admin_peer_added', peerId: body.id, url: body.url },
+          {
+            event: 'admin_peer_added',
+            peerId: body.id,
+            url: body.url,
+            // `null` when inheriting the connector default; explicit-null
+            // beats a `<default>` sentinel for log-shipper grep semantics.
+            transport: body.transport ?? null,
+          },
           `Added peer: ${body.id}`
         );
       } else {
         log.info(
-          { event: 'admin_peer_reregistered', peerId: body.id },
+          {
+            event: 'admin_peer_reregistered',
+            peerId: body.id,
+            // Live transport — re-registration cannot change it (Decision 7).
+            transport: btpClientManager.getPeerTransport(body.id) ?? null,
+          },
           `Re-registering peer: ${body.id}`
         );
       }
@@ -780,7 +852,10 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       }
 
       if (isUpdate) {
-        // Return 200 for re-registration
+        // Return 200 for re-registration. Per F10/AC-10: echo the LIVE
+        // transport (read from the existing BTPClient), NOT body.transport
+        // — re-registration cannot change a peer's live transport, so
+        // returning the requested value would mislead operators.
         const connected = btpClientManager.isConnected(body.id);
         res.status(200).json({
           success: true,
@@ -788,6 +863,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
             id: body.id,
             url: body.url,
             connected,
+            transport: btpClientManager.getPeerTransport(body.id),
           },
           routes: addedRoutes,
           updated: true,
@@ -804,6 +880,9 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
             id: body.id,
             url: body.url,
             connected,
+            // Fresh registration: echo the requested value (matches what
+            // was just persisted on the new BTPClient's Peer record).
+            transport: body.transport,
           },
           routes: addedRoutes,
           created: true,

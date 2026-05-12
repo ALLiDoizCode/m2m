@@ -173,14 +173,20 @@ export class ConfigLoader {
       );
     }
 
-    // Validate required fields and structure
+    // Load environment from environment variable (default: 'development')
+    // Hoisted above the validators because validateTransport's SOCKS5
+    // managed-options branch consults environment-specific defaults.
+    const environment = this.loadEnvironment();
+
+    // Validate required fields and structure. NOTE: validateTransport runs
+    // BEFORE validatePeers so the per-peer transport validator can compare
+    // each peer's optional `transport` override against the connector-level
+    // type (Approach A from the per-peer-transport tech spec, F4).
     this.validateRequiredFields(rawConfig);
-    this.validatePeers(rawConfig.peers as PeerConfig[]);
+    const transport = this.validateTransport(rawConfig.transport, environment);
+    this.validatePeers(rawConfig.peers as PeerConfig[], transport.type);
     this.validateRoutes(rawConfig.routes as RouteConfig[], rawConfig.peers as PeerConfig[]);
     this.validatePorts(rawConfig);
-
-    // Load environment from environment variable (default: 'development')
-    const environment = this.loadEnvironment();
 
     // Load blockchain configuration from environment variables
     const blockchain = this.loadBlockchainConfig(environment);
@@ -209,7 +215,7 @@ export class ConfigLoader {
       chainProviders: rawConfig.chainProviders as ChainProviderConfigEntry[] | undefined,
       deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
       nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
-      transport: this.validateTransport(rawConfig.transport, environment),
+      transport,
     };
 
     // Validate environment configuration
@@ -459,7 +465,7 @@ export class ConfigLoader {
    * @throws ConfigurationError if peer validation fails
    * @private
    */
-  private static validatePeers(peers: PeerConfig[]): void {
+  private static validatePeers(peers: PeerConfig[], transportType: 'direct' | 'socks5'): void {
     const peerIds = new Set<string>();
 
     for (const peer of peers) {
@@ -497,6 +503,21 @@ export class ConfigLoader {
         throw new ConfigurationError(
           `Invalid WebSocket URL for peer ${peer.id}: ${peer.url}. Must start with ws:// or wss:// and include port.`
         );
+      }
+
+      // Per-peer transport override (per-peer-transport tech spec, AC-12).
+      // Validates enum membership and rejects `'socks5'` on a non-socks5 connector.
+      if (peer.transport !== undefined) {
+        if (peer.transport !== 'direct' && peer.transport !== 'socks5') {
+          throw new ConfigurationError(
+            `peer '${peer.id}': invalid transport value '${peer.transport}' (must be 'direct' or 'socks5')`
+          );
+        }
+        if (peer.transport === 'socks5' && transportType !== 'socks5') {
+          throw new ConfigurationError(
+            `peer '${peer.id}': transport: 'socks5' requires connector-level transport.type 'socks5'`
+          );
+        }
       }
 
       // Check for duplicate peer IDs
