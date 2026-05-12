@@ -148,38 +148,9 @@ jobs:
           fail_ci_if_error: false
         continue-on-error: true
 
-  contracts-coverage:
-    name: Smart Contract Coverage Check
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: nightly
-
-      - name: Run Foundry tests
-        working-directory: packages/contracts
-        run: forge test --no-match-test "testGas_"
-        continue-on-error: false
-
-      - name: Generate coverage report
-        working-directory: packages/contracts
-        run: forge coverage --ir-minimum --report summary --no-match-test "testGas_" > coverage-report.txt 2>&1 || true
-
-      - name: Check coverage threshold
-        working-directory: packages/contracts
-        run: |
-          # Note: Coverage check with --ir-minimum can have test failures due to gas differences
-          # We focus on ensuring contracts compile and core tests pass
-          # Detailed coverage analysis done manually due to IR mode limitations
-          echo "Coverage report generated. Manual review required for exact percentage."
-          echo "All 113 tests pass in normal mode. Coverage target >95% validated in Story 8.5 QA."
+  # contracts-coverage moved to .github/workflows/contracts.yml — that workflow
+  # is path-filtered to `packages/contracts/**` and authenticates foundryup
+  # against api.github.com so it doesn't 403 on rate-limited runner IPs.
 
   build:
     name: Build All Packages
@@ -873,7 +844,6 @@ jobs:
         test,
         build,
         type-check,
-        contracts-coverage,
         security,
         rfc-links,
         solana-program,
@@ -899,7 +869,7 @@ jobs:
           echo "  Tests: ${{ needs.test.result }}"
           echo "  Build: ${{ needs.build.result }}"
           echo "  Type Check: ${{ needs.type-check.result }}"
-          echo "  EVM Contracts: ${{ needs.contracts-coverage.result }}"
+          echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Solana Integration: ${{ needs.solana-integration.result }}"
           echo "  Mina Integration: ${{ needs.mina-integration.result }}"
