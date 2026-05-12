@@ -207,14 +207,44 @@ export class ConnectorNode implements HealthStatusProvider {
       resolvedConfig.nodeId,
       logger.child({ component: 'BTPClientManager' })
     );
-    // Story 35.4: wire an agent factory that reads the active transport
-    // provider (populated in start()) so every outbound BTP WebSocket
-    // routes through it. Before start() or after a failed start(), the
-    // provider is null and the factory returns undefined -- matching
-    // pre-Epic-35 default WebSocket behavior.
-    this._btpClientManager.setAgentFactory((peerUrl) =>
-      this._transportProvider?.createAgent(peerUrl)
-    );
+    // Story 35.4 + per-peer transport dispatch: wire an agent factory that
+    // (a) honors `peer.transport` as a per-peer override of the connector
+    // level `transport.type`, and (b) defaults to the connector-level
+    // `_transportType` when the peer field is omitted. Before start() or
+    // after stop(), `_transportProvider` and `_transportType` are both
+    // null, in which case the effective transport coalesces to `'direct'`
+    // and the factory returns undefined -- matching pre-Epic-35 default
+    // WebSocket behavior.
+    //
+    // Defense-in-depth (AC-11): if a peer requests `'socks5'` but the
+    // connector has no SOCKS5 provider wired (because validation was
+    // bypassed by a test fixture or future code path), the closure throws
+    // rather than silently dialing direct. The provisioning validators in
+    // POST /admin/peers, ConnectorNode.registerPeer(), and
+    // ConfigLoader.validatePeers() are the primary line of defense; this
+    // is the runtime backstop. The throw is caught by BTPClient.connect()
+    // and surfaced as a BTPConnectionError.
+    this._btpClientManager.setAgentFactory((peer) => {
+      const effective = peer.transport ?? this._transportType ?? 'direct';
+
+      if (
+        effective === 'socks5' &&
+        (!this._transportProvider || this._transportType !== 'socks5')
+      ) {
+        this._logger.error(
+          {
+            event: 'btp_agent_factory_invariant_violation',
+            peerId: peer.id,
+            requestedTransport: 'socks5',
+            connectorTransport: this._transportType,
+          },
+          'Peer requested SOCKS5 transport but connector has no SOCKS5 provider — refusing to fall through to direct dial'
+        );
+        throw new Error('SOCKS5 transport requested for peer but no SOCKS5 provider configured');
+      }
+
+      return effective === 'socks5' ? this._transportProvider!.createAgent(peer.url) : undefined;
+    });
 
     // Initialize packet handler
     this._packetHandler = new PacketHandler(
@@ -1218,6 +1248,13 @@ export class ConnectorNode implements HealthStatusProvider {
           isReady: () => this._btpServerStarted,
           metricsRegistry: this._ilpMetrics,
           managedAnonClient: this._managedAnonClient ?? undefined,
+          // Per-peer transport selection: forward the post-validation
+          // connector-level discriminator so POST /admin/peers can reject
+          // `transport: 'socks5'` when the connector has no SOCKS5 proxy.
+          // `_transportType` is null between init() and start(); coalesce
+          // to the safe default. AdminServer also defaults to 'direct'
+          // (belt-and-suspenders for test fixtures that omit the field).
+          transportType: this._transportType ?? 'direct',
         });
 
         await this._adminServer.start();
@@ -1247,6 +1284,7 @@ export class ConnectorNode implements HealthStatusProvider {
           authToken: peerConfig.authToken,
           connected: false,
           lastSeen: new Date(),
+          transport: peerConfig.transport,
         };
         peerConnections.push(this._btpClientManager.addPeer(peer));
       }
@@ -2081,6 +2119,24 @@ export class ConnectorNode implements HealthStatusProvider {
       throw new Error(`URL must start with ${PLAIN_WS_PREFIX} or ${SECURE_WS_PREFIX}`);
     }
 
+    // Validate per-peer transport against the connector-level transport type.
+    // Uses `_transportType` (the post-validation field at connector-node.ts:130),
+    // NOT `_config.transport.type` — `_config.transport` may be undefined for
+    // partial-config test callers, and `_transportType` is the canonical source
+    // of truth after start().
+    if (
+      config.transport !== undefined &&
+      config.transport !== 'direct' &&
+      config.transport !== 'socks5'
+    ) {
+      throw new Error(
+        `Invalid transport: must be 'direct' or 'socks5' (got '${config.transport}')`
+      );
+    }
+    if (config.transport === 'socks5' && this._transportType !== 'socks5') {
+      throw new Error("transport: 'socks5' requires connector-level transport.type 'socks5'");
+    }
+
     // Validate routes if provided
     if (config.routes) {
       for (const route of config.routes) {
@@ -2113,6 +2169,7 @@ export class ConnectorNode implements HealthStatusProvider {
         authToken: config.authToken,
         connected: false,
         lastSeen: new Date(),
+        transport: config.transport,
       };
       await this._btpClientManager.addPeer(peer);
       // Story 37.2/37.3: prime metrics labels so runtime-added peers appear in both
@@ -2120,12 +2177,22 @@ export class ConnectorNode implements HealthStatusProvider {
       // their first packet.
       this._ilpMetrics.registerPeer(config.id);
       this._logger.info(
-        { event: 'peer_registered', peerId: config.id, url: config.url },
+        {
+          event: 'peer_registered',
+          peerId: config.id,
+          url: config.url,
+          // `null` when inheriting the connector default — see addPeer for rationale.
+          transport: config.transport ?? null,
+        },
         `Registered peer: ${config.id}`
       );
     } else {
       this._logger.info(
-        { event: 'peer_reregistered', peerId: config.id },
+        {
+          event: 'peer_reregistered',
+          peerId: config.id,
+          transport: this._btpClientManager.getPeerTransport(config.id) ?? null,
+        },
         `Re-registering peer: ${config.id}`
       );
     }
@@ -2156,6 +2223,12 @@ export class ConnectorNode implements HealthStatusProvider {
       connected,
       ilpAddresses: peerRoutes.map((r) => r.prefix),
       routeCount: peerRoutes.length,
+      // Fresh registration: echo the requested transport (the BTPClient may
+      // not be fully wired at this moment). Re-registration cannot change a
+      // peer's live transport (Decision 7), so the response surfaces the
+      // ORIGINAL live transport read from the existing client, NOT the
+      // requested value (mirrors the admin POST re-reg semantics in F10).
+      transport: isUpdate ? this._btpClientManager.getPeerTransport(config.id) : config.transport,
     };
 
     const peerConfig = this._settlementPeers.get(config.id);
@@ -2248,6 +2321,11 @@ export class ConnectorNode implements HealthStatusProvider {
         connected: peerStatus.get(peerId) ?? false,
         ilpAddresses: peerRoutes.map((r) => r.prefix),
         routeCount: peerRoutes.length,
+        // Per-peer transport override; `undefined` when the peer inherits
+        // the connector-level default. Mirrors GET /admin/peers so SDK
+        // consumers (Townhouse, test fixtures, future BMad agents) keep
+        // parity with the admin API.
+        transport: this._btpClientManager.getPeerTransport(peerId),
       };
 
       const peerConfig = this._settlementPeers.get(peerId);

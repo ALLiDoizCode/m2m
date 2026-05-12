@@ -52,6 +52,8 @@ describe('Admin API Settlement Extension', () => {
       isConnected: jest.fn().mockReturnValue(false),
       getConnectedPeers: jest.fn().mockReturnValue([]),
       getClientForPeer: jest.fn(),
+      // Per-peer transport selection: additive mock for new accessor.
+      getPeerTransport: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<BTPClientManager>;
 
     mockLogger = {

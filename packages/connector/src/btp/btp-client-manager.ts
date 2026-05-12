@@ -19,7 +19,7 @@ export class BTPClientManager {
   private readonly _logger: Logger;
   private readonly _nodeId: string;
   private _packetHandler: PacketHandler | null = null;
-  private _agentFactory: ((peerUrl: string) => http.Agent | undefined) | null = null;
+  private _agentFactory: ((peer: Peer) => http.Agent | undefined) | null = null;
 
   /**
    * Create BTPClientManager instance
@@ -32,16 +32,25 @@ export class BTPClientManager {
   }
 
   /**
-   * Provide an agent factory for outbound BTP connections (Story 35.4).
+   * Provide an agent factory for outbound BTP connections (Story 35.4 +
+   * per-peer transport dispatch).
    *
-   * Forwarded to every `BTPClient` created via `addPeer`. The factory is
-   * invoked once per `connect()` attempt (not cached at client construction),
-   * so SOCKS5 transports can return a fresh `SocksProxyAgent` per call.
+   * Forwarded to every `BTPClient` created via `addPeer`. The factory
+   * receives the full `Peer` (not just the URL) so per-peer transport
+   * dispatch can branch on `peer.transport`. It is invoked once per
+   * `connect()` attempt (not cached at client construction), so SOCKS5
+   * transports can return a fresh `SocksProxyAgent` per call.
+   *
+   * **The factory MAY throw synchronously.** Per-peer dispatch's
+   * defense-in-depth path throws when a peer requests `'socks5'` but
+   * the connector has no SOCKS5 provider wired (AC-11 in the per-peer
+   * transport tech spec). Throws are caught by `BTPClient.connect()`'s
+   * outer try/catch and surface as `BTPConnectionError`.
    *
    * Safe to call at any time before `addPeer`. Null disables the factory
    * (i.e., WebSockets are constructed with no options bag).
    */
-  setAgentFactory(factory: ((peerUrl: string) => http.Agent | undefined) | null): void {
+  setAgentFactory(factory: ((peer: Peer) => http.Agent | undefined) | null): void {
     this._agentFactory = factory;
   }
 
@@ -64,7 +73,16 @@ export class BTPClientManager {
    */
   async addPeer(peer: Peer): Promise<void> {
     this._logger.info(
-      { event: 'btp_client_add_peer', peerId: peer.id, url: redactPeerUrl(peer.url) },
+      {
+        event: 'btp_client_add_peer',
+        peerId: peer.id,
+        url: redactPeerUrl(peer.url),
+        // `null` when the peer inherits the connector-level default;
+        // explicit-null beats a `<default>` sentinel because log-shippers
+        // can still grep `transport: "direct"` / `transport: "socks5"`
+        // without collisions on peers literally named `<default>`.
+        transport: peer.transport ?? null,
+      },
       'Adding peer'
     );
 
@@ -273,6 +291,17 @@ export class BTPClientManager {
    */
   getClientForPeer(peerId: string): BTPClient | undefined {
     return this._clients.get(peerId);
+  }
+
+  /**
+   * Get the per-peer transport override for a peer, or `undefined` when
+   * the peer inherits the connector-level default (including when the
+   * peer is unknown). Canonical accessor for admin / SDK surfaces that
+   * need to surface the live (post-construction) transport — re-reads
+   * from the `BTPClient`'s `_peer` record on every call.
+   */
+  getPeerTransport(peerId: string): 'direct' | 'socks5' | undefined {
+    return this._clients.get(peerId)?.getTransport();
   }
 
   /**

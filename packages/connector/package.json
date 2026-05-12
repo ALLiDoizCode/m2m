@@ -75,6 +75,7 @@
     "test:admin-surface": "STANDALONE_DOCKER=true jest --testPathPattern='admin-api-surface-e2e' --forceExit",
     "test:cross-surface": "STANDALONE_DOCKER=true jest --testPathPattern='cross-surface-invariants' --forceExit",
     "test:packet-flow": "STANDALONE_DOCKER=true jest --testPathPattern='packet-flow-invariants' --forceExit",
+    "test:per-peer-transport-e2e": "STANDALONE_DOCKER=true jest --testPathPattern=per-peer-transport-cross-surface-e2e --forceExit --testTimeout=300000",
     "test:town-e2e": "jest --testPathPattern='town-comprehensive-e2e'",
     "lint": "eslint src --ext .ts && npm run lint:inventory",
     "lint:inventory": "ts-node scripts/check-admin-api-inventory.ts",

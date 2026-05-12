@@ -210,6 +210,9 @@ describe('ConnectorNode', () => {
       setPacketHandler: jest.fn(),
       // Story 35.4: additive mock method for transport agent factory wiring
       setAgentFactory: jest.fn(),
+      // Per-peer transport selection: additive mock for the new accessor
+      // used by registerPeer's re-reg log + listPeers's PeerInfo surface.
+      getPeerTransport: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<BTPClientManager>;
 
     mockBTPServer = {
@@ -2296,15 +2299,39 @@ describe('ConnectorNode', () => {
 
       // setAgentFactory is called once during construction (additive mock).
       expect(mockBTPClientManager.setAgentFactory).toHaveBeenCalledTimes(1);
+      // Per-peer dispatch: factory now receives the full Peer (not just URL).
+      type FactoryArg = {
+        id: string;
+        url: string;
+        authToken: string;
+        connected: boolean;
+        lastSeen: Date;
+        transport?: 'direct' | 'socks5';
+      };
       const factory = mockBTPClientManager.setAgentFactory.mock.calls[0]![0] as (
-        url: string
+        peer: FactoryArg
       ) => unknown;
-      expect(factory('wss://peer.example/btp')).toEqual({ __socks: true });
+      const inheritingPeer: FactoryArg = {
+        id: 'p1',
+        url: 'wss://peer.example/btp',
+        authToken: 't',
+        connected: false,
+        lastSeen: new Date(),
+      };
+      expect(factory(inheritingPeer)).toEqual({ __socks: true });
       expect(spies.socksCreateAgentSpy).toHaveBeenCalledWith('wss://peer.example/btp');
 
       await node.stop();
-      // After stop, the factory closure sees a null provider and returns undefined.
-      expect(factory('wss://peer.example/btp')).toBeUndefined();
+      // After stop, both `_transportProvider` and `_transportType` are reset
+      // to null (see connector-node.ts:1488-1489), so an inheriting peer's
+      // effective transport coalesces to `'direct'` and the factory returns
+      // undefined. An explicit `transport: 'socks5'` peer in this state would
+      // be an invariant violation; the defense-in-depth guard throws rather
+      // than silently fall through to a direct dial (AC-11).
+      expect(factory(inheritingPeer)).toBeUndefined();
+      expect(() => factory({ ...inheritingPeer, transport: 'socks5' })).toThrow(
+        /SOCKS5 transport requested/
+      );
     });
 
     it('T-35.4-11 (AC #9): DirectTransportProvider is constructed with a synthesized ws://localhost:<btpServerPort> externalUrl', async () => {

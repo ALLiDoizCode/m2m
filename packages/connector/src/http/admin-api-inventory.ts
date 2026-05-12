@@ -163,16 +163,27 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
     successStatus: 201,
     failureModes: [
       { status: 400, description: 'Invalid request body or missing required fields' },
+      {
+        status: 400,
+        description:
+          "Invalid transport value, or transport: 'socks5' requested on a connector with transport.type != 'socks5'",
+      },
       { status: 401, description: 'Missing or invalid X-Api-Key' },
       { status: 403, description: 'IP not in allowlist' },
-      { status: 409, description: 'Peer ID already exists' },
     ],
     requestContract: 'AddPeerRequest (http/admin-api.ts)',
-    responseContract: '{ id: string; connected: boolean }',
+    responseContract:
+      "{ id: string; url: string; connected: boolean; transport?: 'direct' | 'socks5' }",
     owningModule: 'http/admin-api.ts',
     relatedStories: ['6.4', '37.1'],
     crossSurfaceGroupId: 'peer-existence',
-    operationalNotes: 'Automatically establishes BTP connection. Settlement config optional.',
+    operationalNotes:
+      'Automatically establishes BTP connection. Settlement config optional. ' +
+      'Optional per-peer `transport` field (`direct` | `socks5`) overrides the connector-level ' +
+      'transport for outbound BTP dial; omitted → inherits connector default. Returns 200 on ' +
+      'idempotent re-registration (NOT 409); re-registration does NOT change a peer’s live ' +
+      'transport — the response payload reflects the original live value, not the requested ' +
+      'value. To change peer transport, DELETE + POST.',
   },
 
   /**
@@ -222,7 +233,10 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
     owningModule: 'http/admin-api.ts',
     relatedStories: ['6.4'],
     crossSurfaceGroupId: 'peer-existence',
-    operationalNotes: 'Partial update - only provided fields are modified.',
+    operationalNotes:
+      'Partial update - only provided fields are modified. PUT does NOT accept peer-identity ' +
+      'fields (id / url / authToken) or the per-peer `transport` field — any such fields in the ' +
+      'request body are silently ignored. To change peer transport, use DELETE + POST.',
   },
 
   /**

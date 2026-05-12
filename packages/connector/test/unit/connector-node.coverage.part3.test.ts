@@ -350,6 +350,7 @@ describe('ConnectorNode coverage part 3', () => {
       getConnectionHealth: jest.fn().mockReturnValue(100),
       setPacketHandler: jest.fn(),
       setAgentFactory: jest.fn(),
+      getPeerTransport: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<BTPClientManager>;
 
     mockBTPServer = {
