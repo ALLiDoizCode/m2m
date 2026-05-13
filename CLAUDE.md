@@ -6,7 +6,9 @@ Multi-chain ILP connector with EVM, Solana, and Mina payment channel settlement.
 
 ## Terminology
 
-- Use **"BLS"** (not "agent runtime") for the local delivery handler component.
+- Use **"app"** (or **"handler"** when referring to the HTTP endpoint specifically) for the HTTP service the connector POSTs local delivery to — the thing the operator runs at `handler_url` in `toon.json`. Examples: "the app returns 200/4xx", "the handler endpoint", "any HTTP service is a TOON node app".
+- The legacy term **"BLS"** (Business Logic Server) is **deprecated** as of 2026-05-01 (Epic 39, Story 39.15). It originated when the local delivery handler had to import the TOON SDK and do ILP-aware work; that role no longer exists post-Epic-39. Do not introduce "BLS" in new code, comments, docs, or commit messages. Existing occurrences in code/config (e.g., `packages/connector/src/core/local-delivery-client.ts` comments) are migration debt to be cleared by Story 39.15.
+- **Never** use "agent runtime" — that term is deprecated from before "BLS" and is not coming back.
 
 ## Quick Start
 
