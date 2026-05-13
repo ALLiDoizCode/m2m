@@ -104,6 +104,7 @@ export class ConnectorNode implements HealthStatusProvider {
   private _chainSDKs: Map<number, PaymentChannelSDK> = new Map();
   private _channelManager: ChannelManager | null = null;
   private _accountManager: AccountManager | null = null;
+  private _claimReceiver: ClaimReceiver | null = null;
   private _settlementMonitor: SettlementMonitor | null = null;
   private _settlementExecutor: SettlementExecutor | null = null;
   private _tigerBeetleClient: TigerBeetleClient | null = null;
@@ -1139,6 +1140,11 @@ export class ConnectorNode implements HealthStatusProvider {
               // path has no claim to submit on-chain.
               this._settlementExecutor?.setClaimReceiver(claimReceiver);
 
+              // Store on the instance so AdminServer can expose it on the
+              // /admin/earnings.json endpoint. Without this, the earnings
+              // endpoint always returns 503 even when claimReceiver is wired.
+              this._claimReceiver = claimReceiver;
+
               this._logger.info(
                 { event: 'claim_receiver_enabled' },
                 'ClaimReceiver wired to BTP server and SettlementMonitor'
@@ -1242,6 +1248,7 @@ export class ConnectorNode implements HealthStatusProvider {
           channelManager: this._channelManager ?? undefined,
           paymentChannelSDK: this._paymentChannelSDK ?? undefined,
           accountManager: this._accountManager ?? undefined,
+          claimReceiver: this._claimReceiver ?? undefined,
           settlementMonitor: this._settlementMonitor ?? undefined,
           defaultSettlementTokenId: this._defaultSettlementTokenId,
           packetSender: (params) => this.sendPacket(params),
@@ -1487,19 +1494,42 @@ export class ConnectorNode implements HealthStatusProvider {
         this._inMemoryLedgerClient = null;
       }
 
+      // Code-review C2: stop AdminServer BEFORE nulling `_claimReceiver`. The
+      // AdminServer captures `claimReceiver` by value at construction (see
+      // ~line 1251). Nulling the node-side field while the AdminServer is
+      // still serving requests creates a race window where the server keeps
+      // serving with a captured reference whose underlying resources are
+      // being torn down. Stopping the AdminServer first rejects new requests
+      // and waits for in-flight handlers to drain.
+      if (this._adminServer) {
+        await this._adminServer.stop();
+        this._logger.info({ event: 'admin_server_stopped' }, 'Admin API server stopped');
+        this._adminServer = null;
+      }
+
+      // Code-review C1: dispose ClaimReceiver before nulling. Optional
+      // chaining keeps this safe today (ClaimReceiver has no dispose() yet)
+      // and establishes the pattern for when dispose() is implemented to
+      // release SQLite handles + close file descriptors. Without this, the
+      // node-side null masks open resource handles in tests that recreate
+      // connector instances repeatedly.
+      try {
+        await (
+          this._claimReceiver as unknown as { dispose?: () => Promise<void> } | null
+        )?.dispose?.();
+      } catch (e) {
+        this._logger.warn(
+          { event: 'claim_receiver_dispose_failed', err: e },
+          'ClaimReceiver dispose() threw — ignoring'
+        );
+      }
       this._accountManager = null;
+      this._claimReceiver = null;
 
       // Disconnect all BTP clients
       const peerIds = this._btpClientManager.getPeerIds();
       for (const peerId of peerIds) {
         await this._btpClientManager.removePeer(peerId);
-      }
-
-      // Stop admin server if running
-      if (this._adminServer) {
-        await this._adminServer.stop();
-        this._logger.info({ event: 'admin_server_stopped' }, 'Admin API server stopped');
-        this._adminServer = null;
       }
 
       // Stop health server
