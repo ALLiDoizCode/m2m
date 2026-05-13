@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.3](https://github.com/toon-protocol/connector/compare/v3.6.2...v3.6.3) (2026-05-13)
+
+### Bug Fixes
+
+- **connector:** wire ClaimReceiver to AdminServer + safe shutdown ordering ([bf9cb29](https://github.com/toon-protocol/connector/commit/bf9cb298a73c2bf335859f85f7f883ee8fa04353))
+
 ## [3.6.2](https://github.com/toon-protocol/connector/compare/v3.6.1...v3.6.2) (2026-05-12)
 
 ### Bug Fixes
