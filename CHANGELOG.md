@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0](https://github.com/toon-protocol/connector/compare/v3.6.3...v3.7.0) (2026-05-21)
+
+### Features
+
+- **connector:** add packetsLocallyDelivered counter for self-delivery route (closes [#73](https://github.com/toon-protocol/connector/issues/73)) ([59674d5](https://github.com/toon-protocol/connector/commit/59674d56a86788b9529c804ac17e05560fc6f5ec))
+
+### Bug Fixes
+
+- **ci:** auth anyone-client postinstall against GitHub API rate limit ([cca6c3c](https://github.com/toon-protocol/connector/commit/cca6c3c7f576c983abe0c6de1ffc2783c77cf9dd))
+
 ## [3.6.3](https://github.com/toon-protocol/connector/compare/v3.6.2...v3.6.3) (2026-05-13)
 
 ### Bug Fixes
