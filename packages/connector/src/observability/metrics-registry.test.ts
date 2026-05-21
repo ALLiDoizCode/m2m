@@ -159,6 +159,7 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
         packetsForwarded: 2,
         packetsRejected: 1,
         bytesSent: 350,
+        packetsLocallyDelivered: 0,
       });
     });
   });
