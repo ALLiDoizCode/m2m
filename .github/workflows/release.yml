@@ -46,6 +46,12 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
+        # @anyone-protocol/anyone-client postinstall calls api.github.com to
+        # fetch a release binary. Unauthenticated runners share the 60 req/hr
+        # limit and hit 403 "rate limit exceeded". GITHUB_TOKEN raises it to
+        # 5000 req/hr — same fix applied to foundryup in contracts.yml.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Build packages
