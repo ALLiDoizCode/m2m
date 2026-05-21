@@ -58,6 +58,8 @@ jobs:
 
       - name: Install dependencies with retry
         uses: nick-fields/retry@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           timeout_minutes: 10
           max_attempts: 3
@@ -190,6 +192,8 @@ jobs:
 
       - name: Install dependencies with retry
         uses: nick-fields/retry@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           timeout_minutes: 10
           max_attempts: 3
@@ -266,6 +270,8 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Build shared package
@@ -315,6 +321,8 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Build shared package
