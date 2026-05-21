@@ -313,6 +313,7 @@ export interface AdminMetricsJsonPeer {
   packetsForwarded: number;
   packetsRejected: number;
   bytesSent: number;
+  packetsLocallyDelivered: number;
   lastPacketAt: string | null;
 }
 
@@ -326,6 +327,7 @@ export interface AdminMetricsJsonResponse {
     packetsForwarded: number;
     packetsRejected: number;
     bytesSent: number;
+    packetsLocallyDelivered: number;
   };
   peers: AdminMetricsJsonPeer[];
   timestamp: string;
@@ -1800,6 +1802,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
           packetsForwarded: snap?.packetsForwarded ?? 0,
           packetsRejected: snap?.packetsRejected ?? 0,
           bytesSent: snap?.bytesSent ?? 0,
+          packetsLocallyDelivered: snap?.packetsLocallyDelivered ?? 0,
           lastPacketAt,
         } satisfies AdminMetricsJsonPeer;
       });
@@ -1810,8 +1813,9 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
           packetsForwarded: acc.packetsForwarded + p.packetsForwarded,
           packetsRejected: acc.packetsRejected + p.packetsRejected,
           bytesSent: acc.bytesSent + p.bytesSent,
+          packetsLocallyDelivered: acc.packetsLocallyDelivered + p.packetsLocallyDelivered,
         }),
-        { packetsForwarded: 0, packetsRejected: 0, bytesSent: 0 }
+        { packetsForwarded: 0, packetsRejected: 0, bytesSent: 0, packetsLocallyDelivered: 0 }
       );
 
       // Dashboard polls at 1 Hz; prevent proxies / browsers from caching stale data.

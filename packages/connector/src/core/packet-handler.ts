@@ -978,20 +978,24 @@ export class PacketHandler {
           data: packet.data.toString('base64'),
           sourcePeer: sourcePeerId,
         };
+        let localResponse: ILPFulfillPacket | ILPRejectPacket;
         try {
           const result = await this.localDeliveryHandler(request, sourcePeerId);
-          const response = this.convertLocalDeliveryResponse(result);
-          if (response.type === PacketType.FULFILL && preimage) {
-            (response as ILPFulfillPacket).fulfillment = preimage;
+          localResponse = this.convertLocalDeliveryResponse(result);
+          if (localResponse.type === PacketType.FULFILL && preimage) {
+            (localResponse as ILPFulfillPacket).fulfillment = preimage;
           }
-          return response;
         } catch (error) {
-          return this.generateReject(
+          localResponse = this.generateReject(
             ILPErrorCode.T00_INTERNAL_ERROR,
             `Local delivery handler error: ${error instanceof Error ? error.message : String(error)}`,
             this.nodeId
           );
         }
+        if (localResponse.type === PacketType.FULFILL) {
+          this.ilpMetrics?.recordLocalDeliver(sourcePeerId);
+        }
+        return localResponse;
       }
 
       // If local delivery client is enabled, forward to BLS via HTTP
@@ -1021,6 +1025,9 @@ export class PacketHandler {
             : 'Packet rejected by BLS'
         );
 
+        if (response.type === PacketType.FULFILL) {
+          this.ilpMetrics?.recordLocalDeliver(sourcePeerId);
+        }
         return response;
       }
 
@@ -1042,6 +1049,7 @@ export class PacketHandler {
         'Returning local fulfillment (auto-fulfill stub)'
       );
 
+      this.ilpMetrics?.recordLocalDeliver(sourcePeerId);
       return fulfillPacket;
     }
 

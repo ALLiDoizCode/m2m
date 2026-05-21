@@ -49,17 +49,19 @@ export interface IlpMetricsRegistryOptions {
  *
  * Counter / gauge semantics:
  *
- * | Metric                                  | Label      | When                                                          |
- * | --------------------------------------- | ---------- | ------------------------------------------------------------- |
- * | `toon_packets_forwarded_total`          | `{peer}`   | FULFILL received from next-hop peer (peer = nextHop).         |
- * | `toon_packets_rejected_total`           | `{peer}`   | REJECT received from next-hop peer, OR connector generated    |
- * |                                         |            | REJECT after attempting forward (peer = nextHop).             |
- * | `toon_bytes_sent_total`                 | `{peer}`   | Every outbound forward attempt (peer = nextHop).              |
- * | `toon_bytes_received_total`             | `{peer}`   | Every PREPARE received (peer = fromPeerId, skipped if         |
- * |                                         |            | 'unknown').                                                   |
- * | `toon_last_packet_timestamp_seconds`    | `{peer}`   | Either direction — updated on inbound receive AND on outbound |
- * |                                         |            | forward. Unix seconds.                                        |
- * | `toon_packets_rejected_pre_routing_total` | `{reason}` | REJECT generated before next-hop was resolved. Aggregate-only.|
+ * | Metric                                      | Label      | When                                                          |
+ * | ------------------------------------------- | ---------- | ------------------------------------------------------------- |
+ * | `toon_packets_forwarded_total`              | `{peer}`   | FULFILL received from next-hop peer (peer = nextHop).         |
+ * | `toon_packets_rejected_total`               | `{peer}`   | REJECT received from next-hop peer, OR connector generated    |
+ * |                                             |            | REJECT after attempting forward (peer = nextHop).             |
+ * | `toon_bytes_sent_total`                     | `{peer}`   | Every outbound forward attempt (peer = nextHop).              |
+ * | `toon_bytes_received_total`                 | `{peer}`   | Every PREPARE received (peer = fromPeerId, skipped if         |
+ * |                                             |            | 'unknown').                                                   |
+ * | `toon_last_packet_timestamp_seconds`        | `{peer}`   | Either direction — updated on inbound receive AND on outbound |
+ * |                                             |            | forward. Unix seconds.                                        |
+ * | `toon_packets_rejected_pre_routing_total`   | `{reason}` | REJECT generated before next-hop was resolved. Aggregate-only.|
+ * | `toon_packets_locally_delivered_total`      | `{peer}`   | FULFILL produced by the local-delivery branch (self-route).   |
+ * |                                             |            | peer = inbound source peer (sourcePeerId).                    |
  */
 export class IlpMetricsRegistry {
   public readonly register: Registry;
@@ -70,6 +72,7 @@ export class IlpMetricsRegistry {
   public readonly bytesReceivedTotal: Counter<'peer'>;
   public readonly lastPacketTimestampSeconds: Gauge<'peer'>;
   public readonly packetsRejectedPreRoutingTotal: Counter<'reason'>;
+  public readonly packetsLocallyDeliveredTotal: Counter<'peer'>;
 
   /**
    * Tracks peers that have been explicitly registered via `registerPeer()`. Used so that
@@ -124,6 +127,13 @@ export class IlpMetricsRegistry {
       registers: [this.register],
     });
 
+    this.packetsLocallyDeliveredTotal = new Counter({
+      name: 'toon_packets_locally_delivered_total',
+      help: 'Count of ILP PREPARE packets fulfilled via the local-delivery branch (self-route, nextHop === nodeId). peer = inbound source peer.',
+      labelNames: ['peer'] as const,
+      registers: [this.register],
+    });
+
     if (options.collectDefaults !== false) {
       collectDefaultMetrics({ register: this.register });
     }
@@ -147,6 +157,7 @@ export class IlpMetricsRegistry {
     this.bytesSentTotal.inc({ peer: peerId }, 0);
     this.bytesReceivedTotal.inc({ peer: peerId }, 0);
     this.lastPacketTimestampSeconds.set({ peer: peerId }, 0);
+    this.packetsLocallyDeliveredTotal.inc({ peer: peerId }, 0);
   }
 
   /**
@@ -203,6 +214,15 @@ export class IlpMetricsRegistry {
   }
 
   /**
+   * Record a packet fulfilled via the local-delivery branch (self-route). No-op when
+   * peerId is 'unknown'.
+   */
+  recordLocalDeliver(peerId: string): void {
+    if (!peerId || peerId === 'unknown') return;
+    this.packetsLocallyDeliveredTotal.inc({ peer: peerId }, 1);
+  }
+
+  /**
    * Express middleware for GET /metrics — OpenMetrics text format.
    *
    * This is the value that `HealthServer.metricsMiddleware` has been silently missing
@@ -238,6 +258,7 @@ export class IlpMetricsRegistry {
       bytesSent: number;
       bytesReceived: number;
       lastPacketAtUnixSeconds: number;
+      packetsLocallyDelivered: number;
     }>
   > {
     const peerIds = new Set<string>(this.knownPeers);
@@ -248,6 +269,7 @@ export class IlpMetricsRegistry {
       this.packetsRejectedTotal,
       this.bytesSentTotal,
       this.bytesReceivedTotal,
+      this.packetsLocallyDeliveredTotal,
     ] as Array<Metric>) {
       const snapshot = await metric.get();
       for (const value of snapshot.values) {
@@ -261,6 +283,7 @@ export class IlpMetricsRegistry {
     const sent = await this.bytesSentTotal.get();
     const received = await this.bytesReceivedTotal.get();
     const last = await this.lastPacketTimestampSeconds.get();
+    const locallyDelivered = await this.packetsLocallyDeliveredTotal.get();
 
     const readPeer = (snapshot: Awaited<ReturnType<Counter['get']>>, peerId: string): number => {
       const entry = snapshot.values.find((v) => v.labels?.peer === peerId);
@@ -276,6 +299,7 @@ export class IlpMetricsRegistry {
         bytesSent: readPeer(sent, peerId),
         bytesReceived: readPeer(received, peerId),
         lastPacketAtUnixSeconds: readPeer(last, peerId),
+        packetsLocallyDelivered: readPeer(locallyDelivered, peerId),
       }));
   }
 
@@ -286,6 +310,7 @@ export class IlpMetricsRegistry {
     packetsForwarded: number;
     packetsRejected: number;
     bytesSent: number;
+    packetsLocallyDelivered: number;
   }> {
     const peers = await this.snapshotPeers();
     return peers.reduce(
@@ -293,8 +318,9 @@ export class IlpMetricsRegistry {
         packetsForwarded: acc.packetsForwarded + p.packetsForwarded,
         packetsRejected: acc.packetsRejected + p.packetsRejected,
         bytesSent: acc.bytesSent + p.bytesSent,
+        packetsLocallyDelivered: acc.packetsLocallyDelivered + p.packetsLocallyDelivered,
       }),
-      { packetsForwarded: 0, packetsRejected: 0, bytesSent: 0 }
+      { packetsForwarded: 0, packetsRejected: 0, bytesSent: 0, packetsLocallyDelivered: 0 }
     );
   }
 }
