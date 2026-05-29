@@ -68,6 +68,26 @@ import type { ProviderConfig } from '../settlement/provider/payment-channel-prov
 export type ChainProviderConfigEntry = ProviderConfig & { chainId: string };
 
 /**
+ * ILP peering relationship for a peer (Interledger RFC-0032 semantics).
+ *
+ * Determines the direction settlement claims flow on value-bearing forwards:
+ * - `'parent'` — an upstream provider this node settles **up** to. The parent
+ *   issues per-packet claims to us; we issue claims to it when forwarding up.
+ * - `'peer'` — a lateral peer with a bilateral settlement relationship. Claims
+ *   flow on every value-bearing forward in either direction. **Default.**
+ * - `'child'` — a downstream node that settles **up** to this node. A parent
+ *   never issues per-packet claims **down** to a child: the child accrues a
+ *   balance owed up and settles it via its own up-claims. Value-bearing
+ *   forwards to a `'child'` next hop therefore skip the mandatory per-packet
+ *   claim (and thus the on-demand pay-the-child channel that would otherwise
+ *   reject the packet with T00 when no such channel exists).
+ *
+ * When omitted, a peer defaults to `'peer'`, which preserves the pre-existing
+ * behavior of requiring a claim on every value-bearing peer forward.
+ */
+export type PeerRelation = 'parent' | 'peer' | 'child';
+
+/**
  * Peer Configuration Interface
  *
  * Defines connection parameters for a peer connector in the network.
@@ -137,6 +157,16 @@ export interface PeerConfig {
    * config-load time (ConfigurationError).
    */
   transport?: 'direct' | 'socks5';
+
+  /**
+   * ILP peering relationship for this peer. Governs whether value-bearing
+   * forwards to this peer require a mandatory per-packet settlement claim.
+   * A `'child'` next hop is forwarded **without** issuing a claim (the child
+   * settles up to us); `'parent'` and `'peer'` require a claim as before.
+   * Defaults to `'peer'` when omitted (backward compatible). See
+   * {@link PeerRelation}.
+   */
+  relation?: PeerRelation;
 }
 
 /**
@@ -1577,6 +1607,14 @@ export interface PeerRegistrationRequest {
    * with `transport.type !== 'socks5'` is rejected at registration time.
    */
   transport?: 'direct' | 'socks5';
+
+  /**
+   * ILP peering relationship for this peer. A `'child'` next hop is forwarded
+   * value without a mandatory per-packet claim (the child settles up to us);
+   * `'parent'`/`'peer'` require a claim. Defaults to `'peer'` when omitted.
+   * See {@link PeerRelation}.
+   */
+  relation?: PeerRelation;
 }
 
 /** Response from ConnectorNode.registerPeer() and listPeers() */
@@ -1597,6 +1635,13 @@ export interface PeerInfo {
    * in YAML, or peers registered without an explicit `transport` field).
    */
   transport?: 'direct' | 'socks5';
+
+  /**
+   * Effective ILP peering relationship for this peer. `undefined` when the
+   * peer was registered without an explicit `relation` (treated as `'peer'`).
+   * See {@link PeerRelation}.
+   */
+  relation?: PeerRelation;
 }
 
 /** Response from ConnectorNode.getBalance() */

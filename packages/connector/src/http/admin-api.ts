@@ -51,6 +51,7 @@ import { IlpSendHandler } from './ilp-send-handler';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 import type { ManagedAnonClient } from '../transport/managed-anon-client';
+import type { PeerRelation } from '../config/types';
 
 /**
  * Admin API Configuration
@@ -172,6 +173,16 @@ export interface AdminAPIConfig {
    * managed-lifecycle options, …).
    */
   transportType?: 'direct' | 'socks5';
+
+  /**
+   * Optional hook for propagating a peer's ILP relationship to the packet
+   * forwarding path. When provided, `POST /admin/peers` calls this with the
+   * peer id and its (defaulted) {@link PeerRelation} so the PacketHandler can
+   * decide whether value-bearing forwards to the peer require a per-packet
+   * settlement claim. When omitted, relation tracking is silently skipped and
+   * every value-bearing peer forward requires a claim (legacy behavior).
+   */
+  setPeerRelation?: (peerId: string, relation: PeerRelation) => void;
 }
 
 /**
@@ -226,6 +237,15 @@ export interface AddPeerRequest {
    * PUT `/admin/peers/:peerId` does NOT accept this field.
    */
   transport?: 'direct' | 'socks5';
+
+  /**
+   * ILP peering relationship for this peer (`'parent' | 'peer' | 'child'`).
+   * A `'child'` next hop is forwarded value WITHOUT a mandatory per-packet
+   * settlement claim (the child settles up to this connector); `'parent'` and
+   * `'peer'` require a claim. Defaults to `'peer'` when omitted. See
+   * {@link PeerRelation}.
+   */
+  relation?: PeerRelation;
 }
 
 /**
@@ -510,6 +530,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     resolveTokenMetadata,
     connectorFeePercentage,
     transportType = 'direct',
+    setPeerRelation,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -710,6 +731,21 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         return;
       }
 
+      // Validate peer relation (issue #76). Error string is byte-identical to
+      // the one thrown by ConnectorNode.registerPeer() for cross-surface parity.
+      if (
+        body.relation !== undefined &&
+        body.relation !== 'parent' &&
+        body.relation !== 'peer' &&
+        body.relation !== 'child'
+      ) {
+        res.status(400).json({
+          error: 'Bad request',
+          message: `Invalid relation: must be 'parent', 'peer', or 'child' (got '${body.relation}')`,
+        });
+        return;
+      }
+
       // Check if peer already exists (idempotent re-registration)
       const existingPeers = btpClientManager.getPeerIds();
       const isUpdate = existingPeers.includes(body.id);
@@ -792,6 +828,14 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         }
       }
 
+      // Propagate the peer's ILP relationship to the forwarding path (issue #76).
+      // Defaults to 'peer' so an omitted relation preserves the legacy
+      // claim-on-every-forward behavior. Applied on both fresh registration and
+      // re-registration so an operator can flip a peer's relation via re-POST.
+      if (setPeerRelation) {
+        setPeerRelation(body.id, body.relation ?? 'peer');
+      }
+
       // Create/merge PeerConfig if settlement provided and settlementPeers available
       if (body.settlement && settlementPeers) {
         const s = body.settlement;
@@ -866,6 +910,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
             url: body.url,
             connected,
             transport: btpClientManager.getPeerTransport(body.id),
+            relation: body.relation,
           },
           routes: addedRoutes,
           updated: true,
@@ -885,6 +930,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
             // Fresh registration: echo the requested value (matches what
             // was just persisted on the new BTPClient's Peer record).
             transport: body.transport,
+            relation: body.relation,
           },
           routes: addedRoutes,
           created: true,

@@ -80,6 +80,7 @@ export class AdminServer {
     ) => Promise<{ assetCode: string; assetScale: number }>;
     connectorFeePercentage?: number;
     transportType?: 'direct' | 'socks5';
+    setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
   };
   private readonly _transportType: 'direct' | 'socks5';
 
@@ -123,6 +124,13 @@ export class AdminServer {
      * (H7 — explicit default for callers that omit the field).
      */
     transportType?: 'direct' | 'socks5';
+    /**
+     * Relationship-aware settlement gate hook (issue #76). Forwarded to the
+     * admin router so `POST /admin/peers` can propagate a peer's
+     * {@link PeerRelation} to the PacketHandler. Omitted by test fixtures that
+     * do not exercise the forwarding path.
+     */
+    setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -159,6 +167,7 @@ export class AdminServer {
       managedAnonClient,
       resolveTokenMetadata,
       connectorFeePercentage,
+      setPeerRelation,
     } = this._options;
 
     this._app = express();
@@ -187,6 +196,7 @@ export class AdminServer {
       resolveTokenMetadata,
       connectorFeePercentage,
       transportType: this._transportType,
+      setPeerRelation,
     });
 
     this._app.use('/admin', adminRouter);

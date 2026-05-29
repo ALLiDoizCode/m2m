@@ -363,6 +363,7 @@ describe('ConnectorNode branch coverage', () => {
       setIlpMetrics: jest.fn(),
       setPerPacketClaimService: jest.fn(),
       setSettlement: jest.fn(),
+      setPeerRelation: jest.fn(),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {

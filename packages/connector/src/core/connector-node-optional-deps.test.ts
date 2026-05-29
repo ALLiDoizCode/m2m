@@ -119,6 +119,8 @@ describe('ConnectorNode — minimal dependency startup', () => {
       handlePreparePacket: jest.fn(),
       // Story 37.2: ILP observability metrics
       setIlpMetrics: jest.fn(),
+      // Issue #76: relationship-aware settlement gate
+      setPeerRelation: jest.fn(),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {

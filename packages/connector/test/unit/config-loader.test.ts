@@ -889,4 +889,35 @@ describe('ConfigLoader', () => {
       expect(() => ConfigLoader.validateConfig(raw)).not.toThrow(ConfigurationError);
     });
   });
+
+  // Issue #76: per-peer ILP relationship governs the settlement-claim gate.
+  describe('peer relation validation', () => {
+    const baseConfig = (relation: unknown) => ({
+      nodeId: 'test-node',
+      btpServerPort: 3000,
+      peers: [{ id: 'peer1', url: 'ws://peer1:3001', authToken: 'secret', relation }],
+      routes: [{ prefix: 'g.peer1', nextHop: 'peer1' }],
+    });
+
+    it.each(['parent', 'peer', 'child'])("accepts relation '%s'", (relation) => {
+      expect(() => ConfigLoader.validateConfig(baseConfig(relation))).not.toThrow();
+    });
+
+    it('accepts a peer with no relation (defaults downstream to peer)', () => {
+      const raw = {
+        nodeId: 'test-node',
+        btpServerPort: 3000,
+        peers: [{ id: 'peer1', url: 'ws://peer1:3001', authToken: 'secret' }],
+        routes: [{ prefix: 'g.peer1', nextHop: 'peer1' }],
+      };
+      expect(() => ConfigLoader.validateConfig(raw)).not.toThrow();
+    });
+
+    it('rejects an invalid relation value', () => {
+      expect(() => ConfigLoader.validateConfig(baseConfig('sibling'))).toThrow(ConfigurationError);
+      expect(() => ConfigLoader.validateConfig(baseConfig('sibling'))).toThrow(
+        /peer 'peer1': invalid relation value 'sibling' \(must be 'parent', 'peer', or 'child'\)/
+      );
+    });
+  });
 });

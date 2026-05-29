@@ -228,6 +228,8 @@ describe('ConnectorNode', () => {
       handlePreparePacket: jest.fn(),
       // Story 37.2: ILP observability metrics
       setIlpMetrics: jest.fn(),
+      // Issue #76: relationship-aware settlement gate
+      setPeerRelation: jest.fn(),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {
@@ -1284,6 +1286,58 @@ describe('ConnectorNode', () => {
       expect(mockRoutingTable.addRoute).toHaveBeenCalledTimes(2);
       expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.peerB', 'peerB', 10);
       expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.peerB.sub', 'peerB', 0);
+    });
+
+    it('registerPeer() propagates relation to the packet handler and echoes it (issue #76)', async () => {
+      // Arrange
+      mockBTPClientManager.getPeerIds.mockReturnValue([]); // new peer
+      mockBTPClientManager.isConnected.mockReturnValue(false);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+
+      // Act
+      const result = await connectorNode.registerPeer({
+        id: 'mill',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+        url: 'ws://mill:3000',
+        authToken: 'token-mill',
+        relation: 'child',
+      });
+
+      // Assert
+      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('mill', 'child');
+      expect(result.relation).toBe('child');
+    });
+
+    it("registerPeer() defaults an omitted relation to 'peer' (issue #76)", async () => {
+      // Arrange
+      mockBTPClientManager.getPeerIds.mockReturnValue([]);
+      mockBTPClientManager.isConnected.mockReturnValue(false);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+
+      // Act
+      await connectorNode.registerPeer({
+        id: 'peerB',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+        url: 'ws://peer-b:3000',
+        authToken: 'token-b',
+      });
+
+      // Assert
+      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('peerB', 'peer');
+    });
+
+    it('registerPeer() rejects an invalid relation (issue #76)', async () => {
+      // Act & Assert
+      await expect(
+        connectorNode.registerPeer({
+          id: 'peerB',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://peer-b:3000',
+          authToken: 'token-b',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          relation: 'sibling' as any,
+        })
+      ).rejects.toThrow(/Invalid relation: must be 'parent', 'peer', or 'child' \(got 'sibling'\)/);
     });
 
     it('registerPeer() throws ConnectorNotStartedError before start()', async () => {

@@ -291,6 +291,10 @@ export class ConnectorNode implements HealthStatusProvider {
     this._ilpMetrics = new IlpMetricsRegistry({ collectDefaults: false });
     for (const peer of resolvedConfig.peers) {
       this._ilpMetrics.registerPeer(peer.id);
+      // Seed the forwarding path with each peer's ILP relationship (issue #76).
+      // Defaults to 'peer' so peers without an explicit relation keep requiring
+      // a per-packet claim on value-bearing forwards (pre-issue-76 behavior).
+      this._packetHandler.setPeerRelation(peer.id, peer.relation ?? 'peer');
     }
     this._packetHandler.setIlpMetrics(this._ilpMetrics);
 
@@ -1262,6 +1266,11 @@ export class ConnectorNode implements HealthStatusProvider {
           // to the safe default. AdminServer also defaults to 'direct'
           // (belt-and-suspenders for test fixtures that omit the field).
           transportType: this._transportType ?? 'direct',
+          // Relationship-aware settlement gate (issue #76): POST /admin/peers
+          // forwards a peer's relation to the PacketHandler so value-bearing
+          // forwards to a 'child' next hop skip the mandatory per-packet claim.
+          setPeerRelation: (peerId, relation) =>
+            this._packetHandler.setPeerRelation(peerId, relation),
         });
 
         await this._adminServer.start();
@@ -2167,6 +2176,19 @@ export class ConnectorNode implements HealthStatusProvider {
       throw new Error("transport: 'socks5' requires connector-level transport.type 'socks5'");
     }
 
+    // Validate peer relation (issue #76). Error string is byte-identical to the
+    // POST /admin/peers handler for cross-surface parity (see CLAUDE.md AG3).
+    if (
+      config.relation !== undefined &&
+      config.relation !== 'parent' &&
+      config.relation !== 'peer' &&
+      config.relation !== 'child'
+    ) {
+      throw new Error(
+        `Invalid relation: must be 'parent', 'peer', or 'child' (got '${config.relation}')`
+      );
+    }
+
     // Validate routes if provided
     if (config.routes) {
       for (const route of config.routes) {
@@ -2238,6 +2260,12 @@ export class ConnectorNode implements HealthStatusProvider {
       }
     }
 
+    // Propagate the peer's ILP relationship to the forwarding path (issue #76).
+    // Defaults to 'peer' so an omitted relation preserves the legacy
+    // claim-on-every-forward behavior. Applied on both fresh and
+    // re-registration so an operator can flip a peer's relation via re-register.
+    this._packetHandler.setPeerRelation(config.id, config.relation ?? 'peer');
+
     // Create/merge settlement config
     if (config.settlement) {
       this._applySettlementConfig(config.id, config.settlement, config.routes, isUpdate);
@@ -2259,6 +2287,9 @@ export class ConnectorNode implements HealthStatusProvider {
       // ORIGINAL live transport read from the existing client, NOT the
       // requested value (mirrors the admin POST re-reg semantics in F10).
       transport: isUpdate ? this._btpClientManager.getPeerTransport(config.id) : config.transport,
+      // Echo the effective relation (issue #76). `config.relation` is undefined
+      // when the caller omitted it; the forwarding path treats that as 'peer'.
+      relation: config.relation,
     };
 
     const peerConfig = this._settlementPeers.get(config.id);
