@@ -24,6 +24,7 @@ import {
   LocalDeliveryHandler,
   LocalDeliveryRequest,
   LocalDeliveryResponse,
+  PeerRelation,
 } from '../config/types';
 import { AccountLedgerCodes } from '../settlement/types';
 import * as crypto from 'crypto';
@@ -105,6 +106,20 @@ export class PacketHandler {
    * Default token ID for settlement recording (resolved from on-chain ERC-20 symbol)
    */
   private defaultTokenId: string = 'M2M';
+
+  /**
+   * ILP peering relationship per next-hop peer id (issue #76).
+   *
+   * Consulted by {@link requiresSettlementClaim} to decide whether a
+   * value-bearing forward to a peer must carry a mandatory per-packet claim.
+   * A peer absent from this map (or explicitly `'peer'`/`'parent'`) requires a
+   * claim — preserving the pre-issue-76 behavior; only `'child'` skips it.
+   *
+   * Populated by ConnectorNode from startup config and from runtime peer
+   * registration (`registerPeer` / `POST /admin/peers`) via
+   * {@link setPeerRelation}.
+   */
+  private readonly peerRelations: Map<string, PeerRelation> = new Map();
 
   /**
    * Account manager for settlement recording (optional)
@@ -247,6 +262,38 @@ export class PacketHandler {
   setPerPacketClaimService(service: PerPacketClaimService): void {
     this.perPacketClaimService = service;
     this.logger.info('Per-packet claim service enabled');
+  }
+
+  /**
+   * Record (or update) the ILP peering relationship for a next-hop peer (issue #76).
+   *
+   * Called by ConnectorNode for each configured peer at startup and on every
+   * runtime registration. `'child'` next hops are forwarded value WITHOUT a
+   * mandatory per-packet claim; `'parent'`/`'peer'` continue to require one.
+   *
+   * @param peerId - Next-hop peer id (matches the route `nextHop`)
+   * @param relation - ILP peering relationship
+   */
+  setPeerRelation(peerId: string, relation: PeerRelation): void {
+    this.peerRelations.set(peerId, relation);
+    this.logger.info(
+      { event: 'peer_relation_set', peerId, relation },
+      `Peer relation set: ${peerId} -> ${relation}`
+    );
+  }
+
+  /**
+   * Whether a value-bearing forward to `peerId` must carry a mandatory
+   * per-packet settlement claim (issue #76).
+   *
+   * Returns `false` only for a `'child'` next hop — a parent never issues
+   * claims down to a child; the child accrues a balance owed up and settles it
+   * via its own up-claims. Every other relation (including peers absent from
+   * the map, which default to `'peer'`) requires a claim, preserving the
+   * pre-issue-76 behavior.
+   */
+  private requiresSettlementClaim(peerId: string): boolean {
+    return this.peerRelations.get(peerId) !== 'child';
   }
 
   /**
@@ -1236,11 +1283,30 @@ export class PacketHandler {
       }
     }
 
-    // Generate mandatory per-packet claim before forwarding to peer
+    // Generate mandatory per-packet claim before forwarding to peer.
+    //
+    // The claim is relationship-aware (issue #76): it is required for every
+    // value-bearing forward to a non-`local`, non-`child` next hop. A `'child'`
+    // next hop is skipped — a parent settles DOWN to a child by letting the
+    // child accrue a balance owed up (the child settles via its own up-claims),
+    // so issuing a pay-the-child claim here is incorrect ILP semantics and
+    // would reject the packet with T00 whenever no pay-the-child channel exists.
     let claimProtocolData:
       | Array<{ protocolName: string; contentType: number; data: Buffer }>
       | undefined;
-    if (!isLocalDelivery && forwardingPacket.amount > 0n) {
+    const claimRequired =
+      !isLocalDelivery && forwardingPacket.amount > 0n && this.requiresSettlementClaim(nextHop);
+    if (!isLocalDelivery && forwardingPacket.amount > 0n && !claimRequired) {
+      this.logger.debug(
+        {
+          correlationId,
+          peerId: nextHop,
+          relation: this.peerRelations.get(nextHop),
+        },
+        'Skipping per-packet claim for child next hop (child settles up to parent)'
+      );
+    }
+    if (claimRequired) {
       if (!this.perPacketClaimService) {
         this.logger.error(
           {

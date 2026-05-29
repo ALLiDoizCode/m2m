@@ -520,6 +520,20 @@ export class ConfigLoader {
         }
       }
 
+      // Per-peer ILP relationship (issue #76). Governs whether value-bearing
+      // forwards to this peer require a per-packet settlement claim. Defaults
+      // to 'peer' downstream when omitted.
+      if (
+        peer.relation !== undefined &&
+        peer.relation !== 'parent' &&
+        peer.relation !== 'peer' &&
+        peer.relation !== 'child'
+      ) {
+        throw new ConfigurationError(
+          `peer '${peer.id}': invalid relation value '${peer.relation}' (must be 'parent', 'peer', or 'child')`
+        );
+      }
+
       // Check for duplicate peer IDs
       if (peerIds.has(peer.id)) {
         throw new ConfigurationError(`Duplicate peer ID: ${peer.id}`);

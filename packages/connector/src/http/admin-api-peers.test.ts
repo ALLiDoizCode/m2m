@@ -298,4 +298,56 @@ describe('Admin API Peer Endpoints (Story 20.4)', () => {
       expect(config?.initialDeposit).toBe('500000');
     });
   });
+
+  // Issue #76: POST /admin/peers forwards a peer's ILP relation to the
+  // forwarding path via the setPeerRelation hook so a 'child' next hop skips
+  // the mandatory per-packet settlement claim.
+  describe('POST /admin/peers — relation propagation (issue #76)', () => {
+    let setPeerRelation: jest.Mock;
+    let relApp: Express;
+
+    beforeEach(async () => {
+      setPeerRelation = jest.fn();
+      const config: AdminAPIConfig = {
+        routingTable: mockRoutingTable,
+        btpClientManager: mockBTPClientManager,
+        logger: mockLogger,
+        nodeId: 'test-node',
+        settlementPeers,
+        setPeerRelation,
+      };
+      relApp = express();
+      relApp.use('/admin', await createAdminRouter(config));
+    });
+
+    it("propagates an explicit relation 'child' to the hook and echoes it", async () => {
+      const res = await request(relApp)
+        .post('/admin/peers')
+        .send({ ...validPeerRequest, relation: 'child' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.peer.relation).toBe('child');
+      expect(setPeerRelation).toHaveBeenCalledWith('peer-a', 'child');
+    });
+
+    it("defaults an omitted relation to 'peer' when calling the hook", async () => {
+      const res = await request(relApp).post('/admin/peers').send(validPeerRequest);
+
+      expect(res.status).toBe(201);
+      expect(setPeerRelation).toHaveBeenCalledWith('peer-a', 'peer');
+    });
+
+    it('rejects an invalid relation with 400 and does not call the hook', async () => {
+      const res = await request(relApp)
+        .post('/admin/peers')
+        .send({ ...validPeerRequest, relation: 'sibling' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe(
+        "Invalid relation: must be 'parent', 'peer', or 'child' (got 'sibling')"
+      );
+      expect(setPeerRelation).not.toHaveBeenCalled();
+      expect(mockBTPClientManager.addPeer).not.toHaveBeenCalled();
+    });
+  });
 });

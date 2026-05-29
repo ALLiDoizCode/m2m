@@ -1353,6 +1353,150 @@ describe('PacketHandler', () => {
     });
   });
 
+  // Issue #76: a parent must NOT issue a per-packet claim DOWN to a child.
+  // Value-bearing forwards to a 'child' next hop skip the mandatory claim
+  // (the child accrues a balance owed up and settles via its own up-claims),
+  // so they never hit the on-demand pay-the-child channel that would otherwise
+  // reject the packet with T00 when no such channel exists.
+  describe('handlePreparePacket() - Relationship-Aware Settlement Gate (issue #76)', () => {
+    let mockLogger: ReturnType<typeof createMockLogger>;
+    let btpClientManager: jest.Mocked<BTPClientManager>;
+
+    beforeEach(() => {
+      mockLogger = createMockLogger();
+      btpClientManager = createMockBTPClientManager();
+    });
+
+    const newHandler = (): PacketHandler => {
+      const routingTable = new RoutingTable([{ prefix: 'g.alice', nextHop: 'peer-alice' }]);
+      return new PacketHandler(routingTable, btpClientManager, 'test.connector', mockLogger);
+    };
+
+    it('forwards a value-bearing packet to a child WITHOUT generating a claim', async () => {
+      // Arrange
+      const handler = newHandler();
+      handler.setPeerRelation('peer-alice', 'child');
+      const mockClaimService = createMockPerPacketClaimService();
+      handler.setPerPacketClaimService(mockClaimService);
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+
+      // Act
+      const result = await handler.handlePreparePacket(packet);
+
+      // Assert — forwarded with no claim attached and the claim service untouched
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect(mockClaimService.generateClaimForPacket).not.toHaveBeenCalled();
+      expect(btpClientManager.sendToPeer).toHaveBeenCalledWith(
+        'peer-alice',
+        expect.any(Object),
+        undefined
+      );
+    });
+
+    it('forwards to a child even with NO claim service configured (no T00)', async () => {
+      // Arrange — this is the exact failure mode from issue #76
+      const handler = newHandler();
+      handler.setPeerRelation('peer-alice', 'child');
+      // No claim service set
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+
+      // Act
+      const result = await handler.handlePreparePacket(packet);
+
+      // Assert
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect(btpClientManager.sendToPeer).toHaveBeenCalled();
+    });
+
+    it('forwards to a child even when no payment channel exists (claim returns null)', async () => {
+      // Arrange
+      const handler = newHandler();
+      handler.setPeerRelation('peer-alice', 'child');
+      const mockClaimService = createMockPerPacketClaimService();
+      // Would reject with T00 for a peer/parent — but a child must not hit this path
+      mockClaimService.generateClaimForPacket.mockResolvedValue(null);
+      handler.setPerPacketClaimService(mockClaimService);
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+
+      // Act
+      const result = await handler.handlePreparePacket(packet);
+
+      // Assert
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect(mockClaimService.generateClaimForPacket).not.toHaveBeenCalled();
+    });
+
+    it("still requires a claim for an explicit 'peer' relation", async () => {
+      // Arrange
+      const handler = newHandler();
+      handler.setPeerRelation('peer-alice', 'peer');
+      const mockClaimService = createMockPerPacketClaimService();
+      handler.setPerPacketClaimService(mockClaimService);
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+
+      // Act
+      const result = await handler.handlePreparePacket(packet);
+
+      // Assert
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect(mockClaimService.generateClaimForPacket).toHaveBeenCalledWith(
+        'peer-alice',
+        'M2M',
+        BigInt(1000)
+      );
+    });
+
+    it("still requires a claim for a 'parent' relation (rejects T00 with no channel)", async () => {
+      // Arrange
+      const handler = newHandler();
+      handler.setPeerRelation('peer-alice', 'parent');
+      const mockClaimService = createMockPerPacketClaimService();
+      mockClaimService.generateClaimForPacket.mockResolvedValue(null);
+      handler.setPerPacketClaimService(mockClaimService);
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+
+      // Act
+      const result = await handler.handlePreparePacket(packet);
+
+      // Assert
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.T00_INTERNAL_ERROR);
+      expect((result as ILPRejectPacket).message).toBe('No payment channel available for peer');
+    });
+
+    it('requires a claim for an unregistered peer (defaults to peer behavior)', async () => {
+      // Arrange — no setPeerRelation call at all
+      const handler = newHandler();
+      const mockClaimService = createMockPerPacketClaimService();
+      mockClaimService.generateClaimForPacket.mockResolvedValue(null);
+      handler.setPerPacketClaimService(mockClaimService);
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+
+      // Act
+      const result = await handler.handlePreparePacket(packet);
+
+      // Assert — preserves pre-issue-76 behavior
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.T00_INTERNAL_ERROR);
+    });
+
+    it('re-requires a claim after a child is flipped back to peer', async () => {
+      // Arrange
+      const handler = newHandler();
+      handler.setPeerRelation('peer-alice', 'child');
+      handler.setPeerRelation('peer-alice', 'peer'); // operator re-registers as peer
+      const mockClaimService = createMockPerPacketClaimService();
+      handler.setPerPacketClaimService(mockClaimService);
+      const packet = createValidPreparePacket({ destination: 'g.alice.wallet' });
+
+      // Act
+      await handler.handlePreparePacket(packet);
+
+      // Assert
+      expect(mockClaimService.generateClaimForPacket).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('handlePreparePacket() - Downstream Response Handling', () => {
     it('should pass through fulfill response from downstream peer', async () => {
       // Arrange
