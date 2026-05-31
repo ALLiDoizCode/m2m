@@ -283,6 +283,22 @@ export class PacketHandler {
   }
 
   /**
+   * Current ILP peering relationship for `peerId`, or `undefined` if the peer
+   * has not been registered.
+   *
+   * Exposes the forwarding path's single source of truth for peer relations so
+   * the inbound claim validator can mirror {@link requiresSettlementClaim}'s
+   * relation-aware logic on the receiving side (issue #78): a child node skips
+   * the inline-claim requirement for PREPAREs arriving from its `'parent'`,
+   * since the parent forwards value to a child WITHOUT a per-packet claim.
+   *
+   * @param peerId - Peer id (matches the authenticated inbound peer / route nextHop)
+   */
+  getPeerRelation(peerId: string): PeerRelation | undefined {
+    return this.peerRelations.get(peerId);
+  }
+
+  /**
    * Whether a value-bearing forward to `peerId` must carry a mandatory
    * per-packet settlement claim (issue #76).
    *

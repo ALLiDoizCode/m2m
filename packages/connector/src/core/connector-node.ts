@@ -1093,7 +1093,12 @@ export class ConnectorNode implements HealthStatusProvider {
             this._logger,
             this._channelManager ?? undefined,
             nip59Wrapper,
-            nodeSecp256k1PrivKey
+            nodeSecp256k1PrivKey,
+            // Relation-aware inbound validation (issue #78): consult the
+            // forwarding path's single source of truth so a child node skips
+            // the inline-claim requirement for PREPAREs from its parent,
+            // mirroring the outbound child-skip in requiresSettlementClaim.
+            (peerId) => this._packetHandler.getPeerRelation(peerId)
           );
           this._btpServer.setInboundClaimValidator((protocolData, ilpPacket, peerId) =>
             inboundClaimValidator.validate(protocolData, ilpPacket, peerId)
