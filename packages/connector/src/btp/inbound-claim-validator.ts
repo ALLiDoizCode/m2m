@@ -25,7 +25,18 @@ import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { BalanceProof } from '@toon-protocol/shared';
 import type { PaymentChannelSDK } from '../settlement/payment-channel-sdk';
 import type { ChannelManager } from '../settlement/channel-manager';
+import type { PeerRelation } from '../config/types';
 import type { Logger } from '../utils/logger';
+
+/**
+ * Resolves the ILP peering relationship for an authenticated inbound peer.
+ *
+ * Backed by the forwarding path's single source of truth (the PacketHandler's
+ * peer-relation map), so inbound claim validation stays consistent with the
+ * outbound `requiresSettlementClaim` decision. Returns `undefined` for an
+ * unregistered peer.
+ */
+export type PeerRelationResolver = (peerId: string) => PeerRelation | undefined;
 
 /**
  * Callback type for inbound claim validation.
@@ -53,13 +64,21 @@ export class InboundClaimValidator {
   private readonly nip59Wrapper?: NIP59ClaimWrapper;
   private readonly nip59PrivateKey?: Uint8Array;
 
+  /**
+   * Resolves the source peer's ILP relation, enabling the relation-aware
+   * parent skip (issue #78). Optional: when absent, every value-bearing PREPARE
+   * requires an inline claim, preserving the pre-issue-78 behavior.
+   */
+  private readonly getPeerRelation?: PeerRelationResolver;
+
   constructor(
     paymentChannelSDK: PaymentChannelSDK,
     nodeId: string,
     logger: Logger,
     channelManager?: ChannelManager,
     nip59Wrapper?: NIP59ClaimWrapper,
-    nip59PrivateKey?: Uint8Array
+    nip59PrivateKey?: Uint8Array,
+    getPeerRelation?: PeerRelationResolver
   ) {
     this.paymentChannelSDK = paymentChannelSDK;
     this.nodeId = nodeId;
@@ -67,6 +86,7 @@ export class InboundClaimValidator {
     this.channelManager = channelManager;
     this.nip59Wrapper = nip59Wrapper;
     this.nip59PrivateKey = nip59PrivateKey;
+    this.getPeerRelation = getPeerRelation;
   }
 
   /**
@@ -87,6 +107,21 @@ export class InboundClaimValidator {
       this.logger.debug(
         { event: 'inbound_claim_skip_zero', peerId, destination: ilpPacket.destination },
         'Skipping claim validation for zero-amount packet'
+      );
+      return null;
+    }
+
+    // Relation-aware skip (issue #78): a parent forwards value to its children
+    // WITHOUT a per-packet claim — a child accrues a balance owed up and settles
+    // it via its own up-claims, exactly mirroring the outbound
+    // `requiresSettlementClaim(peerId) === false for 'child'` skip in the
+    // PacketHandler. Requiring an inline claim here would F06-reject every paid
+    // packet the parent forwards down. So when the source peer is our 'parent',
+    // accept without an inline claim.
+    if (this.getPeerRelation?.(peerId) === 'parent') {
+      this.logger.debug(
+        { event: 'inbound_claim_skip_parent', peerId, destination: ilpPacket.destination },
+        'Skipping inbound claim requirement for packet forwarded by parent peer'
       );
       return null;
     }

@@ -108,6 +108,7 @@ const createValidator = (
     channelManager?: jest.Mocked<ChannelManager>;
     nip59Wrapper?: NIP59ClaimWrapper;
     nip59PrivateKey?: Uint8Array;
+    getPeerRelation?: (peerId: string) => 'parent' | 'peer' | 'child' | undefined;
   } = {}
 ): ValidatorFixture => {
   const mockLogger = createMockLogger();
@@ -119,7 +120,8 @@ const createValidator = (
     mockLogger,
     options.channelManager,
     options.nip59Wrapper,
-    options.nip59PrivateKey
+    options.nip59PrivateKey,
+    options.getPeerRelation
   );
 
   return {
@@ -172,6 +174,58 @@ describe('InboundClaimValidator branch coverage', () => {
       expect(mockLogger.debug).toHaveBeenCalledWith(
         expect.objectContaining({ event: 'inbound_claim_skip_zero', peerId: 'peer-a' }),
         'Skipping claim validation for zero-amount packet'
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #78: relation-aware skip for parent-forwarded packets
+  // -------------------------------------------------------------------------
+  describe('Issue #78: relation-aware parent skip', () => {
+    it('should accept a value-bearing PREPARE from a parent peer WITHOUT an inline claim', async () => {
+      const { validator, mockLogger } = createValidator({
+        getPeerRelation: () => 'parent',
+      });
+      const packet = createPreparePacket(1_000_000n);
+
+      // No claim protocol data — a parent forwards value to children claim-less.
+      const result = await validator.validate([], packet, 'g.townhouse');
+
+      expect(result).toBeNull();
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'inbound_claim_skip_parent', peerId: 'g.townhouse' }),
+        'Skipping inbound claim requirement for packet forwarded by parent peer'
+      );
+    });
+
+    it.each(['peer', 'child', undefined] as const)(
+      'should still REQUIRE a claim for a %s source peer (F06 when missing)',
+      async (relation) => {
+        const { validator } = createValidator({
+          getPeerRelation: () => relation,
+        });
+        const packet = createPreparePacket(1_000_000n);
+
+        const result = await validator.validate([], packet, 'peer-a');
+
+        expect(result).toEqual(
+          expect.objectContaining({
+            type: PacketType.REJECT,
+            code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
+            message: 'No payment channel claim attached to packet',
+          })
+        );
+      }
+    );
+
+    it('should REQUIRE a claim when no relation resolver is configured (legacy behavior)', async () => {
+      const { validator } = createValidator();
+      const packet = createPreparePacket(1_000_000n);
+
+      const result = await validator.validate([], packet, 'peer-a');
+
+      expect(result).toEqual(
+        expect.objectContaining({ code: ILPErrorCode.F06_UNEXPECTED_PAYMENT })
       );
     });
   });

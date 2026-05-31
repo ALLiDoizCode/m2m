@@ -479,4 +479,72 @@ describeEvm('Claim Validation Gate (BTP Transport Layer)', () => {
       ws.close();
     }
   });
+
+  // ==========================================================================
+  // Issue #78: relation-aware inbound claim skip
+  //
+  // A parent forwards value to its children WITHOUT a per-packet claim — the
+  // outbound side already skips it (issue #76, requiresSettlementClaim returns
+  // false for 'child' next hops). The inbound gate must mirror that: a child
+  // node accepts claim-less paid PREPAREs from its 'parent', otherwise every
+  // parent-forwarded packet is wrongly F06-rejected. These tests drive Peer1
+  // as the child node and a raw BTP client as its parent.
+  // ==========================================================================
+  describe('Issue #78: relation-aware parent skip', () => {
+    const PARENT_PEER_ID = 'apex-parent';
+
+    beforeAll(async () => {
+      // Register an upstream 'parent' peer on Peer1 (the child node). We only
+      // exercise the INBOUND path via a raw client, so the url points at an
+      // unused port — the background outbound dial never needs to succeed.
+      await network.peers[0]!.registerPeer({
+        id: PARENT_PEER_ID,
+        url: `ws://localhost:${portBase + 500}`,
+        authToken: '',
+        relation: 'parent',
+      });
+    });
+
+    // T-CVG-078-001: parent-forwarded paid packet with NO claim → NOT F06
+    it('T-CVG-078-001: should accept a value-bearing PREPARE from a parent peer with no claim', async () => {
+      const ws = await connectRawBTPClient(portBase, PARENT_PEER_ID);
+
+      try {
+        // amount > 0, NO claim protocol data — exactly what a parent forwards.
+        const { packet } = createTestPrepare('test.peer1.receiver', 1_000_000n);
+
+        const result = await sendRawBTPPrepare(ws, packet);
+
+        // The parent skip must prevent the F06 the unconditional gate produced.
+        if (result.type === PacketType.REJECT) {
+          const reject = result as ILPRejectPacket;
+          expect(reject.code).not.toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
+        } else {
+          // Ideal: local delivery auto-fulfilled the claim-less parent packet.
+          expect(result.type).toBe(PacketType.FULFILL);
+        }
+      } finally {
+        ws.close();
+      }
+    });
+
+    // T-CVG-078-002: a NON-parent peer with NO claim is still F06-rejected.
+    // Proves the skip is relation-gated, not a blanket disable of the gate.
+    it('T-CVG-078-002: should still reject a value-bearing PREPARE from a non-parent peer with no claim (F06)', async () => {
+      const ws = await connectRawBTPClient(portBase, 'unregistered-peer-no-relation');
+
+      try {
+        const { packet } = createTestPrepare('test.peer1.receiver', 1_000_000n);
+
+        const result = await sendRawBTPPrepare(ws, packet);
+
+        expect(result.type).toBe(PacketType.REJECT);
+        const reject = result as ILPRejectPacket;
+        expect(reject.code).toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
+        expect(reject.message).toContain('No payment channel claim');
+      } finally {
+        ws.close();
+      }
+    });
+  });
 });
