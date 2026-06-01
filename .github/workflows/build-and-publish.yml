@@ -135,6 +135,12 @@ jobs:
           name: build-artifacts
           path: packages/connector
 
+      # Register an up-to-date QEMU/binfmt for the emulated linux/arm64 build.
+      # Without this, arm64 `npm install` runs under the runner's stale QEMU and
+      # intermittently crashes with SIGILL (exit 132). Mirrors ci.yml.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -243,6 +249,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # Register an up-to-date QEMU/binfmt for the emulated linux/arm64 build.
+      # Without this, arm64 `npm install` runs under the runner's stale QEMU and
+      # intermittently crashes with SIGILL (exit 132). Mirrors ci.yml.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
