@@ -16,7 +16,10 @@
  * - Settlement state preservation
  */
 
-import Database from 'better-sqlite3';
+// Runtime DB is libsql (better-sqlite3-compatible, incl. .pragma()); the
+// better-sqlite3 type still describes the API surface.
+import LibsqlDatabase from 'libsql';
+import type Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -71,7 +74,8 @@ class PersistentStorage {
       fs.mkdirSync(backupDir, { recursive: true });
     }
 
-    this.db = new Database(dbPath);
+    // libsql instance satisfies the better-sqlite3 Database API at runtime.
+    this.db = new LibsqlDatabase(dbPath) as unknown as Database.Database;
     this.initializeSchema();
   }
 
@@ -216,7 +220,7 @@ class PersistentStorage {
     fs.copyFileSync(backupPath, this.dbPath);
 
     // Reopen connection
-    this.db = new Database(this.dbPath);
+    this.db = new LibsqlDatabase(this.dbPath) as unknown as Database.Database;
   }
 
   /**
@@ -494,7 +498,7 @@ describe('Disaster Recovery Acceptance Tests', () => {
       expect(fs.existsSync(backupPath)).toBe(true);
 
       // Verify backup contains data
-      const backupDb = new Database(backupPath);
+      const backupDb = new LibsqlDatabase(backupPath);
       const accounts = backupDb.prepare('SELECT COUNT(*) as count FROM accounts').get() as {
         count: number;
       };

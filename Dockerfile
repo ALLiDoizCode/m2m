@@ -66,11 +66,11 @@ COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
 # Install production dependencies only (excludes devDependencies like TypeScript)
 # This significantly reduces image size
 # Remove the 'prepare' script before install (it runs husky which is a devDependency)
-# Then explicitly install the platform-specific libsql binary for Alpine ARM64/x64
-# and rebuild better-sqlite3's native binding (the install above used
-# --ignore-scripts, which skips its prebuild-install postinstall step).
+# Then explicitly install the platform-specific libsql prebuilt binary for
+# Alpine ARM64/x64. libsql ships N-API prebuilds, so no C toolchain is needed
+# (issue #79 — this replaced native better-sqlite3, which required a
+# python3/make/g++ build step and had no Node 24 prebuild).
 RUN apk add --no-cache jq && \
-    apk add --no-cache --virtual .native-build python3 make g++ && \
     jq 'del(.scripts.prepare)' package.json > package.json.tmp && \
     mv package.json.tmp package.json && \
     npm install --omit=dev --ignore-scripts && \
@@ -78,9 +78,8 @@ RUN apk add --no-cache jq && \
     LIBSQL_VERSION=$(npm ls libsql --json 2>/dev/null | jq -r '.dependencies.libsql.version // .dependencies["@libsql/client"].dependencies.libsql.version // "0.4.7"') && \
     (npm install "@libsql/linux-arm64-musl@${LIBSQL_VERSION}" --no-save 2>/dev/null || \
      npm install "@libsql/linux-x64-musl@${LIBSQL_VERSION}" --no-save 2>/dev/null || true) && \
-    npm rebuild better-sqlite3 && \
     cd ../.. && \
-    apk del jq .native-build
+    apk del jq
 
 # Copy compiled JavaScript from builder stage
 # Only copy dist directories, not source code

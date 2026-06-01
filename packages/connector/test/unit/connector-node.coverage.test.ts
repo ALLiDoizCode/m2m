@@ -408,7 +408,7 @@ describe('ConnectorNode branch coverage', () => {
       if (pkg === 'ethers') {
         return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
       }
-      if (pkg === 'better-sqlite3') {
+      if (pkg === 'libsql') {
         return {
           default: jest.fn().mockImplementation(() => ({
             exec: jest.fn(),
@@ -1797,7 +1797,7 @@ describe('ConnectorNode branch coverage', () => {
         if (pkg === 'ethers') {
           return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
         }
-        if (pkg === 'better-sqlite3') {
+        if (pkg === 'libsql') {
           return { default: jest.fn() };
         }
         throw new Error(`${pkg} not available`);
@@ -1859,7 +1859,7 @@ describe('ConnectorNode branch coverage', () => {
         if (pkg === 'ethers') {
           return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
         }
-        if (pkg === 'better-sqlite3') {
+        if (pkg === 'libsql') {
           return { default: jest.fn() };
         }
         throw new Error(`${pkg} not available`);
@@ -2101,7 +2101,7 @@ describe('ConnectorNode branch coverage', () => {
   // ═══════════════════════════════════════════════════════════════════════════
   describe('start() AccountManager wiring branch', () => {
     it('wires settlement into PacketHandler when accountManager is created', async () => {
-      // Use the default requireOptional (which already handles ethers & better-sqlite3)
+      // Use the default requireOptional (which already handles ethers & libsql)
 
       delete process.env.TIGERBEETLE_CLUSTER_ID;
       delete process.env.TIGERBEETLE_REPLICAS;

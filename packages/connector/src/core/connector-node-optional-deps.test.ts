@@ -206,18 +206,19 @@ describe('ConnectorNode — minimal dependency startup', () => {
       expect(errorMsg).toContain('npm install ethers');
     });
 
-    // Regression test for issue #54: 3.3.3 image shipped without compiled
-    // better-sqlite3 native bindings, silently degrading payment channels to
+    // Regression test for issue #54: 3.3.3 image shipped without the compiled
+    // SQLite native binding, silently degrading payment channels to
     // routing-only mode. Missing native SQLite deps must abort startup so the
-    // failure is visible to operators immediately.
-    it('should fail-closed at startup when better-sqlite3 native binding is missing', async () => {
+    // failure is visible to operators immediately. (issue #79: the local DB
+    // binding is now libsql.)
+    it('should fail-closed at startup when the libsql native binding is missing', async () => {
       (requireOptional as jest.Mock).mockImplementation(async (pkg: string) => {
         if (pkg === 'ethers') {
           return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
         }
-        if (pkg === 'better-sqlite3') {
+        if (pkg === 'libsql') {
           throw new Error(
-            'better-sqlite3 is required for per-packet claims persistence. Install it with: npm install better-sqlite3'
+            'libsql is required for per-packet claims persistence. Install it with: npm install libsql'
           );
         }
         return {};
@@ -238,7 +239,7 @@ describe('ConnectorNode — minimal dependency startup', () => {
       (ConfigLoader.validateConfig as jest.Mock).mockReturnValue(config);
 
       const node = new ConnectorNode(config, mockLogger);
-      await expect(node.start()).rejects.toThrow(/better-sqlite3 is required/);
+      await expect(node.start()).rejects.toThrow(/libsql is required/);
 
       const abortLog = mockLogger.error.mock.calls.find(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -408,7 +408,7 @@ describe('ConnectorNode branch coverage — part 2', () => {
       if (pkg === 'ethers') {
         return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
       }
-      if (pkg === 'better-sqlite3') {
+      if (pkg === 'libsql') {
         return {
           default: jest.fn().mockImplementation(() => ({
             exec: jest.fn(),
@@ -691,12 +691,12 @@ describe('ConnectorNode branch coverage — part 2', () => {
         if (pkg === 'ethers') {
           return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
         }
-        if (pkg === 'better-sqlite3' && purpose === 'claim receiver persistence') {
+        if (pkg === 'libsql' && purpose === 'claim receiver persistence') {
           const err = new Error('MODULE_NOT_FOUND') as any;
           err.code = 'MODULE_NOT_FOUND';
           throw err;
         }
-        if (pkg === 'better-sqlite3') {
+        if (pkg === 'libsql') {
           return {
             default: jest.fn().mockImplementation(() => ({
               exec: jest.fn(),

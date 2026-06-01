@@ -3,7 +3,8 @@
  * Story 17.2: Claim Sender Implementation
  */
 
-import { Database } from 'better-sqlite3';
+// Type-only: this suite passes a mock DB, so no runtime SQLite module loads.
+import type { Database } from 'better-sqlite3';
 import { Logger } from 'pino';
 import { ClaimSender } from './claim-sender';
 import { BTPClient } from '../btp/btp-client';

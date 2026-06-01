@@ -13,7 +13,8 @@
 
 import request from 'supertest';
 import express, { Express } from 'express';
-import BetterSqlite3 from 'better-sqlite3';
+// Runtime DB is libsql (better-sqlite3-compatible); type stays on better-sqlite3.
+import BetterSqlite3 from 'libsql';
 import type { Database } from 'better-sqlite3';
 import { createAdminRouter, AdminAPIConfig } from './admin-api';
 import type { RoutingTable } from '../routing/routing-table';
@@ -191,11 +192,13 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
       mockLogger
     );
 
-    claimsDb = new BetterSqlite3(':memory:');
+    // libsql instances asserted as the better-sqlite3 Database type the
+    // ClaimReceiver / sent-claims queries are typed against.
+    claimsDb = new BetterSqlite3(':memory:') as unknown as Database;
     initializeClaimReceiverSchema(claimsDb);
     claimReceiver = new ClaimReceiver(claimsDb, stubRegistry, mockLogger);
 
-    sentClaimsDb = new BetterSqlite3(':memory:');
+    sentClaimsDb = new BetterSqlite3(':memory:') as unknown as Database;
     sentClaimsDb.exec(SENT_CLAIMS_TABLE_SCHEMA);
     for (const idx of SENT_CLAIMS_INDEXES) sentClaimsDb.exec(idx);
     sentClaimsQueries = new SentClaimsQueries(sentClaimsDb, mockLogger);
