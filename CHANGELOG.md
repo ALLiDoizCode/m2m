@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.0](https://github.com/toon-protocol/connector/compare/v3.7.2...v3.8.0) (2026-06-01)
+
+### Features
+
+- **connector:** migrate local SQLite from better-sqlite3 to libsql (closes [#79](https://github.com/toon-protocol/connector/issues/79)) ([7d41005](https://github.com/toon-protocol/connector/commit/7d410056910dd456da47e65e52ba118dc5f1d37f)), closes [#78](https://github.com/toon-protocol/connector/issues/78)
+
 ## [3.7.2](https://github.com/toon-protocol/connector/compare/v3.7.1...v3.7.2) (2026-05-31)
 
 ### Bug Fixes
