@@ -92,6 +92,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
+      - name: Install libsql native module for Linux
+        run: |
+          # Force install the Linux x64 glibc native module for libsql.
+          # package-lock.json may have been generated on macOS, so npm ci does
+          # not pull the linux binary that the connector tests load.
+          npm install @libsql/linux-x64-gnu --no-save --ignore-scripts || true
+
       - name: Build packages
         run: npm run build
 
