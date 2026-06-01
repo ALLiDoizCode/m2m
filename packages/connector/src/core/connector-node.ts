@@ -1043,13 +1043,18 @@ export class ConnectorNode implements HealthStatusProvider {
           // Wire PerPacketClaimService for attaching claims to outgoing packets
           if (this._channelManager && this._paymentChannelSDK) {
             try {
-              const BetterSqlite3Module = await requireOptional<{
+              // libsql is a better-sqlite3-compatible drop-in shipping N-API
+              // prebuilt binaries, so it loads on Node 22.11+ and Node 24 with
+              // no C toolchain (unlike native better-sqlite3, which has no Node
+              // 24 prebuild). The @types/better-sqlite3 Database type still
+              // describes the API surface accurately (issue #79).
+              const LibsqlModule = await requireOptional<{
                 default: new (path: string) => import('better-sqlite3').Database;
-              }>('better-sqlite3', 'per-packet claims persistence');
-              const BetterSqlite3 = BetterSqlite3Module.default;
+              }>('libsql', 'per-packet claims persistence');
+              const LibsqlDatabase = LibsqlModule.default;
 
               const claimDbPath = `./data/claims-${this._config.nodeId}.db`;
-              const claimDb = new BetterSqlite3(claimDbPath);
+              const claimDb = new LibsqlDatabase(claimDbPath);
               claimDb.exec(SENT_CLAIMS_TABLE_SCHEMA);
               for (const indexSql of SENT_CLAIMS_INDEXES) {
                 claimDb.exec(indexSql);
@@ -1113,13 +1118,15 @@ export class ConnectorNode implements HealthStatusProvider {
           // that SettlementMonitor uses to trigger on-chain claimFromChannel()
           if (this._paymentChannelSDK) {
             try {
-              const BetterSqlite3Module = await requireOptional<{
+              // libsql: better-sqlite3-compatible drop-in with N-API prebuilts
+              // (Node 22.11+/24, no native build). See note above (issue #79).
+              const LibsqlModule = await requireOptional<{
                 default: new (path: string) => import('better-sqlite3').Database;
-              }>('better-sqlite3', 'claim receiver persistence');
-              const BetterSqlite3 = BetterSqlite3Module.default;
+              }>('libsql', 'claim receiver persistence');
+              const LibsqlDatabase = LibsqlModule.default;
 
               const receivedClaimDbPath = `./data/received-claims-${this._config.nodeId}.db`;
-              const receivedClaimDb = new BetterSqlite3(receivedClaimDbPath);
+              const receivedClaimDb = new LibsqlDatabase(receivedClaimDbPath);
               initializeClaimReceiverSchema(receivedClaimDb);
 
               const claimReceiver = new ClaimReceiver(

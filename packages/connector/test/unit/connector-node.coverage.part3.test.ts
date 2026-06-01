@@ -434,7 +434,7 @@ describe('ConnectorNode coverage part 3', () => {
       if (pkg === 'ethers') {
         return { ethers: { JsonRpcProvider: jest.fn().mockReturnValue({}) } };
       }
-      if (pkg === 'better-sqlite3') {
+      if (pkg === 'libsql') {
         return {
           default: jest.fn().mockImplementation(() => ({
             exec: jest.fn(),

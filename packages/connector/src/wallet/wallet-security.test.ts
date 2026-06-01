@@ -10,7 +10,9 @@ import {
   FraudDetector,
 } from './wallet-security';
 import pino from 'pino';
-import Database from 'better-sqlite3';
+// Type-only: this suite uses a mock DB (never instantiates), so no runtime
+// SQLite module is loaded here.
+import type Database from 'better-sqlite3';
 
 describe('WalletSecurityManager', () => {
   let securityManager: WalletSecurityManager;

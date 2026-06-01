@@ -5,7 +5,10 @@
 
 import { AuditLogger } from './audit-logger';
 import pino from 'pino';
-import Database from 'better-sqlite3';
+// Runtime DB is libsql (better-sqlite3-compatible, N-API prebuilts → Node 22/24
+// without a native build); the better-sqlite3 type still describes the API.
+import LibsqlDatabase from 'libsql';
+import type Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -29,7 +32,9 @@ describe('AuditLogger', () => {
       fs.mkdirSync(dbDir, { recursive: true });
     }
 
-    db = new Database(tempDbPath);
+    // libsql instance satisfies the better-sqlite3 Database API at runtime;
+    // the bundled libsql types differ structurally, so assert the BS3 type.
+    db = new LibsqlDatabase(tempDbPath) as unknown as Database.Database;
     auditLogger = new AuditLogger(mockLogger, db);
   });
 
