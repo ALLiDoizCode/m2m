@@ -239,6 +239,15 @@ jobs:
         if: steps.tag.outputs.tag != ''
         run: npm ci
 
+      - name: Install libsql native module for Linux
+        if: steps.tag.outputs.tag != ''
+        run: |
+          # Force install the Linux x64 glibc native module for libsql.
+          # package-lock.json may have been generated on macOS, so npm ci does
+          # not pull the linux binary; `npm publish` runs the connector's
+          # prepublishOnly (build:publish && test), which loads libsql.
+          npm install @libsql/linux-x64-gnu --no-save --ignore-scripts || true
+
       - name: Build packages
         if: steps.tag.outputs.tag != ''
         run: npm run build
