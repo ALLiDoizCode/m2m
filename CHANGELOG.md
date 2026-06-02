@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.1](https://github.com/toon-protocol/connector/compare/v3.8.0...v3.8.1) (2026-06-02)
+
+### Bug Fixes
+
+- **settlement:** thread real dual-party authorization through Mina provider ([d71ba6f](https://github.com/toon-protocol/connector/commit/d71ba6fae70c408636114a5774f5f2bb7600e5d7)), closes [#70](https://github.com/toon-protocol/connector/issues/70)
+
 ## [3.8.0](https://github.com/toon-protocol/connector/compare/v3.7.2...v3.8.0) (2026-06-01)
 
 ### Features
