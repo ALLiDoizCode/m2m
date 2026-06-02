@@ -243,15 +243,20 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    * Proof generation runs asynchronously without blocking the event loop.
    *
    * @remarks
-   * `balanceB` and `salt` are passed as `0n` placeholders. The EVM-centric
-   * `BalanceProofParams` interface does not carry these Mina-specific fields.
-   * The `signature` parameter is passed as both `signatureA` and `signatureB`
-   * to the SDK. In production, callers should provide both participant
-   * signatures via the SDK directly for dual-party authorization.
+   * Dual-party authorization is threaded through to the SDK: `signature` is
+   * participant A's signature, `balanceProof.signatureB` is participant B's,
+   * and `balanceProof.balanceB` / `balanceProof.salt` populate the Poseidon
+   * balance commitment. For bidirectional settlement (e.g. Mill swaps) callers
+   * MUST supply a distinct `signatureB`, a real `balanceB`, and a non-zero
+   * `salt`. When `signatureB` is omitted the provider falls back to a
+   * single-signature (unidirectional) claim and logs a warning — a true
+   * two-party claim with two participant keys rejects a duplicated signature
+   * on-chain.
    *
    * @param channelId - zkApp address (base58)
-   * @param balanceProof - The balance proof parameters
-   * @param signature - Serialized proof/commitment string (used as both signatureA and signatureB)
+   * @param balanceProof - The balance proof parameters (including Mina-only
+   *   `balanceB`, `salt`, and `signatureB` for dual-party authorization)
+   * @param signature - Participant A's serialized signature
    * @returns Transaction hash
    */
   async claimFromChannel(
@@ -267,16 +272,37 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     this._warnIfEVMFields(balanceProof);
 
     try {
-      const transferredAmount = safeBigInt(balanceProof.transferredAmount, 'transferredAmount');
+      // `transferredAmount` is participant A's balance; `balanceB` / `salt`
+      // complete the Poseidon balance commitment for the bidirectional case.
+      const balanceA = safeBigInt(balanceProof.transferredAmount, 'transferredAmount');
+      const balanceB =
+        balanceProof.balanceB !== undefined ? safeBigInt(balanceProof.balanceB, 'balanceB') : 0n;
+      const salt = balanceProof.salt !== undefined ? safeBigInt(balanceProof.salt, 'salt') : 0n;
       const nonce = safeBigInt(String(balanceProof.nonce), 'nonce');
+
+      // Dual-party authorization: `signature` is participant A's signature.
+      // For bidirectional settlement the caller must supply participant B's
+      // signature via `balanceProof.signatureB`. If omitted we fall back to a
+      // single-signature unidirectional claim and warn — a real two-party
+      // claim with two distinct participant keys rejects a duplicated signature.
+      const signatureA = signature;
+      const signatureB = balanceProof.signatureB;
+      if (signatureB === undefined) {
+        this._logger.warn(
+          { event: 'claim_from_channel_single_signature', channelId, chainId: this.chainId },
+          'No participant B signature provided (balanceProof.signatureB); falling back to a ' +
+            'single-signature unidirectional claim. Supply signatureB for bidirectional settlement.'
+        );
+      }
+
       const result = await this._sdk.claimFromChannel(
         channelId,
-        transferredAmount,
-        0n, // balanceB -- adapted by SDK
-        0n, // salt -- adapted by SDK
+        balanceA,
+        balanceB,
+        salt,
         nonce,
-        signature, // signatureA
-        signature // signatureB -- same signature used as placeholder
+        signatureA,
+        signatureB ?? signatureA
       );
 
       return { txHash: result.txHash };
@@ -380,10 +406,14 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    * commitment generation. Returns the serialized proof/commitment as a string.
    *
    * @remarks
-   * Same `balanceB=0n` and `salt=0n` placeholder constraints as `claimFromChannel()`.
-   * See that method's `@remarks` for details on Story 34.4 SDK expectations.
+   * `params.balanceB` and `params.salt` are threaded through to the SDK to
+   * build the Poseidon commitment `hash([balanceA, balanceB, salt])`, where
+   * `params.transferredAmount` is participant A's balance. They default to
+   * `0n` (unidirectional, unsalted) when omitted; provide real values for
+   * bidirectional settlement and commitment privacy.
    *
-   * @param params - Balance proof parameters to sign
+   * @param params - Balance proof parameters to sign (including Mina-only
+   *   `balanceB` and `salt`)
    * @returns Serialized Poseidon commitment + proof string
    */
   async signBalanceProof(params: BalanceProofParams): Promise<string> {
@@ -400,15 +430,11 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     this._warnIfEVMFields(params);
 
     try {
-      const transferredAmount = safeBigInt(params.transferredAmount, 'transferredAmount');
+      const balanceA = safeBigInt(params.transferredAmount, 'transferredAmount');
+      const balanceB = params.balanceB !== undefined ? safeBigInt(params.balanceB, 'balanceB') : 0n;
+      const salt = params.salt !== undefined ? safeBigInt(params.salt, 'salt') : 0n;
       const nonce = safeBigInt(String(params.nonce), 'nonce');
-      return await this._sdk.signBalanceProof(
-        params.channelId,
-        transferredAmount,
-        0n, // balanceB -- adapted by SDK
-        0n, // salt -- adapted by SDK
-        nonce
-      );
+      return await this._sdk.signBalanceProof(params.channelId, balanceA, balanceB, salt, nonce);
     } catch (err: unknown) {
       throw this._wrapError(err, 'signBalanceProof', params.channelId);
     }
