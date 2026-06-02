@@ -410,14 +410,55 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
       expect(mockSdk.claimFromChannel).toHaveBeenCalledTimes(3);
       for (let i = 0; i < mockSdk.claimFromChannel.mock.calls.length; i++) {
         const call = mockSdk.claimFromChannel.mock.calls[i]!;
-        // SDK signature: claimFromChannel(channelId, transferredAmount, balanceB, salt, nonce, signature)
+        // SDK signature:
+        //   claimFromChannel(channelId, balanceA, balanceB, salt, nonce, signatureA, signatureB)
         expect(call[0]).toBe(MINA_ZKAPP_ADDRESS); // channelId
-        expect(typeof call[1]).toBe('bigint'); // transferredAmount (bigint, not plaintext string)
+        expect(typeof call[1]).toBe('bigint'); // balanceA = transferredAmount (bigint, not plaintext string)
         expect(call[1]).toBe(BigInt((i + 1) * 1000)); // matches loop: String(i * 1000) where i = 1..3
-        expect(typeof call[2]).toBe('bigint'); // balanceB placeholder
-        expect(typeof call[3]).toBe('bigint'); // salt placeholder
+        expect(typeof call[2]).toBe('bigint'); // balanceB (0n here — unidirectional claim)
+        expect(typeof call[3]).toBe('bigint'); // salt (0n here — none provided)
         expect(typeof call[4]).toBe('bigint'); // nonce
+        // No signatureB provided → falls back to signatureA for both participants
+        expect(call[5]).toBe(`proof-${i + 1}`); // signatureA
+        expect(call[6]).toBe(`proof-${i + 1}`); // signatureB (single-signature fallback)
       }
+    });
+
+    it('[issue #84] should settle a true two-party claim with distinct balances, salt, and signatures', async () => {
+      // Given: a provider and a bidirectional claim (e.g. a Mill swap) where
+      // both participants hold a non-zero balance and each signs independently
+      const mockSdk = createMockMinaSDK();
+      mockSdk.claimFromChannel.mockResolvedValue({ txHash: 'tx-two-party' });
+      const { provider } = createMinaTestProvider(mockSdk);
+
+      // When: claimFromChannel is called with real balanceB, salt, and a
+      // distinct participant B signature threaded via BalanceProofParams
+      const result = await provider.claimFromChannel(
+        MINA_ZKAPP_ADDRESS,
+        {
+          channelId: MINA_ZKAPP_ADDRESS,
+          nonce: 9,
+          transferredAmount: '4000', // participant A balance
+          lockedAmount: '0',
+          locksRoot: '0x' + '0'.repeat(64),
+          balanceB: '6000', // participant B balance
+          salt: '424242', // non-zero salt preserves commitment privacy
+          signatureB: 'sigB-from-bob',
+        },
+        'sigA-from-alice' // participant A signature
+      );
+
+      // Then: the SDK receives the full dual-party authorization — NOT the old
+      // balanceB=0n / salt=0n / single-signature placeholders
+      expect(result.txHash).toBe('tx-two-party');
+      const call = mockSdk.claimFromChannel.mock.calls[0]!;
+      expect(call[1]).toBe(4000n); // balanceA
+      expect(call[2]).toBe(6000n); // balanceB — real, not 0n
+      expect(call[3]).toBe(424242n); // salt — real, not 0n
+      expect(call[4]).toBe(9n); // nonce
+      expect(call[5]).toBe('sigA-from-alice'); // signatureA
+      expect(call[6]).toBe('sigB-from-bob'); // signatureB — distinct from A
+      expect(call[5]).not.toBe(call[6]); // two-party authorization, not reuse
     });
   });
 

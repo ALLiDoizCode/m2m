@@ -100,6 +100,31 @@ export interface BalanceProofParams {
   lockedAmount: string;
   /** Merkle root of locked transfers */
   locksRoot: string;
+  /**
+   * Mina-only: revealed balance for participant B in the Poseidon balance
+   * commitment `hash([balanceA, balanceB, salt])`, where `transferredAmount`
+   * is participant A's balance. Required for true two-party (bidirectional)
+   * settlement; defaults to `0n` (unidirectional) when omitted. Ignored by the
+   * EVM and Solana providers.
+   */
+  balanceB?: string;
+  /**
+   * Mina-only: salt for the Poseidon balance commitment. Preserves the
+   * commitment privacy the zkApp was designed for — a `0n` salt makes
+   * `hash([balanceA, balanceB, 0])` trivially brute-forceable. Callers
+   * settling real bidirectional channels MUST provide a non-zero salt.
+   * Defaults to `0n` when omitted. Ignored by the EVM and Solana providers.
+   */
+  salt?: string;
+  /**
+   * Mina-only: participant B's signature for dual-party authorization. The
+   * `signature` argument passed to {@link PaymentChannelProvider.claimFromChannel}
+   * is participant A's signature; this is participant B's. Required for true
+   * two-party Mina settlement — the zkApp verifies each signature against a
+   * distinct participant key, so reusing one signature for both fails on-chain.
+   * Ignored by the EVM and Solana providers.
+   */
+  signatureB?: string;
 }
 
 /** Parameters for verifying a balance proof off-chain. */

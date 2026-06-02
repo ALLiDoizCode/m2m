@@ -419,6 +419,99 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
 
       expect(mockLogger.warn).toHaveBeenCalled();
     });
+
+    // -----------------------------------------------------------------------
+    // Dual-party authorization (issue #84): real balanceB / salt / signatureB
+    // -----------------------------------------------------------------------
+
+    it('should thread distinct balanceB, salt, and signatureB to the SDK for two-party claims', async () => {
+      // Given: a balance proof carrying real bidirectional settlement data
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 7,
+        transferredAmount: '4000', // participant A's balance
+        lockedAmount: '0',
+        locksRoot: '',
+        balanceB: '6000', // participant B's balance
+        salt: '123456789', // non-zero salt for commitment privacy
+        signatureB: 'sigB_from_participant_b',
+      };
+      mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx-two-party' });
+
+      // When: claimFromChannel is called with participant A's signature
+      const result = await provider.claimFromChannel(
+        TEST_ZKAPP_ADDRESS,
+        balanceProof,
+        'sigA_from_participant_a'
+      );
+
+      // Then: the SDK receives real balanceB, salt, and two DISTINCT signatures
+      expect(result).toEqual({ txHash: 'tx-two-party' });
+      expect(mockSDK.claimFromChannel).toHaveBeenCalledTimes(1);
+      const call = mockSDK.claimFromChannel.mock.calls[0]!;
+      // SDK signature: (channelId, balanceA, balanceB, salt, nonce, signatureA, signatureB)
+      expect(call[0]).toBe(TEST_ZKAPP_ADDRESS);
+      expect(call[1]).toBe(4000n); // balanceA
+      expect(call[2]).toBe(6000n); // balanceB — NOT the 0n placeholder
+      expect(call[3]).toBe(123456789n); // salt — NOT the 0n placeholder
+      expect(call[4]).toBe(7n); // nonce
+      expect(call[5]).toBe('sigA_from_participant_a'); // signatureA
+      expect(call[6]).toBe('sigB_from_participant_b'); // signatureB — distinct, not reused
+      expect(call[5]).not.toBe(call[6]); // the core fix: no single-signature reuse
+      // And: no single-signature fallback warning was emitted
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'claim_from_channel_single_signature' }),
+        expect.anything()
+      );
+    });
+
+    it('should warn and fall back to single signature when signatureB is omitted', async () => {
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 2,
+        transferredAmount: '100',
+        lockedAmount: '0',
+        locksRoot: '',
+      };
+      mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx-unidir' });
+
+      await provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'onlySig');
+
+      const call = mockSDK.claimFromChannel.mock.calls[0]!;
+      expect(call[2]).toBe(0n); // balanceB defaults to 0n
+      expect(call[3]).toBe(0n); // salt defaults to 0n
+      expect(call[5]).toBe('onlySig'); // signatureA
+      expect(call[6]).toBe('onlySig'); // signatureB falls back to signatureA
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'claim_from_channel_single_signature' }),
+        expect.stringContaining('signatureB')
+      );
+    });
+
+    it('should thread balanceB and salt to the SDK in signBalanceProof', async () => {
+      const params: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 3,
+        transferredAmount: '4000',
+        lockedAmount: '0',
+        locksRoot: '',
+        balanceB: '6000',
+        salt: '987654321',
+      };
+      mockSDK.signBalanceProof.mockResolvedValue('signed-commitment');
+
+      await provider.signBalanceProof(params);
+
+      expect(mockSDK.signBalanceProof).toHaveBeenCalledTimes(1);
+      // SDK signature: (channelId, balanceA, balanceB, salt, nonce)
+      expect(mockSDK.signBalanceProof).toHaveBeenCalledWith(
+        TEST_ZKAPP_ADDRESS,
+        4000n, // balanceA
+        6000n, // balanceB — NOT the 0n placeholder
+        987654321n, // salt — NOT the 0n placeholder
+        3n // nonce
+      );
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1527,15 +1620,17 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
 
       await provider.claimFromChannel(channelId, balanceProof, signature);
 
-      // Verify SDK called with correct bigint conversions
+      // Verify SDK called with correct bigint conversions. No balanceB/salt/
+      // signatureB supplied → unidirectional defaults (see issue #84): balanceB
+      // and salt default to 0n, and signatureB falls back to signatureA.
       expect(mockSDK.claimFromChannel).toHaveBeenCalledWith(
         channelId,
-        250000n, // transferredAmount as bigint
-        0n, // balanceB placeholder
-        0n, // salt placeholder
+        250000n, // balanceA (transferredAmount) as bigint
+        0n, // balanceB default (unidirectional)
+        0n, // salt default (unidirectional)
         7n, // nonce as BigInt
         signature, // signatureA passed through
-        signature // signatureB -- same signature used as placeholder (Story 34.4)
+        signature // signatureB falls back to signatureA when not provided
       );
     });
   });
@@ -1560,9 +1655,9 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
 
       expect(mockSDK.signBalanceProof).toHaveBeenCalledWith(
         TEST_ZKAPP_ADDRESS,
-        777000n, // transferredAmount as bigint
-        0n, // balanceB placeholder
-        0n, // salt placeholder
+        777000n, // balanceA (transferredAmount) as bigint
+        0n, // balanceB default (none provided)
+        0n, // salt default (none provided)
         3n // nonce as BigInt
       );
     });
