@@ -358,7 +358,7 @@ chainProviders:
     chainId: solana:mainnet
     rpcUrl: https://api.mainnet-beta.solana.com
     programId: 'YourProgram...'
-    keyId: '/path/to/keypair.json'
+    keyId: '<base58 ed25519 secret key>' # env fallback: SOLANA_PRIVATE_KEY
 
   - chainType: mina
     chainId: mina:mainnet
@@ -367,7 +367,7 @@ chainProviders:
     keyId: 'EKE...'
 ```
 
-Each peer's `chain` field determines which provider handles settlement for that peer. You can run EVM, Solana, and Mina peers in the same network — the connector routes settlement to the right chain automatically.
+Each peer's `chain` field determines which provider handles settlement for that peer. You can run EVM, Solana, and Mina peers in the same network — the connector routes settlement to the right chain automatically. A **Solana-only or Mina-only** node (no EVM `chainProvider`) is fully supported: it boots the settlement stack and redeems claims on-chain. Non-EVM settlement is **claim-driven redemption** of channels opened out-of-band — the connector does not open Solana/Mina channels on demand. See [docs/solana-deployment.md](docs/solana-deployment.md) and [docs/mina-deployment.md](docs/mina-deployment.md).
 
 > **Migrating from `settlementInfra`?** The legacy `settlementInfra` config block was removed in v2.3.0. If your config still uses it, the connector will print a clear error message explaining how to move your settings into `chainProviders`. See the [connector package README](packages/connector/README.md) for the full migration guide.
 

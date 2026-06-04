@@ -13,7 +13,13 @@
  */
 
 import type { BTPProtocolData } from './btp-types';
-import { BTP_CLAIM_PROTOCOL, validateClaimMessage, isEVMClaim } from './btp-claim-types';
+import {
+  BTP_CLAIM_PROTOCOL,
+  validateClaimMessage,
+  isEVMClaim,
+  isSolanaClaim,
+  isMinaClaim,
+} from './btp-claim-types';
 import type { BTPClaimMessage, EVMClaimMessage } from './btp-claim-types';
 import {
   type NIP59ClaimWrapper,
@@ -24,6 +30,7 @@ import type { ILPPreparePacket, ILPRejectPacket } from '@toon-protocol/shared';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { BalanceProof } from '@toon-protocol/shared';
 import type { PaymentChannelSDK } from '../settlement/payment-channel-sdk';
+import type { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
 import type { ChannelManager } from '../settlement/channel-manager';
 import type { PeerRelation } from '../config/types';
 import type { Logger } from '../utils/logger';
@@ -57,7 +64,8 @@ export type InboundClaimValidatorFn = (
  */
 export class InboundClaimValidator {
   private readonly logger: Logger;
-  private readonly paymentChannelSDK: PaymentChannelSDK;
+  private readonly paymentChannelSDK?: PaymentChannelSDK;
+  private readonly chainRegistry?: ChainProviderRegistry;
   private readonly channelManager?: ChannelManager;
   private readonly nodeId: string;
 
@@ -72,13 +80,14 @@ export class InboundClaimValidator {
   private readonly getPeerRelation?: PeerRelationResolver;
 
   constructor(
-    paymentChannelSDK: PaymentChannelSDK,
+    paymentChannelSDK: PaymentChannelSDK | undefined,
     nodeId: string,
     logger: Logger,
     channelManager?: ChannelManager,
     nip59Wrapper?: NIP59ClaimWrapper,
     nip59PrivateKey?: Uint8Array,
-    getPeerRelation?: PeerRelationResolver
+    getPeerRelation?: PeerRelationResolver,
+    chainRegistry?: ChainProviderRegistry
   ) {
     this.paymentChannelSDK = paymentChannelSDK;
     this.nodeId = nodeId;
@@ -87,6 +96,7 @@ export class InboundClaimValidator {
     this.nip59Wrapper = nip59Wrapper;
     this.nip59PrivateKey = nip59PrivateKey;
     this.getPeerRelation = getPeerRelation;
+    this.chainRegistry = chainRegistry;
   }
 
   /**
@@ -176,22 +186,59 @@ export class InboundClaimValidator {
 
     // Dispatch verification based on blockchain type
     if (isEVMClaim(claim)) {
+      // EVM claims require the EVM PaymentChannelSDK for EIP-712 verification.
+      // On a standalone non-EVM node there is no SDK, so reject gracefully
+      // rather than dereferencing an undefined SDK.
+      if (!this.paymentChannelSDK) {
+        this.logger.warn(
+          { event: 'inbound_claim_no_evm_sdk', peerId, blockchain: claim.blockchain },
+          'Rejecting ILP PREPARE: EVM claim received but no EVM payment-channel SDK configured'
+        );
+        return this.createReject('EVM claim received but EVM settlement is not configured');
+      }
       return this.verifyEVMClaim(claim, peerId);
     }
 
-    // Non-EVM claims: signature verification is not yet wired to a provider
-    // This path is reachable now that Solana claims pass structural validation.
-    // Full provider-based verification will be added in Epic 33.
-    this.logger.warn(
-      {
-        event: 'inbound_claim_unsupported_chain',
-        peerId,
-        blockchain: claim.blockchain,
-      },
-      'Rejecting ILP PREPARE: signature verification not yet supported for this blockchain'
-    );
+    // Non-EVM claims (Solana / Mina): admit inbound when a provider is
+    // registered for the claim's chain. The real cryptographic verification of
+    // Solana/Mina claims happens downstream in ClaimReceiver (which performs the
+    // provider-backed signature / zk-SNARK check before redemption). Here we
+    // only gate on whether this node can settle the claim's chain at all.
+    if (isSolanaClaim(claim) || isMinaClaim(claim)) {
+      const chainId = isSolanaClaim(claim)
+        ? `solana:${claim.cluster ?? 'devnet'}`
+        : `mina:${claim.network ?? 'devnet'}`;
+      const provider = this.chainRegistry?.getProvider(claim.blockchain, chainId);
+      if (provider) {
+        this.logger.debug(
+          {
+            event: 'inbound_claim_accept_nonevm',
+            peerId,
+            blockchain: claim.blockchain,
+            chainId,
+          },
+          'Accepting inbound non-EVM claim; cryptographic verification deferred to ClaimReceiver'
+        );
+        return null;
+      }
+
+      this.logger.warn(
+        {
+          event: 'inbound_claim_unsupported_chain',
+          peerId,
+          blockchain: claim.blockchain,
+          chainId,
+        },
+        'Rejecting ILP PREPARE: no settlement provider registered for this blockchain'
+      );
+      return this.createReject(
+        `No settlement provider registered for blockchain: ${claim.blockchain}`
+      );
+    }
+
+    // Unreachable: the three type guards above are exhaustive over BTPClaimMessage.
     return this.createReject(
-      `Signature verification not yet supported for blockchain: ${claim.blockchain}`
+      `Unsupported claim blockchain: ${(claim as BTPClaimMessage).blockchain}`
     );
   }
 
@@ -207,6 +254,13 @@ export class InboundClaimValidator {
     claim: EVMClaimMessage,
     peerId: string
   ): Promise<ILPRejectPacket | null> {
+    // Callers (validate) guard this; re-assert here so the local SDK reference
+    // is non-null for the verification calls below.
+    const paymentChannelSDK = this.paymentChannelSDK;
+    if (!paymentChannelSDK) {
+      return this.createReject('EVM claim received but EVM settlement is not configured');
+    }
+
     // Verify EIP-712 signature
     // BigInt() can throw on non-numeric strings; wrap in try/catch for defense-in-depth
     // even though validateClaimMessage() already validates the format.
@@ -235,7 +289,7 @@ export class InboundClaimValidator {
     try {
       // Prefer self-describing claims with explicit domain (Epic 31)
       if (claim.chainId !== undefined && claim.tokenNetworkAddress) {
-        signatureValid = await this.paymentChannelSDK.verifyBalanceProofWithDomain(
+        signatureValid = await paymentChannelSDK.verifyBalanceProofWithDomain(
           balanceProof,
           claim.signature,
           claim.signerAddress,
@@ -258,7 +312,7 @@ export class InboundClaimValidator {
             'Unknown channel: claim must include chainId and tokenNetworkAddress'
           );
         }
-        signatureValid = await this.paymentChannelSDK.verifyBalanceProof(
+        signatureValid = await paymentChannelSDK.verifyBalanceProof(
           balanceProof,
           claim.signature,
           claim.signerAddress

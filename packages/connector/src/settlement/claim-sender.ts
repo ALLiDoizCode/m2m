@@ -217,6 +217,10 @@ export class ClaimSender {
    * @param proof - Base64-encoded zk-SNARK proof
    * @param salt - Shared salt for commitment verification
    * @param network - Optional Mina network identifier (e.g., 'devnet')
+   * @param dualParty - Optional dual-party (#84) fields: participant A's plaintext
+   *   cumulative balance (`transferredAmount`), participant B's revealed balance
+   *   (`balanceB`), and participant B's signature (`signatureB`). When omitted the
+   *   claim is unidirectional.
    * @returns Promise resolving to ClaimSendResult
    */
   async sendMinaClaim(
@@ -228,7 +232,8 @@ export class ClaimSender {
     nonce: number,
     proof: string,
     salt: string,
-    network?: string
+    network?: string,
+    dualParty?: { transferredAmount?: string; balanceB?: string; signatureB?: string }
   ): Promise<ClaimSendResult> {
     const messageId = this._generateMessageId('mina', zkAppAddress, nonce);
     const timestamp = new Date().toISOString();
@@ -245,6 +250,11 @@ export class ClaimSender {
       nonce,
       proof,
       salt,
+      // transferredAmount defaults to balanceCommitment's plaintext value (= balanceA);
+      // callers may override it (and supply balanceB/signatureB) for dual-party channels.
+      transferredAmount: dualParty?.transferredAmount ?? balanceCommitment,
+      ...(dualParty?.balanceB !== undefined && { balanceB: dualParty.balanceB }),
+      ...(dualParty?.signatureB !== undefined && { signatureB: dualParty.signatureB }),
       ...(network !== undefined && { network }),
     };
 

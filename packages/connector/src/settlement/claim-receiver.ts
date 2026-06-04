@@ -1303,4 +1303,41 @@ export class ClaimReceiver extends EventEmitter {
       return null;
     }
   }
+
+  /**
+   * Retrieve the latest verified, unredeemed claim for a peer across all of its
+   * channels (newest first), without specifying a channel.
+   *
+   * Used by SettlementExecutor's non-EVM channel-id fallback: when there is no
+   * ChannelManager to look up a channel for the peer, the latest verified claim
+   * carries the on-chain channel identifier (Solana `channelAccount` / Mina
+   * `zkAppAddress`) needed to redeem.
+   *
+   * @param peerId - Peer ID (claim sender)
+   * @returns Latest verified, unredeemed claim or null if none found
+   */
+  async getLatestVerifiedClaimForPeer(peerId: string): Promise<BTPClaimMessage | null> {
+    try {
+      const stmt = this.db.prepare(`
+        SELECT claim_data
+        FROM received_claims
+        WHERE peer_id = ?
+          AND verified = 1
+          AND redeemed_at IS NULL
+        ORDER BY received_at DESC
+        LIMIT 1
+      `);
+
+      const row = stmt.get(peerId) as { claim_data: string } | undefined;
+
+      if (!row) {
+        return null;
+      }
+
+      return JSON.parse(row.claim_data) as BTPClaimMessage;
+    } catch (error) {
+      this.logger.error({ error, peerId }, 'Failed to query latest verified claim for peer');
+      return null;
+    }
+  }
 }

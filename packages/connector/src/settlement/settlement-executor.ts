@@ -28,7 +28,8 @@ import { SettlementState, SettlementTriggerEvent } from '../config/types';
 import { AccountManager } from './account-manager';
 import { SettlementMonitor } from './settlement-monitor';
 import type { PerPacketClaimService } from './per-packet-claim-service';
-import { isEVMClaim } from '../btp/btp-claim-types';
+import { isEVMClaim, isSolanaClaim, isMinaClaim } from '../btp/btp-claim-types';
+import type { BTPClaimMessage } from '../btp/btp-claim-types';
 import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 import type {
   PaymentChannelProvider,
@@ -36,6 +37,24 @@ import type {
 } from './provider/payment-channel-provider';
 import type { ChannelManager } from './channel-manager';
 import type { ClaimReceiver } from './claim-receiver';
+
+/**
+ * Derive the on-chain channel identifier carried by a claim, used by the
+ * non-EVM channel-id fallback when no ChannelManager is available.
+ *
+ * - EVM: `channelId` (bytes32)
+ * - Solana: `channelAccount` (PDA, base58)
+ * - Mina: `zkAppAddress` (B62 address)
+ *
+ * @param claim - A verified BTP claim message
+ * @returns The on-chain channel identifier, or null if unrecognized
+ */
+function deriveOnChainChannelId(claim: BTPClaimMessage): string | null {
+  if (isEVMClaim(claim)) return claim.channelId;
+  if (isSolanaClaim(claim)) return claim.channelAccount;
+  if (isMinaClaim(claim)) return claim.zkAppAddress;
+  return null;
+}
 
 /**
  * Configuration interface for SettlementExecutor
@@ -353,7 +372,25 @@ export class SettlementExecutor extends EventEmitter {
 
     // Find existing channel for peer
     this.logger.debug({ peerId, tokenId }, 'Searching for existing channel');
-    const channelId = await this.findChannelForPeer(peerId, tokenId);
+    let channelId = await this.findChannelForPeer(peerId, tokenId);
+
+    // Non-EVM channel-id fallback (#86): when there is no ChannelManager (e.g. a
+    // standalone Solana/Mina node), findChannelForPeer returns null. In that case
+    // a verified inbound claim carries the on-chain channel identifier
+    // (Solana channelAccount / Mina zkAppAddress) we need to redeem. Derive it.
+    if (!channelId && this.claimReceiver && !this.channelManager) {
+      const peerClaim = await this.claimReceiver.getLatestVerifiedClaimForPeer(peerId);
+      if (peerClaim) {
+        const derived = deriveOnChainChannelId(peerClaim);
+        if (derived) {
+          this.logger.info(
+            { peerId, tokenId, channelId: derived, blockchain: peerClaim.blockchain },
+            'Derived on-chain channel id from latest verified claim (no ChannelManager)'
+          );
+          channelId = derived;
+        }
+      }
+    }
 
     if (!channelId) {
       // No existing channel: Open new channel and deposit
@@ -529,7 +566,7 @@ export class SettlementExecutor extends EventEmitter {
     const sentClaim = this.perPacketClaimService?.getLatestClaim(channelId) ?? null;
     const latestClaim = receivedClaim ?? sentClaim;
 
-    if (!latestClaim || !isEVMClaim(latestClaim)) {
+    if (!latestClaim) {
       this.logger.error(
         { channelId, peerId },
         'No per-packet claim available for settlement — cannot compute balance proof without chain-specific state'
@@ -537,29 +574,73 @@ export class SettlementExecutor extends EventEmitter {
       throw new Error(`No per-packet claim available for channel ${channelId}`);
     }
 
-    // Per-packet claims already accumulated the correct cumulative state
-    // Use string amounts directly from EVMClaimMessage for provider call
-    const balanceProofParams: BalanceProofParams = {
-      channelId,
-      nonce: latestClaim.nonce,
-      transferredAmount: latestClaim.transferredAmount,
-      lockedAmount: latestClaim.lockedAmount,
-      locksRoot: latestClaim.locksRoot,
-    };
-    const claimSignature = latestClaim.signature;
+    // Per-packet claims already accumulated the correct cumulative state.
+    // Build per-chain BalanceProofParams and resolve the on-chain channel id
+    // from the claim itself (EVM uses the local channelId; non-EVM claims carry
+    // their own on-chain account/zkApp address).
+    let onChainChannelId: string;
+    let balanceProofParams: BalanceProofParams;
+    let claimSignature: string;
+
+    if (isEVMClaim(latestClaim)) {
+      onChainChannelId = channelId;
+      balanceProofParams = {
+        channelId,
+        nonce: latestClaim.nonce,
+        transferredAmount: latestClaim.transferredAmount,
+        lockedAmount: latestClaim.lockedAmount,
+        locksRoot: latestClaim.locksRoot,
+      };
+      claimSignature = latestClaim.signature;
+    } else if (isSolanaClaim(latestClaim)) {
+      onChainChannelId = latestClaim.channelAccount;
+      balanceProofParams = {
+        channelId: latestClaim.channelAccount,
+        nonce: latestClaim.nonce,
+        transferredAmount: latestClaim.transferredAmount,
+        lockedAmount: '0',
+        locksRoot: '',
+      };
+      // Base64 Ed25519 signature; the Solana provider decodes it.
+      claimSignature = latestClaim.signature;
+    } else if (isMinaClaim(latestClaim)) {
+      onChainChannelId = latestClaim.zkAppAddress;
+      balanceProofParams = {
+        channelId: latestClaim.zkAppAddress,
+        nonce: latestClaim.nonce,
+        // transferredAmount carries participant A's plaintext balance; fall back
+        // to balanceCommitment (which also carries the plaintext amount).
+        transferredAmount: latestClaim.transferredAmount ?? latestClaim.balanceCommitment,
+        lockedAmount: '0',
+        locksRoot: '',
+        // Dual-party (#84) fields — undefined => unidirectional fallback (the
+        // Mina provider already warns and reuses participant A's signature).
+        balanceB: latestClaim.balanceB,
+        salt: latestClaim.salt,
+        signatureB: latestClaim.signatureB,
+      };
+      // Participant A's signature is carried in the claim's `proof` field.
+      claimSignature = latestClaim.proof;
+    } else {
+      throw new Error(
+        `Unsupported claim blockchain for settlement: ${(latestClaim as BTPClaimMessage).blockchain}`
+      );
+    }
 
     this.logger.info(
       {
-        channelId,
-        nonce: latestClaim.nonce,
-        transferred: latestClaim.transferredAmount,
+        channelId: onChainChannelId,
+        blockchain: latestClaim.blockchain,
+        nonce: balanceProofParams.nonce,
+        transferred: balanceProofParams.transferredAmount,
       },
       'Using latest per-packet claim for on-chain settlement (claimFromChannel)'
     );
 
     // Claim from channel — transfers delta tokens to us, channel stays open
     await this.retryWithBackoff(
-      async () => await provider.claimFromChannel(channelId, balanceProofParams, claimSignature),
+      async () =>
+        await provider.claimFromChannel(onChainChannelId, balanceProofParams, claimSignature),
       'claimFromChannel',
       this.config.maxRetries
     );

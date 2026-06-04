@@ -74,7 +74,17 @@ import { InMemoryLedgerClient } from '../settlement/in-memory-ledger-client';
 import { PerPacketClaimService } from '../settlement/per-packet-claim-service';
 import { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
 import { EVMPaymentChannelProvider } from '../settlement/provider/evm-payment-channel-provider';
-import type { EVMProviderConfig } from '../settlement/provider/payment-channel-provider';
+import { createMinaProviderFactory } from '../settlement/provider/mina-payment-channel-provider';
+import type {
+  EVMProviderConfig,
+  MinaProviderConfig,
+  SolanaProviderConfig,
+} from '../settlement/provider/payment-channel-provider';
+import {
+  resolveMinaSignerKey,
+  resolveSolanaSigner,
+} from '../settlement/provider/signer-resolution';
+import { createSolanaProviderFactory } from '../settlement/provider/solana-payment-channel-provider';
 import {
   SENT_CLAIMS_TABLE_SCHEMA,
   SENT_CLAIMS_INDEXES,
@@ -107,6 +117,11 @@ export class ConnectorNode implements HealthStatusProvider {
   private _claimReceiver: ClaimReceiver | null = null;
   private _settlementMonitor: SettlementMonitor | null = null;
   private _settlementExecutor: SettlementExecutor | null = null;
+  // Issue #86: the shared ChainProviderRegistry built during settlement
+  // bootstrap, exposed read-only via the `chainRegistry` getter so callers
+  // (and integration tests) can observe which chain providers were registered.
+  // Stays null when the settlement stack is disabled.
+  private _chainRegistry: ChainProviderRegistry | null = null;
   private _tigerBeetleClient: TigerBeetleClient | null = null;
   private _inMemoryLedgerClient: InMemoryLedgerClient | null = null;
   private readonly _settlementPeers: Map<string, SettlementPeerConfig> = new Map();
@@ -621,167 +636,239 @@ export class ConnectorNode implements HealthStatusProvider {
       const m2mTokenAddress = evmProviderConfig?.tokenAddress;
       const treasuryPrivateKey = evmProviderConfig?.keyId;
 
-      if (
+      // Issue #86: the settlement stack is no longer EVM-only. A node settles on
+      // any configured chain — EVM (full config), Solana (rpc+program+key), or
+      // Mina (graphql+zkApp+key). The EVM-specific sub-blocks below are gated on
+      // `hasEvm`; everything chain-agnostic runs whenever `hasAnySettlementChain`.
+      const chainProviderConfigs = this._config.chainProviders ?? [];
+      const hasAnySettlementChain = chainProviderConfigs.some(
+        (p) =>
+          (p.chainType === 'evm' && p.rpcUrl && p.registryAddress && p.tokenAddress && p.keyId) ||
+          (p.chainType === 'solana' &&
+            p.rpcUrl &&
+            p.programId &&
+            (p.keyId || process.env.SOLANA_PRIVATE_KEY)) ||
+          (p.chainType === 'mina' &&
+            p.graphqlUrl &&
+            p.zkAppAddress &&
+            (p.keyId || process.env.MINA_PRIVATE_KEY))
+      );
+      const hasEvm = !!(
         evmProviderConfig &&
         baseRpcUrl &&
         registryAddress &&
         m2mTokenAddress &&
         treasuryPrivateKey
-      ) {
+      );
+
+      if (hasAnySettlementChain) {
         try {
-          // Initialize KeyManager with Environment backend using direct private key injection
-          // No process.env mutation needed — enables multi-node isolation
-          const keyManager = new KeyManager(
-            {
-              backend: 'env',
-              nodeId: this._config.nodeId,
-              evmPrivateKey: treasuryPrivateKey,
-            },
-            this._logger
-          );
+          // -----------------------------------------------------------------
+          // EVM-specific construction (issue #86): only runs when a full EVM
+          // chainProvider is configured. For Solana-only / Mina-only nodes,
+          // `this._paymentChannelSDK` and `this._channelManager` stay null and
+          // the chain-agnostic code below builds the registry + executor +
+          // claim receiver from the non-EVM providers instead.
+          // -----------------------------------------------------------------
+          // Primary EVM chain id (numeric, from blockchain config). Hoisted to
+          // the outer scope because chain-agnostic code below references it when
+          // computing `primaryChainIdStr`. Undefined for non-EVM-only nodes.
+          let primaryChainId: number | undefined;
 
-          // Use 'evm' as key ID (EnvironmentVariableBackend detects type from keyId)
-          const evmKeyId = 'evm';
-
-          // Initialize PaymentChannelSDK (primary chain)
-          const { ethers } = await requireOptional<typeof import('ethers')>(
-            'ethers',
-            'EVM settlement'
-          );
-          const provider = new ethers.JsonRpcProvider(baseRpcUrl);
-          this._paymentChannelSDK = new PaymentChannelSDK(
-            provider,
-            keyManager,
-            evmKeyId,
-            registryAddress,
-            this._logger
-          );
-
-          // Resolve on-chain token symbol for canonical tokenId
-          try {
-            const resolvedSymbol = await this._paymentChannelSDK.getTokenSymbol(m2mTokenAddress);
-            if (resolvedSymbol) {
-              this._defaultSettlementTokenId = resolvedSymbol;
-              this._logger.info(
-                {
-                  event: 'token_symbol_resolved',
-                  symbol: resolvedSymbol,
-                  tokenAddress: m2mTokenAddress,
-                },
-                `Resolved on-chain token symbol: ${resolvedSymbol}`
-              );
-            } else {
-              this._logger.warn(
-                { event: 'token_symbol_empty', tokenAddress: m2mTokenAddress },
-                'ERC-20 symbol() returned empty string, falling back to M2M'
-              );
-            }
-          } catch (symbolError) {
-            this._logger.warn(
+          if (hasEvm) {
+            // Initialize KeyManager with Environment backend using direct private key injection
+            // No process.env mutation needed — enables multi-node isolation
+            const keyManager = new KeyManager(
               {
-                event: 'token_symbol_resolution_failed',
-                tokenAddress: m2mTokenAddress,
-                error: symbolError instanceof Error ? symbolError.message : String(symbolError),
+                backend: 'env',
+                nodeId: this._config.nodeId,
+                evmPrivateKey: treasuryPrivateKey,
               },
-              'Failed to resolve on-chain token symbol, falling back to M2M'
-            );
-          }
-
-          // Store primary SDK in chain map
-          const primaryChainId =
-            this._config.blockchain?.base?.chainId ?? this._config.blockchain?.arbitrum?.chainId;
-          if (primaryChainId) {
-            this._chainSDKs.set(primaryChainId, this._paymentChannelSDK);
-          }
-
-          // Initialize additional chain SDKs for multi-chain settlement
-          const enabledChains: Array<{
-            name: string;
-            config: import('../config/types').EVMChainConfig;
-          }> = [];
-          if (this._config.blockchain?.base?.enabled && this._config.blockchain.base) {
-            enabledChains.push({ name: 'Base', config: this._config.blockchain.base });
-          }
-          if (this._config.blockchain?.arbitrum?.enabled && this._config.blockchain.arbitrum) {
-            enabledChains.push({ name: 'Arbitrum', config: this._config.blockchain.arbitrum });
-          }
-
-          for (const chain of enabledChains) {
-            // Skip if already stored (primary chain)
-            if (this._chainSDKs.has(chain.config.chainId)) {
-              continue;
-            }
-
-            const chainRpcUrl = chain.config.rpcUrl;
-            const chainRegistryAddress = chain.config.registryAddress ?? registryAddress;
-            const chainPrivateKey = chain.config.privateKey ?? treasuryPrivateKey;
-
-            // Create per-chain KeyManager if different private key
-            const chainKeyManager =
-              chainPrivateKey !== treasuryPrivateKey
-                ? new KeyManager(
-                    { backend: 'env', nodeId: this._config.nodeId, evmPrivateKey: chainPrivateKey },
-                    this._logger
-                  )
-                : keyManager;
-
-            const chainProvider = new ethers.JsonRpcProvider(chainRpcUrl);
-            const chainSDK = new PaymentChannelSDK(
-              chainProvider,
-              chainKeyManager,
-              evmKeyId,
-              chainRegistryAddress,
               this._logger
             );
-            this._chainSDKs.set(chain.config.chainId, chainSDK);
 
-            this._logger.info(
-              {
-                event: 'chain_sdk_initialized',
-                chain: chain.name,
-                chainId: chain.config.chainId,
-                rpcUrl: chainRpcUrl,
-              },
-              `PaymentChannelSDK initialized for ${chain.name} (chainId: ${chain.config.chainId})`
+            // Use 'evm' as key ID (EnvironmentVariableBackend detects type from keyId)
+            const evmKeyId = 'evm';
+
+            // Initialize PaymentChannelSDK (primary chain)
+            const { ethers } = await requireOptional<typeof import('ethers')>(
+              'ethers',
+              'EVM settlement'
             );
+            const provider = new ethers.JsonRpcProvider(baseRpcUrl);
+            this._paymentChannelSDK = new PaymentChannelSDK(
+              provider,
+              keyManager,
+              evmKeyId,
+              registryAddress!,
+              this._logger
+            );
+
+            // Resolve on-chain token symbol for canonical tokenId
+            try {
+              const resolvedSymbol = await this._paymentChannelSDK.getTokenSymbol(m2mTokenAddress!);
+              if (resolvedSymbol) {
+                this._defaultSettlementTokenId = resolvedSymbol;
+                this._logger.info(
+                  {
+                    event: 'token_symbol_resolved',
+                    symbol: resolvedSymbol,
+                    tokenAddress: m2mTokenAddress,
+                  },
+                  `Resolved on-chain token symbol: ${resolvedSymbol}`
+                );
+              } else {
+                this._logger.warn(
+                  { event: 'token_symbol_empty', tokenAddress: m2mTokenAddress },
+                  'ERC-20 symbol() returned empty string, falling back to M2M'
+                );
+              }
+            } catch (symbolError) {
+              this._logger.warn(
+                {
+                  event: 'token_symbol_resolution_failed',
+                  tokenAddress: m2mTokenAddress,
+                  error: symbolError instanceof Error ? symbolError.message : String(symbolError),
+                },
+                'Failed to resolve on-chain token symbol, falling back to M2M'
+              );
+            }
+
+            // Store primary SDK in chain map
+            primaryChainId =
+              this._config.blockchain?.base?.chainId ?? this._config.blockchain?.arbitrum?.chainId;
+            if (primaryChainId) {
+              this._chainSDKs.set(primaryChainId, this._paymentChannelSDK);
+            }
+
+            // Initialize additional chain SDKs for multi-chain settlement
+            const enabledChains: Array<{
+              name: string;
+              config: import('../config/types').EVMChainConfig;
+            }> = [];
+            if (this._config.blockchain?.base?.enabled && this._config.blockchain.base) {
+              enabledChains.push({ name: 'Base', config: this._config.blockchain.base });
+            }
+            if (this._config.blockchain?.arbitrum?.enabled && this._config.blockchain.arbitrum) {
+              enabledChains.push({ name: 'Arbitrum', config: this._config.blockchain.arbitrum });
+            }
+
+            for (const chain of enabledChains) {
+              // Skip if already stored (primary chain)
+              if (this._chainSDKs.has(chain.config.chainId)) {
+                continue;
+              }
+
+              const chainRpcUrl = chain.config.rpcUrl;
+              const chainRegistryAddress = chain.config.registryAddress ?? registryAddress!;
+              const chainPrivateKey = chain.config.privateKey ?? treasuryPrivateKey!;
+
+              // Create per-chain KeyManager if different private key
+              const chainKeyManager =
+                chainPrivateKey !== treasuryPrivateKey
+                  ? new KeyManager(
+                      {
+                        backend: 'env',
+                        nodeId: this._config.nodeId,
+                        evmPrivateKey: chainPrivateKey,
+                      },
+                      this._logger
+                    )
+                  : keyManager;
+
+              const chainProvider = new ethers.JsonRpcProvider(chainRpcUrl);
+              const chainSDK = new PaymentChannelSDK(
+                chainProvider,
+                chainKeyManager,
+                evmKeyId,
+                chainRegistryAddress,
+                this._logger
+              );
+              this._chainSDKs.set(chain.config.chainId, chainSDK);
+
+              this._logger.info(
+                {
+                  event: 'chain_sdk_initialized',
+                  chain: chain.name,
+                  chainId: chain.config.chainId,
+                  rpcUrl: chainRpcUrl,
+                },
+                `PaymentChannelSDK initialized for ${chain.name} (chainId: ${chain.config.chainId})`
+              );
+            }
+          } // end if (hasEvm)
+
+          // -----------------------------------------------------------------
+          // Chain-agnostic settlement defaults (issue #86).
+          //
+          // When no EVM provider is configured, derive the default settlement
+          // token id from the first non-EVM provider so executor token lookups
+          // succeed: Solana -> `tokenMint ?? 'SOL'`, Mina -> `tokenId ?? 'MINA'`.
+          // -----------------------------------------------------------------
+          const firstNonEvmConfig = chainProviderConfigs.find(
+            (p) => p.chainType === 'solana' || p.chainType === 'mina'
+          );
+          if (!hasEvm && firstNonEvmConfig) {
+            if (firstNonEvmConfig.chainType === 'solana') {
+              this._defaultSettlementTokenId = firstNonEvmConfig.tokenMint ?? 'SOL';
+            } else if (firstNonEvmConfig.chainType === 'mina') {
+              this._defaultSettlementTokenId = firstNonEvmConfig.tokenId ?? 'MINA';
+            }
           }
 
-          // Build peer ID to EVM address mapping from config (with env var fallback)
+          // Build peer ID to settlement-address mapping from config. EVM peers
+          // use `evmAddress`; non-EVM peers use the generic `settlementAddress`.
           const peerIdToAddressMap = new Map<string, string>();
           for (const peer of this._config.peers) {
-            if (peer.evmAddress) {
-              peerIdToAddressMap.set(peer.id, peer.evmAddress);
+            const peerAddr = peer.evmAddress ?? peer.settlementAddress;
+            if (peerAddr) {
+              peerIdToAddressMap.set(peer.id, peerAddr);
               this._logger.debug(
-                { peerId: peer.id, address: peer.evmAddress },
-                'Loaded peer EVM address from config'
+                { peerId: peer.id, address: peerAddr },
+                'Loaded peer settlement address from config'
               );
             }
           }
 
-          // Env var fallback for peers without evmAddress in config
-          // Supports legacy PEER{N}_EVM_ADDRESS pattern (expanded to 10; will be removed in a future epic)
-          for (let i = 1; i <= 10; i++) {
-            const peerAddress = process.env[`PEER${i}_EVM_ADDRESS`];
-            const peerId = `peer${i}`;
-            if (peerAddress && !peerIdToAddressMap.has(peerId)) {
-              peerIdToAddressMap.set(peerId, peerAddress);
-              this._logger.debug(
-                { peerId, address: peerAddress },
-                'Loaded peer EVM address from env var (fallback)'
-              );
+          // Env var fallback for peers without an address in config.
+          // The legacy PEER{N}_EVM_ADDRESS pattern is EVM-only.
+          if (hasEvm) {
+            for (let i = 1; i <= 10; i++) {
+              const peerAddress = process.env[`PEER${i}_EVM_ADDRESS`];
+              const peerId = `peer${i}`;
+              if (peerAddress && !peerIdToAddressMap.has(peerId)) {
+                peerIdToAddressMap.set(peerId, peerAddress);
+                this._logger.debug(
+                  { peerId, address: peerAddress },
+                  'Loaded peer EVM address from env var (fallback)'
+                );
+              }
             }
           }
 
-          // Build token address map using the resolved on-chain symbol
+          // Build token address map. For EVM, seed the resolved on-chain symbol
+          // and the M2M token address. For non-EVM-only nodes, seed the default
+          // token id -> on-chain token reference (Solana mint / Mina zkApp).
           const tokenAddressMap = new Map<string, string>();
-          tokenAddressMap.set(this._defaultSettlementTokenId, m2mTokenAddress);
-          tokenAddressMap.set(m2mTokenAddress, m2mTokenAddress); // Also map address to itself for direct lookups
+          if (hasEvm) {
+            tokenAddressMap.set(this._defaultSettlementTokenId, m2mTokenAddress!);
+            tokenAddressMap.set(m2mTokenAddress!, m2mTokenAddress!); // Also map address to itself for direct lookups
+          } else if (firstNonEvmConfig) {
+            const nonEvmTokenRef =
+              firstNonEvmConfig.chainType === 'solana'
+                ? (firstNonEvmConfig.tokenMint ?? this._defaultSettlementTokenId)
+                : firstNonEvmConfig.zkAppAddress;
+            tokenAddressMap.set(this._defaultSettlementTokenId, nonEvmTokenRef);
+          }
 
-          // Initialize ChannelManager with TigerBeetle accounting if configured
-          const defaultSettlementTimeout =
-            evmProviderConfig.settlementOptions?.settlementTimeoutSecs ?? 86400;
-          const initialDepositMultiplier =
-            evmProviderConfig.settlementOptions?.initialDepositMultiplier ?? 1;
+          // Settlement tuning: read from the first chainProvider that carries
+          // settlementOptions (EVM today), falling back to safe defaults.
+          const firstSettlementOptions = chainProviderConfigs.find(
+            (p): p is EVMProviderConfig & { chainId: string } =>
+              p.chainType === 'evm' && !!p.settlementOptions
+          )?.settlementOptions;
+          const defaultSettlementTimeout = firstSettlementOptions?.settlementTimeoutSecs ?? 86400;
+          const initialDepositMultiplier = firstSettlementOptions?.initialDepositMultiplier ?? 1;
 
           // Initialize TigerBeetle AccountManager if configured (Story 19.1-19.2)
           // When TigerBeetle is unavailable, falls back to mock AccountManager (graceful degradation)
@@ -886,9 +973,7 @@ export class ConnectorNode implements HealthStatusProvider {
           // Extract peer IDs from peerIdToAddressMap (includes all known peers in the network)
           const peerIds = Array.from(peerIdToAddressMap.keys());
 
-          const settlementThreshold = BigInt(
-            evmProviderConfig.settlementOptions?.threshold ?? '1000000'
-          );
+          const settlementThreshold = BigInt(firstSettlementOptions?.threshold ?? '1000000');
 
           this._logger.info(
             {
@@ -911,41 +996,144 @@ export class ConnectorNode implements HealthStatusProvider {
           );
           this._settlementMonitor = settlementMonitor;
 
-          // Create a shared ChainProviderRegistry wrapping the primary SDK
-          // in an EVMPaymentChannelProvider. Both SettlementExecutor and
-          // PerPacketClaimService share this registry instance.
-          // Resolve primary chain ID string: prefer blockchain config, then chainProviders, then fallback
+          // Create a shared ChainProviderRegistry. Both SettlementExecutor and
+          // PerPacketClaimService share this registry instance. Each configured
+          // chain registers its own provider (issue #86): EVM (when hasEvm),
+          // Solana, and Mina. One bad chain must not abort the others.
+          const chainRegistry = new ChainProviderRegistry();
+          // Expose the registry on the instance (read-only via the
+          // `chainRegistry` getter) so the settlement stack's wiring is
+          // observable after start() (issue #86).
+          this._chainRegistry = chainRegistry;
+
+          // Resolve primary EVM chain ID string: prefer blockchain config, then
+          // chainProviders, then fallback. Only meaningful when hasEvm.
           const chainProviderChainId = this._config.chainProviders?.find(
             (cp) => cp.chainType === 'evm'
           )?.chainId;
-          const primaryChainIdStr = primaryChainId
+          const evmChainIdStr = primaryChainId
             ? `evm:${primaryChainId}`
             : (chainProviderChainId ?? 'evm:unknown');
-          const chainRegistry = new ChainProviderRegistry();
-          const evmProvider = new EVMPaymentChannelProvider(
-            this._paymentChannelSDK,
-            primaryChainIdStr,
-            m2mTokenAddress,
-            this._logger
-          );
-          chainRegistry.register(evmProvider);
+
+          if (hasEvm) {
+            const evmProvider = new EVMPaymentChannelProvider(
+              this._paymentChannelSDK!,
+              evmChainIdStr,
+              m2mTokenAddress!,
+              this._logger
+            );
+            chainRegistry.register(evmProvider);
+            this._logger.info(
+              { event: 'chain_provider_registered', chainType: 'evm', chainId: evmChainIdStr },
+              `EVM payment channel provider registered (${evmChainIdStr})`
+            );
+          }
+
+          // Register Solana providers (issue #86). The signer is built from the
+          // config keyId (raw base58) or the SOLANA_PRIVATE_KEY env fallback.
+          for (const cfg of chainProviderConfigs) {
+            if (cfg.chainType !== 'solana') continue;
+            try {
+              const solanaCfg = cfg as SolanaProviderConfig & { chainId: string };
+              const signer = await resolveSolanaSigner(solanaCfg.keyId, this._logger);
+              const tokenMint = solanaCfg.tokenMint ?? this._defaultSettlementTokenId;
+              const provider = createSolanaProviderFactory(
+                this._logger,
+                signer,
+                tokenMint
+              )(solanaCfg);
+              chainRegistry.register(provider);
+              this._logger.info(
+                {
+                  event: 'chain_provider_registered',
+                  chainType: 'solana',
+                  chainId: provider.chainId,
+                },
+                `Solana payment channel provider registered (${provider.chainId})`
+              );
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              this._logger.error(
+                {
+                  event: 'chain_provider_registration_failed',
+                  chainType: 'solana',
+                  chainId: cfg.chainId,
+                  error: errorMessage,
+                },
+                'Failed to register Solana payment channel provider'
+              );
+            }
+          }
+
+          // Register Mina providers (issue #86). The signer key is the config
+          // keyId (raw base58) or the MINA_PRIVATE_KEY env fallback.
+          for (const cfg of chainProviderConfigs) {
+            if (cfg.chainType !== 'mina') continue;
+            try {
+              const minaCfg = cfg as MinaProviderConfig & { chainId: string };
+              const key = resolveMinaSignerKey(minaCfg.keyId);
+              const provider = createMinaProviderFactory(this._logger, key)(minaCfg);
+              chainRegistry.register(provider);
+              this._logger.info(
+                {
+                  event: 'chain_provider_registered',
+                  chainType: 'mina',
+                  chainId: provider.chainId,
+                },
+                `Mina payment channel provider registered (${provider.chainId})`
+              );
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              this._logger.error(
+                {
+                  event: 'chain_provider_registration_failed',
+                  chainType: 'mina',
+                  chainId: cfg.chainId,
+                  error: errorMessage,
+                },
+                'Failed to register Mina payment channel provider'
+              );
+            }
+          }
+
+          // Determine the primary chain id string used as the default for peers
+          // that don't explicitly reference a chain. For EVM nodes this is the
+          // EVM chain. For non-EVM-only nodes it is the single registered chain;
+          // if multiple non-EVM chains are registered, there is no safe default.
+          const registeredChainIds = chainRegistry.getAllProviders().map((p) => p.chainId);
+          const nonEvmChainIds = registeredChainIds.filter((id) => !id.startsWith('evm:'));
+          const primaryChainIdStr = hasEvm
+            ? evmChainIdStr
+            : nonEvmChainIds.length === 1
+              ? nonEvmChainIds[0]
+              : undefined;
 
           // Build peerIdToChainMap — config-driven when peers have `chain` fields,
-          // otherwise all peers default to the primary EVM chain.
+          // otherwise peers default to the single primary chain. When there are
+          // multiple non-EVM chains and no explicit `peer.chain`, skip the peer
+          // rather than guess.
           const peerIdToChainMap = new Map<string, string>();
           for (const peer of this._config.peers) {
             if (peer.chain) {
               // Config-driven: peer explicitly references a chain provider
               peerIdToChainMap.set(peer.id, peer.chain);
             } else if (peerIdToAddressMap.has(peer.id)) {
-              // Legacy: peer defaults to primary EVM chain
-              peerIdToChainMap.set(peer.id, primaryChainIdStr);
+              if (primaryChainIdStr) {
+                peerIdToChainMap.set(peer.id, primaryChainIdStr);
+              } else {
+                this._logger.warn(
+                  { event: 'peer_chain_ambiguous', peerId: peer.id, chains: nonEvmChainIds },
+                  'Peer has no explicit chain and multiple non-EVM chains are registered; skipping default chain mapping'
+                );
+              }
             }
           }
-          // Also map env-var-discovered peers (legacy PEER{N} pattern) to primary chain
-          for (const peerId of peerIdToAddressMap.keys()) {
-            if (!peerIdToChainMap.has(peerId)) {
-              peerIdToChainMap.set(peerId, primaryChainIdStr);
+          // Also map env-var-discovered peers (legacy PEER{N} pattern) to the primary chain.
+          if (primaryChainIdStr) {
+            for (const peerId of peerIdToAddressMap.keys()) {
+              if (!peerIdToChainMap.has(peerId)) {
+                peerIdToChainMap.set(peerId, primaryChainIdStr);
+              }
             }
           }
 
@@ -955,9 +1143,13 @@ export class ConnectorNode implements HealthStatusProvider {
             nip59Enabled,
             logger: this._logger,
           });
-          const nodeSecp256k1PrivKey = treasuryPrivateKey
-            ? hexToBytes(treasuryPrivateKey.replace(/^0x/, ''))
-            : undefined;
+          // NIP-59 wrapping needs an secp256k1 private key. This is derived from
+          // the EVM treasury key; non-EVM-only nodes have no such key, so NIP-59
+          // wrapping is simply unavailable for them (acceptable — issue #86).
+          const nodeSecp256k1PrivKey =
+            hasEvm && treasuryPrivateKey
+              ? hexToBytes(treasuryPrivateKey.replace(/^0x/, ''))
+              : undefined;
           const peerIdToNip59PubKey = new Map<string, Uint8Array>();
           for (const peer of this._config.peers) {
             if (peer.nip59PublicKey) {
@@ -1008,27 +1200,33 @@ export class ConnectorNode implements HealthStatusProvider {
             'Event-driven settlement monitoring started'
           );
 
-          this._channelManager = new ChannelManager(
-            {
-              nodeId: this._config.nodeId,
-              defaultSettlementTimeout,
-              initialDepositMultiplier,
-              idleChannelThreshold: 86400,
-              minDepositThreshold: 0.5,
-              idleCheckInterval: 3600,
-              tokenAddressMap,
-              peerIdToAddressMap,
-              registryAddress,
-              rpcUrl: baseRpcUrl,
-              privateKey: treasuryPrivateKey,
-            },
-            this._paymentChannelSDK,
-            this._settlementExecutor,
-            this._logger
-          );
+          // ChannelManager requires the EVM SDK + EVM registry/rpc/key, so it is
+          // built only for EVM nodes (issue #86). For non-EVM-only nodes it stays
+          // null; the SettlementExecutor's Wave-2 ClaimReceiver fallback derives
+          // channel ids from verified inbound claims instead.
+          if (hasEvm) {
+            this._channelManager = new ChannelManager(
+              {
+                nodeId: this._config.nodeId,
+                defaultSettlementTimeout,
+                initialDepositMultiplier,
+                idleChannelThreshold: 86400,
+                minDepositThreshold: 0.5,
+                idleCheckInterval: 3600,
+                tokenAddressMap,
+                peerIdToAddressMap,
+                registryAddress: registryAddress!,
+                rpcUrl: baseRpcUrl!,
+                privateKey: treasuryPrivateKey!,
+              },
+              this._paymentChannelSDK!,
+              this._settlementExecutor,
+              this._logger
+            );
 
-          // Wire ChannelManager to SettlementExecutor for chain-agnostic channel lookup
-          this._settlementExecutor.setChannelManager(this._channelManager);
+            // Wire ChannelManager to SettlementExecutor for chain-agnostic channel lookup
+            this._settlementExecutor.setChannelManager(this._channelManager);
+          }
 
           this._logger.info(
             {
@@ -1093,7 +1291,7 @@ export class ConnectorNode implements HealthStatusProvider {
           // Every ILP PREPARE arriving via BTP must carry a valid signed claim
           // before reaching the packet handler / local delivery.
           const inboundClaimValidator = new InboundClaimValidator(
-            this._paymentChannelSDK,
+            this._paymentChannelSDK ?? undefined,
             this._config.nodeId,
             this._logger,
             this._channelManager ?? undefined,
@@ -1103,7 +1301,10 @@ export class ConnectorNode implements HealthStatusProvider {
             // forwarding path's single source of truth so a child node skips
             // the inline-claim requirement for PREPAREs from its parent,
             // mirroring the outbound child-skip in requiresSettlementClaim.
-            (peerId) => this._packetHandler.getPeerRelation(peerId)
+            (peerId) => this._packetHandler.getPeerRelation(peerId),
+            // Issue #86: pass the registry so non-EVM inbound claims (Solana/Mina)
+            // are accepted when a provider is registered for the claim's chain.
+            chainRegistry
           );
           this._btpServer.setInboundClaimValidator((protocolData, ilpPacket, peerId) =>
             inboundClaimValidator.validate(protocolData, ilpPacket, peerId)
@@ -1115,8 +1316,10 @@ export class ConnectorNode implements HealthStatusProvider {
 
           // Wire ClaimReceiver for event-driven settlement monitoring
           // ClaimReceiver validates inbound claims and emits CLAIM_RECEIVED events
-          // that SettlementMonitor uses to trigger on-chain claimFromChannel()
-          if (this._paymentChannelSDK) {
+          // that SettlementMonitor uses to trigger on-chain claimFromChannel().
+          // Issue #86: built for any active settlement stack — it only needs the
+          // chainRegistry (not the EVM SDK), so non-EVM nodes get the credit path.
+          if (chainRegistry.getAllProviders().length > 0) {
             try {
               // libsql: better-sqlite3-compatible drop-in with N-API prebuilts
               // (Node 22.11+/24, no native build). See note above (issue #79).
@@ -1500,6 +1703,9 @@ export class ConnectorNode implements HealthStatusProvider {
         this._logger.info({ event: 'payment_channel_sdk_stopped' }, 'Payment channel SDK stopped');
         this._paymentChannelSDK = null;
       }
+
+      // Drop the chain provider registry reference (issue #86 observability surface)
+      this._chainRegistry = null;
 
       // Close TigerBeetle client if connected
       if (this._tigerBeetleClient) {
@@ -1928,6 +2134,20 @@ export class ConnectorNode implements HealthStatusProvider {
    */
   get paymentChannelSDK(): PaymentChannelSDK | null {
     return this._paymentChannelSDK;
+  }
+
+  /**
+   * Get the shared ChainProviderRegistry built during settlement bootstrap.
+   *
+   * Read-only observability surface (issue #86): callers and integration tests
+   * can inspect which chain providers (evm:*, solana:*, mina:*) were registered
+   * after `start()`. Returns `null` when the settlement stack is disabled (no
+   * settlement-capable chainProviders configured).
+   *
+   * @returns The ChainProviderRegistry, or null if settlement is disabled
+   */
+  get chainRegistry(): ChainProviderRegistry | null {
+    return this._chainRegistry;
   }
 
   /**

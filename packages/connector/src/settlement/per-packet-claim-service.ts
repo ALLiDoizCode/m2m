@@ -260,6 +260,12 @@ export class PerPacketClaimService {
         // The Mina provider's signBalanceProof() internally computes the Poseidon
         // commitment from this value. The receiver verifies via the zk-SNARK proof.
         balanceCommitment: newCumulative.toString(),
+        // transferredAmount carries participant A's plaintext cumulative balance
+        // (the same value that feeds balanceCommitment). It drives the on-chain
+        // claimFromChannel in SettlementExecutor. balanceB/signatureB are left
+        // undefined here: the per-packet path is unidirectional; dual-party
+        // fields only apply to true bidirectional channels.
+        transferredAmount: newCumulative.toString(),
         nonce: newNonce,
         proof: signature, // signBalanceProof returns the serialized zk-SNARK proof
         salt: ctx.minaSalt,

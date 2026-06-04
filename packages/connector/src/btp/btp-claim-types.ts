@@ -161,6 +161,12 @@ export interface MinaClaimMessage extends BaseClaimMessage {
   proof: string;
   /** Shared salt for commitment verification (sent to peer, not on-chain) */
   salt: string;
+  /** Participant A's cumulative balance (balanceA), plaintext — mirrors balanceCommitment's value. Used to drive on-chain claimFromChannel. */
+  transferredAmount?: string;
+  /** Mina dual-party (#84): participant B's revealed balance for the Poseidon commitment hash([balanceA, balanceB, salt]). */
+  balanceB?: string;
+  /** Mina dual-party (#84): participant B's signature for dual-party authorization. */
+  signatureB?: string;
   /** Optional Mina network identifier (e.g., 'devnet', 'mainnet') */
   network?: string;
 }
@@ -337,6 +343,24 @@ function validateMinaClaim(claim: Partial<MinaClaimMessage>): void {
   }
   if (!claim.salt || typeof claim.salt !== 'string') {
     throw new Error('Missing or invalid salt (expected non-empty string)');
+  }
+
+  // Optional dual-party fields (Mina #84) — validated only when present so that
+  // single-party (unidirectional) claims remain valid.
+  if (claim.transferredAmount !== undefined) {
+    if (typeof claim.transferredAmount !== 'string' || !/^\d+$/.test(claim.transferredAmount)) {
+      throw new Error('Invalid transferredAmount (expected non-negative integer string)');
+    }
+  }
+  if (claim.balanceB !== undefined) {
+    if (typeof claim.balanceB !== 'string' || !/^\d+$/.test(claim.balanceB)) {
+      throw new Error('Invalid balanceB (expected non-negative integer string)');
+    }
+  }
+  if (claim.signatureB !== undefined) {
+    if (typeof claim.signatureB !== 'string' || claim.signatureB.length === 0) {
+      throw new Error('Invalid signatureB (expected non-empty string)');
+    }
   }
 
   // Optional network validation

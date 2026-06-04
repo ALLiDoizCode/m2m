@@ -138,6 +138,9 @@ export interface PeerConfig {
    */
   evmAddress?: string;
 
+  /** Generic settlement address for non-EVM chains (Solana base58 / Mina B62…). Seeds peerIdToAddressMap when evmAddress is absent. */
+  settlementAddress?: string;
+
   /**
    * Chain reference linking peer to a registered provider's chainId (e.g., 'evm:8453').
    */
