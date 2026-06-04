@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.0](https://github.com/toon-protocol/connector/compare/v3.8.1...v3.9.0) (2026-06-04)
+
+### Features
+
+- **settlement:** wire Solana and Mina settlement end-to-end ([#86](https://github.com/toon-protocol/connector/issues/86)) ([86ad042](https://github.com/toon-protocol/connector/commit/86ad04217a6cbc776bf6b6651e0876decf48f104)), closes [#84](https://github.com/toon-protocol/connector/issues/84)
+
 ## [3.8.1](https://github.com/toon-protocol/connector/compare/v3.8.0...v3.8.1) (2026-06-02)
 
 ### Bug Fixes
