@@ -163,9 +163,38 @@ The `MinaProviderConfig` interface defines how the connector connects to the Min
 | `chainType`    | `'mina'` | Yes      | Discriminator for the Mina provider                                            |
 | `graphqlUrl`   | `string` | Yes      | Mina GraphQL endpoint (e.g., `https://api.minascan.io/node/devnet/v1/graphql`) |
 | `zkAppAddress` | `string` | Yes      | Base58-encoded deployed zkApp address (B62... format)                          |
-| `keyId`        | `string` | No       | Key identifier for signing operations (references key management config)       |
+| `keyId`        | `string` | No\*     | Raw **base58 Pallas private key** (see "Settlement key contract" below)        |
 | `tokenId`      | `string` | No       | Mina token ID (defaults to native MINA if omitted)                             |
 | `network`      | `string` | No       | Network name for chainId namespacing: `'devnet'` or `'mainnet'`                |
+
+\* `keyId` is required to sign claims; if omitted, the connector falls back to the `MINA_PRIVATE_KEY` environment variable.
+
+### Settlement key (`keyId`) contract
+
+The Mina `keyId` follows the same contract as the EVM/Solana `keyId`: it holds the **raw private key**, not a key-management identifier.
+
+- **Format:** a **base58-encoded Pallas private key** (the `EKE...` string produced by `PrivateKey.toBase58()` / the lightnet accounts manager's `sk` field). The connector passes it verbatim to the Mina SDK, which parses it when constructing the signer.
+- **Environment fallback:** when `keyId` is omitted, the connector reads the key from the `MINA_PRIVATE_KEY` environment variable. If neither resolves, settlement bootstrap throws a descriptive error.
+
+#### Standalone Mina-only nodes (claim-driven redemption)
+
+A node configured with **only** a Mina `chainProvider` (no EVM entry) is fully supported. On startup it boots the settlement stack — `ChainProviderRegistry`, `SettlementExecutor`, `ClaimReceiver`, and `SettlementMonitor` — and registers a `mina:<network>` provider. The EVM `PaymentChannelSDK` and `ChannelManager` stay `null`.
+
+Non-EVM settlement is **claim-driven redemption**: the connector redeems verified claims against zkApp channels **opened out-of-band**. It does **not** open Mina channels on demand. Operators open and deposit into channels themselves; the connector submits `claimFromChannel` transactions when a peer's credit balance crosses the settlement threshold.
+
+### Dual-party Mina claims
+
+A Mina claim's balance commitment is `Poseidon(balanceA, balanceB, salt)`. The connector's claim message (`MinaClaimMessage`) and the provider's `claimFromChannel` accept the following dual-party fields:
+
+| Field               | Maps to           | Meaning                                           |
+| ------------------- | ----------------- | ------------------------------------------------- |
+| `transferredAmount` | `balanceA`        | Participant A's balance in the commitment         |
+| `balanceB`          | `balanceB`        | Participant B's balance in the commitment         |
+| `salt`              | `salt`            | Blinding factor that preserves commitment privacy |
+| `proof`             | participant A sig | Participant A's signature/authorization           |
+| `signatureB`        | participant B sig | Participant B's distinct signature/authorization  |
+
+**Unidirectional vs. dual-party:** for a true two-party settlement (e.g. a bidirectional swap) supply a **distinct** `signatureB`, a real `balanceB`, and a **non-zero** `salt`. When `balanceB`/`signatureB` are **omitted**, the provider falls back to a **single-signature unidirectional** claim (`balanceB = 0`, `salt = 0`, `signatureB = signatureA`) and logs a warning. The per-packet claim producer emits unidirectional claims (it populates `transferredAmount` only); dual-party fields are threaded through when a caller supplies them.
 
 ### Connector YAML Configuration Example
 
@@ -180,7 +209,7 @@ chainProviders:
     chainId: 'mina:devnet'
     graphqlUrl: 'https://api.minascan.io/node/devnet/v1/graphql'
     zkAppAddress: '<DEPLOYED_ZKAPP_ADDRESS>'
-    keyId: 'mina-operator-key'
+    keyId: '<base58 Pallas private key, EKE...>' # raw key; or set MINA_PRIVATE_KEY
     tokenId: 'wSHV2S4qX9jFsLjQo8r1BsMLH2ZRKsZx6EJd1sbozGPieEC4Jf'
     network: 'devnet'
 
@@ -194,6 +223,28 @@ peers:
     url: wss://peer-evm:3002
     authToken: secret-evm
     chain: 'evm:8453' # EVM peer unchanged
+```
+
+### Minimal Mina-only configuration
+
+A standalone Mina-only node needs only the Mina `chainProvider`:
+
+```yaml
+nodeId: mina-node
+btpServerPort: 3000
+environment: development
+deploymentMode: standalone
+
+chainProviders:
+  - chainType: mina
+    chainId: 'mina:devnet'
+    graphqlUrl: 'https://api.minascan.io/node/devnet/v1/graphql'
+    zkAppAddress: '<DEPLOYED_ZKAPP_ADDRESS>'
+    keyId: '<base58 Pallas private key, EKE...>' # or set MINA_PRIVATE_KEY
+    network: 'devnet'
+
+peers: [] # accepts inbound BTP; redeems claims against out-of-band channels
+routes: []
 ```
 
 ### Per-Peer Chain Reference

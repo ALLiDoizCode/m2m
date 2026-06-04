@@ -163,14 +163,31 @@ The program ID is recorded in `tools/solana/program-id.json` with the following 
 
 The `SolanaProviderConfig` interface defines how the connector connects to the Solana payment channel program:
 
-| Field       | Type       | Required | Description                                                                      |
-| ----------- | ---------- | -------- | -------------------------------------------------------------------------------- |
-| `chainType` | `'solana'` | Yes      | Discriminator for the Solana provider                                            |
-| `rpcUrl`    | `string`   | Yes      | Solana cluster RPC endpoint (HTTP). Example: `https://api.devnet.solana.com`     |
-| `wsUrl`     | `string`   | No       | WebSocket endpoint for account subscriptions. Derived from `rpcUrl` if omitted   |
-| `programId` | `string`   | Yes      | Base58-encoded deployed program address (from `tools/solana/program-id.json`)    |
-| `keyId`     | `string`   | Yes      | Key identifier for Ed25519 signing operations (references key management config) |
-| `cluster`   | `string`   | No       | Solana cluster name: `'mainnet-beta'`, `'devnet'`, or `'testnet'`                |
+| Field       | Type       | Required | Description                                                                    |
+| ----------- | ---------- | -------- | ------------------------------------------------------------------------------ |
+| `chainType` | `'solana'` | Yes      | Discriminator for the Solana provider                                          |
+| `rpcUrl`    | `string`   | Yes      | Solana cluster RPC endpoint (HTTP). Example: `https://api.devnet.solana.com`   |
+| `wsUrl`     | `string`   | No       | WebSocket endpoint for account subscriptions. Derived from `rpcUrl` if omitted |
+| `programId` | `string`   | Yes      | Base58-encoded deployed program address (from `tools/solana/program-id.json`)  |
+| `keyId`     | `string`   | Yes\*    | Raw **base58 ed25519 secret key** (see "Settlement key contract" below)        |
+| `cluster`   | `string`   | No       | Solana cluster name: `'mainnet-beta'`, `'devnet'`, or `'testnet'`              |
+| `tokenMint` | `string`   | No       | Base58 SPL token mint address for the payment-channel token                    |
+
+\* `keyId` is required unless the `SOLANA_PRIVATE_KEY` environment variable is set (see below).
+
+### Settlement key (`keyId`) contract
+
+The Solana `keyId` follows the same contract as the EVM `keyId`: it holds the **raw private key**, not a key-management identifier.
+
+- **Format:** a base58-encoded **64-byte ed25519 secret key** (the full keypair, `seed || public_key`). A base58-encoded **32-byte private-key seed** is also accepted and expanded to a full keypair.
+- **Environment fallback:** when `keyId` is omitted, the connector reads the key from the `SOLANA_PRIVATE_KEY` environment variable. If neither resolves, settlement bootstrap throws a descriptive error.
+- **No file paths / no KMS reference:** unlike some Solana tooling, the connector does **not** read `~/.config/solana/id.json`-style keypair files here. Pass the decoded base58 string (e.g. `bs58.encode(Uint8Array.from(require('./id.json')))`).
+
+#### Standalone Solana-only nodes (claim-driven redemption)
+
+A node configured with **only** a Solana `chainProvider` (no EVM entry) is fully supported. On startup it boots the settlement stack — `ChainProviderRegistry`, `SettlementExecutor`, `ClaimReceiver`, and `SettlementMonitor` — and registers a `solana:<cluster>` provider. The EVM `PaymentChannelSDK` and `ChannelManager` stay `null`.
+
+Non-EVM settlement is **claim-driven redemption**: the connector redeems verified claims against channels that were **opened out-of-band**. It does **not** open Solana channels on demand. Operators are responsible for opening and depositing into channels (see "Deposit Management"); the connector's role is to submit `claimFromChannel` transactions when a peer's credit balance crosses the settlement threshold.
 
 ### Connector YAML Configuration Example
 
@@ -186,8 +203,9 @@ chainProviders:
     rpcUrl: 'https://api.devnet.solana.com'
     wsUrl: 'wss://api.devnet.solana.com'
     programId: '<DEPLOYED_PROGRAM_ID>' # From tools/solana/program-id.json
-    keyId: 'solana-operator-key'
+    keyId: '<base58 ed25519 secret key>' # raw key; or set SOLANA_PRIVATE_KEY
     cluster: 'devnet'
+    tokenMint: '<SPL_TOKEN_MINT>' # optional; defaults to the node settlement token
 
 peers:
   - id: peer-solana
@@ -199,6 +217,29 @@ peers:
     url: wss://peer-evm:3002
     authToken: secret-evm
     chain: 'evm:8453' # EVM peer unchanged
+```
+
+### Minimal Solana-only configuration
+
+A standalone Solana-only node needs only the Solana `chainProvider`:
+
+```yaml
+nodeId: solana-node
+btpServerPort: 3000
+environment: development
+deploymentMode: standalone
+
+chainProviders:
+  - chainType: solana
+    chainId: 'solana:devnet'
+    rpcUrl: 'https://api.devnet.solana.com'
+    programId: '<DEPLOYED_PROGRAM_ID>'
+    keyId: '<base58 ed25519 secret key>' # or set SOLANA_PRIVATE_KEY
+    cluster: 'devnet'
+    tokenMint: '<SPL_TOKEN_MINT>'
+
+peers: [] # accepts inbound BTP; redeems claims against out-of-band channels
+routes: []
 ```
 
 ### Per-Peer Chain Reference

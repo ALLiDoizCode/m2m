@@ -725,7 +725,7 @@ describe('SettlementExecutor branch coverage', () => {
       expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
     });
 
-    it('should throw when latestClaim is not EVM (!isEVMClaim branch)', async () => {
+    it('should throw on an unsupported claim blockchain (else branch)', async () => {
       const { executor, mockSettlementMonitor } = buildExecutor();
       const mockChannelManager = createMockChannelManager({
         [`${TEST_PEER_ID}:${TEST_TOKEN_ID}`]: {
@@ -736,14 +736,16 @@ describe('SettlementExecutor branch coverage', () => {
       executor.setChannelManager(mockChannelManager);
 
       const mockPerPacketClaimService = {
+        // A claim whose blockchain matches none of the EVM/Solana/Mina type
+        // guards exercises the `else -> throw Unsupported claim blockchain` path.
         getLatestClaim: jest.fn().mockReturnValue({
-          blockchain: 'solana',
+          blockchain: 'cosmos',
           channelId: TEST_CHANNEL_ID,
           nonce: 1,
           transferredAmount: '100',
           lockedAmount: '0',
           locksRoot: '0x' + '0'.repeat(64),
-          signature: '0xsolSig',
+          signature: '0xnope',
         }),
         resetChannel: jest.fn(),
       };
@@ -754,6 +756,53 @@ describe('SettlementExecutor branch coverage', () => {
       await executor.stop();
 
       expect(mockSettlementMonitor.markSettlementCompleted).not.toHaveBeenCalled();
+    });
+
+    it('should settle a Solana claim via the resolved provider (claimFromChannel)', async () => {
+      const mockProvider = createMockProvider();
+      const { executor, mockSettlementMonitor } = buildExecutor({ provider: mockProvider });
+      const mockChannelManager = createMockChannelManager({
+        [`${TEST_PEER_ID}:${TEST_TOKEN_ID}`]: {
+          channelId: TEST_CHANNEL_ID,
+          tokenId: TEST_TOKEN_ID,
+        },
+      });
+      executor.setChannelManager(mockChannelManager);
+
+      const solanaChannelAccount = '11111111111111111111111111111111';
+      const mockPerPacketClaimService = {
+        getLatestClaim: jest.fn().mockReturnValue({
+          version: '1.0',
+          blockchain: 'solana',
+          messageId: 'm1',
+          timestamp: new Date().toISOString(),
+          senderId: TEST_PEER_ID,
+          programId: solanaChannelAccount,
+          channelAccount: solanaChannelAccount,
+          nonce: 3,
+          transferredAmount: '100',
+          signature: 'c2ln', // base64
+          signerPublicKey: solanaChannelAccount,
+        }),
+        resetChannel: jest.fn(),
+      };
+      executor.setPerPacketClaimService(mockPerPacketClaimService as any);
+
+      executor.start();
+      fireSettlementEvent(mockSettlementMonitor, createSettlementEvent());
+      await executor.stop();
+
+      expect(mockProvider.claimFromChannel).toHaveBeenCalledWith(
+        solanaChannelAccount,
+        expect.objectContaining({
+          channelId: solanaChannelAccount,
+          nonce: 3,
+          transferredAmount: '100',
+          lockedAmount: '0',
+          locksRoot: '',
+        }),
+        'c2ln'
+      );
     });
 
     it('should NOT reset per-packet claim when perPacketClaimService is undefined (if false branch)', async () => {

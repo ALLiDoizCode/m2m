@@ -93,13 +93,20 @@ jest.mock('../../src/settlement/claim-receiver', () => ({
   })),
 }));
 jest.mock('../../src/settlement/provider/chain-provider-registry', () => ({
-  ChainProviderRegistry: jest.fn().mockImplementation(() => ({
-    register: jest.fn(),
-  })),
+  ChainProviderRegistry: jest.fn().mockImplementation(() => {
+    const providers: unknown[] = [];
+    return {
+      register: jest.fn((provider: unknown) => {
+        providers.push(provider);
+      }),
+      getAllProviders: jest.fn(() => providers),
+    };
+  }),
 }));
 jest.mock('../../src/settlement/provider/evm-payment-channel-provider', () => ({
-  EVMPaymentChannelProvider: jest.fn().mockImplementation(() => ({
-    // no-op
+  EVMPaymentChannelProvider: jest.fn().mockImplementation((_sdk: unknown, chainId: string) => ({
+    chainType: 'evm',
+    chainId,
   })),
 }));
 jest.mock('../../src/settlement/privacy/nip59-claim-wrapper', () => ({

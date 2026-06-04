@@ -28,7 +28,13 @@ import {
   BTP_WRAPPED_CLAIM_PROTOCOL,
   deserializeWrappedClaim,
 } from '../settlement/privacy/nip59-claim-wrapper';
-import { BTP_CLAIM_PROTOCOL, validateClaimMessage, isEVMClaim } from './btp-claim-types';
+import {
+  BTP_CLAIM_PROTOCOL,
+  validateClaimMessage,
+  isEVMClaim,
+  isSolanaClaim,
+  isMinaClaim,
+} from './btp-claim-types';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { ILPPreparePacket } from '@toon-protocol/shared';
 
@@ -44,6 +50,8 @@ jest.mock('./btp-claim-types', () => ({
   },
   validateClaimMessage: jest.fn(),
   isEVMClaim: jest.fn(),
+  isSolanaClaim: jest.fn(),
+  isMinaClaim: jest.fn(),
 }));
 
 jest.mock('../settlement/privacy/nip59-claim-wrapper', () => ({
@@ -556,9 +564,11 @@ describe('InboundClaimValidator branch coverage', () => {
       expect(isEVMClaim).toHaveBeenCalled();
     });
 
-    it('should reject non-EVM claims with unsupported chain message', async () => {
+    it('should reject non-EVM claims when no settlement provider is registered', async () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(false);
+      (isSolanaClaim as unknown as jest.Mock).mockReturnValue(true);
+      (isMinaClaim as unknown as jest.Mock).mockReturnValue(false);
 
       const { validator, mockLogger } = createValidator();
       const solanaClaim = {
@@ -589,12 +599,12 @@ describe('InboundClaimValidator branch coverage', () => {
         type: PacketType.REJECT,
         code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
         triggeredBy: 'test-node',
-        message: 'Signature verification not yet supported for blockchain: solana',
+        message: 'No settlement provider registered for blockchain: solana',
         data: Buffer.alloc(0),
       });
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ event: 'inbound_claim_unsupported_chain', blockchain: 'solana' }),
-        'Rejecting ILP PREPARE: signature verification not yet supported for this blockchain'
+        'Rejecting ILP PREPARE: no settlement provider registered for this blockchain'
       );
     });
   });
