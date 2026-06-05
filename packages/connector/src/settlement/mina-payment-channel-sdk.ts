@@ -270,6 +270,13 @@ export class MinaPaymentChannelSDK {
     const { PublicKey, fetchAccount } = await getO1js();
     const Contract = await getPaymentChannelContract();
 
+    // Bind the active Mina instance before fetching/constructing the contract so
+    // that any `<field>.get()` read on the returned instance resolves against the
+    // configured network rather than an empty active-instance ledger (Issue #95).
+    // The `_networkInitialized` guard makes this idempotent for callers (settle
+    // paths) that already bound the network.
+    await this._setNetwork();
+
     const zkAppPublicKey = PublicKey.fromBase58(channelAddress);
 
     const result = await fetchAccount({ publicKey: zkAppPublicKey });
@@ -784,6 +791,13 @@ export class MinaPaymentChannelSDK {
     try {
       const { PublicKey, fetchAccount } = await getO1js();
       const Contract = await getPaymentChannelContract();
+
+      // Bind the active Mina instance to the configured GraphQL endpoint before
+      // reading on-chain state. Without this, `<field>.get()` reads against an
+      // empty active-instance ledger and throws "can't find this zkapp account"
+      // (Issue #95). getChannelState is the first Mina operation on the claim
+      // verification path, so no prior settle call has bound the network yet.
+      await this._setNetwork();
 
       const zkAppPublicKey = PublicKey.fromBase58(channelAddress);
 
