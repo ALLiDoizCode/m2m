@@ -686,6 +686,13 @@ export class SolanaPaymentChannelSDK {
    * @param nonce - Balance proof nonce
    * @param transferredAmount - Balance proof transferred amount
    * @param signature - 64-byte Ed25519 signature over the balance proof message
+   * @param signerPublicKey - Base58 public key of the key that produced
+   *   `signature`. Ed25519 signatures are not public-key-recoverable, so the
+   *   Ed25519 precompile must be told which key to verify against. When omitted,
+   *   the claimer's own address is used (self-signed claim). For inbound peer
+   *   claims the signer is the counterparty, so this MUST be the counterparty's
+   *   pubkey — otherwise the precompile verifies the counterparty's signature
+   *   against the wrong key and fails preflight with `Custom(2)`.
    * @returns Transaction signature
    */
   async claimFromChannel(
@@ -693,7 +700,8 @@ export class SolanaPaymentChannelSDK {
     channelPDA: string,
     nonce: bigint,
     transferredAmount: bigint,
-    signature: Uint8Array
+    signature: Uint8Array,
+    signerPublicKey?: string
   ): Promise<{ txSignature: string }> {
     this._logger.info(
       {
@@ -705,9 +713,16 @@ export class SolanaPaymentChannelSDK {
       'Claiming from Solana payment channel'
     );
 
-    // Get the claimer's public key bytes for the Ed25519 precompile instruction
+    // Public key the Ed25519 precompile must verify the signature against.
+    // This is the key that SIGNED the balance proof, which is not necessarily
+    // the claimer submitting the transaction (e.g. an inbound peer claim is
+    // signed by the counterparty). Ed25519 signatures are not recoverable, so
+    // the precompile pubkey must be supplied explicitly and must match the
+    // signer; mismatching it makes the precompile reject the signature at
+    // preflight (`Custom(2)`). Falls back to the claimer for self-signed claims.
     const encoder = getAddressEncoder();
-    const claimerPubkey = toMutableBytes(encoder.encode(claimer.address));
+    const signerAddress = signerPublicKey ?? claimer.address;
+    const signerPubkey = toMutableBytes(encoder.encode(address(signerAddress)));
 
     // Build the balance proof message
     const balanceProofMessage = SolanaPaymentChannelSDK._buildBalanceProofMessage(
@@ -719,7 +734,7 @@ export class SolanaPaymentChannelSDK {
     // Instruction 0: Ed25519 precompile verification
     const ed25519Instruction = buildEd25519PrecompileInstruction(
       signature,
-      claimerPubkey,
+      signerPubkey,
       balanceProofMessage
     );
 
@@ -730,8 +745,15 @@ export class SolanaPaymentChannelSDK {
     writeUint64LE(claimData, 8, nonce);
     writeUint64LE(claimData, 16, transferredAmount);
 
+    // The on-chain program requires the `claimer` account (index 0) to equal the
+    // Ed25519 precompile pubkey (the balance-proof signer) and to be a transaction
+    // signer. For self-signed claims `signerAddress === claimer.address`, so the
+    // claimer also signs the transaction. For counterparty-signed claims the
+    // signer must co-sign the transaction; that authorization is handled by the
+    // caller — here we only ensure the claimer account matches the precompile
+    // pubkey so the program's signer check is internally consistent.
     const claimAccounts: AccountMeta[] = [
-      { address: claimer.address, role: AccountRole.READONLY_SIGNER },
+      { address: address(signerAddress), role: AccountRole.READONLY_SIGNER },
       { address: address(channelPDA), role: AccountRole.WRITABLE },
       { address: INSTRUCTIONS_SYSVAR, role: AccountRole.READONLY },
     ];
