@@ -644,6 +644,125 @@ describe('SettlementExecutor', () => {
       expect(mockProvider.openChannel).not.toHaveBeenCalled();
     });
 
+    it('should resolve chain from the channel record for a dynamic inbound peer (#88)', async () => {
+      // Dynamically-connected (anonymous HS) inbound BTP peer: its peer id is
+      // minted at dial time and cannot be pre-listed in static `peers:` config,
+      // so peerIdToChainMap has no entry. The chain is still carried by the
+      // channel record (the field /admin/channels surfaces).
+      const dynamicPeerId = '0x1FB9F4A1c6cA8Ef6Fc05F1F6e0d89c242d61f3b2';
+      const dynamicConfig = {
+        ...config,
+        peerIdToChainMap: new Map<string, string>(), // no static entry for the peer
+        peerIdToAddressMap: new Map([[dynamicPeerId, testPeerAddress]]),
+      };
+
+      const dynamicExecutor = new SettlementExecutor(
+        dynamicConfig,
+        mockAccountManager,
+        mockRegistry,
+        mockSettlementMonitor,
+        logger
+      );
+      dynamicExecutor.setChannelManager(mockChannelManager);
+
+      // Channel record carries the chain (status not 'open' → opens a new channel).
+      mockChannelManager.getChannelForPeer.mockReturnValue({
+        channelId: testChannelId,
+        peerId: dynamicPeerId,
+        tokenId: testTokenId,
+        tokenAddress: testTokenAddress,
+        chain: testChainId,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'closed',
+      } as ChannelMetadata);
+
+      const event: SettlementTriggerEvent = {
+        peerId: dynamicPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      dynamicExecutor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await dynamicExecutor.stop();
+
+      // Verify: chain resolved from the channel record → settlement proceeds.
+      expect(mockRegistry.getProviderForPeer).toHaveBeenCalledWith({
+        peerId: dynamicPeerId,
+        chain: testChainId,
+      });
+      expect(mockProvider.openChannel).toHaveBeenCalled();
+      expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
+        dynamicPeerId,
+        testTokenId
+      );
+    });
+
+    it('should resolve chain from the latest verified claim when no ChannelManager (#88)', async () => {
+      // Standalone non-EVM node: no ChannelManager, no static chain mapping.
+      // The chain is derived from the latest verified inbound claim's blockchain.
+      const dynamicPeerId = '0x1FB9F4A1c6cA8Ef6Fc05F1F6e0d89c242d61f3b2';
+      const claimConfig = {
+        ...config,
+        peerIdToChainMap: new Map<string, string>(),
+        peerIdToAddressMap: new Map([[dynamicPeerId, testPeerAddress]]),
+      };
+
+      const claimExecutor = new SettlementExecutor(
+        claimConfig,
+        mockAccountManager,
+        mockRegistry,
+        mockSettlementMonitor,
+        logger
+      );
+      // Intentionally NOT calling setChannelManager() — standalone node.
+
+      const evmClaim = {
+        blockchain: 'evm',
+        channelId: testChannelId,
+        nonce: 5,
+        transferredAmount: '5000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0xperpacketsignature',
+      };
+      const mockClaimReceiver = {
+        getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(evmClaim),
+        getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(evmClaim),
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      claimExecutor.setClaimReceiver(mockClaimReceiver as any);
+
+      const event: SettlementTriggerEvent = {
+        peerId: dynamicPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      claimExecutor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await claimExecutor.stop();
+
+      // Verify: chain derived from the claim's blockchain → settlement proceeds.
+      expect(mockRegistry.getProviderForPeer).toHaveBeenCalledWith({
+        peerId: dynamicPeerId,
+        chain: testChainId,
+      });
+      expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
+        dynamicPeerId,
+        testTokenId
+      );
+    });
+
     it('should fail with descriptive error when no provider registered for chain', async () => {
       // Mock registry returns undefined for this peer's chain
       mockRegistry.getProviderForPeer.mockReturnValue(undefined);
