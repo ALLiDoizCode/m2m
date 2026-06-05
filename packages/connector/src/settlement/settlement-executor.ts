@@ -349,7 +349,7 @@ export class SettlementExecutor extends EventEmitter {
     );
 
     // Resolve the chain provider for this peer
-    const chain = this.config.peerIdToChainMap.get(peerId);
+    const chain = await this.resolveChainForPeer(peerId, tokenId);
     if (!chain) {
       throw new Error(`No chain configured for peer: ${peerId}`);
     }
@@ -404,6 +404,71 @@ export class SettlementExecutor extends EventEmitter {
       this.logger.info({ peerId, tokenId, channelId }, 'Using existing channel for settlement');
       await this.settleViaExistingChannel(channelId, peerId, tokenId, currentBalance, provider);
     }
+  }
+
+  /**
+   * Resolve the settlement chain identifier for a peer.
+   *
+   * Lookup order:
+   *   1. Static `peerIdToChainMap` (the normal path for peers listed in `peers:`
+   *      config). Also serves as a cache for previously-resolved dynamic peers.
+   *   2. The channel record for this peer (ChannelManager). A **dynamically
+   *      connected (anonymous HS) inbound BTP peer** has a peer id minted at dial
+   *      time that cannot be pre-listed in static config, so it never appears in
+   *      `peerIdToChainMap`. Its chain *is* known from the channel record — the
+   *      same `chain` field surfaced by `/admin/channels` (e.g. `solana:devnet`).
+   *   3. The latest verified inbound claim (ClaimReceiver). Covers standalone
+   *      non-EVM nodes that run without a ChannelManager: the claim's blockchain
+   *      discriminator picks a registered provider for that chain family.
+   *
+   * On a fallback hit (2 or 3) the result is cached back into `peerIdToChainMap`
+   * via {@link registerPeerChain} so subsequent settlements skip the lookup.
+   *
+   * Source: Issue #88 — settlement failed for dynamic inbound peers because the
+   * executor only read static config and threw "No chain configured for peer".
+   *
+   * @param peerId - Peer connector ID
+   * @param tokenId - Token identifier
+   * @returns The resolved chain identifier, or undefined if none can be found
+   * @private
+   */
+  private async resolveChainForPeer(peerId: string, tokenId: string): Promise<string | undefined> {
+    // 1. Static peer config (and dynamic-peer cache).
+    const configured = this.config.peerIdToChainMap.get(peerId);
+    if (configured) {
+      return configured;
+    }
+
+    // 2. Dynamic inbound peer: fall back to the channel record's chain.
+    const channelChain = this.channelManager?.getChannelForPeer(peerId, tokenId)?.chain;
+    if (channelChain) {
+      this.logger.info(
+        { peerId, tokenId, chain: channelChain },
+        'Resolved settlement chain from channel record for dynamic inbound peer (#88)'
+      );
+      this.registerPeerChain(peerId, channelChain);
+      return channelChain;
+    }
+
+    // 3. Standalone non-EVM node (no ChannelManager): derive from latest claim.
+    if (this.claimReceiver) {
+      const claim = await this.claimReceiver.getLatestVerifiedClaimForPeer(peerId);
+      if (claim) {
+        const provider = this.chainProviderRegistry
+          .getAllProviders()
+          .find((p) => p.chainType === claim.blockchain);
+        if (provider) {
+          this.logger.info(
+            { peerId, tokenId, chain: provider.chainId, blockchain: claim.blockchain },
+            'Resolved settlement chain from latest verified claim for dynamic inbound peer (#88)'
+          );
+          this.registerPeerChain(peerId, provider.chainId);
+          return provider.chainId;
+        }
+      }
+    }
+
+    return undefined;
   }
 
   /**
