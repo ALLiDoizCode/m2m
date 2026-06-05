@@ -157,6 +157,34 @@ export class ChannelManager extends EventEmitter {
   }
 
   /**
+   * Get all channels for a peer, regardless of the tokenId they are indexed under.
+   *
+   * The peer→channel index is keyed by tokenId, but a non-EVM external channel is
+   * registered under a tokenId derived from its on-chain token/program identifier
+   * (e.g. a Solana `programId`) which never matches the EVM-derived settlement
+   * tokenId carried on a SettlementMonitor event. SettlementExecutor uses this as a
+   * fallback to locate the already-verified channel for the peer instead of
+   * wrongly opening a brand-new one (#92).
+   *
+   * @param peerId - Peer connector ID
+   * @returns All channel metadata records for the peer (empty array if none)
+   */
+  getChannelsForPeer(peerId: string): ChannelMetadata[] {
+    const index = this.peerChannelIndex.get(peerId);
+    if (!index) {
+      return [];
+    }
+    const channels: ChannelMetadata[] = [];
+    for (const channelId of index.values()) {
+      const metadata = this.channelMetadata.get(channelId);
+      if (metadata) {
+        channels.push(metadata);
+      }
+    }
+    return channels;
+  }
+
+  /**
    * Register a channel discovered from an incoming self-describing claim.
    * Populates both channelMetadata and peerChannelIndex without opening on-chain.
    * Idempotent: if channelId already exists, returns existing metadata.

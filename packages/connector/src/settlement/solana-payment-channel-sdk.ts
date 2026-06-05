@@ -21,11 +21,12 @@ import {
   setTransactionMessageLifetimeUsingBlockhash,
   appendTransactionMessageInstruction,
   pipe,
-  signAndSendTransactionMessageWithSigners,
+  signTransactionMessageWithSigners,
+  getSignatureFromTransaction,
+  sendAndConfirmTransactionFactory,
   signBytes,
   generateKeyPairSigner,
   AccountRole,
-  getBase58Decoder,
 } from '@solana/kit';
 import type {
   Address,
@@ -410,12 +411,17 @@ export class SolanaPaymentChannelSDK {
   private readonly _rpcSubscriptions: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
   private readonly _programId: Address;
   private readonly _logger: Logger;
+  private readonly _sendAndConfirmTransaction: ReturnType<typeof sendAndConfirmTransactionFactory>;
 
   constructor(rpcUrl: string, programId: string, logger: Logger) {
     this._programId = address(programId);
     this._logger = logger.child({ component: 'solana-payment-channel-sdk' });
     this._rpc = createSolanaRpc(rpcUrl);
     this._rpcSubscriptions = createSolanaRpcSubscriptions(rpcUrl.replace('http', 'ws'));
+    this._sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
+      rpc: this._rpc,
+      rpcSubscriptions: this._rpcSubscriptions,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1155,15 +1161,29 @@ export class SolanaPaymentChannelSDK {
         )
     );
 
-    // Sign and send using the signer-aware API
-    const signatureBytes = await signAndSendTransactionMessageWithSigners(
+    // Sign with the signer-aware API. We use signTransactionMessageWithSigners
+    // (not signAndSendTransactionMessageWithSigners) because the apex fee-payer is
+    // a KeyPairSigner — a partial/message signer, NOT a TransactionSendingSigner.
+    // signAndSend... asserts a single sending signer and throws Solana #5508010
+    // when the fee-payer cannot send itself (issue #92). Sign here, then submit
+    // explicitly over the RPC.
+    const signedTransaction = await signTransactionMessageWithSigners(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       txMessage as any
     );
 
-    // Convert SignatureBytes (Uint8Array) to base58 string
-    const base58Decoder = getBase58Decoder();
-    return base58Decoder.decode(signatureBytes);
+    // Submit and await confirmation over the RPC + WS subscription.
+    // Cast: the `any` txMessage above erases the branded blockhash-lifetime /
+    // size-limit types sendAndConfirm requires; the message is built correctly via
+    // setTransactionMessageLifetimeUsingBlockhash above.
+    await this._sendAndConfirmTransaction(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      signedTransaction as any,
+      { commitment: 'confirmed' }
+    );
+
+    // The signature is derivable from the fully-signed transaction (base58 string).
+    return getSignatureFromTransaction(signedTransaction);
   }
 }
 
