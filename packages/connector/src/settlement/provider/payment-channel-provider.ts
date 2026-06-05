@@ -125,6 +125,15 @@ export interface BalanceProofParams {
    * Ignored by the EVM and Solana providers.
    */
   signatureB?: string;
+  /**
+   * Solana-only: base58 public key of the key that produced `signature`.
+   * Ed25519 signatures are not public-key-recoverable, so the on-chain Ed25519
+   * precompile must be told which key to verify against. For inbound peer claims
+   * this is the counterparty's pubkey (the claim's `signerPublicKey`); omitting
+   * it makes the precompile verify the signature against the submitting signer's
+   * key and fail preflight. Ignored by the EVM and Mina providers.
+   */
+  signerPublicKey?: string;
 }
 
 /** Parameters for verifying a balance proof off-chain. */

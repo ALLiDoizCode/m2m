@@ -217,6 +217,67 @@ describe('SolanaPaymentChannelSDK - Branch Coverage', () => {
       );
     });
 
+    it('claimFromChannel uses signerPublicKey for the Ed25519 precompile pubkey (issue #94)', async () => {
+      // The Ed25519 precompile must verify the balance-proof signature against
+      // the key that signed it (the counterparty for inbound peer claims), not
+      // the submitting claimer. Otherwise preflight fails with Custom(2).
+      const logger = createMockLogger();
+      const sdk = new SolanaPaymentChannelSDK('http://localhost:8899', TEST_PROGRAM_ID, logger);
+      const captured: any[][] = [];
+      (sdk as unknown as { _sendTransaction: jest.Mock })._sendTransaction = jest
+        .fn()
+        .mockImplementation((_payer: any, instructions: any[]) => {
+          captured.push(instructions);
+          return Promise.resolve('sig');
+        });
+
+      const claimer = await generateKeyPairSigner();
+      const signature = new Uint8Array(64).fill(0xcd);
+
+      await sdk.claimFromChannel(claimer, TEST_PUBKEY_A, 1n, 500n, signature, TEST_PUBKEY_B);
+
+      const instructions = captured[0]!;
+      const ed25519Data = new Uint8Array(instructions[0].data as Uint8Array);
+      // Pubkey is inlined at offset 80 (32 bytes) in the precompile data.
+      const precompilePubkey = ed25519Data.slice(80, 112);
+
+      const { getAddressEncoder, address } = await import('@solana/kit');
+      const expectedSigner = new Uint8Array(getAddressEncoder().encode(address(TEST_PUBKEY_B)));
+      const expectedClaimer = new Uint8Array(getAddressEncoder().encode(claimer.address));
+
+      expect(precompilePubkey).toEqual(expectedSigner);
+      // Must NOT be the submitting claimer's key.
+      expect(precompilePubkey).not.toEqual(expectedClaimer);
+
+      // The claim instruction's claimer account (index 0) must match the
+      // precompile pubkey so the on-chain signer check is consistent.
+      expect(instructions[1].accounts[0].address).toBe(TEST_PUBKEY_B);
+    });
+
+    it('claimFromChannel falls back to claimer address when signerPublicKey omitted', async () => {
+      const logger = createMockLogger();
+      const sdk = new SolanaPaymentChannelSDK('http://localhost:8899', TEST_PROGRAM_ID, logger);
+      const captured: any[][] = [];
+      (sdk as unknown as { _sendTransaction: jest.Mock })._sendTransaction = jest
+        .fn()
+        .mockImplementation((_payer: any, instructions: any[]) => {
+          captured.push(instructions);
+          return Promise.resolve('sig');
+        });
+
+      const claimer = await generateKeyPairSigner();
+      await sdk.claimFromChannel(claimer, TEST_PUBKEY_A, 1n, 500n, new Uint8Array(64));
+
+      const instructions = captured[0]!;
+      const ed25519Data = new Uint8Array(instructions[0].data as Uint8Array);
+      const precompilePubkey = ed25519Data.slice(80, 112);
+
+      const { getAddressEncoder, address } = await import('@solana/kit');
+      const expectedClaimer = new Uint8Array(getAddressEncoder().encode(address(claimer.address)));
+      expect(precompilePubkey).toEqual(expectedClaimer);
+      expect(instructions[1].accounts[0].address).toBe(claimer.address);
+    });
+
     it('claimFromChannel throws SolanaChannelError on program error', async () => {
       const sdk = createSDKWithSendTransactionError(new Error('custom program error: 0x08'));
       const signer = await generateKeyPairSigner();

@@ -693,6 +693,11 @@ export class SettlementExecutor extends EventEmitter {
         transferredAmount: latestClaim.transferredAmount,
         lockedAmount: '0',
         locksRoot: '',
+        // The Ed25519 precompile must verify the signature against the key that
+        // signed the balance proof (the counterparty for inbound claims), not
+        // our own submitting signer. Ed25519 signatures are not recoverable, so
+        // the signer pubkey must be supplied explicitly.
+        signerPublicKey: latestClaim.signerPublicKey,
       };
       // Base64 Ed25519 signature; the Solana provider decodes it.
       claimSignature = latestClaim.signature;

@@ -320,12 +320,42 @@ describe('SolanaPaymentChannelProvider (Story 33.5)', () => {
         TEST_CHANNEL_PDA,
         5n,
         500000n,
-        expect.any(Uint8Array)
+        expect.any(Uint8Array),
+        // No signerPublicKey on this balance proof => self-signed claim path
+        undefined
       );
       // Verify the signature bytes match the original
       const passedSig = mockSDK.claimFromChannel.mock.calls[0]?.[4] as Uint8Array;
       expect(passedSig).toEqual(new Uint8Array(64).fill(0xab));
       expect(result).toEqual({ txHash: 'claimSig789' });
+    });
+
+    it('should forward the balance proof signerPublicKey to the SDK (inbound peer claim)', async () => {
+      mockSDK.claimFromChannel.mockResolvedValue({ txSignature: 'claimSig789' });
+      const base64Sig = Buffer.from(new Uint8Array(64).fill(0xab)).toString('base64');
+      const peerPubkey = 'PeerSignerPubkey11111111111111111111111111';
+
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_CHANNEL_PDA,
+        nonce: 5,
+        transferredAmount: '500000',
+        lockedAmount: '0',
+        locksRoot: '0x',
+        // Counterparty-signed claim: the Ed25519 precompile must verify against
+        // the peer's key, not our own signer.
+        signerPublicKey: peerPubkey,
+      };
+
+      await provider.claimFromChannel(TEST_CHANNEL_PDA, balanceProof, base64Sig);
+
+      expect(mockSDK.claimFromChannel).toHaveBeenCalledWith(
+        mockSigner,
+        TEST_CHANNEL_PDA,
+        5n,
+        500000n,
+        expect.any(Uint8Array),
+        peerPubkey
+      );
     });
   });
 

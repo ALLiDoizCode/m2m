@@ -208,12 +208,18 @@ export class SolanaPaymentChannelProvider implements PaymentChannelProvider {
 
     try {
       const signatureBytes = new Uint8Array(Buffer.from(signature, 'base64'));
+      // The Ed25519 precompile must verify `signature` against the key that
+      // produced it. For inbound peer claims that is the counterparty, not our
+      // own signer; pass the claim's signerPublicKey through so the precompile
+      // pubkey matches the signature. When absent (self-signed claim), the SDK
+      // falls back to the submitting signer's address.
       const result = await this._sdk.claimFromChannel(
         this._signer,
         channelId,
         BigInt(balanceProof.nonce),
         safeBigInt(balanceProof.transferredAmount, 'transferredAmount'),
-        signatureBytes
+        signatureBytes,
+        balanceProof.signerPublicKey
       );
 
       return { txHash: result.txSignature };
