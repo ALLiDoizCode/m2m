@@ -17,6 +17,7 @@ import {
   isEVMClaim,
   isSolanaClaim,
   isMinaClaim,
+  validateClaimMessage,
 } from '../btp/btp-claim-types';
 import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 import type { ChannelManager } from './channel-manager';
@@ -1086,10 +1087,19 @@ describe('PerPacketClaimService', () => {
     const MINA_NETWORK = 'devnet';
     const MINA_PEER_ID = 'connector-mina';
 
+    // signBalanceProof returns a raw-JSON proof string (matching the real SDK).
+    // The producer base64-encodes it onto the wire (Issue #90).
+    const MINA_PROOF_JSON = JSON.stringify({
+      commitment: '12345678901234567890',
+      signature: { r: '67890', s: '11111' },
+      nonce: '1',
+    });
+    const MINA_PROOF_B64 = Buffer.from(MINA_PROOF_JSON, 'utf8').toString('base64');
+
     // Mock MinaPaymentChannelProvider
     const createMockMinaProvider = (): jest.Mocked<MinaPaymentChannelProvider> => {
       const provider = {
-        signBalanceProof: jest.fn().mockResolvedValue('eyJwcm9vZiI6InRlc3QifQ=='),
+        signBalanceProof: jest.fn().mockResolvedValue(MINA_PROOF_JSON),
         verifyBalanceProof: jest.fn().mockResolvedValue(true),
         getChannelState: jest.fn(),
         openChannel: jest.fn(),
@@ -1171,9 +1181,34 @@ describe('PerPacketClaimService', () => {
       expect(minaClaim.zkAppAddress).toBe(MINA_ZKAPP_ADDRESS);
       expect(minaClaim.tokenId).toBe(MINA_TOKEN_ID);
       expect(minaClaim.network).toBe(MINA_NETWORK);
-      expect(minaClaim.proof).toBe('eyJwcm9vZiI6InRlc3QifQ==');
+      // Issue #90: proof is base64-encoded JSON on the wire (passes the inbound
+      // validateMinaClaim base64 gate) and round-trips to the raw JSON the
+      // settlement-side verifier consumes.
+      expect(minaClaim.proof).toBe(MINA_PROOF_B64);
+      expect(Buffer.from(minaClaim.proof, 'base64').toString('utf8')).toBe(MINA_PROOF_JSON);
       expect(minaClaim.salt).toBeDefined();
       expect(minaClaim.salt.length).toBeGreaterThan(0);
+    });
+
+    it('[P0] should produce a Mina claim that passes validateMinaClaim (Issue #90)', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMinaChannelManager();
+
+      const svc = new PerPacketClaimService(
+        minaRegistry as unknown as ChainProviderRegistry,
+        minaChannelManager as unknown as ChannelManager,
+        mockDb as unknown as Database,
+        mockLogger,
+        TEST_NODE_ID
+      );
+
+      const result = await svc.generateClaimForPacket(MINA_PEER_ID, 'MINA', 1000n);
+
+      // The producer's own claim must satisfy the inbound PREPARE-gate validator,
+      // which requires a base64-encoded proof. Before #90 the raw-JSON proof was
+      // rejected here as non-base64.
+      expect(() => validateClaimMessage(result!.claimMessage)).not.toThrow();
     });
 
     it('[P0] should populate correct Mina fields from getMinaContext (T-34.7-17)', async () => {
@@ -1263,7 +1298,7 @@ describe('PerPacketClaimService', () => {
       expect(parsed.tokenId).toBe(MINA_TOKEN_ID);
       expect(parsed.network).toBe(MINA_NETWORK);
       expect(parsed.nonce).toBe(1);
-      expect(parsed.proof).toBe('eyJwcm9vZiI6InRlc3QifQ==');
+      expect(parsed.proof).toBe(MINA_PROOF_B64);
       expect(typeof parsed.salt).toBe('string');
       expect(typeof parsed.balanceCommitment).toBe('string');
     });

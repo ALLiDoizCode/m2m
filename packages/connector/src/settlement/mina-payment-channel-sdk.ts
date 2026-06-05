@@ -311,7 +311,7 @@ export class MinaPaymentChannelSDK {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let parsed: any;
     try {
-      parsed = JSON.parse(signatureStr);
+      parsed = JSON.parse(this._normalizeSerializedProof(signatureStr));
     } catch {
       throw new MinaChannelError(
         `Invalid ${fieldName}: expected a JSON string with { r, s } fields, received malformed JSON`,
@@ -336,6 +336,40 @@ export class MinaPaymentChannelSDK {
     // Import Signature from the cached o1js module (caller must have loaded o1js already)
     const { Signature } = o1jsModule;
     return Signature.fromJSON({ r: parsed.r, s: parsed.s });
+  }
+
+  /**
+   * Normalize a serialized proof/signature string to its raw-JSON form.
+   *
+   * The canonical wire encoding for a Mina claim `proof` is base64-encoded JSON
+   * (Issue #90): {@link validateMinaClaim} gates inbound claims on a base64
+   * regex, and the per-packet claim producer base64-encodes the proof it emits.
+   * The settlement side must therefore base64-decode before `JSON.parse`.
+   *
+   * Raw-JSON inputs (internal callers, dual-party `signatureB`, and pre-#90
+   * claims) remain accepted: a JSON payload begins with `{` or `[`, characters
+   * that never appear in base64, so the two encodings are distinguishable
+   * without ambiguity. Anything that is neither is returned unchanged so the
+   * caller's own `JSON.parse` surfaces a precise error.
+   *
+   * @param input - A serialized proof/signature: base64(JSON) or raw JSON
+   * @returns The raw JSON string
+   */
+  private _normalizeSerializedProof(input: string): string {
+    const trimmed = input.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      // Already raw JSON — no decode needed.
+      return input;
+    }
+    try {
+      const decoded = Buffer.from(input, 'base64').toString('utf8');
+      // Only accept the decode if it actually yields JSON; otherwise fall
+      // through to returning the original input.
+      JSON.parse(decoded);
+      return decoded;
+    } catch {
+      return input;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -918,7 +952,10 @@ export class MinaPaymentChannelSDK {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let proofData: any;
       try {
-        proofData = JSON.parse(proof);
+        // The canonical wire encoding is base64(JSON) (Issue #90); decode it
+        // before parsing. Raw-JSON proofs are still accepted for backward
+        // compatibility (see _normalizeSerializedProof).
+        proofData = JSON.parse(this._normalizeSerializedProof(proof));
       } catch {
         this._logger.warn(
           { event: 'verify_balance_proof_parse_error', channelAddress },

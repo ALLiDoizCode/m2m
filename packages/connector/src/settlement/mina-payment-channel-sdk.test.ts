@@ -927,6 +927,26 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       expect(isValid).toBe(true);
     });
 
+    // Issue #90: the canonical wire encoding for a Mina claim `proof` is
+    // base64(JSON). The verifier must decode it before JSON.parse.
+    it('should verify a base64-encoded proof (canonical wire encoding, Issue #90)', async () => {
+      const proofJson = JSON.stringify({
+        commitment: 'mock-poseidon-hash',
+        signature: { r: 'mock-r-value', s: 'mock-s-value' },
+        nonce: '5',
+      });
+      const proofB64 = Buffer.from(proofJson, 'utf8').toString('base64');
+
+      const isValid = await sdk.verifyBalanceProof(
+        TEST_ZKAPP_ADDRESS,
+        'mock-poseidon-hash',
+        proofB64,
+        5n
+      );
+
+      expect(isValid).toBe(true);
+    });
+
     it('should return false when commitment does not match expected', async () => {
       const proofStr = JSON.stringify({
         commitment: 'bad-commitment',
