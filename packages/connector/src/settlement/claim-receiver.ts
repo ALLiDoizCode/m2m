@@ -823,8 +823,16 @@ export class ClaimReceiver extends EventEmitter {
       try {
         channelState = await provider.getChannelState(claim.zkAppAddress);
       } catch (error) {
+        // o1js Errors carry a non-enumerable `message`, so structured-logging the
+        // raw object emits `error: {}` and hides the real cause (Issue #95). Log
+        // the stringified message explicitly to surface the underlying o1js error.
         this.logger.warn(
-          { event: 'mina_claim_verification_failed', messageId: claim.messageId, error },
+          {
+            event: 'mina_claim_verification_failed',
+            messageId: claim.messageId,
+            zkAppAddress: claim.zkAppAddress,
+            error: error instanceof Error ? error.message : String(error),
+          },
           ERRORS.ON_CHAIN_VERIFICATION_FAILED
         );
         return {

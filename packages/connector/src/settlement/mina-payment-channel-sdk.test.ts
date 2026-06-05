@@ -806,6 +806,17 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
         errorName: 'ACCOUNT_NOT_FOUND',
       });
     });
+
+    // Regression for Issue #95: getChannelState is the first Mina operation on
+    // the claim verification path. It must bind the active network to the
+    // configured GraphQL endpoint before reading `<field>.get()`, otherwise
+    // o1js throws "can't find this zkapp account".
+    it('should bind the active Mina network before reading state (Issue #95)', async () => {
+      await sdk.getChannelState(TEST_ZKAPP_ADDRESS);
+
+      expect(mockMina.Network).toHaveBeenCalledWith(TEST_GRAPHQL_URL);
+      expect(mockMina.setActiveInstance).toHaveBeenCalled();
+    });
   });
 
   // -------------------------------------------------------------------------
