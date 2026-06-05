@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.4](https://github.com/toon-protocol/connector/compare/v3.9.3...v3.9.4) (2026-06-05)
+
+### Bug Fixes
+
+- **settlement:** bind Mina active network before zkApp state reads ([#95](https://github.com/toon-protocol/connector/issues/95)) ([#97](https://github.com/toon-protocol/connector/issues/97)) ([f3b6f09](https://github.com/toon-protocol/connector/commit/f3b6f09850bd9bb8df0f21f5bb4b0ea8eb2e7699))
+- **settlement:** use balance-proof signer pubkey for Solana Ed25519 precompile ([#94](https://github.com/toon-protocol/connector/issues/94)) ([#96](https://github.com/toon-protocol/connector/issues/96)) ([74a3f98](https://github.com/toon-protocol/connector/commit/74a3f982f4322153eb7c71817a0f7d17854847df))
+
 ## [3.9.3](https://github.com/toon-protocol/connector/compare/v3.9.2...v3.9.3) (2026-06-05)
 
 ### Bug Fixes
