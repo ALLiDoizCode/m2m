@@ -165,6 +165,37 @@ describe('ChannelManager', () => {
     });
   });
 
+  describe('getChannelsForPeer (#92)', () => {
+    it('should return all channels for a peer regardless of indexed tokenId', () => {
+      // A non-EVM external channel is indexed under a program-derived tokenId that
+      // never matches the EVM settlement tokenId. getChannelsForPeer ignores the
+      // tokenId key so the executor can locate it via the chain fallback.
+      const programTokenId = 'EdJxYPDxGvaJuu57DSUptf4soLv8enpdyQJJhHDLiydG';
+      channelManager.registerExternalChannel({
+        channelId: 'SolChannelPDA111',
+        peerId: 'peer-dyn',
+        tokenAddress: programTokenId, // no tokenAddressMap match → tokenId = raw program id
+        status: 'open',
+        chain: 'solana:devnet',
+      });
+
+      const channels = channelManager.getChannelsForPeer('peer-dyn');
+      expect(channels).toHaveLength(1);
+      const [channel] = channels;
+      expect(channel?.channelId).toBe('SolChannelPDA111');
+      expect(channel?.tokenId).toBe(programTokenId);
+      expect(channel?.chain).toBe('solana:devnet');
+
+      // The tokenId-keyed lookup with the EVM settlement tokenId misses...
+      expect(channelManager.getChannelForPeer('peer-dyn', 'TEST_TOKEN')).toBeNull();
+      // ...but getChannelsForPeer still surfaces it.
+    });
+
+    it('should return an empty array for an unknown peer', () => {
+      expect(channelManager.getChannelsForPeer('peer-unknown')).toEqual([]);
+    });
+  });
+
   describe('registerExternalChannel', () => {
     const externalChannelParams = {
       channelId: '0xExternalChannel123',

@@ -92,11 +92,12 @@ function createMockRegistry(
  * Create a mock ChannelManager
  */
 function createMockChannelManager(): jest.Mocked<
-  Pick<ChannelManager, 'getChannelForPeer' | 'getChannelById'>
+  Pick<ChannelManager, 'getChannelForPeer' | 'getChannelById' | 'getChannelsForPeer'>
 > {
   return {
     getChannelForPeer: jest.fn().mockReturnValue(null),
     getChannelById: jest.fn().mockReturnValue(null),
+    getChannelsForPeer: jest.fn().mockReturnValue([]),
   };
 }
 
@@ -342,6 +343,114 @@ describe('SettlementExecutor', () => {
         testPeerId,
         testTokenId
       );
+    });
+  });
+
+  describe('Channel Lookup Token-Id Fallback (#92)', () => {
+    it('should reuse the verified channel via chain fallback when the tokenId-keyed lookup misses', async () => {
+      // Issue #92: a non-EVM external channel is indexed in the ChannelManager
+      // under a tokenId derived from its on-chain program/token id (e.g. a Solana
+      // programId). The SettlementMonitor fires with the EVM-derived settlement
+      // tokenId ('M2M'), so the direct tokenId-keyed lookup misses. The executor
+      // must fall back to the peer+chain scan and claimFromChannel the existing
+      // verified channel — NOT wrongly open a brand-new one.
+      const solanaProgramTokenId = 'EdJxYPDxGvaJuu57DSUptf4soLv8enpdyQJJhHDLiydG';
+
+      // Direct lookup by the monitor's tokenId ('M2M') misses...
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
+      // ...but the peer has an open channel indexed under the program-derived tokenId.
+      mockChannelManager.getChannelsForPeer.mockReturnValue([
+        {
+          channelId: testChannelId,
+          peerId: testPeerId,
+          tokenId: solanaProgramTokenId,
+          tokenAddress: solanaProgramTokenId,
+          chain: testChainId,
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          status: 'open',
+        } as ChannelMetadata,
+      ]);
+
+      // Verified inbound claim used to build the balance proof for claimFromChannel.
+      const verifiedClaim = {
+        blockchain: 'evm',
+        channelId: testChannelId,
+        nonce: 7,
+        transferredAmount: '5000',
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        signature: '0xverifiedclaimsignature',
+      };
+      const mockClaimReceiver = {
+        getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(verifiedClaim),
+        getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(verifiedClaim),
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      executor.setClaimReceiver(mockClaimReceiver as any);
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await executor.stop();
+
+      // Verify: claimFromChannel used the verified channel; no new channel opened.
+      expect(mockChannelManager.getChannelsForPeer).toHaveBeenCalledWith(testPeerId);
+      expect(mockProvider.claimFromChannel).toHaveBeenCalledWith(
+        testChannelId,
+        expect.objectContaining({ channelId: testChannelId, nonce: 7 }),
+        '0xverifiedclaimsignature'
+      );
+      expect(mockProvider.openChannel).not.toHaveBeenCalled();
+      expect(mockSettlementMonitor.markSettlementCompleted).toHaveBeenCalledWith(
+        testPeerId,
+        testTokenId
+      );
+    });
+
+    it('should not match a channel on a different chain in the fallback scan', async () => {
+      // The fallback is chain-scoped: an open channel on a different chain must not
+      // be claimed for a settlement resolved to testChainId.
+      mockChannelManager.getChannelForPeer.mockReturnValue(null);
+      mockChannelManager.getChannelsForPeer.mockReturnValue([
+        {
+          channelId: testChannelId,
+          peerId: testPeerId,
+          tokenId: 'SomeOtherToken',
+          tokenAddress: 'SomeOtherToken',
+          chain: 'solana:devnet', // different from the peer's resolved chain (testChainId)
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          status: 'open',
+        } as ChannelMetadata,
+      ]);
+
+      const event: SettlementTriggerEvent = {
+        peerId: testPeerId,
+        tokenId: testTokenId,
+        currentBalance: testCurrentBalance,
+        threshold: testThreshold,
+        exceedsBy: testCurrentBalance - testThreshold,
+        timestamp: new Date(),
+      };
+
+      executor.start();
+      const handler = (mockSettlementMonitor.on as jest.Mock).mock.calls[0][1];
+      handler(event);
+      await executor.stop();
+
+      // Verify: no chain match → opens a new channel (does not claim the mismatched one).
+      expect(mockProvider.claimFromChannel).not.toHaveBeenCalled();
+      expect(mockProvider.openChannel).toHaveBeenCalled();
     });
   });
 

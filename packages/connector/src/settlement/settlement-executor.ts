@@ -372,7 +372,7 @@ export class SettlementExecutor extends EventEmitter {
 
     // Find existing channel for peer
     this.logger.debug({ peerId, tokenId }, 'Searching for existing channel');
-    let channelId = await this.findChannelForPeer(peerId, tokenId);
+    let channelId = await this.findChannelForPeer(peerId, tokenId, chain);
 
     // Non-EVM channel-id fallback (#86): when there is no ChannelManager (e.g. a
     // standalone Solana/Mina node), findChannelForPeer returns null. In that case
@@ -477,28 +477,56 @@ export class SettlementExecutor extends EventEmitter {
    * Uses ChannelManager's peer-channel index for chain-agnostic channel lookup,
    * then verifies on-chain status via the provider.
    *
+   * The peer→channel index is keyed by tokenId. For EVM that key is the settlement
+   * token symbol (e.g. `M2M`), the same value the SettlementMonitor emits. But a
+   * non-EVM external channel is registered under a tokenId derived from its on-chain
+   * token/program id (e.g. a Solana `programId`) — which never matches the
+   * EVM-derived settlement tokenId. When the direct tokenId lookup misses, fall back
+   * to scanning the peer's channels for an open one on the resolved `chain`, so the
+   * already-verified channel is reused (`claimFromChannel`) instead of the executor
+   * wrongly opening a brand-new channel (#92).
+   *
    * @param peerId - Peer connector ID
    * @param tokenId - Token identifier
+   * @param chain - Resolved settlement chain for the peer (used for the fallback scan)
    * @returns channelId if found, null otherwise
    * @private
    */
-  private async findChannelForPeer(peerId: string, tokenId: string): Promise<string | null> {
+  private async findChannelForPeer(
+    peerId: string,
+    tokenId: string,
+    chain?: string
+  ): Promise<string | null> {
     try {
       if (!this.channelManager) {
         this.logger.warn({ peerId }, 'ChannelManager not set, cannot look up channels');
         return null;
       }
 
-      const metadata = this.channelManager.getChannelForPeer(peerId, tokenId);
-      if (!metadata) {
-        return null;
-      }
-
       // Trust ChannelManager's local state for channel lookup.
       // On-chain verification is deferred to the settlement operation itself.
       // ChannelManager normalizes all statuses to AdminChannelStatus ('open', 'closed', etc.)
-      if (metadata.status === 'open') {
-        return metadata.channelId;
+      const metadata = this.channelManager.getChannelForPeer(peerId, tokenId);
+      if (metadata) {
+        return metadata.status === 'open' ? metadata.channelId : null;
+      }
+
+      // tokenId-keyed lookup missed — fall back to a peer+chain scan (#92).
+      const candidate = this.channelManager
+        .getChannelsForPeer(peerId)
+        .find((c) => c.status === 'open' && (!chain || c.chain === chain));
+      if (candidate) {
+        this.logger.info(
+          {
+            peerId,
+            tokenId,
+            chain,
+            channelId: candidate.channelId,
+            channelTokenId: candidate.tokenId,
+          },
+          'Found open channel for peer via chain fallback (tokenId-keyed lookup missed) (#92)'
+        );
+        return candidate.channelId;
       }
 
       return null;
