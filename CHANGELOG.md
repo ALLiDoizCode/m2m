@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.3](https://github.com/toon-protocol/connector/compare/v3.9.2...v3.9.3) (2026-06-05)
+
+### Bug Fixes
+
+- **settlement:** complete Solana on-chain SETTLE for dynamic inbound peers ([#92](https://github.com/toon-protocol/connector/issues/92)) ([eed232c](https://github.com/toon-protocol/connector/commit/eed232ce675b7c8132465f207b0db2e74947746e)), closes [#1](https://github.com/toon-protocol/connector/issues/1) [#2](https://github.com/toon-protocol/connector/issues/2)
+
 ## [3.9.2](https://github.com/toon-protocol/connector/compare/v3.9.1...v3.9.2) (2026-06-05)
 
 ### Bug Fixes
