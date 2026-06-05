@@ -267,7 +267,12 @@ export class PerPacketClaimService {
         // fields only apply to true bidirectional channels.
         transferredAmount: newCumulative.toString(),
         nonce: newNonce,
-        proof: signature, // signBalanceProof returns the serialized zk-SNARK proof
+        // signBalanceProof returns the serialized (raw-JSON) zk-SNARK proof.
+        // The canonical wire encoding for a Mina claim `proof` is base64-encoded
+        // JSON (Issue #90): the inbound validateMinaClaim gate requires base64,
+        // and the settlement-side verifier base64-decodes before JSON.parse.
+        // Encoding here keeps our own produced claims valid against that gate.
+        proof: Buffer.from(signature, 'utf8').toString('base64'),
         salt: ctx.minaSalt,
         ...(ctx.minaNetwork !== undefined && { network: ctx.minaNetwork }),
       };
