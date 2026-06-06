@@ -447,13 +447,16 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    * verification and commitment consistency checking.
    *
    * @remarks
-   * Parameter mapping from the EVM-centric `VerifyBalanceProofParams` to Mina SDK:
-   * - `params.signerAddress` is passed as `balanceCommitment` (Mina uses Poseidon commitments,
-   *   not signer-based verification; when Story 34.4 finalizes the SDK, this mapping should
-   *   be revisited to pass the actual Poseidon commitment)
+   * Parameter mapping from the EVM-centric `VerifyBalanceProofParams` to Mina SDK
+   * (Story 34.4 finalization, Issue #98):
+   * - The SDK's `balanceCommitment` argument is the channel's actual on-chain Poseidon
+   *   commitment, read here via `getChannelState`. Mina uses Poseidon commitments, not
+   *   signer-based verification, so `params.signerAddress` (the zkApp address) must NOT be
+   *   passed -- doing so deterministically fails the commitment check because the proof's
+   *   real Poseidon commitment can never equal the zkApp address string.
    * - `params.signature` is passed as the `proof` (serialized zk-SNARK proof)
    * - `params.transferredAmount` is NOT passed to the SDK (the Poseidon commitment encodes
-   *   balances internally; Story 34.4 should ensure the SDK verifies amount consistency)
+   *   balances internally; the SDK verifies the proof's commitment against the on-chain one)
    *
    * @param params - Parameters including the signature/proof to verify
    * @returns `true` if the proof is valid, `false` otherwise
@@ -473,13 +476,14 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     this._warnIfEVMFields(params);
 
     try {
-      // NOTE: Parameter mapping requires revisiting in Story 34.4.
-      // signerAddress is used as balanceCommitment placeholder; the real SDK
-      // should accept the actual Poseidon commitment for verification.
+      // Read the channel's actual on-chain Poseidon balance commitment so the SDK can
+      // compare the proof's commitment against it (Story 34.4 / Issue #98). Passing the
+      // zkApp address (params.signerAddress) here would always fail the commitment check.
+      const onChainState = await this._sdk.getChannelState(params.channelId);
       const nonce = safeBigInt(String(params.nonce), 'nonce');
       return await this._sdk.verifyBalanceProof(
         params.channelId,
-        params.signerAddress, // placeholder for balanceCommitment -- see @remarks
+        onChainState.balanceCommitment,
         params.signature,
         nonce
       );

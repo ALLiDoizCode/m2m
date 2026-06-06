@@ -346,6 +346,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         signerAddress: 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
       };
 
+      mockSDK.getChannelState.mockResolvedValue(createSampleMinaChannelState());
       mockSDK.verifyBalanceProof.mockResolvedValue(true);
 
       // When: verifyBalanceProof() is called
@@ -354,6 +355,40 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       // Then: the zk-SNARK proof is verified and returns true
       expect(mockSDK.verifyBalanceProof).toHaveBeenCalledTimes(1);
       expect(result).toBe(true);
+    });
+
+    it('should pass the on-chain Poseidon commitment (not the zkApp address) to the SDK (Issue #98)', async () => {
+      // Given: a channel whose on-chain balance commitment differs from its zkApp address
+      const onChainCommitment =
+        '12959127256962165143508808117769303281268450174623886682930289771047606309704';
+      const params: VerifyBalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 7,
+        transferredAmount: '100000',
+        lockedAmount: '0',
+        locksRoot: '',
+        signature: 'serialized_proof_abc123',
+        // signerAddress carries the zkApp address; it must NOT be forwarded as the commitment.
+        signerAddress: TEST_ZKAPP_ADDRESS,
+      };
+
+      mockSDK.getChannelState.mockResolvedValue(
+        createSampleMinaChannelState({ balanceCommitment: onChainCommitment })
+      );
+      mockSDK.verifyBalanceProof.mockResolvedValue(true);
+
+      // When: verifyBalanceProof() is called
+      const result = await provider.verifyBalanceProof(params);
+
+      // Then: the SDK receives the real on-chain commitment, not the zkApp address
+      expect(result).toBe(true);
+      expect(mockSDK.getChannelState).toHaveBeenCalledWith(TEST_ZKAPP_ADDRESS);
+      expect(mockSDK.verifyBalanceProof).toHaveBeenCalledWith(
+        TEST_ZKAPP_ADDRESS,
+        onChainCommitment,
+        'serialized_proof_abc123',
+        7n
+      );
     });
 
     it('should return false for invalid proof', async () => {
@@ -367,6 +402,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         signerAddress: 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
       };
 
+      mockSDK.getChannelState.mockResolvedValue(createSampleMinaChannelState());
       mockSDK.verifyBalanceProof.mockResolvedValue(false);
 
       const result = await provider.verifyBalanceProof(params);
@@ -1244,6 +1280,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         signerAddress: 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
       };
 
+      mockSDK.getChannelState.mockResolvedValue(createSampleMinaChannelState());
       mockSDK.verifyBalanceProof.mockRejectedValue(new Error('Proof deserialization failed'));
 
       // When: verifyBalanceProof() is called
@@ -1268,11 +1305,32 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         signerAddress: 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
       };
 
+      mockSDK.getChannelState.mockResolvedValue(createSampleMinaChannelState());
       mockSDK.verifyBalanceProof.mockRejectedValue('string error');
 
       const result = await provider.verifyBalanceProof(params);
 
       expect(result).toBe(false);
+    });
+
+    it('should return false when getChannelState throws (commitment unavailable)', async () => {
+      // Given: the on-chain state read fails, so the commitment cannot be resolved
+      const params: VerifyBalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 1,
+        transferredAmount: '50000',
+        lockedAmount: '0',
+        locksRoot: '',
+        signature: 'sig',
+        signerAddress: 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
+      };
+
+      mockSDK.getChannelState.mockRejectedValue(new Error('account not found'));
+
+      const result = await provider.verifyBalanceProof(params);
+
+      expect(result).toBe(false);
+      expect(mockSDK.verifyBalanceProof).not.toHaveBeenCalled();
     });
   });
 
@@ -1668,7 +1726,8 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
   // -------------------------------------------------------------------------
 
   describe('verifyBalanceProof argument passing (AC 6 gap)', () => {
-    it('should pass channelId, signerAddress, signature, and nonce as BigInt to SDK', async () => {
+    it('should pass channelId, on-chain balanceCommitment, signature, and nonce as BigInt to SDK', async () => {
+      const onChainCommitment = 'poseidon_commitment_on_chain';
       const params: VerifyBalanceProofParams = {
         channelId: TEST_ZKAPP_ADDRESS,
         nonce: 4,
@@ -1679,13 +1738,17 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         signerAddress: 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
       };
 
+      mockSDK.getChannelState.mockResolvedValue(
+        createSampleMinaChannelState({ balanceCommitment: onChainCommitment })
+      );
       mockSDK.verifyBalanceProof.mockResolvedValue(true);
 
       await provider.verifyBalanceProof(params);
 
+      // Issue #98: the SDK must receive the on-chain Poseidon commitment, not signerAddress.
       expect(mockSDK.verifyBalanceProof).toHaveBeenCalledWith(
         TEST_ZKAPP_ADDRESS,
-        'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
+        onChainCommitment,
         'proof_data_xyz',
         4n // nonce as BigInt
       );
