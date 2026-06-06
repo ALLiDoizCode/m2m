@@ -887,14 +887,17 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ github.sha }}
-          path: benchmark-results.json
+          # `npm run benchmark` runs in the connector workspace, so the script
+          # writes the results there, not at the repo root.
+          path: packages/connector/benchmark-results.json
           retention-days: 30
 
       - name: Check benchmark results
         run: |
-          if [ -f benchmark-results.json ]; then
-            TPS=$(jq -r '.tps' benchmark-results.json)
-            PASSED=$(jq -r '.passed' benchmark-results.json)
+          RESULTS=packages/connector/benchmark-results.json
+          if [ -f "$RESULTS" ]; then
+            TPS=$(jq -r '.tps' "$RESULTS")
+            PASSED=$(jq -r '.passed' "$RESULTS")
             echo "Benchmark TPS: $TPS"
             echo "Threshold passed: $PASSED"
 
@@ -907,7 +910,7 @@ jobs:
               echo "✓ Performance benchmark passed"
             fi
           else
-            echo "Benchmark results file not found"
+            echo "Benchmark results file not found at $RESULTS"
             exit 1
           fi
 
