@@ -9,6 +9,45 @@ on:
       - main
 
 jobs:
+  # Detect which areas changed so heavy, chain-specific Docker integration jobs
+  # run on PRs only when relevant, without path-gating the whole workflow
+  # (which would drop required checks on unrelated PRs).
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      solana: ${{ steps.filter.outputs.solana }}
+      mina: ${{ steps.filter.outputs.mina }}
+      evm: ${{ steps.filter.outputs.evm }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            solana:
+              - 'packages/solana-program/**'
+              - 'packages/connector/src/settlement/solana-**'
+              - 'packages/connector/test/integration/solana-**'
+              - 'infra/solana/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/ci.yml'
+            mina:
+              - 'packages/connector/src/settlement/mina-**'
+              - 'packages/connector/src/settlement/provider/mina-**'
+              - 'packages/connector/test/integration/mina-**'
+              - 'docker-compose.yml'
+              - '.github/workflows/ci.yml'
+            evm:
+              - 'packages/connector/src/settlement/payment-channel-sdk.ts'
+              - 'packages/connector/src/settlement/provider/evm-**'
+              - 'packages/connector/test/integration/standalone-**'
+              - 'docker-compose.yml'
+              - '.github/workflows/ci.yml'
+
   lint-and-format:
     name: Lint and Format Check
     runs-on: ubuntu-latest
@@ -392,9 +431,12 @@ jobs:
   solana-integration:
     name: Solana Integration Tests (Docker)
     runs-on: ubuntu-latest
-    needs: [test]
-    # Only run when explicitly triggered or on main branch pushes
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, changes]
+    # Run on main branch pushes, and on PRs that touch Solana code/infra so
+    # on-chain regressions are caught before merge (not just post-merge on main).
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.solana == 'true')
 
     steps:
       - name: Checkout code
@@ -422,7 +464,9 @@ jobs:
 
       - name: Build Solana program
         working-directory: packages/solana-program
-        run: cargo build-sbf
+        # --tools-version v1.52 matches the solana-program job: the default
+        # platform-tools (cargo 1.84) cannot parse the edition2024 lockfile deps.
+        run: cargo build-sbf --tools-version v1.52
 
       - name: Start Solana validator via docker-compose
         run: docker compose --profile solana up -d
@@ -470,9 +514,13 @@ jobs:
   mina-integration:
     name: Mina Integration Tests (Docker)
     runs-on: ubuntu-latest
-    needs: [test]
-    # Only run on main branch pushes (matching Solana pattern)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, changes]
+    # Run on main branch pushes, and on PRs that touch Mina code. Readiness
+    # waits only for the lightnet endpoints (accounts-manager + GraphQL) to be
+    # responsive, NOT a full chain sync, and is bounded by timeout-minutes.
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.mina == 'true')
     timeout-minutes: 10
 
     steps:
@@ -538,9 +586,12 @@ jobs:
   standalone-e2e:
     name: Standalone Mode E2E (Docker)
     runs-on: ubuntu-latest
-    needs: [test]
-    # Only run on main branch pushes (matching Solana/Mina gate)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, changes]
+    # Run on main branch pushes, and on PRs that touch EVM settlement code or
+    # the standalone e2e suite (brings up the EVM/Anvil node via --profile evm).
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.evm == 'true')
     timeout-minutes: 15
 
     steps:
@@ -558,6 +609,13 @@ jobs:
 
       - name: Build shared package
         run: npm run build --workspace=packages/shared
+
+      # The standalone settlement e2e imports the connector, which dynamically
+      # imports @toon-protocol/mina-zkapp (mina-payment-channel-sdk.ts) — build
+      # it so ts-jest can resolve the module/types (matches the build order in
+      # other jobs that build shared then mina-zkapp).
+      - name: Build mina-zkapp package
+        run: npm run build --workspace=packages/mina-zkapp
 
       - name: Start Anvil + Faucet via docker-compose
         run: docker compose --profile evm up -d
