@@ -296,6 +296,7 @@ fn build_force_close_expired_instruction(
 }
 
 fn build_claim_instruction(
+    fee_payer: &Pubkey,
     claimer: &Pubkey,
     channel_pda: &Pubkey,
     nonce: u64,
@@ -306,10 +307,13 @@ fn build_claim_instruction(
     data.extend_from_slice(&nonce.to_le_bytes());
     data.extend_from_slice(&transferred_amount.to_le_bytes());
 
+    // Account layout (#99): fee-payer/submitter signs the tx; the claiming
+    // participant (claimer) is a non-signer authorized via the Ed25519 precompile.
     Instruction {
         program_id: PROGRAM_ID,
         accounts: vec![
-            AccountMeta::new(*claimer, true),
+            AccountMeta::new(*fee_payer, true),
+            AccountMeta::new_readonly(*claimer, false),
             AccountMeta::new(*channel_pda, false),
             AccountMeta::new_readonly(sysvar::instructions::id(), false),
         ],
@@ -447,14 +451,19 @@ async fn submit_claim(
     let message = build_balance_proof_message(channel_pda, nonce, transferred_amount);
     let dalek_keypair = to_dalek_keypair(claimer);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
-    let claim_ix =
-        build_claim_instruction(&claimer.pubkey(), channel_pda, nonce, transferred_amount);
+    let claim_ix = build_claim_instruction(
+        &context.payer.pubkey(),
+        &claimer.pubkey(),
+        channel_pda,
+        nonce,
+        transferred_amount,
+    );
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
         &[ed25519_ix, claim_ix],
         Some(&context.payer.pubkey()),
-        &[&context.payer, claimer],
+        &[&context.payer],
         recent,
     );
     context.banks_client.process_transaction(tx).await
