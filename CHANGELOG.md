@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.5](https://github.com/toon-protocol/connector/compare/v3.9.4...v3.9.5) (2026-06-06)
+
+### Bug Fixes
+
+- **settlement:** compare Mina proof commitment against on-chain balanceCommitment ([#98](https://github.com/toon-protocol/connector/issues/98)) ([#100](https://github.com/toon-protocol/connector/issues/100)) ([9f29fac](https://github.com/toon-protocol/connector/commit/9f29facefa20d0d30809db0c5ef3943b9fa18b69)), closes [Post-#95](https://github.com/toon-protocol/Post-/issues/95)
+- **settlement:** decouple Solana claim fee-payer from claiming participant ([#99](https://github.com/toon-protocol/connector/issues/99)) ([#101](https://github.com/toon-protocol/connector/issues/101)) ([6a8c954](https://github.com/toon-protocol/connector/commit/6a8c954d10b679f9d1e95668116bf074ca99f9d2)), closes [#94](https://github.com/toon-protocol/connector/issues/94)
+- **settlement:** derive Solana PubSub WS URL on rpc_port + 1 ([#102](https://github.com/toon-protocol/connector/issues/102)) ([31c3fc5](https://github.com/toon-protocol/connector/commit/31c3fc55a6ca1934db4aa524b1ff7a80fca7420a)), closes [#99](https://github.com/toon-protocol/connector/issues/99)
+
 ## [3.9.4](https://github.com/toon-protocol/connector/compare/v3.9.3...v3.9.4) (2026-06-05)
 
 ### Bug Fixes
