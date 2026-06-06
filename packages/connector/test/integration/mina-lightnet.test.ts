@@ -44,7 +44,8 @@ describeMina('Mina Lightnet E2E Integration Tests (Story 34.8)', () => {
   const acquiredAccounts: MinaFundedAccount[] = [];
 
   beforeAll(async () => {
-    // Wait for lightnet to be fully synced and ready
+    // Wait until the lightnet endpoints (accounts-manager + GraphQL) are
+    // responsive. This is endpoint-readiness only, NOT a full chain sync.
     await waitForMinaReady();
   });
 
@@ -90,8 +91,10 @@ describeMina('Mina Lightnet E2E Integration Tests (Story 34.8)', () => {
 
       // Verify B62 prefix for public key
       expect(account.publicKey).toMatch(/^B62/);
-      // Verify EKE prefix for private key
-      expect(account.privateKey).toMatch(/^EKE/);
+      // Verify Mina base58 private-key prefix. The 3rd char varies with the
+      // key bytes (lightnet issues both EKE… and EKF…), so match the stable
+      // "EK" prefix rather than a specific third character.
+      expect(account.privateKey).toMatch(/^EK/);
       // Verify sufficient balance (>= 1000 MINA)
       expect(Number(account.balance)).toBeGreaterThanOrEqual(1000);
     });
