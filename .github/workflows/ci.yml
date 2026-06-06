@@ -633,6 +633,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install libsql native module for Linux
+        run: |
+          # The connector aborts startup without libsql (per-packet claims
+          # persistence). package-lock.json may be generated on macOS, so force
+          # the Linux x64 glibc native module here (mirrors the `test` job).
+          npm install @libsql/linux-x64-gnu --no-save --ignore-scripts || true
+
       - name: Build shared package
         run: npm run build --workspace=packages/shared
 
