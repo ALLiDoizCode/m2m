@@ -21,6 +21,7 @@ import {
   parseSolanaError,
   buildEd25519PrecompileInstruction,
   generateKeyPairSigner,
+  deriveWsUrl,
 } from './solana-payment-channel-sdk';
 import type { SolanaChannelState } from './solana-payment-channel-sdk';
 
@@ -1301,5 +1302,31 @@ describe('SolanaPaymentChannelSDK - Integration Tests (Story 33.4)', () => {
       // When: the full lifecycle is executed through the SDK
       // Then: all operations succeed and the final state is settled
     }, 60000); // Extended timeout for full lifecycle
+  });
+
+  // -------------------------------------------------------------------------
+  // RPC PubSub WebSocket URL derivation
+  // -------------------------------------------------------------------------
+
+  describe('deriveWsUrl', () => {
+    it('increments the explicit port for a local http validator (RPC -> PubSub on rpc_port + 1)', () => {
+      // Given: a local validator RPC on :8899 (PubSub is served on :8900)
+      // When/Then: the ws URL targets the next port, not the same one
+      expect(deriveWsUrl('http://127.0.0.1:8899')).toBe('ws://127.0.0.1:8900/');
+    });
+
+    it('upgrades https to wss and increments the explicit port', () => {
+      expect(deriveWsUrl('https://localhost:8899')).toBe('wss://localhost:8900/');
+    });
+
+    it('leaves portless hosted endpoints as a plain scheme swap (WS shares the host)', () => {
+      // Given: a hosted RPC with no explicit port
+      // When/Then: only the scheme changes; no port is invented
+      expect(deriveWsUrl('https://api.devnet.solana.com')).toBe('wss://api.devnet.solana.com/');
+    });
+
+    it('falls back to a scheme-only swap for non-URL inputs', () => {
+      expect(deriveWsUrl('not a url')).toBe('not a url');
+    });
   });
 });
