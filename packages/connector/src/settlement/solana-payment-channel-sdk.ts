@@ -144,6 +144,34 @@ function toMutableBytes(readonly: ReadonlyUint8Array): Uint8Array {
   return new Uint8Array(readonly as Uint8Array);
 }
 
+/**
+ * Derive the RPC PubSub (WebSocket) URL from an HTTP(S) RPC URL.
+ *
+ * A Solana validator serves the RPC PubSub WebSocket on `rpc_port + 1` (see
+ * `solana-test-validator --rpc-port`: "Enable JSON RPC on this port, and the
+ * NEXT port for the RPC websocket"). The previous derivation only swapped the
+ * scheme (`http`->`ws`) while keeping the SAME port, so against a real validator
+ * with RPC on :8899 it produced `ws://host:8899` instead of `ws://host:8900` --
+ * the WebSocket then 405s and `sendAndConfirmTransaction` fails with
+ * "WebSocket failed to connect". This helper increments an explicit port so
+ * transaction confirmation works against a local validator, while leaving
+ * portless hosted endpoints (e.g. devnet/mainnet RPC providers, where the WS
+ * endpoint shares the host) as a plain scheme swap.
+ */
+export function deriveWsUrl(rpcUrl: string): string {
+  try {
+    const url = new URL(rpcUrl);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    if (url.port) {
+      url.port = String(Number(url.port) + 1);
+    }
+    return url.toString();
+  } catch {
+    // Fallback to the legacy scheme-only swap for non-URL inputs.
+    return rpcUrl.replace('http', 'ws');
+  }
+}
+
 /** Maximum value for a u64: 2^64 - 1 */
 const MAX_U64 = (1n << 64n) - 1n;
 
@@ -417,7 +445,7 @@ export class SolanaPaymentChannelSDK {
     this._programId = address(programId);
     this._logger = logger.child({ component: 'solana-payment-channel-sdk' });
     this._rpc = createSolanaRpc(rpcUrl);
-    this._rpcSubscriptions = createSolanaRpcSubscriptions(rpcUrl.replace('http', 'ws'));
+    this._rpcSubscriptions = createSolanaRpcSubscriptions(deriveWsUrl(rpcUrl));
     this._sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
       rpc: this._rpc,
       rpcSubscriptions: this._rpcSubscriptions,
