@@ -799,6 +799,10 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,prefix=
+            # Full 40-char commit SHA: the Container Security Scan job scans
+            # connector:${{ github.sha }} (full SHA), which the default
+            # type=sha (short SHA) tag does not satisfy -> MANIFEST_UNKNOWN.
+            type=sha,prefix=,format=long
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
