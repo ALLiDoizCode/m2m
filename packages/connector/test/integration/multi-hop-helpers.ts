@@ -439,18 +439,25 @@ export async function waitForAnvilReady(timeoutMs: number = 30_000): Promise<voi
     throw new Error(`Anvil not ready after ${timeoutMs}ms`);
   }
 
-  // Wait for Faucet health
+  // Wait for Faucet health AND a genuinely-deployed token. The anvil container
+  // deploys the USDC token + TokenNetworkRegistry asynchronously after Anvil's
+  // RPC is up, so gating only on `response.ok` races the deploy. We require the
+  // faucet's (now honest) `tokenReady` flag — which verifies on-chain code — so
+  // fundPeerAccounts never runs against a token that isn't deployed yet. See #104.
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`${FAUCET_URL}/health`);
-      if (response.ok) return;
+      if (response.ok) {
+        const health = (await response.json()) as { tokenReady?: boolean };
+        if (health.tokenReady) return;
+      }
     } catch {
       // Not ready yet
     }
     await sleep(500);
   }
 
-  throw new Error(`Faucet not ready after ${timeoutMs}ms`);
+  throw new Error(`Faucet not ready (token not deployed) after ${timeoutMs}ms`);
 }
 
 /** Minimum USDC balance (in wei) before we bother calling the faucet. */
@@ -474,7 +481,16 @@ async function getTokenBalance(address: string): Promise<bigint> {
     }),
   });
   const data = (await response.json()) as { result?: string };
-  return data.result ? BigInt(data.result) : 0n;
+  // Defensive: `eth_call` returns the empty hex `0x` when there is no contract
+  // code at the address (or the call reverted). `BigInt('0x')` THROWS
+  // ("Cannot convert 0x to a BigInt"), which is the crash reported in #104.
+  // Treat `0x`/empty as a zero balance. NOTE: this is only a guard against a
+  // transient/edge read — the real fix is that the token is now reliably
+  // deployed (anvil compose + forge submodules) and the faucet `tokenReady`
+  // signal is honest, so a persistent 0x here means a genuinely-undeployed
+  // token and funding will then fail loudly at the faucet step.
+  if (!data.result || data.result === '0x') return 0n;
+  return BigInt(data.result);
 }
 
 /**

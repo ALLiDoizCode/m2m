@@ -40,21 +40,42 @@ let tokenContract = null;
 let tokenSymbol = 'USDC';
 let tokenDecimals = 18;
 
-// Initialize token contract
+// Initialize token contract.
+//
+// Crucially, this verifies the token actually has on-chain code before
+// reporting ready. The previous implementation set `tokenContract` from the
+// address alone, so `/health` `tokenReady` was a FALSE signal: it returned
+// true even when nothing was deployed at TOKEN_ADDRESS (e.g. the anvil
+// `forge script` deploy silently failed). The standalone-settlement-e2e
+// readiness wait then passed, and the suite crashed on `BigInt('0x')` because
+// `balanceOf` had no contract to call. See issue #104.
 async function initTokenContract() {
   if (!TOKEN_ADDRESS) {
     console.log('⚠️  TOKEN_ADDRESS not set. Waiting for contract deployment...');
+    tokenContract = null;
     return false;
   }
 
   try {
-    tokenContract = new ethers.Contract(TOKEN_ADDRESS, ERC20_ABI, tokenWallet);
-    tokenSymbol = await tokenContract.symbol();
-    tokenDecimals = await tokenContract.decimals();
+    // Verify on-chain code exists at TOKEN_ADDRESS — an undeployed token
+    // returns '0x' here. This is the honest readiness check.
+    const code = await provider.getCode(TOKEN_ADDRESS);
+    if (!code || code === '0x') {
+      console.log(`⚠️  No contract code at ${TOKEN_ADDRESS} yet — token not deployed.`);
+      tokenContract = null;
+      return false;
+    }
+
+    const contract = new ethers.Contract(TOKEN_ADDRESS, ERC20_ABI, tokenWallet);
+    tokenSymbol = await contract.symbol();
+    tokenDecimals = await contract.decimals();
+    // Only publish the contract (flip tokenReady true) once all reads succeed.
+    tokenContract = contract;
     console.log(`✅ Token contract initialized: ${tokenSymbol} at ${TOKEN_ADDRESS}`);
     return true;
   } catch (error) {
     console.error('❌ Failed to initialize token contract:', error.message);
+    tokenContract = null;
     return false;
   }
 }
@@ -200,8 +221,21 @@ app.listen(PORT, async () => {
   console.log('═══════════════════════════════════════════════');
   console.log('');
 
-  // Try to initialize token contract
-  await initTokenContract();
+  // Try to initialize token contract. The anvil container deploys the token
+  // asynchronously after Anvil's RPC comes up, so the token may not exist yet
+  // when the faucet boots. Poll in the background until it appears so
+  // `/health` `tokenReady` flips true on its own once the deploy lands — no
+  // restart required. See issue #104.
+  const ready = await initTokenContract();
+  if (!ready) {
+    const poll = setInterval(async () => {
+      if (await initTokenContract()) {
+        clearInterval(poll);
+      }
+    }, 2000);
+    // Don't keep the event loop alive solely for this poll.
+    if (typeof poll.unref === 'function') poll.unref();
+  }
 
   console.log('✅ Faucet is running!');
   console.log(`   UI: http://localhost:${PORT}`);
