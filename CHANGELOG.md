@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.6](https://github.com/toon-protocol/connector/compare/v3.9.5...v3.9.6) (2026-06-06)
+
+### Bug Fixes
+
+- **ci:** deploy USDC token in --profile evm stack so standalone-e2e passes ([#104](https://github.com/toon-protocol/connector/issues/104)) ([#111](https://github.com/toon-protocol/connector/issues/111)) ([73159a7](https://github.com/toon-protocol/connector/commit/73159a70e23356c3f0c9166d4ca8c3e56e878b04))
+
 ## [3.9.5](https://github.com/toon-protocol/connector/compare/v3.9.4...v3.9.5) (2026-06-06)
 
 ### Bug Fixes
