@@ -463,6 +463,17 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
+      # Cache the downloaded platform-tools (keyed on the tools-version) so
+      # cargo build-sbf doesn't re-resolve/re-download it from the network each
+      # run. Network resolution is the source of the flaky "unexpected character
+      # 'l' while parsing major version" panic (issue #105); a warm cache skips
+      # it entirely. The retry loop below still covers the cold-cache first run.
+      - name: Cache Solana platform-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: solana-platform-tools-${{ runner.os }}-v1.52
+
       - name: Build Solana program
         working-directory: packages/solana-program
         # --tools-version v1.52 matches the solana-program job: the default
@@ -793,6 +804,14 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
+      # See the solana-integration job: caching the platform-tools dir keyed on
+      # the tools-version avoids the flaky network resolution panic (issue #105).
+      - name: Cache Solana platform-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: solana-platform-tools-${{ runner.os }}-v1.52
+
       - name: Cache Solana program build
         uses: actions/cache@v4
         with:
@@ -804,7 +823,20 @@ jobs:
 
       - name: Run Solana program tests
         working-directory: packages/solana-program
-        run: cargo test-sbf --tools-version v1.52
+        # Retry on the flaky platform-tools version-resolution panic (issue #105):
+        # the first run on a cold platform-tools cache still hits the network and
+        # can panic ("unexpected character 'l' while parsing major version").
+        run: |
+          n=0
+          until cargo test-sbf --tools-version v1.52; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "cargo test-sbf failed after $n attempts"
+              exit 1
+            fi
+            echo "cargo test-sbf attempt $n failed (likely flaky tools-version resolution) — retrying in 5s..."
+            sleep 5
+          done
 
   # Build and push Docker image to GitHub Container Registry
   docker-build-push:
