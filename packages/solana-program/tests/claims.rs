@@ -614,10 +614,13 @@ async fn test_invalid_signature_rejected() {
     );
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    // Per #99, the claiming participant (participant_a) is a non-signer at
+    // index 1 and authorizes solely via the Ed25519 precompile; only the
+    // fee-payer (context.payer) signs the redemption transaction.
     let tx = Transaction::new_signed_with_payer(
         &[ed25519_ix, claim_ix],
         Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
+        &[&context.payer],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
@@ -815,10 +818,13 @@ async fn test_missing_ed25519_precompile_rejected() {
         5000,
     );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    // Per #99, the claiming participant (participant_a) is a non-signer at
+    // index 1; only the fee-payer (context.payer) signs the transaction. This
+    // tx deliberately omits the Ed25519 precompile to exercise rejection.
     let tx = Transaction::new_signed_with_payer(
         &[claim_ix],
         Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
+        &[&context.payer],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
@@ -867,10 +873,14 @@ async fn test_ed25519_precompile_at_wrong_index_rejected() {
     );
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    // Per #99, the claiming participant (participant_a) is a non-signer at
+    // index 1; only the fee-payer (context.payer) signs the transaction. The
+    // instructions are deliberately ordered with the precompile at the wrong
+    // index to exercise rejection.
     let tx = Transaction::new_signed_with_payer(
         &[claim_ix, ed25519_ix], // Wrong order: claim at 0, ed25519 at 1
         Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
+        &[&context.payer],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
