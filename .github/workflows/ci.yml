@@ -868,7 +868,16 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           echo "Running performance benchmark..."
-          npm run benchmark -- --duration 10 --target-tps 10000 --threshold 5000
+          # Threshold is a runner-appropriate floor, not an absolute target (#107).
+          # The benchmark is single-core-bound (~1.05ms serial busy-wait per
+          # simulated packet), so it caps at ~950 TPS regardless of core count
+          # — the original 5000 bar was never reachable on any hardware. 750 TPS
+          # sits ~20% below the consistently observed ~950 (CI 953 / local 945,
+          # near-zero variance) so it catches a real regression (e.g. per-packet
+          # work doubling -> ~475 TPS) while tolerating runner noise. Override
+          # for stricter local/dedicated runs via --threshold or
+          # BENCHMARK_TPS_THRESHOLD.
+          npm run benchmark -- --duration 10 --target-tps 10000 --threshold 750
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4

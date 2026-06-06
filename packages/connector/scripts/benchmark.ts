@@ -202,6 +202,30 @@ export async function runBenchmark(
 }
 
 /**
+ * Read benchmark configuration from environment variables.
+ *
+ * Lets CI (or any caller) pick a runner-appropriate threshold without changing
+ * the invocation. Precedence is: CLI args > environment variables > defaults.
+ *
+ * - BENCHMARK_DURATION      -> durationSeconds
+ * - BENCHMARK_TARGET_TPS    -> targetTps
+ * - BENCHMARK_TPS_THRESHOLD -> tpsThreshold (pass/fail gate)
+ */
+export function parseEnv(): Partial<BenchmarkConfig> {
+  const config: Partial<BenchmarkConfig> = {};
+
+  const duration = process.env.BENCHMARK_DURATION;
+  const targetTps = process.env.BENCHMARK_TARGET_TPS;
+  const threshold = process.env.BENCHMARK_TPS_THRESHOLD;
+
+  if (duration !== undefined && duration !== '') config.durationSeconds = parseInt(duration, 10);
+  if (targetTps !== undefined && targetTps !== '') config.targetTps = parseInt(targetTps, 10);
+  if (threshold !== undefined && threshold !== '') config.tpsThreshold = parseInt(threshold, 10);
+
+  return config;
+}
+
+/**
  * Parse command line arguments
  * Supports both flag format (--duration 10) and positional format (10)
  */
@@ -248,7 +272,8 @@ function parseArgs(): Partial<BenchmarkConfig> {
 
 // Main entry point when run directly
 if (require.main === module) {
-  const config = parseArgs();
+  // Precedence: CLI args override env vars, which override defaults.
+  const config = { ...parseEnv(), ...parseArgs() };
 
   runBenchmark(config)
     .then((results) => {
