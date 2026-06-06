@@ -18,6 +18,7 @@ jobs:
     outputs:
       solana: ${{ steps.filter.outputs.solana }}
       mina: ${{ steps.filter.outputs.mina }}
+      evm: ${{ steps.filter.outputs.evm }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -38,6 +39,13 @@ jobs:
               - 'packages/connector/src/settlement/mina-**'
               - 'packages/connector/src/settlement/provider/mina-**'
               - 'packages/connector/test/integration/mina-**'
+              - 'docker-compose.yml'
+              - '.github/workflows/ci.yml'
+            evm:
+              - 'packages/connector/src/settlement/payment-channel-sdk.ts'
+              - 'packages/connector/src/settlement/provider/evm-**'
+              - 'packages/connector/test/integration/standalone-**'
+              - 'packages/faucet/**'
               - 'docker-compose.yml'
               - '.github/workflows/ci.yml'
 
@@ -592,17 +600,29 @@ jobs:
   standalone-e2e:
     name: Standalone Mode E2E (Docker)
     runs-on: ubuntu-latest
-    needs: [test]
-    # Main-only for now: the standalone-settlement-e2e harness is pre-existingly
-    # broken (the EVM faucet never deploys the USDC token at the hardcoded
-    # TOKEN_ADDRESS, and its `tokenReady` flag is a false signal), so it cannot
-    # gate PRs yet. Tracked separately; re-enable on PRs once fixed.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, changes]
+    # Run on main branch pushes, and on PRs that touch EVM settlement code/infra
+    # so on-chain regressions are caught before merge (not just post-merge on
+    # main). Fixed in #104: the anvil compose service now deterministically
+    # deploys the USDC token + TokenNetworkRegistry (the forge submodules are
+    # fetched via `submodules: recursive` below), and the faucet `tokenReady`
+    # flag now verifies on-chain code instead of being a false signal.
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.evm == 'true')
     timeout-minutes: 15
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # The anvil compose service runs `forge script DeployLocal.s.sol`,
+          # which imports forge-std + openzeppelin-contracts from
+          # packages/contracts/lib (git submodules). Without these the deploy
+          # silently fails and no USDC token / TokenNetworkRegistry exists at
+          # the deterministic addresses the standalone-settlement-e2e harness
+          # depends on. Fetch them so the on-chain deploy succeeds (#104).
+          submodules: recursive
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -638,6 +658,22 @@ jobs:
               break
             fi
             echo "Attempt $i/60 -- waiting for Anvil..."
+            sleep 2
+          done
+          echo "Waiting for USDC token to be deployed on-chain..."
+          # The faucet's tokenReady now verifies eth_getCode, but gate explicitly
+          # on-chain here too so a deploy failure surfaces as a clear timeout on
+          # the token rather than a downstream BigInt('0x') crash in the suite.
+          for i in $(seq 1 60); do
+            CODE=$(curl -s -X POST http://localhost:8545 \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","method":"eth_getCode","params":["0x5FbDB2315678afecb367f032d93F642f64180aa3","latest"],"id":1}' \
+                | grep -o '"result":"0x[0-9a-fA-F]*"' || true)
+            if [ -n "$CODE" ] && [ "$CODE" != '"result":"0x"' ]; then
+              echo "USDC token is deployed (code present)."
+              break
+            fi
+            echo "Attempt $i/60 -- waiting for token deploy..."
             sleep 2
           done
           echo "Waiting for Faucet..."

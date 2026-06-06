@@ -42,7 +42,23 @@ services:
 
         echo "Deploying contracts..."
         cd /contracts
-        forge script script/DeployLocal.s.sol:DeployLocalScript --rpc-url http://localhost:8545 --broadcast --skip-simulation || echo "Deployment failed (non-fatal)"
+
+        # DeployLocal.s.sol imports forge-std + openzeppelin-contracts from
+        # lib/ (git submodules). In CI the checkout fetches them via
+        # `submodules: recursive`; for local dev / git worktrees where the
+        # submodules may not be initialized, fall back to `forge install` so the
+        # deploy is self-healing and the stack never comes up without the USDC
+        # token + TokenNetworkRegistry. See issue #104.
+        if [ ! -f lib/forge-std/src/Script.sol ] || [ ! -f lib/openzeppelin-contracts/contracts/access/Ownable.sol ]; then
+          echo "Foundry libs missing — running 'forge install'..."
+          forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git || forge install
+        fi
+
+        # Deploy must succeed: the standalone-settlement-e2e harness depends on
+        # the USDC token + TokenNetworkRegistry existing at deterministic
+        # addresses. A silent failure here (the old `|| echo non-fatal`) is what
+        # left the faucet reporting tokenReady:true with no token on-chain (#104).
+        forge script script/DeployLocal.s.sol:DeployLocalScript --rpc-url http://localhost:8545 --broadcast --skip-simulation
 
         echo "Anvil ready with contracts deployed!"
         wait $$ANVIL_PID
