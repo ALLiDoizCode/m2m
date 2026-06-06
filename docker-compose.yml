@@ -24,6 +24,11 @@ services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   anvil:
     image: ghcr.io/foundry-rs/foundry:latest
+    # Run as root: the foundry image's default non-root user cannot write
+    # forge's out/cache/broadcast dirs into the bind-mounted ./packages/contracts
+    # when the host dir is owned by a different UID (e.g. the CI runner) —
+    # `forge script` then fails with `"/contracts/out": Permission denied`. See #104.
+    user: root
     profiles:
       - evm
     entrypoint: []
