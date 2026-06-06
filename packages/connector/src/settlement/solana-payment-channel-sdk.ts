@@ -709,18 +709,24 @@ export class SolanaPaymentChannelSDK {
    *   [0] Ed25519 precompile instruction (signature verification)
    *   [1] claim_from_channel program instruction
    *
-   * @param claimer - Claimer signer
+   * @param claimer - Fee-payer/submitter signer. This account signs and pays for
+   *   the transaction (the connector). Post-#99 it is decoupled from the credited
+   *   participant: it need NOT be a channel participant. For self-signed claims it
+   *   is the participant; for inbound peer claims it is the connector submitting on
+   *   the peer's behalf.
    * @param channelPDA - Base58 channel PDA address
    * @param nonce - Balance proof nonce
    * @param transferredAmount - Balance proof transferred amount
    * @param signature - 64-byte Ed25519 signature over the balance proof message
    * @param signerPublicKey - Base58 public key of the key that produced
-   *   `signature`. Ed25519 signatures are not public-key-recoverable, so the
-   *   Ed25519 precompile must be told which key to verify against. When omitted,
-   *   the claimer's own address is used (self-signed claim). For inbound peer
-   *   claims the signer is the counterparty, so this MUST be the counterparty's
-   *   pubkey — otherwise the precompile verifies the counterparty's signature
-   *   against the wrong key and fails preflight with `Custom(2)`.
+   *   `signature` — the credited channel participant. Ed25519 signatures are not
+   *   public-key-recoverable, so the Ed25519 precompile must be told which key to
+   *   verify against. When omitted, the claimer's own address is used (self-signed
+   *   claim). For inbound peer claims the signer is the counterparty, so this MUST
+   *   be the counterparty's pubkey — otherwise the precompile verifies the
+   *   counterparty's signature against the wrong key and fails preflight with
+   *   `Custom(2)`. This participant is passed as a NON-signer account (index 1);
+   *   its authorization is the precompile signature, so it does not co-sign the tx.
    * @returns Transaction signature
    */
   async claimFromChannel(
@@ -773,15 +779,19 @@ export class SolanaPaymentChannelSDK {
     writeUint64LE(claimData, 8, nonce);
     writeUint64LE(claimData, 16, transferredAmount);
 
-    // The on-chain program requires the `claimer` account (index 0) to equal the
-    // Ed25519 precompile pubkey (the balance-proof signer) and to be a transaction
-    // signer. For self-signed claims `signerAddress === claimer.address`, so the
-    // claimer also signs the transaction. For counterparty-signed claims the
-    // signer must co-sign the transaction; that authorization is handled by the
-    // caller — here we only ensure the claimer account matches the precompile
-    // pubkey so the program's signer check is internally consistent.
+    // Account layout (#99): the fee-payer/submitter (index 0) signs the tx, and
+    // the credited participant (index 1, the balance-proof signer) is a NON-signer
+    // whose authorization is the Ed25519 precompile over the balance proof. This
+    // decouples the tx signer from the claiming participant so the connector can
+    // unilaterally redeem an inbound peer's signed claim without the peer
+    // co-signing the redemption transaction.
+    //   0. [signer]    fee_payer    — `claimer` (the submitter / `_sendTransaction` fee-payer)
+    //   1. []          participant  — `signerAddress` (precompile-authorized, non-signer)
+    //   2. [writable]  channel_pda
+    //   3. []          instructions sysvar
     const claimAccounts: AccountMeta[] = [
-      { address: address(signerAddress), role: AccountRole.READONLY_SIGNER },
+      { address: claimer.address, role: AccountRole.READONLY_SIGNER },
+      { address: address(signerAddress), role: AccountRole.READONLY },
       { address: address(channelPDA), role: AccountRole.WRITABLE },
       { address: INSTRUCTIONS_SYSVAR, role: AccountRole.READONLY },
     ];

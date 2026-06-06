@@ -115,9 +115,15 @@ services:
       - /entrypoint.sh
     volumes:
       - ./infra/solana/entrypoint.sh:/entrypoint.sh:ro
+      # No committed fee-payer keypair: the entrypoint reuses the genesis-funded
+      # validator-identity keypair the validator writes into its ledger dir as the
+      # deploy fee-payer (the beeman image has no solana-keygen). The program id
+      # stays deterministic via the mounted program keypair in /programs.
+      # See infra/solana/entrypoint.sh.
       - ./packages/solana-program/target/deploy:/programs:ro
     tmpfs:
-      - /tmp/test-ledger
+      # Validator ledger (genesis keypairs + state) lives here; cleared on restart.
+      - /workspace/test-ledger
     ports:
       - '8899:8899'
       - '8900:8900'

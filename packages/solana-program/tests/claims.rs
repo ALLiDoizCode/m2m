@@ -267,6 +267,7 @@ fn build_settle_channel_instruction(
 
 /// Build a claim_from_channel instruction.
 fn build_claim_instruction(
+    fee_payer: &Pubkey,
     claimer: &Pubkey,
     channel_pda: &Pubkey,
     nonce: u64,
@@ -277,10 +278,13 @@ fn build_claim_instruction(
     data.extend_from_slice(&nonce.to_le_bytes());
     data.extend_from_slice(&transferred_amount.to_le_bytes());
 
+    // Account layout (#99): fee-payer/submitter signs the tx; the claiming
+    // participant (claimer) is a non-signer authorized via the Ed25519 precompile.
     Instruction {
         program_id: PROGRAM_ID,
         accounts: vec![
-            AccountMeta::new(*claimer, true),
+            AccountMeta::new(*fee_payer, true),
+            AccountMeta::new_readonly(*claimer, false),
             AccountMeta::new(*channel_pda, false),
             AccountMeta::new_readonly(sysvar::instructions::id(), false),
         ],
@@ -420,14 +424,22 @@ async fn submit_claim(
     let message = build_balance_proof_message(channel_pda, nonce, transferred_amount);
     let dalek_keypair = to_dalek_keypair(claimer);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
-    let claim_ix =
-        build_claim_instruction(&claimer.pubkey(), channel_pda, nonce, transferred_amount);
+    // The claimer (participant) authorizes via the precompile only; the
+    // fee-payer (context.payer) is the sole tx signer. This exercises the #99
+    // unilateral-redemption path where the participant does not sign the tx.
+    let claim_ix = build_claim_instruction(
+        &context.payer.pubkey(),
+        &claimer.pubkey(),
+        channel_pda,
+        nonce,
+        transferred_amount,
+    );
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
         &[ed25519_ix, claim_ix],
         Some(&context.payer.pubkey()),
-        &[&context.payer, claimer],
+        &[&context.payer],
         recent,
     );
     context.banks_client.process_transaction(tx).await
@@ -593,13 +605,22 @@ async fn test_invalid_signature_rejected() {
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &wrong_message);
 
     // But claim instruction has nonce = 1
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
+    let claim_ix = build_claim_instruction(
+        &context.payer.pubkey(),
+        &participant_a.pubkey(),
+        &channel_pda,
+        1,
+        5000,
+    );
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    // Per #99, the claiming participant (participant_a) is a non-signer at
+    // index 1 and authorizes solely via the Ed25519 precompile; only the
+    // fee-payer (context.payer) signs the redemption transaction.
     let tx = Transaction::new_signed_with_payer(
         &[ed25519_ix, claim_ix],
         Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
+        &[&context.payer],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
@@ -640,13 +661,19 @@ async fn test_non_participant_signer_rejected() {
     let message = build_balance_proof_message(&channel_pda, 1, 5000);
     let dalek_outsider = to_dalek_keypair(&outsider);
     let ed25519_ix = new_ed25519_instruction(&dalek_outsider, &message);
-    let claim_ix = build_claim_instruction(&outsider.pubkey(), &channel_pda, 1, 5000);
+    let claim_ix = build_claim_instruction(
+        &context.payer.pubkey(),
+        &outsider.pubkey(),
+        &channel_pda,
+        1,
+        5000,
+    );
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
         &[ed25519_ix, claim_ix],
         Some(&context.payer.pubkey()),
-        &[&context.payer, &outsider],
+        &[&context.payer],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
@@ -783,12 +810,21 @@ async fn test_missing_ed25519_precompile_rejected() {
     .await;
 
     // Submit claim WITHOUT Ed25519 precompile instruction
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
+    let claim_ix = build_claim_instruction(
+        &context.payer.pubkey(),
+        &participant_a.pubkey(),
+        &channel_pda,
+        1,
+        5000,
+    );
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    // Per #99, the claiming participant (participant_a) is a non-signer at
+    // index 1; only the fee-payer (context.payer) signs the transaction. This
+    // tx deliberately omits the Ed25519 precompile to exercise rejection.
     let tx = Transaction::new_signed_with_payer(
         &[claim_ix],
         Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
+        &[&context.payer],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
@@ -828,13 +864,23 @@ async fn test_ed25519_precompile_at_wrong_index_rejected() {
     let message = build_balance_proof_message(&channel_pda, 1, 5000);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
-    let claim_ix = build_claim_instruction(&participant_a.pubkey(), &channel_pda, 1, 5000);
+    let claim_ix = build_claim_instruction(
+        &context.payer.pubkey(),
+        &participant_a.pubkey(),
+        &channel_pda,
+        1,
+        5000,
+    );
 
     let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    // Per #99, the claiming participant (participant_a) is a non-signer at
+    // index 1; only the fee-payer (context.payer) signs the transaction. The
+    // instructions are deliberately ordered with the precompile at the wrong
+    // index to exercise rejection.
     let tx = Transaction::new_signed_with_payer(
         &[claim_ix, ed25519_ix], // Wrong order: claim at 0, ed25519 at 1
         Some(&context.payer.pubkey()),
-        &[&context.payer, &participant_a],
+        &[&context.payer],
         recent,
     );
     let result = context.banks_client.process_transaction(tx).await;
@@ -1033,4 +1079,86 @@ async fn test_claim_from_participant_b_updates_b_fields() {
     // A's fields should be unchanged
     assert_eq!(read_u64_at(data, NONCE_A_OFFSET), 0);
     assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_A_OFFSET), 0);
+}
+
+// ============================================================================
+// T-33.2-14: Third-party fee-payer redeems a participant's claim without the
+// participant signing the transaction (#99 unilateral inbound-peer redemption).
+// The participant authorizes (nonce, transferred_amount) solely via the Ed25519
+// precompile; a distinct submitter (the connector) signs/pays for the tx.
+// ============================================================================
+
+#[tokio::test]
+async fn test_third_party_fee_payer_redeems_without_participant_signature() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, _vault_pda, _token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    // A distinct submitter (the connector) that is NOT a channel participant and
+    // is NOT the default test payer. Fund it so it can pay the transaction fee.
+    let connector = Keypair::new();
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let fund_tx = Transaction::new_signed_with_payer(
+        &[solana_sdk::system_instruction::transfer(
+            &context.payer.pubkey(),
+            &connector.pubkey(),
+            1_000_000_000,
+        )],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context
+        .banks_client
+        .process_transaction(fund_tx)
+        .await
+        .unwrap();
+
+    // Participant A signs the balance proof (the precompile authorization), but
+    // does NOT sign the redemption transaction.
+    let message = build_balance_proof_message(&channel_pda, 1, 5000);
+    let dalek_a = to_dalek_keypair(&participant_a);
+    let ed25519_ix = new_ed25519_instruction(&dalek_a, &message);
+    let claim_ix = build_claim_instruction(
+        &connector.pubkey(),
+        &participant_a.pubkey(),
+        &channel_pda,
+        1,
+        5000,
+    );
+
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    // Only the connector signs the tx; participant A is absent.
+    let tx = Transaction::new_signed_with_payer(
+        &[ed25519_ix, claim_ix],
+        Some(&connector.pubkey()),
+        &[&connector],
+        recent,
+    );
+    context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("Connector should redeem participant A's signed claim unilaterally");
+
+    // Verify A's fields were credited from the precompile-authorized proof.
+    let account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    let data = &account.data;
+    assert_eq!(read_u64_at(data, NONCE_A_OFFSET), 1);
+    assert_eq!(read_u64_at(data, TRANSFERRED_AMOUNT_A_OFFSET), 5000);
 }

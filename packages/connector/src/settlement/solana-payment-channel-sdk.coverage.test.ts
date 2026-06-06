@@ -249,9 +249,11 @@ describe('SolanaPaymentChannelSDK - Branch Coverage', () => {
       // Must NOT be the submitting claimer's key.
       expect(precompilePubkey).not.toEqual(expectedClaimer);
 
-      // The claim instruction's claimer account (index 0) must match the
-      // precompile pubkey so the on-chain signer check is consistent.
-      expect(instructions[1].accounts[0].address).toBe(TEST_PUBKEY_B);
+      // Post-#99 account layout: the fee-payer/submitter (index 0) is the
+      // claimer signer; the credited participant (index 1) is the precompile
+      // pubkey and is a non-signer.
+      expect(instructions[1].accounts[0].address).toBe(claimer.address);
+      expect(instructions[1].accounts[1].address).toBe(TEST_PUBKEY_B);
     });
 
     it('claimFromChannel falls back to claimer address when signerPublicKey omitted', async () => {
@@ -275,7 +277,10 @@ describe('SolanaPaymentChannelSDK - Branch Coverage', () => {
       const { getAddressEncoder, address } = await import('@solana/kit');
       const expectedClaimer = new Uint8Array(getAddressEncoder().encode(address(claimer.address)));
       expect(precompilePubkey).toEqual(expectedClaimer);
+      // Fee-payer (index 0) and participant (index 1) are both the claimer
+      // address for a self-signed claim (signerPublicKey omitted).
       expect(instructions[1].accounts[0].address).toBe(claimer.address);
+      expect(instructions[1].accounts[1].address).toBe(claimer.address);
     });
 
     it('claimFromChannel throws SolanaChannelError on program error', async () => {

@@ -597,9 +597,17 @@ fn process_force_close_expired(program_id: &Pubkey, accounts: &[AccountInfo]) ->
 // claim_from_channel
 // ---------------------------------------------------------------------------
 // Accounts:
-//   0. [signer]    claimer        — participant submitting the claim
-//   1. [writable]  channel_pda    — channel state account
-//   2. []          instructions   — Instructions sysvar
+//   0. [signer]    fee_payer      — submitter that pays for / signs the tx
+//   1. []          claimer        — credited participant; authorized via the
+//                                   Ed25519 precompile, NOT a tx signer
+//   2. [writable]  channel_pda    — channel state account
+//   3. []          instructions   — Instructions sysvar
+//
+// The fee-payer/submitter is decoupled from the claiming participant (#99).
+// A connector can unilaterally redeem an inbound peer's balance proof: the peer
+// (claimer) authorizes the (nonce, transferred_amount) by signing the balance
+// proof verified by the Ed25519 precompile at instruction index 0, so it need
+// not sign the redemption transaction itself. The fee_payer (index 0) signs.
 
 /// Ed25519 precompile instruction data offsets (matching solana-sdk layout).
 const ED25519_PUBKEY_SERIALIZED_SIZE: usize = 32;
@@ -615,12 +623,17 @@ fn process_claim_from_channel(
     transferred_amount: u64,
 ) -> ProgramResult {
     let account_iter = &mut accounts.iter();
+    let fee_payer = next_account_info(account_iter)?;
     let claimer = next_account_info(account_iter)?;
     let channel_pda_info = next_account_info(account_iter)?;
     let instructions_sysvar = next_account_info(account_iter)?;
 
-    // Claimer must be a signer
-    if !claimer.is_signer {
+    // The submitter (fee-payer) must sign the transaction. The claiming
+    // participant (claimer) is NOT required to sign — its authorization for this
+    // (nonce, transferred_amount) is the Ed25519 precompile signature over the
+    // balance proof (verified below). This lets a connector unilaterally redeem
+    // an inbound peer's signed claim without the peer co-signing the tx (#99).
+    if !fee_payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
