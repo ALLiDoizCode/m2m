@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.9](https://github.com/toon-protocol/connector/compare/v3.9.8...v3.9.9) (2026-06-07)
+
+### Bug Fixes
+
+- **mina:** accept advancing claims in verifyBalanceProof so on-chain settle progresses ([#118](https://github.com/toon-protocol/connector/issues/118)) ([#120](https://github.com/toon-protocol/connector/issues/120)) ([d0d0a12](https://github.com/toon-protocol/connector/commit/d0d0a125b84890f3dd4dfb25a41c97ef43bd0c71))
+
 ## [3.9.8](https://github.com/toon-protocol/connector/compare/v3.9.7...v3.9.8) (2026-06-07)
 
 ### Bug Fixes
