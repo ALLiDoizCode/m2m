@@ -2445,6 +2445,9 @@ describe('ClaimReceiver', () => {
         nonce: 5,
         proof: 'eyJwcm9vZiI6InRlc3QifQ==',
         salt: 'abcdef1234567890',
+        // Participant A's plaintext cumulative balance — drives on-chain
+        // claimFromChannel (mirrors EVM/Solana transferredAmount). #116/#117.
+        transferredAmount: '1000000000000',
         network: 'devnet',
       };
 
@@ -2582,7 +2585,7 @@ describe('ClaimReceiver', () => {
       );
     });
 
-    it('[P1] should emit CLAIM_RECEIVED event with Mina zkAppAddress and BigInt(0) amount (T-34.7-22)', async () => {
+    it('[P1] should emit CLAIM_RECEIVED event with Mina zkAppAddress and real transferredAmount (T-34.7-22, #116/#117)', async () => {
       const minaProvider = createMockMinaProvider();
       const minaRegistry = createMinaRegistry(minaProvider);
       const minaChannelManager = createMockMinaChannelManager();
@@ -2607,7 +2610,62 @@ describe('ClaimReceiver', () => {
       const emittedEvent: ClaimReceivedEvent = claimReceivedListener.mock.calls[0][0];
       expect(emittedEvent.peerId).toBe('peer-mina');
       expect(emittedEvent.channelId).toBe(MINA_ZKAPP_ADDRESS);
-      expect(emittedEvent.cumulativeAmount).toBe(BigInt(0)); // Mina: commitment-based, amount private
+      // Regression for #116/#117: Mina must carry the real cumulative amount
+      // (not the old hardcoded 0), otherwise settlement-monitor's
+      // `cumulativeAmount > threshold` check is always false and on-chain
+      // claimFromChannel never auto-triggers — symmetric with EVM/Solana.
+      expect(emittedEvent.cumulativeAmount).toBe(BigInt(validMinaClaim.transferredAmount!));
+      expect(emittedEvent.cumulativeAmount).not.toBe(BigInt(0));
+      // The amount must actually be able to cross a settlement threshold.
+      const exampleThreshold = BigInt('1000000');
+      expect(emittedEvent.cumulativeAmount > exampleThreshold).toBe(true);
+    });
+
+    it('[P2] should emit CLAIM_RECEIVED with cumulativeAmount 0 when Mina claim omits transferredAmount', async () => {
+      const minaProvider = createMockMinaProvider();
+      const minaRegistry = createMinaRegistry(minaProvider);
+      const minaChannelManager = createMockMinaChannelManager();
+
+      const receiver = new ClaimReceiver(
+        mockDb,
+        minaRegistry as unknown as ChainProviderRegistry,
+        mockLogger,
+        minaChannelManager as unknown as ChannelManager
+      );
+
+      // transferredAmount is optional on MinaClaimMessage; when absent the
+      // event must still emit (no BigInt(undefined) throw) with a 0 amount.
+      const claimWithoutAmount: MinaClaimMessage = { ...validMinaClaim };
+      delete claimWithoutAmount.transferredAmount;
+      const protocolDataNoAmount: BTPProtocolData = {
+        protocolName: 'payment-channel-claim',
+        contentType: 1,
+        data: Buffer.from(JSON.stringify(claimWithoutAmount), 'utf8'),
+      };
+      const btpMessageNoAmount: BTPMessage = {
+        type: 6,
+        requestId: 1,
+        data: {
+          protocolData: [protocolDataNoAmount],
+          transfer: {
+            amount: '0',
+            expiresAt: new Date(Date.now() + 30000).toISOString(),
+          },
+        } as BTPData,
+      };
+
+      const claimReceivedListener = jest.fn();
+      receiver.on('CLAIM_RECEIVED', claimReceivedListener);
+
+      mockStatement.get.mockReturnValue(undefined);
+
+      receiver.registerWithBTPServer(mockBTPServer);
+      await btpMessageHandler!('peer-mina', btpMessageNoAmount);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(claimReceivedListener).toHaveBeenCalledTimes(1);
+      const emittedEvent: ClaimReceivedEvent = claimReceivedListener.mock.calls[0][0];
+      expect(emittedEvent.cumulativeAmount).toBe(BigInt(0));
     });
 
     it('[P1] should register unknown Mina channel after successful verification (T-34.7-22)', async () => {
