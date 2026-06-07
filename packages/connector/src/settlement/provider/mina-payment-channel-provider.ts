@@ -462,15 +462,19 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    *
    * @remarks
    * Parameter mapping from the EVM-centric `VerifyBalanceProofParams` to Mina SDK
-   * (Story 34.4 finalization, Issue #98):
-   * - The SDK's `balanceCommitment` argument is the channel's actual on-chain Poseidon
-   *   commitment, read here via `getChannelState`. Mina uses Poseidon commitments, not
-   *   signer-based verification, so `params.signerAddress` (the zkApp address) must NOT be
-   *   passed -- doing so deterministically fails the commitment check because the proof's
-   *   real Poseidon commitment can never equal the zkApp address string.
-   * - `params.signature` is passed as the `proof` (serialized zk-SNARK proof)
-   * - `params.transferredAmount` is NOT passed to the SDK (the Poseidon commitment encodes
-   *   balances internally; the SDK verifies the proof's commitment against the on-chain one)
+   * (Story 34.4 finalization, Issues #98 and #118):
+   * - The SDK's `balanceCommitment` argument is passed empty: a valid claim
+   *   *advances* on-chain state, so its Poseidon commitment is expected to DIFFER
+   *   from the current on-chain commitment. Requiring equality (the pre-#118
+   *   behaviour) was contradictory with the on-chain `claimFromChannel`, which
+   *   asserts `newNonce > currentNonce` — see Issue #118. The proof's commitment
+   *   is still cryptographically bound by the signature.
+   * - Instead, the channel's current on-chain `nonceField` is read here via
+   *   `getChannelState` and passed as `onChainNonce`, so the SDK enforces that
+   *   the claim advances past on-chain state (mirroring the on-chain claim).
+   * - `params.signature` is passed as the `proof` (serialized zk-SNARK proof).
+   * - `params.signerAddress` (the zkApp address) must NOT be passed as the
+   *   commitment — the proof's real Poseidon commitment can never equal it.
    *
    * @param params - Parameters including the signature/proof to verify
    * @returns `true` if the proof is valid, `false` otherwise
@@ -490,19 +494,27 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     this._warnIfEVMFields(params);
 
     try {
-      // Read the channel's actual on-chain Poseidon balance commitment so the SDK can
-      // compare the proof's commitment against it (Story 34.4 / Issue #98). Passing the
-      // zkApp address (params.signerAddress) here would always fail the commitment check.
+      // Read the channel's current on-chain state. The on-chain `nonceField` is
+      // the advance baseline: a valid claim must carry a nonce strictly greater
+      // than it (Issue #118). We deliberately do NOT compare the proof's
+      // commitment against the on-chain commitment — an advancing claim has a new
+      // commitment, so equality would reject every settleable claim while only
+      // accepting non-advancing replays that revert on-chain.
       const onChainState = await this._sdk.getChannelState(params.channelId);
       const nonce = safeBigInt(String(params.nonce), 'nonce');
       return await this._sdk.verifyBalanceProof(
         params.channelId,
-        onChainState.balanceCommitment,
+        // Skip the commitment-equality check (Issue #118); the signature already
+        // binds the commitment and the on-chain claim re-verifies it.
+        '',
         params.signature,
         nonce,
         // Bind verification to the on-chain channelHash (Issue #114, Bug B). The
         // SDK still accepts the legacy message format as a transitional fallback.
-        onChainState.channelHash
+        onChainState.channelHash,
+        // Enforce that the claim advances past the current on-chain nonce so a
+        // proof that verifies here can actually settle on-chain (Issue #118).
+        onChainState.nonceField
       );
     } catch (err: unknown) {
       // Verification errors return false but are logged for diagnostics.

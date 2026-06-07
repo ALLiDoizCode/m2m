@@ -1015,20 +1015,43 @@ export class MinaPaymentChannelSDK {
   /**
    * Verify a balance proof / zk-SNARK proof.
    *
-   * Deserializes the proof string and verifies the signature against
-   * the commitment. Also validates that the proof's commitment matches the
-   * expected on-chain commitment and that the proof's nonce matches the
-   * expected nonce.
+   * Deserializes the proof string and verifies the signature against the
+   * commitment. Optionally enforces internal consistency (the proof's embedded
+   * commitment/nonce match the values declared alongside it) and that the claim
+   * *advances* past the current on-chain nonce.
+   *
+   * Issue #118 — verify-vs-advance contradiction: previously this method
+   * required the proof's commitment to **equal** the current on-chain
+   * commitment (the provider sourced `balanceCommitment` from on-chain state).
+   * That is contradictory with the on-chain `claimFromChannel`, which asserts
+   * `newNonce > currentNonce` and is *designed to advance* state:
+   *   - A claim representing a NEW balance has a NEW commitment, so the equality
+   *     check rejected it and settlement never even attempted.
+   *   - A claim whose commitment matched on-chain necessarily carried a
+   *     non-advancing nonce, so the on-chain tx reverted as a replay/no-op.
+   * Either way the on-chain settle could never progress through a normal claim
+   * sequence. We now mirror the on-chain semantics off-chain: accept claims that
+   * ADVANCE past the current on-chain nonce (via `onChainNonce`) rather than
+   * requiring commitment equality. The signature still cryptographically binds
+   * the commitment, and the on-chain `claimFromChannel` remains the authoritative
+   * check (dual-party signatures, conservation, monotonic nonce).
    *
    * @param channelAddress - zkApp address (used for channel binding in verification)
-   * @param balanceCommitment - Expected balance commitment string (from on-chain state)
+   * @param balanceCommitment - Optional commitment to assert the proof's embedded
+   *   commitment against (internal consistency). Pass an empty string to skip —
+   *   the Mina provider does, because the on-chain commitment is a Poseidon hash
+   *   that an *advancing* claim is expected to differ from (Issue #118).
    * @param proof - Serialized proof string (from signBalanceProof)
-   * @param nonce - Expected nonce (must match the nonce in the proof)
+   * @param nonce - Expected nonce (must match the nonce embedded in the proof)
    * @param channelHash - Optional on-chain channelHash (decimal Field string). When
    *   supplied (the provider already reads it via `getChannelState`), the proof is
    *   verified against the canonical `channelHash`-bound message (Issue #114, Bug
    *   B). The legacy `Poseidon([zkApp.x])` message is also accepted as a fallback
    *   during the wire-format rollout.
+   * @param onChainNonce - Optional current on-chain nonce. When supplied, the
+   *   proof's nonce must be strictly greater (it must advance past on-chain state,
+   *   mirroring the on-chain `claimFromChannel` assertion). Omit to skip the
+   *   advance check (Issue #118).
    * @returns `true` if the proof is valid, `false` otherwise
    */
   async verifyBalanceProof(
@@ -1036,7 +1059,8 @@ export class MinaPaymentChannelSDK {
     balanceCommitment: string,
     proof: string,
     nonce: bigint,
-    channelHash?: string
+    channelHash?: string,
+    onChainNonce?: bigint
   ): Promise<boolean> {
     try {
       const { Field, Poseidon, Signature, PublicKey, PrivateKey } = await getO1js();
@@ -1098,6 +1122,25 @@ export class MinaPaymentChannelSDK {
             actual: proofData.nonce,
           },
           'Balance proof nonce does not match expected nonce'
+        );
+        return false;
+      }
+
+      // Issue #118: a claim can only settle on-chain if it ADVANCES past the
+      // current on-chain nonce — `claimFromChannel` asserts `newNonce >
+      // currentNonce`. Mirror that here so a claim that verifies off-chain can
+      // actually be submitted on-chain. A claim at or below the on-chain nonce
+      // is stale (already settled / a replay) and is rejected. When the caller
+      // does not supply `onChainNonce` the advance check is skipped.
+      if (onChainNonce !== undefined && BigInt(proofData.nonce) <= onChainNonce) {
+        this._logger.warn(
+          {
+            event: 'verify_balance_proof_stale_nonce',
+            channelAddress,
+            onChainNonce: onChainNonce.toString(),
+            proofNonce: proofData.nonce,
+          },
+          'Balance proof nonce does not advance past the current on-chain nonce'
         );
         return false;
       }
