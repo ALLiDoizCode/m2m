@@ -504,6 +504,41 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       expect(mockSignature.fromJSON).toHaveBeenCalledWith({ r: 'sig-r-value', s: 'sig-s-value' });
     });
 
+    // Issue #121: the inbound per-packet claim carries the full `signBalanceProof`
+    // wrapper ({ commitment, signature: { r, s }, nonce, signerPublicKey }) in its
+    // `proof` field, which the settlement executor forwards verbatim as signatureA.
+    // _deserializeSignature must unwrap `.signature` instead of rejecting the
+    // wrapper for having no top-level r/s.
+    it('should accept the signBalanceProof wrapper as signatureA (Issue #121)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cacheMap = (sdk as any)._participantCache as Map<string, any>;
+      cacheMap.set(TEST_ZKAPP_ADDRESS, {
+        participantA: TEST_PARTICIPANT_A,
+        participantB: TEST_PARTICIPANT_B,
+      });
+
+      const wrappedSignature = JSON.stringify({
+        commitment: 'commitment-field-value',
+        signature: { r: 'sig-r-value', s: 'sig-s-value' },
+        nonce: '2',
+        signerPublicKey: TEST_PARTICIPANT_A,
+      });
+
+      const result = await sdk.claimFromChannel(
+        TEST_ZKAPP_ADDRESS,
+        600000n,
+        400000n,
+        12345n,
+        2n,
+        wrappedSignature,
+        wrappedSignature
+      );
+
+      expect(result).toEqual({ txHash: 'mina_tx_hash_abc123' });
+      // The inner {r,s} is extracted from the wrapper, not the wrapper itself.
+      expect(mockSignature.fromJSON).toHaveBeenCalledWith({ r: 'sig-r-value', s: 'sig-s-value' });
+    });
+
     it('should throw when participant keys not in cache', async () => {
       // Use an address that was NOT opened by this SDK
       const unknownAddress = 'B62qUnknownAddressNotInCache123';
