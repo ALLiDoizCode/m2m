@@ -959,10 +959,12 @@ export class ClaimReceiver extends EventEmitter {
    * - proof -> signature (zk-SNARK proof maps to signature slot)
    * - lockedAmount/locksRoot set to zero (Mina does not use them)
    *
-   * Note (Issue #98): `signerAddress` is the zkApp address only to satisfy the
-   * chain-agnostic shape. The Mina provider does NOT use it for the commitment
-   * check -- it reads the actual on-chain Poseidon `balanceCommitment` via
-   * `getChannelState` and compares that against the proof's commitment.
+   * Note (Issues #98, #118): `signerAddress` is the zkApp address only to satisfy
+   * the chain-agnostic shape; it is NOT used as a commitment. The Mina provider no
+   * longer compares the proof's commitment against the on-chain commitment —
+   * doing so rejected every advancing claim (Issue #118). It instead reads the
+   * current on-chain `nonceField` via `getChannelState` and requires the claim to
+   * advance past it, mirroring the on-chain `claimFromChannel` assertion.
    *
    * @param claim - The Mina claim message
    * @returns Parameters for provider.verifyBalanceProof()

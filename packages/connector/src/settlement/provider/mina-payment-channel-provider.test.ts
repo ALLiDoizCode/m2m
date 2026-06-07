@@ -357,7 +357,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       expect(result).toBe(true);
     });
 
-    it('should pass the on-chain Poseidon commitment (not the zkApp address) to the SDK (Issue #98)', async () => {
+    it('should skip commitment equality and pass the on-chain nonce as the advance baseline (Issues #98, #118)', async () => {
       // Given: a channel whose on-chain balance commitment differs from its zkApp address
       const onChainCommitment =
         '12959127256962165143508808117769303281268450174623886682930289771047606309704';
@@ -373,24 +373,29 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       };
 
       mockSDK.getChannelState.mockResolvedValue(
-        createSampleMinaChannelState({ balanceCommitment: onChainCommitment })
+        createSampleMinaChannelState({ balanceCommitment: onChainCommitment, nonceField: 6n })
       );
       mockSDK.verifyBalanceProof.mockResolvedValue(true);
 
       // When: verifyBalanceProof() is called
       const result = await provider.verifyBalanceProof(params);
 
-      // Then: the SDK receives the real on-chain commitment, not the zkApp address
+      // Then (Issue #118): the SDK is NOT asked to compare against the on-chain
+      // commitment (an advancing claim has a new commitment). Instead it receives
+      // an empty commitment and the on-chain nonce as the advance baseline.
       expect(result).toBe(true);
       expect(mockSDK.getChannelState).toHaveBeenCalledWith(TEST_ZKAPP_ADDRESS);
       expect(mockSDK.verifyBalanceProof).toHaveBeenCalledWith(
         TEST_ZKAPP_ADDRESS,
-        onChainCommitment,
+        // Empty commitment => commitment-equality check is skipped (Issue #118).
+        '',
         'serialized_proof_abc123',
         7n,
         // Issue #114: the on-chain channelHash is passed so verification binds the
         // canonical channel-identity field.
-        'channel_hash_xyz789'
+        'channel_hash_xyz789',
+        // Issue #118: the current on-chain nonce is the advance baseline.
+        6n
       );
     });
 
@@ -1762,8 +1767,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
   // -------------------------------------------------------------------------
 
   describe('verifyBalanceProof argument passing (AC 6 gap)', () => {
-    it('should pass channelId, on-chain balanceCommitment, signature, and nonce as BigInt to SDK', async () => {
-      const onChainCommitment = 'poseidon_commitment_on_chain';
+    it('should pass channelId, empty commitment, signature, nonce, channelHash, and on-chain nonce to SDK', async () => {
       const params: VerifyBalanceProofParams = {
         channelId: TEST_ZKAPP_ADDRESS,
         nonce: 4,
@@ -1774,21 +1778,21 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         signerAddress: 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE',
       };
 
-      mockSDK.getChannelState.mockResolvedValue(
-        createSampleMinaChannelState({ balanceCommitment: onChainCommitment })
-      );
+      mockSDK.getChannelState.mockResolvedValue(createSampleMinaChannelState({ nonceField: 3n }));
       mockSDK.verifyBalanceProof.mockResolvedValue(true);
 
       await provider.verifyBalanceProof(params);
 
-      // Issue #98: the SDK must receive the on-chain Poseidon commitment, not signerAddress.
+      // Issue #118: the commitment-equality check is skipped (empty commitment);
+      // the on-chain nonce is forwarded as the advance baseline.
       // Issue #114: the on-chain channelHash is also passed for canonical binding.
       expect(mockSDK.verifyBalanceProof).toHaveBeenCalledWith(
         TEST_ZKAPP_ADDRESS,
-        onChainCommitment,
+        '',
         'proof_data_xyz',
         4n, // nonce as BigInt
-        'channel_hash_xyz789'
+        'channel_hash_xyz789',
+        3n // on-chain nonce baseline as BigInt
       );
     });
   });

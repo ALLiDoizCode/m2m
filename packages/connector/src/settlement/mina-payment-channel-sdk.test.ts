@@ -1163,6 +1163,93 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       expect(isValid).toBe(true);
       expect(mockPublicKey.fromBase58).toHaveBeenCalledWith(TEST_PARTICIPANT_A);
     });
+
+    // Issue #118: verify-vs-advance contradiction. A claim only settles on-chain
+    // if its nonce ADVANCES past the current on-chain nonce (claimFromChannel
+    // asserts newNonce > currentNonce). verifyBalanceProof mirrors that when an
+    // `onChainNonce` baseline is supplied, instead of the old (contradictory)
+    // requirement that the commitment EQUAL the current on-chain commitment.
+    describe('on-chain nonce advance check (Issue #118)', () => {
+      it('should accept a proof whose nonce advances past the on-chain nonce', async () => {
+        const proofStr = JSON.stringify({
+          commitment: 'new-state-commitment',
+          signature: { r: 'mock-r-value', s: 'mock-s-value' },
+          nonce: '6',
+        });
+
+        // Empty balanceCommitment => commitment-equality is skipped; onChainNonce=5
+        // and the claim's nonce=6 advances, so the proof is accepted.
+        const isValid = await sdk.verifyBalanceProof(
+          TEST_ZKAPP_ADDRESS,
+          '',
+          proofStr,
+          6n,
+          undefined,
+          5n
+        );
+
+        expect(isValid).toBe(true);
+      });
+
+      it('should reject a proof whose nonce equals the on-chain nonce (replay/no-op)', async () => {
+        const proofStr = JSON.stringify({
+          commitment: 'current-state-commitment',
+          signature: { r: 'mock-r-value', s: 'mock-s-value' },
+          nonce: '5',
+        });
+
+        const isValid = await sdk.verifyBalanceProof(
+          TEST_ZKAPP_ADDRESS,
+          '',
+          proofStr,
+          5n,
+          undefined,
+          5n
+        );
+
+        expect(isValid).toBe(false);
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ event: 'verify_balance_proof_stale_nonce' }),
+          expect.any(String)
+        );
+      });
+
+      it('should reject a proof whose nonce is below the on-chain nonce (stale)', async () => {
+        const proofStr = JSON.stringify({
+          commitment: 'stale-commitment',
+          signature: { r: 'mock-r-value', s: 'mock-s-value' },
+          nonce: '4',
+        });
+
+        const isValid = await sdk.verifyBalanceProof(
+          TEST_ZKAPP_ADDRESS,
+          '',
+          proofStr,
+          4n,
+          undefined,
+          5n
+        );
+
+        expect(isValid).toBe(false);
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ event: 'verify_balance_proof_stale_nonce' }),
+          expect.any(String)
+        );
+      });
+
+      it('should skip the advance check when no on-chain nonce is supplied', async () => {
+        const proofStr = JSON.stringify({
+          commitment: 'any-commitment',
+          signature: { r: 'mock-r-value', s: 'mock-s-value' },
+          nonce: '5',
+        });
+
+        // No onChainNonce arg => advance check skipped, proof accepted on signature.
+        const isValid = await sdk.verifyBalanceProof(TEST_ZKAPP_ADDRESS, '', proofStr, 5n);
+
+        expect(isValid).toBe(true);
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
