@@ -716,6 +716,10 @@ export class SettlementExecutor extends EventEmitter {
         balanceB: latestClaim.balanceB,
         salt: latestClaim.salt,
         signatureB: latestClaim.signatureB,
+        // Counterparty pubkey (Issue #114): lets the provider resolve participant
+        // identity for the on-chain claimFromChannel of an externally-opened
+        // channel whose keys are not in the SDK's participant cache.
+        signerPublicKey: latestClaim.signerPublicKey,
       };
       // Participant A's signature is carried in the claim's `proof` field.
       claimSignature = latestClaim.proof;

@@ -167,6 +167,13 @@ export interface MinaClaimMessage extends BaseClaimMessage {
   balanceB?: string;
   /** Mina dual-party (#84): participant B's signature for dual-party authorization. */
   signatureB?: string;
+  /**
+   * Base58 (B62) public key of the claim signer. Self-describing field (Issue
+   * #114) that lets the receiver verify the signature against the correct key and
+   * resolve participant identity for the on-chain `claimFromChannel` of an
+   * externally-opened channel. Mirrors `SolanaClaimMessage.signerPublicKey`.
+   */
+  signerPublicKey?: string;
   /** Optional Mina network identifier (e.g., 'devnet', 'mainnet') */
   network?: string;
 }
@@ -360,6 +367,18 @@ function validateMinaClaim(claim: Partial<MinaClaimMessage>): void {
   if (claim.signatureB !== undefined) {
     if (typeof claim.signatureB !== 'string' || claim.signatureB.length === 0) {
       throw new Error('Invalid signatureB (expected non-empty string)');
+    }
+  }
+
+  // Optional self-describing signer pubkey (Issue #114) — validated only when present.
+  if (claim.signerPublicKey !== undefined) {
+    if (
+      typeof claim.signerPublicKey !== 'string' ||
+      !minaAddressRegex.test(claim.signerPublicKey)
+    ) {
+      throw new Error(
+        'Invalid signerPublicKey (expected B62-prefixed base58 Mina address, 55 chars)'
+      );
     }
   }
 

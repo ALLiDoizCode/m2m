@@ -387,7 +387,10 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         TEST_ZKAPP_ADDRESS,
         onChainCommitment,
         'serialized_proof_abc123',
-        7n
+        7n,
+        // Issue #114: the on-chain channelHash is passed so verification binds the
+        // canonical channel-identity field.
+        'channel_hash_xyz789'
       );
     });
 
@@ -1688,7 +1691,40 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         0n, // salt default (unidirectional)
         7n, // nonce as BigInt
         signature, // signatureA passed through
-        signature // signatureB falls back to signatureA when not provided
+        signature, // signatureB falls back to signatureA when not provided
+        undefined // no counterparty pubkey → cache-based resolution (Issue #114)
+      );
+    });
+
+    // Issue #114, Bug A: when the claim carries the counterparty's pubkey, the
+    // provider resolves participant keys (own signer + counterparty) and forwards
+    // them so the SDK can settle an externally-opened channel.
+    it('should forward resolved participant keys when signerPublicKey is present', async () => {
+      const channelId = TEST_ZKAPP_ADDRESS;
+      const counterparty = 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE';
+      const balanceProof: BalanceProofParams = {
+        channelId,
+        nonce: 7,
+        transferredAmount: '250000',
+        lockedAmount: '0',
+        locksRoot: '',
+        signerPublicKey: counterparty,
+      };
+
+      mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx_claim' });
+
+      await provider.claimFromChannel(channelId, balanceProof, 'proof_sig_abc');
+
+      expect(mockSDK.getSignerPublicKey).toHaveBeenCalled();
+      expect(mockSDK.claimFromChannel).toHaveBeenCalledWith(
+        channelId,
+        250000n,
+        0n,
+        0n,
+        7n,
+        'proof_sig_abc',
+        'proof_sig_abc',
+        { participant1: 'B62qMockSignerPublicKey', participant2: counterparty }
       );
     });
   });
@@ -1746,11 +1782,13 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       await provider.verifyBalanceProof(params);
 
       // Issue #98: the SDK must receive the on-chain Poseidon commitment, not signerAddress.
+      // Issue #114: the on-chain channelHash is also passed for canonical binding.
       expect(mockSDK.verifyBalanceProof).toHaveBeenCalledWith(
         TEST_ZKAPP_ADDRESS,
         onChainCommitment,
         'proof_data_xyz',
-        4n // nonce as BigInt
+        4n, // nonce as BigInt
+        'channel_hash_xyz789'
       );
     });
   });
