@@ -295,6 +295,19 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
         );
       }
 
+      // Resolve participant pubkeys for channels not opened by this SDK instance
+      // (inbound/externally-opened, Issue #114, Bug A). The two participants are
+      // this connector's own signer and the claim's counterparty
+      // (`balanceProof.signerPublicKey`). The SDK assigns A/B by matching the
+      // on-chain channelHash. When the counterparty pubkey is unavailable we omit
+      // the override and let the SDK fall back to its participant cache.
+      const counterpartyPublicKey = balanceProof.signerPublicKey;
+      let participantKeys: { participant1: string; participant2: string } | undefined;
+      if (counterpartyPublicKey) {
+        const ownPublicKey = await this._ensureSignerPublicKey();
+        participantKeys = { participant1: ownPublicKey, participant2: counterpartyPublicKey };
+      }
+
       const result = await this._sdk.claimFromChannel(
         channelId,
         balanceA,
@@ -302,7 +315,8 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
         salt,
         nonce,
         signatureA,
-        signatureB ?? signatureA
+        signatureB ?? signatureA,
+        participantKeys
       );
 
       return { txHash: result.txHash };
@@ -485,7 +499,10 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
         params.channelId,
         onChainState.balanceCommitment,
         params.signature,
-        nonce
+        nonce,
+        // Bind verification to the on-chain channelHash (Issue #114, Bug B). The
+        // SDK still accepts the legacy message format as a transitional fallback.
+        onChainState.channelHash
       );
     } catch (err: unknown) {
       // Verification errors return false but are logged for diagnostics.

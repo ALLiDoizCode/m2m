@@ -219,6 +219,16 @@ export class MinaPaymentChannelSDK {
     { participantA: string; participantB: string }
   >();
 
+  /**
+   * Cached on-chain `channelHash` per zkApp address.
+   *
+   * The channelHash (`Poseidon(participantA.x, participantB.x, channelNonce)`) is
+   * immutable for the lifetime of a channel, so it is safe to memoize. It is the
+   * canonical channel-identity field bound by the on-chain `claimFromChannel`
+   * method, so the off-chain proof message must bind the same value (Issue #114).
+   */
+  private readonly _channelHashCache = new Map<string, string>();
+
   constructor(
     graphqlUrl: string,
     private readonly _zkAppAddress: string,
@@ -289,6 +299,30 @@ export class MinaPaymentChannelSDK {
     }
 
     return new Contract(zkAppPublicKey);
+  }
+
+  /**
+   * Resolve the on-chain `channelHash` for a channel, memoizing the result.
+   *
+   * The channelHash is `Poseidon(participantA.x, participantB.x, channelNonce)` and
+   * is written once at `initializeChannel` time, so it never changes for a given
+   * channel. It is the exact channel-identity field the on-chain `claimFromChannel`
+   * method signs over (`storedChannelHash`), so off-chain proof construction and
+   * verification must bind this same value rather than `Poseidon([zkApp.x])`
+   * (Issue #114, Bug B).
+   *
+   * @param channelAddress - Base58 zkApp address of the channel
+   * @returns The on-chain channelHash as a decimal Field string
+   */
+  private async _resolveChannelHash(channelAddress: string): Promise<string> {
+    const cached = this._channelHashCache.get(channelAddress);
+    if (cached) {
+      return cached;
+    }
+    const zkApp = await this._getZkApp(channelAddress);
+    const channelHash = zkApp.channelHash.get().toString();
+    this._channelHashCache.set(channelAddress, channelHash);
+    return channelHash;
   }
 
   /**
@@ -561,6 +595,10 @@ export class MinaPaymentChannelSDK {
    * @param nonce - New channel nonce (must be greater than current)
    * @param signatureA - Serialized signature from participant A (JSON with r/s fields)
    * @param signatureB - Serialized signature from participant B (JSON with r/s fields)
+   * @param participantKeys - Optional explicit participant pubkeys (base58) for
+   *   channels not opened by this SDK instance (inbound/externally-opened, Issue
+   *   #114, Bug A). Order is irrelevant -- the SDK assigns A/B to match the
+   *   on-chain `channelHash`. When omitted, keys are read from `_participantCache`.
    * @returns Transaction hash
    */
   async claimFromChannel(
@@ -570,7 +608,8 @@ export class MinaPaymentChannelSDK {
     salt: bigint,
     nonce: bigint,
     signatureA: string,
-    signatureB: string
+    signatureB: string,
+    participantKeys?: { participant1: string; participant2: string }
   ): Promise<MinaTxResult> {
     const signerKeyBase58 = this._requireSignerKey();
 
@@ -598,22 +637,48 @@ export class MinaPaymentChannelSDK {
       const sigA = this._deserializeSignature(signatureA, 'signatureA');
       const sigB = this._deserializeSignature(signatureB, 'signatureB');
 
-      // Resolve participant keys -- require them from cache
+      // Read channelHash nonce (used Field(0) when opening)
+      const channelNonce = Field(0);
+
+      // Resolve participant keys. Channels opened by this SDK instance are in the
+      // cache; inbound/externally-opened channels supply keys explicitly (Issue
+      // #114, Bug A). For explicit keys we don't know the A/B assignment, so we
+      // order them to reproduce the on-chain `channelHash` =
+      // Poseidon(participantA.x, participantB.x, channelNonce).
+      let participantA: ReturnType<typeof PublicKey.fromBase58>;
+      let participantB: ReturnType<typeof PublicKey.fromBase58>;
       const cached = this._participantCache.get(channelAddress);
-      if (!cached) {
+      if (cached) {
+        participantA = PublicKey.fromBase58(cached.participantA);
+        participantB = PublicKey.fromBase58(cached.participantB);
+      } else if (participantKeys) {
+        const key1 = PublicKey.fromBase58(participantKeys.participant1);
+        const key2 = PublicKey.fromBase58(participantKeys.participant2);
+        const onChainChannelHash = await this._resolveChannelHash(channelAddress);
+        const hash12 = Poseidon.hash([key1.x, key2.x, channelNonce]).toString();
+        const hash21 = Poseidon.hash([key2.x, key1.x, channelNonce]).toString();
+        if (hash12 === onChainChannelHash) {
+          participantA = key1;
+          participantB = key2;
+        } else if (hash21 === onChainChannelHash) {
+          participantA = key2;
+          participantB = key1;
+        } else {
+          throw new MinaChannelError(
+            `Supplied participant keys do not match the on-chain channelHash for ${channelAddress}. ` +
+              'Neither ordering of the provided pubkeys reproduces the stored channel identity.',
+            MINA_ERROR_CODES.INVALID_PARAMETERS,
+            'INVALID_PARAMETERS'
+          );
+        }
+      } else {
         throw new MinaChannelError(
-          'Participant keys not found in cache. The channel must have been opened by this SDK instance, ' +
-            'or participant keys must be provided via openChannel().',
+          'Participant keys not found in cache and none were supplied. The channel must have been ' +
+            'opened by this SDK instance, or participant pubkeys must be passed for inbound channels.',
           MINA_ERROR_CODES.ACCOUNT_NOT_FOUND,
           'ACCOUNT_NOT_FOUND'
         );
       }
-
-      const participantA = PublicKey.fromBase58(cached.participantA);
-      const participantB = PublicKey.fromBase58(cached.participantB);
-
-      // Read channelHash nonce (used Field(0) when opening)
-      const channelNonce = Field(0);
 
       const txn = await Mina.transaction(signerPublicKey, async () => {
         await zkApp.claimFromChannel(
@@ -907,27 +972,35 @@ export class MinaPaymentChannelSDK {
     }
 
     try {
-      const { PrivateKey, PublicKey, Field, Poseidon, Signature } = await getO1js();
+      const { PrivateKey, Field, Poseidon, Signature } = await getO1js();
 
       // Compute Poseidon commitment
       const commitment = Poseidon.hash([Field(balanceA), Field(balanceB), Field(salt)]);
 
-      // Derive channel hash field for signing context by hashing the channel's
-      // public key x-coordinate. This binds the proof to the specific channel
-      // address, preventing cross-channel replay attacks.
-      const channelPubKey = PublicKey.fromBase58(channelAddress);
-      const channelHashField = Poseidon.hash([channelPubKey.x]);
+      // Bind the proof to the on-chain `channelHash` — the same channel-identity
+      // field the on-chain `claimFromChannel` method signs over (Issue #114, Bug
+      // B). This makes the off-chain signature directly forwardable into the
+      // on-chain method instead of using a separate `Poseidon([zkApp.x])` digest
+      // that the contract rejects.
+      const channelHashField = Field(await this._resolveChannelHash(channelAddress));
 
-      // Sign [commitment, nonce, channelHashField]
+      // Sign [commitment, nonce, channelHash]
       const privateKey = PrivateKey.fromBase58(this._signerPrivateKey);
       const signature = Signature.create(privateKey, [commitment, Field(nonce), channelHashField]);
 
       const sigJson = signature.toJSON();
 
+      // Embed the signer's public key so the peer side can verify the signature
+      // against the correct key instead of falling back to its own signer key
+      // (the two parties hold different keys). Mirrors the Solana claim, which
+      // carries `signerPublicKey`.
+      const signerPublicKey = privateKey.toPublicKey().toBase58();
+
       return JSON.stringify({
         commitment: commitment.toString(),
         signature: { r: sigJson.r, s: sigJson.s },
         nonce: nonce.toString(),
+        signerPublicKey,
       });
     } catch (err: unknown) {
       if (err instanceof MinaChannelError) throw err;
@@ -951,13 +1024,19 @@ export class MinaPaymentChannelSDK {
    * @param balanceCommitment - Expected balance commitment string (from on-chain state)
    * @param proof - Serialized proof string (from signBalanceProof)
    * @param nonce - Expected nonce (must match the nonce in the proof)
+   * @param channelHash - Optional on-chain channelHash (decimal Field string). When
+   *   supplied (the provider already reads it via `getChannelState`), the proof is
+   *   verified against the canonical `channelHash`-bound message (Issue #114, Bug
+   *   B). The legacy `Poseidon([zkApp.x])` message is also accepted as a fallback
+   *   during the wire-format rollout.
    * @returns `true` if the proof is valid, `false` otherwise
    */
   async verifyBalanceProof(
     channelAddress: string,
     balanceCommitment: string,
     proof: string,
-    nonce: bigint
+    nonce: bigint,
+    channelHash?: string
   ): Promise<boolean> {
     try {
       const { Field, Poseidon, Signature, PublicKey, PrivateKey } = await getO1js();
@@ -1025,13 +1104,38 @@ export class MinaPaymentChannelSDK {
 
       // Reconstruct the commitment field
       const commitment = Field(proofData.commitment);
+      const nonceField = Field(proofData.nonce);
 
-      // Derive channel hash field (same derivation as signBalanceProof)
+      // Build the candidate signed messages. The canonical message binds the
+      // on-chain `channelHash` (Issue #114, Bug B) — the same field the on-chain
+      // `claimFromChannel` method signs over. The legacy message binds
+      // `Poseidon([zkApp.x])` and is still accepted during the wire-format
+      // rollout so pre-#114 signers interoperate.
+      const messages: Array<ReturnType<typeof Field>[]> = [];
+
+      // Canonical: prefer the supplied channelHash, else read it on-chain.
+      let resolvedChannelHash = channelHash;
+      if (resolvedChannelHash === undefined) {
+        try {
+          resolvedChannelHash = await this._resolveChannelHash(channelAddress);
+        } catch (hashErr: unknown) {
+          this._logger.debug(
+            {
+              event: 'verify_balance_proof_channelhash_unavailable',
+              channelAddress,
+              error: hashErr instanceof Error ? hashErr.message : String(hashErr),
+            },
+            'Could not resolve on-chain channelHash; verifying against legacy message only'
+          );
+        }
+      }
+      if (resolvedChannelHash !== undefined) {
+        messages.push([commitment, nonceField, Field(resolvedChannelHash)]);
+      }
+
+      // Legacy fallback: Poseidon([zkApp.x]).
       const channelPubKey = PublicKey.fromBase58(channelAddress);
-      const channelHashField = Poseidon.hash([channelPubKey.x]);
-
-      // Reconstruct the message that was signed
-      const message = [commitment, Field(proofData.nonce), channelHashField];
+      messages.push([commitment, nonceField, Poseidon.hash([channelPubKey.x])]);
 
       // Reconstruct the signature
       const signature = Signature.fromJSON({
@@ -1039,27 +1143,26 @@ export class MinaPaymentChannelSDK {
         s: proofData.signature.s,
       });
 
-      // If signer public key is provided in the proof, use it for verification
+      // Resolve the verification public key: prefer the signer pubkey carried in
+      // the proof (the counterparty's key for inbound claims), else fall back to
+      // this SDK's own signer key.
+      let verifyKey: ReturnType<typeof PublicKey.fromBase58> | undefined;
       if (proofData.signerPublicKey) {
-        const signerPubKey = PublicKey.fromBase58(proofData.signerPublicKey);
-        const isValid = signature.verify(signerPubKey, message);
-        return isValid.toBoolean();
+        verifyKey = PublicKey.fromBase58(proofData.signerPublicKey);
+      } else if (this._signerPrivateKey) {
+        verifyKey = PrivateKey.fromBase58(this._signerPrivateKey).toPublicKey();
       }
 
-      // If we have a signer key, derive the public key and verify
-      if (this._signerPrivateKey) {
-        const privateKey = PrivateKey.fromBase58(this._signerPrivateKey);
-        const publicKey = privateKey.toPublicKey();
-        const isValid = signature.verify(publicKey, message);
-        return isValid.toBoolean();
+      if (!verifyKey) {
+        this._logger.warn(
+          { event: 'verify_balance_proof_no_key', channelAddress },
+          'Cannot verify balance proof: no signer key or public key available'
+        );
+        return false;
       }
 
-      // Cannot verify without a public key
-      this._logger.warn(
-        { event: 'verify_balance_proof_no_key', channelAddress },
-        'Cannot verify balance proof: no signer key or public key available'
-      );
-      return false;
+      const resolvedKey = verifyKey;
+      return messages.some((message) => signature.verify(resolvedKey, message).toBoolean());
     } catch (err: unknown) {
       this._logger.warn(
         {

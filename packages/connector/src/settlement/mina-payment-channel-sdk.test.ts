@@ -545,6 +545,52 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       });
     });
 
+    // Issue #114, Bug A: an inbound/externally-opened channel is not in the
+    // participant cache. Explicit participant pubkeys are accepted and ordered to
+    // reproduce the on-chain channelHash.
+    it('should accept explicit participant keys for an uncached (inbound) channel', async () => {
+      const unknownAddress = 'B62qUnknownInboundChannelAddr123';
+      // Poseidon.hash is called for: (1) the balance commitment, then (2) the
+      // ordering check (key1.x, key2.x, 0). Make the first ordering match the
+      // on-chain channelHash (mock returns 'channel_hash_123').
+      mockPoseidonHash
+        .mockReturnValueOnce({ toString: () => 'commitment', toBigInt: () => 0n })
+        .mockReturnValueOnce({ toString: () => 'channel_hash_123', toBigInt: () => 0n });
+
+      const result = await sdk.claimFromChannel(
+        unknownAddress,
+        600000n,
+        400000n,
+        12345n,
+        1n,
+        mockSignatureStr,
+        mockSignatureStr,
+        { participant1: TEST_PARTICIPANT_A, participant2: TEST_PARTICIPANT_B }
+      );
+
+      expect(result).toEqual({ txHash: 'mina_tx_hash_abc123' });
+    });
+
+    it('should throw INVALID_PARAMETERS when explicit keys do not match channelHash', async () => {
+      const unknownAddress = 'B62qUnknownInboundChannelAddr123';
+      // Default Poseidon.hash returns 'mock-poseidon-hash' which never equals the
+      // on-chain 'channel_hash_123', so neither ordering matches.
+      await expect(
+        sdk.claimFromChannel(
+          unknownAddress,
+          600000n,
+          400000n,
+          12345n,
+          1n,
+          mockSignatureStr,
+          mockSignatureStr,
+          { participant1: TEST_PARTICIPANT_A, participant2: TEST_PARTICIPANT_B }
+        )
+      ).rejects.toMatchObject({
+        code: MINA_ERROR_CODES.INVALID_PARAMETERS,
+      });
+    });
+
     it('should re-throw MinaChannelError without double-wrapping', async () => {
       // Given: _getZkApp throws a MinaChannelError (e.g., ACCOUNT_NOT_FOUND)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -876,6 +922,25 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       expect(parsed.nonce).toBe('5');
     });
 
+    // Issue #114: the proof carries the signer's own pubkey so the peer side can
+    // verify against the correct key and resolve participant identity on-chain.
+    it('should embed the signer public key in the proof', async () => {
+      const proof = await sdk.signBalanceProof(TEST_ZKAPP_ADDRESS, 600000n, 400000n, 12345n, 5n);
+
+      const parsed = JSON.parse(proof) as { signerPublicKey?: string };
+      expect(parsed.signerPublicKey).toBe('B62qMockPublicKeyBase58');
+    });
+
+    // Issue #114, Bug B: the third signed field must be the on-chain channelHash,
+    // not Poseidon([zkApp.x]). The SDK reads it from on-chain state.
+    it('should bind the proof to the on-chain channelHash', async () => {
+      await sdk.signBalanceProof(TEST_ZKAPP_ADDRESS, 600000n, 400000n, 12345n, 5n);
+
+      // Field() is invoked with the on-chain channelHash string when constructing
+      // the signed message.
+      expect(mockFieldFn).toHaveBeenCalledWith('channel_hash_123');
+    });
+
     it('should call Poseidon.hash with balanceA, balanceB, and salt', async () => {
       await sdk.signBalanceProof(TEST_ZKAPP_ADDRESS, 600000n, 400000n, 12345n, 5n);
 
@@ -1001,7 +1066,12 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
     });
 
     it('should return false for invalid signature verification', async () => {
-      mockSignatureInstance.verify.mockReturnValueOnce({ toBoolean: () => false });
+      // Verification now tries the canonical channelHash-bound message and the
+      // legacy Poseidon([zkApp.x]) message (Issue #114 transitional fallback), so
+      // both candidate messages must fail for the proof to be rejected.
+      mockSignatureInstance.verify
+        .mockReturnValueOnce({ toBoolean: () => false })
+        .mockReturnValueOnce({ toBoolean: () => false });
 
       const proofStr = JSON.stringify({
         commitment: 'mock-poseidon-hash',
@@ -1017,6 +1087,28 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       );
 
       expect(isValid).toBe(false);
+    });
+
+    // Issue #114, Bug B: a proof signed over the legacy Poseidon([zkApp.x])
+    // message must still verify while clients migrate to the channelHash-bound
+    // message. The canonical message is tried first (fails here), then legacy.
+    it('should accept a legacy-format proof when the channelHash message fails (transitional)', async () => {
+      mockSignatureInstance.verify.mockReturnValueOnce({ toBoolean: () => false });
+
+      const proofStr = JSON.stringify({
+        commitment: 'mock-poseidon-hash',
+        signature: { r: 'mock-r-value', s: 'mock-s-value' },
+        nonce: '5',
+      });
+
+      const isValid = await sdk.verifyBalanceProof(
+        TEST_ZKAPP_ADDRESS,
+        'mock-poseidon-hash',
+        proofStr,
+        5n
+      );
+
+      expect(isValid).toBe(true);
     });
 
     it('should return false when proof string is malformed', async () => {

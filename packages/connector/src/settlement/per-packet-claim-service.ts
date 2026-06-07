@@ -274,6 +274,10 @@ export class PerPacketClaimService {
         // Encoding here keeps our own produced claims valid against that gate.
         proof: Buffer.from(signature, 'utf8').toString('base64'),
         salt: ctx.minaSalt,
+        // Self-describing signer pubkey (Issue #114): lets the receiver verify the
+        // signature against the correct key and resolve participant identity for
+        // the on-chain claimFromChannel of an externally-opened channel.
+        ...(ctx.signerAddress !== undefined && { signerPublicKey: ctx.signerAddress }),
         ...(ctx.minaNetwork !== undefined && { network: ctx.minaNetwork }),
       };
       claimMessage = minaClaim;
@@ -460,6 +464,9 @@ export class PerPacketClaimService {
           zkAppAddress: minaContext.zkAppAddress,
           minaTokenId: minaContext.tokenId,
           minaNetwork: minaContext.network,
+          // signerAddress is the producer's Mina pubkey, emitted on the claim as
+          // a self-describing `signerPublicKey` (Issue #114).
+          signerAddress: minaContext.signerAddress,
           // minaSalt is generated on first claim, not here
         }),
       };

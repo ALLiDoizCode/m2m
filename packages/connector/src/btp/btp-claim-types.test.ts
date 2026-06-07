@@ -964,6 +964,23 @@ describe('validateClaimMessage - Mina Claim Validation (Story 34.7)', () => {
     expect(() => validateClaimMessage(validMinaClaim)).not.toThrow();
   });
 
+  // Issue #114: optional self-describing signerPublicKey (base58 B62 address)
+  it('should accept a valid Mina claim with signerPublicKey', () => {
+    const claimWithSigner: MinaClaimMessage = {
+      ...validMinaClaim,
+      messageId: 'claim-mina-signer',
+      signerPublicKey: 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy',
+    };
+    expect(() => validateClaimMessage(claimWithSigner)).not.toThrow();
+  });
+
+  it('should reject an invalid signerPublicKey format on a Mina claim', () => {
+    const invalid = { ...validMinaClaim, signerPublicKey: '0xNotABase58MinaAddress' };
+    expect(() => validateClaimMessage(invalid)).toThrow(
+      'Invalid signerPublicKey (expected B62-prefixed base58 Mina address, 55 chars)'
+    );
+  });
+
   // Accept valid Mina claim without optional network field
   it('should accept valid Mina claim without network field', () => {
     const claimWithoutNetwork: MinaClaimMessage = {

@@ -891,6 +891,17 @@ export class ClaimReceiver extends EventEmitter {
         chain: `mina:${claim.network ?? 'devnet'}`,
       });
 
+      // Record the peer's Mina pubkey so it is available for participant
+      // resolution on the on-chain settle path (Issue #114). Mirrors the
+      // Solana branch.
+      if (
+        claim.signerPublicKey &&
+        this.peerIdToAddressMap &&
+        !this.peerIdToAddressMap.has(peerId)
+      ) {
+        this.peerIdToAddressMap.set(peerId, claim.signerPublicKey);
+      }
+
       this.logger.info(
         { zkAppAddress: claim.zkAppAddress, peerId },
         'External Mina channel registered'
