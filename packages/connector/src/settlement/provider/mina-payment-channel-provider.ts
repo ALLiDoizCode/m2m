@@ -244,14 +244,18 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    *
    * @remarks
    * Dual-party authorization is threaded through to the SDK: `signature` is
-   * participant A's signature, `balanceProof.signatureB` is participant B's,
-   * and `balanceProof.balanceB` / `balanceProof.salt` populate the Poseidon
-   * balance commitment. For bidirectional settlement (e.g. Mill swaps) callers
-   * MUST supply a distinct `signatureB`, a real `balanceB`, and a non-zero
-   * `salt`. When `signatureB` is omitted the provider falls back to a
-   * single-signature (unidirectional) claim and logs a warning — a true
-   * two-party claim with two participant keys rejects a duplicated signature
-   * on-chain.
+   * participant A's (the client's) signature, `balanceProof.signatureB` is
+   * participant B's, and `balanceProof.balanceB` / `balanceProof.salt` populate
+   * the Poseidon balance commitment. For bidirectional settlement (e.g. Mill
+   * swaps) callers MUST supply a distinct `signatureB`, a real `balanceB`, and a
+   * non-zero `salt`. When `signatureB` is omitted — the inbound
+   * (anonymous-HS-client) unidirectional case — the on-chain method still
+   * verifies `signatureB` against participant B (the apex). The client cannot
+   * produce that signature, so this connector, which holds the apex settlement
+   * key, **co-signs `signatureB` itself** via `signBalanceProof` over the same
+   * `[commitment, nonce, channelHash]` message (Issue #123). The pre-#123
+   * fallback of reusing `signatureA` as `signatureB` made the participant-B
+   * check assert false and the on-chain claim revert.
    *
    * @param channelId - zkApp address (base58)
    * @param balanceProof - The balance proof parameters (including Mina-only
@@ -280,19 +284,26 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
       const salt = balanceProof.salt !== undefined ? safeBigInt(balanceProof.salt, 'salt') : 0n;
       const nonce = safeBigInt(String(balanceProof.nonce), 'nonce');
 
-      // Dual-party authorization: `signature` is participant A's signature.
-      // For bidirectional settlement the caller must supply participant B's
-      // signature via `balanceProof.signatureB`. If omitted we fall back to a
-      // single-signature unidirectional claim and warn — a real two-party
-      // claim with two distinct participant keys rejects a duplicated signature.
+      // Dual-party authorization: `signature` is participant A's (the client's)
+      // signature. The on-chain `claimFromChannel` verifies `signatureB` against
+      // participant B (the apex) over `[commitment, nonce, channelHash]`. For
+      // bidirectional settlement the caller supplies participant B's signature
+      // via `balanceProof.signatureB`. When it is omitted — the inbound
+      // unidirectional case — the connector holds the apex settlement key, so it
+      // **co-signs `signatureB` itself** with that key via `signBalanceProof`
+      // (the same routine the client uses for sigA). Reusing sigA as sigB (the
+      // pre-#123 fallback) made the participant-B check assert false because the
+      // client (participant A) cannot sign as the apex (participant B) — Issue
+      // #123.
       const signatureA = signature;
-      const signatureB = balanceProof.signatureB;
+      let signatureB = balanceProof.signatureB;
       if (signatureB === undefined) {
-        this._logger.warn(
-          { event: 'claim_from_channel_single_signature', channelId, chainId: this.chainId },
-          'No participant B signature provided (balanceProof.signatureB); falling back to a ' +
-            'single-signature unidirectional claim. Supply signatureB for bidirectional settlement.'
+        this._logger.info(
+          { event: 'claim_from_channel_apex_cosign', channelId, nonce, chainId: this.chainId },
+          'No participant B signature provided (balanceProof.signatureB); co-signing signatureB ' +
+            'with the apex settlement key for the inbound unidirectional claim (Issue #123).'
         );
+        signatureB = await this._sdk.signBalanceProof(channelId, balanceA, balanceB, salt, nonce);
       }
 
       // Resolve participant pubkeys for channels not opened by this SDK instance
@@ -315,7 +326,7 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
         salt,
         nonce,
         signatureA,
-        signatureB ?? signatureA,
+        signatureB,
         participantKeys
       );
 
