@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.10](https://github.com/toon-protocol/connector/compare/v3.9.9...v3.9.10) (2026-06-07)
+
+### Bug Fixes
+
+- **mina:** accept signBalanceProof wrapper as signatureA in claimFromChannel ([#121](https://github.com/toon-protocol/connector/issues/121)) ([#122](https://github.com/toon-protocol/connector/issues/122)) ([75f4423](https://github.com/toon-protocol/connector/commit/75f44237c09fb16fbf1a8d8f27d0d8a1589c6387)), closes [#117](https://github.com/toon-protocol/connector/issues/117) [#118](https://github.com/toon-protocol/connector/issues/118)
+
 ## [3.9.9](https://github.com/toon-protocol/connector/compare/v3.9.8...v3.9.9) (2026-06-07)
 
 ### Bug Fixes
