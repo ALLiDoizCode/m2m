@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.8](https://github.com/toon-protocol/connector/compare/v3.9.7...v3.9.8) (2026-06-07)
+
+### Bug Fixes
+
+- **mina:** emit real transferredAmount in CLAIM_RECEIVED so settlement triggers ([#116](https://github.com/toon-protocol/connector/issues/116), [#117](https://github.com/toon-protocol/connector/issues/117)) ([#119](https://github.com/toon-protocol/connector/issues/119)) ([4684b26](https://github.com/toon-protocol/connector/commit/4684b26046d3fa177b7ee457b5766f6a69a3d80c)), closes [#114](https://github.com/toon-protocol/connector/issues/114) [#98](https://github.com/toon-protocol/connector/issues/98) [#84](https://github.com/toon-protocol/connector/issues/84)
+
 ## [3.9.7](https://github.com/toon-protocol/connector/compare/v3.9.6...v3.9.7) (2026-06-07)
 
 ### Bug Fixes
