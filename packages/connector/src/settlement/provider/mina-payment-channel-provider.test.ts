@@ -509,7 +509,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       );
     });
 
-    it('should warn and fall back to single signature when signatureB is omitted', async () => {
+    it('should co-sign signatureB with the apex key when signatureB is omitted (Issue #123)', async () => {
       const balanceProof: BalanceProofParams = {
         channelId: TEST_ZKAPP_ADDRESS,
         nonce: 2,
@@ -517,18 +517,37 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         lockedAmount: '0',
         locksRoot: '',
       };
+      // The apex co-signature is produced via the SDK's signBalanceProof, the
+      // same routine the client uses for signatureA.
+      mockSDK.signBalanceProof.mockResolvedValue('apex_cosigned_sigB');
       mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx-unidir' });
 
       await provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'onlySig');
 
+      // The apex co-signs over the SAME (channelId, balanceA, balanceB, salt, nonce)
+      // tuple that drives the on-chain commitment.
+      expect(mockSDK.signBalanceProof).toHaveBeenCalledWith(
+        TEST_ZKAPP_ADDRESS,
+        100n, // balanceA
+        0n, // balanceB defaults to 0n (unidirectional)
+        0n, // salt defaults to 0n
+        2n // nonce
+      );
+
       const call = mockSDK.claimFromChannel.mock.calls[0]!;
       expect(call[2]).toBe(0n); // balanceB defaults to 0n
       expect(call[3]).toBe(0n); // salt defaults to 0n
-      expect(call[5]).toBe('onlySig'); // signatureA
-      expect(call[6]).toBe('onlySig'); // signatureB falls back to signatureA
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'claim_from_channel_single_signature' }),
+      expect(call[5]).toBe('onlySig'); // signatureA — the client's signature
+      expect(call[6]).toBe('apex_cosigned_sigB'); // signatureB — apex co-signature, NOT reused sigA
+      expect(call[5]).not.toBe(call[6]); // the core #123 fix: no single-signature reuse
+      // And: the apex co-sign path is logged (no single-signature fallback warning)
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'claim_from_channel_apex_cosign' }),
         expect.stringContaining('signatureB')
+      );
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'claim_from_channel_single_signature' }),
+        expect.anything()
       );
     });
 
@@ -1682,13 +1701,14 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       };
       const signature = 'proof_sig_abc';
 
+      mockSDK.signBalanceProof.mockResolvedValue('apex_sigB');
       mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx_claim' });
 
       await provider.claimFromChannel(channelId, balanceProof, signature);
 
       // Verify SDK called with correct bigint conversions. No balanceB/salt/
       // signatureB supplied → unidirectional defaults (see issue #84): balanceB
-      // and salt default to 0n, and signatureB falls back to signatureA.
+      // and salt default to 0n, and signatureB is the apex co-signature (#123).
       expect(mockSDK.claimFromChannel).toHaveBeenCalledWith(
         channelId,
         250000n, // balanceA (transferredAmount) as bigint
@@ -1696,7 +1716,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         0n, // salt default (unidirectional)
         7n, // nonce as BigInt
         signature, // signatureA passed through
-        signature, // signatureB falls back to signatureA when not provided
+        'apex_sigB', // signatureB co-signed with apex key (Issue #123)
         undefined // no counterparty pubkey → cache-based resolution (Issue #114)
       );
     });
@@ -1716,6 +1736,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         signerPublicKey: counterparty,
       };
 
+      mockSDK.signBalanceProof.mockResolvedValue('apex_sigB');
       mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx_claim' });
 
       await provider.claimFromChannel(channelId, balanceProof, 'proof_sig_abc');
@@ -1728,7 +1749,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         0n,
         7n,
         'proof_sig_abc',
-        'proof_sig_abc',
+        'apex_sigB', // signatureB co-signed with apex key (Issue #123)
         { participant1: 'B62qMockSignerPublicKey', participant2: counterparty }
       );
     });
