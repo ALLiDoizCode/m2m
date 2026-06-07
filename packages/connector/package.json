@@ -1,6 +1,6 @@
 {
   "name": "@toon-protocol/connector",
-  "version": "3.9.6",
+  "version": "3.9.7",
   "description": "Multi-chain ILP connector with EVM, Solana, and Mina settlement",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",

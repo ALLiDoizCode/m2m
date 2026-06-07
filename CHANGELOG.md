@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.7](https://github.com/toon-protocol/connector/compare/v3.9.6...v3.9.7) (2026-06-07)
+
+### Bug Fixes
+
+- **mina:** enable on-chain claimFromChannel for inbound channels ([#114](https://github.com/toon-protocol/connector/issues/114)) ([#115](https://github.com/toon-protocol/connector/issues/115)) ([9130525](https://github.com/toon-protocol/connector/commit/9130525deb7988b064a4530469a120144b4f9aed)), closes [#98](https://github.com/toon-protocol/connector/issues/98) [#84](https://github.com/toon-protocol/connector/issues/84)
+
 ## [3.9.6](https://github.com/toon-protocol/connector/compare/v3.9.5...v3.9.6) (2026-06-06)
 
 ### Bug Fixes
