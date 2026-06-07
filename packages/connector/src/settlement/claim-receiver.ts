@@ -255,11 +255,21 @@ export class ClaimReceiver extends EventEmitter {
             const event: ClaimReceivedEvent = {
               peerId,
               channelId: claimMessage.zkAppAddress,
-              cumulativeAmount: BigInt(0), // Mina uses commitment-based balances; amount is private
+              // Mina carries participant A's plaintext cumulative balance in
+              // `transferredAmount` (mirrors the Poseidon balanceCommitment's
+              // value) to drive the on-chain claimFromChannel — symmetric with
+              // EVM/Solana. The field is optional on MinaClaimMessage, so fall
+              // back to 0 when absent (settlement won't trigger without an
+              // amount, which is the correct behaviour). Previously hardcoded
+              // to 0, which left the Mina auto-settle path dead (#116/#117).
+              cumulativeAmount: BigInt(claimMessage.transferredAmount ?? '0'),
             };
             this.emit('CLAIM_RECEIVED', event);
             childLogger.debug(
-              { zkAppAddress: event.channelId },
+              {
+                zkAppAddress: event.channelId,
+                cumulativeAmount: event.cumulativeAmount.toString(),
+              },
               'CLAIM_RECEIVED event emitted (Mina)'
             );
           }
