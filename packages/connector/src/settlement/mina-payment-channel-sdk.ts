@@ -342,7 +342,19 @@ export class MinaPaymentChannelSDK {
    * Validates the parsed shape before passing to `Signature.fromJSON()` to
    * prevent injection or malformed data from reaching o1js internals.
    *
-   * @param signatureStr - JSON string with `{ r: string, s: string }` shape
+   * Accepts two serializations (Issue #121):
+   *   1. The bare signature `{ r: string, s: string }` — what dual-party
+   *      `signatureB`, internal callers, and the `closeChannel` defaults pass.
+   *   2. The full `signBalanceProof` wrapper
+   *      `{ commitment, signature: { r, s }, nonce, signerPublicKey }` — what the
+   *      inbound per-packet claim carries in its `proof` field and what the
+   *      settlement executor forwards verbatim as `signatureA`.
+   * `signBalanceProof` nests `{r,s}` under `.signature`; without this the wrapper
+   * parses fine but has no top-level `r`/`s`, so on-chain `claimFromChannel`
+   * aborted at parameter construction.
+   *
+   * @param signatureStr - JSON string: a bare `{ r, s }` or a `signBalanceProof`
+   *   wrapper carrying `{ r, s }` under `.signature`
    * @param fieldName - Human-readable field name for error messages
    * @returns o1js Signature object
    * @throws {MinaChannelError} code 1008 if the signature string is malformed
@@ -361,11 +373,22 @@ export class MinaPaymentChannelSDK {
       );
     }
 
+    // Unwrap the `signBalanceProof` wrapper: when `{r,s}` is not at the top level
+    // but is nested under `.signature`, use the inner object (Issue #121).
+    const candidate =
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      typeof parsed.r !== 'string' &&
+      typeof parsed.signature === 'object' &&
+      parsed.signature !== null
+        ? parsed.signature
+        : parsed;
+
     if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      typeof parsed.r !== 'string' ||
-      typeof parsed.s !== 'string'
+      typeof candidate !== 'object' ||
+      candidate === null ||
+      typeof candidate.r !== 'string' ||
+      typeof candidate.s !== 'string'
     ) {
       throw new MinaChannelError(
         `Invalid ${fieldName}: expected an object with string 'r' and 's' fields`,
@@ -376,7 +399,7 @@ export class MinaPaymentChannelSDK {
 
     // Import Signature from the cached o1js module (caller must have loaded o1js already)
     const { Signature } = o1jsModule;
-    return Signature.fromJSON({ r: parsed.r, s: parsed.s });
+    return Signature.fromJSON({ r: candidate.r, s: candidate.s });
   }
 
   /**
