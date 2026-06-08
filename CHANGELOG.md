@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.12](https://github.com/toon-protocol/connector/compare/v3.9.11...v3.9.12) (2026-06-08)
+
+### Bug Fixes
+
+- **mina:** set zkApp tx fee and guard claim balance conservation ([#126](https://github.com/toon-protocol/connector/issues/126)) ([#127](https://github.com/toon-protocol/connector/issues/127)) ([113fb46](https://github.com/toon-protocol/connector/commit/113fb4689a20ff3b2e6de75018ad9ab26deb1e7d)), closes [post-#123](https://github.com/toon-protocol/post-/issues/123)
+
 ## [3.9.11](https://github.com/toon-protocol/connector/compare/v3.9.10...v3.9.11) (2026-06-07)
 
 ### Bug Fixes
