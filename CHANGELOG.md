@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.0](https://github.com/toon-protocol/connector/compare/v3.9.13...v3.10.0) (2026-06-08)
+
+### Features
+
+- **mina:** bundle Story 34.4 fund-custody PaymentChannel zkApp ([#131](https://github.com/toon-protocol/connector/issues/131)) ([018ddd2](https://github.com/toon-protocol/connector/commit/018ddd2068adae8881802f32a719a98b017221c6)), closes [#134](https://github.com/toon-protocol/connector/issues/134) [#130](https://github.com/toon-protocol/connector/issues/130)
+
 ## [3.9.13](https://github.com/toon-protocol/connector/compare/v3.9.12...v3.9.13) (2026-06-08)
 
 ### Bug Fixes
