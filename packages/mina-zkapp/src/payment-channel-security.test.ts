@@ -302,9 +302,15 @@ describe('PaymentChannel zkApp -- Security & Edge Cases (Story 34.3)', () => {
   // AC: MAX_SAFE_AMOUNT boundary edge case
   // =========================================================================
 
-  it('[P1] T-34.3-08: claim near MAX_SAFE_AMOUNT does not overflow', async () => {
-    // Use a large deposit near MAX_SAFE_AMOUNT
-    const largeDeposit = Field(BigInt('18446744073709551614')); // MAX_SAFE_AMOUNT - 1
+  it('[P1] T-34.3-08: claim splitting a large deposit does not overflow', async () => {
+    // NOTE (Story 34.4 — fund custody): `deposit()` now actually escrows native
+    // MINA on the zkApp account, so the depositor must HOLD the deposited amount.
+    // The lightnet/LocalBlockchain test accounts hold ~1000 MINA, so we cannot
+    // deposit near MAX_SAFE_AMOUNT (2^64 nanomina ≈ 1.8e10 MINA) as the original
+    // (no-custody, Field-only) test did. We instead deposit a large-but-fundable
+    // amount (300 MINA) and verify the claim-split arithmetic + commitment still
+    // hold — the overflow guard remains exercised by T-34.1-19 / T-34.3-08b.
+    const largeDeposit = Field(300_000_000_000n); // 300 MINA in nanomina
 
     await initializeChannel(
       deployer,
@@ -321,9 +327,9 @@ describe('PaymentChannel zkApp -- Security & Edge Cases (Story 34.3)', () => {
     const channelHash = Poseidon.hash([participantA.x, participantB.x, channelNonce]);
 
     // Claim splitting the large deposit -- both values within safe range
-    const balA = Field(BigInt('9223372036854775807')); // ~half of large deposit
-    const balB = Field(BigInt('9223372036854775807'));
-    // balA + balB = 18446744073709551614 == largeDeposit
+    const balA = Field(150_000_000_000n); // half of largeDeposit
+    const balB = Field(150_000_000_000n);
+    // balA + balB = 300_000_000_000 == largeDeposit
     const salt = Field(88888);
 
     await submitClaim(
@@ -357,8 +363,15 @@ describe('PaymentChannel zkApp -- Security & Edge Cases (Story 34.3)', () => {
     );
 
     const unsafeAmount = MAX_SAFE_AMOUNT.add(Field(1));
+    // An over-range deposit is rejected. With fund custody (Story 34.4) the
+    // depositor→zkApp transfer converts the amount to a UInt64/Int64, whose
+    // witness generation (Int64 range check) can fire before the contract's own
+    // `AMOUNT_EXCEEDS_SAFE_RANGE` assertion is checked — both are valid
+    // rejections of an unsafe amount, so accept either.
     await expect(
       depositToChannel(participantA, zkApp, unsafeAmount, participantA, [participantA.key])
-    ).rejects.toThrow(ASSERT_MESSAGES.AMOUNT_EXCEEDS_SAFE_RANGE);
+    ).rejects.toThrow(
+      new RegExp(`${ASSERT_MESSAGES.AMOUNT_EXCEEDS_SAFE_RANGE}|Int64: Expected a value between`)
+    );
   });
 });
