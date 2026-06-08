@@ -256,4 +256,97 @@ describe('PaymentChannel zkApp -- Full Lifecycle Integration (Story 34.3)', () =
     expect(zkApp.channelState.get().toString()).toBe(CHANNEL_STATE.SETTLED.toString());
     expect(zkApp.depositTotal.get().toString()).toBe(depositAmount.toString());
   });
+
+  // T-34.4-01: FUND CUSTODY + DISTRIBUTION — the heart of Story 34.4.
+  // Proves that deposit() actually escrows native MINA on the zkApp account and
+  // that settle() debits that escrow, crediting the recipient (participantB, the
+  // apex analog) balanceB and refunding the depositor (participantA) balanceA.
+  // This is the Mina mirror of the Solana SETTLE_CHANNEL vault→recipient ATA
+  // transfer — the recipient is TOKEN-CREDITED at close.
+  it('[P0] T-34.4-01: deposit escrows MINA on the zkApp and settle credits the recipient', async () => {
+    await initializeChannel(
+      deployer,
+      zkApp,
+      participantA,
+      participantB,
+      channelNonce,
+      settlementTimeout,
+      tokenId,
+      [deployer.key, participantA.key, participantB.key]
+    );
+
+    const zkAppAddr = zkAppKey.toPublicKey();
+    const zkAppBalBeforeDeposit = Mina.getBalance(zkAppAddr).toBigInt();
+    const depositorBeforeDeposit = Mina.getBalance(participantA).toBigInt();
+
+    // Deposit escrows depositAmount nanomina on the zkApp account.
+    await depositToChannel(participantA, zkApp, depositAmount, participantA, [participantA.key]);
+
+    const zkAppBalAfterDeposit = Mina.getBalance(zkAppAddr).toBigInt();
+    const depositorAfterDeposit = Mina.getBalance(participantA).toBigInt();
+    const depositBig = depositAmount.toBigInt();
+
+    // zkApp account GAINED exactly depositAmount; depositor LOST at least it
+    // (plus the tx fee). This is real on-chain custody, not a bare Field record.
+    expect(zkAppBalAfterDeposit - zkAppBalBeforeDeposit).toBe(depositBig);
+    expect(depositorBeforeDeposit - depositorAfterDeposit).toBeGreaterThanOrEqual(depositBig);
+
+    // Single claim: recipient (B) is owed 600M, depositor (A) keeps 400M.
+    const channelHash = Poseidon.hash([participantA.x, participantB.x, channelNonce]);
+    const balA = Field(400_000_000);
+    const balB = Field(600_000_000);
+    const salt = Field(99999);
+    await submitClaim(
+      deployer,
+      zkApp,
+      balA,
+      balB,
+      salt,
+      participantA.key,
+      participantB.key,
+      channelNonce,
+      Field(1),
+      channelHash,
+      [deployer.key]
+    );
+
+    // Close with the latest balances.
+    const closeMsg = [balA, balB, salt, Field(2)];
+    const sigA = Signature.create(participantA.key, closeMsg);
+    const sigB = Signature.create(participantB.key, closeMsg);
+    Local.setGlobalSlot(100);
+    await closeChannel(deployer, zkApp, balA, balB, salt, Field(2), sigA, sigB, [deployer.key]);
+
+    // ── Capture recipient + depositor balances immediately BEFORE settle ──
+    const recipientBeforeSettle = Mina.getBalance(participantB).toBigInt();
+    const depositorBeforeSettle = Mina.getBalance(participantA).toBigInt();
+    const zkAppBeforeSettle = Mina.getBalance(zkAppAddr).toBigInt();
+
+    Local.setGlobalSlot(200);
+    await settleChannel(
+      deployer,
+      zkApp,
+      balA,
+      balB,
+      salt,
+      participantA,
+      participantB,
+      channelNonce,
+      [deployer.key]
+    );
+
+    const recipientAfterSettle = Mina.getBalance(participantB).toBigInt();
+    const depositorAfterSettle = Mina.getBalance(participantA).toBigInt();
+    const zkAppAfterSettle = Mina.getBalance(zkAppAddr).toBigInt();
+
+    expect(zkApp.channelState.get().toString()).toBe(CHANNEL_STATE.SETTLED.toString());
+
+    // RECIPIENT (participantB / apex) is CREDITED balanceB at settle.
+    expect(recipientAfterSettle - recipientBeforeSettle).toBe(balB.toBigInt());
+    // DEPOSITOR (participantA) is REFUNDED balanceA (deployer pays the settle fee,
+    // not participantA, so participantA's delta is exactly the refund).
+    expect(depositorAfterSettle - depositorBeforeSettle).toBe(balA.toBigInt());
+    // The zkApp escrow is drained by exactly depositTotal (balA + balB).
+    expect(zkAppBeforeSettle - zkAppAfterSettle).toBe(depositBig);
+  });
 });

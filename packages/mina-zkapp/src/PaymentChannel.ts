@@ -11,7 +11,18 @@
  * @module PaymentChannel
  */
 
-import { SmartContract, State, state, method, Field, PublicKey, Poseidon, Signature } from 'o1js';
+import {
+  SmartContract,
+  State,
+  state,
+  method,
+  Field,
+  PublicKey,
+  Poseidon,
+  Signature,
+  UInt64,
+  AccountUpdate,
+} from 'o1js';
 
 import { CHANNEL_STATE, ASSERT_MESSAGES, MAX_SAFE_AMOUNT } from './constants';
 
@@ -89,18 +100,22 @@ export class PaymentChannel extends SmartContract {
   /**
    * Deposit into an open channel.
    *
-   * Increments depositTotal by the given amount. Requires channelState == OPEN
-   * and amount > 0.
+   * Increments depositTotal by the given amount AND custodies the funds on the
+   * zkApp account. Requires channelState == OPEN and amount > 0.
    *
-   * NOTE: The depositor parameter is included as a circuit witness for future
-   * use (Story 34.4 SDK will bind depositor identity). On-chain authorization
-   * currently relies on Mina transaction signatures (the sender must sign the
-   * transaction). Full depositor-key binding is enforced at the SDK level.
+   * FUND CUSTODY (Story 34.4): a signed AccountUpdate debits the depositor and
+   * credits this zkApp account by `amount` native MINA (nanomina). This makes
+   * the zkApp account the on-chain custodian of channel funds -- the Mina analog
+   * of the Solana program's vault PDA. Without this, `settle()` would have no
+   * funds to distribute (the earlier behaviour recorded depositTotal as a bare
+   * Field with nothing actually escrowed). The depositor authorizes the debit by
+   * signing the transaction (AccountUpdate.createSigned), which also binds the
+   * depositor identity on-chain.
    *
-   * @param amount - Amount to deposit (must be > 0)
-   * @param _depositor - Public key of the depositor (circuit witness for SDK-level authorization)
+   * @param amount - Amount to deposit (must be > 0), in nanomina
+   * @param depositor - Public key of the depositor (debited and bound on-chain)
    */
-  @method async deposit(amount: Field, _depositor: PublicKey): Promise<void> {
+  @method async deposit(amount: Field, depositor: PublicKey): Promise<void> {
     // Require channel is OPEN
     const currentState = this.channelState.getAndRequireEquals();
     currentState.assertEquals(CHANNEL_STATE.OPEN, ASSERT_MESSAGES.CHANNEL_MUST_BE_OPEN);
@@ -122,6 +137,18 @@ export class PaymentChannel extends SmartContract {
     newDeposit.assertLessThanOrEqual(MAX_SAFE_AMOUNT, ASSERT_MESSAGES.DEPOSIT_TOTAL_OVERFLOW);
 
     this.depositTotal.set(newDeposit);
+
+    // FUND CUSTODY: move `amount` nanomina from the depositor into this zkApp
+    // account. createSigned requires the depositor's signature on the enclosing
+    // transaction (authorizing the debit + binding the depositor identity), then
+    // `send({ to: this.address })` credits the zkApp's own balance. The deposited
+    // MINA is now escrowed here until settle() distributes it.
+    // `amount` is already proven <= MAX_SAFE_AMOUNT (2^64 - 1) above, so the
+    // unchecked Field->UInt64 conversion is sound (the range bound is the
+    // explicit assertion, not an implicit witness check).
+    const amountU64 = UInt64.Unsafe.fromField(amount);
+    const depositorUpdate = AccountUpdate.createSigned(depositor);
+    depositorUpdate.send({ to: this.address, amount: amountU64 });
   }
 
   /**
@@ -209,12 +236,16 @@ export class PaymentChannel extends SmartContract {
    * challenge period has passed, and verifies participant identity against the
    * stored channelHash. Transitions state to SETTLED.
    *
-   * NOTE: Fund distribution (sending balanceA to participantA and balanceB to
-   * participantB) is orchestrated at the SDK level (Story 34.4). The on-chain
-   * contract verifies all settlement preconditions and transitions state; the
-   * SDK then constructs the AccountUpdate tree that moves funds. This separation
-   * is necessary because Mina token transfers require sender-specific
-   * AccountUpdates that depend on the token type (native MINA vs custom tokens).
+   * FUND DISTRIBUTION (Story 34.4): after verifying all preconditions and
+   * transitioning to SETTLED, this method emits two AccountUpdates that debit the
+   * zkApp's custodied balance -- `balanceB` nanomina to participantB (the apex
+   * recipient, the analog of the Solana SETTLE_CHANNEL vault→recipient transfer)
+   * and `balanceA` nanomina to participantA (the depositor refund). The debits
+   * from this zkApp account are authorized by THIS settle proof (the contract's
+   * own AccountUpdate), so no extra signer is required. Conservation
+   * (balanceA + balanceB == depositTotal) was enforced at initiateClose and the
+   * commitment is re-verified below, so the two sends together drain exactly the
+   * custodied deposit.
    *
    * @param balanceA - Revealed balance for participant A
    * @param balanceB - Revealed balance for participant B
@@ -260,6 +291,21 @@ export class PaymentChannel extends SmartContract {
 
     // Transition to SETTLED
     this.channelState.set(CHANNEL_STATE.SETTLED);
+
+    // FUND DISTRIBUTION: drain the custodied deposit to the participants. These
+    // debits come from this zkApp's own account and are authorized by this
+    // settle proof (this.send emits the contract's self-AccountUpdate). The
+    // recipient (participantB / apex) is credited balanceB, the depositor
+    // (participantA / client) is refunded balanceA. Their sum equals depositTotal
+    // (enforced at initiateClose), so the zkApp balance returns to its rent
+    // minimum after settlement.
+    // balanceA/balanceB are proven <= depositTotal (<= MAX_SAFE_AMOUNT) via the
+    // commitment + the conservation check at initiateClose, so the unchecked
+    // Field->UInt64 conversion is sound here too.
+    const balanceBU64 = UInt64.Unsafe.fromField(balanceB);
+    const balanceAU64 = UInt64.Unsafe.fromField(balanceA);
+    this.send({ to: participantB, amount: balanceBU64 });
+    this.send({ to: participantA, amount: balanceAU64 });
   }
 
   /**

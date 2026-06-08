@@ -861,10 +861,13 @@ describe('PaymentChannel zkApp -- Channel Lifecycle (Story 34.1)', () => {
     // When: deposit with amount exceeding MAX_SAFE_AMOUNT (2^64 - 1)
     const unsafeAmount = MAX_SAFE_AMOUNT.add(Field(1));
 
-    // Then: transaction is rejected
+    // Then: transaction is rejected. With fund custody (Story 34.4) the
+    // depositor→zkApp transfer converts the amount to a UInt64/Int64 whose range
+    // check can fire before the contract's own `safe range` assertion — both are
+    // valid rejections of an unsafe amount, so accept either.
     await expect(
       depositToChannel(participantA, zkApp, unsafeAmount, participantA, [participantA.key])
-    ).rejects.toThrow(/safe range/);
+    ).rejects.toThrow(/safe range|Int64: Expected a value between/);
   });
 
   // T-34.1-20: initiateClose with modular-arithmetic-exploiting balances is rejected
