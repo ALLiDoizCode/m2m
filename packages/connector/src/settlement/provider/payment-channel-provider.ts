@@ -347,6 +347,12 @@ export interface MinaProviderConfig {
   tokenId?: string;
   /** Mina network name for chain ID namespacing (e.g., 'devnet', 'mainnet') */
   network?: string;
+  /**
+   * Fee applied to state-changing zkApp transactions, in nanomina (decimal
+   * string for bigint precision). Defaults to 0.1 MINA (100_000_000 nanomina)
+   * when omitted; real networks reject zero-fee zkApp transactions (Issue #126).
+   */
+  txFeeNanomina?: string;
 }
 
 /**

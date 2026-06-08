@@ -41,6 +41,9 @@ import {
   MinaPaymentChannelProvider,
   createMinaProviderFactory,
 } from './mina-payment-channel-provider';
+// Mocked SDK constructor (see jest.mock below) — used to assert the factory
+// forwards configuration such as the transaction fee (Issue #126).
+import { MinaPaymentChannelSDK } from '../mina-payment-channel-sdk';
 import { ChainProviderRegistry } from './chain-provider-registry';
 import type { ChainProviderFactory } from './chain-provider-registry';
 
@@ -1205,6 +1208,47 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       const created = factory(config);
       expect(created.chainType).toBe('mina');
       expect(created.chainId).toBe('mina:devnet');
+    });
+
+    // Issue #126: the factory must forward the configured zkApp transaction fee
+    // to the SDK so submitted claims are not rejected for "Insufficient fee".
+    it('should forward txFeeNanomina to the SDK constructor (Issue #126)', () => {
+      const factory = createMinaProviderFactory(mockLogger, TEST_SIGNER_KEY);
+      const config = {
+        chainType: 'mina' as const,
+        graphqlUrl: TEST_GRAPHQL_URL,
+        zkAppAddress: TEST_ZKAPP_ADDRESS,
+        keyId: 'mina-key-1',
+        tokenId: TEST_TOKEN_ID,
+        network: TEST_NETWORK,
+        txFeeNanomina: '250000000',
+      } as ProviderConfig;
+
+      factory(config);
+
+      const sdkMock = MinaPaymentChannelSDK as unknown as jest.Mock;
+      const lastCallArgs = sdkMock.mock.calls[sdkMock.mock.calls.length - 1];
+      // Constructor: (graphqlUrl, zkAppAddress, logger, signerKey, txFeeNanomina)
+      expect(lastCallArgs[4]).toBe(250000000n);
+    });
+
+    it('should leave the SDK fee default when txFeeNanomina is omitted (Issue #126)', () => {
+      const factory = createMinaProviderFactory(mockLogger, TEST_SIGNER_KEY);
+      const config = {
+        chainType: 'mina' as const,
+        graphqlUrl: TEST_GRAPHQL_URL,
+        zkAppAddress: TEST_ZKAPP_ADDRESS,
+        keyId: 'mina-key-1',
+        tokenId: TEST_TOKEN_ID,
+        network: TEST_NETWORK,
+      } as ProviderConfig;
+
+      factory(config);
+
+      const sdkMock = MinaPaymentChannelSDK as unknown as jest.Mock;
+      const lastCallArgs = sdkMock.mock.calls[sdkMock.mock.calls.length - 1];
+      // undefined => SDK applies its DEFAULT_MINA_TX_FEE_NANOMINA default.
+      expect(lastCallArgs[4]).toBeUndefined();
     });
 
     it('should work with ChainProviderRegistry.fromConfig', () => {

@@ -162,6 +162,16 @@ async function getPaymentChannelContract(): Promise<any> {
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 
 /**
+ * Default transaction fee for zkApp transactions, in nanomina (0.1 MINA).
+ *
+ * o1js builds a fee payer with a zero fee unless one is supplied, and real
+ * Mina networks (devnet/mainnet/lightnet) reject zero-fee zkApp transactions
+ * with "Insufficient fee". 0.1 MINA is the conventional zkApp fee and is
+ * applied to every state-changing transaction the SDK submits (Issue #126).
+ */
+export const DEFAULT_MINA_TX_FEE_NANOMINA = 100_000_000n;
+
+/**
  * Reset the module-level caches for o1js and PaymentChannel.
  *
  * This is intended for testing only -- it allows test suites to simulate
@@ -229,13 +239,37 @@ export class MinaPaymentChannelSDK {
    */
   private readonly _channelHashCache = new Map<string, string>();
 
+  /**
+   * Fee applied to every state-changing zkApp transaction, in nanomina.
+   *
+   * Real Mina networks reject zero-fee zkApp transactions with "Insufficient
+   * fee"; o1js does not set a fee unless one is supplied. Defaults to
+   * {@link DEFAULT_MINA_TX_FEE_NANOMINA} (0.1 MINA) (Issue #126).
+   */
+  private readonly _txFee: bigint;
+
   constructor(
     graphqlUrl: string,
     private readonly _zkAppAddress: string,
     private readonly _logger: Logger,
-    private readonly _signerPrivateKey?: string
+    private readonly _signerPrivateKey?: string,
+    txFeeNanomina: bigint = DEFAULT_MINA_TX_FEE_NANOMINA
   ) {
     this.graphqlUrl = graphqlUrl;
+    this._txFee = txFeeNanomina;
+  }
+
+  /**
+   * Build the o1js fee-payer spec for {@link Mina.transaction}.
+   *
+   * Always sets an explicit fee so transactions are not rejected for
+   * "Insufficient fee" on real networks. The fee is passed as a decimal
+   * string of nanomina; o1js converts it to `UInt64` internally, so the SDK
+   * does not need to import the `UInt64` type (Issue #126).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _feePayer(sender: any): { sender: any; fee: string } {
+    return { sender, fee: this._txFee.toString() };
   }
 
   // -------------------------------------------------------------------------
@@ -543,7 +577,7 @@ export class MinaPaymentChannelSDK {
       const tokenIdField = Field(tokenId ?? '1');
 
       // Build deploy + initialize transaction
-      const txn = await Mina.transaction(signerPublicKey, async () => {
+      const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
         AccountUpdate.fundNewAccount(signerPublicKey);
         await zkApp.deploy();
         await zkApp.initializeChannel(pubA, pubB, nonce, timeoutField, tokenIdField);
@@ -588,7 +622,7 @@ export class MinaPaymentChannelSDK {
       const zkApp = await this._getZkApp(channelAddress);
       const amountField = Field(amount);
 
-      const txn = await Mina.transaction(signerPublicKey, async () => {
+      const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
         await zkApp.deposit(amountField, signerPublicKey);
       });
       await txn.prove();
@@ -703,7 +737,33 @@ export class MinaPaymentChannelSDK {
         );
       }
 
-      const txn = await Mina.transaction(signerPublicKey, async () => {
+      // Bind the proof's `depositTotal` precondition to the *current* on-chain
+      // value (Issue #126). The on-chain `claimFromChannel` asserts
+      // `newBalanceA + newBalanceB == depositTotal` via
+      // `this.depositTotal.getAndRequireEquals()`. That precondition is
+      // satisfied from o1js's account cache, so a deposit that landed after the
+      // channel was opened (e.g. the client deposits at open time, before this
+      // connector ever claims) must be reflected in the cache or the circuit
+      // binds a stale `depositTotal` (observed as `0`) and proof generation
+      // fails with "balance conservation invariant" *before* the transaction is
+      // ever submitted. `_getZkApp()` re-fetched the account immediately above,
+      // so reading `depositTotal` here both (a) confirms the cache is fresh and
+      // (b) lets us fail fast with an actionable error instead of a cryptic
+      // in-circuit `Field.assertEquals()` failure.
+      const onChainDeposit = (zkApp.depositTotal.get() as { toBigInt(): bigint }).toBigInt();
+      if (newBalanceA + newBalanceB !== onChainDeposit) {
+        throw new MinaChannelError(
+          `Claim violates balance conservation for ${channelAddress}: ` +
+            `newBalanceA (${newBalanceA.toString()}) + newBalanceB (${newBalanceB.toString()}) = ` +
+            `${(newBalanceA + newBalanceB).toString()} but the on-chain depositTotal is ` +
+            `${onChainDeposit.toString()}. The balances in the signed claim must sum to the ` +
+            'channel deposit (Issue #126).',
+          MINA_ERROR_CODES.PROOF_GENERATION_FAILED,
+          'PROOF_GENERATION_FAILED'
+        );
+      }
+
+      const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
         await zkApp.claimFromChannel(
           balA,
           balB,
@@ -780,7 +840,7 @@ export class MinaPaymentChannelSDK {
       const sigA = this._deserializeSignature(signatureA, 'signatureA');
       const sigB = this._deserializeSignature(signatureB, 'signatureB');
 
-      const txn = await Mina.transaction(signerPublicKey, async () => {
+      const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
         await zkApp.initiateClose(balA, balB, saltField, nonceField, sigA, sigB);
       });
       await txn.prove();
@@ -839,7 +899,7 @@ export class MinaPaymentChannelSDK {
       const pubB = PublicKey.fromBase58(participantB);
       const nonceField = Field(nonce);
 
-      const txn = await Mina.transaction(signerPublicKey, async () => {
+      const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
         await zkApp.settle(balA, balB, saltField, pubA, pubB, nonceField);
       });
       await txn.prove();

@@ -679,6 +679,122 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       // txn.prove() should be called asynchronously
       expect(mockTxn.prove).toHaveBeenCalledTimes(1);
     });
+
+    // Issue #126: the on-chain `claimFromChannel` asserts
+    // `newBalanceA + newBalanceB == depositTotal`. The connector must bind the
+    // proof's `depositTotal` precondition to the current on-chain value (the
+    // mock reports 1_000_000) and fail fast with an actionable error instead of
+    // a cryptic in-circuit `Field.assertEquals()` failure when the signed
+    // balances do not sum to the channel deposit.
+    it('should throw a clear conservation error when balances do not sum to depositTotal (Issue #126)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cacheMap = (sdk as any)._participantCache as Map<string, any>;
+      cacheMap.set(TEST_ZKAPP_ADDRESS, {
+        participantA: TEST_PARTICIPANT_A,
+        participantB: TEST_PARTICIPANT_B,
+      });
+
+      // 600000 + 300000 = 900000 != on-chain depositTotal (1_000_000)
+      await expect(
+        sdk.claimFromChannel(
+          TEST_ZKAPP_ADDRESS,
+          600000n,
+          300000n,
+          12345n,
+          1n,
+          mockSignatureStr,
+          mockSignatureStr
+        )
+      ).rejects.toMatchObject({
+        code: MINA_ERROR_CODES.PROOF_GENERATION_FAILED,
+        message: expect.stringContaining('balance conservation'),
+      });
+
+      // The conservation guard runs before the expensive proof is built.
+      expect(mockMinaTransaction).not.toHaveBeenCalled();
+      expect(mockTxn.prove).not.toHaveBeenCalled();
+    });
+
+    it('should proceed when balances sum exactly to the on-chain depositTotal (Issue #126)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cacheMap = (sdk as any)._participantCache as Map<string, any>;
+      cacheMap.set(TEST_ZKAPP_ADDRESS, {
+        participantA: TEST_PARTICIPANT_A,
+        participantB: TEST_PARTICIPANT_B,
+      });
+
+      // 1_000_000 + 0 = on-chain depositTotal (1_000_000): the inbound
+      // unidirectional case where the client spent its full deposit.
+      const result = await sdk.claimFromChannel(
+        TEST_ZKAPP_ADDRESS,
+        1000000n,
+        0n,
+        12345n,
+        1n,
+        mockSignatureStr,
+        mockSignatureStr
+      );
+
+      expect(result).toEqual({ txHash: 'mina_tx_hash_abc123' });
+      expect(mockTxn.prove).toHaveBeenCalledTimes(1);
+    });
+
+    // Issue #126: o1js builds a zero-fee fee payer unless a fee is supplied, and
+    // real Mina networks reject zero-fee zkApp transactions with "Insufficient
+    // fee". The SDK must pass an explicit fee on the fee-payer spec.
+    it('should submit the claim with an explicit non-zero transaction fee (Issue #126)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cacheMap = (sdk as any)._participantCache as Map<string, any>;
+      cacheMap.set(TEST_ZKAPP_ADDRESS, {
+        participantA: TEST_PARTICIPANT_A,
+        participantB: TEST_PARTICIPANT_B,
+      });
+
+      await sdk.claimFromChannel(
+        TEST_ZKAPP_ADDRESS,
+        600000n,
+        400000n,
+        12345n,
+        1n,
+        mockSignatureStr,
+        mockSignatureStr
+      );
+
+      // First arg to Mina.transaction is the fee-payer spec carrying the fee.
+      const feePayerSpec = mockMinaTransaction.mock.calls[0][0];
+      expect(feePayerSpec).toEqual(
+        expect.objectContaining({ fee: '100000000' }) // 0.1 MINA default
+      );
+    });
+
+    it('should honor a custom transaction fee passed to the constructor (Issue #126)', async () => {
+      const customSdk = new MinaPaymentChannelSDK(
+        TEST_GRAPHQL_URL,
+        TEST_ZKAPP_ADDRESS,
+        logger as any,
+        TEST_SIGNER_KEY,
+        250_000_000n // 0.25 MINA
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cacheMap = (customSdk as any)._participantCache as Map<string, any>;
+      cacheMap.set(TEST_ZKAPP_ADDRESS, {
+        participantA: TEST_PARTICIPANT_A,
+        participantB: TEST_PARTICIPANT_B,
+      });
+
+      await customSdk.claimFromChannel(
+        TEST_ZKAPP_ADDRESS,
+        600000n,
+        400000n,
+        12345n,
+        1n,
+        mockSignatureStr,
+        mockSignatureStr
+      );
+
+      const feePayerSpec = mockMinaTransaction.mock.calls[0][0];
+      expect(feePayerSpec).toEqual(expect.objectContaining({ fee: '250000000' }));
+    });
   });
 
   // -------------------------------------------------------------------------

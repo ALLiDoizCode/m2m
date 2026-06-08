@@ -831,11 +831,13 @@ describe('MinaPaymentChannelSDK ATDD Acceptance Tests (Story 34.4)', () => {
       await sdkWithSigner.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
       const openedAddress = 'B62mock-zkapp-address';
 
-      // When: the method is invoked
+      // When: the method is invoked. Balances must sum to the mocked on-chain
+      // depositTotal (1_000_000_000) or the conservation guard rejects the claim
+      // before proof generation (Issue #126).
       const claimPromise = sdkWithSigner.claimFromChannel(
         openedAddress,
-        700n,
-        300n,
+        700_000_000n,
+        300_000_000n,
         42n,
         1n,
         JSON.stringify({ r: 'mock-r', s: 'mock-s' }),
