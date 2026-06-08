@@ -875,7 +875,10 @@ export function createMinaProviderFactory(logger: Logger, signerKey: string): Ch
       config.graphqlUrl,
       config.zkAppAddress,
       logger,
-      signerKey
+      signerKey,
+      // Real Mina networks reject zero-fee zkApp transactions; default to
+      // 0.1 MINA unless the operator configures an explicit fee (Issue #126).
+      config.txFeeNanomina !== undefined ? BigInt(config.txFeeNanomina) : undefined
     );
     const network = config.network ?? 'devnet';
     const chainId = `mina:${network}`;
