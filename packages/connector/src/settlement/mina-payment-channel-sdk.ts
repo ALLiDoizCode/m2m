@@ -172,6 +172,20 @@ const DEFAULT_POLL_INTERVAL_MS = 30_000;
 export const DEFAULT_MINA_TX_FEE_NANOMINA = 100_000_000n;
 
 /**
+ * How long `openChannel` waits for a freshly-deployed zkApp account to become
+ * observable on-chain before giving up, in milliseconds (Issue #128).
+ *
+ * The zkApp account is created by the deploy transaction; `initializeChannel`
+ * must run in a *separate* transaction once that account exists, otherwise its
+ * `getAndRequireEquals()` state precondition cannot be satisfied (o1js throws
+ * "Could not find account"). 5 minutes covers lightnet/devnet block inclusion.
+ */
+const DEFAULT_DEPLOY_CONFIRMATION_TIMEOUT_MS = 300_000;
+
+/** Poll interval while waiting for the deployed zkApp account (Issue #128). */
+const DEPLOY_CONFIRMATION_POLL_INTERVAL_MS = 3_000;
+
+/**
  * Reset the module-level caches for o1js and PaymentChannel.
  *
  * This is intended for testing only -- it allows test suites to simulate
@@ -333,6 +347,42 @@ export class MinaPaymentChannelSDK {
     }
 
     return new Contract(zkAppPublicKey);
+  }
+
+  /**
+   * Poll until an account is observable on-chain, refreshing the o1js cache.
+   *
+   * Used after a deploy to confirm the new zkApp account exists before a
+   * follow-up method (e.g. `initializeChannel`) binds a precondition to its
+   * on-chain state (Issue #128). Each successful `fetchAccount` also primes the
+   * cache the next transaction reads from.
+   *
+   * @param channelAddress - Base58 address to wait for
+   * @param timeoutMs - Maximum time to wait
+   * @throws {MinaChannelError} code 1005 if the account never appears in time
+   */
+  private async _waitForAccount(
+    channelAddress: string,
+    timeoutMs: number = DEFAULT_DEPLOY_CONFIRMATION_TIMEOUT_MS
+  ): Promise<void> {
+    const { PublicKey, fetchAccount } = await getO1js();
+    await this._setNetwork();
+    const zkAppPublicKey = PublicKey.fromBase58(channelAddress);
+    const deadline = Date.now() + timeoutMs;
+
+    for (;;) {
+      const result = await fetchAccount({ publicKey: zkAppPublicKey });
+      if (!result.error) return;
+      if (Date.now() >= deadline) {
+        throw new MinaChannelError(
+          `Deployed zkApp account ${channelAddress} did not appear on-chain within ` +
+            `${timeoutMs}ms: ${String(result.error)}`,
+          MINA_ERROR_CODES.ACCOUNT_NOT_FOUND,
+          'ACCOUNT_NOT_FOUND'
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, DEPLOY_CONFIRMATION_POLL_INTERVAL_MS));
+    }
   }
 
   /**
@@ -576,21 +626,48 @@ export class MinaPaymentChannelSDK {
       const timeoutField = Field(timeout);
       const tokenIdField = Field(tokenId ?? '1');
 
-      // Build deploy + initialize transaction
-      const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
+      // Deploy and initialize MUST be separate transactions (Issue #128).
+      // `initializeChannel` opens with `this.channelState.getAndRequireEquals()`,
+      // a precondition on the zkApp's on-chain state. The zkApp account is
+      // created by the deploy AccountUpdate, so if both run in one transaction
+      // the account does not exist on-chain when o1js tries to satisfy that
+      // precondition (its second, `fetchMode: 'cached'` pass), and proving
+      // fails with "Could not find account". We therefore (1) deploy, (2) wait
+      // until the account is observable, then (3) initialize in a second tx.
+      // The contract uses the default `SmartContract.init()`, which sets all
+      // state to 0 (= UNINITIALIZED) on deploy, so step 3's precondition holds.
+
+      // 1. Deploy the zkApp.
+      const deployTxn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
         AccountUpdate.fundNewAccount(signerPublicKey);
         await zkApp.deploy();
+      });
+      await deployTxn.prove();
+      const deployTx = await deployTxn.sign([signerPrivateKey, zkAppPrivateKey]).send();
+      const deployTxHash = deployTx.hash ?? '';
+
+      this._logger.info(
+        { event: 'open_channel_deployed', zkAppAddress, txHash: deployTxHash },
+        'Mina payment channel zkApp deployed; awaiting account before initialize'
+      );
+
+      // 2. Wait for the deployed account to be observable on-chain.
+      await this._waitForAccount(zkAppAddress);
+
+      // 3. Initialize the channel in a separate transaction.
+      await fetchAccount({ publicKey: signerPublicKey });
+      const initTxn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
         await zkApp.initializeChannel(pubA, pubB, nonce, timeoutField, tokenIdField);
       });
-      await txn.prove();
-      const sentTx = await txn.sign([signerPrivateKey, zkAppPrivateKey]).send();
-      const txHash = sentTx.hash ?? '';
+      await initTxn.prove();
+      const initTx = await initTxn.sign([signerPrivateKey]).send();
+      const txHash = initTx.hash ?? '';
 
       // Cache participant keys
       this._participantCache.set(zkAppAddress, { participantA, participantB });
 
       this._logger.info(
-        { event: 'open_channel', zkAppAddress, txHash },
+        { event: 'open_channel', zkAppAddress, deployTxHash, txHash },
         'Mina payment channel opened'
       );
 

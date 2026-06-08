@@ -322,17 +322,36 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       expect(mockMina.Network).toHaveBeenCalledWith(TEST_GRAPHQL_URL);
       expect(mockMina.setActiveInstance).toHaveBeenCalled();
 
-      // Should create a transaction
-      expect(mockMinaTransaction).toHaveBeenCalledTimes(1);
+      // Deploy and initialize are SEPARATE transactions (Issue #128).
+      expect(mockMinaTransaction).toHaveBeenCalledTimes(2);
 
-      // Should prove and sign
-      expect(mockTxn.prove).toHaveBeenCalledTimes(1);
-      expect(mockTxn.sign).toHaveBeenCalledTimes(1);
+      // Should prove and sign both transactions
+      expect(mockTxn.prove).toHaveBeenCalledTimes(2);
+      expect(mockTxn.sign).toHaveBeenCalledTimes(2);
 
       // Should return result with zkApp address and tx hash
       expect(result).toHaveProperty('zkAppAddress');
       expect(result).toHaveProperty('txHash');
       expect(result.txHash).toBe('mina_tx_hash_abc123');
+    });
+
+    // Issue #128: deploy() and initializeChannel() must not share a transaction.
+    // Combining them makes initializeChannel's `getAndRequireEquals()` precondition
+    // bind state of an account that does not exist on-chain yet, so o1js proving
+    // fails with "Could not find account" against a real node.
+    it('should deploy then initialize in two transactions, waiting for the account (Issue #128)', async () => {
+      await sdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+
+      // Two distinct transactions were submitted.
+      expect(mockMinaTransaction).toHaveBeenCalledTimes(2);
+      // The deploy is confirmed (account fetched) before initialize runs.
+      expect(mockFetchAccount).toHaveBeenCalled();
+      // The intermediate "deployed" event is logged before the final "opened".
+      const deployedCall = logger.info.mock.calls.find(
+        (c: unknown[]) =>
+          typeof c[0] === 'object' && (c[0] as { event?: string }).event === 'open_channel_deployed'
+      );
+      expect(deployedCall).toBeDefined();
     });
 
     it('should use default tokenId when not provided', async () => {
@@ -2189,10 +2208,13 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
 
   describe('openChannel txHash handling (AC 2)', () => {
     it('[P2] should return empty string txHash when send() returns undefined hash', async () => {
-      // Given: send() returns a result with hash = undefined
-      mockTxn.sign.mockReturnValueOnce({
-        send: jest.fn().mockResolvedValueOnce({ hash: undefined }),
-      });
+      // Given: send() returns a result with hash = undefined. openChannel submits
+      // two transactions (deploy then initialize, Issue #128) and returns the
+      // initialize tx hash, so both signs must yield an undefined hash.
+      const undefinedHashSign = {
+        send: jest.fn().mockResolvedValue({ hash: undefined }),
+      };
+      mockTxn.sign.mockReturnValueOnce(undefinedHashSign).mockReturnValueOnce(undefinedHashSign);
 
       // When: openChannel is called
       const result = await sdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
