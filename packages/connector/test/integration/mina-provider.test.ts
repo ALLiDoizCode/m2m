@@ -265,7 +265,10 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
       // Then: all SDK methods called in correct order
       expect(mockSdk.openChannel).toHaveBeenCalledTimes(1);
       expect(mockSdk.deposit).toHaveBeenCalledTimes(1);
-      expect(mockSdk.signBalanceProof).toHaveBeenCalledTimes(1);
+      // signBalanceProof is called twice: once directly above (sigA), and once
+      // inside claimFromChannel where the connector co-signs signatureB with the
+      // apex key because no explicit signatureB was supplied (Issue #123 / #124).
+      expect(mockSdk.signBalanceProof).toHaveBeenCalledTimes(2);
       expect(mockSdk.claimFromChannel).toHaveBeenCalledTimes(1);
       expect(mockSdk.closeChannel).toHaveBeenCalledTimes(1);
       expect(mockSdk.settleChannel).toHaveBeenCalledTimes(1);
@@ -370,6 +373,10 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
       // Given: a provider with mock SDK
       const mockSdk = createMockMinaSDK();
       mockSdk.claimFromChannel.mockResolvedValue({ txHash: 'tx-claim' });
+      // No explicit signatureB is supplied below, so the connector co-signs
+      // signatureB with the apex settlement key via signBalanceProof (Issue
+      // #123 / #124). Give that call a distinct return value.
+      mockSdk.signBalanceProof.mockResolvedValue('apex-cosigned-sigB');
       mockSdk.getChannelState.mockResolvedValue({
         participantA: 'alice',
         participantB: 'bob',
@@ -418,9 +425,11 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
         expect(typeof call[2]).toBe('bigint'); // balanceB (0n here — unidirectional claim)
         expect(typeof call[3]).toBe('bigint'); // salt (0n here — none provided)
         expect(typeof call[4]).toBe('bigint'); // nonce
-        // No signatureB provided → falls back to signatureA for both participants
-        expect(call[5]).toBe(`proof-${i + 1}`); // signatureA
-        expect(call[6]).toBe(`proof-${i + 1}`); // signatureB (single-signature fallback)
+        // No signatureB provided → the connector co-signs signatureB with the
+        // apex key (Issue #123 / #124), so sigB is the apex co-signature, NOT a
+        // duplicate of signatureA.
+        expect(call[5]).toBe(`proof-${i + 1}`); // signatureA (the client's proof)
+        expect(call[6]).toBe('apex-cosigned-sigB'); // signatureB (apex co-signature)
       }
     });
 
