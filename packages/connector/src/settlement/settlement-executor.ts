@@ -433,6 +433,33 @@ export class SettlementExecutor extends EventEmitter {
    * @private
    */
   private async resolveChainForPeer(peerId: string, tokenId: string): Promise<string | undefined> {
+    // 0. Claim-driven precedence (mixed-chain correctness): settlement is
+    //    triggered BY a verified inbound claim, so the claim's own blockchain is
+    //    the authoritative chain to settle on. A peer may hold channels on more
+    //    than one chain (e.g. an EVM channel AND a Solana channel), and the
+    //    static cache / the tokenId-keyed channel record can both resolve to the
+    //    *other* chain — sending a Solana claim down the EVM provider path
+    //    (claimFromChannel against the EVM TokenNetwork → execution reverted).
+    //    When the latest verified claim names a chain we have a provider for,
+    //    prefer it. Only fall through to the cache/channel-record/static paths
+    //    when no verified claim is available.
+    if (this.claimReceiver) {
+      const claim = await this.claimReceiver.getLatestVerifiedClaimForPeer(peerId);
+      if (claim) {
+        const provider = this.chainProviderRegistry
+          .getAllProviders()
+          .find((p) => p.chainType === claim.blockchain);
+        if (provider) {
+          this.logger.info(
+            { peerId, tokenId, chain: provider.chainId, blockchain: claim.blockchain },
+            'Resolved settlement chain from latest verified claim (claim-driven precedence)'
+          );
+          this.registerPeerChain(peerId, provider.chainId);
+          return provider.chainId;
+        }
+      }
+    }
+
     // 1. Static peer config (and dynamic-peer cache).
     const configured = this.config.peerIdToChainMap.get(peerId);
     if (configured) {
@@ -448,24 +475,6 @@ export class SettlementExecutor extends EventEmitter {
       );
       this.registerPeerChain(peerId, channelChain);
       return channelChain;
-    }
-
-    // 3. Standalone non-EVM node (no ChannelManager): derive from latest claim.
-    if (this.claimReceiver) {
-      const claim = await this.claimReceiver.getLatestVerifiedClaimForPeer(peerId);
-      if (claim) {
-        const provider = this.chainProviderRegistry
-          .getAllProviders()
-          .find((p) => p.chainType === claim.blockchain);
-        if (provider) {
-          this.logger.info(
-            { peerId, tokenId, chain: provider.chainId, blockchain: claim.blockchain },
-            'Resolved settlement chain from latest verified claim for dynamic inbound peer (#88)'
-          );
-          this.registerPeerChain(peerId, provider.chainId);
-          return provider.chainId;
-        }
-      }
     }
 
     return undefined;
@@ -506,12 +515,36 @@ export class SettlementExecutor extends EventEmitter {
       // Trust ChannelManager's local state for channel lookup.
       // On-chain verification is deferred to the settlement operation itself.
       // ChannelManager normalizes all statuses to AdminChannelStatus ('open', 'closed', etc.)
+      //
+      // The tokenId-keyed lookup must also match the *resolved settlement chain*.
+      // A mixed deployment can hold both an EVM channel and a Solana/Mina channel
+      // for the same peer. The EVM channel is indexed under the EVM-derived
+      // settlement tokenId (e.g. `M2M`/`USDC`) — the very key the monitor emits —
+      // so a Solana/Mina settle would otherwise get the EVM channel's `0x…`
+      // channelId back, then submit an EVM-path claimFromChannel against the EVM
+      // TokenNetwork for a non-EVM claim (execution reverted). Only trust the
+      // direct hit when its chain matches the resolved chain; otherwise fall
+      // through to the chain-aware peer scan below so the correct (claim-derived)
+      // non-EVM channel is used.
       const metadata = this.channelManager.getChannelForPeer(peerId, tokenId);
-      if (metadata) {
+      if (metadata && (!chain || metadata.chain === chain)) {
         return metadata.status === 'open' ? metadata.channelId : null;
       }
+      if (metadata) {
+        this.logger.info(
+          {
+            peerId,
+            tokenId,
+            resolvedChain: chain,
+            channelChain: metadata.chain,
+            channelId: metadata.channelId,
+          },
+          'tokenId-keyed channel chain mismatch — ignoring and scanning peer channels for resolved chain'
+        );
+      }
 
-      // tokenId-keyed lookup missed — fall back to a peer+chain scan (#92).
+      // tokenId-keyed lookup missed (or matched a different chain) — fall back to
+      // a peer+chain scan (#92).
       const candidate = this.channelManager
         .getChannelsForPeer(peerId)
         .find((c) => c.status === 'open' && (!chain || c.chain === chain));
@@ -665,6 +698,41 @@ export class SettlementExecutor extends EventEmitter {
         'No per-packet claim available for settlement — cannot compute balance proof without chain-specific state'
       );
       throw new Error(`No per-packet claim available for channel ${channelId}`);
+    }
+
+    // Mis-route guard: the resolved provider's chain MUST match the selected
+    // claim's blockchain. A mixed deployment can surface a channelId / cached
+    // chain for the wrong chain (e.g. an EVM channel indexed under the same
+    // settlement tokenId as a Solana claim), which would otherwise submit an
+    // EVM-path claimFromChannel against the EVM TokenNetwork for a Solana/Mina
+    // claim (execution reverted, custom error 0x756688fe). Reject the mismatch
+    // before touching any on-chain provider so settlement re-resolves cleanly.
+    if (provider.chainType !== latestClaim.blockchain) {
+      this.logger.error(
+        {
+          peerId,
+          channelId,
+          providerChain: provider.chainType,
+          claimBlockchain: latestClaim.blockchain,
+        },
+        'Settlement provider/claim chain mismatch — refusing to submit a cross-chain claimFromChannel'
+      );
+      throw new Error(
+        `Settlement provider chain (${provider.chainType}) does not match claim blockchain (${latestClaim.blockchain}) for channel ${channelId}`
+      );
+    }
+
+    // Defense-in-depth: a Solana/Mina settle must never use an EVM (0x…) on-chain
+    // channel id. The claim-derived id (channelAccount / zkAppAddress) is used
+    // below, but reject an EVM-shaped id up front for non-EVM claims.
+    if (!isEVMClaim(latestClaim) && channelId.startsWith('0x')) {
+      this.logger.error(
+        { peerId, channelId, claimBlockchain: latestClaim.blockchain },
+        'EVM-shaped channel id (0x…) selected for a non-EVM settle — refusing to settle'
+      );
+      throw new Error(
+        `EVM-shaped channel id (${channelId}) is invalid for a ${latestClaim.blockchain} settlement`
+      );
     }
 
     // Per-packet claims already accumulated the correct cumulative state.
