@@ -179,8 +179,23 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
       const settleResult: MinaTxResult = { txHash: 'tx-settle-1' };
       mockSdk.settleChannel.mockResolvedValue(settleResult);
 
-      // Mock getChannelState for state transitions
+      // Mock getChannelState for state transitions. The first value feeds the
+      // claimFromChannel step below, which reads depositTotal to derive
+      // balanceB = depositTotal − balanceA for the unidirectional claim (Issue
+      // #133); the next three feed the explicit opened/closed/settled assertions.
       mockSdk.getChannelState
+        .mockResolvedValueOnce({
+          participantA: SIGNER_KEY,
+          participantB: 'peer-bob',
+          channelState: 1, // OPEN (claim-time deposit read)
+          depositTotal: 10000n,
+          balanceCommitment: 'commitment-hash-claim',
+          nonceField: 0n,
+          closedAtSlot: 0n,
+          settlementTimeout: 300n,
+          tokenId: MINA_TOKEN_ID,
+          channelHash: 'channel-hash-1',
+        } satisfies MinaChannelState)
         .mockResolvedValueOnce({
           participantA: SIGNER_KEY,
           participantB: 'peer-bob',
@@ -675,6 +690,20 @@ describe('Mina Provider E2E -- Full Lifecycle (Story 34.8)', () => {
     it('should reject a claim with a stale nonce (nonce <= current)', async () => {
       // Given: a provider where the SDK rejects stale nonces
       const mockSdk = createMockMinaSDK();
+      // The unidirectional claim path reads depositTotal to derive balanceB
+      // (Issue #133) before delegating to the SDK, so provide channel state.
+      mockSdk.getChannelState.mockResolvedValue({
+        participantA: SIGNER_KEY,
+        participantB: 'peer-bob',
+        channelState: 1, // OPEN
+        depositTotal: 10000n,
+        balanceCommitment: 'commitment-hash-stale',
+        nonceField: 3n,
+        closedAtSlot: 0n,
+        settlementTimeout: 300n,
+        tokenId: MINA_TOKEN_ID,
+        channelHash: 'channel-hash-1',
+      } satisfies MinaChannelState);
       mockSdk.claimFromChannel.mockRejectedValue(
         new MinaChannelError('Nonce must be strictly increasing', 6, 'NonceNotMonotonic')
       );
