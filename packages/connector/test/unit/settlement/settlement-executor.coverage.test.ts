@@ -77,7 +77,9 @@ const createMockProvider = (): jest.Mocked<PaymentChannelProvider> =>
 
 const createMockRegistry = (
   provider?: jest.Mocked<PaymentChannelProvider>
-): jest.Mocked<Pick<ChainProviderRegistry, 'getProviderForPeer' | 'getProvider'>> => ({
+): jest.Mocked<
+  Pick<ChainProviderRegistry, 'getProviderForPeer' | 'getProvider' | 'getAllProviders'>
+> => ({
   getProviderForPeer: jest
     .fn()
     .mockImplementation((peerConfig: { peerId: string; chain?: string }) => {
@@ -85,6 +87,7 @@ const createMockRegistry = (
       return undefined;
     }),
   getProvider: jest.fn().mockReturnValue(provider),
+  getAllProviders: jest.fn().mockReturnValue(provider ? [provider] : []),
 });
 
 const createMockChannelManager = (
@@ -576,6 +579,7 @@ describe('SettlementExecutor branch coverage', () => {
 
       const mockClaimReceiver = {
         getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(evmClaim),
+        getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(evmClaim),
       };
       executor.setClaimReceiver(mockClaimReceiver as any);
 
@@ -656,6 +660,10 @@ describe('SettlementExecutor branch coverage', () => {
 
       const mockClaimReceiver = {
         getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(null),
+        // No verified peer claim → claim-driven chain resolution is skipped and
+        // the static peerIdToChainMap (evm) is used, exercising the sent-claim
+        // (perPacketClaimService) fallback below.
+        getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(null),
       };
       executor.setClaimReceiver(mockClaimReceiver as any);
 
@@ -759,17 +767,26 @@ describe('SettlementExecutor branch coverage', () => {
     });
 
     it('should settle a Solana claim via the resolved provider (claimFromChannel)', async () => {
+      // A Solana claim must be settled by a Solana-typed provider. The executor
+      // guards against a provider/claim chain mismatch (an EVM provider claiming
+      // a Solana balance proof reverts on-chain), so the mock provider's
+      // chainType must match the claim's blockchain.
       const mockProvider = createMockProvider();
+      (mockProvider as { chainType: string }).chainType = 'solana';
       const { executor, mockSettlementMonitor } = buildExecutor({ provider: mockProvider });
+      // A Solana external channel is registered in the ChannelManager under its
+      // base58 channelAccount (not an EVM 0x… id). The executor rejects an EVM-
+      // shaped channel id for a non-EVM settle, so the registered id must be the
+      // base58 account that the claim also carries.
+      const solanaChannelAccount = '11111111111111111111111111111111';
       const mockChannelManager = createMockChannelManager({
         [`${TEST_PEER_ID}:${TEST_TOKEN_ID}`]: {
-          channelId: TEST_CHANNEL_ID,
+          channelId: solanaChannelAccount,
           tokenId: TEST_TOKEN_ID,
         },
       });
       executor.setChannelManager(mockChannelManager);
 
-      const solanaChannelAccount = '11111111111111111111111111111111';
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
           version: '1.0',
