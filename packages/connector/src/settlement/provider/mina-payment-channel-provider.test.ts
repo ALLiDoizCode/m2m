@@ -188,6 +188,10 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
     jest.clearAllMocks();
     mockSDK = createMockSDK();
     mockLogger = createMockLogger();
+    // Default on-chain state so the unidirectional claimFromChannel path can
+    // derive balanceB = depositTotal − balanceA (Issue #133). Individual tests
+    // override this when they need a specific depositTotal or an error.
+    mockSDK.getChannelState.mockResolvedValue(createSampleMinaChannelState());
     provider = new MinaPaymentChannelProvider(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       mockSDK as any,
@@ -528,17 +532,19 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       await provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'onlySig');
 
       // The apex co-signs over the SAME (channelId, balanceA, balanceB, salt, nonce)
-      // tuple that drives the on-chain commitment.
+      // tuple that drives the on-chain commitment. balanceB is derived from the
+      // on-chain depositTotal (1_000_000) as depositTotal − balanceA = 999_900,
+      // NOT 0, so the balances satisfy the conservation invariant (Issue #133).
       expect(mockSDK.signBalanceProof).toHaveBeenCalledWith(
         TEST_ZKAPP_ADDRESS,
         100n, // balanceA
-        0n, // balanceB defaults to 0n (unidirectional)
+        999900n, // balanceB = depositTotal − balanceA (Issue #133)
         0n, // salt defaults to 0n
         2n // nonce
       );
 
       const call = mockSDK.claimFromChannel.mock.calls[0]!;
-      expect(call[2]).toBe(0n); // balanceB defaults to 0n
+      expect(call[2]).toBe(999900n); // balanceB = depositTotal − balanceA (Issue #133)
       expect(call[3]).toBe(0n); // salt defaults to 0n
       expect(call[5]).toBe('onlySig'); // signatureA — the client's signature
       expect(call[6]).toBe('apex_cosigned_sigB'); // signatureB — apex co-signature, NOT reused sigA
@@ -552,6 +558,88 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         expect.objectContaining({ event: 'claim_from_channel_single_signature' }),
         expect.anything()
       );
+    });
+
+    // -----------------------------------------------------------------------
+    // Balance conservation (Issue #133): for an inbound unidirectional claim
+    // the connector must derive balanceB = depositTotal − balanceA rather than
+    // defaulting it to 0, or the on-chain `newBalanceA + newBalanceB ==
+    // depositTotal` assertion fails at proof generation.
+    // -----------------------------------------------------------------------
+
+    it('should derive balanceB = depositTotal − balanceA for a partial unidirectional claim (Issue #133)', async () => {
+      // depositTotal 10_000_000, transferred 2_000_001 → balanceB 7_999_999.
+      mockSDK.getChannelState.mockResolvedValue(
+        createSampleMinaChannelState({ depositTotal: 10000000n })
+      );
+      mockSDK.signBalanceProof.mockResolvedValue('apex_cosigned_sigB');
+      mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx-partial' });
+
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 1,
+        transferredAmount: '2000001',
+        lockedAmount: '0',
+        locksRoot: '',
+      };
+
+      await provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'clientSigA');
+
+      // Both the co-sign and the on-chain claim must use the conserved balanceB.
+      expect(mockSDK.signBalanceProof).toHaveBeenCalledWith(
+        TEST_ZKAPP_ADDRESS,
+        2000001n, // balanceA
+        7999999n, // balanceB = depositTotal − balanceA
+        0n, // salt
+        1n // nonce
+      );
+      const call = mockSDK.claimFromChannel.mock.calls[0]!;
+      expect(call[1]).toBe(2000001n); // balanceA
+      expect(call[2]).toBe(7999999n); // balanceB
+      expect(call[1] + call[2]).toBe(10000000n); // sums to depositTotal
+    });
+
+    it('should reject a unidirectional claim whose balanceA exceeds depositTotal (Issue #133)', async () => {
+      mockSDK.getChannelState.mockResolvedValue(
+        createSampleMinaChannelState({ depositTotal: 1000n })
+      );
+
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 1,
+        transferredAmount: '5000', // > depositTotal
+        lockedAmount: '0',
+        locksRoot: '',
+      };
+
+      await expect(
+        provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'clientSigA')
+      ).rejects.toThrow(/depositTotal/);
+      // Neither the co-sign nor the claim should be attempted.
+      expect(mockSDK.signBalanceProof).not.toHaveBeenCalled();
+      expect(mockSDK.claimFromChannel).not.toHaveBeenCalled();
+    });
+
+    it('should not consult on-chain state when balanceB is supplied explicitly (Issue #133)', async () => {
+      // Bidirectional callers carry a real balanceB; the connector must use it
+      // verbatim and skip the depositTotal-derived fallback entirely.
+      mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx-explicit' });
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 9,
+        transferredAmount: '4000',
+        lockedAmount: '0',
+        locksRoot: '',
+        balanceB: '6000',
+        salt: '123456789',
+        signatureB: 'sigB',
+      };
+
+      await provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'sigA');
+
+      expect(mockSDK.getChannelState).not.toHaveBeenCalled();
+      const call = mockSDK.claimFromChannel.mock.calls[0]!;
+      expect(call[2]).toBe(6000n); // balanceB used verbatim
     });
 
     it('should thread balanceB and salt to the SDK in signBalanceProof', async () => {
@@ -1751,12 +1839,14 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       await provider.claimFromChannel(channelId, balanceProof, signature);
 
       // Verify SDK called with correct bigint conversions. No balanceB/salt/
-      // signatureB supplied → unidirectional defaults (see issue #84): balanceB
-      // and salt default to 0n, and signatureB is the apex co-signature (#123).
+      // signatureB supplied → unidirectional path: salt defaults to 0n, signatureB
+      // is the apex co-signature (#123), and balanceB is derived from the on-chain
+      // depositTotal (1_000_000) as depositTotal − balanceA = 750_000 to satisfy
+      // the conservation invariant (Issue #133).
       expect(mockSDK.claimFromChannel).toHaveBeenCalledWith(
         channelId,
         250000n, // balanceA (transferredAmount) as bigint
-        0n, // balanceB default (unidirectional)
+        750000n, // balanceB = depositTotal − balanceA (Issue #133)
         0n, // salt default (unidirectional)
         7n, // nonce as BigInt
         signature, // signatureA passed through
@@ -1789,7 +1879,7 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       expect(mockSDK.claimFromChannel).toHaveBeenCalledWith(
         channelId,
         250000n,
-        0n,
+        750000n, // balanceB = depositTotal − balanceA (Issue #133)
         0n,
         7n,
         'proof_sig_abc',
