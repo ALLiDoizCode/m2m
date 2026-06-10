@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.3](https://github.com/toon-protocol/connector/compare/v3.10.2...v3.10.3) (2026-06-10)
+
+### Bug Fixes
+
+- **mina:** feed channel state to [#133](https://github.com/toon-protocol/connector/issues/133) balanceB derivation in integration tests ([#135](https://github.com/toon-protocol/connector/issues/135)) ([a93b382](https://github.com/toon-protocol/connector/commit/a93b382108a78ca4ea76f7f21af22a2787d301a7))
+
 ## [3.10.2](https://github.com/toon-protocol/connector/compare/v3.10.1...v3.10.2) (2026-06-10)
 
 ### Bug Fixes
