@@ -257,6 +257,14 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
    * fallback of reusing `signatureA` as `signatureB` made the participant-B
    * check assert false and the on-chain claim revert.
    *
+   * Likewise, when `balanceProof.balanceB` is omitted the connector does NOT
+   * default it to `0` — the on-chain method asserts
+   * `balanceA + balanceB == depositTotal`, so `balanceB` is derived as
+   * `depositTotal − balanceA` (the funder's remaining balance) from the public
+   * on-chain `depositTotal` read via `getChannelState`. The pre-#133 default of
+   * `0` made the balances sum to `balanceA` and proof generation rejected the
+   * claim with a balance-conservation violation (Issue #133).
+   *
    * @param channelId - zkApp address (base58)
    * @param balanceProof - The balance proof parameters (including Mina-only
    *   `balanceB`, `salt`, and `signatureB` for dual-party authorization)
@@ -279,8 +287,32 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
       // `transferredAmount` is participant A's balance; `balanceB` / `salt`
       // complete the Poseidon balance commitment for the bidirectional case.
       const balanceA = safeBigInt(balanceProof.transferredAmount, 'transferredAmount');
-      const balanceB =
-        balanceProof.balanceB !== undefined ? safeBigInt(balanceProof.balanceB, 'balanceB') : 0n;
+      // Resolve participant B's balance. The on-chain `claimFromChannel` asserts
+      // `newBalanceA + newBalanceB == depositTotal` and verifies BOTH signatures
+      // over `Poseidon(balanceA, balanceB, salt)`. For the inbound unidirectional
+      // case the claim carries no explicit `balanceB`, but it is NOT zero — it is
+      // the funder's *remaining* balance, derived from the public on-chain
+      // `depositTotal` as `depositTotal − balanceA` (Issue #133). Because the
+      // derivation uses only public on-chain state plus the shared `salt`, both
+      // parties reconstruct the identical commitment, so participant A's signature
+      // still verifies on-chain. The pre-#133 default of `0n` made the balances
+      // sum to `balanceA` (≠ `depositTotal` whenever the funder retains any
+      // balance), so proof generation rejected the claim with a balance-
+      // conservation violation before any tx was submitted.
+      let balanceB: bigint;
+      if (balanceProof.balanceB !== undefined) {
+        balanceB = safeBigInt(balanceProof.balanceB, 'balanceB');
+      } else {
+        const { depositTotal } = await this._sdk.getChannelState(channelId);
+        if (balanceA > depositTotal) {
+          throw new Error(
+            `Mina claim balanceA (${balanceA.toString()}) exceeds the on-chain depositTotal ` +
+              `(${depositTotal.toString()}) for channel ${channelId}; cannot derive a ` +
+              'non-negative balanceB for the conservation invariant (Issue #133).'
+          );
+        }
+        balanceB = depositTotal - balanceA;
+      }
       const salt = balanceProof.salt !== undefined ? safeBigInt(balanceProof.salt, 'salt') : 0n;
       const nonce = safeBigInt(String(balanceProof.nonce), 'nonce');
 
