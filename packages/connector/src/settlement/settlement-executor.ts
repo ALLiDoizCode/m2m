@@ -446,9 +446,7 @@ export class SettlementExecutor extends EventEmitter {
     if (this.claimReceiver) {
       const claim = await this.claimReceiver.getLatestVerifiedClaimForPeer(peerId);
       if (claim) {
-        const provider = this.chainProviderRegistry
-          .getAllProviders()
-          .find((p) => p.chainType === claim.blockchain);
+        const provider = this.resolveProviderForClaim(claim);
         if (provider) {
           this.logger.info(
             { peerId, tokenId, chain: provider.chainId, blockchain: claim.blockchain },
@@ -478,6 +476,59 @@ export class SettlementExecutor extends EventEmitter {
     }
 
     return undefined;
+  }
+
+  /**
+   * Resolve the PaymentChannelProvider that should settle a given verified claim.
+   *
+   * A dynamically-connected (anonymous HS) inbound peer is never in static
+   * config, so the only authoritative source for its settlement chain is the
+   * verified claim itself. The claim carries self-describing chain coordinates
+   * (EVM `chainId`, Solana `cluster`, Mina `network`) alongside the blockchain
+   * family discriminator. Resolve precisely so the chain registered back into
+   * `peerIdToChainMap` is the *exact* provider chainId — not merely the first
+   * provider of that family — which matters once a deployment runs more than one
+   * provider per chain family (e.g. two EVM chains, or devnet + mainnet Solana).
+   *
+   * Lookup order mirrors ClaimReceiver.lookupProvider:
+   *   1. Exact `<blockchain>:<self-describing-id>` match.
+   *   2. Suffix match: any registered provider whose chainId ends with
+   *      `:<self-describing-id>` (covers `evm:base:31337` ⇄ `31337`).
+   *   3. Fallback: the first registered provider for this chain family.
+   *
+   * Source: Issue #136 — on-chain settlement never executed for dynamically
+   * connected (inbound BTP) peers because no chain was registered from the claim.
+   *
+   * @param claim - A verified inbound BTP claim
+   * @returns The matching provider, or undefined if none is registered
+   * @private
+   */
+  private resolveProviderForClaim(claim: BTPClaimMessage): PaymentChannelProvider | undefined {
+    const selfDescribingId = isEVMClaim(claim)
+      ? claim.chainId
+      : isSolanaClaim(claim)
+        ? claim.cluster
+        : isMinaClaim(claim)
+          ? claim.network
+          : undefined;
+
+    if (selfDescribingId !== undefined) {
+      const direct = this.chainProviderRegistry.getProvider(
+        claim.blockchain,
+        `${claim.blockchain}:${selfDescribingId}`
+      );
+      if (direct) return direct;
+
+      const suffix = `:${selfDescribingId}`;
+      const suffixHit = this.chainProviderRegistry
+        .getAllProviders()
+        .find((p) => p.chainType === claim.blockchain && p.chainId.endsWith(suffix));
+      if (suffixHit) return suffixHit;
+    }
+
+    return this.chainProviderRegistry
+      .getAllProviders()
+      .find((p) => p.chainType === claim.blockchain);
   }
 
   /**
