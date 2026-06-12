@@ -20,7 +20,12 @@ import {
   isSolanaClaim,
   isMinaClaim,
 } from './btp-claim-types';
-import type { BTPClaimMessage, EVMClaimMessage } from './btp-claim-types';
+import type {
+  BTPClaimMessage,
+  EVMClaimMessage,
+  SolanaClaimMessage,
+  MinaClaimMessage,
+} from './btp-claim-types';
 import {
   type NIP59ClaimWrapper,
   BTP_WRAPPED_CLAIM_PROTOCOL,
@@ -31,6 +36,10 @@ import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { BalanceProof } from '@toon-protocol/shared';
 import type { PaymentChannelSDK } from '../settlement/payment-channel-sdk';
 import type { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
+import type {
+  PaymentChannelProvider,
+  VerifyBalanceProofParams,
+} from '../settlement/provider/payment-channel-provider';
 import type { ChannelManager } from '../settlement/channel-manager';
 import type { PeerRelation } from '../config/types';
 import type { Logger } from '../utils/logger';
@@ -199,41 +208,35 @@ export class InboundClaimValidator {
       return this.verifyEVMClaim(claim, peerId);
     }
 
-    // Non-EVM claims (Solana / Mina): admit inbound when a provider is
-    // registered for the claim's chain. The real cryptographic verification of
-    // Solana/Mina claims happens downstream in ClaimReceiver (which performs the
-    // provider-backed signature / zk-SNARK check before redemption). Here we
-    // only gate on whether this node can settle the claim's chain at all.
+    // Non-EVM claims (Solana / Mina): resolve the settlement provider for the
+    // claim's chain and verify the claim's signature / zk-SNARK proof at the
+    // gate, mirroring the EVM path. The provider exposes a chain-agnostic
+    // `verifyBalanceProof()` backed by the same primitives ClaimReceiver uses
+    // downstream (Ed25519 for Solana, zk-SNARK for Mina) — so a forged claim is
+    // F06-rejected before the packet ever reaches the local delivery handler.
     if (isSolanaClaim(claim) || isMinaClaim(claim)) {
       const chainId = isSolanaClaim(claim)
         ? `solana:${claim.cluster ?? 'devnet'}`
         : `mina:${claim.network ?? 'devnet'}`;
       const provider = this.chainRegistry?.getProvider(claim.blockchain, chainId);
-      if (provider) {
-        this.logger.debug(
+      if (!provider) {
+        this.logger.warn(
           {
-            event: 'inbound_claim_accept_nonevm',
+            event: 'inbound_claim_unsupported_chain',
             peerId,
             blockchain: claim.blockchain,
             chainId,
           },
-          'Accepting inbound non-EVM claim; cryptographic verification deferred to ClaimReceiver'
+          'Rejecting ILP PREPARE: no settlement provider registered for this blockchain'
         );
-        return null;
+        return this.createReject(
+          `No settlement provider registered for blockchain: ${claim.blockchain}`
+        );
       }
 
-      this.logger.warn(
-        {
-          event: 'inbound_claim_unsupported_chain',
-          peerId,
-          blockchain: claim.blockchain,
-          chainId,
-        },
-        'Rejecting ILP PREPARE: no settlement provider registered for this blockchain'
-      );
-      return this.createReject(
-        `No settlement provider registered for blockchain: ${claim.blockchain}`
-      );
+      return isSolanaClaim(claim)
+        ? this.verifySolanaClaim(claim, peerId, provider)
+        : this.verifyMinaClaim(claim, peerId, provider);
     }
 
     // Unreachable: the three type guards above are exhaustive over BTPClaimMessage.
@@ -350,6 +353,163 @@ export class InboundClaimValidator {
         peerId,
         channelId: claim.channelId,
         transferredAmount: claim.transferredAmount,
+        nonce: claim.nonce,
+      },
+      'Inbound claim validated successfully'
+    );
+
+    return null; // Claim is valid, proceed to packet handler
+  }
+
+  /**
+   * Verify a Solana claim's Ed25519 balance-proof signature via the provider.
+   *
+   * Delegates the actual cryptography to the resolved `PaymentChannelProvider`
+   * (`SolanaPaymentChannelProvider.verifyBalanceProof`), which reconstructs the
+   * 48-byte balance-proof message and verifies it against the signer's base58
+   * public key — the same primitive ClaimReceiver uses for redemption. The gate
+   * does not query on-chain state (the per-packet hot path stays RPC-free);
+   * full on-chain channel-state validation remains ClaimReceiver's job.
+   *
+   * @param claim - Validated Solana claim message
+   * @param peerId - Authenticated peer ID
+   * @param provider - Resolved Solana payment-channel provider
+   * @returns null if valid (proceed), or ILPRejectPacket to reject
+   * @private
+   */
+  private async verifySolanaClaim(
+    claim: SolanaClaimMessage,
+    peerId: string,
+    provider: PaymentChannelProvider
+  ): Promise<ILPRejectPacket | null> {
+    const verifyParams: VerifyBalanceProofParams = {
+      channelId: claim.channelAccount,
+      nonce: claim.nonce,
+      transferredAmount: claim.transferredAmount,
+      lockedAmount: '0',
+      locksRoot: '0x' + '0'.repeat(64),
+      signature: claim.signature,
+      signerAddress: claim.signerPublicKey,
+    };
+
+    let signatureValid: boolean;
+    try {
+      signatureValid = await provider.verifyBalanceProof(verifyParams);
+    } catch (error) {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_signature_error',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId: claim.channelAccount,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Rejecting ILP PREPARE: signature verification error'
+      );
+      return this.createReject('Signature verification failed');
+    }
+
+    if (!signatureValid) {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_invalid_signature',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId: claim.channelAccount,
+          signerAddress: claim.signerPublicKey,
+        },
+        'Rejecting ILP PREPARE: invalid Ed25519 signature'
+      );
+      return this.createReject('Invalid Ed25519 signature on claim');
+    }
+
+    this.logger.debug(
+      {
+        event: 'inbound_claim_validated',
+        peerId,
+        blockchain: claim.blockchain,
+        channelId: claim.channelAccount,
+        transferredAmount: claim.transferredAmount,
+        nonce: claim.nonce,
+      },
+      'Inbound claim validated successfully'
+    );
+
+    return null; // Claim is valid, proceed to packet handler
+  }
+
+  /**
+   * Verify a Mina claim's zk-SNARK balance-proof via the provider.
+   *
+   * Delegates the actual cryptography to the resolved `PaymentChannelProvider`
+   * (`MinaPaymentChannelProvider.verifyBalanceProof`), which deserializes and
+   * verifies the zk-SNARK proof — the same primitive ClaimReceiver uses for
+   * redemption. The gate does not query on-chain state (the per-packet hot path
+   * stays RPC-free); full on-chain channel-state validation remains
+   * ClaimReceiver's job.
+   *
+   * @param claim - Validated Mina claim message
+   * @param peerId - Authenticated peer ID
+   * @param provider - Resolved Mina payment-channel provider
+   * @returns null if valid (proceed), or ILPRejectPacket to reject
+   * @private
+   */
+  private async verifyMinaClaim(
+    claim: MinaClaimMessage,
+    peerId: string,
+    provider: PaymentChannelProvider
+  ): Promise<ILPRejectPacket | null> {
+    // Mina maps the zk-SNARK proof into the chain-agnostic `signature` slot and
+    // the zkApp address into both `channelId` and `signerAddress` — mirroring
+    // ClaimReceiver.buildMinaVerifyParams so the provider sees identical input.
+    const verifyParams: VerifyBalanceProofParams = {
+      channelId: claim.zkAppAddress,
+      nonce: claim.nonce,
+      transferredAmount: claim.balanceCommitment,
+      lockedAmount: '0',
+      locksRoot: '0x' + '0'.repeat(64),
+      signature: claim.proof,
+      signerAddress: claim.zkAppAddress,
+    };
+
+    let proofValid: boolean;
+    try {
+      proofValid = await provider.verifyBalanceProof(verifyParams);
+    } catch (error) {
+      // o1js Errors carry a non-enumerable `message`, so logging the raw object
+      // emits `error: {}` and hides the cause (Issue #95). Stringify explicitly.
+      this.logger.warn(
+        {
+          event: 'inbound_claim_signature_error',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId: claim.zkAppAddress,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Rejecting ILP PREPARE: signature verification error'
+      );
+      return this.createReject('Signature verification failed');
+    }
+
+    if (!proofValid) {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_invalid_signature',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId: claim.zkAppAddress,
+        },
+        'Rejecting ILP PREPARE: invalid zk-SNARK proof'
+      );
+      return this.createReject('Invalid zk-SNARK proof on claim');
+    }
+
+    this.logger.debug(
+      {
+        event: 'inbound_claim_validated',
+        peerId,
+        blockchain: claim.blockchain,
+        channelId: claim.zkAppAddress,
         nonce: claim.nonce,
       },
       'Inbound claim validated successfully'
