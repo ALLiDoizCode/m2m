@@ -1,6 +1,6 @@
 {
   "name": "@toon-protocol/shared",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Shared TypeScript types and utilities for Connector",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -50,7 +50,9 @@
     "lint": "eslint src --ext .ts",
     "prepublishOnly": "npm run build && npm test"
   },
-  "dependencies": {},
+  "dependencies": {
+    "zod": "^3.25.76"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.19",
