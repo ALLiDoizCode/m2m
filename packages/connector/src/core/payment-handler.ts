@@ -13,6 +13,7 @@
 import * as crypto from 'crypto';
 import { Logger } from '../utils/logger';
 import { LocalDeliveryHandler, LocalDeliveryRequest, LocalDeliveryResponse } from '../config/types';
+import type { PaymentRequest, PaymentResponse } from '@toon-protocol/shared';
 
 /** Maximum ILP data field size per RFC-0027 (32KB) */
 const ILP_MAX_DATA_BYTES = 32768;
@@ -22,46 +23,13 @@ const ILP_MAX_DATA_BYTES = 32768;
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Simplified inbound payment request.
- * Drops sourcePeer — users don't need it.
+ * The localDelivery (`/handle-packet`) wire contract — {@link PaymentRequest} /
+ * {@link PaymentResponse} — is defined ONCE in `@toon-protocol/shared`
+ * (`types/local-delivery.ts`) as the cross-process source of truth, and
+ * re-exported here for back-compat with existing `@toon-protocol/connector`
+ * consumers (and the connector's public `lib.ts`).
  */
-export interface PaymentRequest {
-  /** Unique payment identifier (base64url) */
-  paymentId: string;
-  /** Full ILP destination address */
-  destination: string;
-  /** Amount in smallest unit (as string for precision) */
-  amount: string;
-  /** ISO 8601 expiration timestamp */
-  expiresAt: string;
-  /** Base64-encoded application data (optional) */
-  data?: string;
-  /**
-   * Whether this is a transit notification at an intermediate hop.
-   * When true, the BLS response is ignored (fire-and-forget notification).
-   * When false or omitted, this is a final-hop delivery where the BLS
-   * response determines accept/reject.
-   */
-  isTransit?: boolean;
-}
-
-/**
- * Simplified payment response.
- * Users return accept/reject decisions without ILP knowledge.
- */
-export interface PaymentResponse {
-  /** Whether to accept (fulfill) the payment */
-  accept: boolean;
-  /** Optional response data (base64) for fulfill or reject packet */
-  data?: string;
-  /** Rejection reason (only used when accept is false) */
-  rejectReason?: {
-    /** Business error code (e.g., 'insufficient_funds', 'invalid_amount') */
-    code: string;
-    /** Human-readable error message */
-    message: string;
-  };
-}
+export type { PaymentRequest, PaymentResponse };
 
 /**
  * Simple payment handler function type.

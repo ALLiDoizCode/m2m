@@ -53,6 +53,10 @@ export {
 // Routing Types
 export { RoutingTableEntry } from './types/routing';
 
+// localDelivery wire contract (`/handle-packet`) — the cross-process source of
+// truth shared by the connector and every node (relay/store/sdk bridge).
+export type { PaymentRequest, PaymentResponse } from './types/local-delivery';
+
 // Payment Channel Types (Epic 8 Story 8.7)
 export {
   ChannelStatus,
