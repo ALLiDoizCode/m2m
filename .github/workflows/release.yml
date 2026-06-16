@@ -259,6 +259,29 @@ jobs:
         if: steps.tag.outputs.tag != ''
         run: npm run build
 
+      # Publish workspace deps the connector relies on (shared, mina-zkapp)
+      # BEFORE the connector itself, so a connector release that depends on a
+      # bumped @toon-protocol/shared resolves cleanly. Idempotent: each is
+      # skipped if its current version is already on npm, so this no-ops on
+      # routine pushes and only publishes genuinely new versions.
+      - name: Publish workspace deps (shared, mina-zkapp) to npm
+        if: steps.tag.outputs.tag != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in shared mina-zkapp; do
+            NAME=$(node -p "require('./packages/$pkg/package.json').name")
+            VERSION=$(node -p "require('./packages/$pkg/package.json').version")
+            if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+              echo "$NAME@$VERSION already published — skipping (no-op)"
+            else
+              echo "Publishing $NAME@$VERSION to npm..."
+              npm run build --workspace=packages/$pkg
+              npm publish --workspace=packages/$pkg --access public
+              echo "✓ Published $NAME@$VERSION"
+            fi
+          done
+
       - name: Publish to npm
         if: steps.tag.outputs.tag != ''
         env:
