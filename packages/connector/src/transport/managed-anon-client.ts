@@ -27,6 +27,7 @@ import path from 'path';
 import type pino from 'pino';
 import { probeTcpPort, waitForTcpPort } from './probe-tcp-port';
 import { parseSocks5hUrl } from './socks-url';
+import { socks5Connect } from './socks5-connect';
 
 /**
  * Minimal surface of the `Anon` class we depend on. Declared here rather than
@@ -94,6 +95,31 @@ export interface ManagedAnonClientOptions {
    * Anon(opts)`. In tests, a fake factory is injected.
    */
   anonFactory: (opts: AnonFactoryOptions) => AnonSdkHandle;
+  /**
+   * When true (default), the hostname is only reported as published after a
+   * self-dial through the local SOCKS proxy to the node's own `.anyone` address
+   * succeeds — proving the v3 descriptor is actually fetchable on the overlay,
+   * not merely that the local `hostname` file exists. Requires
+   * `hiddenServicePort` to be set; if it is not, verification is skipped and
+   * the hostname is reported on file detection (legacy behaviour).
+   *
+   * Set to false to restore the pre-verification behaviour (report on file
+   * detection). Mainly useful for tests or constrained environments where a
+   * self-dial to one's own hidden service is not possible.
+   */
+  verifyReachability?: boolean;
+  /**
+   * Override for the SOCKS5 self-dial used by reachability verification. Tests
+   * inject a fake (resolve = reachable, reject = not yet). Defaults to the
+   * built-in {@link socks5Connect}.
+   */
+  selfDial?: (opts: {
+    socksHost: string;
+    socksPort: number;
+    destHost: string;
+    destPort: number;
+    timeoutMs: number;
+  }) => Promise<void>;
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
@@ -103,14 +129,19 @@ const DEFAULT_STOP_TIMEOUT_MS = 10_000;
 const HOSTNAME_POLL_INTERVAL_MS = 2_000;
 /** Maximum total time the fallback poll runs before giving up (ms). */
 const HOSTNAME_POLL_MAX_DURATION_MS = 5 * 60 * 1_000;
+/** Per-attempt timeout for the self-dial reachability probe (ms). */
+const SELF_DIAL_TIMEOUT_MS = 10_000;
 
 /**
  * Snapshot of the cached hidden-service hostname.
  *
- * `hostname` is `null` until the anon process publishes the v3 descriptor and
- * writes `${hiddenServiceDir}/hostname`. Once read, both fields are stable for
- * the lifetime of the `ManagedAnonClient` instance — there is no SIGHUP-style
- * re-read; key rotation is a process-restart event.
+ * Both fields are `null` until the hidden service is confirmed published: the
+ * anon process has written `${hiddenServiceDir}/hostname` AND (when
+ * `verifyReachability` is enabled) a self-dial through the local SOCKS proxy to
+ * the address succeeded, proving the v3 descriptor is fetchable on the overlay.
+ * Once set, both fields are stable for the lifetime of the `ManagedAnonClient`
+ * instance — there is no SIGHUP-style re-read; key rotation is a
+ * process-restart event.
  */
 export interface HostnameSnapshot {
   hostname: string | null;
@@ -137,8 +168,14 @@ export class ManagedAnonClient {
   private _consecutiveProbeFailures = 0;
   /** Cached hostname read from `${hiddenServiceDir}/hostname` (trimmed). */
   private _hostname: string | null = null;
-  /** ISO-8601 timestamp set on the first successful hostname read. */
+  /**
+   * ISO-8601 timestamp set once the hidden service is confirmed published —
+   * i.e. the hostname file exists AND (when verification is enabled) a
+   * self-dial through the local SOCKS proxy reached it. `null` until then.
+   */
   private _publishedAt: string | null = null;
+  /** True while a self-dial verification attempt is in flight (re-entrancy guard). */
+  private _verifyInFlight = false;
   /** Active fs.watch handle for the hidden-service directory; closed on read or stop. */
   private _hostnameWatcher: FSWatcher | undefined;
   /** Active fallback-poll timer; cleared on read or stop. */
@@ -461,7 +498,9 @@ export class ManagedAnonClient {
 
   private _scheduleHostnamePoll(): void {
     if (this._hostnameWatchStopped) return;
-    if (this._hostname !== null) return;
+    // Keep polling until the hostname is both detected AND (optionally) verified
+    // reachable — `_publishedAt`, not `_hostname`, is the terminal condition.
+    if (this._publishedAt !== null) return;
     if (Date.now() >= this._hostnamePollDeadlineMs) {
       this._logger.warn(
         {
@@ -485,45 +524,114 @@ export class ManagedAnonClient {
   }
 
   /**
-   * Read `${hiddenServiceDir}/hostname` once. On success, cache the trimmed
-   * value, set `publishedAt`, log at info, and tear down the watcher/timer.
-   * Returns true iff a non-empty hostname was cached.
+   * Drive the hidden service toward the published state. Returns true once
+   * `_publishedAt` is set (terminal); false while still pending.
+   *
+   * Two idempotent steps, safe to call repeatedly from the watcher and poll:
+   *   1. Read `${hiddenServiceDir}/hostname` (once) to learn the address.
+   *   2. When `verifyReachability` is enabled and `hiddenServicePort` is set,
+   *      self-dial the address through the local SOCKS proxy and only publish
+   *      once that CONNECT succeeds (descriptor fetched + rendezvous up).
+   *      Otherwise publish on detection (legacy behaviour).
    */
   private async _tryReadHostname(): Promise<boolean> {
     if (this._hostnameWatchStopped) return false;
-    if (this._hostname !== null) return true;
-    const dir = this._opts.hiddenServiceDir;
-    if (!dir) return false;
-    const hostnameFile = path.join(dir, 'hostname');
-    try {
-      const raw = await fsp.readFile(hostnameFile, 'utf8');
-      // Re-check the stopped flag — `stop()` may have run while readFile was
-      // in flight. Without this guard a late read could populate the cache
-      // after the client is supposed to be torn down.
+    if (this._publishedAt !== null) return true;
+
+    // Step 1: ensure the hostname file has been read (once).
+    if (this._hostname === null) {
+      const dir = this._opts.hiddenServiceDir;
+      if (!dir) return false;
+      const hostnameFile = path.join(dir, 'hostname');
+      try {
+        const raw = await fsp.readFile(hostnameFile, 'utf8');
+        // Re-check the stopped flag — `stop()` may have run while readFile was
+        // in flight. Without this guard a late read could populate the cache
+        // after the client is supposed to be torn down.
+        if (this._hostnameWatchStopped) return false;
+        const trimmed = raw.trim();
+        if (trimmed.length === 0) return false;
+        this._hostname = trimmed;
+        this._logger.info(
+          { event: 'managed_anon_hostname_detected' },
+          'Hidden-service hostname file detected; verifying overlay reachability'
+        );
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'EISDIR') {
+          this._logger.debug(
+            {
+              event: 'managed_anon_hostname_read_error',
+              code,
+              errorMessage: (err as Error).message,
+            },
+            'Hostname file read failed (treating as not-yet-published)'
+          );
+        }
+        return false;
+      }
+    }
+
+    // Step 2: confirm the descriptor is actually reachable before publishing.
+    const verify = this._opts.verifyReachability ?? true;
+    const port = this._opts.hiddenServicePort;
+    if (verify && port !== undefined) {
+      const reachable = await this._verifyReachable(this._hostname, port);
       if (this._hostnameWatchStopped) return false;
-      const trimmed = raw.trim();
-      if (trimmed.length === 0) return false;
-      this._hostname = trimmed;
-      this._publishedAt = new Date().toISOString();
-      this._logger.info(
-        { event: 'managed_anon_hostname_published', publishedAt: this._publishedAt },
-        'Hidden-service hostname published'
-      );
-      this._cleanupHostnameWatch();
+      if (!reachable) return false;
+    }
+
+    this._markPublished();
+    return true;
+  }
+
+  /**
+   * Stamp `_publishedAt`, log at info, and tear down the watch/poll machinery.
+   * The `.anon` address is deliberately NOT logged (security invariant:
+   * addresses must not appear in INFO+ structured fields).
+   */
+  private _markPublished(): void {
+    if (this._publishedAt !== null) return;
+    this._publishedAt = new Date().toISOString();
+    this._logger.info(
+      { event: 'managed_anon_hostname_published', publishedAt: this._publishedAt },
+      'Hidden-service hostname published'
+    );
+    this._cleanupHostnameWatch();
+  }
+
+  /**
+   * Self-dial the connector's own `.anon` address through the local SOCKS proxy
+   * to confirm the v3 descriptor is published and a rendezvous can be
+   * established. Never throws: returns false (retry later) on any failure and
+   * logs at debug. Concurrent calls (watcher + poll firing together) are
+   * coalesced via `_verifyInFlight` so only one self-dial runs at a time.
+   */
+  private async _verifyReachable(hostname: string, port: number): Promise<boolean> {
+    if (this._verifyInFlight) return false;
+    this._verifyInFlight = true;
+    const socksPort = this._sdk?.getSOCKSPort?.() ?? this._socksPort;
+    const dial = this._opts.selfDial ?? socks5Connect;
+    try {
+      await dial({
+        socksHost: this._socksHost,
+        socksPort,
+        destHost: hostname,
+        destPort: port,
+        timeoutMs: SELF_DIAL_TIMEOUT_MS,
+      });
       return true;
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'EISDIR') {
-        this._logger.debug(
-          {
-            event: 'managed_anon_hostname_read_error',
-            code,
-            errorMessage: (err as Error).message,
-          },
-          'Hostname file read failed (treating as not-yet-published)'
-        );
-      }
+      this._logger.debug(
+        {
+          event: 'managed_anon_self_dial_failed',
+          errorMessage: (err as Error)?.message ?? String(err),
+        },
+        'Self-dial to own hidden service not yet reachable; will retry'
+      );
       return false;
+    } finally {
+      this._verifyInFlight = false;
     }
   }
 
