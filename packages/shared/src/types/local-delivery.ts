@@ -1,48 +1,56 @@
 /**
- * localDelivery wire contract (`POST /handle-packet`).
+ * localDelivery wire contract (`POST /handle-packet`) — zod-validated.
  *
- * This is the cross-process source of truth for how the connector forwards a
- * final-hop, already-validated payment to a co-located business-logic node
- * (relay / store / any TOON node). The connector serializes a {@link PaymentRequest}
- * and the node answers with a {@link PaymentResponse} (accept = FULFILL, reject = REJECT).
+ * The cross-process source of truth for how the connector forwards a final-hop,
+ * already-validated payment to a co-located node (relay / store / any TOON node):
+ * the connector sends a {@link PaymentRequest}; the node answers a
+ * {@link PaymentResponse} (accept = FULFILL, reject = REJECT).
  *
  * Defined here (not in the connector or the SDK) so every repo on either side of
- * the wire — connector, `@toon-protocol/sdk` (its payment-handler bridge), and any
- * node implementing `/handle-packet` — imports ONE definition and cannot drift.
+ * the wire imports ONE definition and cannot drift. Exposed as zod schemas so the
+ * boundary can be validated at runtime (`PaymentRequestSchema.parse(...)`), not
+ * just type-checked.
+ *
+ * NOTE: this is the WIRE contract. `@toon-protocol/sdk`'s payment-handler *bridge*
+ * has a separate internal DX type that `create-node.ts` adapts to this shape — do
+ * not conflate them (see toon-meta `context/contracts.md`).
  */
+import { z } from 'zod';
 
-/** Simplified inbound payment request delivered to a node (sourcePeer dropped). */
-export interface PaymentRequest {
+/** Inbound payment delivered to a node (sourcePeer dropped). */
+export const PaymentRequestSchema = z.object({
   /** Unique payment identifier (base64url) */
-  paymentId: string;
+  paymentId: z.string(),
   /** Full ILP destination address */
-  destination: string;
-  /** Amount in smallest unit (as string for precision) */
-  amount: string;
+  destination: z.string(),
+  /** Amount in smallest unit (string for precision) */
+  amount: z.string(),
   /** ISO 8601 expiration timestamp */
-  expiresAt: string;
+  expiresAt: z.string(),
   /** Base64-encoded application data (optional) */
-  data?: string;
+  data: z.string().optional(),
   /**
-   * Whether this is a transit notification at an intermediate hop.
-   * When true, the node response is ignored (fire-and-forget notification).
-   * When false or omitted, this is a final-hop delivery where the node
-   * response determines accept/reject.
+   * Transit notification at an intermediate hop. When true the node response is
+   * ignored (fire-and-forget); when false/omitted the response decides accept/reject.
    */
-  isTransit?: boolean;
-}
+  isTransit: z.boolean().optional(),
+});
+export type PaymentRequest = z.infer<typeof PaymentRequestSchema>;
 
-/** Simplified node response — accept/reject without ILP knowledge. */
-export interface PaymentResponse {
+/** Node response — accept/reject without ILP knowledge. */
+export const PaymentResponseSchema = z.object({
   /** Whether to accept (fulfill) the payment */
-  accept: boolean;
+  accept: z.boolean(),
   /** Optional response data (base64) for the fulfill or reject packet */
-  data?: string;
-  /** Rejection reason (only used when accept is false) */
-  rejectReason?: {
-    /** Business error code (e.g., 'insufficient_funds', 'invalid_amount') */
-    code: string;
-    /** Human-readable error message */
-    message: string;
-  };
-}
+  data: z.string().optional(),
+  /** Rejection reason (only when accept is false) */
+  rejectReason: z
+    .object({
+      /** Business error code (e.g., 'insufficient_funds', 'invalid_amount') */
+      code: z.string(),
+      /** Human-readable error message */
+      message: z.string(),
+    })
+    .optional(),
+});
+export type PaymentResponse = z.infer<typeof PaymentResponseSchema>;

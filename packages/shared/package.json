@@ -50,7 +50,9 @@
     "lint": "eslint src --ext .ts",
     "prepublishOnly": "npm run build && npm test"
   },
-  "dependencies": {},
+  "dependencies": {
+    "zod": "^3.25.76"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.19",

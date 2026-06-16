@@ -55,7 +55,14 @@ export { RoutingTableEntry } from './types/routing';
 
 // localDelivery wire contract (`/handle-packet`) — the cross-process source of
 // truth shared by the connector and every node (relay/store/sdk bridge).
+// zod schemas enable runtime validation; types are inferred from them.
+export { PaymentRequestSchema, PaymentResponseSchema } from './types/local-delivery';
 export type { PaymentRequest, PaymentResponse } from './types/local-delivery';
+
+// Connector Admin-API wire contract (hub → connector) — focused slice: peer
+// registration. Other admin DTOs are a documented backlog (see contracts.md).
+export { PeerRegistrationRequestSchema, PeerRelationSchema, PeerRouteSchema } from './types/admin';
+export type { PeerRegistrationRequest, PeerRelation, PeerRoute } from './types/admin';
 
 // Payment Channel Types (Epic 8 Story 8.7)
 export {

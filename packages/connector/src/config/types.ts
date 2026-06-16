@@ -85,7 +85,9 @@ export type ChainProviderConfigEntry = ProviderConfig & { chainId: string };
  * When omitted, a peer defaults to `'peer'`, which preserves the pre-existing
  * behavior of requiring a claim on every value-bearing peer forward.
  */
-export type PeerRelation = 'parent' | 'peer' | 'child';
+// PeerRelation is owned by the @toon-protocol/shared wire contract; re-exported
+// here so the connector's many internal users keep a stable import path.
+export type PeerRelation = import('@toon-protocol/shared').PeerRelation;
 
 /**
  * Peer Configuration Interface
@@ -1587,38 +1589,22 @@ export interface SendPacketParams {
 /** Re-export AdminSettlementConfig for use in PeerRegistrationRequest */
 import type { AdminSettlementConfig } from '../settlement/types';
 
-/** Request for registering a peer via ConnectorNode.registerPeer() */
-export interface PeerRegistrationRequest {
-  /** Unique peer identifier */
-  id: string;
-  /** WebSocket URL for BTP connection (e.g., ws://peer:3000) */
-  url: string;
-  /** Authentication token for BTP handshake */
-  authToken: string;
-  /** Optional routes to add for this peer */
-  routes?: Array<{
-    /** ILP address prefix */
-    prefix: string;
-    /** Route priority (higher wins, default: 0) */
-    priority?: number;
-  }>;
-  /** Optional settlement configuration */
+/**
+ * Request for registering a peer via ConnectorNode.registerPeer().
+ *
+ * Derived from the canonical wire contract in `@toon-protocol/shared`
+ * (the hub and connector agree on this shape); the connector refines the
+ * wire's opaque `settlement` field to its internal {@link AdminSettlementConfig}.
+ * The shared shape carries `id`, `url`, `authToken`, `routes`, `relation`,
+ * and `transport`.
+ */
+export type PeerRegistrationRequest = Omit<
+  import('@toon-protocol/shared').PeerRegistrationRequest,
+  'settlement'
+> & {
+  /** Optional settlement configuration (connector-internal). */
   settlement?: AdminSettlementConfig;
-  /**
-   * Per-peer override of the connector-level transport — when omitted, the
-   * connector's global `transport.type` is used. `'socks5'` on a connector
-   * with `transport.type !== 'socks5'` is rejected at registration time.
-   */
-  transport?: 'direct' | 'socks5';
-
-  /**
-   * ILP peering relationship for this peer. A `'child'` next hop is forwarded
-   * value without a mandatory per-packet claim (the child settles up to us);
-   * `'parent'`/`'peer'` require a claim. Defaults to `'peer'` when omitted.
-   * See {@link PeerRelation}.
-   */
-  relation?: PeerRelation;
-}
+};
 
 /** Response from ConnectorNode.registerPeer() and listPeers() */
 export interface PeerInfo {
