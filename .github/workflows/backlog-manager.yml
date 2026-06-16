@@ -1,0 +1,57 @@
+# Loop A — Backlog Manager (triage / label / PR-sync).
+# Copy to <repo>/.github/workflows/backlog-manager.yml. Defaults to dry-run.
+# Stagger the cron minute/hour per repo so 8 repos don't all spike Max usage at once.
+name: Backlog Manager
+
+on:
+  schedule:
+    - cron: "35 9 * * *" # staggered per repo to spread Max usage
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run reports only; apply mutates the tracker"
+        type: choice
+        options: [dry-run, apply]
+        default: dry-run
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: backlog-manager-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  backlog:
+    runs-on: ubuntu-latest
+    env:
+      # Custom org App enables org-level GitHub Project WRITES (the default
+      # GITHUB_TOKEN and the official Claude app cannot). Set APP_ID/APP_PRIVATE_KEY
+      # as secrets AND share the org secret with this repo. If absent, the loop
+      # still runs and treats the Project board as report-only.
+      APP_ID: ${{ secrets.APP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token
+        id: app-token
+        if: env.APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token || github.token }}
+          plugin_marketplaces: "https://github.com/toon-protocol/toon-meta.git"
+          plugins: "toon-skills@toon-meta"
+          prompt: >-
+            /toon-skills:backlog-manager ${{ github.event.inputs.mode || 'dry-run' }}
+            GitHub backlog for ${{ github.repository }} including its GitHub Project.
+            This is an unattended scheduled run: never prompt; record blockers in the
+            final report and exit. Source of truth is this repo's GitHub Issues.
+          claude_args: "--max-turns 30"
