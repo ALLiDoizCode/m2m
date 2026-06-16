@@ -1,7 +1,6 @@
 {
   "name": "@toon-protocol/mina-zkapp",
   "version": "0.1.0",
-  "private": true,
   "description": "Mina Protocol payment channel zkApp (o1js SmartContract)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,5 +23,8 @@
   },
   "engines": {
     "node": ">=22.11.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

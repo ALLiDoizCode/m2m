@@ -21,9 +21,10 @@
     "benchmark": "npm run --workspace=packages/connector benchmark",
     "publish:shared": "npm run build --workspace=packages/shared && npm publish --workspace=packages/shared --access public",
     "publish:connector": "npm run build --workspace=packages/connector && npm publish --workspace=packages/connector --access public",
-    "publish:all": "npm run publish:shared && npm run publish:connector",
+    "publish:all": "npm run publish:shared && npm run publish:mina-zkapp && npm run publish:connector",
     "publish:all:dry-run": "npm run publish:shared -- --dry-run && npm run publish:connector -- --dry-run",
-    "prepare": "husky"
+    "prepare": "husky",
+    "publish:mina-zkapp": "npm run build --workspace=packages/mina-zkapp && npm publish --workspace=packages/mina-zkapp --access public"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.28.6",
