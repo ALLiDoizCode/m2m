@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.0](https://github.com/toon-protocol/connector/compare/v3.10.4...v3.11.0) (2026-06-16)
+
+### Features
+
+- **shared:** localDelivery wire contract (PaymentRequest/Response) as the cross-repo source of truth ([#140](https://github.com/toon-protocol/connector/issues/140)) ([0b89124](https://github.com/toon-protocol/connector/commit/0b8912427bb2329731b793c2a274ef7f4639c548))
+
 ## [3.10.4](https://github.com/toon-protocol/connector/compare/v3.10.3...v3.10.4) (2026-06-12)
 
 ### Bug Fixes
