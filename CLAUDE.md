@@ -124,3 +124,14 @@ When the user asks about Interledger protocols or RFCs, **immediately activate**
 | "How does STREAM work with ILPv4?"     | `rfc-0029-stream`, `rfc-0027-interledger-protocol-4` |
 | "What's the payment pointer format?"   | `rfc-0026-payment-pointers`                          |
 | "Explain the Interledger architecture" | `rfc-0001-interledger-architecture`                  |
+
+---
+
+## Deployment status
+
+There is **no production or staging deploy target yet.** `.github/workflows/cd.yml`
+(`appleboy/ssh-action`) fails on every push to `main` with `missing server host`
+because the `DEPLOY_HOST` secret is intentionally unset. **This is expected, not a
+regression** — do not flag the failing CD run as quality drift or open issues for it
+until a real deploy target is configured. (On-chain contract deployment for
+Solana/Mina is unrelated — see "Chain-Specific Build & Deploy" above.)
