@@ -28,6 +28,7 @@ import type pino from 'pino';
 import { probeTcpPort, waitForTcpPort } from './probe-tcp-port';
 import { parseSocks5hUrl } from './socks-url';
 import { socks5Connect } from './socks5-connect';
+import { normalizeHsAddress, waitForHsDescUpload } from './hs-desc-monitor';
 
 /**
  * Minimal surface of the `Anon` class we depend on. Declared here rather than
@@ -43,6 +44,13 @@ export interface AnonSdkHandle {
   isRunning(): boolean;
   /** Returns the bound SOCKS port (useful when `socksPort: 0` ephemeral binding is used). */
   getSOCKSPort(): number;
+  /**
+   * Returns the control-port number the `anon` process is listening on (the
+   * SDK default is 9051). Optional: older/alternate handles may not expose it,
+   * in which case {@link ManagedAnonClient} falls back to the self-dial probe
+   * for reachability verification.
+   */
+  getControlPort?(): number;
 }
 
 /**
@@ -96,22 +104,30 @@ export interface ManagedAnonClientOptions {
    */
   anonFactory: (opts: AnonFactoryOptions) => AnonSdkHandle;
   /**
-   * When true (default), the hostname is only reported as published after a
-   * self-dial through the local SOCKS proxy to the node's own `.anyone` address
-   * succeeds — proving the v3 descriptor is actually fetchable on the overlay,
-   * not merely that the local `hostname` file exists. Requires
-   * `hiddenServicePort` to be set; if it is not, verification is skipped and
-   * the hostname is reported on file detection (legacy behaviour).
+   * When true (default), the hostname is only reported as published once the v3
+   * descriptor is confirmed fetchable on the overlay, not merely that the local
+   * `hostname` file exists. Two mechanisms, in order of preference:
+   *
+   *   1. **Control port (primary).** Subscribe to the anon control port's
+   *      `HS_DESC` events and publish on the first `UPLOADED` for our own
+   *      address — a direct, daemon-reported "descriptor is on an HSDir"
+   *      signal. Used when the handle exposes {@link AnonSdkHandle.getControlPort}.
+   *   2. **Self-dial (fallback).** When no control port is available, or the
+   *      control-port path errors, self-dial the node's own `.anyone` address
+   *      through the local SOCKS proxy and publish once that CONNECT succeeds.
+   *
+   * Requires `hiddenServicePort` to be set; if it is not, verification is
+   * skipped and the hostname is reported on file detection (legacy behaviour).
    *
    * Set to false to restore the pre-verification behaviour (report on file
-   * detection). Mainly useful for tests or constrained environments where a
-   * self-dial to one's own hidden service is not possible.
+   * detection). Mainly useful for tests or constrained environments where
+   * neither the control port nor a self-dial is possible.
    */
   verifyReachability?: boolean;
   /**
-   * Override for the SOCKS5 self-dial used by reachability verification. Tests
-   * inject a fake (resolve = reachable, reject = not yet). Defaults to the
-   * built-in {@link socks5Connect}.
+   * Override for the SOCKS5 self-dial fallback used by reachability
+   * verification. Tests inject a fake (resolve = reachable, reject = not yet).
+   * Defaults to the built-in {@link socks5Connect}.
    */
   selfDial?: (opts: {
     socksHost: string;
@@ -119,6 +135,19 @@ export interface ManagedAnonClientOptions {
     destHost: string;
     destPort: number;
     timeoutMs: number;
+  }) => Promise<void>;
+  /**
+   * Override for the control-port `HS_DESC` monitor used as the primary
+   * reachability signal. Tests inject a fake (resolve = our descriptor was
+   * uploaded, reject = unavailable/timed out → fall back to self-dial).
+   * Defaults to the built-in {@link waitForHsDescUpload}.
+   */
+  waitForHsDescUpload?: (opts: {
+    controlHost: string;
+    controlPort: number;
+    address: string;
+    timeoutMs: number;
+    signal?: AbortSignal;
   }) => Promise<void>;
 }
 
@@ -170,12 +199,25 @@ export class ManagedAnonClient {
   private _hostname: string | null = null;
   /**
    * ISO-8601 timestamp set once the hidden service is confirmed published —
-   * i.e. the hostname file exists AND (when verification is enabled) a
-   * self-dial through the local SOCKS proxy reached it. `null` until then.
+   * i.e. the hostname file exists AND (when verification is enabled) the
+   * descriptor was confirmed fetchable, either via a control-port `HS_DESC`
+   * `UPLOADED` event or, as a fallback, a successful self-dial. `null` until
+   * then.
    */
   private _publishedAt: string | null = null;
   /** True while a self-dial verification attempt is in flight (re-entrancy guard). */
   private _verifyInFlight = false;
+  /** True once the (single) control-port `HS_DESC` monitor has been started. */
+  private _hsDescMonitorStarted = false;
+  /** Set when the control-port monitor confirms our descriptor was UPLOADED. */
+  private _hsDescUploaded = false;
+  /**
+   * Set when the control-port monitor errors out (unavailable, auth failure,
+   * timeout) — subsequent verification attempts fall back to the self-dial.
+   */
+  private _hsDescUnavailable = false;
+  /** Aborts the in-flight control-port monitor on teardown. */
+  private _hsDescAbort: AbortController | undefined;
   /** Active fs.watch handle for the hidden-service directory; closed on read or stop. */
   private _hostnameWatcher: FSWatcher | undefined;
   /** Active fallback-poll timer; cleared on read or stop. */
@@ -601,13 +643,95 @@ export class ManagedAnonClient {
   }
 
   /**
+   * Confirm the v3 descriptor is fetchable on the overlay before publishing.
+   *
+   * Primary path: when the SDK handle exposes a control port, subscribe to its
+   * `HS_DESC` events (once) and publish on the first `UPLOADED` for our own
+   * address — a direct, daemon-reported signal. While that monitor is pending
+   * this returns false (the poll keeps re-checking) and the monitor itself
+   * publishes promptly on the event.
+   *
+   * Fallback path: when no control port is available, or the control-port
+   * monitor has errored, self-dial our own address through the local SOCKS
+   * proxy and treat a successful CONNECT as proof of reachability.
+   *
+   * Returns true once reachability is confirmed; false while still pending.
+   */
+  private async _verifyReachable(hostname: string, port: number): Promise<boolean> {
+    if (this._hsDescUploaded) return true;
+    const controlPort = this._controlPort();
+    if (controlPort !== undefined && !this._hsDescUnavailable) {
+      this._ensureHsDescMonitor(hostname, controlPort);
+      // The monitor resolves asynchronously and publishes itself; until then
+      // (or until it errors and flips us to the self-dial fallback) we are
+      // still pending.
+      return false;
+    }
+    return this._selfDialReachable(hostname, port);
+  }
+
+  /** The anon control port, if the handle exposes a usable one. */
+  private _controlPort(): number | undefined {
+    const p = this._sdk?.getControlPort?.();
+    return typeof p === 'number' && p > 0 ? p : undefined;
+  }
+
+  /**
+   * Start (once) the control-port `HS_DESC` monitor. On the first `UPLOADED`
+   * for our address it marks the service published; on any error it flips
+   * `_hsDescUnavailable` so subsequent verification falls back to the self-dial.
+   * The address is never logged (security invariant).
+   */
+  private _ensureHsDescMonitor(hostname: string, controlPort: number): void {
+    if (this._hsDescMonitorStarted) return;
+    this._hsDescMonitorStarted = true;
+    const wait = this._opts.waitForHsDescUpload ?? waitForHsDescUpload;
+    this._hsDescAbort = new AbortController();
+    // Give the monitor the remaining poll budget so it shares the overall
+    // 5-minute give-up deadline rather than imposing a second, shorter one.
+    const timeoutMs = Math.max(1_000, this._hostnamePollDeadlineMs - Date.now());
+    wait({
+      controlHost: this._socksHost,
+      controlPort,
+      address: normalizeHsAddress(hostname),
+      timeoutMs,
+      signal: this._hsDescAbort.signal,
+    })
+      .then(() => {
+        if (this._hostnameWatchStopped) return;
+        this._hsDescUploaded = true;
+        this._logger.debug(
+          { event: 'managed_anon_hs_desc_uploaded' },
+          'Control port reported HS_DESC UPLOADED for our descriptor'
+        );
+        this._markPublished();
+      })
+      .catch((err) => {
+        if (this._hostnameWatchStopped) return;
+        this._hsDescUnavailable = true;
+        this._logger.debug(
+          {
+            event: 'managed_anon_hs_desc_monitor_failed',
+            errorMessage: (err as Error)?.message ?? String(err),
+          },
+          'Control-port HS_DESC monitor unavailable; falling back to self-dial'
+        );
+        // Nudge the gate so the self-dial fallback starts without waiting for
+        // the next poll tick.
+        void this._tryReadHostname().then((found) => {
+          if (!found) this._scheduleHostnamePoll();
+        });
+      });
+  }
+
+  /**
    * Self-dial the connector's own `.anon` address through the local SOCKS proxy
    * to confirm the v3 descriptor is published and a rendezvous can be
    * established. Never throws: returns false (retry later) on any failure and
    * logs at debug. Concurrent calls (watcher + poll firing together) are
    * coalesced via `_verifyInFlight` so only one self-dial runs at a time.
    */
-  private async _verifyReachable(hostname: string, port: number): Promise<boolean> {
+  private async _selfDialReachable(hostname: string, port: number): Promise<boolean> {
     if (this._verifyInFlight) return false;
     this._verifyInFlight = true;
     const socksPort = this._sdk?.getSOCKSPort?.() ?? this._socksPort;
@@ -637,6 +761,10 @@ export class ManagedAnonClient {
 
   private _cleanupHostnameWatch(): void {
     this._hostnameWatchStopped = true;
+    if (this._hsDescAbort) {
+      this._hsDescAbort.abort();
+      this._hsDescAbort = undefined;
+    }
     if (this._hostnameWatcher) {
       try {
         this._hostnameWatcher.close();
