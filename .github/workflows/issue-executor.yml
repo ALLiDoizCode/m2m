@@ -39,6 +39,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          allowed_bots: "*" # Loop A (App) adds agent:ready -> bot actor; gated by the if: conditions
           branch_prefix: "agent/" # auto-created PR branch -> matches Loop C's filter
           plugin_marketplaces: "https://github.com/toon-protocol/toon-meta.git"
           plugins: "toon-skills@toon-meta"
@@ -72,6 +73,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          allowed_bots: "*" # Loop A (App) adds agent:ready -> bot actor; gated by the if: conditions
           plugin_marketplaces: "https://github.com/toon-protocol/toon-meta.git"
           plugins: "toon-skills@toon-meta"
           prompt: >-
