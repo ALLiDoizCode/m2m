@@ -1,0 +1,54 @@
+# Loop C — PR Reviewer (independent, adversarial review; formal verdict).
+# Copy to <repo>/.github/workflows/pr-reviewer.yml.
+# Runs ONLY on agent/ branches so human-authored PRs aren't double-reviewed.
+#
+# Identity & the auto-fixup loop:
+#   - With REVIEWER_TOKEN (a fine-grained PAT, repo: Contents R, Pull requests RW):
+#     the review is submitted as that user — it can APPROVE, and its
+#     `changes_requested` event TRIGGERS Loop B's fixup job (full auto-fixup).
+#   - Without it: falls back to the github-actions bot — it can REQUEST_CHANGES but
+#     cannot APPROVE (Actions are blocked from approving), and its events do NOT
+#     trigger Loop B. So fixups are human-driven until you add REVIEWER_TOKEN.
+#   Either way the reviewer is a DIFFERENT identity from the App that authored the
+#   PR, so GitHub's "can't review your own PR" rule never blocks it.
+name: PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: reviewer-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: startsWith(github.head_ref, 'agent/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.REVIEWER_TOKEN || github.token }}
+          prompt: >-
+            You are an adversarial PR reviewer for ${{ github.repository }} PR
+            #${{ github.event.pull_request.number }}. Steps:
+            (1) `gh pr diff ${{ github.event.pull_request.number }}` and
+            `gh pr view ${{ github.event.pull_request.number }}` for the change and context;
+            (2) read CLAUDE.md / AGENTS.md for repo standards;
+            (3) check for correctness bugs, security issues, and standards violations —
+            be skeptical, default to requesting changes if anything is genuinely wrong;
+            (4) SUBMIT EXACTLY ONE formal review via the gh CLI:
+            if you find any blocking issue, run
+            `gh pr review ${{ github.event.pull_request.number }} --request-changes --body "<specific, actionable findings>"`;
+            otherwise run
+            `gh pr review ${{ github.event.pull_request.number }} --approve --body "<short summary of what you checked>"`.
+            If `--approve` is rejected (the github-actions bot cannot approve), fall back to
+            `gh pr review ${{ github.event.pull_request.number }} --comment --body "LGTM — no blocking issues found. <summary>"`.
+            Never merge, never push commits to the branch.
+          claude_args: "--max-turns 25 --allowedTools Bash(gh:*),Read,Grep,Glob"
