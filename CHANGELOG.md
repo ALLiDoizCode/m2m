@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.1](https://github.com/toon-protocol/connector/compare/v3.12.0...v3.12.1) (2026-06-17)
+
+### Bug Fixes
+
+- **loops:** allow App bot actor ([223d9ee](https://github.com/toon-protocol/connector/commit/223d9eeaaff081162b54df3910b9b589b08376f3))
+- **loops:** allow App bot actor ([1bcadce](https://github.com/toon-protocol/connector/commit/1bcadce2d72d55f822acf676cae8ae525d5b8e84))
+
 ## [3.12.0](https://github.com/toon-protocol/connector/compare/v3.11.0...v3.12.0) (2026-06-17)
 
 ### Features
