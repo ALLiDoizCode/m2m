@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.0](https://github.com/toon-protocol/connector/compare/v3.12.2...v3.13.0) (2026-06-17)
+
+### Features
+
+- **transport:** gate HS publish on control-port HS_DESC UPLOADED + enable ControlPort ([#143](https://github.com/toon-protocol/connector/issues/143)) ([#144](https://github.com/toon-protocol/connector/issues/144)) ([648dc01](https://github.com/toon-protocol/connector/commit/648dc010431583f43f0e02752fc3450f7de78005)), closes [#142](https://github.com/toon-protocol/connector/issues/142) [#142](https://github.com/toon-protocol/connector/issues/142) [#142](https://github.com/toon-protocol/connector/issues/142) [#142](https://github.com/toon-protocol/connector/issues/142)
+
 ## [3.12.2](https://github.com/toon-protocol/connector/compare/v3.12.1...v3.12.2) (2026-06-17)
 
 ### Bug Fixes
