@@ -275,6 +275,14 @@ export type TransportConfig =
         hiddenServiceDir?: string;
         /** Hidden service port (maps to HS config, not the OR port). */
         hiddenServicePort?: number;
+        /**
+         * anon control-port number. Enables the control port (bound to
+         * 127.0.0.1) so reachability verification can gate HS publication on a
+         * `HS_DESC UPLOADED` event. Defaults to `<socksPort> + 1`. Set an
+         * explicit value to avoid collisions when running multiple managed
+         * clients on one host.
+         */
+        controlPort?: number;
         /** Overall deadline for SOCKS port readiness (ms). Default 60000. */
         startupTimeoutMs?: number;
         /** Overall deadline for `sdk.stop()` (ms). Default 10000. */

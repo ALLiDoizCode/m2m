@@ -75,6 +75,8 @@ export interface AnonFactoryOptions {
   hiddenServiceDir?: string;
   /** Optional hidden service port (native SDK passthrough if supported). */
   hiddenServicePort?: number;
+  /** Control-port number to enable on the anon process (bound to 127.0.0.1). */
+  controlPort?: number;
   /** Accept the Anyone Protocol terms of service non-interactively. */
   autoTermsAgreement?: boolean;
 }
@@ -89,6 +91,12 @@ export interface ManagedAnonClientOptions {
   hiddenServiceDir?: string;
   /** Port to expose on the hidden service (maps to HS config, not the OR port). */
   hiddenServicePort?: number;
+  /**
+   * anon control-port number. Enables the control port (bound to 127.0.0.1)
+   * so HS publication can be gated on a `HS_DESC UPLOADED` event. Defaults to
+   * `<socksPort> + 1`; override to avoid collisions across managed clients.
+   */
+  controlPort?: number;
   /** Optional binary override. When undefined, the SDK uses its bundled binary. */
   binaryPath?: string;
   /** Overall deadline for SOCKS port readiness (ms). Default 60000. */
@@ -186,6 +194,8 @@ export class ManagedAnonClient {
   private readonly _logger: pino.Logger;
   private readonly _socksHost: string;
   private readonly _socksPort: number;
+  /** Control-port number written into the anonrc (HS setups only). */
+  private readonly _controlPortNum: number;
   private _sdk: AnonSdkHandle | undefined;
   /**
    * Public-facing running flag. We distinguish this from `sdk.isRunning()`
@@ -238,6 +248,10 @@ export class ManagedAnonClient {
     const { host, port } = parseSocks5hUrl(options.socksProxy);
     this._socksHost = host;
     this._socksPort = port;
+    // Conventional Tor pairing (SocksPort 9050 / ControlPort 9051). Deriving
+    // from the SOCKS port keeps control ports distinct when several managed
+    // clients share a host; an explicit `controlPort` overrides it.
+    this._controlPortNum = options.controlPort ?? this._socksPort + 1;
   }
 
   /**
@@ -670,10 +684,13 @@ export class ManagedAnonClient {
     return this._selfDialReachable(hostname, port);
   }
 
-  /** The anon control port, if the handle exposes a usable one. */
+  /** The anon control port, if one was enabled for this client. */
   private _controlPort(): number | undefined {
     const p = this._sdk?.getControlPort?.();
-    return typeof p === 'number' && p > 0 ? p : undefined;
+    if (typeof p === 'number' && p > 0) return p;
+    // Fallback to the value we wrote into the anonrc. Only meaningful when the
+    // control port was actually enabled, i.e. an HS dir is configured.
+    return this._opts.hiddenServiceDir ? this._controlPortNum : undefined;
   }
 
   /**
@@ -802,6 +819,11 @@ export class ManagedAnonClient {
       if (this._opts.hiddenServicePort !== undefined) {
         opts.hiddenServicePort = this._opts.hiddenServicePort;
       }
+      // Enable the control port so reachability verification can gate
+      // publication on a `HS_DESC UPLOADED` event. Mirrors the SOCKS port:
+      // also surface it as a native option so `getControlPort()` agrees with
+      // the value written into the anonrc.
+      opts.controlPort = this._controlPortNum;
       try {
         await fsp.mkdir(this._opts.hiddenServiceDir, { recursive: true });
         const anonrcPath = path.join(this._opts.hiddenServiceDir, 'anonrc');
@@ -823,6 +845,13 @@ export class ManagedAnonClient {
             `# Edit freely — ManagedAnonClient will NOT overwrite this file on subsequent starts.\n` +
             `AgreeToTerms 1\n` +
             `SocksPort ${this._socksPort}\n` +
+            // Bound to 127.0.0.1 and unauthenticated (the anon binary warns:
+            // "ControlPort is open, but no authentication method configured").
+            // Localhost-only keeps it reachable solely from this connector,
+            // which is what the HS_DESC reachability gate needs. Only takes
+            // effect on first boot; existing anonrc files keep their content
+            // (such nodes fall back to the self-dial reachability probe).
+            `ControlPort 127.0.0.1:${this._controlPortNum}\n` +
             `HiddenServiceDir ${this._opts.hiddenServiceDir}\n` +
             (this._opts.hiddenServicePort !== undefined
               ? `HiddenServicePort ${this._opts.hiddenServicePort} 127.0.0.1:${this._opts.hiddenServicePort}\n`

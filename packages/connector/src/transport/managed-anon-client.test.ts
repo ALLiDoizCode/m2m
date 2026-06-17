@@ -20,7 +20,7 @@
  * @module managed-anon-client.test
  */
 import net from 'net';
-import { mkdtemp, writeFile } from 'fs/promises';
+import { mkdtemp, writeFile, readFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import pino from 'pino';
@@ -325,6 +325,16 @@ describe('ManagedAnonClient', () => {
       const hasConfigPathFallback =
         typeof arg.configFilePath === 'string' && (arg.configFilePath as string).startsWith(hsDir);
       expect(hasNativeOpts || hasConfigPathFallback).toBe(true);
+
+      // The control port is enabled (default = socksPort + 1) so the HS_DESC
+      // reachability gate can connect: surfaced as a native option AND written
+      // (localhost-only) into the anonrc.
+      const expectedControlPort = listener.port + 1;
+      expect(arg.controlPort).toBe(expectedControlPort);
+      const anonrc = await readFile(path.join(hsDir, 'anonrc'), 'utf8');
+      expect(anonrc).toMatch(
+        new RegExp(`^ControlPort 127\\.0\\.0\\.1:${expectedControlPort}$`, 'm')
+      );
       await client.stop();
     } finally {
       await listener.close();
