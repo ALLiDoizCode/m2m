@@ -2007,6 +2007,7 @@ export class ConnectorNode implements HealthStatusProvider {
           socksProxy: cfg.socksProxy,
           hiddenServiceDir: cfg.managedOptions?.hiddenServiceDir,
           hiddenServicePort: cfg.managedOptions?.hiddenServicePort,
+          controlPort: cfg.managedOptions?.controlPort,
           binaryPath: cfg.managedOptions?.binaryPath,
           startupTimeoutMs: cfg.managedOptions?.startupTimeoutMs,
           stopTimeoutMs: cfg.managedOptions?.stopTimeoutMs,
