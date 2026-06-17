@@ -38,6 +38,7 @@ jobs:
       - name: Generate GitHub App token
         id: app-token
         if: env.APP_ID != ''
+        continue-on-error: true # App not installed on this repo -> fall back to GITHUB_TOKEN (report-only)
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.APP_ID }}
