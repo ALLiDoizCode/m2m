@@ -54,4 +54,6 @@ jobs:
             GitHub backlog for ${{ github.repository }} including its GitHub Project.
             This is an unattended scheduled run: never prompt; record blockers in the
             final report and exit. Source of truth is this repo's GitHub Issues.
-          claude_args: "--max-turns 30"
+          # Allow the gh CLI (issue/label/PR reads + GraphQL for native Issue
+          # Types) plus file reads. In apply mode the same gh tools perform writes.
+          claude_args: "--max-turns 30 --allowedTools Bash(gh:*),Read,Grep,Glob"
