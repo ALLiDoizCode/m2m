@@ -378,4 +378,82 @@ describe('ManagedAnonClient', () => {
       await listener.close();
     }
   });
+
+  // In-place anonrc migration for already-deployed nodes -------------------
+  describe('existing-anonrc ControlPort migration', () => {
+    async function startWithAnonrc(
+      hsDir: string,
+      listenerPort: number
+    ): Promise<ManagedAnonClient> {
+      const client = new ManagedAnonClient(
+        makeOpts({
+          socksProxy: `socks5h://127.0.0.1:${listenerPort}`,
+          anonFactory: () => makeFakeSdk({ getSOCKSPort: () => listenerPort }),
+          startupTimeoutMs: 2000,
+          hiddenServiceDir: hsDir,
+          // No hiddenServicePort → reachability verification is skipped, so the
+          // test exercises only the anonrc migration, not the HS_DESC monitor.
+        })
+      );
+      await client.start();
+      return client;
+    }
+
+    it('appends a localhost ControlPort line to an existing anonrc that lacks one', async () => {
+      const hsDir = await mkdtemp(path.join(tmpdir(), 'ator-hs-mig-'));
+      const original =
+        '# operator file\nAgreeToTerms 1\nSocksPort 9050\nHiddenServiceDir ' +
+        hsDir +
+        '\nHiddenServicePort 3000 127.0.0.1:3000\n';
+      await writeFile(path.join(hsDir, 'anonrc'), original, 'utf8');
+      const listener = await startListener();
+      try {
+        const client = await startWithAnonrc(hsDir, listener.port);
+        const updated = await readFile(path.join(hsDir, 'anonrc'), 'utf8');
+        // Original content preserved, ControlPort appended (socksPort + 1).
+        expect(updated.startsWith(original)).toBe(true);
+        expect(updated).toMatch(
+          new RegExp(`^ControlPort 127\\.0\\.0\\.1:${listener.port + 1}$`, 'm')
+        );
+        await client.stop();
+      } finally {
+        await listener.close();
+      }
+    });
+
+    it('is idempotent — a second start does not append a duplicate ControlPort', async () => {
+      const hsDir = await mkdtemp(path.join(tmpdir(), 'ator-hs-mig-'));
+      await writeFile(
+        path.join(hsDir, 'anonrc'),
+        'AgreeToTerms 1\nSocksPort 9050\nHiddenServiceDir ' + hsDir + '\n',
+        'utf8'
+      );
+      const listener = await startListener();
+      try {
+        await (await startWithAnonrc(hsDir, listener.port)).stop();
+        await (await startWithAnonrc(hsDir, listener.port)).stop();
+        const updated = await readFile(path.join(hsDir, 'anonrc'), 'utf8');
+        expect((updated.match(/^ControlPort\b/gm) || []).length).toBe(1);
+      } finally {
+        await listener.close();
+      }
+    });
+
+    it('respects an operator-set ControlPort (incl. a deliberate "ControlPort 0") and leaves it unchanged', async () => {
+      const hsDir = await mkdtemp(path.join(tmpdir(), 'ator-hs-mig-'));
+      const original =
+        'AgreeToTerms 1\nSocksPort 9050\nControlPort 0\nHiddenServiceDir ' + hsDir + '\n';
+      await writeFile(path.join(hsDir, 'anonrc'), original, 'utf8');
+      const listener = await startListener();
+      try {
+        const client = await startWithAnonrc(hsDir, listener.port);
+        const updated = await readFile(path.join(hsDir, 'anonrc'), 'utf8');
+        expect(updated).toBe(original); // untouched
+        expect(updated).not.toMatch(/ControlPort 127\.0\.0\.1/);
+        await client.stop();
+      } finally {
+        await listener.close();
+      }
+    });
+  });
 });

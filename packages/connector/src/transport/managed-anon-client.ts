@@ -827,11 +827,12 @@ export class ManagedAnonClient {
       try {
         await fsp.mkdir(this._opts.hiddenServiceDir, { recursive: true });
         const anonrcPath = path.join(this._opts.hiddenServiceDir, 'anonrc');
-        // Do NOT clobber an operator-provided anonrc. Only write the default
-        // file on first boot (when the file does not yet exist). This avoids
-        // (a) overwriting operator customizations on every start() and
-        // (b) racing with the running `anon` process if start() is called
-        // while a prior instance is still reading the same file.
+        // Do NOT clobber an operator-provided anonrc wholesale. Write the full
+        // default file only on first boot; for an existing file, perform a
+        // narrow in-place migration that appends a `ControlPort` line if (and
+        // only if) none is present. Both run here in start(), BEFORE the SDK
+        // spawns `anon`, so the binary always reads the final file — no race
+        // with a running process for this client.
         let anonrcExists = false;
         try {
           await fsp.access(anonrcPath);
@@ -848,15 +849,15 @@ export class ManagedAnonClient {
             // Bound to 127.0.0.1 and unauthenticated (the anon binary warns:
             // "ControlPort is open, but no authentication method configured").
             // Localhost-only keeps it reachable solely from this connector,
-            // which is what the HS_DESC reachability gate needs. Only takes
-            // effect on first boot; existing anonrc files keep their content
-            // (such nodes fall back to the self-dial reachability probe).
+            // which is what the HS_DESC reachability gate needs.
             `ControlPort 127.0.0.1:${this._controlPortNum}\n` +
             `HiddenServiceDir ${this._opts.hiddenServiceDir}\n` +
             (this._opts.hiddenServicePort !== undefined
               ? `HiddenServicePort ${this._opts.hiddenServicePort} 127.0.0.1:${this._opts.hiddenServicePort}\n`
               : '');
           await fsp.writeFile(anonrcPath, anonrc, { encoding: 'utf8', flag: 'wx' });
+        } else {
+          await this._ensureControlPortInAnonrc(anonrcPath);
         }
         // The `@anyone-protocol/anyone-client` v1.1.x SDK reads this as
         // `options.configFile`; older/newer surfaces used `configFilePath`.
@@ -872,6 +873,54 @@ export class ManagedAnonClient {
       }
     }
     return opts;
+  }
+
+  /**
+   * In-place migration for already-deployed nodes: append a localhost
+   * `ControlPort` line to an existing anonrc so they opt into the HS_DESC
+   * reachability gate without manual edits or losing their HS keys.
+   *
+   * Safety properties:
+   * - **Idempotent / non-clobbering.** Skips entirely if any active
+   *   `ControlPort` directive is already present (ours from a prior run, an
+   *   operator's custom port, or a deliberate `ControlPort 0` to keep it
+   *   disabled). Commented-out lines do not count as present.
+   * - **Atomic.** Writes a sibling temp file and renames it over the original,
+   *   so a concurrent reader never sees a half-written file.
+   * - **Pre-spawn.** Called from `_buildFactoryOptions()` during `start()`,
+   *   before the SDK launches `anon`, so the binary reads the final content.
+   */
+  private async _ensureControlPortInAnonrc(anonrcPath: string): Promise<void> {
+    // Best-effort: a migration failure must never prevent the caller from
+    // wiring `configFilePath` (which carries the HiddenServiceDir). On any
+    // error we log and leave the file as-is — the node simply keeps using the
+    // self-dial reachability fallback.
+    try {
+      const content = await fsp.readFile(anonrcPath, 'utf8');
+      // An active (non-commented) ControlPort directive — respect it, whatever
+      // its value, and do not append a second one.
+      if (/^[ \t]*ControlPort\b/m.test(content)) return;
+      const addition =
+        `# Added by ManagedAnonClient: localhost control port for the HS_DESC\n` +
+        `# reachability gate (unauthenticated, 127.0.0.1-only). Remove to opt out.\n` +
+        `ControlPort 127.0.0.1:${this._controlPortNum}\n`;
+      const updated = (content.endsWith('\n') ? content : content + '\n') + addition;
+      const tmpPath = `${anonrcPath}.cp-${process.pid}.tmp`;
+      await fsp.writeFile(tmpPath, updated, { encoding: 'utf8' });
+      await fsp.rename(tmpPath, anonrcPath);
+      this._logger.info(
+        { event: 'managed_anon_anonrc_controlport_added', controlPort: this._controlPortNum },
+        'Appended ControlPort to existing anonrc (enables HS_DESC reachability gate)'
+      );
+    } catch (err) {
+      this._logger.debug(
+        {
+          event: 'managed_anon_anonrc_controlport_migration_failed',
+          errorMessage: (err as Error).message,
+        },
+        'Could not append ControlPort to existing anonrc; keeping self-dial fallback'
+      );
+    }
   }
 
   private async _bestEffortStop(sdk: AnonSdkHandle): Promise<void> {

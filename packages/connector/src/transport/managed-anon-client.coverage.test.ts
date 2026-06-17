@@ -29,6 +29,8 @@ jest.mock('fs', () => {
       mkdir: jest.fn(),
       access: jest.fn(),
       writeFile: jest.fn(),
+      readFile: jest.fn(),
+      rename: jest.fn(),
     },
   };
 });
@@ -61,6 +63,8 @@ const mockedWaitForTcpPort = jest.mocked(waitForTcpPort);
 const mockedMkdir = fs.promises.mkdir as jest.MockedFunction<typeof fs.promises.mkdir>;
 const mockedAccess = fs.promises.access as jest.MockedFunction<typeof fs.promises.access>;
 const mockedWriteFile = fs.promises.writeFile as jest.MockedFunction<typeof fs.promises.writeFile>;
+const mockedReadFile = fs.promises.readFile as jest.MockedFunction<typeof fs.promises.readFile>;
+const mockedRename = fs.promises.rename as jest.MockedFunction<typeof fs.promises.rename>;
 
 interface FakeSdkOverrides {
   start?: () => Promise<void>;
@@ -239,11 +243,15 @@ describe('ManagedAnonClient branch coverage', () => {
     expect(await client.healthCheck()).toBe(true);
   });
 
-  // Line 370: existing anonrc file
-  it('does not overwrite existing anonrc file', async () => {
+  // Line 370: existing anonrc file — not clobbered wholesale, but migrated
+  // in place to add a ControlPort line (atomic temp-write + rename).
+  it('does not rewrite an existing anonrc from scratch; migrates ControlPort in place', async () => {
     mockedAccess.mockResolvedValue(undefined);
     mockedMkdir.mockResolvedValue(undefined);
     mockedWriteFile.mockResolvedValue(undefined);
+    mockedRename.mockResolvedValue(undefined);
+    // Existing operator anonrc with no ControlPort line.
+    mockedReadFile.mockResolvedValue('AgreeToTerms 1\nSocksPort 9050\n' as never);
     const factory = jest.fn<jest.Mocked<AnonSdkHandle>, [AnonFactoryOptions]>(() => makeFakeSdk());
     const client = new ManagedAnonClient(
       makeOpts({
@@ -254,7 +262,16 @@ describe('ManagedAnonClient branch coverage', () => {
     );
     await client.start();
     expect(mockedAccess).toHaveBeenCalledWith('/tmp/hs-test/anonrc');
-    expect(mockedWriteFile).not.toHaveBeenCalled();
+    // No full-file rewrite of the anonrc itself; the only write is the atomic
+    // temp file, which is renamed over the original.
+    const anonrcRewrite = mockedWriteFile.mock.calls.find((c) => c[0] === '/tmp/hs-test/anonrc');
+    expect(anonrcRewrite).toBeUndefined();
+    const tmpWrite = mockedWriteFile.mock.calls.find(
+      (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('/tmp/hs-test/anonrc.cp-')
+    );
+    expect(tmpWrite).toBeDefined();
+    expect(tmpWrite![1] as string).toMatch(/^ControlPort 127\.0\.0\.1:9051$/m);
+    expect(mockedRename).toHaveBeenCalledWith(tmpWrite![0], '/tmp/hs-test/anonrc');
     const call = factory.mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(call.configFilePath).toBe('/tmp/hs-test/anonrc');
     await client.stop();
