@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.0](https://github.com/toon-protocol/connector/compare/v3.11.0...v3.12.0) (2026-06-17)
+
+### Features
+
+- **loops:** add Loop B issue-executor ([7c13062](https://github.com/toon-protocol/connector/commit/7c13062b829ff132db65c526369503298d32a705))
+- **loops:** add Loop C pr-reviewer ([f156646](https://github.com/toon-protocol/connector/commit/f1566462c542eef79357849c1213d25a33b0bac4))
+
 ## [3.11.0](https://github.com/toon-protocol/connector/compare/v3.10.4...v3.11.0) (2026-06-16)
 
 ### Features
