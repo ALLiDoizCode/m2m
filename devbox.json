@@ -4,7 +4,7 @@
     "nodejs@22.11.0",
     "rustup@1.27.1",
     "solana-cli@2.3.3",
-    "foundry-bin@latest",
+    "foundry-bin@1.7.1",
     "jq@1.7.1"
   ],
   "shell": {
