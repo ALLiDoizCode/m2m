@@ -1,0 +1,57 @@
+# Loop D — Issue Decomposer (splits an oversized ticket into executor-sized issues).
+# Copy to <repo>/.github/workflows/issue-decomposer.yml.
+# Trigger: the `agent:split` label is added to an issue — by Loop A (backlog-manager
+# judged it too large for one PR), by Loop B (issue-executor hit the 40-turn wall
+# mid-run), or by a human.
+#
+# The custom org App token is REQUIRED here (as in the executor): child issues —
+# and the `agent:ready` label this loop applies to them — must be created/added by
+# the App actor. Issue/label events from the default GITHUB_TOKEN do NOT trigger
+# other workflows, so children opened with the default token would never reach the
+# backlog-manager or executor loops.
+name: Issue Decomposer
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read # this loop never writes code or branches
+  issues: write
+  pull-requests: read
+
+jobs:
+  decompose:
+    if: github.event_name == 'issues' && github.event.label.name == 'agent:split'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: decomposer-issue-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          allowed_bots: "*" # Loop A/B (App) adds agent:split -> bot actor; gated by the if: condition
+          plugin_marketplaces: "https://github.com/toon-protocol/toon-meta.git"
+          plugins: "toon-skills@toon-meta"
+          prompt: >-
+            /toon-skills:issue-decomposer decompose issue
+            #${{ github.event.issue.number }} in ${{ github.repository }} into the
+            smallest set of child issues that each fit one PR and the executor's
+            40-turn budget. Keep the parent open as a tracking issue with a task
+            list. Mark a child agent:ready only when it independently clears the
+            low-risk single-PR bar; otherwise route it to needs:human. This is an
+            unattended run: never prompt; record blockers in the final report and
+            exit.
+          # gh CLI for issue/label reads+writes and GraphQL (native Issue Types),
+          # plus file reads to size slices against the real repo layout. No Edit/
+          # Write/branch tools — this loop must not implement code.
+          claude_args: "--max-turns 30 --allowedTools Bash(gh:*),Read,Grep,Glob"
