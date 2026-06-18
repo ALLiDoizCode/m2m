@@ -458,6 +458,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.87.0
 
+      # v2.3.3 matches solana-cli@2.3.3 in devbox.json, keeping devbox shell and
+      # CI on the same toolchain (devbox/CI parity is the explicit goal of PR #148).
       - name: Install Solana CLI tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.3/install)"
@@ -797,6 +799,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.87.0
 
+      # v2.3.3 matches solana-cli@2.3.3 in devbox.json — see solana-integration
+      # job comment for the full rationale (devbox/CI parity, PR #148).
       - name: Install Solana CLI tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.3/install)"
