@@ -8,7 +8,9 @@
     "jq@1.7.1"
   ],
   "shell": {
-    "init_hook": ["rustup target add bpfel-unknown-unknown"],
+    "init_hook": [
+      "rustup target add bpfel-unknown-unknown && echo '✓ bpfel-unknown-unknown target ready' || echo 'WARNING: rustup target add bpfel-unknown-unknown failed — cargo build-sbf / cargo test-sbf will not work in this shell'"
+    ],
     "scripts": {
       "build": "npm run build",
       "test": "make test",

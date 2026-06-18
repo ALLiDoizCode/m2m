@@ -1015,11 +1015,32 @@ jobs:
 
       - name: Verify pinned toolchain versions
         run: |
-          devbox run -- node --version
-          devbox run -- cargo --version
-          devbox run -- forge --version
-          devbox run -- jq --version
-          echo "✓ All devbox-pinned tools resolved and reachable"
+          echo "=== Verifying devbox-pinned toolchain versions ==="
+
+          NODE_OUT=$(devbox run -- node --version 2>&1)
+          echo "Node:   $NODE_OUT"
+          echo "$NODE_OUT" | grep -qF "v22.11.0" \
+            || { echo "::error::Node version mismatch — expected v22.11.0, got: $NODE_OUT"; exit 1; }
+
+          CARGO_OUT=$(devbox run -- cargo --version 2>&1)
+          echo "Cargo:  $CARGO_OUT"
+          echo "$CARGO_OUT" | grep -qF "1.87.0" \
+            || { echo "::error::Rust/Cargo version mismatch — expected 1.87.0, got: $CARGO_OUT"; exit 1; }
+
+          SOLANA_OUT=$(devbox run -- solana --version 2>&1)
+          echo "Solana: $SOLANA_OUT"
+          echo "$SOLANA_OUT" | grep -qF "2.3.3" \
+            || { echo "::error::Solana CLI version mismatch — expected 2.3.3, got: $SOLANA_OUT"; exit 1; }
+
+          FORGE_OUT=$(devbox run -- forge --version 2>&1 | head -1)
+          echo "Forge:  $FORGE_OUT"
+
+          JQ_OUT=$(devbox run -- jq --version 2>&1)
+          echo "jq:     $JQ_OUT"
+          echo "$JQ_OUT" | grep -qF "1.7.1" \
+            || { echo "::error::jq version mismatch — expected 1.7.1, got: $JQ_OUT"; exit 1; }
+
+          echo "✓ All devbox-pinned tools resolved and versions verified"
 
   # Summary job to provide clear CI status
   ci-status:
