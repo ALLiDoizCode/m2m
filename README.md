@@ -990,12 +990,12 @@ Inside the shell, all tools are on `PATH` at the versions committed in `devbox.j
 | Tool                       | Version |
 | -------------------------- | ------- |
 | Node.js                    | 22.11.0 |
-| Rust (via rustup)          | stable  |
+| Rust                       | 1.87.0  |
 | Solana CLI                 | 2.3.3   |
 | Foundry (forge/cast/anvil) | 1.7.1   |
 | jq                         | 1.7.1   |
 
-The `init_hook` runs `rustup default stable` and adds the `bpfel-unknown-unknown` target automatically on shell entry, so `cargo build-sbf` and `cargo test-sbf` work immediately.
+The `init_hook` adds the `bpfel-unknown-unknown` target automatically on shell entry, so `cargo build-sbf` and `cargo test-sbf` work immediately.
 
 **Run the standard workflow inside devbox shell:**
 

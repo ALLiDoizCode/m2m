@@ -2,13 +2,13 @@
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.2/.schema/devbox.schema.json",
   "packages": [
     "nodejs@22.11.0",
-    "rustup@1.27.1",
+    "rust@1.87.0",
     "solana-cli@2.3.3",
     "foundry-bin@1.7.1",
     "jq@1.7.1"
   ],
   "shell": {
-    "init_hook": ["rustup default stable", "rustup target add bpfel-unknown-unknown"],
+    "init_hook": ["rustup target add bpfel-unknown-unknown"],
     "scripts": {
       "build": "npm run build",
       "test": "make test",

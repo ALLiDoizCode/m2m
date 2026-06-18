@@ -547,7 +547,6 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' && needs.changes.outputs.mina == 'true')
     timeout-minutes: 10
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -622,7 +621,6 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' && needs.changes.outputs.evm == 'true')
     timeout-minutes: 15
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -1006,6 +1004,14 @@ jobs:
         uses: jetify-com/devbox-install-action@v0.11.0
         with:
           enable-cache: true
+
+      - name: Warn if devbox.lock is absent
+        run: |
+          if [ ! -f devbox.lock ]; then
+            echo "::warning::devbox.lock is not committed — Nix hashes are not pinned." \
+              "Packages resolve by version string only, which is not fully reproducible." \
+              "Track: https://github.com/toon-protocol/connector/issues/149"
+          fi
 
       - name: Verify pinned toolchain versions
         run: |
