@@ -994,23 +994,31 @@ jobs:
   devbox-validate:
     name: Devbox Toolchain Validate
     runs-on: ubuntu-latest
-    continue-on-error: true
+    permissions:
+      contents: write          # commit devbox.lock back to the PR branch
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
 
       - name: Install Devbox
         uses: jetify-com/devbox-install-action@v0.11.0
         with:
           enable-cache: true
 
-      - name: Warn if devbox.lock is absent
+      - name: Resolve and pin devbox.lock
+        run: devbox install
+
+      - name: Commit devbox.lock if it changed
         run: |
-          if [ ! -f devbox.lock ]; then
-            echo "::warning::devbox.lock is not committed — Nix hashes are not pinned." \
-              "Packages resolve by version string only, which is not fully reproducible." \
-              "Track: https://github.com/toon-protocol/connector/issues/149"
+          if ! git diff --quiet -- devbox.lock; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add devbox.lock
+            git commit -m "ci: pin devbox.lock"
+            git push
           fi
 
       - name: Verify pinned toolchain versions
