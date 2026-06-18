@@ -969,6 +969,45 @@ npm test
 npm run dev
 ```
 
+### Getting started with Devbox
+
+[Devbox](https://www.jetify.com/devbox) pins the full local toolchain (Node, Rust, Solana CLI, Foundry, jq) to exact versions and provides a reproducible shell that matches CI.
+
+**Install Devbox:**
+
+```bash
+curl -fsSL https://get.jetify.com/devbox | bash
+```
+
+**Enter the pinned shell:**
+
+```bash
+devbox shell
+```
+
+Inside the shell, all tools are on `PATH` at the versions committed in `devbox.json`:
+
+| Tool                       | Version |
+| -------------------------- | ------- |
+| Node.js                    | 22.11.0 |
+| Rust (via rustup)          | stable  |
+| Solana CLI                 | 2.3.3   |
+| Foundry (forge/cast/anvil) | latest  |
+| jq                         | 1.7.1   |
+
+The `init_hook` runs `rustup default stable` and adds the `bpfel-unknown-unknown` target automatically on shell entry, so `cargo build-sbf` and `cargo test-sbf` work immediately.
+
+**Run the standard workflow inside devbox shell:**
+
+```bash
+devbox shell
+npm install
+npm run build
+make test
+```
+
+The Docker Compose chain infra (`make anvil-up`, `make solana-up`, `make mina-up`) is unchanged — devbox provides the toolchain, Docker provides the chain nodes.
+
 ### Requirements
 
 - **Node.js** >= 22.11.0

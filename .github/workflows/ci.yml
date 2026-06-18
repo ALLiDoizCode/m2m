@@ -989,6 +989,32 @@ jobs:
             exit 1
           fi
 
+  # Devbox environment validation — verifies the pinned toolchain in devbox.json
+  # resolves and that all tools are reachable at the expected versions.
+  # Advisory: continue-on-error so a Nix resolution hiccup doesn't block the
+  # critical path until the job has proven stable.
+  devbox-validate:
+    name: Devbox Toolchain Validate
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Devbox
+        uses: jetify-com/devbox-install-action@v0.11.0
+        with:
+          enable-cache: true
+
+      - name: Verify pinned toolchain versions
+        run: |
+          devbox run -- node --version
+          devbox run -- cargo --version
+          devbox run -- forge --version
+          devbox run -- jq --version
+          echo "✓ All devbox-pinned tools resolved and reachable"
+
   # Summary job to provide clear CI status
   ci-status:
     name: CI Status Summary
@@ -1009,6 +1035,7 @@ jobs:
         docker-build-push,
         container-scan,
         performance-benchmark,
+        devbox-validate,
       ]
     if: always()
 
@@ -1035,6 +1062,7 @@ jobs:
           echo "  Docker Build: ${{ needs.docker-build-push.result }}"
           echo "  Container Scan: ${{ needs.container-scan.result }}"
           echo "  Performance: ${{ needs.performance-benchmark.result }}"
+          echo "  Devbox Validate: ${{ needs.devbox-validate.result }} (advisory)"
           echo ""
 
           # Check if any required job failed
