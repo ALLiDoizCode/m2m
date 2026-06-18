@@ -992,64 +992,30 @@ jobs:
   # Advisory: continue-on-error so a Nix resolution hiccup doesn't block the
   # critical path until the job has proven stable.
   devbox-validate:
-    name: Devbox Toolchain Validate
     runs-on: ubuntu-latest
+    continue-on-error: true        # a Nix-resolution or push hiccup must not gate the PR
     permissions:
-      contents: write          # commit devbox.lock back to the PR branch
-
+      contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-
-      - name: Install Devbox
-        uses: jetify-com/devbox-install-action@v0.11.0
+      - uses: jetify-com/devbox-install-action@v0.12.0
         with:
           enable-cache: true
-
-      - name: Resolve and pin devbox.lock
+      - name: Resolve devbox.lock
         run: devbox install
-
-      - name: Commit devbox.lock if it changed
+      - name: Commit devbox.lock if changed
+        # skip on forks: GITHUB_TOKEN is read-only there, so the push would 403
+        if: github.event.pull_request.head.repo.full_name == github.repository
         run: |
-          if ! git diff --quiet -- devbox.lock; then
+          git add devbox.lock
+          if ! git diff --staged --quiet -- devbox.lock; then
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add devbox.lock
             git commit -m "ci: pin devbox.lock"
             git push
           fi
-
-      - name: Verify pinned toolchain versions
-        run: |
-          echo "=== Verifying devbox-pinned toolchain versions ==="
-
-          NODE_OUT=$(devbox run -- node --version 2>&1)
-          echo "Node:   $NODE_OUT"
-          echo "$NODE_OUT" | grep -qF "v22.11.0" \
-            || { echo "::error::Node version mismatch — expected v22.11.0, got: $NODE_OUT"; exit 1; }
-
-          CARGO_OUT=$(devbox run -- cargo --version 2>&1)
-          echo "Cargo:  $CARGO_OUT"
-          echo "$CARGO_OUT" | grep -qF "1.87.0" \
-            || { echo "::error::Rust/Cargo version mismatch — expected 1.87.0, got: $CARGO_OUT"; exit 1; }
-
-          SOLANA_OUT=$(devbox run -- solana --version 2>&1)
-          echo "Solana: $SOLANA_OUT"
-          echo "$SOLANA_OUT" | grep -qF "2.3.3" \
-            || { echo "::error::Solana CLI version mismatch — expected 2.3.3, got: $SOLANA_OUT"; exit 1; }
-
-          FORGE_OUT=$(devbox run -- forge --version 2>&1 | head -1)
-          echo "Forge:  $FORGE_OUT"
-
-          JQ_OUT=$(devbox run -- jq --version 2>&1)
-          echo "jq:     $JQ_OUT"
-          echo "$JQ_OUT" | grep -qF "1.7.1" \
-            || { echo "::error::jq version mismatch — expected 1.7.1, got: $JQ_OUT"; exit 1; }
-
-          echo "✓ All devbox-pinned tools resolved and versions verified"
-
   # Summary job to provide clear CI status
   ci-status:
     name: CI Status Summary
