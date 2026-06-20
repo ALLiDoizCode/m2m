@@ -639,11 +639,11 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
     ],
     requestContract: 'none',
     responseContract:
-      'AdminAnonHostnameResponse { anonHostname: string | null; publishedAt: string | null } (http/admin-api.ts) — anonHostname is "<redacted-anon>" at INFO+; full value at DEBUG. 503 body is { error: "anon-disabled" }',
+      'AdminAnonHostnameResponse { anonHostname: string | null; publishedAt: string | null } (http/admin-api.ts) — anonHostname is "<redacted-anon>" at INFO+; full value at DEBUG or TRACE. 503 body is { error: "anon-disabled" }',
     owningModule: 'http/admin-api.ts + transport/managed-anon-client.ts',
     relatedStories: ['151'],
     operationalNotes:
-      'Cache-Control: no-store. Retry-After: 3 during bootstrap window. anonHostname is redacted to "<redacted-anon>" unless LOG_LEVEL=debug.',
+      'Cache-Control: no-store. Retry-After: 3 during bootstrap window. anonHostname is redacted to "<redacted-anon>" unless log level is debug or trace.',
   },
 
   /**

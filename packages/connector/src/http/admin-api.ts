@@ -123,8 +123,9 @@ export interface AdminAPIConfig {
 
   /**
    * Optional managed anon client (Story 38.1). When provided AND configured
-   * for a hidden service, enables `GET /admin/hs-hostname`. Otherwise that
-   * endpoint returns 503 `{ error: "anon-disabled" }`.
+   * for a hidden service, enables `GET /admin/hs-hostname` and
+   * `GET /admin/anon-hostname`. Otherwise those endpoints return
+   * 503 `{ error: "anon-disabled" }`.
    */
   managedAnonClient?: ManagedAnonClient;
 
@@ -1942,8 +1943,9 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       return;
     }
     const snapshot = managedAnonClient.getHostnameSnapshot();
+    const isVerboseLevel = log.level === 'debug' || log.level === 'trace';
     const anonHostname =
-      snapshot.hostname !== null && log.level !== 'debug' ? '<redacted-anon>' : snapshot.hostname;
+      snapshot.hostname !== null && !isVerboseLevel ? '<redacted-anon>' : snapshot.hostname;
     res.set('Cache-Control', 'no-store');
     if (snapshot.hostname === null) {
       res.set('Retry-After', '3');

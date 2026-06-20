@@ -3,7 +3,7 @@
  *
  * Tests the route handler in isolation against a fake `ManagedAnonClient`
  * surface. Key behaviours under test:
- *   - AC 1: 200 with full `anonHostname` when log level is debug
+ *   - AC 1: 200 with full `anonHostname` when log level is debug or trace
  *   - AC 2: 200 with `anonHostname: "<redacted-anon>"` at info log level
  *   - AC 3: 200 with `anonHostname: null` during the bootstrap window
  *   - AC 4: 503 `{ error: 'anon-disabled' }` when not configured
@@ -93,9 +93,9 @@ describe('Admin API GET /admin/anon-hostname (Story 151)', () => {
     } as unknown as jest.Mocked<Logger>;
   });
 
-  // --- AC 1: debug level returns full hostname ---
+  // --- AC 1: debug and trace levels return full hostname ---
 
-  describe('AC 1: returns full anonHostname at debug log level', () => {
+  describe('AC 1: returns full anonHostname at debug or trace log level', () => {
     it('returns the real hostname when log level is debug', async () => {
       const publishedAt = '2026-06-20T10:00:00.000Z';
       const hostname = 'eag2qnhil4vpvfo2eu3qtqj3rzzkrzbmboivwwbbgzr4svfvjigoxpad.anon';
@@ -108,6 +108,25 @@ describe('Admin API GET /admin/anon-hostname (Story 151)', () => {
           }),
         },
         'debug'
+      );
+
+      const res = await request(app).get('/admin/anon-hostname').expect(200);
+
+      expect(res.body).toEqual({ anonHostname: hostname, publishedAt });
+    });
+
+    it('returns the real hostname when log level is trace', async () => {
+      const publishedAt = '2026-06-20T10:00:00.000Z';
+      const hostname = 'eag2qnhil4vpvfo2eu3qtqj3rzzkrzbmboivwwbbgzr4svfvjigoxpad.anon';
+      const app = await buildApp(
+        {
+          managedAnonClient: fakeManagedAnonClient({
+            hiddenServiceConfigured: true,
+            hostname,
+            publishedAt,
+          }),
+        },
+        'trace'
       );
 
       const res = await request(app).get('/admin/anon-hostname').expect(200);
