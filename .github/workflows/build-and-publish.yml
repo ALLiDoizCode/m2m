@@ -88,8 +88,6 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Install libsql native module for Linux
