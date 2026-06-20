@@ -397,7 +397,21 @@ describeRealBinary(
       } catch {
         // swallow
       }
-      await new Promise((r) => setTimeout(r, 500));
+      // Poll until the process table is clear. A fixed sleep is unreliable:
+      // SIGKILL delivers immediately but the OS may take several hundred
+      // milliseconds to reap the entry, and the SDK's "already running"
+      // check fires on the next start() before the entry is gone.
+      const pollDeadline = Date.now() + 10_000;
+      while (Date.now() < pollDeadline) {
+        try {
+          await execRaw('pgrep -x anon', { cwd: REPO_ROOT });
+          // Process still present — wait a short cycle before re-checking.
+          await new Promise((r) => setTimeout(r, 200));
+        } catch {
+          // pgrep exits non-zero when nothing matches — process table is clear.
+          break;
+        }
+      }
     });
 
     afterAll(async () => {
