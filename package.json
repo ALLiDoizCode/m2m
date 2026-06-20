@@ -24,6 +24,7 @@
     "publish:all": "npm run publish:shared && npm run publish:mina-zkapp && npm run publish:connector",
     "publish:all:dry-run": "npm run publish:shared -- --dry-run && npm run publish:connector -- --dry-run",
     "prepare": "husky",
+    "postinstall": "patch-package",
     "publish:mina-zkapp": "npm run build --workspace=packages/mina-zkapp && npm publish --workspace=packages/mina-zkapp --access public"
   },
   "devDependencies": {
@@ -36,6 +37,7 @@
     "eslint": "^8.56.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
+    "patch-package": "^8.0.1",
     "prettier": "^3.2.5",
     "semantic-release": "^24.2.0",
     "typescript": "^5.3.3"

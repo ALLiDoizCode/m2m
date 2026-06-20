@@ -63,7 +63,18 @@ jobs:
         with:
           timeout_minutes: 10
           max_attempts: 3
-          command: npm ci --verbose
+          # Two-phase install (#156): the @anyone-protocol/anyone-client
+          # postinstall makes an UNAUTHENTICATED api.github.com call as its
+          # first action with no skip-if-exists guard, exhausting the 60/hr
+          # per-IP limit and 403-ing macOS runners. patch-package adds an auth
+          # header, but a dependency's own postinstall runs before the root
+          # postinstall on a plain `npm ci` -- so we ignore scripts first,
+          # apply the patch, then `npm rebuild` to run all deps' (now patched)
+          # install/postinstall scripts with GITHUB_TOKEN in env.
+          command: |
+            npm ci --ignore-scripts --verbose
+            npx patch-package
+            npm rebuild --foreground-scripts
 
       - name: Install libsql native module for Linux
         if: runner.os == 'Linux'
@@ -197,7 +208,18 @@ jobs:
         with:
           timeout_minutes: 10
           max_attempts: 3
-          command: npm ci --verbose
+          # Two-phase install (#156): the @anyone-protocol/anyone-client
+          # postinstall makes an UNAUTHENTICATED api.github.com call as its
+          # first action with no skip-if-exists guard, exhausting the 60/hr
+          # per-IP limit and 403-ing macOS runners. patch-package adds an auth
+          # header, but a dependency's own postinstall runs before the root
+          # postinstall on a plain `npm ci` -- so we ignore scripts first,
+          # apply the patch, then `npm rebuild` to run all deps' (now patched)
+          # install/postinstall scripts with GITHUB_TOKEN in env.
+          command: |
+            npm ci --ignore-scripts --verbose
+            npx patch-package
+            npm rebuild --foreground-scripts
 
       - name: Install libsql native module for Linux
         if: runner.os == 'Linux'
@@ -272,7 +294,13 @@ jobs:
       - name: Install dependencies
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm ci
+        # Two-phase install (#156): apply the anyone-client postinstall auth
+        # patch before its (otherwise unauthenticated) GitHub API call runs.
+        # See the real-binary job for the full rationale.
+        run: |
+          npm ci --ignore-scripts
+          npx patch-package
+          npm rebuild --foreground-scripts
 
       - name: Build shared package
         run: npm run build --workspace=packages/shared
@@ -323,7 +351,13 @@ jobs:
       - name: Install dependencies
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm ci
+        # Two-phase install (#156): apply the anyone-client postinstall auth
+        # patch before its (otherwise unauthenticated) GitHub API call runs.
+        # See the real-binary job for the full rationale.
+        run: |
+          npm ci --ignore-scripts
+          npx patch-package
+          npm rebuild --foreground-scripts
 
       - name: Build shared package
         run: npm run build --workspace=packages/shared
