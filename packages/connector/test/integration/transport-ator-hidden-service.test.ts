@@ -340,6 +340,18 @@ describeRealBinary(
     let testnetDirAuthLines = '';
 
     beforeAll(async () => {
+      // Kill any stale user-owned anon processes from a prior crashed test run.
+      // The SDK's isAnonProcessRunning() check fires BEFORE start(), so even a
+      // single orphan causes AnonRunningError on T-36.4-01. User-scoped kill
+      // avoids touching Docker container anon processes (owned by root on Linux).
+      try {
+        await execRaw('pkill -x -u "$(id -u)" anon 2>/dev/null || true', { cwd: REPO_ROOT });
+      } catch {
+        // swallow
+      }
+      // Short grace period for the signal to propagate before the first test.
+      await new Promise((r) => setTimeout(r, 500));
+
       if (!ATOR_SOCKS_PORT) {
         throw new Error(
           'ATOR_SOCKS_PORT not set -- run via `make ator-test` (the Makefile ' +
@@ -390,21 +402,21 @@ describeRealBinary(
         }
       }
       // Belt-and-suspenders: kill any orphan anon processes left by a
-      // slow/failed stop(). The SDK detects "already running" via global
-      // process check, so we must ensure zero anon processes between tests.
+      // slow/failed stop(). Use user-scoped kill so Docker container anon
+      // processes (root-owned on Linux) are not disturbed.
       try {
-        await execCompose('pkill -x anon || true');
+        await execRaw('pkill -x -u "$(id -u)" anon 2>/dev/null || true', { cwd: REPO_ROOT });
       } catch {
         // swallow
       }
-      // Poll until the process table is clear. A fixed sleep is unreliable:
-      // SIGKILL delivers immediately but the OS may take several hundred
-      // milliseconds to reap the entry, and the SDK's "already running"
-      // check fires on the next start() before the entry is gone.
+      // Poll until the SDK's own isAnonProcessRunning() pattern sees no
+      // user-owned anon processes. Using the same user-scoped pgrep ensures
+      // Docker container anon processes (root-owned on Linux CI) don't
+      // extend the poll indefinitely.
       const pollDeadline = Date.now() + 10_000;
       while (Date.now() < pollDeadline) {
         try {
-          await execRaw('pgrep -x anon', { cwd: REPO_ROOT });
+          await execRaw('pgrep -x -u "$(id -u)" anon', { cwd: REPO_ROOT });
           // Process still present — wait a short cycle before re-checking.
           await new Promise((r) => setTimeout(r, 200));
         } catch {
@@ -424,10 +436,10 @@ describeRealBinary(
         }
       }
       // Clean up orphan anon processes (belt-and-suspenders).
-      // Use `pgrep -x anon` to match only the anon binary, not unrelated
-      // processes with "anon" in their command line (e.g., "anonymous").
+      // Use user-scoped pgrep so Docker container anon processes (root-owned
+      // on Linux CI) are not mistaken for managed clients and not killed.
       try {
-        const { stdout } = await execRaw('pgrep -x anon', { cwd: REPO_ROOT });
+        const { stdout } = await execRaw('pgrep -x -u "$(id -u)" anon', { cwd: REPO_ROOT });
         const pids = stdout
           .trim()
           .split('\n')

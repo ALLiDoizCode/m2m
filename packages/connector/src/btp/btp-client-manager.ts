@@ -137,16 +137,10 @@ export class BTPClientManager {
     // Store client before connecting
     this._clients.set(peer.id, client);
 
-    try {
-      // Connect to peer
-      await client.connect();
-      this._logger.info(
-        { event: 'btp_client_peer_added', peerId: peer.id },
-        'Peer added and connected'
-      );
-    } catch (error) {
-      // Don't remove client from map - BTPClient will retry in background
-      // Client can still be used once retry succeeds
+    // Fire-and-forget: POST /admin/peers returns 201 immediately so hidden-service
+    // circuit establishment (30-90 s) does not block the HTTP response. BTPClient
+    // keeps the client in the map and retries on failure regardless.
+    void client.connect().catch((error) => {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this._logger.warn(
         {
@@ -156,8 +150,11 @@ export class BTPClientManager {
         },
         'Initial connection to peer failed (will retry in background)'
       );
-      // Don't rethrow - allow connector to start even if initial connection fails
-    }
+    });
+    this._logger.info(
+      { event: 'btp_client_peer_added', peerId: peer.id },
+      'Peer registered (connecting in background)'
+    );
   }
 
   /**

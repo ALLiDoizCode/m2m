@@ -182,10 +182,12 @@ jobs:
         include:
           - os: ubuntu-latest
             install: 'sudo apt-get update && sudo apt-get install -y tor'
+            configure: 'echo "AllowUnroutableAddresses 1" | sudo tee -a /etc/tor/torrc'
             start: 'sudo systemctl start tor || (tor & echo $! > /tmp/tor.pid)'
             stop: 'sudo systemctl stop tor || { [ -f /tmp/tor.pid ] && kill "$(cat /tmp/tor.pid)" 2>/dev/null; } || true'
           - os: macos-14
             install: 'brew install tor'
+            configure: 'echo "AllowUnroutableAddresses 1" >> "$(brew --prefix)/etc/tor/torrc"'
             start: 'brew services start tor || (tor & echo $! > /tmp/tor.pid)'
             stop: 'brew services stop tor || { [ -f /tmp/tor.pid ] && kill "$(cat /tmp/tor.pid)" 2>/dev/null; } || true'
     runs-on: ${{ matrix.os }}
@@ -238,6 +240,13 @@ jobs:
       # validates SOCKS5 protocol compatibility, not version-specific behavior.
       - name: Install system tor
         run: ${{ matrix.install }}
+
+      # T-36.5-07b: tor rejects SOCKS5 connections to loopback (127.0.0.1) by
+      # default (AllowUnroutableAddresses 0). The echo-server test routes a WS
+      # connection through the SOCKS5 proxy to a local 127.0.0.1 address, so
+      # we must set AllowUnroutableAddresses 1 before starting tor.
+      - name: Configure system tor (allow loopback for T-36.5-07b)
+        run: ${{ matrix.configure }}
 
       - name: Start system tor
         run: ${{ matrix.start }}
