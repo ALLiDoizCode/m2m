@@ -863,6 +863,12 @@ services:
     depends_on:
       two-home-local-sidecar-a:
         condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 8081 || exit 1']
+      interval: 3s
+      timeout: 2s
+      retries: 40
+      start_period: 15s
 
   two-home-local-connector-b:
     build:
@@ -879,6 +885,12 @@ services:
     depends_on:
       two-home-local-sidecar-b:
         condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 8081 || exit 1']
+      interval: 3s
+      timeout: 2s
+      retries: 40
+      start_period: 15s
 
   # Per-peer-transport selection (Story 46.4 unblock): direct-only sibling
   # peer on the shared `ator_net` Docker network. The two-home apex
