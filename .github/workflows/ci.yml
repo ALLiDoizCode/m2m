@@ -1072,10 +1072,10 @@ jobs:
       - name: Assert tool versions
         run: |
           devbox run -- node --version | grep -E "^v22\.11\."
-          devbox run -- npm --version
+          devbox run -- npm --version | grep -E "^10\."
           devbox run -- cargo --version
           devbox run -- rustc --version
-          devbox run -- forge --version
+          devbox run -- forge --version | grep -E "^forge 1\.7\."
           devbox run -- cast --version
           devbox run -- anvil --version
           devbox run -- jq --version | grep -E "^jq-1\.7\."

@@ -987,7 +987,7 @@ devbox shell
 
 # Inside the devbox shell, all tools are on PATH:
 node --version    # v22.11.0
-cargo --version   # rustc stable
+cargo --version   # cargo stable
 solana --version  # 3.1.12 (installed via init_hook on first shell entry)
 forge --version   # Foundry latest
 jq --version      # 1.7.1
