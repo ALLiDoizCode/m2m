@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.3/.schema/devbox.schema.json",
-  "packages": ["nodejs@22.11.0", "rustup@latest", "foundry@latest", "jq@1.7.1"],
+  "packages": ["nodejs@22.11.0", "rustup@1.29.0", "foundry@1.7.1", "jq@1.7.1"],
   "shell": {
     "init_hook": [
       "rustup default stable 2>/dev/null || true",
