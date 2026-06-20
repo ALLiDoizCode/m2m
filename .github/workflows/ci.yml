@@ -1093,7 +1093,11 @@ jobs:
           npm --version | grep -E '^10\.'
           cargo --version
           rustc --version
-          forge --version | grep -E '^forge 1\.7\.'
+          # foundry (forge/cast/anvil): assert they run, not a version string. The
+          # devbox package `foundry@1.7.1` is the nixpkgs package version, which is
+          # NOT what `forge --version` prints, so a `^forge 1\.7\.` regex is wrong.
+          # devbox.lock already pins the exact foundry build.
+          forge --version
           cast --version
           anvil --version
           jq --version | grep -E '^jq-1\.7\.'
