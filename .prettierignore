@@ -14,3 +14,5 @@ packages/contracts/broadcast
 _bmad-output
 packages/solana-program/target
 data
+.devbox
+devbox.lock

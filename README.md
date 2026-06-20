@@ -975,6 +975,32 @@ npm run dev
 - **Docker** >= 20.10.0 (for container deployments)
 - **Docker Compose** >= 2.0.0
 
+### Getting started with Devbox
+
+[Devbox](https://github.com/jetify-com/devbox) pins the full local toolchain to the exact versions CI uses — Node 22.11.0, Rust stable, Solana CLI 3.1.12, Foundry, and jq — so `make build`, `make test`, `make lint`, and `make solana-build` all work in a reproducible shell without touching your system packages.
+
+**Prerequisites:** [Install devbox](https://www.jetify.com/devbox/docs/installing_devbox/) (one-liner).
+
+```bash
+# Enter the pinned shell (downloads packages on first run via Nix)
+devbox shell
+
+# Inside the devbox shell, all tools are on PATH:
+node --version    # v22.11.0
+cargo --version   # rustc stable
+solana --version  # 3.1.12 (installed via init_hook on first shell entry)
+forge --version   # Foundry latest
+jq --version      # 1.7.1
+
+# Run the standard build and test targets
+npm ci
+npm run build
+make lint
+make solana-build   # cargo build-sbf --tools-version v1.52
+```
+
+Docker Compose targets (`make anvil-up`, `make solana-up`, `make mina-up`) work normally alongside the devbox shell — devbox only manages the host toolchain, not the chain infrastructure containers.
+
 **macOS note:** For local development with TigerBeetle outside Docker, run `npm run tigerbeetle:install` first.
 
 ## Documentation

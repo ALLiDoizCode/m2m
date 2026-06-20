@@ -460,7 +460,7 @@ jobs:
 
       - name: Install Solana CLI tools
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       # Cache the downloaded platform-tools (keyed on the tools-version) so
@@ -801,7 +801,7 @@ jobs:
 
       - name: Install Solana CLI tools
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       # See the solana-integration job: caching the platform-tools dir keyed on
@@ -1053,3 +1053,35 @@ jobs:
             echo ""
             echo "All critical checks completed successfully!"
           fi
+
+  # Non-gating bake-in job: validates the devbox environment on every CI run.
+  # Intentionally NOT listed in ci-status `needs:` so it does not block merges.
+  devbox-validate:
+    name: Devbox Environment Validation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install devbox
+        uses: jetify-com/devbox-install-action@v0.11.0
+        with:
+          enable-cache: true
+
+      - name: Assert tool versions
+        run: |
+          devbox run -- node --version | grep -E "^v22\.11\."
+          devbox run -- npm --version
+          devbox run -- cargo --version
+          devbox run -- rustc --version
+          devbox run -- forge --version
+          devbox run -- cast --version
+          devbox run -- anvil --version
+          devbox run -- jq --version | grep -E "^jq-1\.7\."
+          echo "✅ All devbox tools resolved at expected versions"
+
+      - name: Smoke build (npm ci + make build)
+        run: |
+          devbox run -- npm ci
+          devbox run -- npm run build
