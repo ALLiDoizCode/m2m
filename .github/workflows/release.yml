@@ -46,12 +46,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        # @anyone-protocol/anyone-client postinstall calls api.github.com to
-        # fetch a release binary. Unauthenticated runners share the 60 req/hr
-        # limit and hit 403 "rate limit exceeded". GITHUB_TOKEN raises it to
-        # 5000 req/hr — same fix applied to foundryup in contracts.yml.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # NOTE: a plain `npm ci` does NOT authenticate the
+        # @anyone-protocol/anyone-client postinstall against api.github.com.
+        # patch-package (which injects the GITHUB_TOKEN auth header) only runs
+        # via the root postinstall, which fires AFTER the dependency's own
+        # postinstall — so a GITHUB_TOKEN env here would be dead config. To
+        # actually authenticate it, adopt the two-phase install used in
+        # nightly-ator.yml (npm ci --ignore-scripts → patch-package → rebuild).
         run: npm ci
 
       - name: Build packages
