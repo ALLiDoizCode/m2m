@@ -123,8 +123,9 @@ export interface AdminAPIConfig {
 
   /**
    * Optional managed anon client (Story 38.1). When provided AND configured
-   * for a hidden service, enables `GET /admin/hs-hostname`. Otherwise that
-   * endpoint returns 503 `{ error: "anon-disabled" }`.
+   * for a hidden service, enables `GET /admin/hs-hostname` and
+   * `GET /admin/anon-hostname`. Otherwise those endpoints return
+   * 503 `{ error: "anon-disabled" }`.
    */
   managedAnonClient?: ManagedAnonClient;
 
@@ -366,6 +367,26 @@ export interface AdminMetricsJsonResponse {
  */
 export interface AdminHsHostnameResponse {
   hostname: string | null;
+  publishedAt: string | null;
+}
+
+/**
+ * GET /admin/anon-hostname response (Story 151).
+ *
+ * Hub-facing accessor for the connector's `.anon` hidden-service hostname.
+ * `anonHostname` is redacted to `<redacted-anon>` unless the connector is
+ * running at DEBUG or TRACE log level — preventing casual display of the
+ * `.anon` address in hub status output.
+ *
+ * Both fields are `null` during the 30–90s bootstrap window. 503 with
+ * `{ error: "anon-disabled" }` when no hidden service is configured.
+ *
+ * Note: this endpoint reduces accidental log exposure of the `.anon` address;
+ * it is not a privacy enforcement boundary. `GET /admin/hs-hostname` returns
+ * the same address unredacted to any caller with a valid `X-Api-Key`.
+ */
+export interface AdminAnonHostnameResponse {
+  anonHostname: string | null;
   publishedAt: string | null;
 }
 
@@ -1909,6 +1930,35 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       res.set('Retry-After', '3');
     }
     res.json(snapshot satisfies AdminHsHostnameResponse);
+  });
+
+  /**
+   * GET /admin/anon-hostname
+   *
+   * Story 151 — hub-facing read accessor for the connector's `.anon`
+   * hidden-service hostname. Redacts the hostname to `<redacted-anon>` at
+   * INFO and above so it does not appear in operator log streams; full value
+   * is included in the response only when the connector runs at DEBUG or TRACE
+   * level.
+   */
+  router.get('/anon-hostname', (_req: Request, res: Response) => {
+    if (!managedAnonClient || !managedAnonClient.isHiddenServiceConfigured()) {
+      res.set('Cache-Control', 'no-store');
+      res.status(503).json({ error: 'anon-disabled' });
+      return;
+    }
+    const snapshot = managedAnonClient.getHostnameSnapshot();
+    const isVerboseLevel = log.level === 'debug' || log.level === 'trace';
+    const anonHostname =
+      snapshot.hostname !== null && !isVerboseLevel ? '<redacted-anon>' : snapshot.hostname;
+    res.set('Cache-Control', 'no-store');
+    if (snapshot.hostname === null) {
+      res.set('Retry-After', '3');
+    }
+    res.json({
+      anonHostname,
+      publishedAt: snapshot.publishedAt,
+    } satisfies AdminAnonHostnameResponse);
   });
 
   /**

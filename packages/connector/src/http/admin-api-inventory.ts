@@ -618,6 +618,35 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
   },
 
   /**
+   * GET /admin/anon-hostname
+   * Hub-facing read accessor for the connector's `.anon` hidden-service hostname (Story 151).
+   */
+  {
+    path: '/anon-hostname',
+    method: 'GET',
+    server: 'AdminServer',
+    mountPrefix: '/admin',
+    authModel: 'X-Api-Key',
+    successStatus: 200,
+    failureModes: [
+      { status: 401, description: 'Missing or invalid X-Api-Key' },
+      { status: 403, description: 'IP not in allowlist' },
+      {
+        status: 503,
+        description:
+          'anon-disabled: ManagedAnonClient not constructed OR no hiddenServiceDir configured',
+      },
+    ],
+    requestContract: 'none',
+    responseContract:
+      'AdminAnonHostnameResponse { anonHostname: string | null; publishedAt: string | null } (http/admin-api.ts) — anonHostname is "<redacted-anon>" at INFO+; full value at DEBUG or TRACE. 503 body is { error: "anon-disabled" }',
+    owningModule: 'http/admin-api.ts + transport/managed-anon-client.ts',
+    relatedStories: ['151'],
+    operationalNotes:
+      'Cache-Control: no-store. Retry-After: 3 during bootstrap window. anonHostname is redacted to "<redacted-anon>" unless log level is debug or trace.',
+  },
+
+  /**
    * GET /health (AdminServer)
    * Health check for the admin server itself (separate from HealthServer)
    */
