@@ -975,6 +975,34 @@ npm run dev
 - **Docker** >= 20.10.0 (for container deployments)
 - **Docker Compose** >= 2.0.0
 
+### Getting started with Devbox
+
+[Devbox](https://github.com/jetify-com/devbox) pins the full local toolchain to the exact versions CI uses — Node 22.11.0, Rust stable, Solana CLI 3.1.12, Foundry 1.7.1, and jq 1.7.1 — so `make build`, `make test`, `make lint`, and `make solana-build` all work in a reproducible shell without touching your system packages. **Note:** `contracts.yml` CI uses `foundry-rs/foundry-toolchain@v1 nightly`; devbox pins 1.7.1 for reproducibility. If nightly Foundry diverges, local forge builds may differ from contracts CI.
+
+**Prerequisites:** [Install devbox](https://www.jetify.com/devbox/docs/installing_devbox/) (one-liner).
+
+```bash
+# Enter the pinned shell (downloads packages on first run via Nix)
+devbox shell
+
+# Inside the devbox shell, all tools are on PATH:
+node --version    # v22.11.0
+cargo --version   # cargo stable
+solana --version  # 3.1.12 (installed via init_hook on first shell entry)
+forge --version   # 1.7.1 (devbox); contracts CI uses foundry-rs/foundry-toolchain@v1 nightly — intentional mismatch
+jq --version      # 1.7.1
+
+# Run the standard build and test targets
+npm ci
+npm run build
+make lint
+make solana-build   # cargo build-sbf --tools-version v1.52
+```
+
+**Existing Solana install note:** The devbox `init_hook` only installs Solana CLI if no `solana` binary is found on `$PATH`. If you already have a different version installed (e.g. v2.x), remove it before entering the devbox shell so the init_hook installs v3.1.12 correctly: `rm -rf ~/.local/share/solana`.
+
+Docker Compose targets (`make anvil-up`, `make solana-up`, `make mina-up`) work normally alongside the devbox shell — devbox only manages the host toolchain, not the chain infrastructure containers.
+
 **macOS note:** For local development with TigerBeetle outside Docker, run `npm run tigerbeetle:install` first.
 
 ## Documentation

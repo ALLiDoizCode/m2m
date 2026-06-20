@@ -460,7 +460,7 @@ jobs:
 
       - name: Install Solana CLI tools
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       # Cache the downloaded platform-tools (keyed on the tools-version) so
@@ -801,7 +801,7 @@ jobs:
 
       - name: Install Solana CLI tools
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.13/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       # See the solana-integration job: caching the platform-tools dir keyed on
@@ -1053,3 +1053,48 @@ jobs:
             echo ""
             echo "All critical checks completed successfully!"
           fi
+
+  # Non-gating bake-in job: validates the devbox environment on every CI run.
+  # Intentionally NOT listed in ci-status `needs:` so it does not block merges.
+  devbox-validate:
+    name: Devbox Environment Validation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install devbox
+        uses: jetify-com/devbox-install-action@v0.15.0
+        with:
+          enable-cache: true
+
+      # Cache the Solana CLI binary installed by the devbox init_hook
+      # (written to ~/.local/share/solana by release.anza.xyz/v3.1.12/install).
+      # Without this, every cold devbox-validate run re-downloads the CLI.
+      # Note: platform-tools (~/.cache/solana) are not cached here because this
+      # job never runs cargo build-sbf and therefore never downloads them.
+      - name: Cache Solana CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/solana
+          key: solana-cli-${{ runner.os }}-v3.1.12
+
+      - name: Assert tool versions
+        run: |
+          devbox run -- bash -c "
+            set -e
+            node --version | grep -E '^v22\.11\.'
+            npm --version | grep -E '^10\.'
+            cargo --version
+            rustc --version
+            forge --version | grep -E '^forge 1\.7\.'
+            cast --version
+            anvil --version
+            jq --version | grep -E '^jq-1\.7\.'
+            solana --version | grep -E '^solana-cli 3\.1\.12'
+          "
+          echo "✅ All devbox tools resolved at expected versions"
+
+      - name: Smoke build (npm ci + npm run build)
+        run: devbox run -- bash -c "npm ci && npm run build"

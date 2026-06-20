@@ -71,6 +71,9 @@ packages/connector/terms-agreement
 # Docker volumes
 .docker-data/
 
+# Devbox virtualenv (Nix symlinks + package cache — never commit)
+.devbox/
+
 # BMAD framework (already in repo, don't ignore)
 # .bmad-core/
 # .bmad-creative-writing/

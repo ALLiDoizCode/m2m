@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.3/.schema/devbox.schema.json",
+  "packages": ["nodejs@22.11.0", "rustup@1.29.0", "foundry@1.7.1", "jq@1.7.1"],
+  "shell": {
+    "init_hook": [
+      "rustup default stable 2>/dev/null || true",
+      "rustup component add rustfmt clippy 2>/dev/null || true",
+      "rustup target add bpfel-unknown-unknown 2>/dev/null || true",
+      "export PATH=\"$HOME/.local/share/solana/install/active_release/bin:$PATH\"",
+      "command -v solana >/dev/null 2>&1 || sh -c \"$(curl -sSfL https://release.anza.xyz/v3.1.12/install)\""
+    ],
+    "scripts": {
+      "build": "npm ci && npm run build",
+      "lint": "npm run lint",
+      "test": "make test",
+      "solana-build": "cd packages/solana-program && cargo build-sbf --tools-version v1.52",
+      "forge-build": "cd packages/contracts && forge build"
+    }
+  }
+}
