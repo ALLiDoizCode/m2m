@@ -414,6 +414,8 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
     volumes:
       - ator_hs1:/var/lib/anon
       - ator_shared:/shared

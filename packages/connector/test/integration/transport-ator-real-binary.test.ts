@@ -97,7 +97,7 @@ const JEST_TEST_TIMEOUT_MS = 120_000;
 // empty — indistinguishable from a missing tcpdump binary (see
 // `captureAtypByte` below). Centralised constant so T-36.3-04 and T-36.3-05
 // don't drift.
-const TCPDUMP_ATTACH_GRACE_MS = 2_000;
+const TCPDUMP_ATTACH_GRACE_MS = 4_000;
 
 // Dynamic host port assigned by docker at `make ator-up`; read via
 // `docker compose port hs1 9050` inside the ator-test target. NO FALLBACK
