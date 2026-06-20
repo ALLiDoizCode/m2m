@@ -29,6 +29,11 @@ jobs:
   review:
     if: startsWith(github.head_ref, 'agent/')
     runs-on: ubuntu-latest
+    # No turn cap on the reviewer (large PRs touching multi-thousand-line files
+    # such as admin-api.ts were exhausting the old --max-turns 25 and failing
+    # the job before submitting a verdict). This timeout is a wall-clock safety
+    # net against a genuinely stuck run — it does NOT cap reasoning turns.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: anthropics/claude-code-action@v1
@@ -52,4 +57,6 @@ jobs:
             If `--approve` is rejected (the github-actions bot cannot approve), fall back to
             `gh pr review ${{ github.event.pull_request.number }} --comment --body "LGTM — no blocking issues found. <summary>"`.
             Never merge, never push commits to the branch.
-          claude_args: "--max-turns 25 --allowedTools Bash(gh:*),Read,Grep,Glob"
+          # Intentionally no --max-turns: the reviewer must be free to read as
+          # many files as a large diff requires before submitting its verdict.
+          claude_args: "--allowedTools Bash(gh:*),Read,Grep,Glob"
