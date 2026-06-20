@@ -111,7 +111,25 @@ ok "home-a → ${HS_A}"
 HS_B="$(wait_for_hs "$SIDECAR_B")"
 ok "home-b → ${HS_B}"
 
-# 3. Register peers via admin API
+# 3. Wait for connector admin APIs to be ready, then register peers
+ADMIN_BUDGET_S=120
+wait_for_admin() {
+    local url="$1" label="$2" deadline
+    deadline=$(( $(date +%s) + ADMIN_BUDGET_S ))
+    while [[ $(date +%s) -lt $deadline ]]; do
+        if curl --silent --max-time 3 -o /dev/null -w '%{http_code}' "${url}/health" 2>/dev/null | grep -q '200'; then
+            ok "${label} admin API ready"
+            return 0
+        fi
+        sleep 2
+    done
+    die "${label} admin API did not come up within ${ADMIN_BUDGET_S}s — check 'docker compose logs'"
+}
+
+log "Waiting for connector admin APIs (budget ${ADMIN_BUDGET_S}s each)..."
+wait_for_admin "$ADMIN_A" "home-a"
+wait_for_admin "$ADMIN_B" "home-b"
+
 log "Registering home-b on home-a's admin API"
 curl --silent --show-error --max-time 10 -X POST \
     -H "Content-Type: application/json" \
