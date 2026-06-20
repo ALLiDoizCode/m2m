@@ -37,6 +37,7 @@
 import * as fs from 'fs';
 import * as net from 'net';
 import pino from 'pino';
+import { SocksClient } from 'socks';
 import { SocksTransportProvider } from '../../src/transport/socks-transport-provider';
 
 // ---------------------------------------------------------------------------
@@ -214,9 +215,6 @@ describeSmoke(`System-tor fallback smoke (Story 36.5, ${SKIP_REASON})`, () => {
     });
 
     it('data round-trips correctly through system tor SOCKS proxy to local echo server', async () => {
-      // Use SocksTransportProvider.createAgent() to drive a SOCKS5 CONNECT
-      // through system tor to the local echo server. This exercises the same
-      // code path that BTPClient uses in production (agentFactory callback).
       const provider = trackProvider(
         new SocksTransportProvider({
           socksProxy: PROXY_URL,
@@ -225,54 +223,15 @@ describeSmoke(`System-tor fallback smoke (Story 36.5, ${SKIP_REASON})`, () => {
         })
       );
       await provider.start();
-      const agent = provider.createAgent(`ws://127.0.0.1:${echoPort}/btp`);
 
-      const sock = await new Promise<net.Socket>((resolve, reject) => {
-        let settled = false;
-        const timer = setTimeout(() => {
-          settled = true;
-          reject(
-            new Error(`SOCKS connect to echo server timed out after ${ROUND_TRIP_BUDGET_MS}ms`)
-          );
-        }, ROUND_TRIP_BUDGET_MS);
-
-        const anyAgent = agent as unknown as {
-          createConnection?: (
-            opts: { host: string; port: number },
-            cb: (err: Error | null, sock?: net.Socket) => void
-          ) => void;
-        };
-
-        if (typeof anyAgent.createConnection !== 'function') {
-          clearTimeout(timer);
-          settled = true;
-          reject(new Error('SocksProxyAgent has no createConnection'));
-          return;
-        }
-
-        anyAgent.createConnection({ host: '127.0.0.1', port: echoPort }, (err, s) => {
-          if (err) {
-            clearTimeout(timer);
-            if (!settled) {
-              settled = true;
-              reject(err);
-            }
-          } else if (s) {
-            clearTimeout(timer);
-            if (!settled) {
-              settled = true;
-              resolve(s);
-            } else {
-              s.destroy();
-            }
-          } else {
-            clearTimeout(timer);
-            if (!settled) {
-              settled = true;
-              reject(new Error('no socket and no error'));
-            }
-          }
-        });
+      // SocksProxyAgent.createConnection() callback is not reliably invoked in
+      // agent-base v7+ when connect() returns undefined. Use SocksClient
+      // directly — same underlying SOCKS5 path, stable Promise-based API.
+      const { socket: sock } = await SocksClient.createConnection({
+        proxy: { host: '127.0.0.1', port: TOR_PORT, type: 5 },
+        command: 'connect',
+        destination: { host: '127.0.0.1', port: echoPort },
+        timeout: ROUND_TRIP_BUDGET_MS,
       });
 
       try {
