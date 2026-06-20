@@ -999,6 +999,8 @@ make lint
 make solana-build   # cargo build-sbf --tools-version v1.52
 ```
 
+**Existing Solana install note:** The devbox `init_hook` only installs Solana CLI if no `solana` binary is found on `$PATH`. If you already have a different version installed (e.g. v2.x), remove it before entering the devbox shell so the init_hook installs v3.1.12 correctly: `rm -rf ~/.local/share/solana`.
+
 Docker Compose targets (`make anvil-up`, `make solana-up`, `make mina-up`) work normally alongside the devbox shell — devbox only manages the host toolchain, not the chain infrastructure containers.
 
 **macOS note:** For local development with TigerBeetle outside Docker, run `npm run tigerbeetle:install` first.
