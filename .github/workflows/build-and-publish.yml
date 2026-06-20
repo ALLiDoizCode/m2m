@@ -88,8 +88,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # NOTE: a plain `npm ci` does NOT authenticate the
+        # @anyone-protocol/anyone-client postinstall against api.github.com —
+        # patch-package (which injects the GITHUB_TOKEN auth header) only runs
+        # via the root postinstall, which fires AFTER the dependency's own
+        # postinstall, so a GITHUB_TOKEN env here would be dead config. To
+        # actually authenticate it, adopt the two-phase install used in
+        # nightly-ator.yml (npm ci --ignore-scripts → patch-package → rebuild).
         run: npm ci
 
       - name: Install libsql native module for Linux
