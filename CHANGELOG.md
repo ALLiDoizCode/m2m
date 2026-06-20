@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.0](https://github.com/toon-protocol/connector/compare/v3.14.1...v3.15.0) (2026-06-20)
+
+### Features
+
+- add devbox.json + CI devbox-validate job; bump Solana CLI to v3.1.12 ([#163](https://github.com/toon-protocol/connector/issues/163)) ([169a7ff](https://github.com/toon-protocol/connector/commit/169a7ff370fc9fba25ac3de6ac7931daf533bf26)), closes [#145](https://github.com/toon-protocol/connector/issues/145) [#145](https://github.com/toon-protocol/connector/issues/145) [#105](https://github.com/toon-protocol/connector/issues/105)
+
+### Bug Fixes
+
+- **ci:** make devbox 'Assert tool versions' robust (fix grep --versionn) ([#175](https://github.com/toon-protocol/connector/issues/175)) ([a85d395](https://github.com/toon-protocol/connector/commit/a85d39572a6d0a008458323e80e08dcf547a7dc0))
+
 ## [3.14.1](https://github.com/toon-protocol/connector/compare/v3.14.0...v3.14.1) (2026-06-20)
 
 ### Bug Fixes
