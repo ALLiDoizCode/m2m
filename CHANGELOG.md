@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.1](https://github.com/toon-protocol/connector/compare/v3.13.0...v3.13.1) (2026-06-20)
+
+### Bug Fixes
+
+- **ci:** add admin-API healthcheck to two-home-ator-local connector services ([#162](https://github.com/toon-protocol/connector/issues/162)) ([639dda1](https://github.com/toon-protocol/connector/commit/639dda19d6ab8e99ae9ce14abccac352ace2e003)), closes [#160](https://github.com/toon-protocol/connector/issues/160)
+- **ci:** add NET_ADMIN capability to hs1 container for tcpdump BPF access ([#169](https://github.com/toon-protocol/connector/issues/169)) ([f3d3371](https://github.com/toon-protocol/connector/commit/f3d337101aa058e2dec89ed0a72888bfbec188f0)), closes [#166](https://github.com/toon-protocol/connector/issues/166)
+- **test:** replace fixed sleep with poll-until-gone in ator afterEach ([#164](https://github.com/toon-protocol/connector/issues/164)) ([f4594f2](https://github.com/toon-protocol/connector/commit/f4594f23877dc034e41c90bd9b81949e33ec86d5)), closes [#157](https://github.com/toon-protocol/connector/issues/157)
+
 ## [3.13.0](https://github.com/toon-protocol/connector/compare/v3.12.2...v3.13.0) (2026-06-17)
 
 ### Features
