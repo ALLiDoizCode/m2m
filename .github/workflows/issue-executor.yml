@@ -6,6 +6,11 @@
 # The custom org App token is REQUIRED here (not just for Projects): a PR opened
 # with the default GITHUB_TOKEN does NOT trigger other workflows, so Loop C's
 # reviewer would never fire. Opening the PR via the App makes the handshake work.
+#
+# Turn budget: we deliberately do NOT pass --max-turns. A turn cap truncates
+# legitimate long implementations (issue #151 was killed mid-task at the cap,
+# producing no branch/PR while the job still reported green). The real backstop
+# is timeout-minutes below; the guard step turns an errored session red.
 name: Issue Executor
 
 on:
@@ -24,6 +29,7 @@ jobs:
   execute:
     if: github.event_name == 'issues' && github.event.label.name == 'agent:ready'
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # real backstop now that --max-turns is removed
     concurrency:
       group: executor-issue-${{ github.event.issue.number }}
       cancel-in-progress: false
@@ -36,6 +42,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - uses: anthropics/claude-code-action@v1
+        id: claude
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
@@ -47,7 +54,25 @@ jobs:
             /toon-skills:issue-executor implement issue
             #${{ github.event.issue.number }} in ${{ github.repository }} and open a PR
             on an agent/ branch so the reviewer loop runs.
-          claude_args: "--max-turns 40 --allowedTools Edit,Write,Read,Grep,Glob,Bash"
+          claude_args: "--allowedTools Edit,Write,Read,Grep,Glob,Bash"
+      - name: Fail the job if the Claude session did not complete cleanly
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          # claude-code-action exits 0 even when the session ends in is_error
+          # (hit a limit, a tool failed, etc.), which would otherwise show a
+          # misleading green. Fail closed: only an explicit is_error=false passes.
+          if [ -z "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
+            echo "::error::No Claude execution output file; treating as failure."
+            exit 1
+          fi
+          is_error=$(jq -rs 'flatten | map(select(.type? == "result")) | last | .is_error' "$EXECUTION_FILE" 2>/dev/null)
+          echo "Claude session is_error=${is_error:-unknown}"
+          if [ "$is_error" != "false" ]; then
+            echo "::error::Claude session did not complete cleanly (is_error=${is_error:-unknown})."
+            exit 1
+          fi
 
   # Bounded fix loop: the reviewer requested changes on an agent/ PR.
   fixup:
@@ -56,6 +81,7 @@ jobs:
       github.event.review.state == 'changes_requested' &&
       startsWith(github.event.pull_request.head.ref, 'agent/')
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # real backstop now that --max-turns is removed
     concurrency:
       group: executor-pr-${{ github.event.pull_request.number }}
       cancel-in-progress: false
@@ -70,6 +96,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - uses: anthropics/claude-code-action@v1
+        id: claude
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
@@ -81,4 +108,22 @@ jobs:
             #${{ github.event.pull_request.number }} in ${{ github.repository }}.
             Follow the bounded fix loop: respect the review-round:<n> cap and
             escalate to needs:human if the cap is exceeded.
-          claude_args: "--max-turns 40 --allowedTools Edit,Write,Read,Grep,Glob,Bash"
+          claude_args: "--allowedTools Edit,Write,Read,Grep,Glob,Bash"
+      - name: Fail the job if the Claude session did not complete cleanly
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          # claude-code-action exits 0 even when the session ends in is_error
+          # (hit a limit, a tool failed, etc.), which would otherwise show a
+          # misleading green. Fail closed: only an explicit is_error=false passes.
+          if [ -z "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
+            echo "::error::No Claude execution output file; treating as failure."
+            exit 1
+          fi
+          is_error=$(jq -rs 'flatten | map(select(.type? == "result")) | last | .is_error' "$EXECUTION_FILE" 2>/dev/null)
+          echo "Claude session is_error=${is_error:-unknown}"
+          if [ "$is_error" != "false" ]; then
+            echo "::error::Claude session did not complete cleanly (is_error=${is_error:-unknown})."
+            exit 1
+          fi
