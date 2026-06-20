@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.2](https://github.com/toon-protocol/connector/compare/v3.15.1...v3.15.2) (2026-06-20)
+
+### Bug Fixes
+
+- **ci:** resolve nightly-ator failures (Causes B1, C, D + patch A) ([#177](https://github.com/toon-protocol/connector/issues/177)) ([b272488](https://github.com/toon-protocol/connector/commit/b27248837ca21661516f915b8dadd7ecf2840061))
+
 ## [3.15.1](https://github.com/toon-protocol/connector/compare/v3.15.0...v3.15.1) (2026-06-20)
 
 ### Bug Fixes
