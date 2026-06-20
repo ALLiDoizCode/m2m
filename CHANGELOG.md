@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.14.1](https://github.com/toon-protocol/connector/compare/v3.14.0...v3.14.1) (2026-06-20)
+
+### Bug Fixes
+
+- **test:** use SocksProxyAgent + WebSocket { agent } for system-tor round-trip (T-36.5-07b) ([#168](https://github.com/toon-protocol/connector/issues/168)) ([921062e](https://github.com/toon-protocol/connector/commit/921062e994fa445cd61bdacc14b6c57458bcb1c9)), closes [#159](https://github.com/toon-protocol/connector/issues/159)
+
 ## [3.14.0](https://github.com/toon-protocol/connector/compare/v3.13.2...v3.14.0) (2026-06-20)
 
 ### Features
