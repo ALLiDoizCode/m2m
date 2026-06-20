@@ -977,7 +977,7 @@ npm run dev
 
 ### Getting started with Devbox
 
-[Devbox](https://github.com/jetify-com/devbox) pins the full local toolchain to the exact versions CI uses — Node 22.11.0, Rust stable, Solana CLI 3.1.12, Foundry, and jq — so `make build`, `make test`, `make lint`, and `make solana-build` all work in a reproducible shell without touching your system packages.
+[Devbox](https://github.com/jetify-com/devbox) pins the full local toolchain to the exact versions CI uses — Node 22.11.0, Rust stable, Solana CLI 3.1.12, Foundry 1.7.1, and jq 1.7.1 — so `make build`, `make test`, `make lint`, and `make solana-build` all work in a reproducible shell without touching your system packages. **Note:** `contracts.yml` CI uses `foundry-rs/foundry-toolchain@v1 nightly`; devbox pins 1.7.1 for reproducibility. If nightly Foundry diverges, local forge builds may differ from contracts CI.
 
 **Prerequisites:** [Install devbox](https://www.jetify.com/devbox/docs/installing_devbox/) (one-liner).
 
@@ -989,7 +989,7 @@ devbox shell
 node --version    # v22.11.0
 cargo --version   # cargo stable
 solana --version  # 3.1.12 (installed via init_hook on first shell entry)
-forge --version   # Foundry latest
+forge --version   # 1.7.1 (devbox); contracts CI uses foundry-rs/foundry-toolchain@v1 nightly — intentional mismatch
 jq --version      # 1.7.1
 
 # Run the standard build and test targets

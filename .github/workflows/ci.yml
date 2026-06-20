@@ -1071,17 +1071,19 @@ jobs:
 
       - name: Assert tool versions
         run: |
-          devbox run -- node --version | grep -E "^v22\.11\."
-          devbox run -- npm --version | grep -E "^10\."
-          devbox run -- cargo --version
-          devbox run -- rustc --version
-          devbox run -- forge --version | grep -E "^forge 1\.7\."
-          devbox run -- cast --version
-          devbox run -- anvil --version
-          devbox run -- jq --version | grep -E "^jq-1\.7\."
+          devbox run -- bash -c "
+            set -e
+            node --version | grep -E '^v22\.11\.'
+            npm --version | grep -E '^10\.'
+            cargo --version
+            rustc --version
+            forge --version | grep -E '^forge 1\.7\.'
+            cast --version
+            anvil --version
+            jq --version | grep -E '^jq-1\.7\.'
+            solana --version | grep -E '^solana-cli 3\.1\.12'
+          "
           echo "✅ All devbox tools resolved at expected versions"
 
       - name: Smoke build (npm ci + npm run build)
-        run: |
-          devbox run -- npm ci
-          devbox run -- npm run build
+        run: devbox run -- bash -c "npm ci && npm run build"
