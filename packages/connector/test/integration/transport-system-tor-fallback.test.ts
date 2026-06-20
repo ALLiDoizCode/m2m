@@ -37,7 +37,7 @@
 import * as fs from 'fs';
 import * as net from 'net';
 import pino from 'pino';
-import { SocksClient } from 'socks';
+import WebSocket, { WebSocketServer } from 'ws';
 import { SocksTransportProvider } from '../../src/transport/socks-transport-provider';
 
 // ---------------------------------------------------------------------------
@@ -180,41 +180,44 @@ describeSmoke(`System-tor fallback smoke (Story 36.5, ${SKIP_REASON})`, () => {
   // T-36.5-07b (AC 8): TCP round-trip through system tor SOCKS proxy
   //                     succeeds (smoke)
   //
-  // Scope: This opens a SOCKS5-proxied TCP connection to a LOCAL echo
-  // server (NOT an external host through the tor exit network). We spin
-  // up a net.createServer echo sidecar on an ephemeral port and route
-  // through the system tor SOCKS proxy to 127.0.0.1:<echoPort>.
+  // Scope: This opens a SOCKS5-proxied WebSocket connection to a LOCAL
+  // echo server (NOT an external host through the tor exit network). We
+  // spin up a WebSocketServer echo sidecar on an ephemeral port and route
+  // through the system tor SOCKS proxy via provider.createAgent().
+  //
+  // provider.createAgent() returns a SocksProxyAgent, passed to ws as
+  // { agent } — the same code path BTPClient uses in production
+  // (agentFactory callback). This is the stable, documented API surface
+  // for SOCKS5 over WebSocket; it exercises createAgent() end-to-end.
   // -----------------------------------------------------------------------
   describe('T-36.5-07b: TCP round-trip through system tor SOCKS proxy succeeds (smoke)', () => {
-    let echoServer: net.Server | undefined;
+    let echoServer: WebSocketServer | undefined;
     let echoPort: number;
 
-    beforeAll(
+    beforeAll(async () => {
+      echoServer = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+      echoServer.on('connection', (ws) => {
+        ws.on('message', (data) => ws.send(data));
+      });
+      await new Promise<void>((resolve, reject) => {
+        echoServer!.once('listening', resolve);
+        echoServer!.once('error', reject);
+      });
+      const addr = echoServer.address();
+      if (!addr || typeof addr === 'string') throw new Error('WS echo server did not bind');
+      echoPort = addr.port;
+    });
+
+    afterAll(
       () =>
-        new Promise<void>((resolve, reject) => {
-          echoServer = net.createServer((sock) => {
-            sock.pipe(sock); // echo
-          });
-          echoServer.listen(0, '127.0.0.1', () => {
-            const addr = echoServer!.address();
-            if (addr && typeof addr === 'object') {
-              echoPort = addr.port;
-              resolve();
-            } else {
-              reject(new Error('Echo server did not bind'));
-            }
-          });
-          echoServer.once('error', reject);
+        new Promise<void>((resolve) => {
+          if (!echoServer) return resolve();
+          for (const client of echoServer.clients) client.terminate();
+          echoServer.close(() => resolve());
         })
     );
 
-    afterAll(() => {
-      if (echoServer) {
-        echoServer.close();
-      }
-    });
-
-    it('data round-trips correctly through system tor SOCKS proxy to local echo server', async () => {
+    it('data round-trips correctly through system tor SOCKS proxy to local WS echo server', async () => {
       const provider = trackProvider(
         new SocksTransportProvider({
           socksProxy: PROXY_URL,
@@ -224,50 +227,35 @@ describeSmoke(`System-tor fallback smoke (Story 36.5, ${SKIP_REASON})`, () => {
       );
       await provider.start();
 
-      // SocksProxyAgent.createConnection() callback is not reliably invoked in
-      // agent-base v7+ when connect() returns undefined. Use SocksClient
-      // directly — same underlying SOCKS5 path, stable Promise-based API.
-      const { socket: sock } = await SocksClient.createConnection({
-        proxy: { host: '127.0.0.1', port: TOR_PORT, type: 5 },
-        command: 'connect',
-        destination: { host: '127.0.0.1', port: echoPort },
-        timeout: ROUND_TRIP_BUDGET_MS,
+      const echoWsUrl = `ws://127.0.0.1:${echoPort}`;
+      const agent = provider.createAgent(echoWsUrl);
+      const client = new WebSocket(echoWsUrl, { agent });
+
+      await new Promise<void>((resolve, reject) => {
+        client.once('open', resolve);
+        client.once('error', reject);
       });
 
       try {
-        const payload = Buffer.from('hello-system-tor-fallback');
-        const received: Buffer[] = [];
-        const roundTrip = new Promise<Buffer>((resolve, reject) => {
+        const payload = 'hello-system-tor-fallback';
+        const received = await new Promise<string>((resolve, reject) => {
           const timer = setTimeout(
             () => reject(new Error(`Round-trip budget ${ROUND_TRIP_BUDGET_MS}ms exceeded`)),
             ROUND_TRIP_BUDGET_MS
           );
-          let collected = 0;
-          sock.on('data', (chunk: Buffer) => {
-            received.push(chunk);
-            collected += chunk.length;
-            if (collected >= payload.length) {
-              clearTimeout(timer);
-              resolve(Buffer.concat(received).subarray(0, payload.length));
-            }
+          client.once('message', (data) => {
+            clearTimeout(timer);
+            resolve(data.toString());
           });
-          sock.once('error', (err) => {
+          client.once('error', (err) => {
             clearTimeout(timer);
             reject(err);
           });
-          sock.once('close', () => {
-            if (collected < payload.length) {
-              clearTimeout(timer);
-              reject(new Error(`Peer closed after ${collected}/${payload.length} bytes`));
-            }
-          });
+          client.send(payload);
         });
-
-        sock.write(payload);
-        const echoed = await roundTrip;
-        expect(echoed.equals(payload)).toBe(true);
+        expect(received).toBe(payload);
       } finally {
-        sock.destroy();
+        client.terminate();
       }
     });
   });
