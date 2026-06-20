@@ -370,6 +370,22 @@ export interface AdminHsHostnameResponse {
 }
 
 /**
+ * GET /admin/anon-hostname response (Story 151).
+ *
+ * Hub-facing accessor for the connector's `.anon` hidden-service hostname.
+ * `anonHostname` is redacted to `<redacted-anon>` unless the connector is
+ * running at DEBUG log level — preventing casual display of the `.anon`
+ * address in hub status output.
+ *
+ * Both fields are `null` during the 30–90s bootstrap window. 503 with
+ * `{ error: "anon-disabled" }` when no hidden service is configured.
+ */
+export interface AdminAnonHostnameResponse {
+  anonHostname: string | null;
+  publishedAt: string | null;
+}
+
+/**
  * GET /admin/settlement/states response item
  */
 export interface SettlementStateResponse {
@@ -1909,6 +1925,31 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       res.set('Retry-After', '3');
     }
     res.json(snapshot satisfies AdminHsHostnameResponse);
+  });
+
+  /**
+   * GET /admin/anon-hostname
+   *
+   * Story 151 — hub-facing read accessor for the connector's `.anon`
+   * hidden-service hostname. Redacts the hostname to `<redacted-anon>` at
+   * INFO and above so it does not appear in operator log streams; full value
+   * is included in the response only when the connector runs at DEBUG level.
+   */
+  router.get('/anon-hostname', (_req: Request, res: Response) => {
+    if (!managedAnonClient || !managedAnonClient.isHiddenServiceConfigured()) {
+      res.set('Cache-Control', 'no-store');
+      res.status(503).json({ error: 'anon-disabled' });
+      return;
+    }
+    const snapshot = managedAnonClient.getHostnameSnapshot();
+    const anonHostname =
+      snapshot.hostname !== null && log.level !== 'debug' ? '<redacted-anon>' : snapshot.hostname;
+    res.set('Cache-Control', 'no-store');
+    if (snapshot.hostname === null) {
+      res.set('Retry-After', '3');
+    }
+    const body: AdminAnonHostnameResponse = { anonHostname, publishedAt: snapshot.publishedAt };
+    res.json(body);
   });
 
   /**
