@@ -413,6 +413,7 @@ services:
       HIDDEN_SERVICE_PORT: '5000'
     cap_add:
       - NET_RAW
+      - NET_ADMIN
     volumes:
       - ator_hs1:/var/lib/anon
       - ator_shared:/shared
