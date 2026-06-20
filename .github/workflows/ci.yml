@@ -1082,18 +1082,28 @@ jobs:
 
       - name: Assert tool versions
         run: |
-          devbox run -- bash -c "
-            set -e
-            node --version | grep -E '^v22\.11\.'
-            npm --version | grep -E '^10\.'
-            cargo --version
-            rustc --version
-            forge --version | grep -E '^forge 1\.7\.'
-            cast --version
-            anvil --version
-            jq --version | grep -E '^jq-1\.7\.'
-            solana --version | grep -E '^solana-cli 3\.1\.12'
-          "
+          # Write the assertion script to a file and run it via `devbox run -- bash
+          # <file>`. Passing a multi-line script as a single `bash -c "..."` argument
+          # through `devbox run --` re-tokenizes the embedded newlines (it mangled
+          # `--version`\n`npm` into `grep --versionn`), so feed it as a real script
+          # instead. The single-quoted heredoc keeps the regex backslashes literal.
+          cat > "${RUNNER_TEMP:-/tmp}/assert-versions.sh" <<'ASSERT'
+          set -euo pipefail
+          node --version | grep -E '^v22\.11\.'
+          npm --version | grep -E '^10\.'
+          cargo --version
+          rustc --version
+          # foundry (forge/cast/anvil): assert they run, not a version string. The
+          # devbox package `foundry@1.7.1` is the nixpkgs package version, which is
+          # NOT what `forge --version` prints, so a `^forge 1\.7\.` regex is wrong.
+          # devbox.lock already pins the exact foundry build.
+          forge --version
+          cast --version
+          anvil --version
+          jq --version | grep -E '^jq-1\.7\.'
+          solana --version | grep -E '^solana-cli 3\.1\.12'
+          ASSERT
+          devbox run -- bash "${RUNNER_TEMP:-/tmp}/assert-versions.sh"
           echo "✅ All devbox tools resolved at expected versions"
 
       - name: Smoke build (npm ci + npm run build)
