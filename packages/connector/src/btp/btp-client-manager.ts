@@ -137,24 +137,30 @@ export class BTPClientManager {
     // Store client before connecting
     this._clients.set(peer.id, client);
 
-    // Fire-and-forget: POST /admin/peers returns 201 immediately so hidden-service
-    // circuit establishment (30-90 s) does not block the HTTP response. BTPClient
-    // keeps the client in the map and retries on failure regardless.
-    void client.connect().catch((error) => {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this._logger.warn(
-        {
-          event: 'btp_client_add_peer_failed',
-          peerId: peer.id,
-          error: redactAnonInMessage(errorMessage),
-        },
-        'Initial connection to peer failed (will retry in background)'
-      );
-    });
-    this._logger.info(
-      { event: 'btp_client_peer_added', peerId: peer.id },
-      'Peer registered (connecting in background)'
-    );
+    // Bounded await: wait for the initial connection attempt, but cap at
+    // BTP_CONNECT_TIMEOUT_MS (default 5 s) so hidden-service peers (30-90 s
+    // circuit establishment) don't block addPeer indefinitely. If the timeout
+    // fires first the connection continues in the background — BTPClient emits
+    // 'connected' when established and retries on failure regardless. addPeer
+    // always resolves so the HTTP handler always returns 201 quickly while
+    // startup's getPeerStatus() correctly sees which peers connected in time.
+    const connectTimeoutMs = parseInt(process.env.BTP_CONNECT_TIMEOUT_MS ?? '5000', 10);
+    const connectTimeout = new Promise<void>((resolve) => setTimeout(resolve, connectTimeoutMs));
+    await Promise.race([
+      client.connect().catch((error) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this._logger.warn(
+          {
+            event: 'btp_client_add_peer_failed',
+            peerId: peer.id,
+            error: redactAnonInMessage(errorMessage),
+          },
+          'Initial connection to peer failed (will retry in background)'
+        );
+      }),
+      connectTimeout,
+    ]);
+    this._logger.info({ event: 'btp_client_peer_added', peerId: peer.id }, 'Peer registered');
   }
 
   /**
