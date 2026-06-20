@@ -12,6 +12,15 @@
 #   Either way the reviewer is a DIFFERENT identity from the App that authored the
 #   PR, so GitHub's "can't review your own PR" rule never blocks it.
 #
+# Metadata self-heal (avoids a structural deadlock):
+#   Loop B's fixup job only edits CODE and pushes COMMITS. A `changes_requested`
+#   review whose only blocker is the PR title/description is therefore unfixable by
+#   that loop — there is no code to change, and editing PR metadata does not emit a
+#   `synchronize` event, so the reviewer would never re-run and the round freezes.
+#   To prevent this, the reviewer FIXES metadata issues itself with `gh pr edit`
+#   (it has Pull requests RW) and then APPROVEs, reserving `--request-changes` for
+#   genuine code issues that the fixup loop can actually resolve.
+#
 # Turn budget: we deliberately do NOT pass --max-turns. A turn cap can truncate a
 # review mid-analysis, leaving the PR with no verdict while the job still reports
 # green. The real backstop is timeout-minutes below; the guard step turns an
@@ -51,14 +60,26 @@ jobs:
             (2) read CLAUDE.md / AGENTS.md for repo standards;
             (3) check for correctness bugs, security issues, and standards violations —
             be skeptical, default to requesting changes if anything is genuinely wrong;
-            (4) SUBMIT EXACTLY ONE formal review via the gh CLI:
-            if you find any blocking issue, run
+            (4) sort every blocking finding into CODE issues (anything in the diff:
+            correctness, security, logic, standards) vs METADATA issues (the PR title
+            or description is inaccurate or misleading — e.g. the title no longer matches
+            the diff, or the body miscounts/misdescribes the change). The PR title becomes
+            the squash-commit message under semantic-release, so it MUST accurately
+            describe the diff. For METADATA issues, FIX THEM YOURSELF instead of blocking:
+            run `gh pr edit ${{ github.event.pull_request.number }} --title "<accurate title>"`
+            and/or `gh pr edit ${{ github.event.pull_request.number }} --body "<accurate body>"`
+            with corrected content, then treat them as resolved. Do NOT request changes
+            solely for metadata you just fixed — the fixup loop cannot edit PR metadata,
+            so blocking on it deadlocks the round;
+            (5) SUBMIT EXACTLY ONE formal review via the gh CLI:
+            if any CODE issue remains, run
             `gh pr review ${{ github.event.pull_request.number }} --request-changes --body "<specific, actionable findings>"`;
-            otherwise run
-            `gh pr review ${{ github.event.pull_request.number }} --approve --body "<short summary of what you checked>"`.
+            otherwise (after applying any metadata fixes above) run
+            `gh pr review ${{ github.event.pull_request.number }} --approve --body "<short summary of what you checked; note any title/body you corrected>"`.
             If `--approve` is rejected (the github-actions bot cannot approve), fall back to
             `gh pr review ${{ github.event.pull_request.number }} --comment --body "LGTM — no blocking issues found. <summary>"`.
-            Never merge, never push commits to the branch.
+            Editing the PR title/body via `gh pr edit` is allowed and expected; never merge,
+            never push commits to the branch.
           claude_args: "--allowedTools Bash(gh:*),Read,Grep,Glob"
       - name: Fail the job if the Claude session did not complete cleanly
         if: always()
