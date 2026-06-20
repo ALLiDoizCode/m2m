@@ -1069,16 +1069,16 @@ jobs:
         with:
           enable-cache: true
 
-      # Mirror the cache step used by solana-integration and solana-program jobs
-      # (ci.yml lines 471-475 and 809-813). Solana is installed via the devbox
-      # init_hook, not as an explicit CI step; without this cache the init_hook
-      # triggers a fresh platform-tools network download — the source of the
-      # flaky "unexpected character 'l'" panic documented in issue #105.
-      - name: Cache Solana platform-tools
+      # Cache the Solana CLI binary installed by the devbox init_hook
+      # (written to ~/.local/share/solana by release.anza.xyz/v3.1.12/install).
+      # Without this, every cold devbox-validate run re-downloads the CLI.
+      # Note: platform-tools (~/.cache/solana) are not cached here because this
+      # job never runs cargo build-sbf and therefore never downloads them.
+      - name: Cache Solana CLI
         uses: actions/cache@v4
         with:
-          path: ~/.cache/solana
-          key: solana-platform-tools-${{ runner.os }}-v1.52
+          path: ~/.local/share/solana
+          key: solana-cli-${{ runner.os }}-v3.1.12
 
       - name: Assert tool versions
         run: |
