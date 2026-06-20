@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.1](https://github.com/toon-protocol/connector/compare/v3.15.0...v3.15.1) (2026-06-20)
+
+### Bug Fixes
+
+- **ci:** remove dead GITHUB_TOKEN env from plain npm ci install steps ([#155](https://github.com/toon-protocol/connector/issues/155)) ([#176](https://github.com/toon-protocol/connector/issues/176)) ([16c0eae](https://github.com/toon-protocol/connector/commit/16c0eaedaa2bed4b4ca98d51e519359b788c3e3e))
+
 ## [3.15.0](https://github.com/toon-protocol/connector/compare/v3.14.1...v3.15.0) (2026-06-20)
 
 ### Features
