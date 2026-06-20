@@ -14,8 +14,8 @@
 
 import request from 'supertest';
 import express, { Express } from 'express';
+import pino from 'pino';
 import { createAdminRouter, AdminAPIConfig } from './admin-api';
-import type { Logger } from 'pino';
 import type { RoutingTable } from '../routing/routing-table';
 import type { BTPClientManager } from '../btp/btp-client-manager';
 import type { ManagedAnonClient } from '../transport/managed-anon-client';
@@ -39,16 +39,13 @@ function fakeManagedAnonClient(opts: FakeManagedAnonClientOptions): ManagedAnonC
 describe('Admin API GET /admin/anon-hostname (Story 151)', () => {
   let mockRoutingTable: jest.Mocked<RoutingTable>;
   let mockBTPClientManager: jest.Mocked<BTPClientManager>;
-  let mockLogger: jest.Mocked<Logger>;
 
   const buildApp = async (
     overrides?: Partial<AdminAPIConfig>,
     logLevel = 'info'
   ): Promise<Express> => {
-    const logger = {
-      ...mockLogger,
-      level: logLevel,
-    } as unknown as jest.Mocked<Logger>;
+    const logger = pino({ level: 'silent' });
+    logger.level = logLevel;
     const config: AdminAPIConfig = {
       routingTable: mockRoutingTable,
       btpClientManager: mockBTPClientManager,
@@ -63,6 +60,8 @@ describe('Admin API GET /admin/anon-hostname (Story 151)', () => {
   };
 
   beforeEach(() => {
+    jest.clearAllMocks();
+
     mockRoutingTable = {
       addRoute: jest.fn(),
       removeRoute: jest.fn(),
@@ -80,17 +79,6 @@ describe('Admin API GET /admin/anon-hostname (Story 151)', () => {
       getConnectedPeers: jest.fn().mockReturnValue([]),
       getClientForPeer: jest.fn(),
     } as unknown as jest.Mocked<BTPClientManager>;
-
-    mockLogger = {
-      info: jest.fn(),
-      error: jest.fn(),
-      warn: jest.fn(),
-      debug: jest.fn(),
-      child: jest.fn().mockReturnThis(),
-      fatal: jest.fn(),
-      trace: jest.fn(),
-      level: 'info',
-    } as unknown as jest.Mocked<Logger>;
   });
 
   // --- AC 1: debug and trace levels return full hostname ---
