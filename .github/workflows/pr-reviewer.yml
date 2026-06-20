@@ -11,6 +11,11 @@
 #     trigger Loop B. So fixups are human-driven until you add REVIEWER_TOKEN.
 #   Either way the reviewer is a DIFFERENT identity from the App that authored the
 #   PR, so GitHub's "can't review your own PR" rule never blocks it.
+#
+# Turn budget: we deliberately do NOT pass --max-turns. A turn cap can truncate a
+# review mid-analysis, leaving the PR with no verdict while the job still reports
+# green. The real backstop is timeout-minutes below; the guard step turns an
+# errored session red.
 name: PR Reviewer
 
 on:
@@ -29,9 +34,11 @@ jobs:
   review:
     if: startsWith(github.head_ref, 'agent/')
     runs-on: ubuntu-latest
+    timeout-minutes: 20 # real backstop now that --max-turns is removed
     steps:
       - uses: actions/checkout@v4
       - uses: anthropics/claude-code-action@v1
+        id: claude
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.REVIEWER_TOKEN || github.token }}
@@ -52,4 +59,22 @@ jobs:
             If `--approve` is rejected (the github-actions bot cannot approve), fall back to
             `gh pr review ${{ github.event.pull_request.number }} --comment --body "LGTM — no blocking issues found. <summary>"`.
             Never merge, never push commits to the branch.
-          claude_args: "--max-turns 25 --allowedTools Bash(gh:*),Read,Grep,Glob"
+          claude_args: "--allowedTools Bash(gh:*),Read,Grep,Glob"
+      - name: Fail the job if the Claude session did not complete cleanly
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          # claude-code-action exits 0 even when the session ends in is_error
+          # (hit a limit, a tool failed, etc.), which would otherwise show a
+          # misleading green. Fail closed: only an explicit is_error=false passes.
+          if [ -z "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
+            echo "::error::No Claude execution output file; treating as failure."
+            exit 1
+          fi
+          is_error=$(jq -rs 'flatten | map(select(.type? == "result")) | last | .is_error' "$EXECUTION_FILE" 2>/dev/null)
+          echo "Claude session is_error=${is_error:-unknown}"
+          if [ "$is_error" != "false" ]; then
+            echo "::error::Claude session did not complete cleanly (is_error=${is_error:-unknown})."
+            exit 1
+          fi
