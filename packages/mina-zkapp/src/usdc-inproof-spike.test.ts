@@ -16,12 +16,7 @@
 
 import { AccountUpdate, Bool, Field, Mina, PrivateKey, UInt64 } from 'o1js';
 
-import {
-  FungibleTokenAdmin,
-  USDC_DECIMALS_U8,
-  ONE_USDC,
-  usdcDeployProps,
-} from './usdc-token';
+import { FungibleTokenAdmin, USDC_DECIMALS_U8, ONE_USDC, usdcDeployProps } from './usdc-token';
 import { SpikeToken, SpikeChannelState } from './usdc-inproof-spike';
 
 describe('SPIKE: in-proof-enforcing USDC token owner', () => {
@@ -111,7 +106,9 @@ describe('SPIKE: in-proof-enforcing USDC token owner', () => {
     // `send: none()` permission set earlier.
     await tx.sign([deployer.key]).send();
 
-    expect((await token.getBalanceOf(recipient)).toBigInt()).toBe(recipientBefore + PAYOUT.toBigInt());
+    expect((await token.getBalanceOf(recipient)).toBigInt()).toBe(
+      recipientBefore + PAYOUT.toBigInt()
+    );
     expect((await token.getBalanceOf(escrow)).toBigInt()).toBe(escrowBefore - PAYOUT.toBigInt());
   });
 

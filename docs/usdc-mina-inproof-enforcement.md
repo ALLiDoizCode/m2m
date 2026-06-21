@@ -14,7 +14,7 @@ compromised channel key could brick or mispay a channel (it can't steal more tha
 escrowed, but accounting↔escrow can desync). EVM (`TokenNetwork`) and Solana (the
 program) both bind payouts in-contract; Mina is the outlier.
 
-**Decision:** move enforcement into a **custom token-owner zkApp** so the *proof*
+**Decision:** move enforcement into a **custom token-owner zkApp** so the _proof_
 (not the SDK) binds payouts to the channel commitment — matching EVM/Solana
 trustlessness.
 
@@ -24,8 +24,8 @@ trustlessness.
 - `approveBase(forest)` is the owner's gate over **every** token movement (enforces
   Σ balanceChange == 0, permissions unchanged).
 - `TokenContract` exposes `this.internal.send(...)` — **the owner can author token
-  movements**, and a subclass can add `@method`s that move tokens *while enforcing
-  arbitrary constraints in the same proof*. Because the owner is the only actor
+  movements**, and a subclass can add `@method`s that move tokens _while enforcing
+  arbitrary constraints in the same proof_. Because the owner is the only actor
   that can move the token, gating the only escrow-moving path behind channel-rule
   checks makes desync impossible.
 
@@ -39,7 +39,7 @@ trustlessness.
 - **`UsdcChannelToken extends FungibleToken`** — the enforcer + mover:
   - `depositToChannel(channelAddr, amount, depositor)` — precondition
     `channel.channelState == OPEN`; `internal.send(depositor → channelEscrow,
-    amount)`; runs in the same tx as `channel.deposit(amount, depositor)` and binds
+amount)`; runs in the same tx as `channel.deposit(amount, depositor)` and binds
     the moved amount to the accounted amount. Depositor signs.
   - `settleFromChannel(channelAddr, balanceA, balanceB, salt, A, B, nonce)` —
     preconditions binding to the channel's on-chain state:
@@ -47,7 +47,7 @@ trustlessness.
     `depositTotal == balanceA+balanceB`, `channelState == CLOSING`,
     `channelHash == Poseidon(A.x,B.x,nonce)`, `currentSlot ≥ closedAtSlot+timeout`;
     then `internal.send(escrow → B, balanceB)` and `internal.send(escrow → A,
-    balanceA)` (skip zero), and drive `channel → SETTLED`. **Payouts are forced ==
+balanceA)` (skip zero), and drive `channel → SETTLED`. **Payouts are forced ==
     committed balances inside the proof.**
 - **Escrow** = the channel zkApp address's token account under the USDC `tokenId`.
   Its permissions are set (at first deposit) so the **owner's proof** can author
@@ -56,7 +56,7 @@ trustlessness.
 ## Feasibility questions the spike MUST answer (before the full build)
 
 1. Can a `FungibleToken` subclass `@method` author `internal.send({from: escrow,
-   …})` authorized by the **owner's proof alone** (no escrow-holder signature),
+…})` authorized by the **owner's proof alone** (no escrow-holder signature),
    given escrow permissions set so only the owner can move it?
 2. Can that `@method` **read another zkApp's (`PaymentChannel`) @state via account
    precondition** to bind `balanceA/balanceB/depositTotal/channelState/channelHash`?
@@ -66,7 +66,7 @@ trustlessness.
 
 The spike proves these with a **minimal passing o1js test** (proofsEnabled:false):
 a custom `FungibleToken` subclass moves escrowed tokens from a holder account to a
-recipient *only* when an in-proof constraint holds, and **rejects** a tampered
+recipient _only_ when an in-proof constraint holds, and **rejects** a tampered
 amount. If a question hits an o1js wall (permissions, cross-account reads,
 recursive-proof need), report it — that gates the rewrite.
 
@@ -76,7 +76,7 @@ Replaces #191's accounting-only-then-SDK-moves and #192's SDK-built transfers wi
 owner-enforced moves. #192's SDK reworks to call `depositToChannel` /
 `settleFromChannel` (the channel key signature for settle likely goes away — the
 owner's proof authorizes escrow movement). #194's adversarial tests carry over
-(now the *contract* enforces what they assert). The nightly lightnet job validates
+(now the _contract_ enforces what they assert). The nightly lightnet job validates
 the new path on-chain.
 
 ## Spike results — VERDICT: FEASIBLE (proven, `usdc-inproof-spike.{ts,test.ts}`)
@@ -87,12 +87,12 @@ the new path on-chain.
   with `Permissions.send = none()` + `setPermissions = impossible()` (the same
   trick `FungibleToken.initialize` uses on its circulation account).
 - **Owner-authored escrow debit (Q1):** do **NOT** use `this.internal.send(...)`
-  for the escrow leg — o1js `tokenMethods.send` hardcodes a lazy *signature*, so a
+  for the escrow leg — o1js `tokenMethods.send` hardcodes a lazy _signature_, so a
   missing escrow key becomes a dummy sig the OCaml ledger rejects. Instead author
   the sender `AccountUpdate` manually (`balanceChange = Int64.from(amount).neg()`,
   `useFullCommitment = true`), set **lazy-none** authorization
   (`authorizationKind.isSigned/isProved = false`, `lazyAuthorization = {kind:
-  'lazy-none'}`), then `this.approve(senderAu)`. With `send: none`, lazy-none is
+'lazy-none'}`), then `this.approve(senderAu)`. With `send: none`, lazy-none is
   accepted; a non-custodial holder correctly FAILS (negative control passed).
 - **Cross-account state precondition (Q2):** the high-level `au.account.state`
   helper is a **no-op for the state array** — set the slot directly:
@@ -101,7 +101,7 @@ the new path on-chain.
   `balanceCommitment`/`depositTotal`/`channelState`/`channelHash`.
 - **TS subclass friction:** `FungibleToken`'s typed `events` trips the `@method`
   decorator (TS1241); add `declare events: FungibleToken['events'] & Record<string,
-  never>;` to the subclass.
+never>;` to the subclass.
 - **Cost:** `enforcedPayout` = 1327 rows; full `settleFromChannel` (2 sends + ~5
   preconditions) ~1800–2600, well under Mina's ~2^16 budget. No recursive proofs.
 - **Channel-key settle signature goes away** (owner proof authorizes escrow moves),
@@ -110,6 +110,6 @@ the new path on-chain.
 ## Risks (post-spike)
 
 Mostly retired by the spike. Remaining: composing `channel.settle` + the token
-method in one tx binding to the channel's *pre-settle* state; preserving
+method in one tx binding to the channel's _pre-settle_ state; preserving
 `channelHash` native + bare-deploy; migrating the merged #191/#192 SDK + EVM/Solana
 paths unchanged.
