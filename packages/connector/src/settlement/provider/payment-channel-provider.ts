@@ -354,10 +354,11 @@ export interface MinaProviderConfig {
   /** Mina token ID (native MINA or custom fungible token) */
   tokenId?: string;
   /**
-   * Base58 address of the USDC token-owner (`FungibleToken`) zkApp (#192). When
-   * set, the channel custodies the USDC custom token: the SDK builds
-   * `token.transfer(...)` AccountUpdates on deposit/settle and derives the
-   * channel's tokenId from this owner. Omit for legacy native-MINA channels.
+   * Base58 address of the USDC token-owner (`UsdcChannelToken`) zkApp. When set,
+   * the channel custodies the USDC custom token: the SDK composes the in-proof
+   * `depositToChannel` / `settleFromChannel` owner methods on deposit/settle and
+   * derives the channel's tokenId from this owner. Omit for legacy native-MINA
+   * channels.
    */
   tokenAddress?: string;
   /** Mina network name for chain ID namespacing (e.g., 'devnet', 'mainnet') */
