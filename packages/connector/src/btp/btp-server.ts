@@ -4,7 +4,10 @@
  */
 
 import WebSocket, { WebSocketServer } from 'ws';
+import { createServer, Server as HttpServer, IncomingMessage, ServerResponse } from 'http';
+import type { Duplex } from 'stream';
 import { Logger } from '../utils/logger';
+import { evaluatePeerSecret } from '../auth/peer-secret-resolver';
 import { PacketHandler } from '../core/packet-handler';
 import { BTPMessage, BTPMessageType, BTPData, BTPError, isBTPData } from './btp-types';
 import { parseBTPMessage, serializeBTPMessage } from './btp-message-parser';
@@ -28,6 +31,38 @@ interface PeerConnection {
 }
 
 /**
+ * Pre-authentication carried across an HTTP→BTP upgrade.
+ *
+ * When an upgrade request already proved its identity over HTTP (via
+ * `ILP-Peer-Id` + `Authorization`, resolved by the shared peer-secret policy),
+ * the resulting BTP session starts authenticated — the client does not need to
+ * send the in-band BTP `auth` frame again. This makes the upgrade continuous:
+ * a client that paid over ILP-over-HTTP transitions to a duplex BTP peer with
+ * no second handshake. Absent a pre-auth, the standard BTP `auth` frame flow
+ * applies unchanged.
+ */
+export interface BtpPreAuth {
+  /** Authenticated peer identifier to bind the session to. */
+  peerId: string;
+}
+
+/** Handler for ILP-over-HTTP requests served on the BTP listener's `POST /ilp`. */
+export type IlpHttpHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
+/** The ILP-over-HTTP request path served alongside the BTP WebSocket upgrade. */
+const ILP_HTTP_PATH = '/ilp';
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function extractBearer(authHeader: string | undefined): string | undefined {
+  if (!authHeader) return undefined;
+  const match = /^Bearer\s+(.*)$/i.exec(authHeader.trim());
+  return match ? match[1] : authHeader.trim();
+}
+
+/**
  * Pending request for response tracking
  */
 interface PendingRequest {
@@ -44,6 +79,13 @@ export class BTPServer {
   private readonly logger: Logger;
   private readonly packetHandler: PacketHandler;
   private wss: WebSocketServer | null = null;
+  // The single HTTP listener that owns the port. It serves the BTP WebSocket
+  // upgrade AND (when set) ILP-over-HTTP on `POST /ilp` — both terminating at
+  // the same claim gate + packet handler.
+  private httpServer: HttpServer | null = null;
+  // Injected ILP-over-HTTP request handler (the RFC-0035 adapter). When unset,
+  // `POST /ilp` returns 503; BTP still works.
+  private ilpHttpHandler?: IlpHttpHandler;
   private readonly peers: Map<string, PeerConnection> = new Map();
   private readonly pendingRequests: Map<number, PendingRequest> = new Map();
   private onConnectionCallback?: (peerId: string, connection: WebSocket) => void;
@@ -61,7 +103,25 @@ export class BTPServer {
   }
 
   /**
-   * Start BTP WebSocket server
+   * Inject the ILP-over-HTTP (RFC-0035) request handler.
+   *
+   * When set, `POST /ilp` on this server's listener is dispatched to `handler`
+   * (the adapter that terminates ILP-over-HTTP into the same claim gate +
+   * packet handler as BTP). Must be called before {@link start}.
+   */
+  setIlpHttpHandler(handler: IlpHttpHandler): void {
+    this.ilpHttpHandler = handler;
+  }
+
+  /**
+   * Start the server's HTTP listener. One port serves both ILP transports:
+   *  - HTTP `Upgrade` → BTP-over-WebSocket (RFC 6455 / RFC-0023)
+   *  - `POST /ilp` → ILP-over-HTTP (RFC-0035), when an handler is set
+   *
+   * The listener is a plain http.Server so the BTP WebSocket rides the standard
+   * HTTP `Upgrade` handshake — exactly how BTP-over-WebSocket already worked,
+   * now made explicit and shared with the ILP-over-HTTP edge.
+   *
    * @param port - Port number to listen on (default from BTP_SERVER_PORT env var or 3000)
    */
   async start(port?: number): Promise<void> {
@@ -69,32 +129,31 @@ export class BTPServer {
 
     return new Promise<void>((resolve, reject) => {
       try {
-        this.wss = new WebSocketServer({ port: serverPort });
+        this.ensureWss();
 
-        this.wss.on('listening', () => {
-          this.logger.info(
-            {
-              event: 'btp_server_started',
-              port: serverPort,
-            },
-            `BTP server listening on port ${serverPort}`
-          );
-          resolve();
+        const httpServer = createServer((req, res) => {
+          void this.handleHttpRequest(req, res);
+        });
+        this.httpServer = httpServer;
+
+        httpServer.on('upgrade', (req, socket, head) => {
+          this.handleHttpUpgrade(req, socket as Duplex, head);
         });
 
-        this.wss.on('error', (error) => {
+        httpServer.on('error', (error) => {
           this.logger.error(
-            {
-              event: 'btp_server_error',
-              error: error.message,
-            },
+            { event: 'btp_server_error', error: error.message },
             'BTP server error'
           );
           reject(error);
         });
 
-        this.wss.on('connection', (ws: WebSocket, req) => {
-          this.handleConnection(ws, req);
+        httpServer.listen(serverPort, () => {
+          this.logger.info(
+            { event: 'btp_server_started', port: serverPort },
+            `BTP server listening on port ${serverPort} (BTP upgrade + ILP-over-HTTP)`
+          );
+          resolve();
         });
       } catch (error) {
         this.logger.error(
@@ -106,6 +165,103 @@ export class BTPServer {
         );
         reject(error);
       }
+    });
+  }
+
+  /** The bound HTTP address (after `start()` resolves), or null when not listening. */
+  address(): ReturnType<HttpServer['address']> {
+    return this.httpServer?.address() ?? null;
+  }
+
+  /**
+   * Route plain HTTP requests on the listener. Only `POST /ilp` is served (the
+   * ILP-over-HTTP edge); everything else is 404. Health/admin live on their own
+   * servers.
+   */
+  private async handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+    if (req.method === 'POST' && pathname === ILP_HTTP_PATH) {
+      if (this.ilpHttpHandler) {
+        await this.ilpHttpHandler(req, res);
+      } else {
+        res.writeHead(503, { 'Content-Type': 'text/plain' });
+        res.end('ILP-over-HTTP not enabled\n');
+      }
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found\n');
+  }
+
+  /**
+   * Route HTTP→WebSocket upgrades to BTP, resolving pre-auth from headers.
+   *
+   * Any WebSocket upgrade is treated as BTP (backward compatible with clients
+   * dialing `ws://host:3000/btp` without a `btp` subprotocol). If the request
+   * carries valid `ILP-Peer-Id` + `Authorization`, the session starts
+   * pre-authenticated; present-but-invalid credentials are refused with 401.
+   */
+  private handleHttpUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    let preAuth: BtpPreAuth | undefined;
+    const headerPeerId = firstHeader(req.headers['ilp-peer-id']);
+    if (headerPeerId) {
+      // No Authorization header → no-auth request (secret ''), as on BTP. HTTP
+      // strips a trailing-space bearer, so default a missing bearer to ''.
+      const secret = extractBearer(firstHeader(req.headers['authorization'])) ?? '';
+      const decision = evaluatePeerSecret(headerPeerId, secret);
+      if (!decision.ok) {
+        this.logger.warn(
+          { event: 'btp_upgrade_auth_failed', peerId: headerPeerId, reason: decision.reason },
+          'Refusing BTP upgrade: authentication failed'
+        );
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      preAuth = { peerId: headerPeerId };
+    }
+    this.handleUpgrade(req, socket, head, preAuth);
+  }
+
+  /**
+   * Lazily create the WebSocket server in `noServer` mode.
+   *
+   * `noServer` means the WS server does not bind a port itself; sockets are
+   * handed to it via `handleUpgrade()` from whichever HTTP server owns the port.
+   * This is what lets BTP and ILP-over-HTTP share a single port.
+   */
+  private ensureWss(): WebSocketServer {
+    if (!this.wss) {
+      this.wss = new WebSocketServer({ noServer: true });
+      this.wss.on('error', (error) => {
+        this.logger.error({ event: 'btp_server_error', error: error.message }, 'BTP server error');
+      });
+      // In noServer mode `handleUpgrade()` invokes handleConnection() directly,
+      // so the 'connection' event is not auto-emitted. We still listen for it so
+      // that anything emitting 'connection' on this server (e.g. tests, or a
+      // composing server that prefers the event idiom) routes through the same
+      // connection handler. No double-handling: handleUpgrade does not emit it.
+      this.wss.on('connection', (ws: WebSocket, req) => {
+        this.handleConnection(ws, req);
+      });
+    }
+    return this.wss;
+  }
+
+  /**
+   * Complete an HTTP→WebSocket upgrade and run the BTP connection on the result.
+   *
+   * Called by the shared {@link IlpTransportServer} (and by this server's own
+   * standalone listener) for every inbound WS upgrade. Any WebSocket upgrade is
+   * treated as BTP — preserving backward compatibility with existing clients
+   * that dial `ws://host:3000/btp` without a `btp` subprotocol.
+   *
+   * @param preAuth - When present, the session starts authenticated (see {@link BtpPreAuth}).
+   */
+  handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, preAuth?: BtpPreAuth): void {
+    const wss = this.ensureWss();
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      this.handleConnection(ws, req, preAuth);
     });
   }
 
@@ -137,36 +293,50 @@ export class BTPServer {
 
     this.peers.clear();
 
-    // Close WebSocket server
-    return new Promise<void>((resolve, reject) => {
+    // Close the WebSocket server (noServer mode — just stops tracking clients),
+    // then the owned HTTP listener if start() created one.
+    await new Promise<void>((resolve, reject) => {
       if (!this.wss) {
         resolve();
         return;
       }
-
       this.wss.close((error) => {
         if (error) {
           this.logger.error(
-            {
-              event: 'btp_server_shutdown_error',
-              error: error.message,
-            },
-            'Error during BTP server shutdown'
+            { event: 'btp_server_shutdown_error', error: error.message },
+            'Error during BTP WebSocket server shutdown'
           );
           reject(error);
         } else {
-          this.logger.info(
-            {
-              event: 'btp_server_shutdown',
-              activeConnections,
-            },
-            'BTP server shutdown complete'
-          );
           this.wss = null;
           resolve();
         }
       });
     });
+
+    await new Promise<void>((resolve, reject) => {
+      if (!this.httpServer) {
+        resolve();
+        return;
+      }
+      this.httpServer.close((error) => {
+        if (error) {
+          this.logger.error(
+            { event: 'btp_server_shutdown_error', error: error.message },
+            'Error during BTP HTTP listener shutdown'
+          );
+          reject(error);
+        } else {
+          this.httpServer = null;
+          resolve();
+        }
+      });
+    });
+
+    this.logger.info(
+      { event: 'btp_server_shutdown', activeConnections },
+      'BTP server shutdown complete'
+    );
   }
 
   /**
@@ -294,19 +464,11 @@ export class BTPServer {
    */
   private handleConnection(
     ws: WebSocket,
-    req: { socket: { remoteAddress?: string; remotePort?: number } }
+    req: { socket: { remoteAddress?: string; remotePort?: number } },
+    preAuth?: BtpPreAuth
   ): void {
     const remoteAddress = req.socket.remoteAddress ?? 'unknown';
     const connectionId = `${remoteAddress}:${req.socket.remotePort}`;
-
-    this.logger.info(
-      {
-        event: 'btp_connection',
-        connectionId,
-        remoteAddress,
-      },
-      'BTP connection established (awaiting authentication)'
-    );
 
     // Store temporary connection (not yet authenticated)
     const peerConn: PeerConnection = {
@@ -314,6 +476,32 @@ export class BTPServer {
       ws,
       authenticated: false,
     };
+
+    if (preAuth) {
+      // Continuous HTTP→BTP upgrade: identity was already proven over HTTP, so
+      // bind the session now and skip the in-band BTP auth frame.
+      peerConn.peerId = preAuth.peerId;
+      peerConn.authenticated = true;
+      this.peers.set(preAuth.peerId, peerConn);
+      this.logger.info(
+        {
+          event: 'btp_connection',
+          connectionId,
+          remoteAddress,
+          peerId: preAuth.peerId,
+          preAuth: true,
+        },
+        'BTP connection established (pre-authenticated via HTTP upgrade)'
+      );
+      if (this.onConnectionCallback) {
+        this.onConnectionCallback(preAuth.peerId, ws);
+      }
+    } else {
+      this.logger.info(
+        { event: 'btp_connection', connectionId, remoteAddress },
+        'BTP connection established (awaiting authentication)'
+      );
+    }
 
     ws.on('message', async (data: Buffer) => {
       try {

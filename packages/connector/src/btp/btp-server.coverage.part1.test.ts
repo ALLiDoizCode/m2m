@@ -186,10 +186,11 @@ describe('BTPServer Coverage Part 1', () => {
       );
     });
 
-    it('rejects when wss emits error', async () => {
+    it('rejects when the HTTP listener emits error', async () => {
       const p = server.start(3003);
-      const wss = (server as any).wss;
-      wss.emit('error', new Error('WSS error'));
+      // The HTTP listener owns the port now; a listen error rejects start().
+      const httpServer = (server as any).httpServer;
+      httpServer.emit('error', new Error('WSS error'));
       await expect(p).rejects.toThrow('WSS error');
     });
 

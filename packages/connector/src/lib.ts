@@ -16,6 +16,8 @@ import { BTPClientManager } from './btp/btp-client-manager';
 // Library consumers should use ConnectorNode.setLocalDeliveryHandler() instead
 // import { LocalDeliveryClient } from './core/local-delivery-client';
 import { AdminServer } from './http/admin-server';
+import { IlpHttpAdapter } from './http/ilp-http-adapter';
+import { evaluatePeerSecret } from './auth/peer-secret-resolver';
 import { AccountManager } from './settlement/account-manager';
 import { SettlementMonitor } from './settlement/settlement-monitor';
 import { UnifiedSettlementExecutor } from './settlement/unified-settlement-executor';
@@ -42,6 +44,8 @@ export {
   // LocalDeliveryClient is INTERNAL ONLY - not exported
   // Library consumers should use ConnectorNode.setLocalDeliveryHandler() instead
   AdminServer,
+  IlpHttpAdapter,
+  evaluatePeerSecret,
   AccountManager,
   SettlementMonitor,
   UnifiedSettlementExecutor,
@@ -92,3 +96,12 @@ export type { PacketSenderFn, IsReadyFn } from './http/ilp-send-handler';
 
 // Re-export ILP packet types for library consumers
 export type { ILPPreparePacket, ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
+
+// ILP-over-HTTP + BTP-upgrade transport types
+export type { BtpPreAuth, IlpHttpHandler } from './btp/btp-server';
+export type {
+  InboundClaimValidateFn,
+  HandlePrepareFn,
+  IlpHttpAdapterDeps,
+} from './http/ilp-http-adapter';
+export type { PeerSecretDecision } from './auth/peer-secret-resolver';

@@ -166,8 +166,12 @@ describe('BTPServer', () => {
       await server.start(AUTO_PORT);
 
       // Assert
+      // The HTTP listener owns the port now (BTP rides its WS upgrade); the
+      // WebSocketServer runs in noServer mode and has no address of its own.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const actualPort = ((server as any).wss as WebSocketServer).address() as { port: number };
+      const actualPort = ((server as any).httpServer as import('http').Server).address() as {
+        port: number;
+      };
       expect(mockLogger.info).toHaveBeenCalledWith(
         expect.objectContaining({
           event: 'btp_server_started',
