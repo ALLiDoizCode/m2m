@@ -25,8 +25,9 @@ contract DeployLocalScript is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // Deploy MockERC20 token (USDC token - 18 decimals for local testing)
-        MockERC20 usdcToken = new MockERC20("USD Coin", "USDC", 18);
+        // Deploy MockERC20 token (USDC - 6 decimals, matching real USDC and the
+        // Solana SPL mint / Mina USDC so claim amounts are one scale across chains)
+        MockERC20 usdcToken = new MockERC20("USD Coin", "USDC", 6);
         console.log("USDC Token deployed to:", address(usdcToken));
 
         // Deploy TokenNetworkRegistry
@@ -43,7 +44,7 @@ contract DeployLocalScript is Script {
         peerAddresses[0] = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC; // peer1 (Anvil account 2)
         peerAddresses[1] = 0x90F79bf6EB2c4f870365E785982E1f101E93b906; // peer2 (Anvil account 3)
 
-        uint256 tokensPerPeer = 10000 * 10**18; // 10k tokens each
+        uint256 tokensPerPeer = 10000 * 10**6; // 10k USDC each (6 decimals)
 
         for (uint i = 0; i < peerAddresses.length; i++) {
             usdcToken.transfer(peerAddresses[i], tokensPerPeer);
