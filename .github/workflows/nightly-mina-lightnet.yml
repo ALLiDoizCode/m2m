@@ -1,11 +1,14 @@
 # Nightly Mina lightnet integration workflow — USDC settlement validation
 #
-# The Mina USDC work (#191 token-aware PaymentChannel, #192 settlement SDK) is
-# verified per-PR only with `proofsEnabled:false` / mocked o1js — the real
-# on-chain behaviour (custom-token `AccountUpdate` shapes, `getDecimals()` reads,
-# account-creation-fee counts, proof generation, verification-key pinning) can
-# only be exercised against a real Mina node. This workflow does that nightly on
-# the o1labs lightnet, matching the "Mina nightly, not per-PR" guidance.
+# The Mina USDC work (#191 token-aware PaymentChannel, #192 settlement SDK, and
+# #202 the in-proof-enforcing `UsdcChannelToken`) is verified per-PR only with
+# `proofsEnabled:false` / mocked o1js — the real on-chain behaviour (custom-token
+# `AccountUpdate` shapes, `getDecimals()` reads, account-creation-fee counts,
+# proof generation, verification-key pinning, and — for #202 — the custodial
+# `lazy-none` escrow sends + manual cross-account state preconditions the OCaml
+# ledger must accept) can only be exercised against a real Mina node. This
+# workflow does that nightly on the o1labs lightnet, matching the "Mina nightly,
+# not per-PR" guidance.
 #
 # Trigger: 05:00 UTC daily (staggered after nightly-ator at 04:00) + manual.
 # This is NOT a required PR status check — nightly only. Use workflow_dispatch
@@ -50,10 +53,29 @@ jobs:
           max_attempts: 3
           command: npm ci
 
-      # The connector's Mina provider loads the compiled @toon-protocol/mina-zkapp
-      # (PaymentChannel + usdc-token) at runtime — build its dist before the tests.
-      - name: Build mina-zkapp
-        run: npm run build --workspace=packages/mina-zkapp
+      # Build ALL workspace packages, not just mina-zkapp. The connector
+      # integration suites import BOTH the compiled @toon-protocol/mina-zkapp
+      # (PaymentChannel + UsdcChannelToken, loaded from `dist`) AND
+      # @toon-protocol/shared (e.g. standalone-mina-settlement-e2e.test.ts and
+      # mina-inbound-claim-gate.test.ts). Building only mina-zkapp left
+      # @toon-protocol/shared's `dist` missing → "Cannot find module
+      # '@toon-protocol/shared'". The root `build` script builds shared first,
+      # then mina-zkapp, then the rest of the workspaces, so every dependency
+      # resolves before the tests run.
+      - name: Build workspace packages (shared + mina-zkapp + connector)
+        run: npm run build
+
+      # Fast(er) regression guard for the in-proof prover wiring — runs REAL
+      # proofs on a LocalBlockchain (no 8GB lightnet). This is what catches the
+      # "no prover found" / inherited-@method prover-mirroring regression that the
+      # lightnet test also covers, but here without needing the node up. ~2-3 min.
+      - name: USDC in-proof settlement (proofs-enabled LocalBlockchain)
+        working-directory: packages/connector
+        env:
+          MINA_PROOFS: 'true'
+        run: |
+          npx jest --config jest.config.js --runInBand \
+            test/integration/mina-usdc-inproof-proofs.test.ts
 
       - name: Start Mina lightnet
         run: make mina-up
@@ -84,6 +106,7 @@ jobs:
             test/integration/mina-lightnet.test.ts \
             test/integration/mina-inbound-claim-gate.test.ts \
             test/integration/standalone-mina-settlement-e2e.test.ts \
+            test/integration/mina-usdc-inproof-lightnet.test.ts \
             test/acceptance/story-34-10-mina-local-dev-infra.test.ts
 
       - name: Lightnet logs on failure

@@ -45,6 +45,11 @@ import {
   USDC_DECIMALS_U8,
   usdcDeployProps,
 } from '../../packages/mina-zkapp/src/usdc-token';
+// The deployed USDC owner is `UsdcChannelToken` (Phase A). Its on-chain
+// verification key is the SUBCLASS's, so we must instantiate/compile that exact
+// class for mint proofs to be accepted on-chain. `mint` itself is inherited
+// unchanged from `FungibleToken`.
+import { UsdcChannelToken } from '../../packages/mina-zkapp/src/usdc-channel-token';
 
 const DEFAULT_NETWORK = 'https://api.minascan.io/node/devnet/v1/graphql';
 const DEFAULT_AMOUNT_USDC = 1000n;
@@ -151,7 +156,7 @@ async function runLocal(): Promise<void> {
   const adminContractKey = PrivateKey.random();
   const tokenKey = PrivateKey.random();
   const admin = new FungibleTokenAdmin(adminContractKey.toPublicKey());
-  const token = new FungibleToken(tokenKey.toPublicKey());
+  const token = new UsdcChannelToken(tokenKey.toPublicKey());
 
   const deployTx = await Mina.transaction(deployer, async () => {
     AccountUpdate.fundNewAccount(deployer, 3);
@@ -196,11 +201,11 @@ async function runLive(args: CliArgs): Promise<void> {
   const Network = Mina.Network({ mina: args.network });
   Mina.setActiveInstance(Network);
 
-  console.log('Compiling FungibleTokenAdmin + FungibleToken circuits...');
+  console.log('Compiling FungibleTokenAdmin + UsdcChannelToken circuits...');
   await FungibleTokenAdmin.compile();
-  await FungibleToken.compile();
+  await UsdcChannelToken.compile();
 
-  const token = new FungibleToken(PublicKey.fromBase58(args.token));
+  const token = new UsdcChannelToken(PublicKey.fromBase58(args.token));
   // Bind the token to its admin contract so mint resolves the right authority.
   // (FungibleToken reads its admin from on-chain state; the address is informational
   // here, but we surface it for operator clarity.)

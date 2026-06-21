@@ -73,9 +73,10 @@ export interface MinaProviderOptions {
   /** Mina token ID (native MINA or custom fungible token) */
   tokenId?: string;
   /**
-   * Base58 address of the USDC token-owner (`FungibleToken`) zkApp (#192). When
-   * present, the underlying SDK builds USDC `token.transfer(...)` AccountUpdates
-   * on deposit/settle and derives the channel tokenId from this owner.
+   * Base58 address of the USDC token-owner (`UsdcChannelToken`) zkApp. When
+   * present, the underlying SDK composes the in-proof `depositToChannel` /
+   * `settleFromChannel` owner methods on deposit/settle and derives the channel
+   * tokenId from this owner.
    */
   tokenAddress?: string;
   /** Mina network name (e.g., 'devnet', 'mainnet') -- overrides chainId extraction */
@@ -931,9 +932,10 @@ export function createMinaProviderFactory(logger: Logger, signerKey: string): Ch
       // Real Mina networks reject zero-fee zkApp transactions; default to
       // 0.1 MINA unless the operator configures an explicit fee (Issue #126).
       config.txFeeNanomina !== undefined ? BigInt(config.txFeeNanomina) : undefined,
-      // USDC across all chains (#192): thread the token-owner address + tokenId so
-      // the SDK builds USDC token.transfer(...) on deposit/settle and enforces the
-      // tokenId/decimals invariants. Omitted → legacy native-MINA channel.
+      // USDC across all chains: thread the token-owner address + tokenId so the
+      // SDK composes the in-proof depositToChannel/settleFromChannel owner methods
+      // on deposit/settle and enforces the tokenId/decimals invariants. Omitted →
+      // legacy native-MINA channel.
       { tokenAddress: config.tokenAddress, tokenId: config.tokenId }
     );
     const network = config.network ?? 'devnet';

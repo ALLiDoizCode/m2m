@@ -158,39 +158,41 @@ async function getPaymentChannelContract(): Promise<any> {
   return PaymentChannelContract;
 }
 
-/** Cached FungibleToken class from `mina-fungible-token`. */
+/** Cached `UsdcChannelToken` class from `@toon-protocol/mina-zkapp`. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let FungibleTokenContract: any = null;
+let UsdcChannelTokenContract: any = null;
 
 /**
- * Lazily load the `FungibleToken` token-owner class from `mina-fungible-token`.
+ * Lazily load the in-proof-enforcing `UsdcChannelToken` owner class from
+ * `@toon-protocol/mina-zkapp`.
  *
- * USDC across all chains (#192): the Mina `PaymentChannel` zkApp is
- * accounting-only — it CANNOT move the USDC custom token (o1js rejects a
- * channel-proof-authored custom-token balance change with
- * `Token_owner_not_caller`). Only the `mina-fungible-token` owner may move its
- * token, so the SDK instantiates the token-owner contract here and builds the
- * `token.transfer(...)` AccountUpdates in the SAME transaction as the channel
- * method. This is the SDK's correctness/enforcement role: the channel proof no
- * longer binds token amounts to its balances, so the SDK MUST build transfers
- * that exactly match the channel accounting (deposit amount; settle
- * balanceA/balanceB).
+ * USDC across all chains: the Mina `PaymentChannel` zkApp is accounting-only —
+ * it CANNOT move the USDC custom token (o1js rejects a channel-proof-authored
+ * custom-token balance change with `Token_owner_not_caller`). `UsdcChannelToken`
+ * (a `FungibleToken` subclass) is the custom token OWNER, and the only actor
+ * that can move USDC. Unlike the merged #191/#192 design — where the SDK built
+ * raw `token.transfer(...)` updates and was solely responsible for matching the
+ * escrow move to the channel accounting — `UsdcChannelToken` binds payouts to
+ * the channel's on-chain commitment IN THE PROOF via `depositToChannel` /
+ * `settleFromChannel`. The SDK therefore only has to compose those methods in
+ * the right tx shape; the contract enforces correctness (matching EVM/Solana).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getFungibleTokenContract(): Promise<any> {
-  if (!FungibleTokenContract) {
+async function getUsdcChannelTokenContract(): Promise<any> {
+  if (!UsdcChannelTokenContract) {
     try {
-      const mod = await import('mina-fungible-token');
-      FungibleTokenContract = mod.FungibleToken;
+      const mod = await import('@toon-protocol/mina-zkapp');
+      UsdcChannelTokenContract = mod.UsdcChannelToken;
     } catch {
       throw new MinaChannelError(
-        'mina-fungible-token is required for USDC-token Mina payment channels but is not installed.',
+        '@toon-protocol/mina-zkapp (UsdcChannelToken) is required for USDC-token Mina ' +
+          'payment channels but is not installed.',
         MINA_ERROR_CODES.O1JS_NOT_AVAILABLE,
         'O1JS_NOT_AVAILABLE'
       );
     }
   }
-  return FungibleTokenContract;
+  return UsdcChannelTokenContract;
 }
 
 /**
@@ -242,7 +244,7 @@ const DEPLOY_CONFIRMATION_POLL_INTERVAL_MS = 3_000;
 export function _resetModuleCaches(): void {
   o1jsModule = null;
   PaymentChannelContract = null;
-  FungibleTokenContract = null;
+  UsdcChannelTokenContract = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,23 +305,34 @@ export class MinaPaymentChannelSDK {
   /**
    * Cached channel (zkApp) private keys per zkApp address, base58-encoded.
    *
-   * USDC across all chains (#192): the `settle` token payouts debit the
-   * channel's USDC token account, which is authorized by the channel account's
-   * own signature on the settle transaction. The channel key is generated in
-   * {@link openChannel} (it signs the deploy) and is retained here so the same
-   * SDK instance can sign the settle tx that drains the channel's escrow. Only
+   * In-proof enforcement: SETTLE no longer needs the channel key — the escrow
+   * payouts are authorized purely by the `UsdcChannelToken` owner's proof plus
+   * the escrow's custodial `send: none` permission. The channel key is, however,
+   * required for the ONE-TIME {@link enableChannelEscrow} setup (setting the
+   * escrow account's permissions needs the escrow/channel account's signature).
+   * The key is generated in {@link openChannel} (it signs the deploy) and retained
+   * here so the same SDK instance can sign that one-time escrow-enable tx. Only
    * channels opened by this SDK instance carry a cached key; an externally-opened
-   * channel cannot be settled by this instance because the channel-account
-   * outflow has no authorizing signature.
+   * channel must supply `channelPrivateKey` to `enableChannelEscrow`.
    */
   private readonly _channelKeyCache = new Map<string, string>();
 
   /**
-   * Cached USDC token-owner contract instance and its derived tokenId.
+   * Set of zkApp addresses whose escrow token account this SDK instance has
+   * already made custodial via {@link enableChannelEscrow}. Memoizes the
+   * one-time escrow setup so {@link deposit} can run it on the channel's first
+   * deposit and skip it thereafter.
+   */
+  private readonly _escrowEnabled = new Set<string>();
+
+  /**
+   * Cached USDC `UsdcChannelToken` owner contract instance and its derived
+   * tokenId.
    *
    * Instantiated lazily from {@link _tokenAddress}. The same instance is reused
-   * to build `token.transfer(...)` AccountUpdates on deposit/settle and to derive
-   * the channel's tokenId on open.
+   * to compose the in-proof `enableChannelEscrow` / `depositToChannel` /
+   * `settleFromChannel` methods on open/deposit/settle and to derive the
+   * channel's tokenId on open.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _tokenContext: { token: any; tokenId: string } | null = null;
@@ -334,10 +347,10 @@ export class MinaPaymentChannelSDK {
   private readonly _txFee: bigint;
 
   /**
-   * Base58 address of the USDC token-owner (`FungibleToken`) zkApp, or undefined
-   * for legacy native-MINA channels. When set, deposit/settle build USDC
-   * `token.transfer(...)` AccountUpdates and `openChannel` uses the real
-   * `token.deriveTokenId()` as the channel tokenId (#192).
+   * Base58 address of the USDC token-owner (`UsdcChannelToken`) zkApp, or
+   * undefined for legacy native-MINA channels. When set, deposit/settle compose
+   * the in-proof `depositToChannel` / `settleFromChannel` owner methods and
+   * `openChannel` uses the real `token.deriveTokenId()` as the channel tokenId.
    */
   private readonly _tokenAddress?: string;
 
@@ -415,6 +428,25 @@ export class MinaPaymentChannelSDK {
       this._networkInitialized = true;
     }
     return Mina;
+  }
+
+  /**
+   * Read the LIVE network global slot off-chain (#202).
+   *
+   * `initiateClose` takes the current slot as a `currentSlot` witness and pins it
+   * with a range precondition; the SDK must therefore read the genuinely-current
+   * slot from the node before building the close tx. `fetchLastBlock` queries the
+   * configured GraphQL endpoint for the best tip's `globalSlotSinceGenesis` (and
+   * also refreshes o1js's cached network state). Callers must have bound the
+   * network via `_setNetwork()` first.
+   *
+   * @returns the current global slot as a UInt32
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async _currentGlobalSlot(): Promise<any> {
+    const { fetchLastBlock } = await getO1js();
+    const block = await fetchLastBlock(this.graphqlUrl);
+    return block.globalSlotSinceGenesis;
   }
 
   /**
@@ -507,13 +539,14 @@ export class MinaPaymentChannelSDK {
   }
 
   /**
-   * Instantiate the USDC token-owner (`FungibleToken`) contract and resolve its
-   * tokenId, memoizing the result (#192).
+   * Instantiate the USDC token-owner (`UsdcChannelToken`) contract and resolve
+   * its tokenId, memoizing the result.
    *
-   * The token-owner contract is required to build the deposit/settle
-   * `token.transfer(...)` AccountUpdates (only the owner may move its custom
-   * token). The derived tokenId is the channel's tokenId — it is what
-   * `openChannel` writes into `tokenId_` and what inbound claims must match.
+   * The token-owner contract is required to compose the in-proof
+   * `depositToChannel` / `settleFromChannel` / `enableChannelEscrow` owner
+   * methods (only the owner may move its custom token). The derived tokenId is
+   * the channel's tokenId — it is what `openChannel` writes into `tokenId_` and
+   * what inbound claims must match.
    *
    * Enforcement: when a tokenId was configured (`MinaProviderConfig.tokenId`),
    * this asserts the on-chain token derives the SAME tokenId, so a
@@ -541,21 +574,21 @@ export class MinaPaymentChannelSDK {
     }
 
     const { PublicKey } = await getO1js();
-    const FungibleToken = await getFungibleTokenContract();
+    const UsdcChannelToken = await getUsdcChannelTokenContract();
     await this._setNetwork();
 
     const tokenOwnerKey = PublicKey.fromBase58(this._tokenAddress);
-    const token = new FungibleToken(tokenOwnerKey);
+    const token = new UsdcChannelToken(tokenOwnerKey);
     const tokenId = token.deriveTokenId().toString();
 
     // Enforcement: the configured tokenId (if any) must match the token the
-    // owner address actually derives. A mismatch means the SDK would build
-    // transfers under a different token than the channel/claims assume.
+    // owner address actually derives. A mismatch means the SDK would escrow /
+    // distribute a different token than the channel/claims assume.
     if (this._configuredTokenId !== undefined && this._configuredTokenId !== tokenId) {
       throw new MinaChannelError(
         `Configured Mina tokenId (${this._configuredTokenId}) does not match the tokenId derived ` +
           `from the configured token-owner address ${this._tokenAddress} (${tokenId}). ` +
-          'Check MinaProviderConfig.tokenAddress / tokenId (#192).',
+          'Check MinaProviderConfig.tokenAddress / tokenId.',
         MINA_ERROR_CODES.INVALID_PARAMETERS,
         'INVALID_PARAMETERS'
       );
@@ -806,6 +839,16 @@ export class MinaPaymentChannelSDK {
       const Contract = await getPaymentChannelContract();
       const result = await Contract.compile();
       this._verificationKey = result?.verificationKey ?? null;
+
+      // USDC channels: the `UsdcChannelToken` owner authorizes escrow moves with
+      // its OWN proof (depositToChannel / settleFromChannel / enableChannelEscrow),
+      // so its circuit must be compiled before any deposit/settle/escrow tx can be
+      // proven. Native-MINA channels skip this.
+      if (this.isUsdcToken) {
+        const UsdcChannelToken = await getUsdcChannelTokenContract();
+        await UsdcChannelToken.compile();
+      }
+
       this._compiled = true;
 
       const durationMs = Date.now() - startTime;
@@ -922,9 +965,10 @@ export class MinaPaymentChannelSDK {
       this._participantCache.set(zkAppAddress, { participantA, participantB });
 
       // Retain the channel (zkApp) private key so this SDK instance can later
-      // sign the settle tx that drains the channel's USDC token account (#192).
-      // Without the channel key's signature, the channel-account outflows in
-      // `settleChannel` cannot be authorized.
+      // sign the ONE-TIME `enableChannelEscrow` setup tx (making the escrow token
+      // account custodial requires the escrow/channel account's signature). After
+      // that one-time setup, settle needs NO channel key — the escrow payouts are
+      // authorized by the `UsdcChannelToken` owner's proof alone.
       this._channelKeyCache.set(zkAppAddress, zkAppPrivateKey.toBase58());
 
       this._logger.info(
@@ -939,24 +983,112 @@ export class MinaPaymentChannelSDK {
   }
 
   /**
+   * One-time: make a channel's escrow USDC token account CUSTODIAL via the
+   * in-proof token owner.
+   *
+   * Composes `token.enableChannelEscrow(channelAddress)`, which sets the channel's
+   * token account permissions to `send: none` + `setPermissions: impossible` so
+   * the `UsdcChannelToken` owner's PROOF can later author settle payouts out of it
+   * with NO escrow/channel signature. Setting permissions on the (fresh) escrow
+   * account requires the escrow/channel account's SIGNATURE, so the CHANNEL KEY
+   * must sign THIS tx — the only place in the deposit/settle lifecycle a channel
+   * key is needed. Pays the escrow token account's new-account fee.
+   *
+   * Idempotent per SDK instance: tracked in {@link _escrowEnabled}, so a repeat
+   * call is a no-op. Run once per channel at open / first deposit; {@link deposit}
+   * calls it automatically on the channel's first deposit.
+   *
+   * @param channelAddress - Base58 zkApp address of the channel
+   * @param channelPrivateKey - base58 channel/zkApp key to sign the setup, for
+   *   channels not opened by this SDK instance. Defaults to the key cached at
+   *   {@link openChannel}.
+   * @returns Transaction hash (or an empty hash if already enabled)
+   */
+  async enableChannelEscrow(
+    channelAddress: string,
+    channelPrivateKey?: string
+  ): Promise<MinaTxResult> {
+    const signerKeyBase58 = this._requireSignerKey();
+
+    if (this._escrowEnabled.has(channelAddress)) {
+      return { txHash: '' };
+    }
+
+    try {
+      const { PrivateKey, PublicKey, AccountUpdate, fetchAccount } = await getO1js();
+      const Mina = await this._setNetwork();
+
+      const signerPrivateKey = PrivateKey.fromBase58(signerKeyBase58);
+      const signerPublicKey = signerPrivateKey.toPublicKey();
+
+      await fetchAccount({ publicKey: signerPublicKey });
+
+      // Resolve the token context + channel key BEFORE building the tx so config
+      // errors fail fast.
+      await this._assertTokenDecimals();
+      const { token } = await this._getTokenContext();
+
+      const channelKeyBase58 = channelPrivateKey ?? this._channelKeyCache.get(channelAddress);
+      if (!channelKeyBase58) {
+        throw new MinaChannelError(
+          `Cannot enable the escrow for channel ${channelAddress}: the channel/zkApp private key ` +
+            'is required to sign the one-time escrow-permission setup but is not available. The ' +
+            'channel must have been opened by this SDK instance, or channelPrivateKey must be supplied.',
+          MINA_ERROR_CODES.INVALID_PARAMETERS,
+          'INVALID_PARAMETERS'
+        );
+      }
+      const channelKey = PrivateKey.fromBase58(channelKeyBase58);
+      const channelPublicKey = PublicKey.fromBase58(channelAddress);
+
+      const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
+        // The escrow token account is created here; pay its new-account fee.
+        AccountUpdate.fundNewAccount(signerPublicKey, 1);
+        await token.enableChannelEscrow(channelPublicKey);
+      });
+      await txn.prove();
+      // Fee payer + channel key (authorizes the escrow account permission change).
+      const sentTx = await txn.sign([signerPrivateKey, channelKey]).send();
+      const txHash = sentTx.hash ?? '';
+
+      this._escrowEnabled.add(channelAddress);
+
+      this._logger.info(
+        { event: 'enable_channel_escrow', channelAddress, txHash },
+        'Mina channel escrow token account made custodial (one-time)'
+      );
+
+      return { txHash };
+    } catch (err: unknown) {
+      throw this._wrapError(err, MINA_ERROR_CODES.TRANSACTION_FAILED, 'TRANSACTION_FAILED');
+    }
+  }
+
+  /**
    * Deposit funds into a channel.
    *
-   * USDC across all chains (#192): for USDC channels the channel zkApp is
-   * accounting-only, so this builds the actual USDC custody move —
-   * `token.transfer(depositor → channelAddress, amount)` under the configured
-   * tokenId — as a sibling AccountUpdate in the SAME transaction as
-   * `channel.deposit(amount, depositor)`. The transfer amount is built to exactly
-   * equal the channel's deposit amount, keeping accounting and escrow in sync. On
-   * the channel's first-ever deposit the channel's USDC token account does not
-   * yet exist, so a new-account fee is paid (`fundChannelTokenAccount`). The
-   * depositor (this SDK's signer) signs, authorizing both the token outflow and
-   * the channel's depositor-binding AccountUpdate.
+   * In-proof enforcement: for USDC channels the channel zkApp is accounting-only,
+   * so the USDC custody move is composed via the token owner's in-proof
+   * `depositToChannel(channelAddress, amount, depositor, expectedDepositTotalAfter)`
+   * — bound in the SAME proof to the channel being OPEN and to the channel's
+   * resulting `depositTotal`. The reference tx ORDER is critical: the channel's
+   * accounting `channel.deposit(amount, depositor)` AU is added FIRST, then
+   * `token.depositToChannel(...)`, because o1js evaluates the token method's
+   * post-deposit `depositTotal` precondition against the ledger state as updates
+   * apply IN ORDER. `expectedDepositTotalAfter` = the channel's CURRENT on-chain
+   * `depositTotal + amount`. The depositor (this SDK's signer) signs, authorizing
+   * both the USDC outflow and the channel's depositor-binding AU.
+   *
+   * On the channel's first-ever deposit the escrow token account must first be
+   * made custodial; this auto-runs {@link enableChannelEscrow} (which itself pays
+   * the escrow account's new-account fee and is a no-op if already enabled).
    *
    * @param channelAddress - Base58 zkApp address of the channel
    * @param amount - Amount to deposit (bigint)
-   * @param fundChannelTokenAccount - Whether to pay the new-account fee for the
-   *   channel's USDC token account (true on the channel's first-ever deposit).
-   *   Ignored for legacy native-MINA channels. Defaults to `true`.
+   * @param fundChannelTokenAccount - Whether the escrow token account still needs
+   *   to be created (true on the channel's first-ever deposit). When true, this
+   *   ensures the one-time `enableChannelEscrow` setup has run first. Ignored for
+   *   legacy native-MINA channels. Defaults to `true`.
    * @returns Transaction hash
    */
   async deposit(
@@ -967,16 +1099,11 @@ export class MinaPaymentChannelSDK {
     const signerKeyBase58 = this._requireSignerKey();
 
     try {
-      const { PrivateKey, PublicKey, Field, UInt64, AccountUpdate, fetchAccount } = await getO1js();
+      const { PrivateKey, PublicKey, Field, UInt64, fetchAccount } = await getO1js();
       const Mina = await this._setNetwork();
 
       const signerPrivateKey = PrivateKey.fromBase58(signerKeyBase58);
       const signerPublicKey = signerPrivateKey.toPublicKey();
-
-      await fetchAccount({ publicKey: signerPublicKey });
-
-      const zkApp = await this._getZkApp(channelAddress);
-      const amountField = Field(amount);
 
       // Resolve the USDC token-owner context (if any) once, outside the tx
       // builder, so config/derivation errors surface before tx construction.
@@ -985,27 +1112,46 @@ export class MinaPaymentChannelSDK {
       if (this.isUsdcToken) {
         await this._assertTokenDecimals();
         ({ token } = await this._getTokenContext());
+
+        // The escrow token account must be custodial before any deposit. On the
+        // first deposit (or whenever not yet enabled this instance), run the
+        // one-time setup in its OWN tx — it needs the channel key's signature,
+        // which a deposit tx (depositor-signed only) cannot carry. This also
+        // funds the escrow token account, so the deposit tx funds nothing.
+        if (fundChannelTokenAccount || !this._escrowEnabled.has(channelAddress)) {
+          await this.enableChannelEscrow(channelAddress);
+        }
       }
+
+      await fetchAccount({ publicKey: signerPublicKey });
+
+      const zkApp = await this._getZkApp(channelAddress);
+      const amountField = Field(amount);
       const channelPublicKey = PublicKey.fromBase58(channelAddress);
 
+      // For USDC channels the token method pins a precondition on the channel's
+      // depositTotal AFTER this deposit. Read the CURRENT on-chain depositTotal
+      // (`_getZkApp` just refreshed the account) and add `amount`.
+      let expectedDepositTotalAfter: bigint | null = null;
+      if (token) {
+        const currentDepositTotal = (zkApp.depositTotal.get() as { toBigInt(): bigint }).toBigInt();
+        expectedDepositTotalAfter = currentDepositTotal + amount;
+      }
+
       const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
+        // ORDER MATTERS: the channel's accounting `deposit` AU must precede the
+        // token's `depositToChannel` AU, whose post-deposit `depositTotal`
+        // precondition is evaluated against the ledger state as updates apply in
+        // order. This pins the ESCROWED amount to the ACCOUNTED total in-proof.
+        await zkApp.deposit(amountField, signerPublicKey);
         if (token) {
-          // First-ever deposit creates the channel's USDC token account.
-          if (fundChannelTokenAccount) {
-            AccountUpdate.fundNewAccount(signerPublicKey, 1);
-          }
-          // USDC custody move: depositor → channel token account. The token
-          // owner's `transfer` proof authorizes it; the depositor signs the tx.
-          // The amount is the SAME Field the channel accounts for, so escrow and
-          // accounting stay in lockstep (the enforcement point — the proof no
-          // longer binds it).
-          await token.transfer(
-            signerPublicKey,
+          await token.depositToChannel(
             channelPublicKey,
-            UInt64.Unsafe.fromField(amountField)
+            UInt64.Unsafe.fromField(amountField),
+            signerPublicKey,
+            Field(expectedDepositTotalAfter as bigint)
           );
         }
-        await zkApp.deposit(amountField, signerPublicKey);
       });
       await txn.prove();
       const sentTx = await txn.sign([signerPrivateKey]).send();
@@ -1228,8 +1374,19 @@ export class MinaPaymentChannelSDK {
       const sigA = this._deserializeSignature(signatureA, 'signatureA');
       const sigB = this._deserializeSignature(signatureB, 'signatureB');
 
+      // #202: read the LIVE network global slot off-chain and pass it as the
+      // `initiateClose` `currentSlot` witness. The contract pins it with a range
+      // precondition (`globalSlotSinceGenesis ∈ [currentSlot, currentSlot+SLOT_WINDOW]`),
+      // so it must be genuinely current. The previous design read the exact
+      // on-chain slot inside the proof, which is unsatisfiable on a real chain
+      // (the slot advances between prove and inclusion →
+      // `Protocol_state_precondition_unsatisfied`). `_setNetwork()` already bound
+      // the active instance to the configured GraphQL endpoint, so the network
+      // state reflects the live chain.
+      const currentSlot = await this._currentGlobalSlot();
+
       const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
-        await zkApp.initiateClose(balA, balB, saltField, nonceField, sigA, sigB);
+        await zkApp.initiateClose(balA, balB, saltField, nonceField, sigA, sigB, currentSlot);
       });
       await txn.prove();
       const sentTx = await txn.sign([signerPrivateKey]).send();
@@ -1249,6 +1406,25 @@ export class MinaPaymentChannelSDK {
   /**
    * Settle a closed channel after the challenge period.
    *
+   * In-proof enforcement: for USDC channels the escrow payouts are composed via
+   * the token owner's in-proof `settleFromChannel(channelAddress, balanceA,
+   * balanceB, salt, A, B, nonce, closedAtSlot, settlementTimeout)`, run in the
+   * SAME tx as `channel.settle(balanceA, balanceB, salt, A, B, nonce)`. The token
+   * method binds the payouts to the channel's on-chain pre-settle commitment
+   * (`balanceCommitment`, `depositTotal`, `channelState == CLOSING`, `channelHash`,
+   * and the elapsed challenge period) via account preconditions, so the LEDGER
+   * rejects any mismatch — the payouts are FORCED equal to the committed balances
+   * by the proof, and zero-amount payouts are skipped inside the contract.
+   *
+   * SIGNERS = fee payer ONLY. Unlike the merged #191/#192 design, NO channel/escrow
+   * signature is needed for settle: the escrow moves are authorized purely by the
+   * `UsdcChannelToken` owner's proof plus the escrow's custodial `send: none`
+   * permission (set once at first deposit via `enableChannelEscrow`).
+   *
+   * The witnesses `closedAtSlot` / `settlementTimeout` are read off-chain from the
+   * channel account and passed in; the token method pins them with slot
+   * preconditions, so a wrong witness is rejected (the deadline cannot be forged).
+   *
    * @param channelAddress - Base58 zkApp address of the channel
    * @param balanceA - Revealed balance for participant A
    * @param balanceB - Revealed balance for participant B
@@ -1258,9 +1434,8 @@ export class MinaPaymentChannelSDK {
    * @param nonce - Channel nonce (used in channelHash)
    * @param options - USDC distribution tuning. `fundParticipantTokenAccounts` is
    *   the number of new participant USDC token accounts (0, 1, or 2) whose
-   *   creation fee this tx pays — pass the count of participants who do not yet
-   *   hold the token. `channelPrivateKey` overrides the channel/zkApp signing key
-   *   (base58) for channels not opened by this SDK instance.
+   *   creation fee this tx pays — pass the count of NON-zero payouts whose
+   *   recipient does not yet hold the token.
    * @returns Transaction hash
    */
   async settleChannel(
@@ -1271,12 +1446,13 @@ export class MinaPaymentChannelSDK {
     participantA: string,
     participantB: string,
     nonce: bigint,
-    options?: { fundParticipantTokenAccounts?: number; channelPrivateKey?: string }
+    options?: { fundParticipantTokenAccounts?: number }
   ): Promise<MinaTxResult> {
     const signerKeyBase58 = this._requireSignerKey();
 
     try {
-      const { PrivateKey, PublicKey, Field, UInt64, AccountUpdate, fetchAccount } = await getO1js();
+      const { PrivateKey, PublicKey, Field, UInt32, UInt64, AccountUpdate, fetchAccount } =
+        await getO1js();
       const Mina = await this._setNetwork();
 
       const signerPrivateKey = PrivateKey.fromBase58(signerKeyBase58);
@@ -1294,31 +1470,20 @@ export class MinaPaymentChannelSDK {
       const channelPublicKey = PublicKey.fromBase58(channelAddress);
       const nonceField = Field(nonce);
 
-      // Resolve the USDC token-owner context (if any) and the channel signing
-      // key BEFORE building the tx, so config errors fail fast.
+      // Resolve the USDC token-owner context (if any) BEFORE building the tx so
+      // config errors fail fast. The token method also needs the channel's
+      // on-chain closedAtSlot / settlementTimeout as witnesses (it pins them with
+      // preconditions, so a wrong value is rejected and the deadline can't be
+      // forged). `_getZkApp` just refreshed the channel account.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let token: any = null;
-      let channelPrivateKey: ReturnType<typeof PrivateKey.fromBase58> | null = null;
+      let closedAtSlot = 0n;
+      let settlementTimeout = 0n;
       if (this.isUsdcToken) {
         await this._assertTokenDecimals();
         ({ token } = await this._getTokenContext());
-
-        // The settle USDC payouts debit the channel's token account, authorized
-        // by the channel account's own signature on this tx (#192). Resolve the
-        // channel key: explicit override, else the key cached at openChannel.
-        const channelKeyBase58 =
-          options?.channelPrivateKey ?? this._channelKeyCache.get(channelAddress);
-        if (!channelKeyBase58) {
-          throw new MinaChannelError(
-            `Cannot settle USDC channel ${channelAddress}: the channel/zkApp private key is ` +
-              'required to authorize the channel-account USDC payouts but is not available. The ' +
-              'channel must have been opened by this SDK instance, or channelPrivateKey must be ' +
-              'supplied (#192).',
-            MINA_ERROR_CODES.INVALID_PARAMETERS,
-            'INVALID_PARAMETERS'
-          );
-        }
-        channelPrivateKey = PrivateKey.fromBase58(channelKeyBase58);
+        closedAtSlot = (zkApp.closedAtSlot.get() as { toBigInt(): bigint }).toBigInt();
+        settlementTimeout = (zkApp.settlementTimeout.get() as { toBigInt(): bigint }).toBigInt();
       }
 
       const fundCount = options?.fundParticipantTokenAccounts ?? 0;
@@ -1328,27 +1493,30 @@ export class MinaPaymentChannelSDK {
           if (fundCount > 0) {
             AccountUpdate.fundNewAccount(signerPublicKey, fundCount);
           }
-          // Distribute the channel's custodied USDC. Skip zero-amount transfers
-          // (no balance change, no new account needed). Amounts are exactly the
-          // channel's settle balances — the enforcement point, since the channel
-          // proof no longer binds them. Mirror the reference ordering (B then A).
-          if (balanceB > 0n) {
-            await token.transfer(channelPublicKey, pubB, UInt64.Unsafe.fromField(balB));
-          }
-          if (balanceA > 0n) {
-            await token.transfer(channelPublicKey, pubA, UInt64.Unsafe.fromField(balA));
-          }
+          // In-proof escrow payouts: bound to the channel's pre-settle commitment.
+          // Reference composition (test-helpers `settleFromChannelInProof`): the
+          // token method is added BEFORE `channel.settle`. The contract forces the
+          // payouts == committed balances and skips zero amounts internally.
+          await token.settleFromChannel(
+            channelPublicKey,
+            UInt64.Unsafe.fromField(balA),
+            UInt64.Unsafe.fromField(balB),
+            saltField,
+            pubA,
+            pubB,
+            nonceField,
+            UInt32.from(closedAtSlot),
+            UInt32.from(settlementTimeout)
+          );
         }
         await zkApp.settle(balA, balB, saltField, pubA, pubB, nonceField);
       });
       await txn.prove();
 
-      // Sign with the fee payer/signer, plus the channel key for USDC channels so
-      // the channel-account outflows are authorized.
-      const signers = channelPrivateKey
-        ? [signerPrivateKey, channelPrivateKey]
-        : [signerPrivateKey];
-      const sentTx = await txn.sign(signers).send();
+      // Signers = fee payer ONLY. No channel/escrow key — the escrow moves are
+      // authorized by the token owner's proof + the custodial `send: none`
+      // permission. (The merged #191/#192 channel-key settle signature is gone.)
+      const sentTx = await txn.sign([signerPrivateKey]).send();
       const txHash = sentTx.hash ?? '';
 
       this._logger.info(

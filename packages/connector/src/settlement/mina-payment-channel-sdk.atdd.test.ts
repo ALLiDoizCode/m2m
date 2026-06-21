@@ -165,6 +165,12 @@ const mockFetchAccount = jest.fn().mockResolvedValue({
   },
 });
 
+// #202: closeChannel reads the live network slot via fetchLastBlock and passes it
+// as the initiateClose `currentSlot` witness.
+const mockFetchLastBlock = jest.fn().mockResolvedValue({
+  globalSlotSinceGenesis: { value: mockField('42'), toString: () => '42' },
+});
+
 jest.mock('o1js', () => ({
   Mina: {
     Network: mockMinaNetwork,
@@ -185,6 +191,7 @@ jest.mock('o1js', () => ({
     fromJSON: mockSignatureFromJSON,
   },
   fetchAccount: mockFetchAccount,
+  fetchLastBlock: mockFetchLastBlock,
   AccountUpdate: {
     fundNewAccount: jest.fn(),
   },

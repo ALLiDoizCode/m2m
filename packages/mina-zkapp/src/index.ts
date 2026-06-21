@@ -9,3 +9,4 @@
 
 export { PaymentChannel } from './PaymentChannel';
 export { CHANNEL_STATE, ASSERT_MESSAGES, MAX_SAFE_AMOUNT } from './constants';
+export { UsdcChannelToken, CHANNEL_STATE_SLOT } from './usdc-channel-token';

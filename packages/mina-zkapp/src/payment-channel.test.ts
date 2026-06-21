@@ -79,8 +79,10 @@ async function closeChannel(
   sigB: Signature,
   signers: PrivateKey[]
 ): Promise<void> {
+  // #202: pass the live network slot as the `currentSlot` witness.
+  const currentSlot = Mina.getNetworkState().globalSlotSinceGenesis;
   const tx = await Mina.transaction(sender, async () => {
-    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB);
+    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB, currentSlot);
   });
   await tx.prove();
   await tx.sign(signers).send();
@@ -408,7 +410,11 @@ describe('PaymentChannel zkApp -- Channel Lifecycle (Story 34.1)', () => {
     // When: settle is called BEFORE challenge period expires (100 + 30 = 130, but slot is 110)
     Local.setGlobalSlot(110);
 
-    // Then: transaction is rejected
+    // Then: transaction is rejected. #202: settle now enforces the challenge
+    // period via a NETWORK `globalSlotSinceGenesis` RANGE precondition
+    // (`requireBetween(deadline, MAXINT)`) instead of an in-circuit
+    // `assertGreaterThanOrEqual`, so an early settle is rejected by the
+    // protocol-state precondition rather than the "challenge period" assert.
     await expect(
       settleChannel(
         deployer,
@@ -421,7 +427,7 @@ describe('PaymentChannel zkApp -- Channel Lifecycle (Story 34.1)', () => {
         channelNonce,
         [deployer.key]
       )
-    ).rejects.toThrow(/challenge period/);
+    ).rejects.toThrow(/precondition|globalSlotSinceGenesis|global slot/i);
   });
 
   // T-34.1-07: All 8 state fields used -- no unused, no overflow into field 9

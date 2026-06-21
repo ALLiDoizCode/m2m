@@ -2,10 +2,12 @@
  * Deploy the USDC token-owner zkApp (mina-fungible-token) to a Mina network.
  *
  * Mina has no native ERC-20: a fungible token is defined by a token-owner zkApp.
- * We deploy the audited `mina-fungible-token` standard as USDC at **6 decimals**
- * (matching the EVM MockERC20 + the Solana SPL mint) so a payment-channel claim's
- * base-unit amount means the same thing on every chain — no cross-chain decimal
- * normalization required.
+ * We deploy `UsdcChannelToken` — the in-proof-enforcing token owner (a
+ * `FungibleToken` subclass; Phase A) — as USDC at **6 decimals** (matching the EVM
+ * MockERC20 + the Solana SPL mint) so a payment-channel claim's base-unit amount
+ * means the same thing on every chain — no cross-chain decimal normalization
+ * required. Deploy + initialize are byte-for-byte the stock `FungibleToken`
+ * sequence; the subclass only ADDS the channel-bound escrow/deposit/settle methods.
  *
  * Because we PROXY the public Mina devnet (no self-hosted node), the token is
  * deployed ONCE to public devnet; its address + derived `tokenId` are then pinned
@@ -67,13 +69,17 @@ import * as path from 'path';
 import { AccountUpdate, Bool, Mina, PrivateKey, PublicKey, UInt64 } from 'o1js';
 
 import {
-  FungibleToken,
   FungibleTokenAdmin,
   USDC_DECIMALS,
   USDC_DECIMALS_U8,
   ONE_USDC,
   usdcDeployProps,
 } from '../../packages/mina-zkapp/src/usdc-token';
+// In-proof-enforcing USDC token owner (Phase A). Deploys EXACTLY like the stock
+// `FungibleToken` (same usdcDeployProps / initialize), but ADDS the channel-bound
+// `enableChannelEscrow` / `depositToChannel` / `settleFromChannel` methods so the
+// PROOF (not the SDK) binds escrow payouts to the channel commitment.
+import { UsdcChannelToken } from '../../packages/mina-zkapp/src/usdc-channel-token';
 
 const DEFAULT_NETWORK = 'https://api.minascan.io/node/devnet/v1/graphql';
 
@@ -113,11 +119,11 @@ export async function deployUsdcToken(opts: {
   network: string;
 }): Promise<{
   result: UsdcDeployResult;
-  token: FungibleToken;
+  token: UsdcChannelToken;
   admin: FungibleTokenAdmin;
 }> {
   const admin = new FungibleTokenAdmin(opts.adminContractKey.toPublicKey());
-  const token = new FungibleToken(opts.tokenKey.toPublicKey());
+  const token = new UsdcChannelToken(opts.tokenKey.toPublicKey());
 
   const tx = await Mina.transaction(opts.feePayer, async () => {
     // Three new accounts pay the account-creation fee: admin, token, circulation.
@@ -214,7 +220,7 @@ async function runLocal(): Promise<void> {
 
   // Cache verification keys so deploy() can find them (cheap with proofs off).
   await FungibleTokenAdmin.compile();
-  await FungibleToken.compile();
+  await UsdcChannelToken.compile();
 
   const adminContractKey = PrivateKey.random();
   const tokenKey = PrivateKey.random();
@@ -264,10 +270,10 @@ async function runLive(args: CliArgs): Promise<void> {
   const Network = Mina.Network({ mina: args.network });
   Mina.setActiveInstance(Network);
 
-  console.log('Compiling FungibleTokenAdmin + FungibleToken circuits...');
+  console.log('Compiling FungibleTokenAdmin + UsdcChannelToken circuits...');
   const t0 = Date.now();
   await FungibleTokenAdmin.compile();
-  await FungibleToken.compile();
+  await UsdcChannelToken.compile();
   console.log(`Compilation complete in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
   const deployerPub = deployer.toPublicKey();

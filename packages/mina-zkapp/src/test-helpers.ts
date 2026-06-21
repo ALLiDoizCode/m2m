@@ -30,6 +30,7 @@ import {
 
 import { PaymentChannel } from './PaymentChannel';
 import { FungibleToken, FungibleTokenAdmin, USDC_DECIMALS_U8, usdcDeployProps } from './usdc-token';
+import { UsdcChannelToken } from './usdc-channel-token';
 
 /**
  * A deployed USDC token context threaded into deposit/settle so the channel can
@@ -199,6 +200,12 @@ export async function submitClaim(
 
 /**
  * Initiate cooperative channel closure.
+ *
+ * #202: `initiateClose` now takes a `currentSlot` witness (the live global slot,
+ * pinned to "~now" by a range precondition) instead of pinning the exact on-chain
+ * slot — an exact slot precondition is unsatisfiable on a real chain. This helper
+ * reads the current network slot off-chain via `Mina.getNetworkState()` and passes
+ * it as the witness (mirroring how the SDK reads it from the live network).
  */
 export async function closeChannel(
   sender: Mina.TestPublicKey,
@@ -211,8 +218,9 @@ export async function closeChannel(
   sigB: Signature,
   signers: PrivateKey[]
 ): Promise<void> {
+  const currentSlot = Mina.getNetworkState().globalSlotSinceGenesis;
   const tx = await Mina.transaction(sender, async () => {
-    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB);
+    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB, currentSlot);
   });
   await tx.prove();
   await tx.sign(signers).send();
@@ -261,6 +269,181 @@ export async function settleChannel(
       }
     }
     await zkApp.settle(balanceA, balanceB, salt, participantA, participantB, nonce);
+  });
+  await tx.prove();
+  await tx.sign(signers).send();
+}
+
+// ===========================================================================
+// IN-PROOF token-owner flow (UsdcChannelToken) — the #191/#194 guarantees now
+// enforced by the CONTRACT proof, not the SDK. Mirrors the SDK-enforced helpers
+// above (`deployUsdcToken`/`depositToChannel`/`settleChannel`) but routes escrow
+// movement through `UsdcChannelToken.depositToChannel` / `.settleFromChannel`,
+// composed in the SAME tx as the channel's accounting method.
+// ===========================================================================
+
+/**
+ * A deployed USDC `UsdcChannelToken` context — the in-proof-enforcing variant of
+ * {@link UsdcContext}. `token` is the enforcing token owner whose
+ * `depositToChannel`/`settleFromChannel` methods move escrow under proof.
+ */
+export interface UsdcChannelContext {
+  /** The deployed in-proof-enforcing USDC token owner. */
+  token: UsdcChannelToken;
+  /** The admin/mint authority — a FUNDED account that signs mints. */
+  adminAuthority: Mina.TestPublicKey;
+  /** The USDC tokenId (token.deriveTokenId()). Equals the channel's tokenId_. */
+  tokenId: Field;
+}
+
+/**
+ * Deploy the in-proof-enforcing USDC token (`UsdcChannelToken` + admin) at 6
+ * decimals. Identical deploy sequence to {@link deployUsdcToken}; only the token
+ * class differs (the enforcing subclass).
+ */
+export async function deployUsdcChannelToken(
+  deployer: Mina.TestPublicKey,
+  adminAuthority: Mina.TestPublicKey
+): Promise<UsdcChannelContext> {
+  const adminContractKey = PrivateKey.random();
+  const tokenKey = PrivateKey.random();
+  const admin = new FungibleTokenAdmin(adminContractKey.toPublicKey());
+  const token = new UsdcChannelToken(tokenKey.toPublicKey());
+
+  const tx = await Mina.transaction(deployer, async () => {
+    AccountUpdate.fundNewAccount(deployer, 3); // admin acct, token acct, circulation acct
+    await admin.deploy({ adminPublicKey: adminAuthority });
+    await token.deploy(usdcDeployProps);
+    await token.initialize(adminContractKey.toPublicKey(), USDC_DECIMALS_U8, Bool(false));
+  });
+  await tx.prove();
+  await tx.sign([deployer.key, adminContractKey, tokenKey]).send();
+
+  return { token, adminAuthority, tokenId: token.deriveTokenId() };
+}
+
+/**
+ * Mint USDC via a {@link UsdcChannelContext}. (Thin wrapper so callers don't have
+ * to reshape the context; mint is unchanged from the stock token.)
+ */
+export async function mintUsdcChannel(
+  deployer: Mina.TestPublicKey,
+  ctx: UsdcChannelContext,
+  recipient: PublicKey,
+  amount: bigint,
+  fundRecipient = true
+): Promise<void> {
+  const tx = await Mina.transaction(deployer, async () => {
+    if (fundRecipient) AccountUpdate.fundNewAccount(deployer, 1);
+    await ctx.token.mint(recipient, UInt64.from(amount));
+  });
+  await tx.prove();
+  await tx.sign([deployer.key, ctx.adminAuthority.key]).send();
+}
+
+/**
+ * One-time: make a channel's escrow token account custodial via the in-proof
+ * token owner. The CHANNEL KEY must sign (the only signature this flow needs;
+ * settle needs none). Pays the escrow account's new-account fee.
+ */
+export async function enableChannelEscrow(
+  sender: Mina.TestPublicKey,
+  zkApp: PaymentChannel,
+  usdc: UsdcChannelContext,
+  channelKey: PrivateKey
+): Promise<void> {
+  const tx = await Mina.transaction(sender, async () => {
+    AccountUpdate.fundNewAccount(sender, 1); // escrow token account
+    await usdc.token.enableChannelEscrow(zkApp.address);
+  });
+  await tx.prove();
+  await tx.sign([sender.key, channelKey]).send();
+}
+
+/**
+ * Deposit into a channel via the IN-PROOF token owner.
+ *
+ * Composes, in ONE tx: `token.depositToChannel(...)` (escrow move, bound to the
+ * channel being OPEN + to the resulting depositTotal) and `channel.deposit(...)`
+ * (the accounting half). The depositor signs — that single signature authorizes
+ * both the USDC outflow and the channel's depositor-binding update. The escrow
+ * must already be custodial (see {@link enableChannelEscrow}).
+ *
+ * @param amount - deposit amount in USDC base units
+ * @param currentDepositTotal - the channel's on-chain depositTotal BEFORE this
+ *   deposit (helper computes `+ amount` as the precondition)
+ */
+export async function depositToChannelInProof(
+  sender: Mina.TestPublicKey,
+  zkApp: PaymentChannel,
+  usdc: UsdcChannelContext,
+  amount: bigint,
+  depositor: PublicKey,
+  currentDepositTotal: bigint,
+  signers: PrivateKey[]
+): Promise<void> {
+  const tx = await Mina.transaction(sender, async () => {
+    // ORDER MATTERS: the channel's accounting `deposit` AU must precede the
+    // token's depositTotal precondition AU, because o1js/Mina evaluate account
+    // preconditions against the ledger state as updates are applied IN ORDER. The
+    // precondition then sees the POST-deposit total and pins escrow ↔ accounting.
+    await zkApp.deposit(Field(amount), depositor);
+    await usdc.token.depositToChannel(
+      zkApp.address,
+      UInt64.from(amount),
+      depositor,
+      Field(currentDepositTotal + amount)
+    );
+  });
+  await tx.prove();
+  await tx.sign(signers).send();
+}
+
+/**
+ * Settle a channel via the IN-PROOF token owner.
+ *
+ * Composes, in ONE tx: `token.settleFromChannel(...)` (escrow → A/B payouts bound
+ * to the channel's pre-settle commitment) and `channel.settle(...)` (the
+ * CLOSING→SETTLED accounting transition). The CHANNEL KEY IS NOT REQUIRED — the
+ * escrow moves are authorized by the token owner's proof + the escrow's custodial
+ * `send: none` permission. `signers` typically need only contain the fee payer.
+ *
+ * Zero-balance payouts are skipped inside the contract; pass
+ * `fundParticipantTokenAccounts` = the number of NON-zero payouts that need a new
+ * token account.
+ */
+export async function settleFromChannelInProof(
+  sender: Mina.TestPublicKey,
+  zkApp: PaymentChannel,
+  usdc: UsdcChannelContext,
+  balanceA: bigint,
+  balanceB: bigint,
+  salt: Field,
+  participantA: PublicKey,
+  participantB: PublicKey,
+  nonce: Field,
+  closedAtSlot: bigint,
+  settlementTimeout: bigint,
+  signers: PrivateKey[],
+  fundParticipantTokenAccounts = 0
+): Promise<void> {
+  const { UInt32 } = await import('o1js');
+  const tx = await Mina.transaction(sender, async () => {
+    if (fundParticipantTokenAccounts > 0) {
+      AccountUpdate.fundNewAccount(sender, fundParticipantTokenAccounts);
+    }
+    await usdc.token.settleFromChannel(
+      zkApp.address,
+      UInt64.from(balanceA),
+      UInt64.from(balanceB),
+      salt,
+      participantA,
+      participantB,
+      nonce,
+      UInt32.from(closedAtSlot),
+      UInt32.from(settlementTimeout)
+    );
+    await zkApp.settle(Field(balanceA), Field(balanceB), salt, participantA, participantB, nonce);
   });
   await tx.prove();
   await tx.sign(signers).send();
