@@ -26,7 +26,6 @@ on:
 # uploads artifacts -- no pushes, no deployments, no PR writes.
 permissions:
   contents: read
-  actions: write # required for actions/upload-artifact
 
 jobs:
   http-surface:
