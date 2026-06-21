@@ -126,6 +126,14 @@ export interface BalanceProofParams {
    */
   signatureB?: string;
   /**
+   * Mina-only: tokenId carried by the inbound `MinaClaimMessage` (#192). When
+   * supplied, the Mina provider asserts it matches the channel's configured USDC
+   * tokenId before claiming — the channel proof no longer binds token amounts, so
+   * the SDK is the enforcement point against settling a claim for the wrong token.
+   * Ignored by the EVM and Solana providers.
+   */
+  tokenId?: string;
+  /**
    * Solana-only: base58 public key of the key that produced `signature`.
    * Ed25519 signatures are not public-key-recoverable, so the on-chain Ed25519
    * precompile must be told which key to verify against. For inbound peer claims
@@ -345,6 +353,13 @@ export interface MinaProviderConfig {
   keyId?: string;
   /** Mina token ID (native MINA or custom fungible token) */
   tokenId?: string;
+  /**
+   * Base58 address of the USDC token-owner (`FungibleToken`) zkApp (#192). When
+   * set, the channel custodies the USDC custom token: the SDK builds
+   * `token.transfer(...)` AccountUpdates on deposit/settle and derives the
+   * channel's tokenId from this owner. Omit for legacy native-MINA channels.
+   */
+  tokenAddress?: string;
   /** Mina network name for chain ID namespacing (e.g., 'devnet', 'mainnet') */
   network?: string;
   /**
