@@ -1,0 +1,9 @@
+{
+  "_note": "SAMPLE shape of the deploy output written by tools/mina/deploy-usdc-token.ts --out infra/mina/usdc-token.json. The real file (gitignored) is produced by a live public-devnet deploy; devnet.sh write_endpoints + fund-mina-usdc.sh read tokenAddress/adminContractAddress/tokenId from it. Addresses below are PLACEHOLDERS.",
+  "tokenAddress": "B62qPLACEHOLDER_USDC_TOKEN_ADDRESS_FROM_LIVE_DEPLOY",
+  "tokenId": "PLACEHOLDER_USDC_TOKEN_ID_FROM_LIVE_DEPLOY",
+  "adminContractAddress": "B62qPLACEHOLDER_USDC_ADMIN_CONTRACT_ADDRESS",
+  "adminAuthority": "B62qPLACEHOLDER_FUNDED_ADMIN_AUTHORITY",
+  "decimals": 6,
+  "network": "https://api.minascan.io/node/devnet/v1/graphql"
+}

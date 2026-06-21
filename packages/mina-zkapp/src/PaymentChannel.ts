@@ -20,7 +20,6 @@ import {
   PublicKey,
   Poseidon,
   Signature,
-  UInt64,
   AccountUpdate,
 } from 'o1js';
 
@@ -100,20 +99,31 @@ export class PaymentChannel extends SmartContract {
   /**
    * Deposit into an open channel.
    *
-   * Increments depositTotal by the given amount AND custodies the funds on the
-   * zkApp account. Requires channelState == OPEN and amount > 0.
+   * Increments depositTotal by the given amount (USDC base units) and binds the
+   * depositor's authorization. Requires channelState == OPEN and amount > 0.
    *
-   * FUND CUSTODY (Story 34.4): a signed AccountUpdate debits the depositor and
-   * credits this zkApp account by `amount` native MINA (nanomina). This makes
-   * the zkApp account the on-chain custodian of channel funds -- the Mina analog
-   * of the Solana program's vault PDA. Without this, `settle()` would have no
-   * funds to distribute (the earlier behaviour recorded depositTotal as a bare
-   * Field with nothing actually escrowed). The depositor authorizes the debit by
-   * signing the transaction (AccountUpdate.createSigned), which also binds the
-   * depositor identity on-chain.
+   * TOKEN CUSTODY (#191 — USDC across all chains): the channel now custodies the
+   * **USDC custom token** (`mina-fungible-token`), not native MINA. Custom-token
+   * balances cannot be moved by the channel proof via `AccountUpdate.send` /
+   * `this.send` — only the token-owner zkApp may move its token (any other actor
+   * gets `Token_owner_not_caller`). So this method does the **accounting half**
+   * (depositTotal += amount, range/state checks, depositor binding) while the
+   * **token-transfer half** is built in the SAME transaction by the caller (SDK /
+   * test) as `token.transfer(depositor, channelAddress, amount)` under the USDC
+   * `tokenId`. The token owner's `transfer` proof authorizes the depositor→channel
+   * move; the depositor signs the tx, which authorizes both the token outflow and
+   * the empty signed AccountUpdate below (binding the depositor identity on-chain,
+   * exactly as the native-MINA custody used to).
    *
-   * @param amount - Amount to deposit (must be > 0), in nanomina
-   * @param depositor - Public key of the depositor (debited and bound on-chain)
+   * This composition (channel = accountant, token owner = mover) is the only one
+   * that works with `mina-fungible-token` + o1js 2.14.0; a channel-proof-authored
+   * token balance change fails `Token_owner_not_caller`.
+   *
+   * INVARIANT: `channelHash` stays native (Poseidon(A.x, B.x, nonce)); `tokenId`
+   * is a channel parameter stored in `tokenId_`, NOT part of channelHash.
+   *
+   * @param amount - Amount to deposit (must be > 0), in USDC base units (6 dp)
+   * @param depositor - Public key of the depositor (bound on-chain; signs the tx)
    */
   @method async deposit(amount: Field, depositor: PublicKey): Promise<void> {
     // Require channel is OPEN
@@ -138,17 +148,12 @@ export class PaymentChannel extends SmartContract {
 
     this.depositTotal.set(newDeposit);
 
-    // FUND CUSTODY: move `amount` nanomina from the depositor into this zkApp
-    // account. createSigned requires the depositor's signature on the enclosing
-    // transaction (authorizing the debit + binding the depositor identity), then
-    // `send({ to: this.address })` credits the zkApp's own balance. The deposited
-    // MINA is now escrowed here until settle() distributes it.
-    // `amount` is already proven <= MAX_SAFE_AMOUNT (2^64 - 1) above, so the
-    // unchecked Field->UInt64 conversion is sound (the range bound is the
-    // explicit assertion, not an implicit witness check).
-    const amountU64 = UInt64.Unsafe.fromField(amount);
-    const depositorUpdate = AccountUpdate.createSigned(depositor);
-    depositorUpdate.send({ to: this.address, amount: amountU64 });
+    // DEPOSITOR BINDING: require the depositor's signature on this transaction.
+    // The actual USDC transfer (depositor → this channel's token account) is a
+    // sibling AccountUpdate built by the caller via the token owner in the same
+    // tx; this empty signed update binds the depositor identity on-chain and
+    // ensures the deposit accounting cannot be authorized without the depositor.
+    AccountUpdate.createSigned(depositor);
   }
 
   /**
@@ -236,16 +241,20 @@ export class PaymentChannel extends SmartContract {
    * challenge period has passed, and verifies participant identity against the
    * stored channelHash. Transitions state to SETTLED.
    *
-   * FUND DISTRIBUTION (Story 34.4): after verifying all preconditions and
-   * transitioning to SETTLED, this method emits two AccountUpdates that debit the
-   * zkApp's custodied balance -- `balanceB` nanomina to participantB (the apex
-   * recipient, the analog of the Solana SETTLE_CHANNEL vault→recipient transfer)
-   * and `balanceA` nanomina to participantA (the depositor refund). The debits
-   * from this zkApp account are authorized by THIS settle proof (the contract's
-   * own AccountUpdate), so no extra signer is required. Conservation
-   * (balanceA + balanceB == depositTotal) was enforced at initiateClose and the
-   * commitment is re-verified below, so the two sends together drain exactly the
-   * custodied deposit.
+   * FUND DISTRIBUTION (#191 — USDC across all chains): after verifying all
+   * preconditions and transitioning to SETTLED, the channel's custodied **USDC**
+   * is distributed -- `balanceB` to participantB (the apex recipient, analog of
+   * the Solana SETTLE_CHANNEL vault→recipient transfer) and `balanceA` to
+   * participantA (the depositor refund). As with deposit, the channel proof
+   * CANNOT move a custom token directly (`Token_owner_not_caller`), so this method
+   * does only the **accounting half** (state→SETTLED + identity/timeout/commitment
+   * checks) while the **token-transfer half** is built in the SAME transaction by
+   * the caller as two `token.transfer(channelAddress, participant, amount)` calls
+   * under the USDC `tokenId`. Those token outflows debit the channel's token
+   * account, which is authorized by the channel account's signature on the settle
+   * tx (the channel key signs). Conservation (balanceA + balanceB == depositTotal)
+   * was enforced at initiateClose and the commitment is re-verified below, so the
+   * two token transfers together drain exactly the custodied deposit.
    *
    * @param balanceA - Revealed balance for participant A
    * @param balanceB - Revealed balance for participant B
@@ -292,20 +301,16 @@ export class PaymentChannel extends SmartContract {
     // Transition to SETTLED
     this.channelState.set(CHANNEL_STATE.SETTLED);
 
-    // FUND DISTRIBUTION: drain the custodied deposit to the participants. These
-    // debits come from this zkApp's own account and are authorized by this
-    // settle proof (this.send emits the contract's self-AccountUpdate). The
-    // recipient (participantB / apex) is credited balanceB, the depositor
-    // (participantA / client) is refunded balanceA. Their sum equals depositTotal
-    // (enforced at initiateClose), so the zkApp balance returns to its rent
-    // minimum after settlement.
-    // balanceA/balanceB are proven <= depositTotal (<= MAX_SAFE_AMOUNT) via the
-    // commitment + the conservation check at initiateClose, so the unchecked
-    // Field->UInt64 conversion is sound here too.
-    const balanceBU64 = UInt64.Unsafe.fromField(balanceB);
-    const balanceAU64 = UInt64.Unsafe.fromField(balanceA);
-    this.send({ to: participantB, amount: balanceBU64 });
-    this.send({ to: participantA, amount: balanceAU64 });
+    // FUND DISTRIBUTION: the USDC payouts (channel token account → participantB
+    // balanceB, → participantA balanceA) are built by the caller as sibling
+    // `token.transfer(...)` AccountUpdates in this same transaction (see the note
+    // above and settleChannel in test-helpers). The channel proof intentionally
+    // does NOT emit them: a channel-authored custom-token balance change fails
+    // `Token_owner_not_caller`; only the token owner may move USDC. The channel
+    // key signs the settle tx, authorizing the outflows from the channel's token
+    // account. balanceA/balanceB are proven <= depositTotal (<= MAX_SAFE_AMOUNT)
+    // via the commitment + the conservation check at initiateClose, so the token
+    // amounts the caller derives from them are sound.
   }
 
   /**

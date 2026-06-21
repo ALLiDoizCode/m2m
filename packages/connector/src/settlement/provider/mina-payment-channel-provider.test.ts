@@ -100,6 +100,7 @@ interface MockMinaPaymentChannelSDK {
   compileContract: jest.Mock;
   getSignerPublicKey: jest.Mock;
   subscribeToChannel: jest.Mock;
+  assertClaimTokenId: jest.Mock;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +134,7 @@ function createMockSDK(): MockMinaPaymentChannelSDK {
     compileContract: jest.fn().mockResolvedValue(undefined),
     getSignerPublicKey: jest.fn().mockResolvedValue('B62qMockSignerPublicKey'),
     subscribeToChannel: jest.fn(),
+    assertClaimTokenId: jest.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -453,6 +455,54 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       // Then: the call delegates to SDK and a TxResult is returned
       expect(mockSDK.claimFromChannel).toHaveBeenCalledTimes(1);
       expect(result).toEqual({ txHash: 'mina_tx_hash_claim_456' });
+    });
+
+    it('should assert the claim tokenId matches the channel token before claiming (#192)', async () => {
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 5,
+        transferredAmount: '100000',
+        lockedAmount: '0',
+        locksRoot: '',
+        tokenId: 'usdc-token-id',
+      };
+      mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx' });
+
+      await provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'sig');
+
+      expect(mockSDK.assertClaimTokenId).toHaveBeenCalledWith('usdc-token-id');
+    });
+
+    it('should reject a claim whose tokenId does not match the channel token (#192)', async () => {
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 5,
+        transferredAmount: '100000',
+        lockedAmount: '0',
+        locksRoot: '',
+        tokenId: 'wrong-token-id',
+      };
+      mockSDK.assertClaimTokenId.mockRejectedValueOnce(new Error('tokenId mismatch (#192)'));
+
+      await expect(
+        provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'sig')
+      ).rejects.toThrow(/tokenId mismatch/);
+      expect(mockSDK.claimFromChannel).not.toHaveBeenCalled();
+    });
+
+    it('should skip the tokenId assertion when the claim omits tokenId (legacy)', async () => {
+      const balanceProof: BalanceProofParams = {
+        channelId: TEST_ZKAPP_ADDRESS,
+        nonce: 5,
+        transferredAmount: '100000',
+        lockedAmount: '0',
+        locksRoot: '',
+      };
+      mockSDK.claimFromChannel.mockResolvedValue({ txHash: 'tx' });
+
+      await provider.claimFromChannel(TEST_ZKAPP_ADDRESS, balanceProof, 'sig');
+
+      expect(mockSDK.assertClaimTokenId).not.toHaveBeenCalled();
     });
 
     it('should warn about EVM fields on claimFromChannel', async () => {
@@ -1251,6 +1301,22 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       const context = await providerWithoutNetwork.getMinaContext();
       expect(context.network).toBe('mainnet');
     });
+
+    it('should surface the configured USDC token-owner address (#192)', async () => {
+      const usdcProvider = new MinaPaymentChannelProvider(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        mockSDK as any,
+        TEST_CHAIN_ID,
+        TEST_ZKAPP_ADDRESS,
+        TEST_SIGNER_KEY,
+        mockLogger,
+        { tokenId: 'usdc-token-id', tokenAddress: 'B62qUsdcTokenOwnerAddress', network: TEST_NETWORK }
+      );
+
+      const context = await usdcProvider.getMinaContext();
+      expect(context.tokenAddress).toBe('B62qUsdcTokenOwnerAddress');
+      expect(context.tokenId).toBe('usdc-token-id');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1318,6 +1384,31 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
       const lastCallArgs = sdkMock.mock.calls[sdkMock.mock.calls.length - 1];
       // Constructor: (graphqlUrl, zkAppAddress, logger, signerKey, txFeeNanomina)
       expect(lastCallArgs[4]).toBe(250000000n);
+    });
+
+    // #192: the factory must thread the USDC token-owner address + tokenId into
+    // the SDK so deposit/settle can build token.transfer(...) AccountUpdates.
+    it('should forward tokenAddress + tokenId to the SDK constructor (#192)', () => {
+      const factory = createMinaProviderFactory(mockLogger, TEST_SIGNER_KEY);
+      const config = {
+        chainType: 'mina' as const,
+        graphqlUrl: TEST_GRAPHQL_URL,
+        zkAppAddress: TEST_ZKAPP_ADDRESS,
+        keyId: 'mina-key-1',
+        tokenId: 'usdc-token-id',
+        tokenAddress: 'B62qUsdcTokenOwnerAddress',
+        network: TEST_NETWORK,
+      } as ProviderConfig;
+
+      factory(config);
+
+      const sdkMock = MinaPaymentChannelSDK as unknown as jest.Mock;
+      const lastCallArgs = sdkMock.mock.calls[sdkMock.mock.calls.length - 1];
+      // Constructor arg [5] is the token config { tokenAddress, tokenId }.
+      expect(lastCallArgs[5]).toEqual({
+        tokenAddress: 'B62qUsdcTokenOwnerAddress',
+        tokenId: 'usdc-token-id',
+      });
     });
 
     it('should leave the SDK fee default when txFeeNanomina is omitted (Issue #126)', () => {

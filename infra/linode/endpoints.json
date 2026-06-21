@@ -19,8 +19,11 @@
   "mina": {
     "graphqlUrl": "https://mina.<DOMAIN>/graphql",
     "upstream": "https://api.minascan.io/node/devnet/v1/graphql",
-    "tokenId": null,
-    "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). USDC-on-Mina (token zkApp) is in progress."
+    "tokenAddress": "B62qPLACEHOLDER_USDC_TOKEN_ADDRESS_FROM_LIVE_DEPLOY",
+    "tokenId": "PLACEHOLDER_USDC_TOKEN_ID_FROM_LIVE_DEPLOY",
+    "tokenDecimals": 6,
+    "_fund": "infra/mina/fund-mina-usdc.sh <b58> [usdc] — admin-mints USDC on the public devnet",
+    "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). The USDC token zkApp is deployed ONCE to public devnet by tools/mina/deploy-usdc-token.ts; tokenAddress/tokenId here are PLACEHOLDERS — replace with the live deploy output."
   },
   "_decimalsNote": "USDC is 6-decimal on every chain (EVM + Solana), so claim base units are uniform — no cross-chain normalization needed."
 }
