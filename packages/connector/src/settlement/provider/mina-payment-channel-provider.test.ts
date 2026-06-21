@@ -1310,7 +1310,11 @@ describe('MinaPaymentChannelProvider (Story 34.5)', () => {
         TEST_ZKAPP_ADDRESS,
         TEST_SIGNER_KEY,
         mockLogger,
-        { tokenId: 'usdc-token-id', tokenAddress: 'B62qUsdcTokenOwnerAddress', network: TEST_NETWORK }
+        {
+          tokenId: 'usdc-token-id',
+          tokenAddress: 'B62qUsdcTokenOwnerAddress',
+          network: TEST_NETWORK,
+        }
       );
 
       const context = await usdcProvider.getMinaContext();

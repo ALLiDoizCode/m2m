@@ -999,7 +999,11 @@ export class MinaPaymentChannelSDK {
           // The amount is the SAME Field the channel accounts for, so escrow and
           // accounting stay in lockstep (the enforcement point — the proof no
           // longer binds it).
-          await token.transfer(signerPublicKey, channelPublicKey, UInt64.Unsafe.fromField(amountField));
+          await token.transfer(
+            signerPublicKey,
+            channelPublicKey,
+            UInt64.Unsafe.fromField(amountField)
+          );
         }
         await zkApp.deposit(amountField, signerPublicKey);
       });

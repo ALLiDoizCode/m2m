@@ -143,9 +143,7 @@ function parseArgs(argv: string[]): CliArgs {
 
 /** Local smoke test: deploy a fresh USDC token then admin-mint to a recipient. */
 async function runLocal(): Promise<void> {
-  console.log(
-    'Local smoke test: minting USDC on Mina.LocalBlockchain (proofsEnabled: false)\n'
-  );
+  console.log('Local smoke test: minting USDC on Mina.LocalBlockchain (proofsEnabled: false)\n');
   const Local = await Mina.LocalBlockchain({ proofsEnabled: false });
   Mina.setActiveInstance(Local);
   const [deployer, recipient, adminAuthority] = Local.testAccounts;

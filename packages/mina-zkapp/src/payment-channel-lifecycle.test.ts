@@ -296,7 +296,14 @@ describe('PaymentChannel zkApp -- Full Lifecycle Integration (Story 34.3)', () =
 
     // Deposit escrows depositUsdc on the channel's USDC token account (funded on
     // first deposit). The depositor signs (authorizes the token outflow + binds).
-    await depositToChannel(participantA, zkApp, depositUsdc, participantA, [participantA.key], usdc);
+    await depositToChannel(
+      participantA,
+      zkApp,
+      depositUsdc,
+      participantA,
+      [participantA.key],
+      usdc
+    );
 
     const channelUsdcAfterDeposit = (await usdc.token.getBalanceOf(channelAddr)).toBigInt();
     const depositorUsdcAfterDeposit = (await usdc.token.getBalanceOf(participantA)).toBigInt();
