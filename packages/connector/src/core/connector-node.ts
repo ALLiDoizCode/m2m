@@ -57,6 +57,7 @@ import {
   ConnectorNotStartedError,
 } from '../config/config-loader';
 import { HealthServer } from '../http/health-server';
+import { IlpHttpAdapter, type InboundClaimValidateFn } from '../http/ilp-http-adapter';
 import { AdminServer } from '../http/admin-server';
 import { IlpMetricsRegistry } from '../observability/metrics-registry';
 import { HealthStatus, HealthStatusProvider } from '../http/types';
@@ -109,6 +110,9 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _packetHandler: PacketHandler;
   private readonly _btpServer: BTPServer;
   private readonly _healthServer: HealthServer;
+  // The inbound claim gate, captured so the ILP-over-HTTP adapter validates
+  // through the exact same function the BTP server uses. Null in routing-only mode.
+  private _inboundClaimValidate: InboundClaimValidateFn | null = null;
   private _adminServer: AdminServer | null = null;
   private _paymentChannelSDK: PaymentChannelSDK | null = null;
   private _chainSDKs: Map<number, PaymentChannelSDK> = new Map();
@@ -1306,12 +1310,12 @@ export class ConnectorNode implements HealthStatusProvider {
             // are accepted when a provider is registered for the claim's chain.
             chainRegistry
           );
-          this._btpServer.setInboundClaimValidator((protocolData, ilpPacket, peerId) =>
-            inboundClaimValidator.validate(protocolData, ilpPacket, peerId)
-          );
+          this._inboundClaimValidate = (protocolData, ilpPacket, peerId) =>
+            inboundClaimValidator.validate(protocolData, ilpPacket, peerId);
+          this._btpServer.setInboundClaimValidator(this._inboundClaimValidate);
           this._logger.info(
             { event: 'inbound_claim_validator_enabled' },
-            'Inbound claim validator wired to BTP server'
+            'Inbound claim validator wired to BTP + ILP-over-HTTP transports'
           );
 
           // Wire ClaimReceiver for event-driven settlement monitoring
@@ -1424,7 +1428,24 @@ export class ConnectorNode implements HealthStatusProvider {
         );
       }
 
-      // Start BTP server to accept incoming connections
+      // Enable ILP-over-HTTP (RFC-0035) on the same listener the BTP server
+      // owns: POST /ilp terminates at the same claim gate + packet handler as
+      // BTP. Wire before start() so the handler is live when the port opens.
+      const ilpHttpAdapter = new IlpHttpAdapter({
+        logger: this._logger,
+        nodeId: this._config.nodeId,
+        handlePrepare: (ilpPacket, peerId, protocolData) =>
+          this._packetHandler.handlePreparePacket(ilpPacket, peerId, protocolData),
+        validateClaim: this._inboundClaimValidate ?? undefined,
+        // Record HTTP-delivered claims through the same ClaimReceiver as BTP so
+        // one-shot POST /ilp writes credit on-chain settlement identically.
+        recordClaim: this._claimReceiver
+          ? (peerId, protocolData) => this._claimReceiver!.ingestProtocolData(peerId, protocolData)
+          : undefined,
+      });
+      this._btpServer.setIlpHttpHandler((req, res) => ilpHttpAdapter.handle(req, res));
+
+      // Start the BTP server (now also serves ILP-over-HTTP on the same port).
       await this._btpServer.start(this._config.btpServerPort);
       this._btpServerStarted = true;
       this._logger.info(
@@ -1432,7 +1453,7 @@ export class ConnectorNode implements HealthStatusProvider {
           event: 'btp_server_started',
           port: this._config.btpServerPort,
         },
-        'BTP server started'
+        'BTP + ILP-over-HTTP server started'
       );
 
       // Start health server
@@ -1762,7 +1783,7 @@ export class ConnectorNode implements HealthStatusProvider {
       // Stop health server
       await this._healthServer.stop();
 
-      // Stop BTP server
+      // Stop the BTP server (closes the HTTP listener, peer sockets, and the WS).
       await this._btpServer.stop();
 
       // Epic 35 / Story 35.4: stop the transport provider LAST (after the
