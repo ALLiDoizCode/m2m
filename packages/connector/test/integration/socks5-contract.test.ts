@@ -123,9 +123,9 @@ async function startBtpServer(opts: { peerId: string; secret: string }): Promise
     server.onMessage((peerId, message) => onMessage(peerId, message));
 
     await server.start(0);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const wss = (server as any).wss as WebSocketServer;
-    const addr = wss.address();
+    // The HTTP listener owns the port (BTP rides its WS upgrade); the
+    // WebSocketServer runs in noServer mode and has no address of its own.
+    const addr = server.address();
     if (!addr || typeof addr === 'string') throw new Error('unexpected BTP server addr');
 
     return {
