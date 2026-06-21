@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.16.0](https://github.com/toon-protocol/connector/compare/v3.15.5...v3.16.0) (2026-06-21)
+
+### Features
+
+- **connector:** persistent peer/route registry + relation-route admission + declarative desired-state ([#187](https://github.com/toon-protocol/connector/issues/187)) ([85c3333](https://github.com/toon-protocol/connector/commit/85c3333752da15bb05173acebd7f034e297eee1b))
+
 ## [3.15.5](https://github.com/toon-protocol/connector/compare/v3.15.4...v3.15.5) (2026-06-21)
 
 ### Bug Fixes
