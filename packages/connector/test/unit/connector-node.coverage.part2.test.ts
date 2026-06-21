@@ -359,6 +359,7 @@ describe('ConnectorNode branch coverage — part 2', () => {
       start: jest.fn().mockResolvedValue(undefined),
       stop: jest.fn().mockResolvedValue(undefined),
       setInboundClaimValidator: jest.fn(),
+      setIlpHttpHandler: jest.fn(),
     } as unknown as jest.Mocked<BTPServer>;
 
     mockPacketHandler = {
