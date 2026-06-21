@@ -79,8 +79,37 @@ owner's proof authorizes escrow movement). #194's adversarial tests carry over
 (now the *contract* enforces what they assert). The nightly lightnet job validates
 the new path on-chain.
 
-## Risks
+## Spike results — VERDICT: FEASIBLE (proven, `usdc-inproof-spike.{ts,test.ts}`)
 
-Proving cost (cross-account + token in one circuit); o1js custodial-escrow
-permission model; preserving `channelHash` native + bare-deploy; migrating merged
-code without regressing the EVM/Solana paths.
+5/5 o1js tests pass (incl. negative controls). Patterns the full build MUST reuse:
+
+- **Custodial escrow (Q1):** at first deposit, author the escrow's token account
+  with `Permissions.send = none()` + `setPermissions = impossible()` (the same
+  trick `FungibleToken.initialize` uses on its circulation account).
+- **Owner-authored escrow debit (Q1):** do **NOT** use `this.internal.send(...)`
+  for the escrow leg — o1js `tokenMethods.send` hardcodes a lazy *signature*, so a
+  missing escrow key becomes a dummy sig the OCaml ledger rejects. Instead author
+  the sender `AccountUpdate` manually (`balanceChange = Int64.from(amount).neg()`,
+  `useFullCommitment = true`), set **lazy-none** authorization
+  (`authorizationKind.isSigned/isProved = false`, `lazyAuthorization = {kind:
+  'lazy-none'}`), then `this.approve(senderAu)`. With `send: none`, lazy-none is
+  accepted; a non-custodial holder correctly FAILS (negative control passed).
+- **Cross-account state precondition (Q2):** the high-level `au.account.state`
+  helper is a **no-op for the state array** — set the slot directly:
+  `channelAu.body.preconditions.account.state[i].isSome = Bool(true); .value = …`.
+  This is how `settleFromChannel` binds to `PaymentChannel`'s
+  `balanceCommitment`/`depositTotal`/`channelState`/`channelHash`.
+- **TS subclass friction:** `FungibleToken`'s typed `events` trips the `@method`
+  decorator (TS1241); add `declare events: FungibleToken['events'] & Record<string,
+  never>;` to the subclass.
+- **Cost:** `enforcedPayout` = 1327 rows; full `settleFromChannel` (2 sends + ~5
+  preconditions) ~1800–2600, well under Mina's ~2^16 budget. No recursive proofs.
+- **Channel-key settle signature goes away** (owner proof authorizes escrow moves),
+  matching the design.
+
+## Risks (post-spike)
+
+Mostly retired by the spike. Remaining: composing `channel.settle` + the token
+method in one tx binding to the channel's *pre-settle* state; preserving
+`channelHash` native + bare-deploy; migrating the merged #191/#192 SDK + EVM/Solana
+paths unchanged.
