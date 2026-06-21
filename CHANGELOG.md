@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.4](https://github.com/toon-protocol/connector/compare/v3.15.3...v3.15.4) (2026-06-21)
+
+### Bug Fixes
+
+- **btp:** restore startup channel auto-open (replace fire-and-forget addPeer with bounded await) ([#180](https://github.com/toon-protocol/connector/issues/180)) ([5ceca53](https://github.com/toon-protocol/connector/commit/5ceca53be3d7b40e19e2bcf9fb0296f0edab9e53)), closes [#158](https://github.com/toon-protocol/connector/issues/158) [#169](https://github.com/toon-protocol/connector/issues/169) [#158](https://github.com/toon-protocol/connector/issues/158) [#181](https://github.com/toon-protocol/connector/issues/181) [#181](https://github.com/toon-protocol/connector/issues/181)
+
 ## [3.15.3](https://github.com/toon-protocol/connector/compare/v3.15.2...v3.15.3) (2026-06-20)
 
 ### Bug Fixes
