@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.17.0](https://github.com/toon-protocol/connector/compare/v3.16.0...v3.17.0) (2026-06-21)
+
+### Features
+
+- **devnet:** wire Mina USDC into linode endpoints + funding ([#193](https://github.com/toon-protocol/connector/issues/193)) ([602bea2](https://github.com/toon-protocol/connector/commit/602bea2be84bc8553327d05f8870da2f154cb6e2)), closes [connector#188](https://github.com/toon-protocol/connector/issues/188)
+- **mina-provider:** thread USDC tokenAddress + enforce claim tokenId ([#192](https://github.com/toon-protocol/connector/issues/192)) ([6827780](https://github.com/toon-protocol/connector/commit/68277802f0d3901f4461c371dafd506aacd5dbc1))
+- **mina-sdk:** USDC token-aware deposit/settle composition ([#192](https://github.com/toon-protocol/connector/issues/192)) ([af11edc](https://github.com/toon-protocol/connector/commit/af11edc687bbf56f01a6c4425648148a6e1ac679)), closes [#191](https://github.com/toon-protocol/connector/issues/191)
+- **mina-zkapp:** PaymentChannel custodies USDC token, not native MINA ([#191](https://github.com/toon-protocol/connector/issues/191)) ([2c10bdc](https://github.com/toon-protocol/connector/commit/2c10bdc6b359623e1128410a4e11391cc5731710))
+- **mina:** deploy + fund USDC token on public devnet ([#193](https://github.com/toon-protocol/connector/issues/193)) ([80262ac](https://github.com/toon-protocol/connector/commit/80262ac94c63bf278388f04a964614d6f9fd1860)), closes [#190](https://github.com/toon-protocol/connector/issues/190) [connector#188](https://github.com/toon-protocol/connector/issues/188)
+
 ## [3.16.0](https://github.com/toon-protocol/connector/compare/v3.15.5...v3.16.0) (2026-06-21)
 
 ### Features
