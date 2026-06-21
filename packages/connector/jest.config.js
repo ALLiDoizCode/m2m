@@ -61,6 +61,9 @@ module.exports = {
     ],
     '^.+\\.m?js$': 'babel-jest',
   },
-  // Allow transformation of ESM-only packages
-  transformIgnorePatterns: ['node_modules/(?!(@toon-format|@libsql)/)'],
+  // Allow transformation of ESM-only packages. `mina-fungible-token` ships pure
+  // ESM (`"type": "module"`, `export …`); the in-proof lightnet test imports the
+  // mina-zkapp `dist`, which requires it, so it must be transpiled rather than
+  // ignored (matches the mina-zkapp package's own jest config).
+  transformIgnorePatterns: ['node_modules/(?!(@toon-format|@libsql|mina-fungible-token)/)'],
 };
