@@ -29,12 +29,7 @@ import {
 } from 'o1js';
 
 import { PaymentChannel } from './PaymentChannel';
-import {
-  FungibleToken,
-  FungibleTokenAdmin,
-  USDC_DECIMALS_U8,
-  usdcDeployProps,
-} from './usdc-token';
+import { FungibleToken, FungibleTokenAdmin, USDC_DECIMALS_U8, usdcDeployProps } from './usdc-token';
 
 /**
  * A deployed USDC token context threaded into deposit/settle so the channel can

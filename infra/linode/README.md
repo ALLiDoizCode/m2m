@@ -12,13 +12,13 @@ nginx + Let's Encrypt TLS in front of them.
 
 ## What runs
 
-| Service                     | From                            | Public endpoint                                            | Notes                                                                                                                           |
-| --------------------------- | ------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                             |
-| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`, `POST /api/request {address}` → 100 ETH + 10k USDC. **EVM only.**                               |
-| Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals) |
+| Service                     | From                            | Public endpoint                                            | Notes                                                                                                                                                                                         |
+| --------------------------- | ------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                                                                                           |
+| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`, `POST /api/request {address}` → 100 ETH + 10k USDC. **EVM only.**                                                                                             |
+| Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals)                                                               |
 | Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>` |
-| nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                         |
+| nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                                                                                       |
 
 ## Quick start (fresh Ubuntu/Debian Linode, as root)
 
@@ -96,11 +96,11 @@ value here — all keys (Anvil account #0, etc.) are public.
 
 ## USDC across chains
 
-| Chain  | Token                 | Decimals    | Status                                                             |
-| ------ | --------------------- | ----------- | ------------------------------------------------------------------ |
-| EVM    | MockERC20 `0x5FbDB2…` | **6**       | ✅ TokenNetwork EIP-712 settlement                                 |
-| Solana | SPL mint `H8HSreUF…`  | **6**       | ✅ program is SPL-aware; mint + faucet via `devnet.sh`             |
-| Mina   | token zkApp           | **6**       | ✅ USDC `FungibleToken` (mina-fungible-token) deployed to public devnet; mint + fund via `devnet.sh fund-mina` |
+| Chain  | Token                 | Decimals | Status                                                                                                         |
+| ------ | --------------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| EVM    | MockERC20 `0x5FbDB2…` | **6**    | ✅ TokenNetwork EIP-712 settlement                                                                             |
+| Solana | SPL mint `H8HSreUF…`  | **6**    | ✅ program is SPL-aware; mint + faucet via `devnet.sh`                                                         |
+| Mina   | token zkApp           | **6**    | ✅ USDC `FungibleToken` (mina-fungible-token) deployed to public devnet; mint + fund via `devnet.sh fund-mina` |
 
 **Decimals:** USDC is 6-decimal on every chain, so a claim's base-unit amount
 means the same thing everywhere — no cross-chain normalization required.

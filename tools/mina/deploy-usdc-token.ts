@@ -64,14 +64,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 
-import {
-  AccountUpdate,
-  Bool,
-  Mina,
-  PrivateKey,
-  PublicKey,
-  UInt64,
-} from 'o1js';
+import { AccountUpdate, Bool, Mina, PrivateKey, PublicKey, UInt64 } from 'o1js';
 
 import {
   FungibleToken,
@@ -214,9 +207,7 @@ function keyFromEnvOrRandom(envVar: string): PrivateKey {
 
 /** Local smoke test on Mina.LocalBlockchain — proves deploy + mint with no network. */
 async function runLocal(): Promise<void> {
-  console.log(
-    'Local smoke test: deploying USDC on Mina.LocalBlockchain (proofsEnabled: false)\n'
-  );
+  console.log('Local smoke test: deploying USDC on Mina.LocalBlockchain (proofsEnabled: false)\n');
   const Local = await Mina.LocalBlockchain({ proofsEnabled: false });
   Mina.setActiveInstance(Local);
   const [deployer, recipient, adminAuthority] = Local.testAccounts;
