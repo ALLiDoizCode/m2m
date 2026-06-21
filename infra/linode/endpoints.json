@@ -1,0 +1,26 @@
+{
+  "_note": "Public TOON devnet on Linode. Committed SAMPLE (placeholder DOMAIN). On the live host, devnet.sh regenerates this from .env. Peers point a TOON node/SDK at these URLs (chainRpcUrls / EVM_RPC_URL).",
+  "evm": {
+    "rpcUrl": "https://evm-rpc.<DOMAIN>",
+    "chainId": 31337,
+    "tokenAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+    "tokenDecimals": 6,
+    "registryAddress": "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+    "faucetUrl": "https://faucet.<DOMAIN>"
+  },
+  "solana": {
+    "rpcUrl": "https://solana-rpc.<DOMAIN>",
+    "wsUrl": "wss://solana-ws.<DOMAIN>",
+    "programId": "",
+    "tokenMint": "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H",
+    "tokenDecimals": 6,
+    "_fund": "infra/solana/fund-solana.sh <pubkey> — airdrops SOL + transfers mock USDC from the treasury"
+  },
+  "mina": {
+    "graphqlUrl": "https://mina.<DOMAIN>/graphql",
+    "upstream": "https://api.minascan.io/node/devnet/v1/graphql",
+    "tokenId": null,
+    "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). USDC-on-Mina (token zkApp) is in progress."
+  },
+  "_decimalsNote": "USDC is 6-decimal on every chain (EVM + Solana), so claim base units are uniform — no cross-chain normalization needed."
+}

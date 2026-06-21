@@ -1,0 +1,57 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Linode devnet overlay — public TLS in front of connector's existing chains.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Layer this over the base compose; it adds an nginx reverse proxy + a certbot
+# renewer in FRONT of the existing `anvil`, `faucet`, and `solana-validator`
+# services (see ../../docker-compose.yml). nginx joins the same Compose project
+# default network and reaches those services BY NAME (anvil:8545, faucet:3500,
+# solana-validator:8899/8900) — so it never needs their host-published ports.
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f infra/linode/docker-compose.linode.yml \
+#     --profile evm --profile solana up -d
+#
+# Use infra/linode/devnet.sh (a thin wrapper around exactly that) day-to-day.
+#
+# NOTE: Compose MERGES `ports:` across layered files, so this overlay cannot
+# un-publish the base 0.0.0.0:8545/8899/8900/3500 bindings, and Docker's iptables
+# rules bypass ufw. infra/linode/firewall.sh installs DOCKER-USER drop rules so
+# those raw ports are not reachable from the internet — nginx (80/443) is the
+# only public surface. Run firewall.sh on the host before exposing the box.
+
+services:
+  nginx:
+    image: nginx:alpine
+    profiles: [evm, solana]
+    restart: unless-stopped
+    depends_on:
+      anvil:
+        condition: service_started
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      # Rendered by infra/linode/bootstrap.sh (envsubst of devnet.conf.template).
+      - ./infra/linode/nginx/conf.d:/etc/nginx/conf.d:ro
+      - linode_certbot_conf:/etc/letsencrypt:ro
+      - linode_certbot_www:/var/www/certbot:ro
+    # Reload every 6h so certbot-renewed certs are picked up without a restart.
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+
+  certbot:
+    image: certbot/certbot
+    profiles: [evm, solana]
+    restart: unless-stopped
+    volumes:
+      - linode_certbot_conf:/etc/letsencrypt
+      - linode_certbot_www:/var/www/certbot
+    # Attempt renewal twice a day; a no-op until a cert is within 30 days of
+    # expiry. Initial issuance is done once by infra/linode/init-letsencrypt.sh.
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+
+volumes:
+  linode_certbot_conf:
+  linode_certbot_www:

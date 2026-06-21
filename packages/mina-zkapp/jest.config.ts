@@ -14,7 +14,22 @@ export default {
         tsconfig: '<rootDir>/tsconfig.json',
       },
     ],
+    // mina-fungible-token ships ESM (.js with `export`); compile it to CJS.
+    '^.+\\.js$': [
+      'ts-jest',
+      {
+        tsconfig: {
+          allowJs: true,
+          checkJs: false,
+          module: 'CommonJS',
+          target: 'ES2022',
+          esModuleInterop: true,
+          isolatedModules: true,
+        },
+      },
+    ],
   },
-  // o1js is ESM-native; allow transformation
-  transformIgnorePatterns: ['node_modules/(?!o1js/)'],
+  // o1js ships a CJS build (loaded as-is); mina-fungible-token is ESM, so it must
+  // NOT be ignored — it gets compiled to CJS by the .js transform above.
+  transformIgnorePatterns: ['node_modules/(?!mina-fungible-token/)'],
 };
