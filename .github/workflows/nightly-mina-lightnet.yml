@@ -1,0 +1,99 @@
+# Nightly Mina lightnet integration workflow — USDC settlement validation
+#
+# The Mina USDC work (#191 token-aware PaymentChannel, #192 settlement SDK) is
+# verified per-PR only with `proofsEnabled:false` / mocked o1js — the real
+# on-chain behaviour (custom-token `AccountUpdate` shapes, `getDecimals()` reads,
+# account-creation-fee counts, proof generation, verification-key pinning) can
+# only be exercised against a real Mina node. This workflow does that nightly on
+# the o1labs lightnet, matching the "Mina nightly, not per-PR" guidance.
+#
+# Trigger: 05:00 UTC daily (staggered after nightly-ator at 04:00) + manual.
+# This is NOT a required PR status check — nightly only. Use workflow_dispatch
+# (`gh workflow run nightly-mina-lightnet --ref <branch>`) for manual verification
+# of Mina-settlement-touching PRs.
+#
+# Burn-in: the integration step is `continue-on-error` until the suite is proven
+# stable on the lightnet (same approach as the public-testnet e2e gate). Promote
+# to a hard failure once green runs are consistent.
+
+name: nightly-mina-lightnet
+
+on:
+  schedule:
+    - cron: '0 5 * * *' # 05:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: write # upload-artifact
+
+jobs:
+  mina-lightnet:
+    runs-on: ubuntu-latest
+    # Lightnet boot (~2 min) + o1js compile/proving for deploy + settle is slow.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          cache: 'npm'
+
+      - name: Install dependencies with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          command: npm ci
+
+      # The connector's Mina provider loads the compiled @toon-protocol/mina-zkapp
+      # (PaymentChannel + usdc-token) at runtime — build its dist before the tests.
+      - name: Build mina-zkapp
+        run: npm run build --workspace=packages/mina-zkapp
+
+      - name: Start Mina lightnet
+        run: make mina-up
+
+      - name: Wait for lightnet (accounts manager on :8181)
+        run: |
+          echo "Waiting for the Mina lightnet accounts manager…"
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8181/list-acquired-accounts >/dev/null 2>&1; then
+              echo "Lightnet ready after ${i} x 10s."; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Mina lightnet did not become ready in 10 minutes"
+          docker compose --profile mina logs --tail 200 || true
+          exit 1
+
+      # Burn-in: don't fail the nightly while the on-chain token-custody path is
+      # being stabilised. Flip continue-on-error off once consistently green.
+      - name: Mina integration suite (lightnet)
+        id: mina_tests
+        continue-on-error: true
+        working-directory: packages/connector
+        env:
+          MINA_INTEGRATION: 'true'
+        run: |
+          npx jest --config jest.config.js --runInBand \
+            test/integration/mina-lightnet.test.ts \
+            test/integration/mina-inbound-claim-gate.test.ts \
+            test/integration/standalone-mina-settlement-e2e.test.ts \
+            test/acceptance/story-34-10-mina-local-dev-infra.test.ts
+
+      - name: Lightnet logs on failure
+        if: ${{ steps.mina_tests.outcome != 'success' }}
+        run: docker compose --profile mina logs --tail 400 || true
+
+      - name: Tear down lightnet
+        if: ${{ always() }}
+        run: make mina-down || true
+
+      - name: Flag burn-in failure (visible, non-blocking)
+        if: ${{ steps.mina_tests.outcome != 'success' }}
+        run: echo "::warning::Mina lightnet integration suite did not pass — review the run (burn-in, non-blocking)."
