@@ -81,6 +81,8 @@ export class AdminServer {
     connectorFeePercentage?: number;
     transportType?: 'direct' | 'socks5';
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
+    getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
+    registryStore?: import('./admin-api').RegistryPeerSink;
   };
   private readonly _transportType: 'direct' | 'socks5';
 
@@ -131,6 +133,8 @@ export class AdminServer {
      * do not exercise the forwarding path.
      */
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
+    getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
+    registryStore?: import('./admin-api').RegistryPeerSink;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -168,6 +172,8 @@ export class AdminServer {
       resolveTokenMetadata,
       connectorFeePercentage,
       setPeerRelation,
+      getPeerRelation,
+      registryStore,
     } = this._options;
 
     this._app = express();
@@ -197,6 +203,8 @@ export class AdminServer {
       connectorFeePercentage,
       transportType: this._transportType,
       setPeerRelation,
+      getPeerRelation,
+      registryStore,
     });
 
     this._app.use('/admin', adminRouter);

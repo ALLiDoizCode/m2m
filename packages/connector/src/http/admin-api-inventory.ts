@@ -313,6 +313,35 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
   },
 
   /**
+   * PUT /admin/desired-state
+   * Declaratively reconcile the full peer/route set to the supplied end-state.
+   */
+  {
+    path: '/desired-state',
+    method: 'PUT',
+    server: 'AdminServer',
+    mountPrefix: '/admin',
+    authModel: 'X-Api-Key',
+    successStatus: 200,
+    failureModes: [
+      {
+        status: 400,
+        description:
+          'Invalid peer/route (bad relation, transport, ILP address, or relation↔route mismatch); validation is atomic — nothing is mutated',
+      },
+      { status: 401, description: 'Missing or invalid X-Api-Key' },
+      { status: 403, description: 'IP not in allowlist' },
+    ],
+    requestContract: '{ peers?: AddPeerRequest[]; routes?: AddRouteRequest[] } (http/admin-api.ts)',
+    responseContract:
+      '{ peers: { added: string[]; removed: string[]; total: number }; routes: { desired: string[]; removed: string[] } }',
+    owningModule: 'http/admin-api.ts',
+    relatedStories: ['6.4'],
+    operationalNotes:
+      'Idempotent. Converges to exactly the declared peers + routes; preserves the connector own local routes (nextHop === nodeId/local).',
+  },
+
+  /**
    * GET /admin/channels
    * List all payment channels
    */
