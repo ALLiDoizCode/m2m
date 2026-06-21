@@ -1,0 +1,99 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TOON Linode devnet — nginx reverse proxy (template).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# `${DOMAIN}` is the ONLY placeholder; bootstrap.sh renders this to
+# nginx/conf.d/devnet.conf with:  envsubst '${DOMAIN}' < template > conf.d/devnet.conf
+# (the single-var filter leaves nginx's own $host/$http_upgrade/... untouched).
+#
+# Backends are referenced through the `$backend` variable + the Docker embedded
+# resolver (127.0.0.11) so nginx boots even if a chain container is briefly down
+# or still starting (lazy, per-request resolution instead of boot-time).
+
+# Per-IP rate limits for the public RPC/faucet endpoints (devnet abuse guard).
+limit_req_zone $binary_remote_addr zone=rpc:10m rate=30r/s;
+
+# WebSocket upgrade plumbing (used by the Solana WS endpoint; harmless elsewhere).
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Subdomain -> chain backend (Docker service name + port on the shared network).
+map $host $backend {
+    default              "";
+    evm-rpc.${DOMAIN}    "http://anvil:8545";
+    solana-rpc.${DOMAIN} "http://solana-validator:8899";
+    solana-ws.${DOMAIN}  "http://solana-validator:8900";
+    faucet.${DOMAIN}     "http://faucet:3500";
+}
+
+# ── Port 80: ACME challenge + redirect everything else to HTTPS ──────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name evm-rpc.${DOMAIN} solana-rpc.${DOMAIN} solana-ws.${DOMAIN}
+                faucet.${DOMAIN} mina.${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ── Port 443: chain RPC / WS / faucet (one block, host-routed) ───────────────
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name evm-rpc.${DOMAIN} solana-rpc.${DOMAIN} solana-ws.${DOMAIN} faucet.${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/evm-rpc.${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/evm-rpc.${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location / {
+        if ($backend = "") { return 404; }       # unknown subdomain
+        limit_req zone=rpc burst=60 nodelay;
+
+        proxy_pass $backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        # WebSocket upgrade (Solana WS subscriptions on solana-ws.*).
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+
+        client_max_body_size 4m;                  # JSON-RPC batch ceiling
+    }
+}
+
+# ── Port 443: Mina — passthrough to the PUBLIC devnet (no local node) ────────
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name mina.${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/evm-rpc.${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/evm-rpc.${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    resolver 1.1.1.1 8.8.8.8 valid=300s;
+
+    location /graphql {
+        limit_req zone=rpc burst=60 nodelay;
+        set $mina_upstream "https://api.minascan.io";
+        proxy_pass $mina_upstream/node/devnet/v1/graphql;
+        proxy_ssl_server_name on;
+        proxy_set_header Host api.minascan.io;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+    location / { return 404; }                     # only proxy /graphql
+}
