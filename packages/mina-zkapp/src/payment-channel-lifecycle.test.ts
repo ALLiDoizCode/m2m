@@ -25,7 +25,11 @@ import {
   submitClaim,
   closeChannel,
   settleChannel,
+  deployUsdcToken,
+  mintUsdc,
+  UsdcContext,
 } from './test-helpers';
+import { ONE_USDC } from './usdc-token';
 
 jest.setTimeout(60000); // 60 seconds — lifecycle test runs full open->deposit->claim->close->settle
 
@@ -257,13 +261,20 @@ describe('PaymentChannel zkApp -- Full Lifecycle Integration (Story 34.3)', () =
     expect(zkApp.depositTotal.get().toString()).toBe(depositAmount.toString());
   });
 
-  // T-34.4-01: FUND CUSTODY + DISTRIBUTION — the heart of Story 34.4.
-  // Proves that deposit() actually escrows native MINA on the zkApp account and
-  // that settle() debits that escrow, crediting the recipient (participantB, the
-  // apex analog) balanceB and refunding the depositor (participantA) balanceA.
-  // This is the Mina mirror of the Solana SETTLE_CHANNEL vault→recipient ATA
-  // transfer — the recipient is TOKEN-CREDITED at close.
-  it('[P0] T-34.4-01: deposit escrows MINA on the zkApp and settle credits the recipient', async () => {
+  // T-34.4-01 (#191 USDC): TOKEN CUSTODY + DISTRIBUTION — the heart of the
+  // token-aware channel. Proves that deposit() escrows the USDC custom token on
+  // the channel's TOKEN account and that settle() debits that escrow, crediting
+  // the recipient (participantB, the apex analog) balanceB USDC and refunding the
+  // depositor (participantA) balanceA USDC. Custody is asserted via the USDC
+  // token balances (token.getBalanceOf), NOT native MINA. This is the Mina mirror
+  // of the Solana SETTLE_CHANNEL vault→recipient ATA transfer.
+  it('[P0] T-34.4-01: deposit escrows USDC on the channel and settle distributes it to participants', async () => {
+    // adminAuthority must be a funded account (mint authority).
+    const adminAuthority = Local.testAccounts[3];
+    const usdc: UsdcContext = await deployUsdcToken(deployer, adminAuthority);
+
+    // The channel's stored tokenId_ must equal the USDC tokenId (one channel per
+    // (apex, client, token)). channelHash stays native — tokenId is a parameter.
     await initializeChannel(
       deployer,
       zkApp,
@@ -271,30 +282,36 @@ describe('PaymentChannel zkApp -- Full Lifecycle Integration (Story 34.3)', () =
       participantB,
       channelNonce,
       settlementTimeout,
-      tokenId,
+      usdc.tokenId,
       [deployer.key, participantA.key, participantB.key]
     );
+    expect(zkApp.tokenId_.get().toString()).toBe(usdc.tokenId.toString());
 
-    const zkAppAddr = zkAppKey.toPublicKey();
-    const zkAppBalBeforeDeposit = Mina.getBalance(zkAppAddr).toBigInt();
-    const depositorBeforeDeposit = Mina.getBalance(participantA).toBigInt();
+    // Amounts are USDC base units (6 dp). Mint 2,000 USDC to the depositor.
+    const depositUsdc = Field(1000n * ONE_USDC); // 1,000 USDC
+    await mintUsdc(deployer, usdc, participantA, 2000n * ONE_USDC);
 
-    // Deposit escrows depositAmount nanomina on the zkApp account.
-    await depositToChannel(participantA, zkApp, depositAmount, participantA, [participantA.key]);
+    const channelAddr = zkAppKey.toPublicKey();
+    const depositorBeforeDeposit = (await usdc.token.getBalanceOf(participantA)).toBigInt();
 
-    const zkAppBalAfterDeposit = Mina.getBalance(zkAppAddr).toBigInt();
-    const depositorAfterDeposit = Mina.getBalance(participantA).toBigInt();
-    const depositBig = depositAmount.toBigInt();
+    // Deposit escrows depositUsdc on the channel's USDC token account (funded on
+    // first deposit). The depositor signs (authorizes the token outflow + binds).
+    await depositToChannel(participantA, zkApp, depositUsdc, participantA, [participantA.key], usdc);
 
-    // zkApp account GAINED exactly depositAmount; depositor LOST at least it
-    // (plus the tx fee). This is real on-chain custody, not a bare Field record.
-    expect(zkAppBalAfterDeposit - zkAppBalBeforeDeposit).toBe(depositBig);
-    expect(depositorBeforeDeposit - depositorAfterDeposit).toBeGreaterThanOrEqual(depositBig);
+    const channelUsdcAfterDeposit = (await usdc.token.getBalanceOf(channelAddr)).toBigInt();
+    const depositorUsdcAfterDeposit = (await usdc.token.getBalanceOf(participantA)).toBigInt();
+    const depositBig = depositUsdc.toBigInt();
 
-    // Single claim: recipient (B) is owed 600M, depositor (A) keeps 400M.
+    // Channel's USDC token account GAINED exactly the deposit; depositor LOST it.
+    expect(channelUsdcAfterDeposit).toBe(depositBig);
+    expect(depositorBeforeDeposit - depositorUsdcAfterDeposit).toBe(depositBig);
+    // depositTotal accounting matches the escrowed USDC.
+    expect(zkApp.depositTotal.get().toString()).toBe(depositUsdc.toString());
+
+    // Single claim: recipient (B) is owed 600 USDC, depositor (A) keeps 400 USDC.
     const channelHash = Poseidon.hash([participantA.x, participantB.x, channelNonce]);
-    const balA = Field(400_000_000);
-    const balB = Field(600_000_000);
+    const balA = Field(400n * ONE_USDC);
+    const balB = Field(600n * ONE_USDC);
     const salt = Field(99999);
     await submitClaim(
       deployer,
@@ -317,12 +334,18 @@ describe('PaymentChannel zkApp -- Full Lifecycle Integration (Story 34.3)', () =
     Local.setGlobalSlot(100);
     await closeChannel(deployer, zkApp, balA, balB, salt, Field(2), sigA, sigB, [deployer.key]);
 
-    // ── Capture recipient + depositor balances immediately BEFORE settle ──
-    const recipientBeforeSettle = Mina.getBalance(participantB).toBigInt();
-    const depositorBeforeSettle = Mina.getBalance(participantA).toBigInt();
-    const zkAppBeforeSettle = Mina.getBalance(zkAppAddr).toBigInt();
+    // ── Capture USDC balances immediately BEFORE settle ──
+    // participantB has no USDC token account yet (will be created at settle);
+    // participantA already has one (it was minted to). depositorBeforeSettle reads
+    // the depositor's remaining USDC after the deposit.
+    const depositorBeforeSettle = (await usdc.token.getBalanceOf(participantA)).toBigInt();
+    const channelBeforeSettle = (await usdc.token.getBalanceOf(channelAddr)).toBigInt();
 
     Local.setGlobalSlot(200);
+    // settle distributes USDC: channel → B (balB) and channel → A (balA). The
+    // channel key (zkAppKey) MUST sign to authorize the channel token outflows.
+    // participantB needs a new USDC token account (fund 1); participantA already
+    // has one (fund 0 for it).
     await settleChannel(
       deployer,
       zkApp,
@@ -332,21 +355,22 @@ describe('PaymentChannel zkApp -- Full Lifecycle Integration (Story 34.3)', () =
       participantA,
       participantB,
       channelNonce,
-      [deployer.key]
+      [deployer.key, zkAppKey],
+      usdc,
+      1 // fund participantB's new USDC token account
     );
 
-    const recipientAfterSettle = Mina.getBalance(participantB).toBigInt();
-    const depositorAfterSettle = Mina.getBalance(participantA).toBigInt();
-    const zkAppAfterSettle = Mina.getBalance(zkAppAddr).toBigInt();
+    const recipientAfterSettle = (await usdc.token.getBalanceOf(participantB)).toBigInt();
+    const depositorAfterSettle = (await usdc.token.getBalanceOf(participantA)).toBigInt();
+    const channelAfterSettle = (await usdc.token.getBalanceOf(channelAddr)).toBigInt();
 
     expect(zkApp.channelState.get().toString()).toBe(CHANNEL_STATE.SETTLED.toString());
 
-    // RECIPIENT (participantB / apex) is CREDITED balanceB at settle.
-    expect(recipientAfterSettle - recipientBeforeSettle).toBe(balB.toBigInt());
-    // DEPOSITOR (participantA) is REFUNDED balanceA (deployer pays the settle fee,
-    // not participantA, so participantA's delta is exactly the refund).
+    // RECIPIENT (participantB / apex) is CREDITED balanceB USDC at settle.
+    expect(recipientAfterSettle).toBe(balB.toBigInt());
+    // DEPOSITOR (participantA) is REFUNDED balanceA USDC.
     expect(depositorAfterSettle - depositorBeforeSettle).toBe(balA.toBigInt());
-    // The zkApp escrow is drained by exactly depositTotal (balA + balB).
-    expect(zkAppBeforeSettle - zkAppAfterSettle).toBe(depositBig);
+    // The channel USDC escrow is drained by exactly depositTotal (balA + balB).
+    expect(channelBeforeSettle - channelAfterSettle).toBe(depositBig);
   });
 });
