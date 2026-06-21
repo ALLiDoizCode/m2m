@@ -200,6 +200,12 @@ export async function submitClaim(
 
 /**
  * Initiate cooperative channel closure.
+ *
+ * #202: `initiateClose` now takes a `currentSlot` witness (the live global slot,
+ * pinned to "~now" by a range precondition) instead of pinning the exact on-chain
+ * slot — an exact slot precondition is unsatisfiable on a real chain. This helper
+ * reads the current network slot off-chain via `Mina.getNetworkState()` and passes
+ * it as the witness (mirroring how the SDK reads it from the live network).
  */
 export async function closeChannel(
   sender: Mina.TestPublicKey,
@@ -212,8 +218,9 @@ export async function closeChannel(
   sigB: Signature,
   signers: PrivateKey[]
 ): Promise<void> {
+  const currentSlot = Mina.getNetworkState().globalSlotSinceGenesis;
   const tx = await Mina.transaction(sender, async () => {
-    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB);
+    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB, currentSlot);
   });
   await tx.prove();
   await tx.sign(signers).send();

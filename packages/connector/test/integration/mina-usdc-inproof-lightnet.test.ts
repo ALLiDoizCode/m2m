@@ -382,10 +382,15 @@ describeMina('USDC in-proof settlement — real-Mina lightnet (PR #202)', () => 
     );
 
     // ── Cooperative close (CLOSING) — records closedAtSlot from the network.
+    //    #202: initiateClose now takes a `currentSlot` witness pinned to "~now" by
+    //    a range precondition (the exact-slot precondition it replaced is
+    //    unsatisfiable on a real chain). Read the live network slot off-chain and
+    //    pass it, exactly as settle witnesses closedAtSlot from the chain.
     const closeMsg = [Field(BAL_A), Field(BAL_B), salt, Field(2)];
     const closeSigA = Signature.create(participantA.priv, closeMsg);
     const closeSigB = Signature.create(participantB.priv, closeMsg);
     await refresh(channelAddr);
+    const closeCurrentSlot = UInt32.from(await currentGlobalSlot());
     await sendTx(
       feePayer,
       async () => {
@@ -395,7 +400,8 @@ describeMina('USDC in-proof settlement — real-Mina lightnet (PR #202)', () => 
           salt,
           Field(2),
           closeSigA,
-          closeSigB
+          closeSigB,
+          closeCurrentSlot
         );
       },
       [],

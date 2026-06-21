@@ -21,9 +21,28 @@ import {
   Poseidon,
   Signature,
   AccountUpdate,
+  UInt32,
 } from 'o1js';
 
 import { CHANNEL_STATE, ASSERT_MESSAGES, MAX_SAFE_AMOUNT } from './constants';
+
+/**
+ * Tolerance window (in global slots) for the `initiateClose` "current slot"
+ * witness (#202 real-chain fix).
+ *
+ * `initiateClose` records the close slot from a caller-supplied `currentSlot`
+ * witness rather than pinning an EXACT on-chain slot. On a real Mina node the
+ * global slot advances between proof generation and tx inclusion, so an exact
+ * `getAndRequireEquals()` slot precondition is unsatisfiable (it fails with
+ * `Protocol_state_precondition_unsatisfied`). Instead we bind the witness with a
+ * RANGE precondition `globalSlotSinceGenesis ∈ [currentSlot, currentSlot + SLOT_WINDOW]`,
+ * which proves the witness is "~now" while tolerating the small drift between
+ * proving and inclusion. 7 slots ≈ ~21 min on mainnet (≈3 min/slot) and is
+ * comfortably above lightnet/real-chain proving+inclusion latency, while still
+ * being tight enough that the recorded `closedAtSlot` (which feeds the settle
+ * challenge-period deadline) cannot be meaningfully back/forward-dated.
+ */
+export const SLOT_WINDOW = UInt32.from(7);
 
 /**
  * Payment channel zkApp that manages the full channel lifecycle.
@@ -169,6 +188,13 @@ export class PaymentChannel extends SmartContract {
    * @param nonce - Close nonce
    * @param sigA - Signature from participant A over [balanceA, balanceB, salt, nonce]
    * @param sigB - Signature from participant B over [balanceA, balanceB, salt, nonce]
+   * @param currentSlot - Caller-supplied "current" global slot witness (#202). The
+   *   caller reads the live network slot off-chain and passes it; a RANGE
+   *   precondition `globalSlotSinceGenesis ∈ [currentSlot, currentSlot + SLOT_WINDOW]`
+   *   binds it to "~now". This replaces the old exact on-chain slot read, which is
+   *   unsatisfiable on a real chain (the slot advances between prove and inclusion →
+   *   `Protocol_state_precondition_unsatisfied`). The witnessed `currentSlot` is what
+   *   gets recorded as `closedAtSlot` and feeds the settle challenge-period deadline.
    */
   @method async initiateClose(
     balanceA: Field,
@@ -176,7 +202,8 @@ export class PaymentChannel extends SmartContract {
     salt: Field,
     _nonce: Field,
     _sigA: Signature,
-    _sigB: Signature
+    _sigB: Signature,
+    currentSlot: UInt32
   ): Promise<void> {
     // Require channel is OPEN
     const currentState = this.channelState.getAndRequireEquals();
@@ -223,11 +250,24 @@ export class PaymentChannel extends SmartContract {
     const commitment = Poseidon.hash([balanceA, balanceB, salt]);
     this.balanceCommitment.set(commitment);
 
-    // Record current global slot.
+    // Record the close slot from the caller-supplied `currentSlot` witness,
+    // bound to "~now" by a RANGE precondition (#202 real-chain fix).
+    //
+    // We do NOT pin the EXACT on-chain slot via getAndRequireEquals(): on a real
+    // Mina node the global slot advances between proof generation and tx inclusion,
+    // so an exact slot precondition is unsatisfiable (it fails the ledger with
+    // `Protocol_state_precondition_unsatisfied`). On LocalBlockchain the slot is
+    // frozen during a tx, masking the bug — which is why this only surfaced on
+    // lightnet/real chain. Instead we require globalSlotSinceGenesis to lie within
+    // [currentSlot, currentSlot + SLOT_WINDOW]: the ledger accepts the tx as long
+    // as the witnessed slot is no more than SLOT_WINDOW behind the inclusion slot,
+    // proving the witness is genuinely current. This mirrors the correct pattern
+    // already used by `UsdcChannelToken.settleFromChannel`
+    // (`requireBetween(deadline, UInt32.MAXINT())`).
+    //
     // Note: globalSlotSinceGenesis is a UInt32 -- `.value` extracts the inner
-    // Field. This is the standard o1js pattern for converting UInt32 to Field
-    // for on-chain state storage (UInt32.value is part of the public API).
-    const currentSlot = this.network.globalSlotSinceGenesis.getAndRequireEquals();
+    // Field for on-chain state storage (UInt32.value is part of the public API).
+    this.network.globalSlotSinceGenesis.requireBetween(currentSlot, currentSlot.add(SLOT_WINDOW));
     this.closedAtSlot.set(currentSlot.value);
 
     // Transition to CLOSING
@@ -282,16 +322,24 @@ export class PaymentChannel extends SmartContract {
     const computedChannelHash = Poseidon.hash([participantA.x, participantB.x, nonce]);
     computedChannelHash.assertEquals(storedChannelHash, ASSERT_MESSAGES.CHANNEL_HASH_MISMATCH);
 
-    // Verify challenge period has elapsed
+    // Verify challenge period has elapsed via a RANGE precondition (#202
+    // real-chain fix), NOT an exact on-chain slot read. The deadline is derived
+    // from on-chain state (`closedAtSlot` + `settlementTimeout`, both pinned by
+    // getAndRequireEquals() so they cannot be forged), and we require the network
+    // global slot to be in [deadline, MAXINT] — i.e. at or past the deadline.
+    //
+    // The old `globalSlotSinceGenesis.getAndRequireEquals()` pinned the EXACT
+    // current slot, which is unsatisfiable on a real chain: the slot advances
+    // between proof generation and tx inclusion, failing the ledger with
+    // `Protocol_state_precondition_unsatisfied`. A `>= deadline` range bound is
+    // both correct (settle is only valid after the deadline) and real-chain-safe.
+    // This mirrors `UsdcChannelToken.settleFromChannel`'s
+    // `requireBetween(deadline, UInt32.MAXINT())`.
     const closedAt = this.closedAtSlot.getAndRequireEquals();
     const timeout = this.settlementTimeout.getAndRequireEquals();
-    const deadline = closedAt.add(timeout);
+    const deadline = UInt32.Unsafe.fromField(closedAt.add(timeout));
 
-    const currentSlot = this.network.globalSlotSinceGenesis.getAndRequireEquals();
-    currentSlot.value.assertGreaterThanOrEqual(
-      deadline,
-      ASSERT_MESSAGES.CHALLENGE_PERIOD_NOT_ELAPSED
-    );
+    this.network.globalSlotSinceGenesis.requireBetween(deadline, UInt32.MAXINT());
 
     // Verify balance commitment matches revealed balances
     const storedCommitment = this.balanceCommitment.getAndRequireEquals();

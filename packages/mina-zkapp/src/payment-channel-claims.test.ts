@@ -83,8 +83,10 @@ async function closeChannel(
   sigB: Signature,
   signers: PrivateKey[]
 ): Promise<void> {
+  // #202: pass the live network slot as the `currentSlot` witness.
+  const currentSlot = Mina.getNetworkState().globalSlotSinceGenesis;
   const tx = await Mina.transaction(sender, async () => {
-    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB);
+    await zkApp.initiateClose(balanceA, balanceB, salt, nonce, sigA, sigB, currentSlot);
   });
   await tx.prove();
   await tx.sign(signers).send();

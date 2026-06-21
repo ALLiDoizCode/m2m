@@ -185,7 +185,12 @@ describe('PaymentChannel zkApp -- Security & Edge Cases (Story 34.3)', () => {
     const closedAt = Number(closedAtSlotField.toBigInt());
     const timeout = Number(timeoutField.toBigInt());
 
-    // Try settle before timeout -- should fail
+    // Try settle before timeout -- should fail. settle now enforces the challenge
+    // period with a NETWORK `globalSlotSinceGenesis` RANGE precondition
+    // (`requireBetween(deadline, MAXINT)`, #202 real-chain fix) instead of an
+    // in-circuit `assertGreaterThanOrEqual`, so an early settle is rejected by the
+    // protocol-state precondition rather than the CHALLENGE_PERIOD_NOT_ELAPSED
+    // assert message. Match the precondition failure instead.
     Local.setGlobalSlot(closedAt + timeout - 1);
     await expect(
       settleChannel(
@@ -199,7 +204,7 @@ describe('PaymentChannel zkApp -- Security & Edge Cases (Story 34.3)', () => {
         channelNonce,
         [deployer.key]
       )
-    ).rejects.toThrow(ASSERT_MESSAGES.CHALLENGE_PERIOD_NOT_ELAPSED);
+    ).rejects.toThrow(/precondition|globalSlotSinceGenesis|global slot/i);
 
     // Advance past timeout -- should succeed
     Local.setGlobalSlot(closedAt + timeout);

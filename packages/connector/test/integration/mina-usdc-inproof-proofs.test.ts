@@ -180,13 +180,23 @@ describeProofs('USDC in-proof settlement — proofs-enabled LocalBlockchain (PR 
     await claimTx.prove();
     await claimTx.sign([deployer.key]).send();
 
-    // ── Cooperative close.
+    // ── Cooperative close. #202: initiateClose now takes a `currentSlot` witness
+    //    (the live network slot, pinned to "~now" by a range precondition). On a
+    //    LocalBlockchain the slot is whatever we set it to.
     Local.setGlobalSlot(Number(CLOSE_SLOT));
     const closeMsg = [Field(BAL_A), Field(BAL_B), salt, Field(2)];
     const closeSigA = Signature.create(participantA.key, closeMsg);
     const closeSigB = Signature.create(participantB.key, closeMsg);
     const closeTx = await Mina.transaction(deployer, async () => {
-      await channel.initiateClose(Field(BAL_A), Field(BAL_B), salt, Field(2), closeSigA, closeSigB);
+      await channel.initiateClose(
+        Field(BAL_A),
+        Field(BAL_B),
+        salt,
+        Field(2),
+        closeSigA,
+        closeSigB,
+        UInt32.from(CLOSE_SLOT)
+      );
     });
     await closeTx.prove();
     await closeTx.sign([deployer.key]).send();

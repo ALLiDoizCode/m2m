@@ -105,6 +105,12 @@ const mockSignature = {
 
 const mockFetchAccount = jest.fn().mockResolvedValue({ account: {} });
 
+// #202: closeChannel reads the live network slot via fetchLastBlock and passes it
+// as the initiateClose `currentSlot` witness.
+const mockFetchLastBlock = jest.fn().mockResolvedValue({
+  globalSlotSinceGenesis: { __uint32: 42n, toString: () => '42' },
+});
+
 const mockAccountUpdate = {
   fundNewAccount: jest.fn(),
 };
@@ -149,6 +155,7 @@ jest.mock('o1js', () => ({
   Poseidon: { hash: mockPoseidonHash },
   Signature: mockSignature,
   fetchAccount: mockFetchAccount,
+  fetchLastBlock: mockFetchLastBlock,
   AccountUpdate: mockAccountUpdate,
   UInt64: mockUInt64,
   UInt32: mockUInt32,

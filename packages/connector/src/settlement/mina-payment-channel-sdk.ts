@@ -431,6 +431,25 @@ export class MinaPaymentChannelSDK {
   }
 
   /**
+   * Read the LIVE network global slot off-chain (#202).
+   *
+   * `initiateClose` takes the current slot as a `currentSlot` witness and pins it
+   * with a range precondition; the SDK must therefore read the genuinely-current
+   * slot from the node before building the close tx. `fetchLastBlock` queries the
+   * configured GraphQL endpoint for the best tip's `globalSlotSinceGenesis` (and
+   * also refreshes o1js's cached network state). Callers must have bound the
+   * network via `_setNetwork()` first.
+   *
+   * @returns the current global slot as a UInt32
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async _currentGlobalSlot(): Promise<any> {
+    const { fetchLastBlock } = await getO1js();
+    const block = await fetchLastBlock(this.graphqlUrl);
+    return block.globalSlotSinceGenesis;
+  }
+
+  /**
    * Create a zkApp instance at the given address.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1355,8 +1374,19 @@ export class MinaPaymentChannelSDK {
       const sigA = this._deserializeSignature(signatureA, 'signatureA');
       const sigB = this._deserializeSignature(signatureB, 'signatureB');
 
+      // #202: read the LIVE network global slot off-chain and pass it as the
+      // `initiateClose` `currentSlot` witness. The contract pins it with a range
+      // precondition (`globalSlotSinceGenesis ∈ [currentSlot, currentSlot+SLOT_WINDOW]`),
+      // so it must be genuinely current. The previous design read the exact
+      // on-chain slot inside the proof, which is unsatisfiable on a real chain
+      // (the slot advances between prove and inclusion →
+      // `Protocol_state_precondition_unsatisfied`). `_setNetwork()` already bound
+      // the active instance to the configured GraphQL endpoint, so the network
+      // state reflects the live chain.
+      const currentSlot = await this._currentGlobalSlot();
+
       const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
-        await zkApp.initiateClose(balA, balB, saltField, nonceField, sigA, sigB);
+        await zkApp.initiateClose(balA, balB, saltField, nonceField, sigA, sigB, currentSlot);
       });
       await txn.prove();
       const sentTx = await txn.sign([signerPrivateKey]).send();
