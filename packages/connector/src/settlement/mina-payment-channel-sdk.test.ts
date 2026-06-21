@@ -40,7 +40,19 @@ const mockTxn = {
   }),
 };
 
-const mockMinaTransaction = jest.fn().mockResolvedValue(mockTxn);
+// Execute the transaction builder callback so inner AccountUpdates (USDC
+// token.transfer, fundNewAccount) actually run and can be asserted (#192). The
+// first arg is the fee-payer spec; the second is the async builder.
+const mockMinaTransaction = jest.fn(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (...args: any[]) => {
+    const builder = args[1];
+    if (typeof builder === 'function') {
+      await builder();
+    }
+    return mockTxn;
+  }
+);
 
 const mockMina = {
   Network: jest.fn().mockReturnValue('mock-network-instance'),
@@ -49,6 +61,7 @@ const mockMina = {
 };
 
 const mockPrivateKeyInstance = {
+  toBase58: jest.fn().mockReturnValue('EKEMockPrivateKeyBase58'),
   toPublicKey: jest.fn().mockReturnValue({
     toBase58: jest.fn().mockReturnValue('B62qMockPublicKeyBase58'),
     x: { toString: () => 'mock-x-field' },
@@ -58,6 +71,8 @@ const mockPrivateKeyInstance = {
 const mockPrivateKey = {
   random: jest.fn().mockReturnValue({
     ...mockPrivateKeyInstance,
+    // The channel (zkApp) key is retained (base58) for USDC settle signing (#192).
+    toBase58: jest.fn().mockReturnValue('EKEMockZkAppPrivateKeyBase58'),
     toPublicKey: jest.fn().mockReturnValue({
       toBase58: jest.fn().mockReturnValue('B62qZkAppNewAddress1234'),
       x: { toString: () => 'mock-zkapp-x-field' },
@@ -94,6 +109,25 @@ const mockAccountUpdate = {
   fundNewAccount: jest.fn(),
 };
 
+// UInt64 mock for USDC token transfers (#192). `UInt64.Unsafe.fromField` wraps a
+// Field amount; the token transfer mock only needs an opaque value back.
+const mockUInt64 = {
+  from: jest.fn((v: unknown) => ({ __uint64: v })),
+  Unsafe: {
+    fromField: jest.fn((v: unknown) => ({ __uint64FromField: v })),
+  },
+};
+
+// FungibleToken (mina-fungible-token) mock (#192). The SDK instantiates the
+// token-owner contract to build deposit/settle transfers and derive the tokenId.
+const mockTokenTransfer = jest.fn().mockResolvedValue(undefined);
+const mockTokenInstance = {
+  transfer: mockTokenTransfer,
+  deriveTokenId: jest.fn().mockReturnValue({ toString: () => 'mock-usdc-token-id' }),
+  getDecimals: jest.fn().mockReturnValue({ toString: () => '6' }),
+};
+const MockFungibleToken = jest.fn().mockImplementation(() => mockTokenInstance);
+
 jest.mock('o1js', () => ({
   Mina: mockMina,
   PrivateKey: mockPrivateKey,
@@ -103,6 +137,11 @@ jest.mock('o1js', () => ({
   Signature: mockSignature,
   fetchAccount: mockFetchAccount,
   AccountUpdate: mockAccountUpdate,
+  UInt64: mockUInt64,
+}));
+
+jest.mock('mina-fungible-token', () => ({
+  FungibleToken: MockFungibleToken,
 }));
 
 // ---------------------------------------------------------------------------
@@ -780,7 +819,7 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       );
 
       // First arg to Mina.transaction is the fee-payer spec carrying the fee.
-      const feePayerSpec = mockMinaTransaction.mock.calls[0][0];
+      const feePayerSpec = mockMinaTransaction.mock.calls[0]![0];
       expect(feePayerSpec).toEqual(
         expect.objectContaining({ fee: '100000000' }) // 0.1 MINA default
       );
@@ -811,7 +850,7 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
         mockSignatureStr
       );
 
-      const feePayerSpec = mockMinaTransaction.mock.calls[0][0];
+      const feePayerSpec = mockMinaTransaction.mock.calls[0]![0];
       expect(feePayerSpec).toEqual(expect.objectContaining({ fee: '250000000' }));
     });
   });
@@ -2269,6 +2308,174 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
           0n
         )
       ).rejects.toBeInstanceOf(MinaChannelError);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // #192: USDC token-aware deposit/settle composition
+  // -------------------------------------------------------------------------
+
+  describe('USDC token-aware composition (#192)', () => {
+    const TOKEN_ADDRESS = 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE';
+    const DERIVED_TOKEN_ID = 'mock-usdc-token-id';
+
+    function makeUsdcSdk(tokenId?: string): MinaPaymentChannelSDK {
+      return new MinaPaymentChannelSDK(
+        TEST_GRAPHQL_URL,
+        TEST_ZKAPP_ADDRESS,
+        logger as any,
+        TEST_SIGNER_KEY,
+        undefined,
+        { tokenAddress: TOKEN_ADDRESS, tokenId }
+      );
+    }
+
+    it('isUsdcToken reflects whether a token-owner address is configured', () => {
+      expect(makeUsdcSdk().isUsdcToken).toBe(true);
+      expect(sdk.isUsdcToken).toBe(false);
+    });
+
+    it('openChannel uses the real derived tokenId for USDC channels', async () => {
+      const usdcSdk = makeUsdcSdk();
+      await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      // The channel tokenId_ is set from token.deriveTokenId(), not '1'.
+      expect(mockTokenInstance.deriveTokenId).toHaveBeenCalled();
+      expect(mockFieldFn).toHaveBeenCalledWith(DERIVED_TOKEN_ID);
+    });
+
+    it('deposit builds token.transfer(depositor → channel) + funds the channel token account', async () => {
+      const usdcSdk = makeUsdcSdk();
+      await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 500000n, true);
+
+      // Channel token account funded on first deposit.
+      expect(mockAccountUpdate.fundNewAccount).toHaveBeenCalledTimes(1);
+      // depositor → channel transfer for exactly the deposit amount.
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
+      expect(mockUInt64.Unsafe.fromField).toHaveBeenCalled();
+      // Channel accounting method still invoked.
+      expect(mockZkAppInstance.deposit).toHaveBeenCalledTimes(1);
+    });
+
+    it('deposit skips funding the channel token account when fundChannelTokenAccount=false', async () => {
+      const usdcSdk = makeUsdcSdk();
+      await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 500000n, false);
+      expect(mockAccountUpdate.fundNewAccount).not.toHaveBeenCalled();
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
+    });
+
+    it('settleChannel builds two payouts, skips zero amounts, and signs with the channel key', async () => {
+      const usdcSdk = makeUsdcSdk();
+      // Open so the channel key is cached for settle signing.
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockTokenTransfer.mockClear();
+      (mockTxn.sign as jest.Mock).mockClear();
+
+      await usdcSdk.settleChannel(
+        open.zkAppAddress,
+        600000n,
+        400000n,
+        99999n,
+        TEST_PARTICIPANT_A,
+        TEST_PARTICIPANT_B,
+        0n,
+        { fundParticipantTokenAccounts: 2 }
+      );
+
+      // Two non-zero payouts (balanceB then balanceA).
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(2);
+      expect(mockAccountUpdate.fundNewAccount).toHaveBeenCalledWith(expect.anything(), 2);
+      // Signed with [signer, channelKey] — two signers.
+      const signArgs = (mockTxn.sign as jest.Mock).mock.calls[0][0];
+      expect(Array.isArray(signArgs)).toBe(true);
+      expect(signArgs).toHaveLength(2);
+    });
+
+    it('settleChannel skips a zero-amount payout', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockTokenTransfer.mockClear();
+
+      await usdcSdk.settleChannel(
+        open.zkAppAddress,
+        0n, // balanceA zero -> skipped
+        400000n,
+        99999n,
+        TEST_PARTICIPANT_A,
+        TEST_PARTICIPANT_B,
+        0n,
+        { fundParticipantTokenAccounts: 1 }
+      );
+
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
+    });
+
+    it('settleChannel throws when the channel key is unavailable (externally-opened channel)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      // No openChannel → no cached channel key.
+      await expect(
+        usdcSdk.settleChannel(
+          TEST_ZKAPP_ADDRESS,
+          600000n,
+          400000n,
+          99999n,
+          TEST_PARTICIPANT_A,
+          TEST_PARTICIPANT_B,
+          0n
+        )
+      ).rejects.toMatchObject({ code: MINA_ERROR_CODES.INVALID_PARAMETERS });
+    });
+
+    it('settleChannel accepts an explicit channelPrivateKey override', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const result = await usdcSdk.settleChannel(
+        TEST_ZKAPP_ADDRESS,
+        600000n,
+        400000n,
+        99999n,
+        TEST_PARTICIPANT_A,
+        TEST_PARTICIPANT_B,
+        0n,
+        { channelPrivateKey: 'EKEMockChannelKeyBase58' }
+      );
+      expect(result).toEqual({ txHash: 'mina_tx_hash_abc123' });
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(2);
+    });
+
+    it('_getTokenContext asserts the configured tokenId matches the derived tokenId', async () => {
+      const usdcSdk = makeUsdcSdk('WRONG_TOKEN_ID');
+      await expect(usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 100n)).rejects.toMatchObject({
+        code: MINA_ERROR_CODES.INVALID_PARAMETERS,
+      });
+    });
+
+    it('accepts a matching configured tokenId', async () => {
+      const usdcSdk = makeUsdcSdk(DERIVED_TOKEN_ID);
+      const result = await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 100n);
+      expect(result).toEqual({ txHash: 'mina_tx_hash_abc123' });
+    });
+
+    it('assertClaimTokenId rejects a mismatched claim tokenId', async () => {
+      const usdcSdk = makeUsdcSdk();
+      await expect(usdcSdk.assertClaimTokenId('some-other-token')).rejects.toMatchObject({
+        code: MINA_ERROR_CODES.INVALID_PARAMETERS,
+      });
+    });
+
+    it('assertClaimTokenId accepts the matching claim tokenId', async () => {
+      const usdcSdk = makeUsdcSdk();
+      await expect(usdcSdk.assertClaimTokenId(DERIVED_TOKEN_ID)).resolves.toBeUndefined();
+    });
+
+    it('assertClaimTokenId is a no-op for native-MINA channels', async () => {
+      await expect(sdk.assertClaimTokenId('anything')).resolves.toBeUndefined();
+    });
+
+    it('asserts the token reports 6 decimals (fails loud otherwise)', async () => {
+      mockTokenInstance.getDecimals.mockReturnValueOnce({ toString: () => '9' });
+      const usdcSdk = makeUsdcSdk();
+      await expect(usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 100n)).rejects.toMatchObject({
+        code: MINA_ERROR_CODES.INVALID_PARAMETERS,
+      });
     });
   });
 });

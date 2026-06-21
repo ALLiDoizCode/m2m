@@ -106,10 +106,14 @@
     "zod": "^3.25.76"
   },
   "peerDependencies": {
+    "mina-fungible-token": "^1.1.0",
     "o1js": "^2.2.0",
     "tigerbeetle-node": "0.16.68"
   },
   "peerDependenciesMeta": {
+    "mina-fungible-token": {
+      "optional": true
+    },
     "o1js": {
       "optional": true
     },

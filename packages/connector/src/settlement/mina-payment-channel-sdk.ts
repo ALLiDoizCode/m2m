@@ -158,6 +158,52 @@ async function getPaymentChannelContract(): Promise<any> {
   return PaymentChannelContract;
 }
 
+/** Cached FungibleToken class from `mina-fungible-token`. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let FungibleTokenContract: any = null;
+
+/**
+ * Lazily load the `FungibleToken` token-owner class from `mina-fungible-token`.
+ *
+ * USDC across all chains (#192): the Mina `PaymentChannel` zkApp is
+ * accounting-only — it CANNOT move the USDC custom token (o1js rejects a
+ * channel-proof-authored custom-token balance change with
+ * `Token_owner_not_caller`). Only the `mina-fungible-token` owner may move its
+ * token, so the SDK instantiates the token-owner contract here and builds the
+ * `token.transfer(...)` AccountUpdates in the SAME transaction as the channel
+ * method. This is the SDK's correctness/enforcement role: the channel proof no
+ * longer binds token amounts to its balances, so the SDK MUST build transfers
+ * that exactly match the channel accounting (deposit amount; settle
+ * balanceA/balanceB).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getFungibleTokenContract(): Promise<any> {
+  if (!FungibleTokenContract) {
+    try {
+      const mod = await import('mina-fungible-token');
+      FungibleTokenContract = mod.FungibleToken;
+    } catch {
+      throw new MinaChannelError(
+        'mina-fungible-token is required for USDC-token Mina payment channels but is not installed.',
+        MINA_ERROR_CODES.O1JS_NOT_AVAILABLE,
+        'O1JS_NOT_AVAILABLE'
+      );
+    }
+  }
+  return FungibleTokenContract;
+}
+
+/**
+ * USDC token decimals expected by the cross-chain settlement design.
+ *
+ * USDC is configured at 6 decimals on every chain (EVM MockERC20, Solana SPL
+ * mint, and the Mina `FungibleToken`) so a claim's base-unit amount means the
+ * same thing everywhere (1 USDC = 1_000_000 base units) — no cross-chain decimal
+ * normalization. The SDK asserts the configured token reports exactly 6 decimals
+ * so a misconfigured token fails loud instead of mis-settling.
+ */
+export const EXPECTED_USDC_DECIMALS = 6;
+
 /** Default polling interval for channel subscriptions (30 seconds) */
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 
@@ -196,6 +242,7 @@ const DEPLOY_CONFIRMATION_POLL_INTERVAL_MS = 3_000;
 export function _resetModuleCaches(): void {
   o1jsModule = null;
   PaymentChannelContract = null;
+  FungibleTokenContract = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +301,30 @@ export class MinaPaymentChannelSDK {
   private readonly _channelHashCache = new Map<string, string>();
 
   /**
+   * Cached channel (zkApp) private keys per zkApp address, base58-encoded.
+   *
+   * USDC across all chains (#192): the `settle` token payouts debit the
+   * channel's USDC token account, which is authorized by the channel account's
+   * own signature on the settle transaction. The channel key is generated in
+   * {@link openChannel} (it signs the deploy) and is retained here so the same
+   * SDK instance can sign the settle tx that drains the channel's escrow. Only
+   * channels opened by this SDK instance carry a cached key; an externally-opened
+   * channel cannot be settled by this instance because the channel-account
+   * outflow has no authorizing signature.
+   */
+  private readonly _channelKeyCache = new Map<string, string>();
+
+  /**
+   * Cached USDC token-owner contract instance and its derived tokenId.
+   *
+   * Instantiated lazily from {@link _tokenAddress}. The same instance is reused
+   * to build `token.transfer(...)` AccountUpdates on deposit/settle and to derive
+   * the channel's tokenId on open.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _tokenContext: { token: any; tokenId: string } | null = null;
+
+  /**
    * Fee applied to every state-changing zkApp transaction, in nanomina.
    *
    * Real Mina networks reject zero-fee zkApp transactions with "Insufficient
@@ -262,15 +333,41 @@ export class MinaPaymentChannelSDK {
    */
   private readonly _txFee: bigint;
 
+  /**
+   * Base58 address of the USDC token-owner (`FungibleToken`) zkApp, or undefined
+   * for legacy native-MINA channels. When set, deposit/settle build USDC
+   * `token.transfer(...)` AccountUpdates and `openChannel` uses the real
+   * `token.deriveTokenId()` as the channel tokenId (#192).
+   */
+  private readonly _tokenAddress?: string;
+
+  /**
+   * Configured USDC tokenId (decimal Field string), if provided. When set, the
+   * SDK asserts it matches the token derived from {@link _tokenAddress} and that
+   * inbound claim tokenIds match it.
+   */
+  private readonly _configuredTokenId?: string;
+
   constructor(
     graphqlUrl: string,
     private readonly _zkAppAddress: string,
     private readonly _logger: Logger,
     private readonly _signerPrivateKey?: string,
-    txFeeNanomina: bigint = DEFAULT_MINA_TX_FEE_NANOMINA
+    txFeeNanomina: bigint = DEFAULT_MINA_TX_FEE_NANOMINA,
+    tokenConfig?: { tokenAddress?: string; tokenId?: string }
   ) {
     this.graphqlUrl = graphqlUrl;
     this._txFee = txFeeNanomina;
+    this._tokenAddress = tokenConfig?.tokenAddress;
+    this._configuredTokenId = tokenConfig?.tokenId;
+  }
+
+  /**
+   * Whether this SDK instance custodies a USDC custom token (vs. legacy native
+   * MINA). True iff a token-owner address was configured.
+   */
+  get isUsdcToken(): boolean {
+    return this._tokenAddress !== undefined && this._tokenAddress !== '';
   }
 
   /**
@@ -407,6 +504,148 @@ export class MinaPaymentChannelSDK {
     const channelHash = zkApp.channelHash.get().toString();
     this._channelHashCache.set(channelAddress, channelHash);
     return channelHash;
+  }
+
+  /**
+   * Instantiate the USDC token-owner (`FungibleToken`) contract and resolve its
+   * tokenId, memoizing the result (#192).
+   *
+   * The token-owner contract is required to build the deposit/settle
+   * `token.transfer(...)` AccountUpdates (only the owner may move its custom
+   * token). The derived tokenId is the channel's tokenId — it is what
+   * `openChannel` writes into `tokenId_` and what inbound claims must match.
+   *
+   * Enforcement: when a tokenId was configured (`MinaProviderConfig.tokenId`),
+   * this asserts the on-chain token derives the SAME tokenId, so a
+   * tokenAddress/tokenId misconfiguration fails loud instead of silently
+   * escrowing/distributing a different token than the claim accounting assumes.
+   *
+   * @throws {MinaChannelError} code 1008 if no token-owner address was configured
+   *   or the configured tokenId does not match the derived tokenId
+   */
+  private async _getTokenContext(): Promise<{
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    token: any;
+    tokenId: string;
+  }> {
+    if (!this.isUsdcToken || !this._tokenAddress) {
+      throw new MinaChannelError(
+        'USDC token operations require a configured token-owner address ' +
+          '(MinaProviderConfig.tokenAddress), but none was provided.',
+        MINA_ERROR_CODES.INVALID_PARAMETERS,
+        'INVALID_PARAMETERS'
+      );
+    }
+    if (this._tokenContext) {
+      return this._tokenContext;
+    }
+
+    const { PublicKey } = await getO1js();
+    const FungibleToken = await getFungibleTokenContract();
+    await this._setNetwork();
+
+    const tokenOwnerKey = PublicKey.fromBase58(this._tokenAddress);
+    const token = new FungibleToken(tokenOwnerKey);
+    const tokenId = token.deriveTokenId().toString();
+
+    // Enforcement: the configured tokenId (if any) must match the token the
+    // owner address actually derives. A mismatch means the SDK would build
+    // transfers under a different token than the channel/claims assume.
+    if (this._configuredTokenId !== undefined && this._configuredTokenId !== tokenId) {
+      throw new MinaChannelError(
+        `Configured Mina tokenId (${this._configuredTokenId}) does not match the tokenId derived ` +
+          `from the configured token-owner address ${this._tokenAddress} (${tokenId}). ` +
+          'Check MinaProviderConfig.tokenAddress / tokenId (#192).',
+        MINA_ERROR_CODES.INVALID_PARAMETERS,
+        'INVALID_PARAMETERS'
+      );
+    }
+
+    this._tokenContext = { token, tokenId };
+    return this._tokenContext;
+  }
+
+  /**
+   * Assert the configured USDC token reports exactly 6 decimals on-chain (#192).
+   *
+   * USDC is 6 decimals on every chain so a claim's base-unit amount is identical
+   * everywhere. The decimals live in the token-owner's on-chain `decimals` state;
+   * we read it via `fetchAccount` + the contract's `decimals` getter. A token
+   * that reports anything other than 6 is a misconfiguration and must fail loud
+   * before any settlement is attempted.
+   *
+   * Best-effort: if the decimals cannot be read (e.g. the getter is unavailable
+   * in a given o1js/lib version), this logs a warning rather than blocking the
+   * tx — the tokenId-match assertion remains the primary correctness gate.
+   */
+  private async _assertTokenDecimals(): Promise<void> {
+    const { token } = await this._getTokenContext();
+    const { fetchAccount, PublicKey } = await getO1js();
+    try {
+      // Refresh the token-owner account so its `decimals` state is readable.
+      await fetchAccount({ publicKey: PublicKey.fromBase58(this._tokenAddress as string) });
+      // `mina-fungible-token` exposes decimals via `getDecimals()` (a UInt8).
+      // Fall back to a `decimals` state getter if present.
+      let decimals: number | undefined;
+      if (typeof token.getDecimals === 'function') {
+        decimals = Number(token.getDecimals().toString());
+      } else if (token.decimals && typeof token.decimals.get === 'function') {
+        decimals = Number(token.decimals.get().toString());
+      }
+      if (decimals === undefined) {
+        this._logger.warn(
+          { event: 'token_decimals_unreadable', tokenAddress: this._tokenAddress },
+          'Could not read USDC token decimals; skipping the decimals==6 assertion'
+        );
+        return;
+      }
+      if (decimals !== EXPECTED_USDC_DECIMALS) {
+        throw new MinaChannelError(
+          `Configured Mina USDC token reports ${decimals} decimals, but ${EXPECTED_USDC_DECIMALS} ` +
+            'are required for cross-chain base-unit parity (#192). Refusing to settle.',
+          MINA_ERROR_CODES.INVALID_PARAMETERS,
+          'INVALID_PARAMETERS'
+        );
+      }
+    } catch (err: unknown) {
+      if (err instanceof MinaChannelError) throw err;
+      // A read failure (network / version) is non-fatal; the tokenId assertion
+      // is the load-bearing check.
+      this._logger.warn(
+        {
+          event: 'token_decimals_check_failed',
+          tokenAddress: this._tokenAddress,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'USDC token decimals check failed to read; proceeding (tokenId match still enforced)'
+      );
+    }
+  }
+
+  /**
+   * Assert an inbound claim's tokenId matches the configured channel token (#192).
+   *
+   * The channel proof no longer binds token amounts, so the SDK is the
+   * enforcement point: a claim carrying a different tokenId than this channel
+   * custodies must be rejected before any on-chain settlement.
+   *
+   * @param claimTokenId - tokenId carried by the inbound `MinaClaimMessage`
+   * @throws {MinaChannelError} code 1008 on mismatch
+   */
+  async assertClaimTokenId(claimTokenId: string): Promise<void> {
+    if (!this.isUsdcToken) {
+      // Legacy native-MINA channels: nothing to enforce.
+      return;
+    }
+    const { tokenId } = await this._getTokenContext();
+    if (claimTokenId !== tokenId) {
+      throw new MinaChannelError(
+        `Inbound Mina claim tokenId (${claimTokenId}) does not match this channel's configured ` +
+          `USDC tokenId (${tokenId}). The claim is for a different token (#192).`,
+        MINA_ERROR_CODES.INVALID_PARAMETERS,
+        'INVALID_PARAMETERS'
+      );
+    }
   }
 
   /**
@@ -624,7 +863,23 @@ export class MinaPaymentChannelSDK {
       const pubB = PublicKey.fromBase58(participantB);
       const nonce = Field(0);
       const timeoutField = Field(timeout);
-      const tokenIdField = Field(tokenId ?? '1');
+
+      // Resolve the channel's tokenId. For USDC channels (#192) this is the real
+      // `token.deriveTokenId()` of the configured token-owner — NOT a placeholder
+      // — so the channel's `tokenId_` matches the token the deposit/settle
+      // transfers move and the tokenId inbound claims must carry. A
+      // configured/derived mismatch is caught inside `_getTokenContext`. Legacy
+      // native-MINA channels keep the `tokenId ?? '1'` behaviour.
+      let resolvedTokenId: string;
+      if (this.isUsdcToken) {
+        const ctx = await this._getTokenContext();
+        resolvedTokenId = ctx.tokenId;
+        // Fail loud on a decimals misconfig before opening a USDC channel.
+        await this._assertTokenDecimals();
+      } else {
+        resolvedTokenId = tokenId ?? '1';
+      }
+      const tokenIdField = Field(resolvedTokenId);
 
       // Deploy and initialize MUST be separate transactions (Issue #128).
       // `initializeChannel` opens with `this.channelState.getAndRequireEquals()`,
@@ -666,6 +921,12 @@ export class MinaPaymentChannelSDK {
       // Cache participant keys
       this._participantCache.set(zkAppAddress, { participantA, participantB });
 
+      // Retain the channel (zkApp) private key so this SDK instance can later
+      // sign the settle tx that drains the channel's USDC token account (#192).
+      // Without the channel key's signature, the channel-account outflows in
+      // `settleChannel` cannot be authorized.
+      this._channelKeyCache.set(zkAppAddress, zkAppPrivateKey.toBase58());
+
       this._logger.info(
         { event: 'open_channel', zkAppAddress, deployTxHash, txHash },
         'Mina payment channel opened'
@@ -680,15 +941,33 @@ export class MinaPaymentChannelSDK {
   /**
    * Deposit funds into a channel.
    *
+   * USDC across all chains (#192): for USDC channels the channel zkApp is
+   * accounting-only, so this builds the actual USDC custody move —
+   * `token.transfer(depositor → channelAddress, amount)` under the configured
+   * tokenId — as a sibling AccountUpdate in the SAME transaction as
+   * `channel.deposit(amount, depositor)`. The transfer amount is built to exactly
+   * equal the channel's deposit amount, keeping accounting and escrow in sync. On
+   * the channel's first-ever deposit the channel's USDC token account does not
+   * yet exist, so a new-account fee is paid (`fundChannelTokenAccount`). The
+   * depositor (this SDK's signer) signs, authorizing both the token outflow and
+   * the channel's depositor-binding AccountUpdate.
+   *
    * @param channelAddress - Base58 zkApp address of the channel
    * @param amount - Amount to deposit (bigint)
+   * @param fundChannelTokenAccount - Whether to pay the new-account fee for the
+   *   channel's USDC token account (true on the channel's first-ever deposit).
+   *   Ignored for legacy native-MINA channels. Defaults to `true`.
    * @returns Transaction hash
    */
-  async deposit(channelAddress: string, amount: bigint): Promise<MinaTxResult> {
+  async deposit(
+    channelAddress: string,
+    amount: bigint,
+    fundChannelTokenAccount = true
+  ): Promise<MinaTxResult> {
     const signerKeyBase58 = this._requireSignerKey();
 
     try {
-      const { PrivateKey, Field, fetchAccount } = await getO1js();
+      const { PrivateKey, PublicKey, Field, UInt64, AccountUpdate, fetchAccount } = await getO1js();
       const Mina = await this._setNetwork();
 
       const signerPrivateKey = PrivateKey.fromBase58(signerKeyBase58);
@@ -699,7 +978,29 @@ export class MinaPaymentChannelSDK {
       const zkApp = await this._getZkApp(channelAddress);
       const amountField = Field(amount);
 
+      // Resolve the USDC token-owner context (if any) once, outside the tx
+      // builder, so config/derivation errors surface before tx construction.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let token: any = null;
+      if (this.isUsdcToken) {
+        await this._assertTokenDecimals();
+        ({ token } = await this._getTokenContext());
+      }
+      const channelPublicKey = PublicKey.fromBase58(channelAddress);
+
       const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
+        if (token) {
+          // First-ever deposit creates the channel's USDC token account.
+          if (fundChannelTokenAccount) {
+            AccountUpdate.fundNewAccount(signerPublicKey, 1);
+          }
+          // USDC custody move: depositor → channel token account. The token
+          // owner's `transfer` proof authorizes it; the depositor signs the tx.
+          // The amount is the SAME Field the channel accounts for, so escrow and
+          // accounting stay in lockstep (the enforcement point — the proof no
+          // longer binds it).
+          await token.transfer(signerPublicKey, channelPublicKey, UInt64.Unsafe.fromField(amountField));
+        }
         await zkApp.deposit(amountField, signerPublicKey);
       });
       await txn.prove();
@@ -707,7 +1008,13 @@ export class MinaPaymentChannelSDK {
       const txHash = sentTx.hash ?? '';
 
       this._logger.info(
-        { event: 'deposit', channelAddress, amount: amount.toString(), txHash },
+        {
+          event: 'deposit',
+          channelAddress,
+          amount: amount.toString(),
+          usdc: this.isUsdcToken,
+          txHash,
+        },
         'Deposited into Mina payment channel'
       );
 
@@ -945,6 +1252,11 @@ export class MinaPaymentChannelSDK {
    * @param participantA - Base58 public key of participant A
    * @param participantB - Base58 public key of participant B
    * @param nonce - Channel nonce (used in channelHash)
+   * @param options - USDC distribution tuning. `fundParticipantTokenAccounts` is
+   *   the number of new participant USDC token accounts (0, 1, or 2) whose
+   *   creation fee this tx pays — pass the count of participants who do not yet
+   *   hold the token. `channelPrivateKey` overrides the channel/zkApp signing key
+   *   (base58) for channels not opened by this SDK instance.
    * @returns Transaction hash
    */
   async settleChannel(
@@ -954,12 +1266,13 @@ export class MinaPaymentChannelSDK {
     salt: bigint,
     participantA: string,
     participantB: string,
-    nonce: bigint
+    nonce: bigint,
+    options?: { fundParticipantTokenAccounts?: number; channelPrivateKey?: string }
   ): Promise<MinaTxResult> {
     const signerKeyBase58 = this._requireSignerKey();
 
     try {
-      const { PrivateKey, PublicKey, Field, fetchAccount } = await getO1js();
+      const { PrivateKey, PublicKey, Field, UInt64, AccountUpdate, fetchAccount } = await getO1js();
       const Mina = await this._setNetwork();
 
       const signerPrivateKey = PrivateKey.fromBase58(signerKeyBase58);
@@ -974,17 +1287,68 @@ export class MinaPaymentChannelSDK {
       const saltField = Field(salt);
       const pubA = PublicKey.fromBase58(participantA);
       const pubB = PublicKey.fromBase58(participantB);
+      const channelPublicKey = PublicKey.fromBase58(channelAddress);
       const nonceField = Field(nonce);
 
+      // Resolve the USDC token-owner context (if any) and the channel signing
+      // key BEFORE building the tx, so config errors fail fast.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let token: any = null;
+      let channelPrivateKey: ReturnType<typeof PrivateKey.fromBase58> | null = null;
+      if (this.isUsdcToken) {
+        await this._assertTokenDecimals();
+        ({ token } = await this._getTokenContext());
+
+        // The settle USDC payouts debit the channel's token account, authorized
+        // by the channel account's own signature on this tx (#192). Resolve the
+        // channel key: explicit override, else the key cached at openChannel.
+        const channelKeyBase58 =
+          options?.channelPrivateKey ?? this._channelKeyCache.get(channelAddress);
+        if (!channelKeyBase58) {
+          throw new MinaChannelError(
+            `Cannot settle USDC channel ${channelAddress}: the channel/zkApp private key is ` +
+              'required to authorize the channel-account USDC payouts but is not available. The ' +
+              'channel must have been opened by this SDK instance, or channelPrivateKey must be ' +
+              'supplied (#192).',
+            MINA_ERROR_CODES.INVALID_PARAMETERS,
+            'INVALID_PARAMETERS'
+          );
+        }
+        channelPrivateKey = PrivateKey.fromBase58(channelKeyBase58);
+      }
+
+      const fundCount = options?.fundParticipantTokenAccounts ?? 0;
+
       const txn = await Mina.transaction(this._feePayer(signerPublicKey), async () => {
+        if (token) {
+          if (fundCount > 0) {
+            AccountUpdate.fundNewAccount(signerPublicKey, fundCount);
+          }
+          // Distribute the channel's custodied USDC. Skip zero-amount transfers
+          // (no balance change, no new account needed). Amounts are exactly the
+          // channel's settle balances — the enforcement point, since the channel
+          // proof no longer binds them. Mirror the reference ordering (B then A).
+          if (balanceB > 0n) {
+            await token.transfer(channelPublicKey, pubB, UInt64.Unsafe.fromField(balB));
+          }
+          if (balanceA > 0n) {
+            await token.transfer(channelPublicKey, pubA, UInt64.Unsafe.fromField(balA));
+          }
+        }
         await zkApp.settle(balA, balB, saltField, pubA, pubB, nonceField);
       });
       await txn.prove();
-      const sentTx = await txn.sign([signerPrivateKey]).send();
+
+      // Sign with the fee payer/signer, plus the channel key for USDC channels so
+      // the channel-account outflows are authorized.
+      const signers = channelPrivateKey
+        ? [signerPrivateKey, channelPrivateKey]
+        : [signerPrivateKey];
+      const sentTx = await txn.sign(signers).send();
       const txHash = sentTx.hash ?? '';
 
       this._logger.info(
-        { event: 'settle_channel', channelAddress, txHash },
+        { event: 'settle_channel', channelAddress, usdc: this.isUsdcToken, txHash },
         'Mina payment channel settled'
       );
 
