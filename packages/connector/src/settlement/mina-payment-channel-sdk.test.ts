@@ -2478,4 +2478,104 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // #194: Trust-model guard — the built USDC token.transfer amount must EQUAL
+  // the channel accounting (deposit amount; settle balanceA/balanceB). The
+  // existing #192 tests assert the transfer COUNT and that UInt64.Unsafe.fromField
+  // was invoked, but not that the AMOUNT matches the accounting. Since #191/#192
+  // moved enforcement off the channel proof and onto "the transfer amount IS the
+  // accounted Field", these tests would catch a desync between depositTotal /
+  // settle balances and the actual escrow move.
+  // -------------------------------------------------------------------------
+
+  describe('USDC trust-model guard: transfer amount == channel accounting (#194)', () => {
+    const TOKEN_ADDRESS = 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE';
+
+    function makeUsdcSdk(): MinaPaymentChannelSDK {
+      return new MinaPaymentChannelSDK(
+        TEST_GRAPHQL_URL,
+        TEST_ZKAPP_ADDRESS,
+        logger as any,
+        TEST_SIGNER_KEY,
+        undefined,
+        { tokenAddress: TOKEN_ADDRESS }
+      );
+    }
+
+    // The Field-mock's toString() echoes its constructor input, and the transfer
+    // amount is UInt64.Unsafe.fromField(Field(amount)). So the value handed to
+    // token.transfer round-trips back to the original amount: a desync (e.g.
+    // transferring a different amount than the channel accounts) would surface
+    // as a mismatch here.
+    function transferredAmountOf(call: unknown[]): string {
+      // call = [from, to, UInt64.Unsafe.fromField(<FieldMock>)]
+      const amount = call[2] as { __uint64FromField: { toString(): string } };
+      return amount.__uint64FromField.toString();
+    }
+
+    it('deposit transfers EXACTLY the deposited amount (escrow == accounting)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const depositAmount = 1_234_567n; // 1.234567 USDC
+
+      await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, depositAmount, true);
+
+      // One depositor → channel transfer, for exactly the deposited amount.
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
+      expect(transferredAmountOf(mockTokenTransfer.mock.calls[0]!)).toBe(String(depositAmount));
+
+      // The channel accounting (zkApp.deposit) was bound to the SAME Field value.
+      expect(mockZkAppInstance.deposit).toHaveBeenCalledTimes(1);
+      expect(mockFieldFn).toHaveBeenCalledWith(depositAmount);
+    });
+
+    it('settle pays out EXACTLY balanceB to B and balanceA to A (B then A ordering)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockTokenTransfer.mockClear();
+
+      const balanceA = 400_000n;
+      const balanceB = 600_000n;
+      await usdcSdk.settleChannel(
+        open.zkAppAddress,
+        balanceA,
+        balanceB,
+        99999n,
+        TEST_PARTICIPANT_A,
+        TEST_PARTICIPANT_B,
+        0n,
+        { fundParticipantTokenAccounts: 2 }
+      );
+
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(2);
+      // Reference ordering: balanceB to participantB first, then balanceA to A.
+      const first = mockTokenTransfer.mock.calls[0]!;
+      const second = mockTokenTransfer.mock.calls[1]!;
+      expect(transferredAmountOf(first)).toBe(String(balanceB));
+      expect(transferredAmountOf(second)).toBe(String(balanceA));
+    });
+
+    it('settle never moves USDC for a zero balance (no phantom payout)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockTokenTransfer.mockClear();
+
+      // balanceA == 0 → only the balanceB payout is built, and it carries the
+      // FULL amount. A zero transfer that "leaked" would show up as an extra call.
+      const balanceB = 1_000_000n;
+      await usdcSdk.settleChannel(
+        open.zkAppAddress,
+        0n,
+        balanceB,
+        99999n,
+        TEST_PARTICIPANT_A,
+        TEST_PARTICIPANT_B,
+        0n,
+        { fundParticipantTokenAccounts: 1 }
+      );
+
+      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
+      expect(transferredAmountOf(mockTokenTransfer.mock.calls[0]!)).toBe(String(balanceB));
+    });
+  });
 });
