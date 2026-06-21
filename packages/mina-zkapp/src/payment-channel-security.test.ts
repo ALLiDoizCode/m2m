@@ -363,15 +363,12 @@ describe('PaymentChannel zkApp -- Security & Edge Cases (Story 34.3)', () => {
     );
 
     const unsafeAmount = MAX_SAFE_AMOUNT.add(Field(1));
-    // An over-range deposit is rejected. With fund custody (Story 34.4) the
-    // depositor→zkApp transfer converts the amount to a UInt64/Int64, whose
-    // witness generation (Int64 range check) can fire before the contract's own
-    // `AMOUNT_EXCEEDS_SAFE_RANGE` assertion is checked — both are valid
-    // rejections of an unsafe amount, so accept either.
+    // An over-range deposit is rejected by the contract's explicit
+    // AMOUNT_EXCEEDS_SAFE_RANGE assertion. (#191: deposit no longer converts the
+    // amount to a native UInt64 — USDC custody is built by the caller as a
+    // sibling token.transfer — so the contract assertion is the sole guard here.)
     await expect(
       depositToChannel(participantA, zkApp, unsafeAmount, participantA, [participantA.key])
-    ).rejects.toThrow(
-      new RegExp(`${ASSERT_MESSAGES.AMOUNT_EXCEEDS_SAFE_RANGE}|Int64: Expected a value between`)
-    );
+    ).rejects.toThrow('amount exceeds safe range');
   });
 });
