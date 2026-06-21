@@ -72,6 +72,12 @@ function safeBigInt(value: string, fieldName: string): bigint {
 export interface MinaProviderOptions {
   /** Mina token ID (native MINA or custom fungible token) */
   tokenId?: string;
+  /**
+   * Base58 address of the USDC token-owner (`FungibleToken`) zkApp (#192). When
+   * present, the underlying SDK builds USDC `token.transfer(...)` AccountUpdates
+   * on deposit/settle and derives the channel tokenId from this owner.
+   */
+  tokenAddress?: string;
   /** Mina network name (e.g., 'devnet', 'mainnet') -- overrides chainId extraction */
   network?: string;
 }
@@ -103,6 +109,9 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
 
   /** Resolved token ID */
   private readonly _tokenId: string;
+
+  /** USDC token-owner address (base58), or undefined for native-MINA channels (#192). */
+  private readonly _tokenAddress?: string;
 
   /** Resolved network name */
   private readonly _network: string;
@@ -139,6 +148,7 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     }
     this.chainId = chainId;
     this._tokenId = options?.tokenId ?? 'MINA';
+    this._tokenAddress = options?.tokenAddress;
     this._network = options?.network ?? chainId.split(':')[1] ?? 'devnet';
 
     // Pre-compile the zkApp circuit during construction.
@@ -284,6 +294,14 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     this._warnIfEVMFields(balanceProof);
 
     try {
+      // Enforcement (#192): a USDC channel must only settle a claim carrying its
+      // own tokenId. The channel proof no longer binds token amounts, so reject
+      // a wrong-token claim here before building any transfer. Skipped when the
+      // claim omits a tokenId (legacy / native-MINA) — see SDK.assertClaimTokenId.
+      if (balanceProof.tokenId !== undefined) {
+        await this._sdk.assertClaimTokenId(balanceProof.tokenId);
+      }
+
       // `transferredAmount` is participant A's balance; `balanceB` / `salt`
       // complete the Poseidon balance commitment for the bidirectional case.
       const balanceA = safeBigInt(balanceProof.transferredAmount, 'transferredAmount');
@@ -676,6 +694,7 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
   async getMinaContext(): Promise<{
     zkAppAddress: string;
     tokenId: string;
+    tokenAddress?: string;
     network: string;
     signerAddress: string;
   }> {
@@ -685,6 +704,7 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
     return {
       zkAppAddress: this._zkAppAddress,
       tokenId: this._tokenId,
+      tokenAddress: this._tokenAddress,
       network: this._network,
       signerAddress: signerPublicKey,
     };
@@ -910,12 +930,17 @@ export function createMinaProviderFactory(logger: Logger, signerKey: string): Ch
       signerKey,
       // Real Mina networks reject zero-fee zkApp transactions; default to
       // 0.1 MINA unless the operator configures an explicit fee (Issue #126).
-      config.txFeeNanomina !== undefined ? BigInt(config.txFeeNanomina) : undefined
+      config.txFeeNanomina !== undefined ? BigInt(config.txFeeNanomina) : undefined,
+      // USDC across all chains (#192): thread the token-owner address + tokenId so
+      // the SDK builds USDC token.transfer(...) on deposit/settle and enforces the
+      // tokenId/decimals invariants. Omitted → legacy native-MINA channel.
+      { tokenAddress: config.tokenAddress, tokenId: config.tokenId }
     );
     const network = config.network ?? 'devnet';
     const chainId = `mina:${network}`;
     return new MinaPaymentChannelProvider(sdk, chainId, config.zkAppAddress, signerKey, logger, {
       tokenId: config.tokenId,
+      tokenAddress: config.tokenAddress,
       network,
     });
   };
