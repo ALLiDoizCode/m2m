@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.18.0](https://github.com/toon-protocol/connector/compare/v3.17.0...v3.18.0) (2026-06-21)
+
+### Features
+
+- **mina:** deploy/fund USDC as the in-proof UsdcChannelToken ([4041842](https://github.com/toon-protocol/connector/commit/4041842b637afd0a71960d464fae0aaf90c7fd1c))
+- **mina:** rework settlement SDK onto in-proof UsdcChannelToken ([57f0bbf](https://github.com/toon-protocol/connector/commit/57f0bbf79c238a34115f7429240d17c7c5c7f44c)), closes [191/#192](https://github.com/191/connector/issues/192) [#192](https://github.com/toon-protocol/connector/issues/192)
+- **mina:** UsdcChannelToken — in-proof-enforcing USDC token owner ([f43a437](https://github.com/toon-protocol/connector/commit/f43a437063298284b9c2f7195228d88a843caa71)), closes [191/#194](https://github.com/191/connector/issues/194)
+
+### Bug Fixes
+
+- **mina:** mirror compiled provers to base FungibleToken; nightly builds all workspaces ([d0aecff](https://github.com/toon-protocol/connector/commit/d0aecffffc84b82317d63821e10681f5d5428fd7)), closes [#202](https://github.com/toon-protocol/connector/issues/202)
+- **mina:** real-chain-safe slot preconditions in PaymentChannel close/settle ([#202](https://github.com/toon-protocol/connector/issues/202)) ([ab81d26](https://github.com/toon-protocol/connector/commit/ab81d2694fdb2158a8340f52c4830f4a71d2bee7)), closes [191/#192](https://github.com/191/connector/issues/192)
+
 ## [3.17.0](https://github.com/toon-protocol/connector/compare/v3.16.0...v3.17.0) (2026-06-21)
 
 ### Features
