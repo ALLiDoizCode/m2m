@@ -130,25 +130,38 @@ export class ClaimReceiver extends EventEmitter {
       if (!isBTPData(message)) {
         return;
       }
-
-      // TypeScript now knows message.data is BTPData, not BTPErrorData
-      // Iterate through protocol data array
-      for (const protocolData of message.data.protocolData) {
-        if (protocolData.protocolName === 'payment-channel-claim') {
-          // Plaintext claim
-          await this.handleClaimMessage(peerId, protocolData);
-        } else if (
-          protocolData.protocolName === BTP_WRAPPED_CLAIM_PROTOCOL.NAME &&
-          this._nip59Wrapper &&
-          this._nodePrivateKey
-        ) {
-          // NIP-59 wrapped claim — unwrap then process
-          await this.handleWrappedClaimMessage(peerId, protocolData);
-        }
-      }
+      await this.ingestProtocolData(peerId, message.data.protocolData);
     });
 
     this.logger.info('ClaimReceiver registered with BTP server');
+  }
+
+  /**
+   * Ingest claim protocol-data from any transport.
+   *
+   * Records + verifies any `payment-channel-claim` (or NIP-59 wrapped) entries,
+   * emitting CLAIM_RECEIVED so the SettlementMonitor can trigger on-chain
+   * `claimFromChannel`. Transport-agnostic: {@link registerWithBTPServer} feeds
+   * BTP messages here, and the ILP-over-HTTP adapter calls it directly so a
+   * one-shot `POST /ilp` write credits settlement identically to a BTP write.
+   *
+   * @param peerId - Peer (or ephemeral HTTP identity) the claim arrived from
+   * @param protocolData - BTP-shaped protocol-data entries carrying the claim
+   */
+  async ingestProtocolData(peerId: string, protocolData: BTPProtocolData[]): Promise<void> {
+    for (const pd of protocolData) {
+      if (pd.protocolName === 'payment-channel-claim') {
+        // Plaintext claim
+        await this.handleClaimMessage(peerId, pd);
+      } else if (
+        pd.protocolName === BTP_WRAPPED_CLAIM_PROTOCOL.NAME &&
+        this._nip59Wrapper &&
+        this._nodePrivateKey
+      ) {
+        // NIP-59 wrapped claim — unwrap then process
+        await this.handleWrappedClaimMessage(peerId, pd);
+      }
+    }
   }
 
   /**

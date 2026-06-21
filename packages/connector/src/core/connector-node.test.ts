@@ -218,6 +218,8 @@ describe('ConnectorNode', () => {
     mockBTPServer = {
       start: jest.fn().mockResolvedValue(undefined),
       stop: jest.fn().mockResolvedValue(undefined),
+      setIlpHttpHandler: jest.fn(),
+      setInboundClaimValidator: jest.fn(),
     } as unknown as jest.Mocked<BTPServer>;
 
     mockPacketHandler = {
