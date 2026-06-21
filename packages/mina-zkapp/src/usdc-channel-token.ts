@@ -52,6 +52,7 @@ import {
   Bool,
   Field,
   Int64,
+  type Cache,
   method,
   Permissions,
   Poseidon,
@@ -136,6 +137,65 @@ export class UsdcChannelToken extends FungibleToken {
    * Documented spike friction; required for any `FungibleToken` `.ts` subclass.
    */
   declare events: FungibleToken['events'] & Record<string, never>;
+
+  /**
+   * Compile the in-proof token AND mirror the compiled provers/verification key
+   * onto the base `FungibleToken` class, so the INHERITED `@method`s prove.
+   *
+   * Why this override is needed (root cause of the lightnet "no prover found"):
+   * o1js's `@method` decorator captures, in each wrapped method's closure, the
+   * `ZkappClass` it was DECLARED on (`target.constructor`). For inherited methods
+   * like `initialize`/`mint`/`transfer`, that class is the base `FungibleToken`,
+   * not this subclass. At prove time o1js looks up `FungibleToken._provers`
+   * (`getZkappProver` → `ZkappClass._provers`). But `UsdcChannelToken.compile()`
+   * only sets `UsdcChannelToken._provers` — it leaves `FungibleToken._provers`
+   * `undefined` — so `token.initialize()` throws
+   * "Cannot prove execution of initialize(), no prover found." even though the
+   * subclass was compiled. (The mocked `proofsEnabled:false` tests never prove,
+   * so they never hit this; only REAL proofs — lightnet or a proofs-enabled
+   * LocalBlockchain — surface it.)
+   *
+   * The subclass shares the SAME `_methods` array with the base (o1js's own
+   * documented FIXME: a subclass `@method` declaration pushes onto the parent's
+   * `_methods`). Compiling the subclass therefore produces one prover PER ENTRY
+   * in that shared array, IN THE SAME ORDER the base resolves indices by. So we
+   * can safely point the base class's `_provers`/`_verificationKey` at the
+   * subclass's compiled artifacts; every inherited-method index lines up.
+   *
+   * This keeps the public API identical (`await UsdcChannelToken.compile()` — the
+   * single call the deploy scripts/tests already make) while making inherited
+   * methods provable.
+   */
+  static override async compile(options?: {
+    cache?: Cache;
+    forceRecompile?: boolean;
+  }): ReturnType<typeof FungibleToken.compile> {
+    const artifacts = await super.compile(options);
+    // Mirror onto the base `FungibleToken` so inherited-method lazy proofs
+    // (whose captured `ZkappClass` is `FungibleToken`) resolve everything they
+    // need WITHOUT the base re-deriving it:
+    //   - `_provers`           — the prover lookup (`getZkappProver`).
+    //   - `_verificationKey`   — deploy/verify.
+    //   - `_methodMetadata`    — so `FungibleToken.getMaxProofsVerified()`
+    //     (called by the lazy proof) short-circuits in `analyzeMethods` instead
+    //     of re-running every entry in the SHARED `_methods` array — which now
+    //     includes the SUBCLASS methods (`enableChannelEscrow` etc.) that a bare
+    //     `new FungibleToken()` instance does NOT have, and would otherwise throw
+    //     `instance[methodName] is not a function`.
+    // The subclass shares the `_methods` array (same order) with the base, so all
+    // three artifacts are index-compatible with the base's method resolution.
+    type CompiledStatics = {
+      _provers?: unknown;
+      _verificationKey?: { data: string; hash: Field };
+      _methodMetadata?: unknown;
+    };
+    const base = FungibleToken as unknown as CompiledStatics;
+    const self = this as unknown as CompiledStatics;
+    base._provers = self._provers;
+    base._verificationKey = self._verificationKey;
+    base._methodMetadata = self._methodMetadata;
+    return artifacts;
+  }
 
   /**
    * One-time: make `channelAddress`'s escrow token account CUSTODIAL.
