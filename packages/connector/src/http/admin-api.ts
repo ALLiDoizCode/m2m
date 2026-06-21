@@ -29,6 +29,11 @@ import { Netmask } from 'netmask';
 import { Logger } from '../utils/logger';
 import { requireOptional } from '../utils/optional-require';
 import { RoutingTable } from '../routing/routing-table';
+import {
+  deriveLocalPrefixes,
+  deriveDefaultChildRoute,
+  validateRelationRoute,
+} from '../routing/relation-route-validator';
 import { BTPClientManager } from '../btp/btp-client-manager';
 import { Peer } from '../btp/btp-client';
 import { ILPAddress, isValidILPAddress } from '@toon-protocol/shared';
@@ -184,6 +189,43 @@ export interface AdminAPIConfig {
    * every value-bearing peer forward requires a claim (legacy behavior).
    */
   setPeerRelation?: (peerId: string, relation: PeerRelation) => void;
+
+  /**
+   * Optional reader for a peer's current ILP relationship, mirroring
+   * {@link setPeerRelation}. Used by `POST /admin/routes` to validate that a
+   * route's prefix is consistent with the relation of its `nextHop` peer
+   * (e.g. a `child` route must sit under the connector's own address). When
+   * omitted, the relation↔route admission check is skipped.
+   */
+  getPeerRelation?: (peerId: string) => PeerRelation | undefined;
+
+  /**
+   * Optional persistent peer/route registry. When provided, runtime peer
+   * registrations/removals made through the admin API are written through so
+   * they survive a connector restart (instead of the "re-POST the route after
+   * restart" RUNBOOK step). Routes are persisted at the RoutingTable layer, so
+   * this is only used for the peer record (which carries relation + settlement
+   * that the routing table does not see).
+   */
+  registryStore?: RegistryPeerSink;
+}
+
+/**
+ * Minimal peer write-through surface the admin API needs from the registry
+ * store. Kept structural so the HTTP layer has no hard dependency on the
+ * concrete {@link ../core/registry-store.RegistryStore}.
+ */
+export interface RegistryPeerSink {
+  savePeer(record: {
+    id: string;
+    url: string;
+    authToken: string;
+    relation?: string;
+    transport?: string;
+    settlementJson?: string;
+    source: 'config' | 'runtime';
+  }): void;
+  deletePeer(id: string): void;
 }
 
 /**
@@ -552,6 +594,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     connectorFeePercentage,
     transportType = 'direct',
     setPeerRelation,
+    getPeerRelation,
+    registryStore,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -800,6 +844,31 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         }
       }
 
+      // Relation ↔ route admission validation + child auto-route (Phase 2),
+      // mirroring ConnectorNode.registerPeer() for cross-surface parity. The
+      // connector's self-prefixes are the routes terminating locally; when none
+      // exist the validator no-ops (routing-only nodes are unaffected). A
+      // `child` with no explicit route gets `<self>.<peerId>` derived.
+      const localPrefixes = deriveLocalPrefixes(routingTable.getAllRoutes(), nodeId);
+      let effectiveRoutes = body.routes;
+      if (!effectiveRoutes || effectiveRoutes.length === 0) {
+        const autoRoute = deriveDefaultChildRoute(body.relation, localPrefixes, body.id);
+        if (autoRoute) {
+          effectiveRoutes = [autoRoute];
+        }
+      }
+      if (effectiveRoutes && effectiveRoutes.length > 0) {
+        const relationValidation = validateRelationRoute(
+          body.relation,
+          localPrefixes,
+          effectiveRoutes.map((r) => r.prefix)
+        );
+        if (!relationValidation.ok) {
+          res.status(400).json({ error: 'Bad request', message: relationValidation.error });
+          return;
+        }
+      }
+
       // Only add BTP peer on initial registration (BTP connection doesn't change on re-registration)
       if (!isUpdate) {
         const peer: Peer = {
@@ -836,10 +905,12 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         );
       }
 
-      // Add routes if provided (addRoute replaces existing same-prefix routes, no duplicates)
+      // Add routes if provided — explicit or the auto-derived child route.
+      // (Routes persist via the RoutingTable write-through; addRoute replaces
+      // existing same-prefix routes, no duplicates.)
       const addedRoutes: string[] = [];
-      if (body.routes) {
-        for (const route of body.routes) {
+      if (effectiveRoutes) {
+        for (const route of effectiveRoutes) {
           routingTable.addRoute(route.prefix as ILPAddress, body.id, route.priority ?? 0);
           addedRoutes.push(route.prefix);
           log.info(
@@ -860,7 +931,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       // Create/merge PeerConfig if settlement provided and settlementPeers available
       if (body.settlement && settlementPeers) {
         const s = body.settlement;
-        const ilpAddress = body.routes && body.routes.length > 0 ? body.routes[0]!.prefix : '';
+        const ilpAddress =
+          effectiveRoutes && effectiveRoutes.length > 0 ? effectiveRoutes[0]!.prefix : '';
 
         // Build settlementTokens
         const settlementTokens: string[] = [];
@@ -917,6 +989,20 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
           );
         }
       }
+
+      // Write-through to the persistent registry so this runtime registration
+      // survives a restart (the routes were already persisted at the
+      // RoutingTable layer; here we persist the peer record with its relation +
+      // settlement). Best-effort — the store swallows and logs its own errors.
+      registryStore?.savePeer({
+        id: body.id,
+        url: body.url,
+        authToken: body.authToken,
+        relation: body.relation,
+        transport: body.transport,
+        settlementJson: body.settlement ? JSON.stringify(body.settlement) : undefined,
+        source: 'runtime',
+      });
 
       if (isUpdate) {
         // Return 200 for re-registration. Per F10/AC-10: echo the LIVE
@@ -1017,6 +1103,11 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
           }
         }
       }
+
+      // Write-through: drop the peer from the persistent registry so it is not
+      // replayed on the next boot. (Removed routes were dropped via the
+      // RoutingTable write-through as removeRoute ran above.)
+      registryStore?.deletePeer(peerId);
 
       res.json({
         success: true,
@@ -1208,7 +1299,21 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       const existingPeers = btpClientManager.getPeerIds();
       const peerExists = existingPeers.includes(body.nextHop);
 
-      // Add route
+      // Relation ↔ route admission validation against the nextHop peer's
+      // relation (Phase 2), mirroring ConnectorNode.addRoute(). Unknown/local
+      // nextHops resolve to undefined → treated as 'peer' (no constraint), so
+      // this only rejects an unambiguous child/parent-shaped mismatch.
+      const nextHopRelation = getPeerRelation?.(body.nextHop);
+      const localPrefixes = deriveLocalPrefixes(routingTable.getAllRoutes(), nodeId);
+      const relationValidation = validateRelationRoute(nextHopRelation, localPrefixes, [
+        body.prefix,
+      ]);
+      if (!relationValidation.ok) {
+        res.status(400).json({ error: 'Bad request', message: relationValidation.error });
+        return;
+      }
+
+      // Add route (persisted via the RoutingTable write-through)
       const priority = body.priority ?? 0;
       routingTable.addRoute(body.prefix as ILPAddress, body.nextHop, priority);
 
@@ -1275,6 +1380,221 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.error({ event: 'admin_api_error', error: errorMessage }, 'Failed to remove route');
+      res.status(500).json({ error: 'Internal server error', message: errorMessage });
+    }
+  });
+
+  /**
+   * PUT /admin/desired-state
+   *
+   * Declarative reconciliation of the full peer/route set. The body describes
+   * the desired end-state; the connector diffs it against the running state and
+   * applies the minimal add/update/remove to converge. Idempotent: re-PUTting
+   * the same body is a no-op. This is the front-end to the persistent registry —
+   * the resulting peers/routes are written through and survive a restart.
+   *
+   * Body: `{ peers?: AddPeerRequest[], routes?: AddRouteRequest[] }`
+   *   - `peers` is the COMPLETE desired peer set; peers not listed are removed.
+   *   - A peer's `routes` (or the child auto-route) plus the top-level `routes`
+   *     form the COMPLETE desired set of peer routes; peer routes not listed are
+   *     removed. The connector's own local routes (nextHop === nodeId/'local')
+   *     are always preserved.
+   *
+   * Validation is atomic: if any peer/route is invalid the whole request is
+   * rejected with 400 and nothing is mutated.
+   */
+  router.put('/desired-state', async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as {
+        peers?: AddPeerRequest[];
+        routes?: AddRouteRequest[];
+      };
+      const desiredPeers = body.peers ?? [];
+      const desiredTopRoutes = body.routes ?? [];
+
+      const localPrefixes = deriveLocalPrefixes(routingTable.getAllRoutes(), nodeId);
+      // Relations of peers in THIS request, so a top-level route whose nextHop
+      // is a peer being added in the same PUT validates against its new relation.
+      const desiredRelations = new Map<string, PeerRelation>();
+      for (const p of desiredPeers) {
+        desiredRelations.set(p.id, (p.relation as PeerRelation) ?? 'peer');
+      }
+
+      // ── Validate everything up front (no mutation on failure) ──
+      const reject = (message: string): void => {
+        res.status(400).json({ error: 'Bad request', message });
+      };
+      // Per-peer effective routes (explicit or child auto-route), reused below.
+      const peerEffectiveRoutes = new Map<string, Array<{ prefix: string; priority?: number }>>();
+      for (const peer of desiredPeers) {
+        if (!peer.id || typeof peer.id !== 'string') return reject('Missing or invalid peer id');
+        if (!peer.url || typeof peer.url !== 'string') return reject('Missing or invalid peer url');
+        if (typeof peer.authToken !== 'string') {
+          return reject('authToken must be a string (can be empty for no auth)');
+        }
+        if (!peer.url.startsWith('ws://') && !peer.url.startsWith('wss://')) {
+          return reject('URL must start with ws:// or wss://');
+        }
+        if (peer.transport === 'socks5' && transportType !== 'socks5') {
+          return reject("transport: 'socks5' requires connector-level transport.type 'socks5'");
+        }
+        if (
+          peer.relation !== undefined &&
+          peer.relation !== 'parent' &&
+          peer.relation !== 'peer' &&
+          peer.relation !== 'child'
+        ) {
+          return reject(
+            `Invalid relation: must be 'parent', 'peer', or 'child' (got '${peer.relation}')`
+          );
+        }
+        let effective = peer.routes;
+        if (!effective || effective.length === 0) {
+          const autoRoute = deriveDefaultChildRoute(peer.relation, localPrefixes, peer.id);
+          if (autoRoute) effective = [autoRoute];
+        }
+        for (const r of effective ?? []) {
+          if (!r.prefix || !isValidILPAddress(r.prefix)) {
+            return reject(`Invalid ILP address prefix: ${r.prefix}`);
+          }
+        }
+        if (effective && effective.length > 0) {
+          const v = validateRelationRoute(
+            peer.relation,
+            localPrefixes,
+            effective.map((r) => r.prefix)
+          );
+          if (!v.ok) return reject(v.error);
+        }
+        peerEffectiveRoutes.set(peer.id, effective ?? []);
+      }
+      for (const route of desiredTopRoutes) {
+        if (!route.prefix || !isValidILPAddress(route.prefix)) {
+          return reject(`Invalid ILP address prefix: ${route.prefix}`);
+        }
+        if (!route.nextHop || typeof route.nextHop !== 'string') {
+          return reject('Missing or invalid nextHop');
+        }
+        const relation = desiredRelations.get(route.nextHop) ?? getPeerRelation?.(route.nextHop);
+        const v = validateRelationRoute(relation, localPrefixes, [route.prefix]);
+        if (!v.ok) return reject(v.error);
+      }
+
+      // ── Build the desired route set (peer routes + top-level routes) ──
+      const desiredRoutes = new Map<string, { nextHop: string; priority: number }>();
+      for (const peer of desiredPeers) {
+        for (const r of peerEffectiveRoutes.get(peer.id) ?? []) {
+          desiredRoutes.set(r.prefix, { nextHop: peer.id, priority: r.priority ?? 0 });
+        }
+      }
+      for (const r of desiredTopRoutes) {
+        desiredRoutes.set(r.prefix, { nextHop: r.nextHop, priority: r.priority ?? 0 });
+      }
+
+      // ── Reconcile peers: remove those not desired ──
+      const desiredPeerIds = new Set(desiredPeers.map((p) => p.id));
+      const currentPeerIds = btpClientManager.getPeerIds();
+      const removedPeers: string[] = [];
+      for (const peerId of currentPeerIds) {
+        if (!desiredPeerIds.has(peerId)) {
+          await btpClientManager.removePeer(peerId);
+          settlementPeers?.delete(peerId);
+          registryStore?.deletePeer(peerId);
+          removedPeers.push(peerId);
+        }
+      }
+
+      // ── Reconcile peers: add/update desired ──
+      const addedPeers: string[] = [];
+      for (const peer of desiredPeers) {
+        const isUpdate = currentPeerIds.includes(peer.id);
+        if (!isUpdate) {
+          await btpClientManager.addPeer({
+            id: peer.id,
+            url: peer.url,
+            authToken: peer.authToken,
+            connected: false,
+            lastSeen: new Date(),
+            transport: peer.transport,
+          });
+          addedPeers.push(peer.id);
+        }
+        if (setPeerRelation) setPeerRelation(peer.id, peer.relation ?? 'peer');
+        if (peer.settlement && settlementPeers) {
+          const s = peer.settlement;
+          const ilp = peerEffectiveRoutes.get(peer.id)?.[0]?.prefix ?? '';
+          const settlementTokens: string[] = s.tokenAddress
+            ? [s.tokenAddress]
+            : s.evmAddress
+              ? ['EVM']
+              : [];
+          settlementPeers.set(peer.id, {
+            peerId: peer.id,
+            address: ilp,
+            settlementPreference: s.preference,
+            settlementTokens,
+            evmAddress: s.evmAddress,
+            tokenAddress: s.tokenAddress,
+            tokenNetworkAddress: s.tokenNetworkAddress,
+            chainId: s.chainId,
+            channelId: s.channelId,
+            initialDeposit: s.initialDeposit,
+          });
+        }
+        registryStore?.savePeer({
+          id: peer.id,
+          url: peer.url,
+          authToken: peer.authToken,
+          relation: peer.relation,
+          transport: peer.transport,
+          settlementJson: peer.settlement ? JSON.stringify(peer.settlement) : undefined,
+          source: 'runtime',
+        });
+      }
+
+      // ── Reconcile routes: drop undesired peer routes (preserve local self
+      //    routes), then upsert desired routes (RoutingTable persists them) ──
+      const removedRoutes: string[] = [];
+      for (const r of routingTable.getAllRoutes()) {
+        const isLocal = r.nextHop === nodeId || r.nextHop === 'local';
+        if (!isLocal && !desiredRoutes.has(r.prefix)) {
+          routingTable.removeRoute(r.prefix);
+          removedRoutes.push(r.prefix);
+        }
+      }
+      for (const [prefix, info] of desiredRoutes) {
+        routingTable.addRoute(prefix as ILPAddress, info.nextHop, info.priority);
+      }
+
+      log.info(
+        {
+          event: 'admin_desired_state_reconciled',
+          addedPeers: addedPeers.length,
+          removedPeers: removedPeers.length,
+          desiredRoutes: desiredRoutes.size,
+          removedRoutes: removedRoutes.length,
+        },
+        'Reconciled desired state'
+      );
+
+      res.json({
+        success: true,
+        peers: {
+          added: addedPeers,
+          removed: removedPeers,
+          total: desiredPeers.length,
+        },
+        routes: {
+          desired: Array.from(desiredRoutes.keys()),
+          removed: removedRoutes,
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(
+        { event: 'admin_api_error', error: errorMessage },
+        'Failed to reconcile desired state'
+      );
       res.status(500).json({ error: 'Internal server error', message: errorMessage });
     }
   });

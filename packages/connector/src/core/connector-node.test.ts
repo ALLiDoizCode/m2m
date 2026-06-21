@@ -232,6 +232,9 @@ describe('ConnectorNode', () => {
       setIlpMetrics: jest.fn(),
       // Issue #76: relationship-aware settlement gate
       setPeerRelation: jest.fn(),
+      // Relation↔route admission validation reads a peer's relation; undefined
+      // (treated as 'peer') keeps these mock-based route tests unconstrained.
+      getPeerRelation: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {

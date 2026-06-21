@@ -123,6 +123,7 @@ describe('ConnectorNode — minimal dependency startup', () => {
       setIlpMetrics: jest.fn(),
       // Issue #76: relationship-aware settlement gate
       setPeerRelation: jest.fn(),
+      getPeerRelation: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {

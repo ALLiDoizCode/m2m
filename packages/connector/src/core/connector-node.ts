@@ -7,6 +7,11 @@ import { promises as fsPromises } from 'fs';
 import * as nodePath from 'path';
 import { Logger } from '../utils/logger';
 import { RoutingTable } from '../routing/routing-table';
+import {
+  deriveLocalPrefixes,
+  deriveDefaultChildRoute,
+  validateRelationRoute,
+} from '../routing/relation-route-validator';
 import { BTPClientManager } from '../btp/btp-client-manager';
 import { BTPServer } from '../btp/btp-server';
 import { PacketHandler } from './packet-handler';
@@ -68,6 +73,8 @@ import { AccountManager } from '../settlement/account-manager';
 import { SettlementMonitor } from '../settlement/settlement-monitor';
 import { ClaimReceiver } from '../settlement/claim-receiver';
 import { initializeClaimReceiverSchema } from '../settlement/claim-receiver-db-schema';
+import { initializeRegistrySchema } from './registry-db-schema';
+import { RegistryStore } from './registry-store';
 import { KeyManager } from '../security/key-manager';
 import { requireOptional } from '../utils/optional-require';
 import { TigerBeetleClient } from '../settlement/tigerbeetle-client';
@@ -129,6 +136,11 @@ export class ConnectorNode implements HealthStatusProvider {
   private _tigerBeetleClient: TigerBeetleClient | null = null;
   private _inMemoryLedgerClient: InMemoryLedgerClient | null = null;
   private readonly _settlementPeers: Map<string, SettlementPeerConfig> = new Map();
+  // Persistent peer/route registry (Epic: persistent registry). Mirrors every
+  // runtime peer/route mutation to SQLite so they survive a restart instead of
+  // being dropped (the "re-POST the town route" RUNBOOK workaround). Stays null
+  // when `libsql` is unavailable — registration then degrades to in-memory only.
+  private _registryStore: RegistryStore | null = null;
   private _healthStatus: 'healthy' | 'unhealthy' | 'starting' = 'starting';
   private readonly _ilpMetrics!: IlpMetricsRegistry;
   private readonly _startTime: Date = new Date();
@@ -1467,6 +1479,11 @@ export class ConnectorNode implements HealthStatusProvider {
         'Health server started'
       );
 
+      // Open the persistent peer/route registry before the admin server so the
+      // admin HTTP surface (the primary operator path for runtime peers/routes)
+      // shares the same store and its mutations survive a restart.
+      await this._openRegistryStore();
+
       // Start admin API server if enabled
       const adminApiEnabled =
         this._config.adminApi?.enabled || process.env.ADMIN_API_ENABLED === 'true';
@@ -1507,6 +1524,11 @@ export class ConnectorNode implements HealthStatusProvider {
           // forwards to a 'child' next hop skip the mandatory per-packet claim.
           setPeerRelation: (peerId, relation) =>
             this._packetHandler.setPeerRelation(peerId, relation),
+          // Phase 2/persistence: let the admin handlers read a peer's relation
+          // (for relation↔route admission validation) and write-through peer
+          // registrations to the shared registry so they survive a restart.
+          getPeerRelation: (peerId) => this._packetHandler.getPeerRelation(peerId),
+          registryStore: this._registryStore ?? undefined,
         });
 
         await this._adminServer.start();
@@ -1555,6 +1577,12 @@ export class ConnectorNode implements HealthStatusProvider {
           'Some peer connections failed during startup (will retry in background)'
         );
       }
+
+      // Replay any runtime-added peers/routes from a previous run so they
+      // survive this restart (instead of the "re-POST the town route" RUNBOOK
+      // recovery). The store itself was opened earlier (before the admin server)
+      // so the admin HTTP surface shares it. Best-effort.
+      await this._reconcileRegistry();
 
       const connectedPeers = this._btpClientManager.getPeerStatus();
       const connectedCount = Array.from(connectedPeers.values()).filter(Boolean).length;
@@ -2463,6 +2491,34 @@ export class ConnectorNode implements HealthStatusProvider {
       }
     }
 
+    // Relation ↔ route admission validation + child auto-route (Phase 2).
+    // The connector's self-prefixes are the routes that terminate locally; when
+    // none exist the validator no-ops, so this never breaks routing-only nodes.
+    // A `child` registered without an explicit route gets `<self>.<peerId>`
+    // derived, collapsing the old two-step (register peer, then add route) and
+    // closing the mis-tagged-child F06/T00 trap before any packet flows.
+    const localPrefixes = deriveLocalPrefixes(
+      this._routingTable.getAllRoutes(),
+      this._config.nodeId
+    );
+    let effectiveRoutes = config.routes;
+    if (!effectiveRoutes || effectiveRoutes.length === 0) {
+      const autoRoute = deriveDefaultChildRoute(config.relation, localPrefixes, config.id);
+      if (autoRoute) {
+        effectiveRoutes = [autoRoute];
+      }
+    }
+    if (effectiveRoutes && effectiveRoutes.length > 0) {
+      const relationValidation = validateRelationRoute(
+        config.relation,
+        localPrefixes,
+        effectiveRoutes.map((r) => r.prefix)
+      );
+      if (!relationValidation.ok) {
+        throw new Error(relationValidation.error);
+      }
+    }
+
     // Check if peer already exists (idempotent re-registration)
     const existingPeers = this._btpClientManager.getPeerIds();
     const isUpdate = existingPeers.includes(config.id);
@@ -2503,9 +2559,9 @@ export class ConnectorNode implements HealthStatusProvider {
       );
     }
 
-    // Add routes if provided
-    if (config.routes) {
-      for (const route of config.routes) {
+    // Add routes if provided (explicit or auto-derived for a child peer)
+    if (effectiveRoutes) {
+      for (const route of effectiveRoutes) {
         this._routingTable.addRoute(route.prefix as ILPAddress, config.id, route.priority ?? 0);
         this._logger.info(
           { event: 'route_added', prefix: route.prefix, nextHop: config.id },
@@ -2522,8 +2578,25 @@ export class ConnectorNode implements HealthStatusProvider {
 
     // Create/merge settlement config
     if (config.settlement) {
-      this._applySettlementConfig(config.id, config.settlement, config.routes, isUpdate);
+      this._applySettlementConfig(config.id, config.settlement, effectiveRoutes, isUpdate);
     }
+
+    // Write-through to the persistent registry so this runtime registration
+    // (and its routes) is replayed on the next boot. Peers registered via this
+    // path are always runtime additions (static-config peers are wired directly
+    // in start()), so they carry source='runtime'.
+    // (Routes are persisted by the RoutingTable write-through; here we persist
+    // only the peer record, which carries relation + settlement that the
+    // routing table does not see.)
+    this._registryStore?.savePeer({
+      id: config.id,
+      url: config.url,
+      authToken: config.authToken,
+      relation: config.relation,
+      transport: config.transport,
+      settlementJson: config.settlement ? JSON.stringify(config.settlement) : undefined,
+      source: 'runtime',
+    });
 
     // Build PeerInfo response
     const routes = this._routingTable.getAllRoutes();
@@ -2614,6 +2687,11 @@ export class ConnectorNode implements HealthStatusProvider {
         }
       }
     }
+
+    // Write-through: drop the peer from the persistent registry so it is not
+    // replayed on the next boot. (Removed routes are dropped by the RoutingTable
+    // write-through as removeRoute runs above.)
+    this._registryStore?.deletePeer(peerId);
 
     return { peerId, removedRoutes };
   }
@@ -2731,6 +2809,23 @@ export class ConnectorNode implements HealthStatusProvider {
       );
     }
 
+    // Relation ↔ route admission validation against the nextHop peer's relation
+    // (Phase 2). Unknown/local nextHops resolve to undefined → treated as 'peer'
+    // (no constraint), so this only rejects an unambiguously child/parent-shaped
+    // mismatch and never blocks routing-only or local routes.
+    const nextHopRelation = this._packetHandler.getPeerRelation(route.nextHop);
+    const localPrefixes = deriveLocalPrefixes(
+      this._routingTable.getAllRoutes(),
+      this._config.nodeId
+    );
+    const relationValidation = validateRelationRoute(nextHopRelation, localPrefixes, [
+      route.prefix,
+    ]);
+    if (!relationValidation.ok) {
+      throw new Error(relationValidation.error);
+    }
+
+    // Persisted via the RoutingTable write-through.
     this._routingTable.addRoute(route.prefix as ILPAddress, route.nextHop, route.priority ?? 0);
 
     this._logger.info(
@@ -2753,8 +2848,157 @@ export class ConnectorNode implements HealthStatusProvider {
       throw new Error(`Route not found: ${prefix}`);
     }
 
+    // Persisted via the RoutingTable write-through.
     this._routingTable.removeRoute(prefix as ILPAddress);
     this._logger.info({ event: 'route_removed', prefix }, `Removed route: ${prefix}`);
+  }
+
+  /**
+   * Open the persistent peer/route registry and reconcile it with the running
+   * state. Runs once during start(), after the BTP server is up and the static
+   * config peers have been wired.
+   *
+   * Reconciliation model (additive over static config):
+   *  1. Mirror the static-config baseline into the store (source='config') so
+   *     the declarative desired-state surface sees a complete picture. Config
+   *     entries are already applied in-memory from YAML, so this is just a
+   *     refresh of the mirror — it never re-applies them.
+   *  2. Replay every `source='runtime'` peer/route that isn't already present.
+   *     These are the admin-API additions from a previous run; without this they
+   *     would be lost on restart (the "re-POST the town route" RUNBOOK step).
+   *
+   * Best-effort: if `libsql` is unavailable the store stays null and the
+   * connector keeps today's in-memory-only behavior.
+   */
+  private async _openRegistryStore(): Promise<void> {
+    try {
+      // libsql is the better-sqlite3-compatible drop-in used by the claim
+      // stores (N-API prebuilts; no native toolchain). Mirror that wiring.
+      const LibsqlModule = await requireOptional<{
+        default: new (path: string) => import('better-sqlite3').Database;
+      }>('libsql', 'peer/route registry persistence');
+      const LibsqlDatabase = LibsqlModule.default;
+
+      // better-sqlite3/libsql do not create parent dirs; ensure ./data exists
+      // (the claim stores assume it, but registry boot must not depend on that).
+      await fsPromises.mkdir('./data', { recursive: true });
+      const registryDbPath = `./data/registry-${this._config.nodeId}.db`;
+      const registryDb = new LibsqlDatabase(registryDbPath);
+      initializeRegistrySchema(registryDb);
+      this._registryStore = new RegistryStore(registryDb, this._logger);
+      // Route persistence is write-through at the RoutingTable layer so it
+      // covers both the programmatic API and the admin HTTP surface. The
+      // constructor already loaded the static-config routes before this point,
+      // so only runtime routes will reach the sink.
+      this._routingTable.setPersistence(this._registryStore);
+    } catch (error) {
+      this._logger.warn(
+        {
+          event: 'registry_persistence_disabled',
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Peer/route registry persistence unavailable; runtime peers/routes will not survive restart'
+      );
+      this._registryStore = null;
+    }
+  }
+
+  /**
+   * Reconcile the running state with the persistent registry: refresh the
+   * static-config mirror and replay runtime-added peers/routes from a previous
+   * run. Runs once during start(), after the BTP server is up and the static
+   * config peers have been wired. No-op when persistence is unavailable.
+   */
+  private async _reconcileRegistry(): Promise<void> {
+    if (!this._registryStore) {
+      return;
+    }
+    const { peers, routes } = this._registryStore.loadAll();
+
+    // 1. Refresh the static-config mirror (source='config').
+    for (const peer of this._config.peers) {
+      this._registryStore.savePeer({
+        id: peer.id,
+        url: peer.url,
+        authToken: peer.authToken,
+        relation: peer.relation,
+        transport: peer.transport,
+        source: 'config',
+      });
+    }
+    for (const route of this._config.routes) {
+      this._registryStore.saveRoute({
+        prefix: route.prefix,
+        nextHop: route.nextHop,
+        priority: route.priority ?? 0,
+        source: 'config',
+      });
+    }
+
+    // 2. Replay runtime peers, then runtime routes (peers first so a route's
+    //    nextHop peer exists). Each replay is isolated so one bad row (e.g. a
+    //    transport no longer supported by the current config) can't abort boot.
+    const existingPeerIds = new Set(this._btpClientManager.getPeerIds());
+    let replayedPeers = 0;
+    for (const peer of peers) {
+      if (peer.source !== 'runtime' || existingPeerIds.has(peer.id)) {
+        continue;
+      }
+      try {
+        await this.registerPeer({
+          id: peer.id,
+          url: peer.url,
+          authToken: peer.authToken,
+          relation: peer.relation as PeerRegistrationRequest['relation'],
+          transport: peer.transport as PeerRegistrationRequest['transport'],
+          settlement: peer.settlementJson
+            ? (JSON.parse(peer.settlementJson) as AdminSettlementConfig)
+            : undefined,
+        });
+        replayedPeers++;
+      } catch (error) {
+        this._logger.warn(
+          {
+            event: 'registry_peer_replay_failed',
+            peerId: peer.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          `Failed to replay persisted peer: ${peer.id}`
+        );
+      }
+    }
+
+    const existingPrefixes = new Set(this._routingTable.getAllRoutes().map((r) => r.prefix));
+    let replayedRoutes = 0;
+    for (const route of routes) {
+      if (route.source !== 'runtime' || existingPrefixes.has(route.prefix)) {
+        continue;
+      }
+      try {
+        this.addRoute({
+          prefix: route.prefix,
+          nextHop: route.nextHop,
+          priority: route.priority,
+        });
+        replayedRoutes++;
+      } catch (error) {
+        this._logger.warn(
+          {
+            event: 'registry_route_replay_failed',
+            prefix: route.prefix,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          `Failed to replay persisted route: ${route.prefix}`
+        );
+      }
+    }
+
+    if (replayedPeers > 0 || replayedRoutes > 0) {
+      this._logger.info(
+        { event: 'registry_reconciled', replayedPeers, replayedRoutes },
+        `Replayed ${replayedPeers} peer(s) and ${replayedRoutes} route(s) from the persistent registry`
+      );
+    }
   }
 
   // ────────────────────────────────────────────────────────────────────────────

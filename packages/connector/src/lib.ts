@@ -61,6 +61,15 @@ export {
   validateIlpSendRequest,
 };
 
+// Typed admin API client (runtime peer/route management)
+export { ConnectorAdminClient, ConnectorAdminError } from './client/connector-admin-client';
+export type {
+  ConnectorAdminClientOptions,
+  RegisterPeerInput,
+  AdminRouteInput,
+  FetchLike,
+} from './client/connector-admin-client';
+
 // Export configuration types
 export type {
   ConnectorConfig,

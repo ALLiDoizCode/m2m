@@ -7,6 +7,16 @@
 import { ILPAddress, RoutingTableEntry, isValidILPAddress } from '@toon-protocol/shared';
 
 /**
+ * Minimal write-through sink for persisting routing-table mutations. Satisfied
+ * by {@link ../core/registry-store.RegistryStore}; kept as a structural type so
+ * the routing table has no hard dependency on the persistence layer.
+ */
+export interface RoutePersistenceSink {
+  saveRoute(record: { prefix: string; nextHop: string; priority: number; source: 'runtime' }): void;
+  deleteRoute(prefix: string): void;
+}
+
+/**
  * In-memory routing table implementing longest-prefix matching per RFC-0027
  * @remarks
  * Maintains mappings from ILP address prefixes to next-hop peer identifiers.
@@ -43,6 +53,16 @@ export class RoutingTable {
     info: (obj: object, msg?: string) => void;
     error: (obj: object, msg?: string) => void;
   };
+
+  /**
+   * Optional write-through persistence. Set after construction (the persistent
+   * store opens during start(), after the constructor has already loaded the
+   * static-config routes from YAML). Because it is unset during construction,
+   * config routes never reach the sink — only routes added/removed at runtime
+   * are persisted, which is exactly the additive-over-config model: config
+   * routes reload from YAML each boot, runtime routes replay from the store.
+   */
+  private persistence?: RoutePersistenceSink;
 
   /**
    * Creates a new RoutingTable instance
@@ -90,8 +110,17 @@ export class RoutingTable {
 
     const entry: RoutingTableEntry = { prefix, nextHop, priority };
     this.routes.set(prefix, entry);
+    this.persistence?.saveRoute({ prefix, nextHop, priority: priority ?? 0, source: 'runtime' });
 
     this.logger?.info({ prefix, nextHop, priority }, `Added route: ${prefix} -> ${nextHop}`);
+  }
+
+  /**
+   * Attach a write-through persistence sink. Idempotent; intended to be called
+   * once during connector startup after the static-config routes are loaded.
+   */
+  setPersistence(sink: RoutePersistenceSink): void {
+    this.persistence = sink;
   }
 
   /**
@@ -104,6 +133,7 @@ export class RoutingTable {
   removeRoute(prefix: string): void {
     const existed = this.routes.has(prefix);
     this.routes.delete(prefix);
+    this.persistence?.deleteRoute(prefix);
 
     if (existed) {
       this.logger?.info({ prefix }, `Removed route: ${prefix}`);
