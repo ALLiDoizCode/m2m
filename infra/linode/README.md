@@ -17,7 +17,7 @@ nginx + Let's Encrypt TLS in front of them.
 | Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                             |
 | Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`, `POST /api/request {address}` → 100 ETH + 10k USDC. **EVM only.**                               |
 | Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals) |
-| Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's                                        |
+| Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>` |
 | nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                         |
 
 ## Quick start (fresh Ubuntu/Debian Linode, as root)
@@ -62,6 +62,22 @@ Fund an **EVM** address: `curl -X POST https://faucet.<DOMAIN>/api/request -H 'c
 
 Fund a **Solana** address: `./devnet.sh fund-sol <pubkey> [usdc] [sol]` → airdrops SOL + transfers mock USDC from the treasury (auto-creates the recipient ATA). The mock-USDC SPL mint is `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` (6 decimals); the payment-channel program is already SPL-aware, so channels settle in it directly.
 
+Fund a **Mina** address: `./devnet.sh fund-mina <b58> [usdc]` → admin-mints USDC on the public devnet (no token CLI exists for Mina, so it mints via o1js through `infra/mina/fund-mina-usdc.sh` → `tools/mina/fund-usdc.ts`; the recipient's token account is auto-created on first mint). This needs `MINA_USDC_ADMIN_KEY` (the funded admin authority set at deploy time) in the environment. Unlike EVM/Solana it does **not** airdrop native gas — recipients that submit their own txs top up MINA from the public faucet (`https://faucet.minaprotocol.com`).
+
+### Deploying the Mina USDC token (one-time, to public devnet)
+
+The USDC token-owner zkApp (`mina-fungible-token`, 6 decimals) is deployed **once** to the public Mina devnet — we only proxy it, there's no node to bootstrap on `up`. From the connector root, with a **funded** deployer + admin authority (fund both at `https://faucet.minaprotocol.com` first):
+
+```bash
+export MINA_DEPLOYER_KEY=<base58 priv key, FUNDED>
+export MINA_USDC_ADMIN_KEY=<base58 priv key, FUNDED>   # the mint authority
+npx ts-node tools/mina/deploy-usdc-token.ts \
+  --network https://api.minascan.io/node/devnet/v1/graphql \
+  --out infra/mina/usdc-token.json
+```
+
+It prints + persists `{ tokenAddress, tokenId, adminContractAddress, adminAuthority }` to `infra/mina/usdc-token.json`; `devnet.sh endpoints` then reads that file (via `jq`) to emit `mina.tokenAddress` / `mina.tokenId` into `endpoints.json`. Pin the same `tokenAddress`/`tokenId` into the committed sample `endpoints.json` (currently placeholders). Smoke-test the deploy + mint logic with `npx jest --config tools/mina/jest.config.js`.
+
 ## Reset semantics
 
 Chain state is **ephemeral and deterministic**. `redeploy` (and any container
@@ -84,15 +100,17 @@ value here — all keys (Anvil account #0, etc.) are public.
 | ------ | --------------------- | ----------- | ------------------------------------------------------------------ |
 | EVM    | MockERC20 `0x5FbDB2…` | **6**       | ✅ TokenNetwork EIP-712 settlement                                 |
 | Solana | SPL mint `H8HSreUF…`  | **6**       | ✅ program is SPL-aware; mint + faucet via `devnet.sh`             |
-| Mina   | token zkApp           | 6 (planned) | 🚧 zkApp settles native MINA today; USDC token support in progress |
+| Mina   | token zkApp           | **6**       | ✅ USDC `FungibleToken` (mina-fungible-token) deployed to public devnet; mint + fund via `devnet.sh fund-mina` |
 
 **Decimals:** USDC is 6-decimal on every chain, so a claim's base-unit amount
 means the same thing everywhere — no cross-chain normalization required.
 
 ## Known gaps / follow-ups
 
-- **Mina USDC.** The Mina zkApp currently settles native MINA; a token-owner zkApp
-  - token-aware deposit/settle is being added so Mina can settle USDC too.
+- **Mina USDC.** The USDC token-owner zkApp (6-dp, `mina-fungible-token`) is
+  deployed to the public Mina devnet and fundable via `devnet.sh fund-mina`
+  (admin-mint). The `PaymentChannel` zkApp now custodies this token (#191); the
+  SDK/provider threading of the token into open/settle is the remaining follow-up.
 - **No block explorer.** Otterscan (what Akash advertised) needs Erigon's `ots_*`
   RPC namespace, which Anvil doesn't implement, so it's intentionally omitted
   rather than shipped broken.
