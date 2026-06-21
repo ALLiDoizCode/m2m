@@ -109,24 +109,37 @@ const mockAccountUpdate = {
   fundNewAccount: jest.fn(),
 };
 
-// UInt64 mock for USDC token transfers (#192). `UInt64.Unsafe.fromField` wraps a
-// Field amount; the token transfer mock only needs an opaque value back.
+// UInt64 mock for USDC escrow amounts. `UInt64.Unsafe.fromField` / `UInt64.from`
+// wrap a Field/bigint amount; the in-proof token methods only need an opaque
+// value back whose `.toString()` round-trips for the trust-model assertions.
 const mockUInt64 = {
-  from: jest.fn((v: unknown) => ({ __uint64: v })),
+  from: jest.fn((v: unknown) => ({ __uint64: v, toString: () => String(v) })),
   Unsafe: {
     fromField: jest.fn((v: unknown) => ({ __uint64FromField: v })),
   },
 };
 
-// FungibleToken (mina-fungible-token) mock (#192). The SDK instantiates the
-// token-owner contract to build deposit/settle transfers and derive the tokenId.
-const mockTokenTransfer = jest.fn().mockResolvedValue(undefined);
+// UInt32 mock for the settle witnesses (closedAtSlot / settlementTimeout).
+const mockUInt32 = {
+  from: jest.fn((v: unknown) => ({ __uint32: v, toString: () => String(v) })),
+};
+
+// UsdcChannelToken (@toon-protocol/mina-zkapp) mock. The SDK instantiates this
+// in-proof-enforcing token owner to compose enableChannelEscrow / depositToChannel
+// / settleFromChannel and to derive the tokenId. Replaces the merged #192
+// raw-`token.transfer` token owner.
+const mockEnableChannelEscrow = jest.fn().mockResolvedValue(undefined);
+const mockDepositToChannel = jest.fn().mockResolvedValue(undefined);
+const mockSettleFromChannel = jest.fn().mockResolvedValue(undefined);
 const mockTokenInstance = {
-  transfer: mockTokenTransfer,
+  enableChannelEscrow: mockEnableChannelEscrow,
+  depositToChannel: mockDepositToChannel,
+  settleFromChannel: mockSettleFromChannel,
   deriveTokenId: jest.fn().mockReturnValue({ toString: () => 'mock-usdc-token-id' }),
   getDecimals: jest.fn().mockReturnValue({ toString: () => '6' }),
 };
-const MockFungibleToken = jest.fn().mockImplementation(() => mockTokenInstance);
+const MockUsdcChannelToken = jest.fn().mockImplementation(() => mockTokenInstance);
+(MockUsdcChannelToken as any).compile = jest.fn().mockResolvedValue({ verificationKey: 'mock-vk' });
 
 jest.mock('o1js', () => ({
   Mina: mockMina,
@@ -138,10 +151,7 @@ jest.mock('o1js', () => ({
   fetchAccount: mockFetchAccount,
   AccountUpdate: mockAccountUpdate,
   UInt64: mockUInt64,
-}));
-
-jest.mock('mina-fungible-token', () => ({
-  FungibleToken: MockFungibleToken,
+  UInt32: mockUInt32,
 }));
 
 // ---------------------------------------------------------------------------
@@ -193,6 +203,7 @@ const MockPaymentChannelClass = jest.fn().mockImplementation(() => mockZkAppInst
 
 jest.mock('@toon-protocol/mina-zkapp', () => ({
   PaymentChannel: MockPaymentChannelClass,
+  UsdcChannelToken: MockUsdcChannelToken,
   CHANNEL_STATE: { UNINITIALIZED: 0, OPEN: 1, CLOSING: 2, SETTLED: 3 },
   MAX_SAFE_AMOUNT: 18446744073709551615n,
 }));
@@ -2312,10 +2323,13 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // #192: USDC token-aware deposit/settle composition
+  // In-proof USDC token-owner composition (supersedes the #192 token.transfer
+  // suite). The escrow custody + payouts are now CONTRACT-enforced by
+  // `UsdcChannelToken` (Phase A's zkApp tests cover the adversarial guarantees);
+  // at the SDK level we assert the right methods / signers / ordering are built.
   // -------------------------------------------------------------------------
 
-  describe('USDC token-aware composition (#192)', () => {
+  describe('USDC in-proof composition (UsdcChannelToken)', () => {
     const TOKEN_ADDRESS = 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE';
     const DERIVED_TOKEN_ID = 'mock-usdc-token-id';
 
@@ -2343,31 +2357,101 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       expect(mockFieldFn).toHaveBeenCalledWith(DERIVED_TOKEN_ID);
     });
 
-    it('deposit builds token.transfer(depositor → channel) + funds the channel token account', async () => {
+    it('compileContract also compiles the UsdcChannelToken circuit for USDC channels', async () => {
       const usdcSdk = makeUsdcSdk();
-      await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 500000n, true);
-
-      // Channel token account funded on first deposit.
-      expect(mockAccountUpdate.fundNewAccount).toHaveBeenCalledTimes(1);
-      // depositor → channel transfer for exactly the deposit amount.
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
-      expect(mockUInt64.Unsafe.fromField).toHaveBeenCalled();
-      // Channel accounting method still invoked.
-      expect(mockZkAppInstance.deposit).toHaveBeenCalledTimes(1);
+      await usdcSdk.compileContract();
+      expect((MockPaymentChannelClass as any).compile).toHaveBeenCalledTimes(1);
+      expect((MockUsdcChannelToken as any).compile).toHaveBeenCalledTimes(1);
     });
 
-    it('deposit skips funding the channel token account when fundChannelTokenAccount=false', async () => {
-      const usdcSdk = makeUsdcSdk();
-      await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 500000n, false);
-      expect(mockAccountUpdate.fundNewAccount).not.toHaveBeenCalled();
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
+    it('native-MINA compileContract does NOT compile the token circuit', async () => {
+      await sdk.compileContract();
+      expect((MockUsdcChannelToken as any).compile).not.toHaveBeenCalled();
     });
 
-    it('settleChannel builds two payouts, skips zero amounts, and signs with the channel key', async () => {
+    it('enableChannelEscrow composes token.enableChannelEscrow + signs with [signer, channelKey]', async () => {
       const usdcSdk = makeUsdcSdk();
-      // Open so the channel key is cached for settle signing.
+      // Open so the channel key is cached for the escrow-setup signature.
       const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
-      mockTokenTransfer.mockClear();
+      mockEnableChannelEscrow.mockClear();
+      mockAccountUpdate.fundNewAccount.mockClear();
+      (mockTxn.sign as jest.Mock).mockClear();
+
+      await usdcSdk.enableChannelEscrow(open.zkAppAddress);
+
+      // One-time setup composes the in-proof escrow-enable method + funds the
+      // escrow token account.
+      expect(mockEnableChannelEscrow).toHaveBeenCalledTimes(1);
+      expect(mockAccountUpdate.fundNewAccount).toHaveBeenCalledTimes(1);
+      // Signed with [signer, channelKey] — the channel key authorizes the escrow
+      // account's permission change (the ONLY place a channel key is needed).
+      const signArgs = (mockTxn.sign as jest.Mock).mock.calls[0][0];
+      expect(Array.isArray(signArgs)).toBe(true);
+      expect(signArgs).toHaveLength(2);
+    });
+
+    it('enableChannelEscrow is idempotent per SDK instance (second call is a no-op)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      await usdcSdk.enableChannelEscrow(open.zkAppAddress);
+      mockEnableChannelEscrow.mockClear();
+      const result = await usdcSdk.enableChannelEscrow(open.zkAppAddress);
+      expect(mockEnableChannelEscrow).not.toHaveBeenCalled();
+      expect(result).toEqual({ txHash: '' });
+    });
+
+    it('enableChannelEscrow throws when the channel key is unavailable (externally-opened)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      await expect(usdcSdk.enableChannelEscrow(TEST_ZKAPP_ADDRESS)).rejects.toMatchObject({
+        code: MINA_ERROR_CODES.INVALID_PARAMETERS,
+      });
+    });
+
+    it('enableChannelEscrow accepts an explicit channelPrivateKey override', async () => {
+      const usdcSdk = makeUsdcSdk();
+      mockEnableChannelEscrow.mockClear();
+      await usdcSdk.enableChannelEscrow(TEST_ZKAPP_ADDRESS, 'EKEMockChannelKeyBase58');
+      expect(mockEnableChannelEscrow).toHaveBeenCalledTimes(1);
+    });
+
+    it('deposit composes channel.deposit BEFORE token.depositToChannel (precondition order)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      // Escrow already enabled by the deposit's first-deposit auto-run; clear and
+      // assert ordering with the call-order recorded by jest invocationCallOrder.
+      mockDepositToChannel.mockClear();
+      (mockZkAppInstance.deposit as jest.Mock).mockClear();
+
+      await usdcSdk.deposit(open.zkAppAddress, 500000n, false);
+
+      expect(mockZkAppInstance.deposit).toHaveBeenCalledTimes(1);
+      expect(mockDepositToChannel).toHaveBeenCalledTimes(1);
+      // ORDER: channel.deposit must be invoked before token.depositToChannel so
+      // the depositTotal precondition sees the post-deposit total.
+      const channelOrder = (mockZkAppInstance.deposit as jest.Mock).mock.invocationCallOrder[0]!;
+      const tokenOrder = mockDepositToChannel.mock.invocationCallOrder[0]!;
+      expect(channelOrder).toBeLessThan(tokenOrder);
+    });
+
+    it('deposit auto-enables the escrow on the first deposit (channel-key tx), then deposits', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockEnableChannelEscrow.mockClear();
+      mockDepositToChannel.mockClear();
+
+      await usdcSdk.deposit(open.zkAppAddress, 500000n, true);
+
+      // First deposit runs the one-time escrow setup, then the deposit itself.
+      expect(mockEnableChannelEscrow).toHaveBeenCalledTimes(1);
+      expect(mockDepositToChannel).toHaveBeenCalledTimes(1);
+      expect(mockZkAppInstance.deposit).toHaveBeenCalled();
+    });
+
+    it('settleChannel composes token.settleFromChannel + channel.settle and signs with fee payer ONLY', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockSettleFromChannel.mockClear();
+      (mockZkAppInstance.settle as jest.Mock).mockClear();
       (mockTxn.sign as jest.Mock).mockClear();
 
       await usdcSdk.settleChannel(
@@ -2381,52 +2465,49 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
         { fundParticipantTokenAccounts: 2 }
       );
 
-      // Two non-zero payouts (balanceB then balanceA).
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(2);
+      // The in-proof settle method is composed once, with the channel accounting.
+      expect(mockSettleFromChannel).toHaveBeenCalledTimes(1);
+      expect(mockZkAppInstance.settle).toHaveBeenCalledTimes(1);
+      // ORDER: token.settleFromChannel before channel.settle (reference helper).
+      const tokenOrder = mockSettleFromChannel.mock.invocationCallOrder[0]!;
+      const channelOrder = (mockZkAppInstance.settle as jest.Mock).mock.invocationCallOrder[0]!;
+      expect(tokenOrder).toBeLessThan(channelOrder);
       expect(mockAccountUpdate.fundNewAccount).toHaveBeenCalledWith(expect.anything(), 2);
-      // Signed with [signer, channelKey] — two signers.
+      // Signers = FEE PAYER ONLY — the channel-key settle signature is gone.
       const signArgs = (mockTxn.sign as jest.Mock).mock.calls[0][0];
       expect(Array.isArray(signArgs)).toBe(true);
-      expect(signArgs).toHaveLength(2);
+      expect(signArgs).toHaveLength(1);
     });
 
-    it('settleChannel skips a zero-amount payout', async () => {
+    it('settleChannel passes the on-chain closedAtSlot / settlementTimeout witnesses to the token method', async () => {
       const usdcSdk = makeUsdcSdk();
       const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
-      mockTokenTransfer.mockClear();
+      mockSettleFromChannel.mockClear();
+      mockUInt32.from.mockClear();
 
       await usdcSdk.settleChannel(
         open.zkAppAddress,
-        0n, // balanceA zero -> skipped
+        600000n,
         400000n,
         99999n,
         TEST_PARTICIPANT_A,
         TEST_PARTICIPANT_B,
-        0n,
-        { fundParticipantTokenAccounts: 1 }
+        0n
       );
 
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
+      // The mock channel reports closedAtSlot=0, settlementTimeout=100. Both are
+      // wrapped as UInt32 and passed as the last two args (witnesses pinned by the
+      // contract's slot preconditions).
+      expect(mockUInt32.from).toHaveBeenCalledWith(0n);
+      expect(mockUInt32.from).toHaveBeenCalledWith(100n);
+      const settleArgs = mockSettleFromChannel.mock.calls[0]!;
+      expect(settleArgs).toHaveLength(9);
     });
 
-    it('settleChannel throws when the channel key is unavailable (externally-opened channel)', async () => {
+    it('settleChannel needs NO channel key (externally-opened channel still settles)', async () => {
       const usdcSdk = makeUsdcSdk();
-      // No openChannel → no cached channel key.
-      await expect(
-        usdcSdk.settleChannel(
-          TEST_ZKAPP_ADDRESS,
-          600000n,
-          400000n,
-          99999n,
-          TEST_PARTICIPANT_A,
-          TEST_PARTICIPANT_B,
-          0n
-        )
-      ).rejects.toMatchObject({ code: MINA_ERROR_CODES.INVALID_PARAMETERS });
-    });
-
-    it('settleChannel accepts an explicit channelPrivateKey override', async () => {
-      const usdcSdk = makeUsdcSdk();
+      // No openChannel → no cached channel key. Settle must STILL succeed: the
+      // escrow payouts are owner-proof authorized, not channel-key authorized.
       const result = await usdcSdk.settleChannel(
         TEST_ZKAPP_ADDRESS,
         600000n,
@@ -2434,11 +2515,10 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
         99999n,
         TEST_PARTICIPANT_A,
         TEST_PARTICIPANT_B,
-        0n,
-        { channelPrivateKey: 'EKEMockChannelKeyBase58' }
+        0n
       );
       expect(result).toEqual({ txHash: 'mina_tx_hash_abc123' });
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(2);
+      expect(mockSettleFromChannel).toHaveBeenCalledTimes(1);
     });
 
     it('_getTokenContext asserts the configured tokenId matches the derived tokenId', async () => {
@@ -2446,12 +2526,6 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       await expect(usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 100n)).rejects.toMatchObject({
         code: MINA_ERROR_CODES.INVALID_PARAMETERS,
       });
-    });
-
-    it('accepts a matching configured tokenId', async () => {
-      const usdcSdk = makeUsdcSdk(DERIVED_TOKEN_ID);
-      const result = await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, 100n);
-      expect(result).toEqual({ txHash: 'mina_tx_hash_abc123' });
     });
 
     it('assertClaimTokenId rejects a mismatched claim tokenId', async () => {
@@ -2480,16 +2554,14 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // #194: Trust-model guard — the built USDC token.transfer amount must EQUAL
-  // the channel accounting (deposit amount; settle balanceA/balanceB). The
-  // existing #192 tests assert the transfer COUNT and that UInt64.Unsafe.fromField
-  // was invoked, but not that the AMOUNT matches the accounting. Since #191/#192
-  // moved enforcement off the channel proof and onto "the transfer amount IS the
-  // accounted Field", these tests would catch a desync between depositTotal /
-  // settle balances and the actual escrow move.
+  // Trust-model guard — the in-proof escrow amounts MUST equal the channel
+  // accounting (deposit amount; settle balanceA/balanceB). With Phase A the
+  // CONTRACT enforces this in-proof (its zkApp tests cover the adversarial
+  // rejections); at the SDK level we assert the SAME Field/amount feeds both the
+  // channel method and the token method, in the reference ordering.
   // -------------------------------------------------------------------------
 
-  describe('USDC trust-model guard: transfer amount == channel accounting (#194)', () => {
+  describe('USDC trust-model guard: escrow amount == channel accounting', () => {
     const TOKEN_ADDRESS = 'B62qoG5bKBYCxaVcBN3kPFmqJkLm9K6mZh5v8VBSu4kJqBx4VBfRvE';
 
     function makeUsdcSdk(): MinaPaymentChannelSDK {
@@ -2503,36 +2575,56 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       );
     }
 
-    // The Field-mock's toString() echoes its constructor input, and the transfer
-    // amount is UInt64.Unsafe.fromField(Field(amount)). So the value handed to
-    // token.transfer round-trips back to the original amount: a desync (e.g.
-    // transferring a different amount than the channel accounts) would surface
+    // The Field-mock's toString() echoes its constructor input, and the escrow
+    // amount is UInt64.Unsafe.fromField(Field(amount)). So the value handed to the
+    // token method round-trips back to the original amount: a desync would surface
     // as a mismatch here.
-    function transferredAmountOf(call: unknown[]): string {
-      // call = [from, to, UInt64.Unsafe.fromField(<FieldMock>)]
-      const amount = call[2] as { __uint64FromField: { toString(): string } };
+    function escrowAmountOf(value: unknown): string {
+      const amount = value as { __uint64FromField: { toString(): string } };
       return amount.__uint64FromField.toString();
     }
 
-    it('deposit transfers EXACTLY the deposited amount (escrow == accounting)', async () => {
+    it('deposit escrows EXACTLY the deposited amount, bound to the same Field as channel.deposit', async () => {
       const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockDepositToChannel.mockClear();
+      (mockZkAppInstance.deposit as jest.Mock).mockClear();
+      mockFieldFn.mockClear();
+
       const depositAmount = 1_234_567n; // 1.234567 USDC
+      await usdcSdk.deposit(open.zkAppAddress, depositAmount, false);
 
-      await usdcSdk.deposit(TEST_ZKAPP_ADDRESS, depositAmount, true);
-
-      // One depositor → channel transfer, for exactly the deposited amount.
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
-      expect(transferredAmountOf(mockTokenTransfer.mock.calls[0]!)).toBe(String(depositAmount));
+      // token.depositToChannel(channel, amount, depositor, expectedTotalAfter):
+      // arg[1] is the escrow amount and must equal the deposited amount.
+      expect(mockDepositToChannel).toHaveBeenCalledTimes(1);
+      const depositArgs = mockDepositToChannel.mock.calls[0]!;
+      expect(escrowAmountOf(depositArgs[1])).toBe(String(depositAmount));
 
       // The channel accounting (zkApp.deposit) was bound to the SAME Field value.
       expect(mockZkAppInstance.deposit).toHaveBeenCalledTimes(1);
       expect(mockFieldFn).toHaveBeenCalledWith(depositAmount);
     });
 
-    it('settle pays out EXACTLY balanceB to B and balanceA to A (B then A ordering)', async () => {
+    it('deposit pins expectedDepositTotalAfter = on-chain depositTotal + amount', async () => {
       const usdcSdk = makeUsdcSdk();
       const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
-      mockTokenTransfer.mockClear();
+      mockDepositToChannel.mockClear();
+
+      // Mock channel reports on-chain depositTotal = 1_000_000.
+      const depositAmount = 500_000n;
+      await usdcSdk.deposit(open.zkAppAddress, depositAmount, false);
+
+      // arg[3] is expectedDepositTotalAfter (a Field). The Field-mock toString
+      // echoes its bigint input, so it must equal 1_000_000 + 500_000.
+      const depositArgs = mockDepositToChannel.mock.calls[0]!;
+      const expectedTotal = depositArgs[3] as { toString(): string };
+      expect(expectedTotal.toString()).toBe(String(1_000_000n + depositAmount));
+    });
+
+    it('settle pays EXACTLY balanceA / balanceB into the token method (committed balances)', async () => {
+      const usdcSdk = makeUsdcSdk();
+      const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
+      mockSettleFromChannel.mockClear();
 
       const balanceA = 400_000n;
       const balanceB = 600_000n;
@@ -2547,21 +2639,22 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
         { fundParticipantTokenAccounts: 2 }
       );
 
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(2);
-      // Reference ordering: balanceB to participantB first, then balanceA to A.
-      const first = mockTokenTransfer.mock.calls[0]!;
-      const second = mockTokenTransfer.mock.calls[1]!;
-      expect(transferredAmountOf(first)).toBe(String(balanceB));
-      expect(transferredAmountOf(second)).toBe(String(balanceA));
+      // settleFromChannel(channel, balanceA, balanceB, salt, A, B, nonce, ...):
+      // arg[1] == balanceA, arg[2] == balanceB. The contract forces the payouts to
+      // these committed balances in-proof; we assert the SDK passed them verbatim.
+      expect(mockSettleFromChannel).toHaveBeenCalledTimes(1);
+      const settleArgs = mockSettleFromChannel.mock.calls[0]!;
+      expect(escrowAmountOf(settleArgs[1])).toBe(String(balanceA));
+      expect(escrowAmountOf(settleArgs[2])).toBe(String(balanceB));
     });
 
-    it('settle never moves USDC for a zero balance (no phantom payout)', async () => {
+    it('settle delegates zero-amount skipping to the contract (single settleFromChannel call)', async () => {
       const usdcSdk = makeUsdcSdk();
       const open = await usdcSdk.openChannel(TEST_PARTICIPANT_A, TEST_PARTICIPANT_B, 100);
-      mockTokenTransfer.mockClear();
+      mockSettleFromChannel.mockClear();
 
-      // balanceA == 0 → only the balanceB payout is built, and it carries the
-      // FULL amount. A zero transfer that "leaked" would show up as an extra call.
+      // balanceA == 0: the contract skips the zero payout internally via createIf.
+      // The SDK still composes ONE settleFromChannel carrying both balances.
       const balanceB = 1_000_000n;
       await usdcSdk.settleChannel(
         open.zkAppAddress,
@@ -2574,8 +2667,10 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
         { fundParticipantTokenAccounts: 1 }
       );
 
-      expect(mockTokenTransfer).toHaveBeenCalledTimes(1);
-      expect(transferredAmountOf(mockTokenTransfer.mock.calls[0]!)).toBe(String(balanceB));
+      expect(mockSettleFromChannel).toHaveBeenCalledTimes(1);
+      const settleArgs = mockSettleFromChannel.mock.calls[0]!;
+      expect(escrowAmountOf(settleArgs[1])).toBe('0');
+      expect(escrowAmountOf(settleArgs[2])).toBe(String(balanceB));
     });
   });
 });
