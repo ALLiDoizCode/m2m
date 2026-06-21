@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.5](https://github.com/toon-protocol/connector/compare/v3.15.4...v3.15.5) (2026-06-21)
+
+### Bug Fixes
+
+- **test:** read BTP port via server.address() in socks5 contract test ([#182](https://github.com/toon-protocol/connector/issues/182)) ([f9d6a1e](https://github.com/toon-protocol/connector/commit/f9d6a1ef1ca2e0022433b5443ee380f25e59754f))
+
 ## [3.15.4](https://github.com/toon-protocol/connector/compare/v3.15.3...v3.15.4) (2026-06-21)
 
 ### Bug Fixes
