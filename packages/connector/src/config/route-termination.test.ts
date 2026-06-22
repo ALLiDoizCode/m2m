@@ -177,4 +177,36 @@ describe('issue #218 — validateRouteTermination helper (shared boot+runtime)',
   it('exposes the canonical chain set', () => {
     expect([...TERMINATION_CHAINS].sort()).toEqual(['evm', 'mina', 'solana']);
   });
+
+  // RFC 9421 request-binding opt-in flag (#220 wiring).
+  it('accepts requireRequestBinding: true on a terminated route', () => {
+    expect(
+      validateRouteTermination(
+        { prefix: 'g.greet', ...fullTermination, requireRequestBinding: true },
+        isValidNonNegativeIntegerString
+      )
+    ).toEqual({ ok: true });
+  });
+
+  it('rejects a non-boolean requireRequestBinding', () => {
+    const result = validateRouteTermination(
+      {
+        prefix: 'g.greet',
+        ...fullTermination,
+        requireRequestBinding: 'yes' as unknown as boolean,
+      },
+      isValidNonNegativeIntegerString
+    );
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain(
+      'requireRequestBinding must be a boolean'
+    );
+  });
+
+  it('defaults requireRequestBinding to false via toRouteTermination (do-no-harm)', () => {
+    expect(toRouteTermination(fullTermination)?.requireRequestBinding).toBe(false);
+    expect(
+      toRouteTermination({ ...fullTermination, requireRequestBinding: true })?.requireRequestBinding
+    ).toBe(true);
+  });
 });

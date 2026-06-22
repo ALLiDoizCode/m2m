@@ -246,6 +246,16 @@ export interface RouteTermination {
    * chain, downstream layers fall back to their default asset table.
    */
   asset?: Partial<Record<TerminationChain, string>>;
+
+  /**
+   * Opt-in enforcement of the RFC 9421 claim↔request binding (#220) on the paid
+   * terminated path. Default `false` (do-no-harm): when a signed request IS
+   * present the connector ALWAYS verifies it regardless of this flag; this flag
+   * only governs what happens when NO RFC 9421 signature is present — `true`
+   * rejects the unsigned request (F01, `missing_signature`), `false` (default)
+   * passes it through to the existing claim-only seams unchanged.
+   */
+  requireRequestBinding?: boolean;
 }
 
 /**
@@ -2071,6 +2081,13 @@ export function validateRouteTermination(
     }
   }
 
+  if (
+    route.requireRequestBinding !== undefined &&
+    typeof route.requireRequestBinding !== 'boolean'
+  ) {
+    return { ok: false, error: `${where}: requireRequestBinding must be a boolean` };
+  }
+
   return { ok: true };
 }
 
@@ -2090,5 +2107,7 @@ export function toRouteTermination(route: Partial<RouteTermination>): RouteTermi
     ilpAddress: route.ilpAddress as string,
     settlementAddresses: route.settlementAddresses ?? {},
     asset: route.asset,
+    // Default false (do-no-harm): unsigned requests pass through unless opted in.
+    requireRequestBinding: route.requireRequestBinding ?? false,
   };
 }

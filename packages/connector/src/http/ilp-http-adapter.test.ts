@@ -7,10 +7,13 @@
  */
 
 import { EventEmitter } from 'events';
+import { ed25519 } from '@noble/curves/ed25519';
 import { IlpHttpAdapter } from './ilp-http-adapter';
 import { X402_PAYMENT_REQUIRED_HEADER, X402_PAYMENT_SIGNATURE_HEADER } from './x402-greeting';
 import type { RouteTermination } from '../config/types';
 import { BTP_CLAIM_PROTOCOL } from '../btp/btp-claim-types';
+import { signRequest as signRfc9421Request } from '../auth/rfc9421';
+import { encodeHttpRequest, type HttpRequestEnvelope } from '../core/handlers/http-proxy-handler';
 import { Logger } from '../utils/logger';
 import {
   ILPPreparePacket,
@@ -488,6 +491,165 @@ describe('IlpHttpAdapter', () => {
       await run(adapter, new MockReq(serializePacket(createPrepare())), res);
       expect(res.statusCode).toBe(200);
       expect(handlePrepare).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // RFC 9421 claim↔request binding on the terminated paid path (issue #220 wiring).
+  //
+  // Repo policy: NEVER mock. We use a real ed25519 keypair + the #220 reference
+  // signer over a real #216 HTTP envelope carried in the PREPARE `data`. The
+  // signature, content-digest, and TOON-Price live on the INNER envelope (the
+  // literal HTTP request #216 proxies), NOT the outer `POST /ilp`.
+  // ---------------------------------------------------------------------------
+  describe('RFC 9421 claim↔request binding (#220 wiring)', () => {
+    const BIND_PATH = '/greet';
+    const BIND_METHOD = 'POST';
+    const BIND_PRICE = '1000';
+    const innerBody = Buffer.from(JSON.stringify({ hello: 'world' }), 'utf8');
+
+    const termination = (overrides: Partial<RouteTermination> = {}): RouteTermination => ({
+      upstream: 'http://127.0.0.1:8080',
+      price: BIND_PRICE,
+      chains: ['evm'],
+      ilpAddress: 'g.townhouse.town',
+      settlementAddresses: { evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28' },
+      ...overrides,
+    });
+
+    const makeAdapter = (
+      term: RouteTermination | null
+    ): { adapter: IlpHttpAdapter; handlePrepare: jest.Mock; validateClaim: jest.Mock } => {
+      const handlePrepare = jest.fn(async () => fulfill);
+      const validateClaim = jest.fn(async () => null);
+      const adapter = new IlpHttpAdapter({
+        logger: createMockLogger(),
+        nodeId: 'g.townhouse',
+        handlePrepare,
+        validateClaim,
+        resolveTermination: () => term,
+      });
+      return { adapter, handlePrepare, validateClaim };
+    };
+
+    /**
+     * Build a PREPARE whose `data` is a real #216 HTTP envelope. When `signed`
+     * headers are provided they are added to the envelope (a real RFC 9421
+     * signature). A claim header on the outer request makes the request "paid"
+     * so the greeting does not fire and the binding check runs.
+     */
+    const makePaidReq = (envHeaders: Record<string, string>, body: Buffer = innerBody): MockReq => {
+      const envelope: HttpRequestEnvelope = {
+        method: BIND_METHOD,
+        target: BIND_PATH,
+        httpVersion: 'HTTP/1.1',
+        headers: Object.entries(envHeaders),
+        body,
+      };
+      const prepare: ILPPreparePacket = {
+        type: PacketType.PREPARE,
+        amount: BigInt(1000),
+        destination: 'g.townhouse.town',
+        expiresAt: new Date(Date.now() + 10000),
+        data: encodeHttpRequest(envelope),
+      };
+      return new MockReq(serializePacket(prepare), {
+        // Outer claim header → "paid" → greeting suppressed → binding check runs.
+        'ilp-payment-channel-claim': Buffer.from(claimJson, 'utf8').toString('base64'),
+      });
+    };
+
+    const sign = (opts: {
+      price?: string;
+      body?: Buffer;
+      keypairBody?: Buffer;
+    }): Record<string, string> => {
+      const privateKey = ed25519.utils.randomPrivateKey();
+      const signed = signRfc9421Request({
+        privateKey,
+        method: BIND_METHOD,
+        path: BIND_PATH,
+        body: opts.keypairBody ?? opts.body ?? innerBody,
+        price: opts.price ?? BIND_PRICE,
+      });
+      return signed.headers;
+    };
+
+    it('correctly-signed inner envelope (matching method/path/digest/price) → proxied (FULFILL), NOT rejected', async () => {
+      const { adapter, handlePrepare } = makeAdapter(termination());
+      const res = new MockRes();
+      await run(adapter, makePaidReq(sign({})), res);
+
+      expect(handlePrepare).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(200);
+      expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+    });
+
+    it('signature for a DIFFERENT price → REJECT (price_mismatch, F03), not proxied', async () => {
+      const { adapter, handlePrepare } = makeAdapter(termination({ price: '1000' }));
+      const res = new MockRes();
+      // Client signed price '9999' but the route expects '1000'.
+      await run(adapter, makePaidReq(sign({ price: '9999' })), res);
+
+      expect(handlePrepare).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(200);
+      const out = deserializePacket(res.body) as ILPRejectPacket;
+      expect(out.type).toBe(PacketType.REJECT);
+      expect(out.code).toBe(ILPErrorCode.F03_INVALID_AMOUNT);
+      expect(out.message).toContain('price_mismatch');
+    });
+
+    it('tampered body (digest mismatch) → REJECT (F01)', async () => {
+      const { adapter, handlePrepare } = makeAdapter(termination());
+      // Sign over the original body, then ship a different body → digest mismatch.
+      const signedHeaders = sign({ keypairBody: innerBody });
+      const tampered = Buffer.from(JSON.stringify({ hello: 'tampered' }), 'utf8');
+      const res = new MockRes();
+      await run(adapter, makePaidReq(signedHeaders, tampered), res);
+
+      expect(handlePrepare).not.toHaveBeenCalled();
+      const out = deserializePacket(res.body) as ILPRejectPacket;
+      expect(out.type).toBe(PacketType.REJECT);
+      expect(out.code).toBe(ILPErrorCode.F01_INVALID_PACKET);
+      expect(out.message).toContain('digest_mismatch');
+    });
+
+    it('NO signature + requireRequestBinding:false (default) → passes through (NOT rejected by binding)', async () => {
+      const { adapter, handlePrepare, validateClaim } = makeAdapter(
+        termination({ requireRequestBinding: false })
+      );
+      const res = new MockRes();
+      // No RFC 9421 headers on the inner envelope; just a content-type.
+      await run(adapter, makePaidReq({ 'content-type': 'application/json' }), res);
+
+      expect(validateClaim).toHaveBeenCalledTimes(1);
+      expect(handlePrepare).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(200);
+      expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+    });
+
+    it('NO signature + requireRequestBinding:true → REJECT (missing_signature → F01)', async () => {
+      const { adapter, handlePrepare } = makeAdapter(termination({ requireRequestBinding: true }));
+      const res = new MockRes();
+      await run(adapter, makePaidReq({ 'content-type': 'application/json' }), res);
+
+      expect(handlePrepare).not.toHaveBeenCalled();
+      const out = deserializePacket(res.body) as ILPRejectPacket;
+      expect(out.type).toBe(PacketType.REJECT);
+      expect(out.code).toBe(ILPErrorCode.F01_INVALID_PACKET);
+      expect(out.message).toContain('missing_signature');
+    });
+
+    it('regression: non-terminated destination → binding check never runs (signed-but-mismatched body still proxied)', async () => {
+      // resolveTermination returns null → binding must NOT run even with a
+      // present-but-bogus signature. The request flows to the shared seams.
+      const { adapter, handlePrepare } = makeAdapter(null);
+      const res = new MockRes();
+      await run(adapter, makePaidReq(sign({ price: '9999' })), res);
+
+      expect(handlePrepare).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(200);
+      expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
     });
   });
 });

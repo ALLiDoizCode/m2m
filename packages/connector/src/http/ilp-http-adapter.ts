@@ -59,6 +59,12 @@ import {
   X402_PAYMENT_REQUIRED_HEADER,
   X402_PAYMENT_SIGNATURE_HEADER,
 } from './x402-greeting';
+import {
+  decodeHttpRequest,
+  EnvelopeDecodeError,
+  type HttpRequestEnvelope,
+} from '../core/handlers/http-proxy-handler';
+import { verify as verifyRfc9421Signature, type VerifyFailureCode } from '../auth/rfc9421';
 
 /**
  * Resolves the {@link RouteTermination} for an inbound PREPARE — the seam #217
@@ -126,6 +132,49 @@ const DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 /** The ILP-over-HTTP request path this adapter serves. */
 export const ILP_HTTP_PATH = '/ilp';
+
+/**
+ * Map an RFC 9421 verification failure (#220) to the ILP error code the
+ * terminator rejects the PREPARE with. A `price_mismatch` is an
+ * amount/price-class failure → F03 (invalid amount); every other binding
+ * failure (digest/signature/keyid/covered-set/malformed/missing) is a packet
+ * integrity failure → F01 (invalid packet). The original failure `code` is
+ * always carried in the reject `message` for debuggability.
+ */
+const RFC9421_REJECT_CODE_MAP: Record<VerifyFailureCode, ILPErrorCode> = {
+  missing_signature: ILPErrorCode.F01_INVALID_PACKET,
+  malformed_signature: ILPErrorCode.F01_INVALID_PACKET,
+  unsupported_alg: ILPErrorCode.F01_INVALID_PACKET,
+  covered_components_mismatch: ILPErrorCode.F01_INVALID_PACKET,
+  missing_component: ILPErrorCode.F01_INVALID_PACKET,
+  digest_mismatch: ILPErrorCode.F01_INVALID_PACKET,
+  keyid_mismatch: ILPErrorCode.F01_INVALID_PACKET,
+  signature_invalid: ILPErrorCode.F01_INVALID_PACKET,
+  // price_mismatch is the core anti-replay binding: a cheap claim cannot pay for
+  // an expensive route. Treated as an amount/price-class failure (F03).
+  price_mismatch: ILPErrorCode.F03_INVALID_AMOUNT,
+};
+
+/**
+ * Flatten an HTTP-envelope header array (#216 codec, wire order, case-preserved)
+ * into the lower-cased `Record<string,string>` the RFC 9421 verifier (#220)
+ * expects. Duplicate field names collapse to the last value seen; the MVP
+ * covered set (`content-digest`, `toon-price`, `signature`, `signature-input`)
+ * is single-valued, so this is sufficient and avoids re-canonicalisation.
+ */
+function lowerCaseHeaderMap(headers: ReadonlyArray<[string, string]>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of headers) {
+    out[name.toLowerCase()] = value;
+  }
+  return out;
+}
+
+/** Strip a query string from an HTTP request-target to get the bare `@path`. */
+function pathOf(target: string): string {
+  const q = target.indexOf('?');
+  return q === -1 ? target : target.slice(0, q);
+}
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
@@ -275,6 +324,36 @@ export class IlpHttpAdapter {
     // --- end x402 v2 greeting (#217) ---
 
     try {
+      // --- RFC 9421 claim↔request binding (#220) ---
+      // Terminator path only: when this destination is a locally-terminated
+      // route we bind the prepaid claim to the INNER HTTP request that #216
+      // proxies (the literal HTTP envelope carried in PREPARE `data`), NOT the
+      // outer `POST /ilp`. The signature, content-digest, and `TOON-Price`
+      // headers live on that inner envelope. We reach this point only on the
+      // PAID path (an unpaid terminated request already early-returned a 402
+      // above), so this is the cross-route / cross-price replay defence.
+      //
+      // Policy (do-no-harm, opt-in enforcement):
+      //   - signature PRESENT → ALWAYS verify; on failure reject (never proxy).
+      //   - signature ABSENT  → reject (F01) only when requireRequestBinding is
+      //     true; otherwise pass through unchanged (claim-only flow preserved).
+      const reject = this.checkRequestBinding(prepare);
+      if (reject) {
+        this.logger.warn(
+          {
+            event: 'ilp_http_request_binding_rejected',
+            peerId,
+            destination: prepare.destination,
+            code: reject.code,
+            detail: reject.message,
+          },
+          'ILP-over-HTTP PREPARE rejected: RFC 9421 request binding failed'
+        );
+        this.respondPacket(res, reject);
+        return;
+      }
+      // --- end RFC 9421 claim↔request binding (#220) ---
+
       // Record the claim for event-driven settlement, independent of the packet
       // outcome — mirroring the BTP onMessage→ClaimReceiver path (which records
       // every message's claim). Best-effort: a recording failure never blocks
@@ -404,6 +483,77 @@ export class IlpHttpAdapter {
       [X402_PAYMENT_REQUIRED_HEADER]: Buffer.from(json, 'utf8').toString('base64'),
     });
     res.end(json);
+  }
+
+  /**
+   * RFC 9421 claim↔request binding check (#220) for the terminated paid path.
+   *
+   * Returns `null` to proceed (no termination, or no signature present with
+   * enforcement off, or signature verified ok) or an {@link ILPRejectPacket} to
+   * reject the PREPARE (never proxy). Only runs for terminated routes; ordinary
+   * forwarding destinations return `null` immediately so they are untouched.
+   *
+   * The thing being bound is the INNER HTTP request carried in the PREPARE
+   * `data` (the literal HTTP envelope #216 proxies), so the signature,
+   * content-digest, and `TOON-Price` headers are read off that inner envelope —
+   * NOT the outer `POST /ilp`. `expectedPrice` is the matched route's `price`,
+   * compared byte-exactly against the signed `TOON-Price`.
+   */
+  private checkRequestBinding(prepare: ILPPreparePacket): ILPRejectPacket | null {
+    if (!this.resolveTermination) return null;
+    const termination = this.resolveTermination(prepare);
+    if (!termination) return null; // non-terminated destination → never bind
+
+    const enforce = termination.requireRequestBinding === true;
+
+    // Decode the inner HTTP envelope from PREPARE `data` via the #216 codec.
+    // A `data` that is not a well-formed HTTP envelope carries no RFC 9421
+    // signature surface to verify: under the do-no-harm default this is a
+    // pass-through (the existing claim-only flow); only enforcement rejects it
+    // (the inner request could not be proxied by #216 anyway → F01).
+    let envelope: HttpRequestEnvelope;
+    try {
+      envelope = decodeHttpRequest(prepare.data ?? Buffer.alloc(0));
+    } catch (err) {
+      if (!enforce) return null;
+      const detail = err instanceof EnvelopeDecodeError ? err.message : String(err);
+      return this.bindingReject(ILPErrorCode.F01_INVALID_PACKET, `malformed_envelope: ${detail}`);
+    }
+
+    const headers = lowerCaseHeaderMap(envelope.headers);
+    const hasSignature =
+      headers['signature'] !== undefined && headers['signature-input'] !== undefined;
+
+    if (!hasSignature) {
+      // Absent signature: enforce only when opted in (do-no-harm default).
+      if (enforce) {
+        return this.bindingReject(ILPErrorCode.F01_INVALID_PACKET, 'missing_signature');
+      }
+      return null; // pass through to the existing claim-only seams
+    }
+
+    // Signature present: ALWAYS verify it, regardless of requireRequestBinding.
+    const result = verifyRfc9421Signature(headers, envelope.body, {
+      method: envelope.method,
+      path: pathOf(envelope.target),
+      expectedPrice: termination.price,
+    });
+    if (result.ok) return null; // bound → proceed to the shared seams
+
+    const code = RFC9421_REJECT_CODE_MAP[result.code];
+    const detail = result.detail ? `${result.code}: ${result.detail}` : result.code;
+    return this.bindingReject(code, detail);
+  }
+
+  /** Build an ILP REJECT for a request-binding failure, with the code in-message. */
+  private bindingReject(code: ILPErrorCode, detail: string): ILPRejectPacket {
+    return {
+      type: PacketType.REJECT,
+      code,
+      triggeredBy: this.nodeId,
+      message: `RFC 9421 request binding failed: ${detail}`,
+      data: Buffer.alloc(0),
+    };
   }
 
   private respondPacket(res: ServerResponse, packet: ILPFulfillPacket | ILPRejectPacket): void {
