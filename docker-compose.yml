@@ -805,12 +805,11 @@ services:
   # `faucet:3500`, and `relay:3100` by service name. Only `terminator` (POST
   # /ilp) and the relay's WS read port are published to the host.
   #
-  # NOTE: the oblivious relay image does NOT live in this repo (it is separate
-  # "decouple relay" work, not yet published). Reference it via an env override:
-  # `RELAY_IMAGE` (defaults to the not-yet-published GHCR coordinates). When no
-  # real relay image is available the AC3 full paid-write round-trip is SKIPPED
-  # with a clear message by the e2e test — the negative-path AC2 assertions still
-  # run against the terminator + a stub upstream where needed.
+  # NOTE: the oblivious relay image does NOT live in this repo (it is built from
+  # the separate relay repo, published as ghcr.io/toon-protocol/relay:latest).
+  # Override the tag via `RELAY_IMAGE` (e.g. pin a `sha-…` tag). The full AC3 paid
+  # round-trip runs by default against the published image under
+  # APP_BEHIND_TERMINATOR=1.
   terminator:
     build:
       context: .
@@ -834,25 +833,29 @@ services:
       faucet:
         condition: service_healthy
 
-  # The oblivious app — relay#24 "oblivious mode" (MERGED). Contract pinned from
-  # that PR. NOTE: no oblivious-capable image is published yet (the relay's
-  # image-publish workflow is a follow-up, and the existing `bls` Dockerfile runs
-  # the embedded, NON-oblivious entrypoint). RELAY_IMAGE must point at an image
-  # whose entrypoint is the `relay` CLI (dist/cli.js) honoring TOON_OBLIVIOUS_MODE.
-  # Its paid-write HTTP store port (3100, `POST /write`) is NOT published — only
-  # the terminator dials it over the compose network (`relay:3100`), which enforces
-  # AC2. Its Nostr WS read port (7100) IS published so FREE reads bypass the
-  # terminator entirely.
+  # The oblivious app — relay#26 "oblivious mode" published image. Contract pinned
+  # from relay#24 (store/read) and verified against the real image. Its entrypoint
+  # is the `relay` CLI (dist/cli.js), which runs as a standalone oblivious
+  # read/write relay out of the box. Its paid-write HTTP store port (3100,
+  # `POST /write`) is NOT published — only the terminator dials it over the compose
+  # network (`relay:3100`), which enforces AC2. Its Nostr WS read port (7100) IS
+  # published so FREE reads bypass the terminator entirely.
+  #
+  # RELAY_IMAGE may be overridden to pin a specific tag (e.g. `sha-b8ec120`).
   relay:
-    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:oblivious}
+    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:latest}
     profiles: [app-behind-terminator]
     environment:
-      # Contract from relay#24: run the `relay` CLI in oblivious mode.
+      # The published image already sets TOON_BLS_PORT=3100 / TOON_RELAY_PORT=7100
+      # and runs oblivious by default. We keep the explicit env to document intent.
       TOON_OBLIVIOUS_MODE: 'true'
       TOON_BLS_PORT: '3100' # paid-write HTTP store (POST /write) — NOT published
       TOON_RELAY_PORT: '7100' # free-read Nostr WS — published below
       TOON_CHAIN: 'none' # oblivious forces relay-only; explicit for safety
-      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-} # relay CLI needs an identity key
+      # The relay CLI REQUIRES an identity key to boot (NOSTR_SECRET_KEY /
+      # TOON_SECRET_KEY / TOON_MNEMONIC). Provide a deterministic local-only
+      # default so `compose up` succeeds unattended; override for real keys.
+      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000001}
       TOON_DEV_MODE: ${RELAY_DEV_MODE:-true} # skip sig verify for local smoke fixtures
     ports:
       # Free reads: clients hit the relay's Nostr WS directly (no terminator).

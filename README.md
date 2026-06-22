@@ -957,12 +957,12 @@ The "hello-world" of deploying an app behind the connector locally: one command 
 
 **Four services** (compose profile `app-behind-terminator` in `docker-compose.yml`):
 
-| Service      | Role                               | Host-published port              | Notes                                                                                           |
-| ------------ | ---------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `anvil`      | EVM devnet + deployed contracts    | `127.0.0.1:8545`                 | Reused from the `evm` profile.                                                                  |
-| `faucet`     | ETH/USDC faucet                    | `127.0.0.1:3500`                 | Reused from the `evm` profile.                                                                  |
-| `terminator` | Standalone connector-as-terminator | `127.0.0.1:3000` (`POST /ilp`)   | Admin API (8081) is **not** published. Config: `scripts/app-behind-terminator/terminator.yaml`. |
-| `relay`      | The oblivious app (relay#24)       | `127.0.0.1:7100` (Nostr WS read) | Paid-write store port (`3100`, `POST /write`) is **not** published.                             |
+| Service      | Role                                                     | Host-published port              | Notes                                                                                           |
+| ------------ | -------------------------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `anvil`      | EVM devnet + deployed contracts                          | `127.0.0.1:8545`                 | Reused from the `evm` profile.                                                                  |
+| `faucet`     | ETH/USDC faucet                                          | `127.0.0.1:3500`                 | Reused from the `evm` profile.                                                                  |
+| `terminator` | Standalone connector-as-terminator                       | `127.0.0.1:3000` (`POST /ilp`)   | Admin API (8081) is **not** published. Config: `scripts/app-behind-terminator/terminator.yaml`. |
+| `relay`      | The oblivious app (`ghcr.io/toon-protocol/relay:latest`) | `127.0.0.1:7100` (Nostr WS read) | Paid-write store port (`3100`, `POST /write`) is **not** published.                             |
 
 **One command up / down**
 
@@ -999,10 +999,10 @@ Free reads do **not** go through the terminator at all. Clients connect directly
 
 **Overriding the relay image**
 
-The decoupled relay image is separate, not-yet-published work. It must run the `relay` CLI entrypoint in oblivious mode (`TOON_OBLIVIOUS_MODE=true`); the existing `bls` Dockerfile runs the embedded, non-oblivious entrypoint and will not work here. Reference it via the `RELAY_IMAGE` env override (defaults to the not-yet-published `ghcr.io/toon-protocol/relay:oblivious`):
+The relay image is built from the separate relay repo and published as `ghcr.io/toon-protocol/relay:latest` (the compose default). Its entrypoint is the `relay` CLI, which runs as a standalone oblivious read/write relay out of the box. Pin a specific build via the `RELAY_IMAGE` env override:
 
 ```bash
-RELAY_IMAGE=ghcr.io/your-org/relay:dev make app-up
+RELAY_IMAGE=ghcr.io/toon-protocol/relay:sha-b8ec120 make app-up
 ```
 
 **Smoke test**
@@ -1011,7 +1011,7 @@ RELAY_IMAGE=ghcr.io/your-org/relay:dev make app-up
 make app-test
 ```
 
-The terminator + anvil + faucet portions (compose-up, terminator health, AC2 negative-path assertions — the relay's write port is unreachable from the host, and an unpaid `POST /ilp` is rejected) always run. The full paid-write round-trip is **skipped with a clear message** unless a real `RELAY_IMAGE` is supplied (the relay app does not exist in this repo yet).
+Under `APP_BEHIND_TERMINATOR=1` the full suite runs against the real relay image: AC1 (compose-up + terminator health), AC2 (the relay's write port is unreachable from the host, and an unpaid `POST /ilp` is rejected), and AC3 (the full paid-write round-trip — a signed payment-channel claim rides the `POST /ilp` edge, the terminator reverse-proxies the write to the relay's `POST /write`, and the stored event is read back over the free Nostr WS).
 
 ## Development
 
