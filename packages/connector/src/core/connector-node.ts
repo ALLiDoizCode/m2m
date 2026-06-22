@@ -43,6 +43,7 @@ import {
   toRouteTermination,
 } from '../config/types';
 import { RouteTerminationRegistry } from './route-upstream-registry';
+import { HttpProxyHandler } from './handlers/http-proxy-handler';
 import {
   TransportProvider,
   DirectTransportProvider,
@@ -330,6 +331,59 @@ export class ConnectorNode implements HealthStatusProvider {
           process.env.LOCAL_DELIVERY_PER_HOP_NOTIFICATION === 'true',
       };
       this._packetHandler.setLocalDelivery(localDeliveryConfig);
+    }
+
+    // Wire the #216 HttpProxyHandler to the #218 RouteTerminationRegistry.
+    //
+    // When the operator has configured terminated routes (registry non-empty),
+    // construct a generic HTTP reverse-proxy local-delivery handler and feed it
+    // the registry's `resolveUpstream` seam. Per delivery, the handler asks the
+    // registry "what upstream serves this ILP destination?" — for terminated
+    // destinations it reverse-proxies the opaque HTTP envelope; for destinations
+    // with no terminated route the resolver returns undefined and the handler
+    // rejects with F02. `chainResolver` is left default (derives the chain from
+    // the ILP destination's 2nd label).
+    //
+    // PRECEDENCE / DO-NO-HARM: `setLocalDeliveryHandler()` registers a function
+    // handler that UNCONDITIONALLY short-circuits the HTTP `localDelivery.handlerUrl`
+    // client in PacketHandler (the function handler is checked first and always
+    // returns). A function handler cannot "fall through" to the HTTP client. So
+    // installing the proxy while a global `handlerUrl` is also configured would
+    // silently break the existing handlerUrl path for non-terminated destinations
+    // (they'd get F02 instead of reaching the configured app). To guarantee we
+    // never regress the existing path, we install the proxy ONLY when terminated
+    // routes exist AND no global HTTP localDelivery handler is configured. If BOTH
+    // are configured we PRESERVE the existing handlerUrl path and log a warning —
+    // reconciling the two (per-route proxy for terminated destinations, handlerUrl
+    // fallback for the rest) requires a fall-through seam in PacketHandler and is
+    // deferred to a human decision rather than over-engineered here.
+    if (this._routeTerminationRegistry.size > 0) {
+      if (localDeliveryEnabled) {
+        this._logger.warn(
+          {
+            event: 'route_termination_proxy_skipped',
+            terminatedRoutes: this._routeTerminationRegistry.size,
+            reason: 'global_local_delivery_handler_configured',
+          },
+          'Terminated routes are configured but a global localDelivery.handlerUrl ' +
+            'is also enabled; preserving the existing handlerUrl path and NOT ' +
+            'installing the per-route HTTP proxy (requires PacketHandler fall-through — human decision)'
+        );
+      } else {
+        const proxy = new HttpProxyHandler({
+          upstreamResolver: this._routeTerminationRegistry.resolveUpstream,
+          logger: this._logger,
+        });
+        this.setLocalDeliveryHandler(proxy.handler);
+        this._logger.info(
+          {
+            event: 'route_termination_proxy_installed',
+            terminatedRoutes: this._routeTerminationRegistry.size,
+            prefixes: this._routeTerminationRegistry.prefixes(),
+          },
+          'HttpProxyHandler installed as local-delivery handler for terminated routes'
+        );
+      }
     }
 
     // Link PacketHandler to BTPClientManager for incoming packet handling (resolves circular dependency)
