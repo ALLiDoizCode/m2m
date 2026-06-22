@@ -26,7 +26,6 @@ import type { SettlementMonitor } from '../settlement/settlement-monitor';
 import type { ClaimReceiver } from '../settlement/claim-receiver';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
-import type { ManagedAnonClient } from '../transport/managed-anon-client';
 import { requireOptional } from '../utils/optional-require';
 
 /**
@@ -73,13 +72,11 @@ export class AdminServer {
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
     metricsRegistry?: IlpMetricsRegistry;
-    managedAnonClient?: ManagedAnonClient;
     resolveTokenMetadata?: (
       blockchain: 'evm' | 'solana' | 'mina',
       tokenAddress: string
     ) => Promise<{ assetCode: string; assetScale: number }>;
     connectorFeePercentage?: number;
-    transportType?: 'direct' | 'socks5';
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
     getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
     registryStore?: import('./admin-api').RegistryPeerSink;
@@ -87,7 +84,6 @@ export class AdminServer {
     setPeerProtocol?: (peerId: string, protocol: 'btp' | 'ilp-http') => void;
     routeTerminationRegistry?: import('./admin-api').RouteTerminationSink;
   };
-  private readonly _transportType: 'direct' | 'socks5';
 
   /**
    * Create AdminServer instance
@@ -116,19 +112,11 @@ export class AdminServer {
     packetSender?: PacketSenderFn;
     isReady?: IsReadyFn;
     metricsRegistry?: IlpMetricsRegistry;
-    managedAnonClient?: ManagedAnonClient;
     resolveTokenMetadata?: (
       blockchain: 'evm' | 'solana' | 'mina',
       tokenAddress: string
     ) => Promise<{ assetCode: string; assetScale: number }>;
     connectorFeePercentage?: number;
-    /**
-     * Connector-level transport discriminator. Forwarded to the admin
-     * router for `POST /admin/peers { transport: 'socks5' }` validation.
-     * Defaults to `'direct'` when omitted, matching pre-Epic-35 behavior
-     * (H7 — explicit default for callers that omit the field).
-     */
-    transportType?: 'direct' | 'socks5';
     /**
      * Relationship-aware settlement gate hook (issue #76). Forwarded to the
      * admin router so `POST /admin/peers` can propagate a peer's
@@ -157,7 +145,6 @@ export class AdminServer {
     this._nodeId = options.nodeId;
     this._config = options.config;
     this._logger = options.logger.child({ component: 'AdminServer' });
-    this._transportType = options.transportType ?? 'direct';
   }
 
   /**
@@ -185,7 +172,6 @@ export class AdminServer {
       packetSender,
       isReady,
       metricsRegistry,
-      managedAnonClient,
       resolveTokenMetadata,
       connectorFeePercentage,
       setPeerRelation,
@@ -218,10 +204,8 @@ export class AdminServer {
       packetSender,
       isReady,
       metricsRegistry,
-      managedAnonClient,
       resolveTokenMetadata,
       connectorFeePercentage,
-      transportType: this._transportType,
       setPeerRelation,
       getPeerRelation,
       registryStore,
@@ -294,7 +278,6 @@ export class AdminServer {
                 'GET /admin/settlement/states',
                 'GET /admin/channels/:channelId/claims',
                 'POST /admin/ilp/send',
-                'GET /admin/hs-hostname',
               ],
             },
             `Admin API server started on ${host}:${port}`

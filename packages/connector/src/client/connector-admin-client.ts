@@ -80,7 +80,7 @@ export interface RegisterPeerInput {
   url: string;
   authToken: string;
   relation?: PeerRelation;
-  transport?: 'direct' | 'socks5';
+  transport?: 'direct';
   routes?: AdminRouteInput[];
   settlement?: Record<string, unknown>;
 }

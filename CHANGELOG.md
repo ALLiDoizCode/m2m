@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.22.1](https://github.com/toon-protocol/connector/compare/v3.22.0...v3.22.1) (2026-06-22)
+
+### Bug Fixes
+
+- **deps:** drop orphaned patch-package patch for removed anyone-client ([#232](https://github.com/toon-protocol/connector/issues/232)) ([cb59135](https://github.com/toon-protocol/connector/commit/cb591358276c4849b508d2b871b580ad699bd1ec)), closes [#231](https://github.com/toon-protocol/connector/issues/231)
+
 ## [3.22.0](https://github.com/toon-protocol/connector/compare/v3.21.0...v3.22.0) (2026-06-22)
 
 ### Features

@@ -63,8 +63,8 @@ Connectors handle three critical tasks:
 │  └──────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────┐   │
 │  │  Transport                                │   │
-│  │  • Direct TCP (default)                   │   │
-│  │  • ATOR overlay (onion-routed, opt-in)    │   │
+│  │  • Direct TCP (BTP WebSocket)             │   │
+│  │  • ILP-over-HTTP egress (POST /ilp)       │   │
 │  └──────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────┘
                        │
@@ -298,7 +298,6 @@ routes:
 | `routes`         | Routing table (which prefixes go where)      | Map address prefixes to peers |
 | `localDelivery`  | Forward packets to external HTTP server      | Standalone mode only          |
 | `chainProviders` | Multi-chain settlement (EVM, Solana, Mina)   | When using payment channels   |
-| `transport`      | Network transport (direct or ATOR/SOCKS5)    | Privacy or home-network peers |
 | `explorer`       | Real-time telemetry UI                       | Development and debugging     |
 | `security`       | Rate limiting, IP allowlists                 | Production deployments        |
 | `performance`    | Timeouts, buffer sizes                       | Performance tuning            |
@@ -390,50 +389,6 @@ A payment channel is a smart contract (or zkApp, or Solana program) that holds f
 ```
 
 **Key benefit:** One on-chain transaction per channel lifecycle, unlimited off-chain transactions.
-
-## ATOR Overlay Transport: Run a Peer from Anywhere
-
-By default, connectors peer over direct TCP WebSocket connections. For operators who want **network-level privacy** — or who need to run a peer from a home network without exposing ports — the connector supports **ATOR overlay transport**.
-
-[ATOR](https://anyone.io) (Anyone Protocol) is an incentivized onion-routing network based on Tor. When enabled, the connector tunnels all outbound BTP traffic through ATOR circuits and can accept inbound connections via a `.anon` hidden service. This means:
-
-- **No port forwarding required.** Your home router doesn't need any special configuration. The hidden service handles inbound connections through the overlay network.
-- **IP address stays private.** Peers see a `.anon` address, not your home IP. Traffic is onion-routed through multiple relays.
-- **NAT traversal built in.** Works behind carrier-grade NAT, double NAT, and restrictive firewalls — anywhere that can make an outbound TCP connection.
-
-This makes it practical to run a connector on a Raspberry Pi, a laptop, or any machine on a home network without the operational overhead of VPNs, dynamic DNS, or firewall rules.
-
-### How It Works
-
-```
-Your home network                          ATOR overlay
-┌───────────────────┐                    ┌─────────────┐
-│  Connector        │── outbound TCP ──►│  3+ relays   │──► Peer's connector
-│  (no open ports)  │◄── .anon HS ──────│  (encrypted) │◄── Peer connects to you
-└───────────────────┘                    └─────────────┘
-```
-
-Transport is opt-in. Add a `transport` block to your config to enable it:
-
-```yaml
-transport:
-  type: socks5
-  socksUrl: socks5h://127.0.0.1:9050 # ATOR SOCKS5 proxy
-  managed: true # Auto-start/stop the ATOR binary
-  hiddenService:
-    enabled: true # Accept inbound via .anon address
-    hostname: your-address.anon # Assigned on first start
-    virtualPort: 3000
-```
-
-There are two ways to run ATOR:
-
-- **Managed mode** — The connector starts and monitors the ATOR binary automatically. Recommended for most operators.
-- **External mode** — You run `anon` (or system `tor`) yourself and point the connector at its SOCKS5 port. Useful for shared infrastructure or custom configurations.
-
-Both modes enforce `socks5h://` (DNS resolution at the proxy) to prevent DNS leaks.
-
-See the full [ATOR Transport Guide](docs/ator-transport.md) for configuration examples, monitoring, performance tuning, and troubleshooting.
 
 ## Deployment Modes
 
@@ -563,10 +518,10 @@ The simplest production-ready topology is a **standalone connector paired with y
 
 Two compose files ship at the repo root:
 
-| Compose file              | Purpose                                                                                                                                                                                                                                                                                                                                                     |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `docker-compose.prod.yml` | **Production deployment.** Connector + BLS, secure by default.                                                                                                                                                                                                                                                                                              |
-| `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, ATOR testnet, the standalone-mode E2E test profiles (`standalone-e2e`, `standalone-ator-public`, `standalone-ator-p2p`, `standalone-allowlist`), and the `app-behind-terminator` profile (see [Local "App behind the Terminator"](#local-app-behind-the-terminator-issue-221)). Not for production use. |
+| Compose file              | Purpose                                                                                                                                                                                                                                                                                      |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker-compose.prod.yml` | **Production deployment.** Connector + BLS, secure by default.                                                                                                                                                                                                                               |
+| `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, the standalone-mode E2E test profiles (`standalone-e2e`, `standalone-allowlist`), and the `app-behind-terminator` profile (see [Local "App behind the Terminator"](#local-app-behind-the-terminator-issue-221)). Not for production use. |
 
 ### Production Deployment: Standalone Connector + BLS
 
@@ -877,52 +832,6 @@ docker compose -f docker-compose.prod.yml logs -f bls
 
 That's the whole integration. The connector handles ILP routing, settlement, claim validation, transport, and admin APIs. Your BLS handles the part that matters to your application: _what do we do with this payment?_
 
-### Enabling ATOR Transport (Public Anyone Network)
-
-Route the connector's BTP WebSocket traffic through the public Anyone Protocol network for sender-side anonymity. This uses SOCKS5 egress against the public Anyone proxies — no additional containers required.
-
-**Step 1 — Uncomment the transport block** in `config/connector.prod.yaml`:
-
-```yaml
-transport:
-  type: socks5
-  managed: false
-  socksProxy: socks5h://5.78.181.0:9052
-  externalUrl: ws://placeholder
-```
-
-**Step 2 — Restart the connector**
-
-```bash
-docker compose -f docker-compose.prod.yml up -d --force-recreate connector
-
-# Verify transport is live + healthy:
-curl -s http://127.0.0.1:3100/health
-# The connector's health endpoint (inside its container) will report:
-#   transport: { type: 'socks5', healthy: true }
-# once the SOCKS5 probe to the public proxy succeeds.
-```
-
-**Changing regions / using your own proxy.** The `socksProxy` field takes any `socks5h://host:port` URL. The Anyone team publishes three public proxies (Oregon, Nürnberg, Warsaw) — swap the URL to the one geographically closest to your connector:
-
-```yaml
-# Option A — Oregon, USA
-socksProxy: socks5h://5.78.181.0:9052
-
-# Option B — Nürnberg, Germany
-socksProxy: socks5h://157.90.113.23:9052
-
-# Option C — Warsaw, Poland
-socksProxy: socks5h://57.128.249.250:9052
-
-# Option D — Your own anon-client sidecar
-socksProxy: socks5h://my-anon-sidecar:9050
-```
-
-The authoritative list of public proxies is at <https://docs.anyone.io/connect/public-proxies>. If a proxy becomes unavailable, pick another from that page and restart the connector.
-
-**Peer-to-peer ATOR routing** (both ends of a BTP link anonymized via hidden services) is a more advanced topology — see `docker compose --profile standalone-ator-p2p` in [`docker-compose.yml`](docker-compose.yml) and [`test/integration/standalone-ator-public-p2p-container-e2e.test.ts`](packages/connector/test/integration/standalone-ator-public-p2p-container-e2e.test.ts) for a working reference implementation.
-
 ### Troubleshooting
 
 ```bash
@@ -957,12 +866,12 @@ The "hello-world" of deploying an app behind the connector locally: one command 
 
 **Four services** (compose profile `app-behind-terminator` in `docker-compose.yml`):
 
-| Service      | Role                               | Host-published port              | Notes                                                                                           |
-| ------------ | ---------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `anvil`      | EVM devnet + deployed contracts    | `127.0.0.1:8545`                 | Reused from the `evm` profile.                                                                  |
-| `faucet`     | ETH/USDC faucet                    | `127.0.0.1:3500`                 | Reused from the `evm` profile.                                                                  |
-| `terminator` | Standalone connector-as-terminator | `127.0.0.1:3000` (`POST /ilp`)   | Admin API (8081) is **not** published. Config: `scripts/app-behind-terminator/terminator.yaml`. |
-| `relay`      | The oblivious app (relay#24)       | `127.0.0.1:7100` (Nostr WS read) | Paid-write store port (`3100`, `POST /write`) is **not** published.                             |
+| Service      | Role                                                     | Host-published port              | Notes                                                                                           |
+| ------------ | -------------------------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `anvil`      | EVM devnet + deployed contracts                          | `127.0.0.1:8545`                 | Reused from the `evm` profile.                                                                  |
+| `faucet`     | ETH/USDC faucet                                          | `127.0.0.1:3500`                 | Reused from the `evm` profile.                                                                  |
+| `terminator` | Standalone connector-as-terminator                       | `127.0.0.1:3000` (`POST /ilp`)   | Admin API (8081) is **not** published. Config: `scripts/app-behind-terminator/terminator.yaml`. |
+| `relay`      | The oblivious app (`ghcr.io/toon-protocol/relay:latest`) | `127.0.0.1:7100` (Nostr WS read) | Paid-write store port (`3100`, `POST /write`) is **not** published.                             |
 
 **One command up / down**
 
@@ -999,10 +908,10 @@ Free reads do **not** go through the terminator at all. Clients connect directly
 
 **Overriding the relay image**
 
-The decoupled relay image is separate, not-yet-published work. It must run the `relay` CLI entrypoint in oblivious mode (`TOON_OBLIVIOUS_MODE=true`); the existing `bls` Dockerfile runs the embedded, non-oblivious entrypoint and will not work here. Reference it via the `RELAY_IMAGE` env override (defaults to the not-yet-published `ghcr.io/toon-protocol/relay:oblivious`):
+The relay image is built from the separate relay repo and published as `ghcr.io/toon-protocol/relay:latest` (the compose default). Its entrypoint is the `relay` CLI, which runs as a standalone oblivious read/write relay out of the box. Pin a specific build via the `RELAY_IMAGE` env override:
 
 ```bash
-RELAY_IMAGE=ghcr.io/your-org/relay:dev make app-up
+RELAY_IMAGE=ghcr.io/toon-protocol/relay:sha-b8ec120 make app-up
 ```
 
 **Smoke test**
@@ -1011,7 +920,7 @@ RELAY_IMAGE=ghcr.io/your-org/relay:dev make app-up
 make app-test
 ```
 
-The terminator + anvil + faucet portions (compose-up, terminator health, AC2 negative-path assertions — the relay's write port is unreachable from the host, and an unpaid `POST /ilp` is rejected) always run. The full paid-write round-trip is **skipped with a clear message** unless a real `RELAY_IMAGE` is supplied (the relay app does not exist in this repo yet).
+Under `APP_BEHIND_TERMINATOR=1` the full suite runs against the real relay image: AC1 (compose-up + terminator health), AC2 (the relay's write port is unreachable from the host, and an unpaid `POST /ilp` is rejected), and AC3 (the full paid-write round-trip — a signed payment-channel claim rides the `POST /ilp` edge, the terminator reverse-proxies the write to the relay's `POST /write`, and the stored event is read back over the free Nostr WS).
 
 ## Development
 
@@ -1069,15 +978,14 @@ Docker Compose targets (`make anvil-up`, `make solana-up`, `make mina-up`) work 
 
 ## Documentation
 
-| Guide                                             | Description                                                       |
-| ------------------------------------------------- | ----------------------------------------------------------------- |
-| [Configuration Examples](examples/README.md)      | YAML config schema and example files                              |
-| [Connector Package](packages/connector/README.md) | Implementation reference, API, and `chainProviders` config        |
-| [ATOR Overlay Transport](docs/ator-transport.md)  | Privacy transport: setup, config, monitoring, and troubleshooting |
-| [Solana Deployment](docs/solana-deployment.md)    | Solana program deployment and devnet testing                      |
-| [Mina Deployment](docs/mina-deployment.md)        | Mina zkApp deployment and lightnet testing                        |
-| [Changelog](CHANGELOG.md)                         | Version history and release notes                                 |
-| [Contributing](CONTRIBUTING.md)                   | Contribution guidelines                                           |
+| Guide                                             | Description                                                |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| [Configuration Examples](examples/README.md)      | YAML config schema and example files                       |
+| [Connector Package](packages/connector/README.md) | Implementation reference, API, and `chainProviders` config |
+| [Solana Deployment](docs/solana-deployment.md)    | Solana program deployment and devnet testing               |
+| [Mina Deployment](docs/mina-deployment.md)        | Mina zkApp deployment and lightnet testing                 |
+| [Changelog](CHANGELOG.md)                         | Version history and release notes                          |
+| [Contributing](CONTRIBUTING.md)                   | Contribution guidelines                                    |
 
 ## Contributing
 
