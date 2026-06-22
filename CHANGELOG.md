@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.22.0](https://github.com/toon-protocol/connector/compare/v3.21.0...v3.22.0) (2026-06-22)
+
+### Features
+
+- **transport:** ILP-over-HTTP egress (epic-38 story 38.1) ([#227](https://github.com/toon-protocol/connector/issues/227)) ([e15da50](https://github.com/toon-protocol/connector/commit/e15da50a96426e397ff76a468142b52132839cd3))
+
 ## [3.21.0](https://github.com/toon-protocol/connector/compare/v3.20.2...v3.21.0) (2026-06-22)
 
 ### Features
