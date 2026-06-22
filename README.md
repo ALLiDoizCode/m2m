@@ -962,7 +962,7 @@ The "hello-world" of deploying an app behind the connector locally: one command 
 | `anvil`      | EVM devnet + deployed contracts    | `127.0.0.1:8545`                 | Reused from the `evm` profile.                                                                  |
 | `faucet`     | ETH/USDC faucet                    | `127.0.0.1:3500`                 | Reused from the `evm` profile.                                                                  |
 | `terminator` | Standalone connector-as-terminator | `127.0.0.1:3000` (`POST /ilp`)   | Admin API (8081) is **not** published. Config: `scripts/app-behind-terminator/terminator.yaml`. |
-| `relay`      | The oblivious app                  | `127.0.0.1:7000` (Nostr WS read) | Paid-write store port (`8088`) is **not** published.                                            |
+| `relay`      | The oblivious app (relay#24)       | `127.0.0.1:7100` (Nostr WS read) | Paid-write store port (`3100`, `POST /write`) is **not** published.                             |
 
 **One command up / down**
 
@@ -974,7 +974,7 @@ make app-down    # tear down
 
 **The relay is reachable ONLY through the terminator for paid writes**
 
-The relay's paid-write store port (`8088`) is **never published** to the host — only the terminator dials it over the compose network by service name (`http://relay:8088`, set as the route's `upstream` in `terminator.yaml`). So a paid write MUST flow through the terminator:
+The relay's paid-write store port (`3100`, oblivious-mode `POST /write`, per relay#24) is **never published** to the host — only the terminator dials it over the compose network by service name (`http://relay:3100`, set as the route's `upstream` in `terminator.yaml`). So a paid write MUST flow through the terminator:
 
 ```bash
 # A paid write enters at the terminator's POST /ilp edge. The ILP PREPARE
@@ -995,11 +995,11 @@ In production this is what `h402Fetch` drives for you; the `curl` above is the u
 
 **Free reads stay on the relay's Nostr WS**
 
-Free reads do **not** go through the terminator at all. Clients connect directly to the relay's Nostr WS read port, published at `ws://127.0.0.1:7000`. Only _paid writes_ are gated by the terminator.
+Free reads do **not** go through the terminator at all. Clients connect directly to the relay's Nostr WS read port, published at `ws://127.0.0.1:7100`. Only _paid writes_ are gated by the terminator.
 
 **Overriding the relay image**
 
-The decoupled relay image is separate, not-yet-published work. Reference it via the `RELAY_IMAGE` env override (defaults to `ghcr.io/toon-protocol/relay:latest`):
+The decoupled relay image is separate, not-yet-published work. It must run the `relay` CLI entrypoint in oblivious mode (`TOON_OBLIVIOUS_MODE=true`); the existing `bls` Dockerfile runs the embedded, non-oblivious entrypoint and will not work here. Reference it via the `RELAY_IMAGE` env override (defaults to the not-yet-published `ghcr.io/toon-protocol/relay:oblivious`):
 
 ```bash
 RELAY_IMAGE=ghcr.io/your-org/relay:dev make app-up

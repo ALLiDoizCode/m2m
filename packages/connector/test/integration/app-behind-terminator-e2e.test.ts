@@ -10,7 +10,7 @@
  *
  *   host ─curl/h402Fetch─▶ POST /ilp (3000) ─▶ terminator ─▶ HttpProxyHandler
  *                                                              ▼
- *                                              upstream http://relay:8088
+ *                                              upstream http://relay:3100
  *                                                              ▼
  *                                                         relay (app)
  *
@@ -27,7 +27,7 @@
  * Gate: APP_BEHIND_TERMINATOR=1
  *
  * Why no relay in the default compose-up: the default `RELAY_IMAGE`
- * (ghcr.io/toon-protocol/relay:latest) is not published, so a `--wait` on the
+ * (ghcr.io/toon-protocol/relay:oblivious) is not published, so a `--wait` on the
  * `relay` service would hang/fail. We therefore bring up ONLY
  * `terminator anvil faucet` here and start `relay` only when a real image is
  * supplied via `RELAY_IMAGE` (which also unlocks the AC3 round-trip).
@@ -49,7 +49,7 @@ const describeApp = RUN ? describe : describe.skip;
 // A real relay image unlocks the AC3 paid round-trip. The default points at the
 // not-yet-published GHCR image; presence of an explicit override (any value
 // other than the default) means an operator has wired a real relay.
-const DEFAULT_RELAY_IMAGE = 'ghcr.io/toon-protocol/relay:latest';
+const DEFAULT_RELAY_IMAGE = 'ghcr.io/toon-protocol/relay:oblivious';
 const RELAY_IMAGE = process.env.RELAY_IMAGE;
 const HAVE_REAL_RELAY = Boolean(RELAY_IMAGE && RELAY_IMAGE !== DEFAULT_RELAY_IMAGE);
 
@@ -66,8 +66,11 @@ const ANVIL_RPC_URL = 'http://127.0.0.1:8545';
 const FAUCET_HEALTH_URL = 'http://127.0.0.1:3500/health';
 
 // NOT published — only the terminator dials it over the compose network. The
-// host must NOT be able to reach it (this is AC2's posture).
-const RELAY_WRITE_PORT = 8088;
+// host must NOT be able to reach it (this is AC2's posture). Per relay#24 the
+// oblivious-mode store port is 3100 (`TOON_BLS_PORT`, `POST /write`); the free-read
+// Nostr WS port 7100 (`TOON_RELAY_PORT`) IS published.
+const RELAY_WRITE_PORT = 3100;
+const RELAY_WS_READ_PORT = 7100;
 
 async function compose(...args: string[]): Promise<void> {
   await execFileAsync('docker', [...PROFILE_ARGS, ...args], {
@@ -248,17 +251,27 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
   (HAVE_REAL_RELAY ? it : it.skip)(
     'AC3: a paid POST /ilp round-trips → FULFILL and the relay stores the write',
     async () => {
-      // SCAFFOLD: a real implementation signs a payment-channel claim for the
-      // terminator's channel (via PerPacketClaimService, as in
-      // ilp-http-settlement-e2e.test.ts), attaches it as the
-      // `ILP-Payment-Channel-Claim` header on a paid POST /ilp, and asserts:
-      //   1. the terminator returns an ILP FULFILL, and
-      //   2. the relay actually stored the write (queried over its WS read port).
-      //
-      // This requires the decoupled relay's store/read contract, which is not
-      // yet published. The test is unlocked by supplying a real RELAY_IMAGE.
+      // SCAFFOLD — the relay store/read contract is now PINNED from relay#24
+      // (merged); the only remaining blocker is a published oblivious-capable
+      // relay image (see compose `relay` service note). Concrete steps:
+      //   1. Sign a payment-channel claim for the terminator's channel (via
+      //      PerPacketClaimService, as in ilp-http-settlement-e2e.test.ts).
+      //   2. Build the inner HTTP envelope the terminator will reverse-proxy:
+      //      request-line `POST /write`, `Content-Type: application/json`, body
+      //      `{ "event": <signed NostrEvent kind:1> }` (relay#24 store contract).
+      //   3. POST /ilp to the terminator edge with that envelope as the PREPARE
+      //      `data`, addressed under `g.terminator.relay`, claim attached via the
+      //      `ILP-Payment-Channel-Claim` header. Assert the terminator returns an
+      //      ILP FULFILL and the proxied 200 body contains `eventId == event.id`.
+      //   4. Verify storage over FREE reads: open `ws://127.0.0.1:${RELAY_WS_READ_PORT}`,
+      //      send `["REQ","ac3",{"kinds":[1]}]`, read until `["EOSE","ac3"]`, and
+      //      assert an `["EVENT","ac3",<toonString>]` whose <toonString> contains
+      //      `id: <event.id>` (relay#24 emits NIP-01 EVENT[2] as a TOON-encoded
+      //      string, not a JSON object — substring-match, do not JSON.parse).
       throw new Error(
-        'AC3 paid round-trip not yet implemented: needs the decoupled relay store/read contract'
+        `AC3 paid round-trip not yet runnable: needs a published oblivious relay image ` +
+          `(store port ${RELAY_WRITE_PORT} POST /write, WS read ${RELAY_WS_READ_PORT}). ` +
+          `Contract pinned from relay#24; supply a real RELAY_IMAGE to enable.`
       );
     }
   );

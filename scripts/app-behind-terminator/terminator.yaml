@@ -9,7 +9,7 @@
 #
 #   host ─curl/h402Fetch─▶ POST /ilp (3000) ─▶ terminator ─▶ HttpProxyHandler
 #                                                              │
-#                                              upstream: http://relay:8088
+#                                              upstream: http://relay:3100
 #                                                              ▼
 #                                                         relay (app)
 #
@@ -79,14 +79,16 @@ chainProviders:
 peers: []
 
 # ── Routes ──────────────────────────────────────────────────────────────────
-# ONE terminated route (issue #218 fields). `upstream` points at the relay over
-# the compose network by service name — the host can never reach `relay:8088`
-# directly (that port is NOT published), which is what enforces AC2: paid writes
-# MUST flow through the terminator.
+# ONE terminated route (issue #218 fields). `upstream` points at the relay's
+# oblivious-mode HTTP store port (3100, per relay#24) over the compose network by
+# service name — the host can never reach `relay:3100` directly (that port is NOT
+# published), which is what enforces AC2: paid writes MUST flow through the
+# terminator. The store endpoint (`POST /write`, body `{event}`) is carried in the
+# forwarded HTTP envelope; this only needs the base host:port.
 routes:
   - prefix: g.terminator.relay
     nextHop: terminator
-    upstream: http://relay:8088
+    upstream: http://relay:3100
     price: '1000'
     chains:
       - evm
