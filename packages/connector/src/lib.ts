@@ -114,3 +114,26 @@ export type {
   IlpHttpAdapterDeps,
 } from './http/ilp-http-adapter';
 export type { PeerSecretDecision } from './auth/peer-secret-resolver';
+
+// RFC 9421 claim↔request binding (#220): net-new verifier/signer modules.
+// NOT yet wired into ilp-http-adapter.ts — that integration is gated on #218's
+// route-config and is done at merge time by the project lead.
+export {
+  verify as verifyRfc9421Signature,
+  computeContentDigest,
+  verifyContentDigest,
+  buildSignatureBase,
+  signRequest as signRfc9421Request,
+  publicKeyToKeyid,
+  COVERED_COMPONENTS as RFC9421_COVERED_COMPONENTS,
+  PRICE_HEADER as TOON_PRICE_HEADER,
+  PRICE_HEADER_WIRE as TOON_PRICE_HEADER_WIRE,
+  SIGNATURE_ALG as RFC9421_SIGNATURE_ALG,
+} from './auth/rfc9421';
+export type {
+  VerifyResult as Rfc9421VerifyResult,
+  VerifyOptions as Rfc9421VerifyOptions,
+  VerifyFailureCode as Rfc9421VerifyFailureCode,
+  SignRequestInput as Rfc9421SignRequestInput,
+  SignedHeaders as Rfc9421SignedHeaders,
+} from './auth/rfc9421';
