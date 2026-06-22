@@ -83,6 +83,8 @@ export class AdminServer {
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
     getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
     registryStore?: import('./admin-api').RegistryPeerSink;
+    httpPeerEgress?: import('../transport/http-peer-transport').PeerEgress;
+    setPeerProtocol?: (peerId: string, protocol: 'btp' | 'ilp-http') => void;
   };
   private readonly _transportType: 'direct' | 'socks5';
 
@@ -135,6 +137,14 @@ export class AdminServer {
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
     getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
     registryStore?: import('./admin-api').RegistryPeerSink;
+    /**
+     * ILP-over-HTTP egress (Epic 38, Story 38.1). Forwarded to the admin router
+     * so `POST /admin/peers { peerProtocol: 'ilp-http' }` registers the peer
+     * with the HTTP egress instead of opening a BTP connection. Omitted by test
+     * fixtures / connectors built without HTTP egress.
+     */
+    httpPeerEgress?: import('../transport/http-peer-transport').PeerEgress;
+    setPeerProtocol?: (peerId: string, protocol: 'btp' | 'ilp-http') => void;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -174,6 +184,8 @@ export class AdminServer {
       setPeerRelation,
       getPeerRelation,
       registryStore,
+      httpPeerEgress,
+      setPeerProtocol,
     } = this._options;
 
     this._app = express();
@@ -205,6 +217,8 @@ export class AdminServer {
       setPeerRelation,
       getPeerRelation,
       registryStore,
+      httpPeerEgress,
+      setPeerProtocol,
     });
 
     this._app.use('/admin', adminRouter);

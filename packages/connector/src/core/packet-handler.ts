@@ -17,6 +17,8 @@ import { Logger, generateCorrelationId } from '../utils/logger';
 import { BTPClientManager } from '../btp/btp-client-manager';
 import { BTPServer } from '../btp/btp-server';
 import { BTPConnectionError, BTPAuthenticationError } from '../btp/btp-client';
+import type { PeerEgress } from '../transport/http-peer-transport';
+import { HttpPeerConnectionError, HttpPeerTimeoutError } from '../transport/http-peer-transport';
 import { AccountManager } from '../settlement/account-manager';
 import {
   SettlementConfig,
@@ -120,6 +122,22 @@ export class PacketHandler {
    * {@link setPeerRelation}.
    */
   private readonly peerRelations: Map<string, PeerRelation> = new Map();
+
+  /**
+   * Per-next-hop packet protocol (Epic 38, Story 38.1). Consulted by
+   * {@link forwardToNextHop} to dispatch BTP vs ILP-over-HTTP egress. A peer
+   * absent from this map (or `'btp'`) forwards via BTP — preserving the
+   * pre-Epic-38 behavior byte-for-byte. Populated by ConnectorNode from startup
+   * config and runtime peer registration via {@link setPeerProtocol}.
+   */
+  private readonly peerProtocols: Map<string, 'btp' | 'ilp-http'> = new Map();
+
+  /**
+   * ILP-over-HTTP egress manager (Epic 38, Story 38.1). Null until wired via
+   * {@link setHttpEgress}. Used only for peers whose `peerProtocol` is
+   * `'ilp-http'`; BTP peers never touch it.
+   */
+  private httpEgress: PeerEgress | null = null;
 
   /**
    * Account manager for settlement recording (optional)
@@ -310,6 +328,37 @@ export class PacketHandler {
    */
   private requiresSettlementClaim(peerId: string): boolean {
     return this.peerRelations.get(peerId) !== 'child';
+  }
+
+  /**
+   * Wire the ILP-over-HTTP egress manager (Epic 38, Story 38.1). Called once by
+   * ConnectorNode during init. Required before any `'ilp-http'` peer can be
+   * forwarded to; an `ilp-http` peer with no egress wired rejects with T00.
+   */
+  setHttpEgress(httpEgress: PeerEgress): void {
+    this.httpEgress = httpEgress;
+  }
+
+  /**
+   * Record the packet protocol for a next-hop peer (Epic 38, Story 38.1).
+   * `'ilp-http'` routes forwards through {@link httpEgress}; `'btp'` (default)
+   * keeps the legacy BTP path. Called by ConnectorNode for each configured peer
+   * at startup and on every runtime registration.
+   */
+  setPeerProtocol(peerId: string, protocol: 'btp' | 'ilp-http'): void {
+    this.peerProtocols.set(peerId, protocol);
+    this.logger.info(
+      { event: 'peer_protocol_set', peerId, protocol },
+      `Peer protocol set: ${peerId} -> ${protocol}`
+    );
+  }
+
+  /**
+   * Current packet protocol for `peerId`, or `undefined` (treated as `'btp'`)
+   * when the peer was registered without an explicit protocol.
+   */
+  getPeerProtocol(peerId: string): 'btp' | 'ilp-http' | undefined {
+    return this.peerProtocols.get(peerId);
   }
 
   /**
@@ -799,6 +848,14 @@ export class PacketHandler {
     correlationId: string,
     protocolData?: Array<{ protocolName: string; contentType: number; data: Buffer }>
   ): Promise<ILPFulfillPacket | ILPRejectPacket> {
+    // Epic 38, Story 38.1: dispatch on the peer's packet protocol BEFORE any BTP
+    // connectivity checks. An 'ilp-http' peer forwards via the HTTP egress and
+    // never touches the BTP client/server seam below. A 'btp' peer (the default
+    // when unset) takes the unchanged legacy path — AC5: byte-for-byte identical.
+    if (this.peerProtocols.get(nextHop) === 'ilp-http') {
+      return this.forwardViaHttp(packet, nextHop, correlationId, protocolData);
+    }
+
     this.logger.info(
       {
         correlationId,
@@ -915,6 +972,95 @@ export class PacketHandler {
           error: errorMessage,
         },
         'Unexpected error forwarding packet via BTP'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Forward a PREPARE to an ILP-over-HTTP peer (Epic 38, Story 38.1).
+   *
+   * Symmetric counterpart of {@link forwardToNextHop}'s BTP path: emits the
+   * `POST /ilp` the peer's {@link IlpHttpAdapter} ingress accepts and maps
+   * transport failures to ILP rejects identically to the BTP map:
+   * - connection error → T01 ({@link HttpPeerConnectionError}),
+   * - timeout → R00 ({@link HttpPeerTimeoutError}),
+   * - missing egress wiring → T00 (misconfiguration).
+   *
+   * @returns The peer's FULFILL/REJECT (HTTP-non-2xx already synthesized to a
+   *   reject inside the egress manager).
+   */
+  private async forwardViaHttp(
+    packet: ILPPreparePacket,
+    nextHop: string,
+    correlationId: string,
+    protocolData?: Array<{ protocolName: string; contentType: number; data: Buffer }>
+  ): Promise<ILPFulfillPacket | ILPRejectPacket> {
+    this.logger.info(
+      {
+        correlationId,
+        event: 'http_forward',
+        destination: packet.destination,
+        amount: packet.amount.toString(),
+        peerId: nextHop,
+      },
+      'Forwarding packet to peer via ILP-over-HTTP'
+    );
+
+    if (!this.httpEgress) {
+      this.logger.error(
+        { correlationId, event: 'http_egress_unwired', peerId: nextHop },
+        'ILP-over-HTTP egress not configured but peer requires it'
+      );
+      return this.generateReject(
+        ILPErrorCode.T00_INTERNAL_ERROR,
+        `ILP-over-HTTP egress not configured for peer ${nextHop}`,
+        this.nodeId
+      );
+    }
+
+    try {
+      const response = await this.httpEgress.sendToPeer(nextHop, packet, protocolData);
+      this.logger.info(
+        {
+          correlationId,
+          event: 'http_forward_success',
+          peerId: nextHop,
+          responseType: response.type,
+        },
+        'Received response from peer via ILP-over-HTTP'
+      );
+      return response;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      if (error instanceof HttpPeerTimeoutError) {
+        this.logger.error(
+          { correlationId, event: 'http_timeout', peerId: nextHop, error: errorMessage },
+          'ILP-over-HTTP packet send timeout'
+        );
+        return this.generateReject(
+          ILPErrorCode.R00_TRANSFER_TIMED_OUT,
+          `HTTP timeout to ${nextHop}: ${errorMessage}`,
+          this.nodeId
+        );
+      }
+
+      if (error instanceof HttpPeerConnectionError) {
+        this.logger.error(
+          { correlationId, event: 'http_connection_error', peerId: nextHop, error: errorMessage },
+          'ILP-over-HTTP connection failed'
+        );
+        return this.generateReject(
+          ILPErrorCode.T01_PEER_UNREACHABLE,
+          `HTTP connection to ${nextHop} failed: ${errorMessage}`,
+          this.nodeId
+        );
+      }
+
+      this.logger.error(
+        { correlationId, event: 'http_forward_error', peerId: nextHop, error: errorMessage },
+        'Unexpected error forwarding packet via ILP-over-HTTP'
       );
       throw error;
     }

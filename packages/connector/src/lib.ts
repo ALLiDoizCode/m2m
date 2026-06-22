@@ -114,3 +114,12 @@ export type {
   IlpHttpAdapterDeps,
 } from './http/ilp-http-adapter';
 export type { PeerSecretDecision } from './auth/peer-secret-resolver';
+
+// ILP-over-HTTP egress (Epic 38, Story 38.1)
+export {
+  HttpPeerClientManager,
+  HttpPeerConnectionError,
+  HttpPeerTimeoutError,
+  DEFAULT_ILP_HTTP_EGRESS_PATH,
+} from './transport/http-peer-transport';
+export type { PeerEgress, HttpPeer } from './transport/http-peer-transport';

@@ -373,6 +373,9 @@ describe('ConnectorNode branch coverage', () => {
       setSettlement: jest.fn(),
       setPeerRelation: jest.fn(),
       getPeerRelation: jest.fn().mockReturnValue(undefined),
+      setHttpEgress: jest.fn(),
+      setPeerProtocol: jest.fn(),
+      getPeerProtocol: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {

@@ -160,8 +160,48 @@ export interface PeerConfig {
    * connector's global `transport.type` is used. A peer with `transport:
    * 'socks5'` on a `transport.type !== 'socks5'` connector is rejected at
    * config-load time (ConfigurationError).
+   *
+   * This is the *network-agent* axis (direct TCP vs SOCKS5/Tor) and is
+   * ORTHOGONAL to {@link peerProtocol} (the packet protocol, BTP vs ILP-HTTP):
+   * an `ilp-http` peer may still egress through SOCKS5.
    */
   transport?: 'direct' | 'socks5';
+
+  /**
+   * Packet protocol used to FORWARD to this peer (Epic 38, Story 38.1).
+   *
+   * - `'btp'` (default) — dial the peer's BTP WebSocket at {@link url} (legacy,
+   *   byte-for-byte unchanged behavior).
+   * - `'ilp-http'` — POST OER PREPAREs to the peer's ILP-over-HTTP ingress
+   *   (RFC-0035). Requires {@link httpUrl}; {@link url} is unused for egress.
+   *
+   * Defaults to `'btp'` when omitted, so existing configs are unaffected.
+   * Orthogonal to {@link transport} (the network-agent axis).
+   */
+  peerProtocol?: 'btp' | 'ilp-http';
+
+  /**
+   * http(s) endpoint of this peer's ILP-over-HTTP ingress. Required when
+   * `peerProtocol === 'ilp-http'`. The egress path (default `/ilp`, see
+   * {@link httpPath}) is appended to this origin.
+   *
+   * Example: `https://peer.example.com:3000`
+   */
+  httpUrl?: string;
+
+  /**
+   * Optional path override for ILP-over-HTTP egress. Defaults to `/ilp`
+   * (the real shipped ingress path). Only meaningful for `ilp-http` peers.
+   */
+  httpPath?: string;
+
+  /**
+   * Optional fixed per-request timeout (ms) for ILP-over-HTTP egress. When
+   * omitted, the timeout is derived from each packet's `expiresAt` (the
+   * protocol-level deadline), mirroring the BTP egress path. Only meaningful
+   * for `ilp-http` peers.
+   */
+  httpTimeoutMs?: number;
 
   /**
    * ILP peering relationship for this peer. Governs whether value-bearing
@@ -1612,6 +1652,22 @@ export type PeerRegistrationRequest = Omit<
 > & {
   /** Optional settlement configuration (connector-internal). */
   settlement?: AdminSettlementConfig;
+
+  /**
+   * Packet protocol for forwarding to this peer (Epic 38, Story 38.1).
+   * `'btp'` (default) dials the BTP WebSocket at `url`; `'ilp-http'` POSTs
+   * OER PREPAREs to {@link httpUrl}. See {@link PeerConfig.peerProtocol}.
+   */
+  peerProtocol?: 'btp' | 'ilp-http';
+
+  /** http(s) ingress endpoint; required when `peerProtocol === 'ilp-http'`. */
+  httpUrl?: string;
+
+  /** Optional ILP-over-HTTP egress path override (default `/ilp`). */
+  httpPath?: string;
+
+  /** Optional fixed ILP-over-HTTP egress timeout (ms); else derived from `expiresAt`. */
+  httpTimeoutMs?: number;
 };
 
 /** Response from ConnectorNode.registerPeer() and listPeers() */

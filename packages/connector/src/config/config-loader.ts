@@ -479,10 +479,19 @@ export class ConfigLoader {
         );
       }
 
-      if (!peer.url) {
-        throw new ConfigurationError(`Peer ${peer.id} missing required field: url`);
-      }
-      if (typeof peer.url !== 'string') {
+      // `url` is the BTP WebSocket endpoint and is required for BTP peers. An
+      // `ilp-http` peer egresses via `httpUrl` instead, so `url` may be omitted
+      // for it (validated below once peerProtocol is known).
+      if (peer.peerProtocol !== 'ilp-http') {
+        if (!peer.url) {
+          throw new ConfigurationError(`Peer ${peer.id} missing required field: url`);
+        }
+        if (typeof peer.url !== 'string') {
+          throw new ConfigurationError(
+            `Invalid type for peer.url: expected string, got ${typeof peer.url}`
+          );
+        }
+      } else if (peer.url !== undefined && typeof peer.url !== 'string') {
         throw new ConfigurationError(
           `Invalid type for peer.url: expected string, got ${typeof peer.url}`
         );
@@ -497,12 +506,40 @@ export class ConfigLoader {
         );
       }
 
-      // Validate WebSocket URL format
-      const wsUrlPattern = /^wss?:\/\/.+:\d+$/;
-      if (!wsUrlPattern.test(peer.url)) {
+      // Per-peer packet protocol (Epic 38, Story 38.1). `'btp'` (default) dials
+      // the BTP WebSocket at `url`; `'ilp-http'` POSTs OER PREPAREs to `httpUrl`.
+      if (
+        peer.peerProtocol !== undefined &&
+        peer.peerProtocol !== 'btp' &&
+        peer.peerProtocol !== 'ilp-http'
+      ) {
         throw new ConfigurationError(
-          `Invalid WebSocket URL for peer ${peer.id}: ${peer.url}. Must start with ws:// or wss:// and include port.`
+          `peer '${peer.id}': invalid peerProtocol value '${peer.peerProtocol}' (must be 'btp' or 'ilp-http')`
         );
+      }
+
+      if (peer.peerProtocol === 'ilp-http') {
+        // ILP-over-HTTP egress requires an http(s) endpoint; `url` (the BTP
+        // WebSocket) is unused for this peer, so the ws:// check is skipped.
+        if (!peer.httpUrl || typeof peer.httpUrl !== 'string') {
+          throw new ConfigurationError(
+            `peer '${peer.id}': peerProtocol 'ilp-http' requires httpUrl (http(s) endpoint)`
+          );
+        }
+        const httpUrlPattern = /^https?:\/\/.+/;
+        if (!httpUrlPattern.test(peer.httpUrl)) {
+          throw new ConfigurationError(
+            `Invalid httpUrl for peer ${peer.id}: ${peer.httpUrl}. Must start with http:// or https://.`
+          );
+        }
+      } else {
+        // Validate WebSocket URL format (BTP peers only).
+        const wsUrlPattern = /^wss?:\/\/.+:\d+$/;
+        if (!wsUrlPattern.test(peer.url)) {
+          throw new ConfigurationError(
+            `Invalid WebSocket URL for peer ${peer.id}: ${peer.url}. Must start with ws:// or wss:// and include port.`
+          );
+        }
       }
 
       // Per-peer transport override (per-peer-transport tech spec, AC-12).

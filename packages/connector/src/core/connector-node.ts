@@ -49,6 +49,7 @@ import {
   type AnonFactoryOptions,
   type AnonSdkHandle,
 } from '../transport';
+import { HttpPeerClientManager, type HttpPeer } from '../transport/http-peer-transport';
 import { PaymentHandler, createPaymentHandlerAdapter } from './payment-handler';
 import {
   PeerConfig as SettlementPeerConfig,
@@ -114,6 +115,12 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _logger: Logger;
   private readonly _routingTable: RoutingTable;
   private readonly _btpClientManager: BTPClientManager;
+  /**
+   * ILP-over-HTTP egress manager (Epic 38, Story 38.1). Handles forwarding to
+   * peers configured with `peerProtocol: 'ilp-http'`. Consumes the same
+   * TransportProvider as BTP so SOCKS5/ATOR egress composes.
+   */
+  private readonly _httpPeerClientManager: HttpPeerClientManager;
   private readonly _packetHandler: PacketHandler;
   private readonly _btpServer: BTPServer;
   private readonly _healthServer: HealthServer;
@@ -278,6 +285,31 @@ export class ConnectorNode implements HealthStatusProvider {
       return effective === 'socks5' ? this._transportProvider!.createAgent(peer.url) : undefined;
     });
 
+    // ILP-over-HTTP egress (Epic 38, Story 38.1). Consumes a thin live-adapter
+    // TransportProvider so HTTP egress composes with SOCKS5/ATOR identically to
+    // the BTP agent factory above: `createAgent` returns a SOCKS agent only when
+    // the connector-level transport is 'socks5' (and a provider is wired), else
+    // undefined → HttpPeerClientManager falls back to its pooled keep-alive
+    // agent. The other TransportProvider methods are not used by the HTTP egress
+    // and delegate to the live provider (or no-op before start()).
+    const httpEgressTransport: TransportProvider = {
+      createAgent: (httpUrl: string) => {
+        if (this._transportType === 'socks5' && this._transportProvider) {
+          return this._transportProvider.createAgent(httpUrl);
+        }
+        return undefined;
+      },
+      getExternalUrl: () => this._transportProvider?.getExternalUrl() ?? '',
+      start: async () => {},
+      stop: async () => {},
+      healthCheck: async () => this._transportProvider?.healthCheck() ?? true,
+    };
+    this._httpPeerClientManager = new HttpPeerClientManager(
+      resolvedConfig.nodeId,
+      logger.child({ component: 'HttpPeerClientManager' }),
+      httpEgressTransport
+    );
+
     // Initialize packet handler
     this._packetHandler = new PacketHandler(
       this._routingTable,
@@ -285,6 +317,9 @@ export class ConnectorNode implements HealthStatusProvider {
       resolvedConfig.nodeId,
       logger.child({ component: 'PacketHandler' })
     );
+
+    // Wire the ILP-over-HTTP egress into the forwarding seam (Epic 38, Story 38.1).
+    this._packetHandler.setHttpEgress(this._httpPeerClientManager);
 
     // Initialize BTP server
     this._btpServer = new BTPServer(logger.child({ component: 'BTPServer' }), this._packetHandler);
@@ -326,6 +361,9 @@ export class ConnectorNode implements HealthStatusProvider {
       // Defaults to 'peer' so peers without an explicit relation keep requiring
       // a per-packet claim on value-bearing forwards (pre-issue-76 behavior).
       this._packetHandler.setPeerRelation(peer.id, peer.relation ?? 'peer');
+      // Seed the forwarding seam with each peer's packet protocol (Epic 38,
+      // Story 38.1). Defaults to 'btp' so omitted peers take the legacy path.
+      this._packetHandler.setPeerProtocol(peer.id, peer.peerProtocol ?? 'btp');
     }
     this._packetHandler.setIlpMetrics(this._ilpMetrics);
 
@@ -1529,6 +1567,11 @@ export class ConnectorNode implements HealthStatusProvider {
           // registrations to the shared registry so they survive a restart.
           getPeerRelation: (peerId) => this._packetHandler.getPeerRelation(peerId),
           registryStore: this._registryStore ?? undefined,
+          // Epic 38, Story 38.1: let POST /admin/peers register ilp-http peers
+          // with the HTTP egress and propagate the packet protocol to the seam.
+          httpPeerEgress: this._httpPeerClientManager,
+          setPeerProtocol: (peerId, protocol) =>
+            this._packetHandler.setPeerProtocol(peerId, protocol),
         });
 
         await this._adminServer.start();
@@ -1552,6 +1595,19 @@ export class ConnectorNode implements HealthStatusProvider {
       // Convert PeerConfig to Peer format
       const peerConnections: Promise<void>[] = [];
       for (const peerConfig of this._config.peers) {
+        // Epic 38, Story 38.1: an 'ilp-http' peer registers with the HTTP egress
+        // manager (connectionless POST /ilp) instead of opening a BTP socket.
+        if (peerConfig.peerProtocol === 'ilp-http') {
+          const httpPeer: HttpPeer = {
+            id: peerConfig.id,
+            httpUrl: peerConfig.httpUrl!,
+            httpPath: peerConfig.httpPath,
+            authToken: peerConfig.authToken,
+            httpTimeoutMs: peerConfig.httpTimeoutMs,
+          };
+          peerConnections.push(this._httpPeerClientManager.addPeer(httpPeer));
+          continue;
+        }
         const peer: Peer = {
           id: peerConfig.id,
           url: peerConfig.url,
@@ -2413,12 +2469,17 @@ export class ConnectorNode implements HealthStatusProvider {
       );
     }
 
+    // Epic 38, Story 38.1: packet protocol selects the egress family. Validated
+    // up front so URL validation below can branch (BTP requires ws://; ILP-HTTP
+    // requires httpUrl).
+    const peerProtocol = config.peerProtocol ?? 'btp';
+    if (peerProtocol !== 'btp' && peerProtocol !== 'ilp-http') {
+      throw new Error(`Invalid peerProtocol: must be 'btp' or 'ilp-http' (got '${peerProtocol}')`);
+    }
+
     // Validate required fields
     if (!config.id || typeof config.id !== 'string') {
       throw new Error('Missing or invalid peer id');
-    }
-    if (!config.url || typeof config.url !== 'string') {
-      throw new Error('Missing or invalid peer url');
     }
     if (
       config.authToken === undefined ||
@@ -2428,16 +2489,29 @@ export class ConnectorNode implements HealthStatusProvider {
       throw new Error('authToken must be a string (can be empty for no auth)');
     }
 
-    // Validate URL format. Both the plain and TLS-wrapped WebSocket schemes are
-    // accepted: the plain scheme is required for the ATOR overlay transport
-    // (Epic 35), where .onion hosts are reached via SOCKS5 and the transport
-    // layer provides encryption, and is also appropriate for trusted
-    // local/internal networks. Production deployments over untrusted networks
-    // should use the TLS-wrapped scheme.
-    const PLAIN_WS_PREFIX = 'ws' + '://';
-    const SECURE_WS_PREFIX = 'wss' + '://';
-    if (!config.url.startsWith(PLAIN_WS_PREFIX) && !config.url.startsWith(SECURE_WS_PREFIX)) {
-      throw new Error(`URL must start with ${PLAIN_WS_PREFIX} or ${SECURE_WS_PREFIX}`);
+    if (peerProtocol === 'ilp-http') {
+      // ILP-over-HTTP egress: require an http(s) endpoint; the BTP `url` is unused.
+      if (!config.httpUrl || typeof config.httpUrl !== 'string') {
+        throw new Error("peerProtocol 'ilp-http' requires httpUrl (http(s) endpoint)");
+      }
+      if (!/^https?:\/\/.+/.test(config.httpUrl)) {
+        throw new Error('httpUrl must start with http:// or https://');
+      }
+    } else {
+      if (!config.url || typeof config.url !== 'string') {
+        throw new Error('Missing or invalid peer url');
+      }
+      // Validate URL format. Both the plain and TLS-wrapped WebSocket schemes are
+      // accepted: the plain scheme is required for the ATOR overlay transport
+      // (Epic 35), where .onion hosts are reached via SOCKS5 and the transport
+      // layer provides encryption, and is also appropriate for trusted
+      // local/internal networks. Production deployments over untrusted networks
+      // should use the TLS-wrapped scheme.
+      const PLAIN_WS_PREFIX = 'ws' + '://';
+      const SECURE_WS_PREFIX = 'wss' + '://';
+      if (!config.url.startsWith(PLAIN_WS_PREFIX) && !config.url.startsWith(SECURE_WS_PREFIX)) {
+        throw new Error(`URL must start with ${PLAIN_WS_PREFIX} or ${SECURE_WS_PREFIX}`);
+      }
     }
 
     // Validate per-peer transport against the connector-level transport type.
@@ -2519,45 +2593,73 @@ export class ConnectorNode implements HealthStatusProvider {
       }
     }
 
-    // Check if peer already exists (idempotent re-registration)
-    const existingPeers = this._btpClientManager.getPeerIds();
+    // Check if peer already exists (idempotent re-registration). Epic 38: an
+    // 'ilp-http' peer lives in the HTTP egress manager, not the BTP client map.
+    const existingPeers =
+      peerProtocol === 'ilp-http'
+        ? this._httpPeerClientManager.getPeerIds()
+        : this._btpClientManager.getPeerIds();
     const isUpdate = existingPeers.includes(config.id);
 
-    // Only add BTP peer on initial registration
+    // Only add the peer on initial registration
     if (!isUpdate) {
-      const peer: Peer = {
-        id: config.id,
-        url: config.url,
-        authToken: config.authToken,
-        connected: false,
-        lastSeen: new Date(),
-        transport: config.transport,
-      };
-      await this._btpClientManager.addPeer(peer);
-      // Story 37.2/37.3: prime metrics labels so runtime-added peers appear in both
-      // the Prometheus scrape (with zero counters) and /admin/metrics.json before
-      // their first packet.
-      this._ilpMetrics.registerPeer(config.id);
-      this._logger.info(
-        {
-          event: 'peer_registered',
-          peerId: config.id,
+      if (peerProtocol === 'ilp-http') {
+        const httpPeer: HttpPeer = {
+          id: config.id,
+          httpUrl: config.httpUrl!,
+          httpPath: config.httpPath,
+          authToken: config.authToken,
+          httpTimeoutMs: config.httpTimeoutMs,
+        };
+        await this._httpPeerClientManager.addPeer(httpPeer);
+        this._ilpMetrics.registerPeer(config.id);
+        this._logger.info(
+          { event: 'peer_registered', peerId: config.id, peerProtocol, httpUrl: config.httpUrl },
+          `Registered ILP-over-HTTP peer: ${config.id}`
+        );
+      } else {
+        const peer: Peer = {
+          id: config.id,
           url: config.url,
-          // `null` when inheriting the connector default — see addPeer for rationale.
-          transport: config.transport ?? null,
-        },
-        `Registered peer: ${config.id}`
-      );
+          authToken: config.authToken,
+          connected: false,
+          lastSeen: new Date(),
+          transport: config.transport,
+        };
+        await this._btpClientManager.addPeer(peer);
+        // Story 37.2/37.3: prime metrics labels so runtime-added peers appear in both
+        // the Prometheus scrape (with zero counters) and /admin/metrics.json before
+        // their first packet.
+        this._ilpMetrics.registerPeer(config.id);
+        this._logger.info(
+          {
+            event: 'peer_registered',
+            peerId: config.id,
+            url: config.url,
+            // `null` when inheriting the connector default — see addPeer for rationale.
+            transport: config.transport ?? null,
+          },
+          `Registered peer: ${config.id}`
+        );
+      }
     } else {
       this._logger.info(
         {
           event: 'peer_reregistered',
           peerId: config.id,
-          transport: this._btpClientManager.getPeerTransport(config.id) ?? null,
+          peerProtocol,
+          transport:
+            peerProtocol === 'ilp-http'
+              ? null
+              : (this._btpClientManager.getPeerTransport(config.id) ?? null),
         },
         `Re-registering peer: ${config.id}`
       );
     }
+
+    // Propagate the peer's packet protocol to the forwarding seam (Epic 38).
+    // Applied on both fresh and re-registration.
+    this._packetHandler.setPeerProtocol(config.id, peerProtocol);
 
     // Add routes if provided (explicit or auto-derived for a child peer)
     if (effectiveRoutes) {
@@ -2601,7 +2703,12 @@ export class ConnectorNode implements HealthStatusProvider {
     // Build PeerInfo response
     const routes = this._routingTable.getAllRoutes();
     const peerRoutes = routes.filter((r) => r.nextHop === config.id);
-    const connected = this._btpClientManager.isConnected(config.id);
+    // Epic 38: an 'ilp-http' peer is "connected" iff registered with the HTTP
+    // egress (HTTP is connectionless — reachability is only known at send time).
+    const connected =
+      peerProtocol === 'ilp-http'
+        ? this._httpPeerClientManager.isConnected(config.id)
+        : this._btpClientManager.isConnected(config.id);
 
     const peerInfo: PeerInfo = {
       id: config.id,

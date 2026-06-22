@@ -36,6 +36,7 @@ import {
 } from '../routing/relation-route-validator';
 import { BTPClientManager } from '../btp/btp-client-manager';
 import { Peer } from '../btp/btp-client';
+import type { PeerEgress, HttpPeer } from '../transport/http-peer-transport';
 import { ILPAddress, isValidILPAddress } from '@toon-protocol/shared';
 import {
   AdminSettlementConfig,
@@ -208,6 +209,21 @@ export interface AdminAPIConfig {
    * that the routing table does not see).
    */
   registryStore?: RegistryPeerSink;
+
+  /**
+   * Optional ILP-over-HTTP egress manager (Epic 38, Story 38.1). When provided,
+   * `POST /admin/peers` with `peerProtocol: 'ilp-http'` registers the peer here
+   * instead of opening a BTP connection. When omitted, an `ilp-http` request is
+   * rejected with HTTP 400 (the connector was built without HTTP egress).
+   */
+  httpPeerEgress?: PeerEgress;
+
+  /**
+   * Optional hook for propagating a peer's packet protocol to the forwarding
+   * seam (Epic 38). `POST /admin/peers` calls this with the peer id and its
+   * (defaulted) protocol so the PacketHandler dispatches BTP vs ILP-HTTP egress.
+   */
+  setPeerProtocol?: (peerId: string, protocol: 'btp' | 'ilp-http') => void;
 }
 
 /**
@@ -289,6 +305,22 @@ export interface AddPeerRequest {
    * {@link PeerRelation}.
    */
   relation?: PeerRelation;
+
+  /**
+   * Packet protocol for forwarding to this peer (Epic 38, Story 38.1).
+   * `'btp'` (default) dials the BTP WebSocket at `url`; `'ilp-http'` POSTs OER
+   * PREPAREs to {@link httpUrl}.
+   */
+  peerProtocol?: 'btp' | 'ilp-http';
+
+  /** http(s) ingress endpoint; required when `peerProtocol === 'ilp-http'`. */
+  httpUrl?: string;
+
+  /** Optional ILP-over-HTTP egress path override (default `/ilp`). */
+  httpPath?: string;
+
+  /** Optional fixed ILP-over-HTTP egress timeout (ms); else derived from `expiresAt`. */
+  httpTimeoutMs?: number;
 }
 
 /**
@@ -596,6 +628,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     setPeerRelation,
     getPeerRelation,
     registryStore,
+    httpPeerEgress,
+    setPeerProtocol,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -742,13 +776,20 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     try {
       const body = req.body as AddPeerRequest;
 
+      // Epic 38, Story 38.1: select egress family. Validated up front so URL
+      // validation can branch (BTP requires ws://; ILP-HTTP requires httpUrl).
+      const peerProtocol = body.peerProtocol ?? 'btp';
+      if (peerProtocol !== 'btp' && peerProtocol !== 'ilp-http') {
+        res.status(400).json({
+          error: 'Bad request',
+          message: `Invalid peerProtocol: must be 'btp' or 'ilp-http' (got '${peerProtocol}')`,
+        });
+        return;
+      }
+
       // Validate required fields
       if (!body.id || typeof body.id !== 'string') {
         res.status(400).json({ error: 'Bad request', message: 'Missing or invalid peer id' });
-        return;
-      }
-      if (!body.url || typeof body.url !== 'string') {
-        res.status(400).json({ error: 'Bad request', message: 'Missing or invalid peer url' });
         return;
       }
       if (
@@ -763,13 +804,41 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         return;
       }
 
-      // Validate URL format
-      if (!body.url.startsWith('ws://') && !body.url.startsWith('wss://')) {
-        res.status(400).json({
-          error: 'Bad request',
-          message: 'URL must start with ws:// or wss://',
-        });
-        return;
+      if (peerProtocol === 'ilp-http') {
+        if (!httpPeerEgress || !setPeerProtocol) {
+          res.status(400).json({
+            error: 'Bad request',
+            message: 'ILP-over-HTTP egress is not available on this connector',
+          });
+          return;
+        }
+        if (!body.httpUrl || typeof body.httpUrl !== 'string') {
+          res.status(400).json({
+            error: 'Bad request',
+            message: "peerProtocol 'ilp-http' requires httpUrl (http(s) endpoint)",
+          });
+          return;
+        }
+        if (!/^https?:\/\/.+/.test(body.httpUrl)) {
+          res.status(400).json({
+            error: 'Bad request',
+            message: 'httpUrl must start with http:// or https://',
+          });
+          return;
+        }
+      } else {
+        if (!body.url || typeof body.url !== 'string') {
+          res.status(400).json({ error: 'Bad request', message: 'Missing or invalid peer url' });
+          return;
+        }
+        // Validate URL format
+        if (!body.url.startsWith('ws://') && !body.url.startsWith('wss://')) {
+          res.status(400).json({
+            error: 'Bad request',
+            message: 'URL must start with ws:// or wss://',
+          });
+          return;
+        }
       }
 
       // Validate per-peer transport BEFORE the idempotent-re-reg short-circuit
@@ -811,8 +880,12 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         return;
       }
 
-      // Check if peer already exists (idempotent re-registration)
-      const existingPeers = btpClientManager.getPeerIds();
+      // Check if peer already exists (idempotent re-registration). Epic 38: an
+      // 'ilp-http' peer lives in the HTTP egress manager, not the BTP client map.
+      const existingPeers =
+        peerProtocol === 'ilp-http' && httpPeerEgress
+          ? httpPeerEgress.getPeerIds()
+          : btpClientManager.getPeerIds();
       const isUpdate = existingPeers.includes(body.id);
 
       // Validate routes if provided
@@ -869,30 +942,46 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         }
       }
 
-      // Only add BTP peer on initial registration (BTP connection doesn't change on re-registration)
+      // Only add the peer on initial registration (connection params don't
+      // change on re-registration).
       if (!isUpdate) {
-        const peer: Peer = {
-          id: body.id,
-          url: body.url,
-          authToken: body.authToken,
-          connected: false,
-          lastSeen: new Date(),
-          transport: body.transport,
-        };
-
-        await btpClientManager.addPeer(peer);
-
-        log.info(
-          {
-            event: 'admin_peer_added',
-            peerId: body.id,
+        if (peerProtocol === 'ilp-http' && httpPeerEgress) {
+          const httpPeer: HttpPeer = {
+            id: body.id,
+            httpUrl: body.httpUrl!,
+            httpPath: body.httpPath,
+            authToken: body.authToken,
+            httpTimeoutMs: body.httpTimeoutMs,
+          };
+          await httpPeerEgress.addPeer(httpPeer);
+          log.info(
+            { event: 'admin_peer_added', peerId: body.id, peerProtocol, httpUrl: body.httpUrl },
+            `Added ILP-over-HTTP peer: ${body.id}`
+          );
+        } else {
+          const peer: Peer = {
+            id: body.id,
             url: body.url,
-            // `null` when inheriting the connector default; explicit-null
-            // beats a `<default>` sentinel for log-shipper grep semantics.
-            transport: body.transport ?? null,
-          },
-          `Added peer: ${body.id}`
-        );
+            authToken: body.authToken,
+            connected: false,
+            lastSeen: new Date(),
+            transport: body.transport,
+          };
+
+          await btpClientManager.addPeer(peer);
+
+          log.info(
+            {
+              event: 'admin_peer_added',
+              peerId: body.id,
+              url: body.url,
+              // `null` when inheriting the connector default; explicit-null
+              // beats a `<default>` sentinel for log-shipper grep semantics.
+              transport: body.transport ?? null,
+            },
+            `Added peer: ${body.id}`
+          );
+        }
       } else {
         log.info(
           {
@@ -926,6 +1015,11 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       // re-registration so an operator can flip a peer's relation via re-POST.
       if (setPeerRelation) {
         setPeerRelation(body.id, body.relation ?? 'peer');
+      }
+
+      // Propagate the peer's packet protocol to the forwarding seam (Epic 38).
+      if (setPeerProtocol) {
+        setPeerProtocol(body.id, peerProtocol);
       }
 
       // Create/merge PeerConfig if settlement provided and settlementPeers available
