@@ -6,14 +6,40 @@
 # Let's Encrypt TLS for the public RPC endpoints.
 #
 # ── Required secret ──────────────────────────────────────────────────────────
-#   LINODE_CLI_TOKEN    Linode API token (Linodes + Domains R/W). The ONLY secret
-#                       needed — linode-cli reads it from this env var, and CI
-#                       generates an EPHEMERAL SSH key per run (nothing stored).
+#   LINODE_CLI_TOKEN    Linode API token (Linodes + Domains R/W). linode-cli reads
+#                       it from this env var; CI generates an EPHEMERAL SSH key per
+#                       run (nothing stored).
+# ── Optional secrets (cert preservation across rebuilds) ──────────────────────
+#   LINODE_OBJ_ACCESS_KEY / LINODE_OBJ_SECRET_KEY
+#                       Linode Object Storage keys. When set, the workflow backs up
+#                       the /etc/letsencrypt volume to an Object Storage bucket
+#                       after each deploy and RESTORES it before the next rebuild,
+#                       so a redeploy re-uses the existing cert instead of asking
+#                       Let's Encrypt for a fresh one. Without them a rebuild
+#                       re-issues the cert as before.
 #
 # ── Redeploy semantics ───────────────────────────────────────────────────────
-#   Re-running on an existing VM (same `label`) REBUILDS it: same Linode + IP
-#   preserved, disk wiped → fresh deterministic chains (anvil 0x5FbDB2…, Solana
-#   mint H8HSreUF… reproduce). That is the intended devnet reset. Pass
+#   Re-running on an existing VM (same `label`, same plan) REBUILDS it in place:
+#   same Linode + IP preserved, disk wiped → fresh deterministic chains (anvil
+#   0x5FbDB2…, Solana mint H8HSreUF… reproduce). That is the intended devnet
+#   reset for chain state.
+#
+#   CERTS ARE NO LONGER RE-ISSUED ON EVERY REBUILD. A rebuild wipes the cert
+#   volume, which previously made init-letsencrypt.sh request a NEW cert every
+#   time — repeatedly hitting Let's Encrypt's "5 duplicate certs / 7 days" limit
+#   and dropping the box to self-signed. Now:
+#     • the cert volume is BACKED UP to Object Storage after each deploy and
+#       RESTORED into the freshly-rebuilt box before bootstrap (when the OBJ_*
+#       secrets are configured), and
+#     • init-letsencrypt.sh SKIPS issuance whenever it finds a valid, non-self-
+#       signed, non-expiring cert for the domain — so the restored cert is reused
+#       and certbot only renews (no-op until <30 days to expiry).
+#   Net: routine redeploys reuse the cert; Let's Encrypt is contacted only for the
+#   FIRST issuance, a real renewal, a new domain/IP, or an explicit reset.
+#
+#   Pass `reset: true` to deliberately start CLEAN: the saved cert is NOT restored,
+#   so a brand-new cert is issued (use sparingly — it spends a cert). A plan change
+#   forces a recreate (delete + create; IP changes → new domain → new cert). Pass
 #   `ssh_pubkey` to also authorize your own key for manual debugging.
 #
 # ── DNS ──────────────────────────────────────────────────────────────────────
@@ -41,8 +67,18 @@ on:
         description: 'Linode plan (2GB ok — bootstrap adds swap for the one-time Rust builds)'
         default: 'g6-standard-1'
       label:
-        description: 'Linode label (persistent — rebuilt in place on re-run)'
+        description: 'Linode label (persistent — updated in place on re-run)'
         default: 'toon-devnet'
+      reset:
+        description: "Clean-slate REBUILD: don't restore the saved cert — issue a brand-new one (burns a Let's Encrypt cert; use sparingly). Default re-uses the saved cert."
+        type: boolean
+        default: false
+      obj_bucket:
+        description: 'Linode Object Storage bucket for the cert-volume backup (so a rebuild restores certs instead of re-issuing). Blank = disabled.'
+        default: 'toon-devnet-certs'
+      obj_region:
+        description: 'Linode Object Storage region for the cert-backup bucket'
+        default: 'us-east-1'
       ref:
         description: 'connector git ref to deploy'
         default: 'main'
@@ -69,14 +105,47 @@ jobs:
     env:
       LINODE_CLI_TOKEN: ${{ secrets.LINODE_CLI_TOKEN }}
       LABEL: ${{ inputs.label }}
+      # Object Storage holds the cert-volume backup so a rebuild (which wipes the
+      # disk) can RESTORE the /etc/letsencrypt volume instead of re-issuing — which
+      # is what burned Let's Encrypt's duplicate-cert rate limit. Optional: if these
+      # are unset the cert simply gets re-issued as before (back to old behavior).
+      LINODE_OBJ_ACCESS_KEY: ${{ secrets.LINODE_OBJ_ACCESS_KEY }}
+      LINODE_OBJ_SECRET_KEY: ${{ secrets.LINODE_OBJ_SECRET_KEY }}
+      OBJ_REGION: ${{ inputs.obj_region }}
+      OBJ_BUCKET: ${{ inputs.obj_bucket }}
       # DOMAIN is computed at runtime (see Provision): the given domain, or
       # <vm-ip>.sslip.io when blank — so subdomains like evm-rpc.<DOMAIN> resolve
       # to the box with no registration or DNS management.
     steps:
-      - name: Install linode-cli + jq
+      - name: Install linode-cli + jq + s3cmd
         run: |
-          pip install --quiet linode-cli
+          pip install --quiet linode-cli s3cmd
           sudo apt-get update -y && sudo apt-get install -y jq netcat-openbsd openssh-client
+
+      - name: Configure s3cmd for Linode Object Storage (cert backup)
+        # Only when creds + a bucket are provided; otherwise cert backup/restore
+        # is skipped and a rebuild falls back to re-issuing (old behavior).
+        if: ${{ env.OBJ_BUCKET != '' }}
+        run: |
+          if [ -z "${LINODE_OBJ_ACCESS_KEY:-}" ] || [ -z "${LINODE_OBJ_SECRET_KEY:-}" ]; then
+            echo "OBJ_ENABLED=false" >> "$GITHUB_ENV"
+            echo "::notice::OBJ_BUCKET set but LINODE_OBJ_ACCESS_KEY/SECRET_KEY missing — cert backup/restore disabled."
+            exit 0
+          fi
+          HOST="${OBJ_REGION}.linodeobjects.com"
+          cat > ~/.s3cfg <<CFG
+          [default]
+          access_key = ${LINODE_OBJ_ACCESS_KEY}
+          secret_key = ${LINODE_OBJ_SECRET_KEY}
+          host_base = ${HOST}
+          host_bucket = %(bucket)s.${HOST}
+          use_https = True
+          CFG
+          chmod 600 ~/.s3cfg
+          # Ensure the bucket exists (idempotent).
+          s3cmd mb "s3://${OBJ_BUCKET}" 2>/dev/null || true
+          echo "OBJ_ENABLED=true" >> "$GITHUB_ENV"
+          echo "Object Storage cert backup enabled → s3://${OBJ_BUCKET} (${HOST})"
 
       - name: Generate ephemeral SSH key for this run
         run: |
@@ -84,21 +153,34 @@ jobs:
           cp ~/.ssh/devnet.pub ~/.ssh/authorized.txt
           if [ -n "${{ inputs.ssh_pubkey }}" ]; then echo "${{ inputs.ssh_pubkey }}" >> ~/.ssh/authorized.txt; fi
 
-      - name: Provision (create new, or rebuild existing in place)
+      - name: Provision (create, recreate, or rebuild)
         run: |
           set -euo pipefail
           mapfile -t KEYARGS < <(while IFS= read -r k; do [ -n "$k" ] && printf -- '--authorized_keys\n%s\n' "$k"; done < ~/.ssh/authorized.txt)
           ID=$(linode-cli linodes list --label "$LABEL" --json 2>/dev/null | jq -r '.[0].id // empty')
+          # Decide the deploy MODE:
+          #   create   — no existing box: create it, then bootstrap (issues cert once).
+          #   recreate — existing box but plan changed: delete + create (IP changes); cert re-issued for the new IP/domain.
+          #   rebuild  — existing box, same plan: re-image in place for fresh deterministic chains. The cert volume is
+          #              wiped by the rebuild, so we BACK IT UP to Object Storage first and RESTORE it after (below) —
+          #              UNLESS reset=true, which deliberately starts clean (fresh cert).
+          MODE="create"
           if [ -n "$ID" ]; then
             CURTYPE=$(linode-cli linodes view "$ID" --json | jq -r '.[0].type')
             if [ "$CURTYPE" != "${{ inputs.plan }}" ]; then
               echo "Plan changed ($CURTYPE → ${{ inputs.plan }}) — deleting to recreate (devnet is disposable; IP will change)"
               linode-cli linodes delete "$ID" >/dev/null
               ID=""
+              MODE="create"
+            else
+              MODE="rebuild"
             fi
           fi
-          if [ -n "$ID" ]; then
+          echo "MODE=$MODE" >> "$GITHUB_ENV"
+          echo "Deploy mode: $MODE (reset=${{ inputs.reset }})"
+          if [ "$MODE" = "rebuild" ]; then
             echo "Rebuilding existing Linode '$LABEL' (id=$ID) in place — preserves IP, wipes disk"
+            echo "  (cert volume is restored after the rebuild from Object Storage unless reset=true)"
             linode-cli linodes rebuild "$ID" \
               --image linode/ubuntu24.04 \
               --root_pass "$(openssl rand -base64 24)" \
@@ -142,6 +224,40 @@ jobs:
             echo "  …waiting for ssh key auth ($i)"; sleep 15
           done
           echo "::error::SSH key auth never succeeded on $IP"; exit 1
+
+      - name: Restore cert volume from Object Storage (after rebuild, before bootstrap)
+        # A rebuild wiped the disk → the linode_certbot_conf volume is empty. If we
+        # have a saved cert for THIS domain, restore it into the volume now so that
+        # init-letsencrypt.sh (run by bootstrap) finds a valid cert and SKIPS
+        # issuance — no Let's Encrypt duplicate-cert burn. Skipped on `reset:true`
+        # (clean slate → fresh cert) and on create/recreate (no prior box/cert).
+        if: ${{ env.MODE == 'rebuild' && env.OBJ_ENABLED == 'true' && inputs.reset != true }}
+        run: |
+          set -euo pipefail
+          KEY="s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz"
+          if ! s3cmd info "$KEY" >/dev/null 2>&1; then
+            echo "::notice::No saved cert at $KEY — bootstrap will issue one (first trusted cert for this domain)."
+            exit 0
+          fi
+          echo "Restoring saved cert volume from $KEY"
+          # Stream the tarball to the box and unpack it INTO the named Docker volume
+          # (create the volume first so the helper container mounts the real one the
+          # compose stack will use). Docker Compose names it <project>_linode_certbot_conf;
+          # the project dir is ~/connector, so the project name is "connector".
+          s3cmd get --force "$KEY" /tmp/le.tar.gz
+          scp $SSH_OPTS /tmp/le.tar.gz root@"$IP":/tmp/le.tar.gz
+          ssh $SSH_OPTS root@"$IP" bash -s <<'REMOTE'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # This runs BEFORE bootstrap.sh, so Docker isn't installed yet on a fresh
+          # rebuild — install it now (idempotent; bootstrap.sh then no-ops the step).
+          command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+          docker volume create connector_linode_certbot_conf >/dev/null
+          docker run --rm -i -v connector_linode_certbot_conf:/etc/letsencrypt alpine \
+            sh -c "cd /etc/letsencrypt && tar xzf - " < /tmp/le.tar.gz
+          rm -f /tmp/le.tar.gz
+          echo "  cert volume restored"
+          REMOTE
 
       - name: Create DNS A-records (Linode Domains)
         if: ${{ inputs.manage_dns && inputs.domain != '' }} # sslip.io needs no DNS
@@ -190,6 +306,28 @@ jobs:
           ENV
           bash infra/linode/bootstrap.sh
           REMOTE
+
+      - name: Back up cert volume to Object Storage (for the next rebuild)
+        # After a successful bootstrap the volume holds the current cert. Save it so
+        # the NEXT rebuild can restore it instead of re-issuing. We tar the whole
+        # /etc/letsencrypt tree as-is; correctness is enforced on RESTORE, where
+        # init-letsencrypt.sh's guard rejects a self-signed/expired/wrong-SAN cert
+        # and issues a fresh one — so even a dummy in the backup is harmless.
+        if: ${{ env.OBJ_ENABLED == 'true' }}
+        run: |
+          set -euo pipefail
+          # Tar the cert volume off the box (quoted heredoc → no CI-side expansion).
+          ssh $SSH_OPTS root@"$IP" bash -s <<'REMOTE' > /tmp/le.tar.gz
+          set -euo pipefail
+          docker run --rm -v connector_linode_certbot_conf:/etc/letsencrypt alpine \
+            sh -c 'cd /etc/letsencrypt && tar czf - .'
+          REMOTE
+          if [ -s /tmp/le.tar.gz ]; then
+            s3cmd put /tmp/le.tar.gz "s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz"
+            echo "Backed up cert volume → s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz"
+          else
+            echo "::notice::Cert volume empty — nothing to back up."
+          fi
 
       - name: Summary
         if: ${{ always() && env.IP != '' }}
