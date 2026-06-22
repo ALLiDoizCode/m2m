@@ -26,22 +26,39 @@ else
   echo "    ufw not installed; skipping (DOCKER-USER rules below still apply)"
 fi
 
-echo "==> DOCKER-USER: drop internet access to raw chain ports on $IFACE"
-# Ensure the chain exists (it does once Docker is installed).
-iptables -L DOCKER-USER >/dev/null 2>&1 || iptables -N DOCKER-USER || true
-for port in "${RAW_PORTS[@]}"; do
-  # Remove any prior copy of this rule, then insert — keeps the script idempotent.
-  iptables -D DOCKER-USER -i "$IFACE" -p tcp --dport "$port" -j DROP 2>/dev/null || true
-  iptables -I DOCKER-USER -i "$IFACE" -p tcp --dport "$port" -j DROP
-  echo "    dropped $IFACE:$port"
-done
+echo "==> DOCKER-USER drops for raw chain ports on $IFACE (live + reboot-persistent)"
+# Generate a tiny boot script with the drop rules (ports/iface baked in), apply it
+# now, and re-apply on boot via a systemd unit. We do NOT use iptables-persistent
+# (it conflicts with ufw on Ubuntu 24.04); the unit re-runs after Docker recreates
+# the DOCKER-USER chain on each boot.
+RULES=/usr/local/sbin/toon-docker-user-drops.sh
+{
+  echo '#!/bin/sh'
+  echo 'iptables -L DOCKER-USER >/dev/null 2>&1 || iptables -N DOCKER-USER || true'
+  for port in "${RAW_PORTS[@]}"; do
+    echo "iptables -D DOCKER-USER -i $IFACE -p tcp --dport $port -j DROP 2>/dev/null || true"
+    echo "iptables -I DOCKER-USER -i $IFACE -p tcp --dport $port -j DROP"
+  done
+} > "$RULES"
+chmod +x "$RULES"
+sh "$RULES"
+echo "    dropped $IFACE: ${RAW_PORTS[*]}"
 
-echo "==> Persisting iptables rules"
-if command -v netfilter-persistent >/dev/null 2>&1; then
-  netfilter-persistent save
-else
-  echo "    netfilter-persistent not installed — install 'iptables-persistent'"
-  echo "    so the DOCKER-USER drops survive reboot, then re-run this script."
-fi
+cat > /etc/systemd/system/toon-devnet-firewall.service <<UNIT
+[Unit]
+Description=TOON devnet firewall (DOCKER-USER drops)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$RULES
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable toon-devnet-firewall.service >/dev/null 2>&1 || true
 
 echo "Firewall configured. Public ports: 22, 80, 443. Raw RPC ports blocked."
