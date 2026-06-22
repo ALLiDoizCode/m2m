@@ -460,8 +460,9 @@ export async function waitForAnvilReady(timeoutMs: number = 30_000): Promise<voi
   throw new Error(`Faucet not ready (token not deployed) after ${timeoutMs}ms`);
 }
 
-/** Minimum USDC balance (in wei) before we bother calling the faucet. */
-const MIN_USDC_BALANCE = BigInt('10000') * BigInt(10 ** 18);
+/** Minimum USDC balance (base units) before we bother calling the faucet.
+ *  USDC is 6-decimal on every chain since #188/#195. */
+const MIN_USDC_BALANCE = BigInt('10000') * BigInt(10 ** 6);
 
 /**
  * Return the ERC-20 token balance for `address` by calling `eth_call` directly.
