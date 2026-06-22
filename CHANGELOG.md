@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.18.5](https://github.com/toon-protocol/connector/compare/v3.18.4...v3.18.5) (2026-06-22)
+
+### Bug Fixes
+
+- **devnet:** drop iptables-persistent (conflicts with ufw on Ubuntu 24.04) ([a6624e0](https://github.com/toon-protocol/connector/commit/a6624e0a4cb5625de04e0a5c8172314b09a033ee))
+- **devnet:** SSH wait retries real key auth (rebuild race + new host key) ([40de7b4](https://github.com/toon-protocol/connector/commit/40de7b4985b979bd72f51cf54ba883e3461717c1))
+
 ## [3.18.4](https://github.com/toon-protocol/connector/compare/v3.18.3...v3.18.4) (2026-06-22)
 
 ### Bug Fixes
