@@ -87,6 +87,30 @@ restart) reverts Anvil and `--reset`s the validator, so Mock USDC always returns
 to `0x5FbDB2…` and the Solana program to its fixed id. Never park anything of
 value here — all keys (Anvil account #0, etc.) are public.
 
+## TLS certs: issued once, then reused (no rate-limit burn)
+
+The CI redeploy (`.github/workflows/devnet-deploy.yml`) rebuilds the Linode in
+place for fresh deterministic chains, which **wipes the disk** — including the
+`linode_certbot_conf` (`/etc/letsencrypt`) Docker volume. Left unchecked that made
+`init-letsencrypt.sh` **re-issue the cert every redeploy**, repeatedly hitting
+Let's Encrypt's **5 duplicate certs / 7 days** limit and dropping the box to
+self-signed. Two guards prevent that now:
+
+1. **`init-letsencrypt.sh` skips issuance** whenever the volume already holds a
+   valid cert for the domain — a real (non-self-signed) Let's Encrypt cert, not
+   expiring within 30 days, covering all five SANs, in the requested staging mode.
+   It just starts nginx with that cert; ongoing renewal is the certbot container's
+   job (a no-op until <30 days to expiry). `--force-renewal` is gone.
+2. **The workflow backs the cert volume up to Linode Object Storage** after each
+   deploy and **restores it into the freshly-rebuilt box before bootstrap**, so the
+   guard above finds the cert and reuses it. Set the `LINODE_OBJ_ACCESS_KEY` /
+   `LINODE_OBJ_SECRET_KEY` repo secrets and the `obj_bucket` / `obj_region` inputs
+   to enable it; without them a rebuild simply re-issues as before.
+
+Run the workflow with **`reset: true`** to deliberately skip the restore and issue
+a brand-new cert (spends one cert from the weekly budget — use sparingly). A plan
+change recreates the box (new IP → new domain → new cert).
+
 ## Security
 
 - Public ports are **22 / 80 / 443 only**. The raw chain/faucet ports
