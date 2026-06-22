@@ -31,6 +31,7 @@ services:
     user: root
     profiles:
       - evm
+      - app-behind-terminator # issue #221 — reused by the terminator profile
     entrypoint: []
     command:
       - sh
@@ -96,6 +97,7 @@ services:
     profiles:
       - evm
       - solana
+      - app-behind-terminator # issue #221 — reused by the terminator profile
     environment:
       PORT: 3500
       RPC_URL: http://anvil:8545
@@ -787,6 +789,68 @@ services:
         condition: service_healthy
     networks:
       - standalone_allowlist_net
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # App-behind-terminator (issue #221) — the "hello-world" of deploying an
+  # app behind the connector locally. One `make app-up` brings up a standalone
+  # connector-as-terminator + an oblivious relay (app) + anvil + faucet.
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # AC1: this profile runs terminator + relay + anvil + faucet.
+  # AC2: the relay is reachable ONLY through the terminator for paid writes
+  #      (its write port is NOT published); free reads stay on the relay's
+  #      Nostr WS read port (published to 127.0.0.1).
+  #
+  # All four services live on the compose DEFAULT network (no `networks:` key),
+  # exactly like anvil + faucet above, so the terminator can dial `anvil:8545`,
+  # `faucet:3500`, and `relay:8088` by service name. Only `terminator` (POST
+  # /ilp) and the relay's WS read port are published to the host.
+  #
+  # NOTE: the oblivious relay image does NOT live in this repo (it is separate
+  # "decouple relay" work, not yet published). Reference it via an env override:
+  # `RELAY_IMAGE` (defaults to the not-yet-published GHCR coordinates). When no
+  # real relay image is available the AC3 full paid-write round-trip is SKIPPED
+  # with a clear message by the e2e test — the negative-path AC2 assertions still
+  # run against the terminator + a stub upstream where needed.
+  terminator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [app-behind-terminator]
+    environment:
+      CONFIG_FILE: /app/config/terminator.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./scripts/app-behind-terminator/terminator.yaml:/app/config/terminator.yaml:ro
+    ports:
+      # ONLY the ILP-over-HTTP edge (POST /ilp, RFC-0035) is published, and
+      # only to loopback. The admin API (8081) is intentionally NOT published —
+      # it binds inside the container and is gated by `allowedIPs` in the config.
+      - '127.0.0.1:3000:3000' # POST /ilp edge (paid writes enter here)
+      - '127.0.0.1:8080:8080' # health
+    depends_on:
+      anvil:
+        condition: service_healthy
+      faucet:
+        condition: service_healthy
+
+  # The oblivious app. Env-overridable image (image does not exist in this repo
+  # yet). Its paid-write HTTP store port (8088) is NOT published — only the
+  # terminator dials it over the compose network by service name (`relay:8088`),
+  # which is what enforces AC2. Its Nostr WS read port (7000) IS published to the
+  # host so FREE reads bypass the terminator entirely.
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:latest}
+    profiles: [app-behind-terminator]
+    environment:
+      # Best-effort hints for a future relay image. The decouple-relay contract
+      # is still open (see issue #221 follow-ups); these are the assumed ports.
+      RELAY_WRITE_PORT: '8088' # paid-write HTTP store — NOT published
+      RELAY_WS_PORT: '7000' # free-read Nostr WS — published below
+    ports:
+      # Free reads: clients hit the relay's Nostr WS directly (no terminator).
+      # The paid-write port 8088 is deliberately ABSENT from this list.
+      - '127.0.0.1:7000:7000'
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Two-Home ATOR over LOCAL testnet — peer-to-peer over `make ator-up`
