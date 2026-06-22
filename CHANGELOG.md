@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.18.4](https://github.com/toon-protocol/connector/compare/v3.18.3...v3.18.4) (2026-06-22)
+
+### Bug Fixes
+
+- **devnet:** ssh-key step fails under bash -e when ssh_pubkey is empty ([4e4e3e1](https://github.com/toon-protocol/connector/commit/4e4e3e105af140ca92b2d6074b1003e585c2384b))
+
 ## [3.18.3](https://github.com/toon-protocol/connector/compare/v3.18.2...v3.18.3) (2026-06-22)
 
 ### Bug Fixes
