@@ -122,13 +122,18 @@ jobs:
           echo "DOMAIN=$DOMAIN" >> "$GITHUB_ENV"
           echo "Using domain: $DOMAIN"
 
-      - name: Wait for SSH
+      - name: Wait for SSH (retry real auth — handles rebuild + new host key)
         run: |
-          for i in $(seq 1 40); do
-            nc -z -w5 "$IP" 22 && { echo "SSH up"; break; }
-            echo "  …waiting for sshd ($i)"; sleep 10
+          SSH_OPTS="-i $HOME/.ssh/devnet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
+          echo "SSH_OPTS=$SSH_OPTS" >> "$GITHUB_ENV"
+          # A rebuild keeps the IP but re-images (new host key, our new authorized
+          # key applies only once it finishes), and port 22 can be up on the OLD
+          # system mid-rebuild — so test ACTUAL key auth, not just the port.
+          for i in $(seq 1 60); do
+            if ssh $SSH_OPTS root@"$IP" true 2>/dev/null; then echo "SSH auth OK"; exit 0; fi
+            echo "  …waiting for ssh key auth ($i)"; sleep 15
           done
-          ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null
+          echo "::error::SSH key auth never succeeded on $IP"; exit 1
 
       - name: Create DNS A-records (Linode Domains)
         if: ${{ inputs.manage_dns && inputs.domain != '' }} # sslip.io needs no DNS
@@ -150,7 +155,7 @@ jobs:
 
       - name: Bootstrap the devnet on the VM
         run: |
-          ssh -i ~/.ssh/devnet root@"$IP" bash -s <<REMOTE
+          ssh $SSH_OPTS root@"$IP" bash -s <<REMOTE
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           command -v git >/dev/null || { apt-get update -y && apt-get install -y git; }

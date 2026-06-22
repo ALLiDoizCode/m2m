@@ -21,7 +21,9 @@ if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 apt-get update -y
-apt-get install -y git make jq gettext-base openssl iptables-persistent ufw curl
+# NB: no iptables-persistent — it conflicts with ufw on Ubuntu 24.04 (ufw Breaks
+# iptables-persistent). firewall.sh persists the DOCKER-USER drops via a systemd unit.
+apt-get install -y git make jq gettext-base openssl ufw curl iptables
 
 echo "==> [2/7] Firewall (public = 22/80/443 only; raw RPC ports blocked)"
 "$HERE/firewall.sh"
