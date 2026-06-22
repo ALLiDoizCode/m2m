@@ -135,8 +135,28 @@ export type {
   InboundClaimValidateFn,
   HandlePrepareFn,
   IlpHttpAdapterDeps,
+  ResolveTerminationFn,
 } from './http/ilp-http-adapter';
 export type { PeerSecretDecision } from './auth/peer-secret-resolver';
+
+// x402 v2 "402 Payment Required" greeting on the HTTP edge (#217).
+export {
+  buildX402Greeting,
+  chainToCaip2,
+  X402_VERSION,
+  X402_PAYMENT_SIGNATURE_HEADER,
+  X402_PAYMENT_REQUIRED_HEADER,
+  X402_DEFAULT_MAX_TIMEOUT_SECONDS,
+  TOON_CHANNEL_SCHEME,
+  TOON_CHANNEL_ENDPOINT,
+} from './http/x402-greeting';
+export type {
+  X402PaymentRequired,
+  X402PaymentRequirements,
+  X402ResourceInfo,
+  X402GreetingContext,
+  ToonChannelExtra,
+} from './http/x402-greeting';
 
 // RFC 9421 claim↔request binding (#220): net-new verifier/signer modules.
 // NOT yet wired into ilp-http-adapter.ts — that integration is gated on #218's

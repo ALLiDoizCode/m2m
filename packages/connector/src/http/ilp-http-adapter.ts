@@ -11,8 +11,16 @@
  * HTTP request into exactly the `(protocolData, ilpPacket, peerId)` triple the
  * BTP path produces, then calls the *same* two seams — the inbound claim
  * validator and `PacketHandler.handlePreparePacket` — so validation, routing,
- * fees, and settlement are byte-for-byte identical across transports. No payment
- * validation or 402/x402 challenge logic lives here.
+ * fees, and settlement are byte-for-byte identical across transports.
+ *
+ * The one edge-local behaviour is the x402 v2 greeting (issue #217): an UNPAID
+ * request to a *locally-terminated* route (one carrying a `RouteTermination` in
+ * the injected registry) short-circuits into an HTTP `402 Payment Required`
+ * advertising both a vanilla on-chain `exact` option and the `toon-channel`
+ * upgrade, *before* the claim-record/validate seams run. This is a self-contained
+ * early return that performs no claim *validation* — a present claim simply
+ * suppresses the greeting and the request flows through the shared seams
+ * unchanged. (#220's verifier wiring is inserted adjacent, just before the seams.)
  *
  * Wire format:
  * - Method/path: `POST /ilp`
@@ -45,6 +53,21 @@ import { BTP_CLAIM_PROTOCOL } from '../btp/btp-claim-types';
 import { BTP_WRAPPED_CLAIM_PROTOCOL } from '../settlement/privacy/nip59-claim-wrapper';
 import { evaluatePeerSecret } from '../auth/peer-secret-resolver';
 import type { Logger } from '../utils/logger';
+import type { RouteTermination, TerminationChain } from '../config/types';
+import {
+  buildX402Greeting,
+  X402_PAYMENT_REQUIRED_HEADER,
+  X402_PAYMENT_SIGNATURE_HEADER,
+} from './x402-greeting';
+
+/**
+ * Resolves the {@link RouteTermination} for an inbound PREPARE — the seam #217
+ * uses to decide whether a destination is a *locally-terminated* route (and thus
+ * eligible for the x402 v2 greeting). Sourced from the connector's
+ * `RouteTerminationRegistry` (registry.match(prepare.destination)). Returns
+ * `null` for an ordinary forwarding destination.
+ */
+export type ResolveTerminationFn = (prepare: ILPPreparePacket) => RouteTermination | null;
 
 /** Validates an inbound claim; returns null to proceed or an ILPRejectPacket to reject. */
 export type InboundClaimValidateFn = (
@@ -81,6 +104,22 @@ export interface IlpHttpAdapterDeps {
   nodeId: string;
   /** Max request body size in bytes (default 5 MiB). */
   maxBodyBytes?: number;
+  /**
+   * Resolves a destination's {@link RouteTermination} (issue #217). When wired
+   * (sourced from the connector's `RouteTerminationRegistry` in connector-node)
+   * an UNPAID request to a terminated route is greeted with an x402 v2 `402
+   * Payment Required`. Optional: when absent the adapter behaves exactly as
+   * before (no greeting), so non-terminator deployments are unaffected.
+   */
+  resolveTermination?: ResolveTerminationFn;
+  /**
+   * Internal namespaced chainId per chain, e.g. `{ evm: 'evm:8453', solana:
+   * 'solana:devnet' }` — sourced from the connector's chainProviders/EVM config.
+   * Used to map evm/solana → CAIP-2 `network` ids in the x402 greeting. When a
+   * chain has no id here, its vanilla `exact` entry is skipped (mina is always
+   * skipped — x402 has no Mina network id — and rides the toon-channel upgrade).
+   */
+  terminationChainIds?: Partial<Record<TerminationChain, string>>;
 }
 
 const DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024;
@@ -121,6 +160,8 @@ export class IlpHttpAdapter {
   private readonly recordClaim?: (peerId: string, protocolData: BTPProtocolData[]) => Promise<void>;
   private readonly nodeId: string;
   private readonly maxBodyBytes: number;
+  private readonly resolveTermination?: ResolveTerminationFn;
+  private readonly terminationChainIds: Partial<Record<TerminationChain, string>>;
 
   constructor(deps: IlpHttpAdapterDeps) {
     this.logger = deps.logger.child({ component: 'IlpHttpAdapter' });
@@ -129,6 +170,8 @@ export class IlpHttpAdapter {
     this.recordClaim = deps.recordClaim;
     this.nodeId = deps.nodeId;
     this.maxBodyBytes = deps.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+    this.resolveTermination = deps.resolveTermination;
+    this.terminationChainIds = deps.terminationChainIds ?? {};
   }
 
   /**
@@ -209,6 +252,27 @@ export class IlpHttpAdapter {
     } else {
       peerId = ephemeralPeerIdFromClaim(plaintextClaim);
     }
+
+    // --- x402 v2 greeting (#217) ---
+    // Greet an UNPAID request to a locally-terminated route with an x402 v2
+    // `402 Payment Required` advertising both the vanilla on-chain `exact`
+    // option and the toon-channel upgrade. Self-contained early return: it runs
+    // BEFORE the claim-record/validate seams and performs NO claim validation —
+    // a present claim merely suppresses the greeting so the request flows through
+    // the shared seams unchanged. (#220's verifier wiring goes adjacent, just
+    // before the seams in the try-block below; keep this branch standalone.)
+    if (this.resolveTermination) {
+      const termination = this.resolveTermination(prepare);
+      if (termination && this.isUnpaid(protocolData, req)) {
+        this.respond402(res, termination);
+        this.logger.info(
+          { event: 'ilp_http_x402_greeting', peerId, destination: prepare.destination },
+          'ILP-over-HTTP unpaid terminated request greeted with x402 402'
+        );
+        return;
+      }
+    }
+    // --- end x402 v2 greeting (#217) ---
 
     try {
       // Record the claim for event-driven settlement, independent of the packet
@@ -304,6 +368,42 @@ export class IlpHttpAdapter {
     if (!authHeader) return undefined;
     const match = /^Bearer\s+(.*)$/i.exec(authHeader.trim());
     return match ? match[1] : authHeader.trim();
+  }
+
+  /**
+   * An inbound request is "unpaid" (issue #217) when it carries NO payment
+   * proof in either transport form:
+   *  - no reconstructed `payment-channel-claim` (or wrapped) protocolData entry
+   *    (i.e. no `ILP-Payment-Channel-Claim[-Wrapped]` header), AND
+   *  - no x402 v2 `PAYMENT-SIGNATURE` header (the v2 rename of v1's `X-PAYMENT`).
+   * Either present → the request is (purportedly) paid; the greeting is
+   * suppressed and the shared claim seams below decide the outcome.
+   */
+  private isUnpaid(protocolData: BTPProtocolData[], req: IncomingMessage): boolean {
+    if (protocolData.length > 0) return false;
+    const paymentSig = req.headers[X402_PAYMENT_SIGNATURE_HEADER.toLowerCase()];
+    return paymentSig === undefined;
+  }
+
+  /**
+   * Emit the x402 v2 `402 Payment Required` greeting for a locally-terminated
+   * route. The v2 `PaymentRequired` object is both serialized into the JSON body
+   * (so a client/test can read `accepts` directly) and base64-encoded into the
+   * `PAYMENT-REQUIRED` response header per the v2 HTTP transport spec.
+   */
+  private respond402(res: ServerResponse, termination: RouteTermination): void {
+    const body = buildX402Greeting(termination, {
+      chainIds: this.terminationChainIds,
+      resourceUrl: termination.ilpAddress,
+      error: `${X402_PAYMENT_SIGNATURE_HEADER} header is required`,
+    });
+    const json = JSON.stringify(body);
+    res.writeHead(402, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(json),
+      [X402_PAYMENT_REQUIRED_HEADER]: Buffer.from(json, 'utf8').toString('base64'),
+    });
+    res.end(json);
   }
 
   private respondPacket(res: ServerResponse, packet: ILPFulfillPacket | ILPRejectPacket): void {
