@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.21.0](https://github.com/toon-protocol/connector/compare/v3.20.2...v3.21.0) (2026-06-22)
+
+### Features
+
+- **terminator:** connector-as-terminator epic — HTTP reverse-proxy, x402 v2, route config, RFC 9421 binding, CLI, compose ([#216](https://github.com/toon-protocol/connector/issues/216)-[#221](https://github.com/toon-protocol/connector/issues/221)) ([#226](https://github.com/toon-protocol/connector/issues/226)) ([8e6cd35](https://github.com/toon-protocol/connector/commit/8e6cd351dc16c66e060f54769d53ed77a7022e29)), closes [#218](https://github.com/toon-protocol/connector/issues/218) [#220](https://github.com/toon-protocol/connector/issues/220) [#218](https://github.com/toon-protocol/connector/issues/218) [#217](https://github.com/toon-protocol/connector/issues/217) [#218](https://github.com/toon-protocol/connector/issues/218) [#224](https://github.com/toon-protocol/connector/issues/224) [#218](https://github.com/toon-protocol/connector/issues/218) [217/#220](https://github.com/217/connector/issues/220) [#217](https://github.com/toon-protocol/connector/issues/217) [#220](https://github.com/toon-protocol/connector/issues/220) [#217](https://github.com/toon-protocol/connector/issues/217) [#218](https://github.com/toon-protocol/connector/issues/218) [#217](https://github.com/toon-protocol/connector/issues/217)
+
 ## [3.20.2](https://github.com/toon-protocol/connector/compare/v3.20.1...v3.20.2) (2026-06-22)
 
 ### Bug Fixes
