@@ -6,14 +6,16 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "express": "^4.18.2",
     "ethers": "^6.9.0",
     "cors": "^2.8.5",
     "@solana/web3.js": "^1.95.3",
-    "@solana/spl-token": "^0.4.8"
+    "@solana/spl-token": "^0.4.8",
+    "mina-signer": "^4.0.0"
   },
   "keywords": [
     "faucet",

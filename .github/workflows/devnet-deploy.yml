@@ -179,6 +179,14 @@ jobs:
           LETSENCRYPT_STAGING=${{ inputs.letsencrypt_staging }}
           COMPOSE_PROFILES=evm,solana
           PUBLIC_IFACE=eth0
+          # Mina treasury private key (base58, HD index 2) for the faucet's
+          # native-MINA drip. SECRET — set it with:
+          #   gh secret set MINA_FAUCET_KEY --repo toon-protocol/connector
+          # When the secret is unset this is empty and the faucet's Mina route
+          # gracefully 503s with a public-faucet link (EVM/Solana unaffected).
+          # devnet.sh/bootstrap.sh `set -a; . .env` exports it so docker compose
+          # substitutes it into the faucet container's MINA_FAUCET_KEY.
+          MINA_FAUCET_KEY=${{ secrets.MINA_FAUCET_KEY }}
           ENV
           bash infra/linode/bootstrap.sh
           REMOTE
@@ -194,7 +202,7 @@ jobs:
             echo "| EVM RPC | https://evm-rpc.$DOMAIN |"
             echo "| Solana RPC | https://solana-rpc.$DOMAIN |"
             echo "| Solana WS | wss://solana-ws.$DOMAIN |"
-            echo "| Faucet | https://faucet.$DOMAIN |"
+            echo "| Faucet | https://faucet.$DOMAIN (EVM + Solana + native-MINA drip) |"
             echo "| Mina (proxy) | https://mina.$DOMAIN/graphql |"
             echo ""
             if [ -z "${{ inputs.domain }}" ]; then
