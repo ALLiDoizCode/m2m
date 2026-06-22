@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.1](https://github.com/toon-protocol/connector/compare/v3.20.0...v3.20.1) (2026-06-22)
+
+### Bug Fixes
+
+- **devnet:** stop re-issuing Let's Encrypt certs on every rebuild ([#214](https://github.com/toon-protocol/connector/issues/214)) ([407be00](https://github.com/toon-protocol/connector/commit/407be009d66010bbd5dc10f44e39c09d2c7ee03b))
+
 ## [3.20.0](https://github.com/toon-protocol/connector/compare/v3.19.0...v3.20.0) (2026-06-22)
 
 ### Features
