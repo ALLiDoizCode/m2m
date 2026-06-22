@@ -103,6 +103,24 @@ export type { PaymentRequest, PaymentResponse, PaymentHandler } from './core/pay
 // Re-export ILP send handler types for library consumers
 export type { PacketSenderFn, IsReadyFn } from './http/ilp-send-handler';
 
+// Connector-as-terminator: generic HTTP reverse-proxy local-delivery handler (#216)
+export {
+  HttpProxyHandler,
+  EnvelopeDecodeError,
+  decodeHttpRequest,
+  encodeHttpRequest,
+  encodeHttpResponse,
+  TOON_PAYER_HEADER,
+  TOON_AMOUNT_HEADER,
+  TOON_CHAIN_HEADER,
+} from './core/handlers/http-proxy-handler';
+export type {
+  HttpProxyHandlerOptions,
+  HttpRequestEnvelope,
+  UpstreamResolver,
+  ChainResolver,
+} from './core/handlers/http-proxy-handler';
+
 // Re-export ILP packet types for library consumers
 export type { ILPPreparePacket, ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
 
