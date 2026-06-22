@@ -39,6 +39,7 @@ import {
   DeploymentMode,
   TransportConfig,
   RouteTermination,
+  TerminationChain,
   validateChainProviders,
   toRouteTermination,
 } from '../config/types';
@@ -1515,6 +1516,20 @@ export class ConnectorNode implements HealthStatusProvider {
         );
       }
 
+      // x402 v2 greeting (#217): map each x402-nameable settlement chain to the
+      // connector's internal namespaced chainId (`evm:<id>`, `solana:<cluster>`)
+      // so the greeting can derive CAIP-2 `network` ids. Sourced from
+      // chainProviders config — never hardcoded. Mina is intentionally absent
+      // (x402 has no Mina network id; mina rides the toon-channel upgrade only).
+      const terminationChainIds: Partial<Record<TerminationChain, string>> = {};
+      for (const cp of this._config.chainProviders ?? []) {
+        if (cp.chainType === 'evm' && !terminationChainIds.evm) {
+          terminationChainIds.evm = cp.chainId;
+        } else if (cp.chainType === 'solana' && !terminationChainIds.solana) {
+          terminationChainIds.solana = cp.chainId;
+        }
+      }
+
       // Enable ILP-over-HTTP (RFC-0035) on the same listener the BTP server
       // owns: POST /ilp terminates at the same claim gate + packet handler as
       // BTP. Wire before start() so the handler is live when the port opens.
@@ -1529,6 +1544,12 @@ export class ConnectorNode implements HealthStatusProvider {
         recordClaim: this._claimReceiver
           ? (peerId, protocolData) => this._claimReceiver!.ingestProtocolData(peerId, protocolData)
           : undefined,
+        // x402 v2 greeting (#217): resolve a destination's RouteTermination from
+        // the #218 registry so an unpaid request to a terminated route is greeted
+        // with a 402. `match` returns undefined → coalesce to null (no greeting).
+        resolveTermination: (prepare) =>
+          this._routeTerminationRegistry.match(prepare.destination) ?? null,
+        terminationChainIds,
       });
       this._btpServer.setIlpHttpHandler((req, res) => ilpHttpAdapter.handle(req, res));
 

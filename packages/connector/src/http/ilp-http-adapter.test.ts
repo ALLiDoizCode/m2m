@@ -8,6 +8,8 @@
 
 import { EventEmitter } from 'events';
 import { IlpHttpAdapter } from './ilp-http-adapter';
+import { X402_PAYMENT_REQUIRED_HEADER, X402_PAYMENT_SIGNATURE_HEADER } from './x402-greeting';
+import type { RouteTermination } from '../config/types';
 import { BTP_CLAIM_PROTOCOL } from '../btp/btp-claim-types';
 import { Logger } from '../utils/logger';
 import {
@@ -258,5 +260,234 @@ describe('IlpHttpAdapter', () => {
     const res = new MockRes();
     await run(adapter, req, res);
     expect(res.statusCode).toBe(400);
+  });
+
+  // ---------------------------------------------------------------------------
+  // x402 v2 "402 Payment Required" greeting on the HTTP edge (issue #217).
+  //
+  // Wire shape pinned against the authoritative x402 v2 spec:
+  //   https://github.com/coinbase/x402/blob/main/specs/x402-specification-v2.md
+  //   https://github.com/coinbase/x402/blob/main/specs/transports-v2/http.md
+  // v2 PaymentRequired = { x402Version: 2, error?, resource{url,...}, accepts[] }
+  // v2 accepts[] entry  = { scheme, network, amount, asset?, payTo, maxTimeoutSeconds, extra? }
+  // ---------------------------------------------------------------------------
+  describe('x402 v2 greeting (#217)', () => {
+    // A real RouteTermination (no mocks) — the source of truth the greeting reads.
+    const termination: RouteTermination = {
+      upstream: 'http://127.0.0.1:8080',
+      price: '1000', // atomic nano-USDC; must be advertised byte-identical
+      chains: ['evm', 'solana', 'mina'],
+      ilpAddress: 'g.townhouse.town',
+      settlementAddresses: {
+        evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28',
+        solana: '7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2',
+        mina: 'B62qiTKpEPjGTSHZrtM8uXiKgn8So916pLmNJKDhKeyVAyZTtbTbCXP',
+      },
+    };
+    const chainIds = { evm: 'evm:8453', solana: 'solana:devnet' } as const;
+
+    const makeAdapter = (
+      _unused?: undefined,
+      term: RouteTermination | null = termination
+    ): { adapter: IlpHttpAdapter; handlePrepare: jest.Mock; validateClaim: jest.Mock } => {
+      const handlePrepare = jest.fn(async () => fulfill);
+      const validateClaim = jest.fn(async () => null);
+      const adapter = new IlpHttpAdapter({
+        logger: createMockLogger(),
+        nodeId: 'g.townhouse',
+        handlePrepare,
+        validateClaim,
+        resolveTermination: () => term,
+        terminationChainIds: chainIds,
+      });
+      return { adapter, handlePrepare, validateClaim };
+    };
+
+    interface GreetingBody {
+      x402Version: number;
+      error?: string;
+      resource: { url: string; description?: string; mimeType?: string };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      accepts: any[];
+    }
+    const parseGreeting = (res: MockRes): GreetingBody =>
+      JSON.parse(res.body.toString('utf8')) as GreetingBody;
+
+    it('AC1: unpaid POST to a terminated route → 402 with v2 accepts body; handlePrepare NOT called', async () => {
+      const { adapter, handlePrepare, validateClaim } = makeAdapter();
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+
+      expect(res.statusCode).toBe(402);
+      expect(handlePrepare).not.toHaveBeenCalled();
+      expect(validateClaim).not.toHaveBeenCalled();
+      const body = parseGreeting(res);
+      expect(Array.isArray(body.accepts)).toBe(true);
+      expect(body.accepts.length).toBeGreaterThan(0);
+      // Also carried in the v2 PAYMENT-REQUIRED response header as base64 JSON.
+      const headerB64 = res.headers[X402_PAYMENT_REQUIRED_HEADER] as string;
+      expect(headerB64).toBeDefined();
+      expect(JSON.parse(Buffer.from(headerB64, 'base64').toString('utf8'))).toEqual(body);
+    });
+
+    it('AC5: asserts EXACT v2 field names and x402Version: 2', async () => {
+      const { adapter } = makeAdapter();
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+      const body = parseGreeting(res);
+
+      expect(body.x402Version).toBe(2);
+      expect(body.resource).toEqual({ url: 'g.townhouse.town' });
+      expect(body.error).toBe(`${X402_PAYMENT_SIGNATURE_HEADER} header is required`);
+      for (const entry of body.accepts) {
+        expect(entry).toHaveProperty('scheme');
+        expect(entry).toHaveProperty('network');
+        expect(entry).toHaveProperty('amount'); // v2 uses `amount`, NOT `price`/`maxAmountRequired`
+        expect(entry).toHaveProperty('payTo');
+        expect(entry).toHaveProperty('maxTimeoutSeconds');
+        expect(entry).not.toHaveProperty('price');
+        expect(entry).not.toHaveProperty('maxAmountRequired');
+      }
+    });
+
+    it('AC2: vanilla exact (EVM+Solana CAIP-2) + toon-channel entry whose extra deep-equals the RouteTermination', async () => {
+      const { adapter } = makeAdapter();
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+      const body = parseGreeting(res);
+
+      const exactEntries = body.accepts.filter((a: { scheme: string }) => a.scheme === 'exact');
+      const evm = exactEntries.find((a: { network: string }) => a.network === 'eip155:8453');
+      const sol = exactEntries.find((a: { network: string }) => a.network === 'solana:devnet');
+      expect(evm).toMatchObject({
+        scheme: 'exact',
+        network: 'eip155:8453',
+        amount: '1000',
+        payTo: termination.settlementAddresses.evm,
+      });
+      expect(sol).toMatchObject({
+        scheme: 'exact',
+        network: 'solana:devnet',
+        amount: '1000',
+        payTo: termination.settlementAddresses.solana,
+      });
+      // No vanilla exact entry for mina (x402 has no Mina network id).
+      expect(
+        exactEntries.some((a: { network: string }) => a.network.startsWith('mina')) ||
+          exactEntries.some(
+            (a: { payTo: string }) => a.payTo === termination.settlementAddresses.mina
+          )
+      ).toBe(false);
+
+      const toon = body.accepts.find((a: { scheme: string }) => a.scheme === 'toon-channel');
+      expect(toon).toBeDefined();
+      // extra carries the FULL multi-chain payload INCLUDING mina, verbatim.
+      expect(toon.extra).toEqual({
+        ilpAddress: termination.ilpAddress,
+        endpoint: '/ilp',
+        price: termination.price,
+        chains: termination.chains, // incl. mina
+        settlementAddresses: termination.settlementAddresses, // incl. mina
+      });
+    });
+
+    it('AC3 (graceful degradation): filtering to scheme:"exact" yields complete v2 PaymentRequirements', async () => {
+      const { adapter } = makeAdapter();
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+      const body = parseGreeting(res);
+
+      const exactOnly = body.accepts.filter((a: { scheme: string }) => a.scheme === 'exact');
+      expect(exactOnly.length).toBeGreaterThan(0);
+      for (const e of exactOnly) {
+        expect(typeof e.network).toBe('string');
+        expect(typeof e.amount).toBe('string');
+        expect(typeof e.payTo).toBe('string');
+        expect(e.payTo.length).toBeGreaterThan(0);
+        expect(typeof e.maxTimeoutSeconds).toBe('number');
+      }
+    });
+
+    it('AC4: changing the RouteTermination changes the emitted body (config-sourced)', async () => {
+      const altTermination: RouteTermination = {
+        ...termination,
+        price: '5000',
+        chains: ['evm'],
+        settlementAddresses: { evm: '0x0000000000000000000000000000000000000001' },
+      };
+      const { adapter } = makeAdapter(undefined, altTermination);
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+      const body = parseGreeting(res);
+
+      const exactEntries = body.accepts.filter((a: { scheme: string }) => a.scheme === 'exact');
+      expect(exactEntries).toHaveLength(1); // only evm now
+      expect(exactEntries[0].amount).toBe('5000');
+      expect(exactEntries[0].payTo).toBe('0x0000000000000000000000000000000000000001');
+      const toon = body.accepts.find((a: { scheme: string }) => a.scheme === 'toon-channel');
+      expect(toon.extra.price).toBe('5000');
+      expect(toon.extra.chains).toEqual(['evm']);
+    });
+
+    it('skips a chain whose settlement payTo is missing (never advertises an unpayable address)', async () => {
+      const noSolAddr: RouteTermination = {
+        ...termination,
+        settlementAddresses: { evm: termination.settlementAddresses.evm }, // solana omitted
+      };
+      const { adapter } = makeAdapter(undefined, noSolAddr);
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+      const body = parseGreeting(res);
+      const exactEntries = body.accepts.filter((a: { scheme: string }) => a.scheme === 'exact');
+      expect(exactEntries.map((a: { network: string }) => a.network)).toEqual(['eip155:8453']);
+    });
+
+    it('pass-through: a present claim suppresses the greeting (terminated + claim → NOT 402)', async () => {
+      const { adapter, handlePrepare, validateClaim } = makeAdapter();
+      const req = new MockReq(serializePacket(createPrepare()), {
+        'ilp-payment-channel-claim': Buffer.from(claimJson, 'utf8').toString('base64'),
+      });
+      const res = new MockRes();
+      await run(adapter, req, res);
+
+      expect(res.statusCode).toBe(200);
+      expect(validateClaim).toHaveBeenCalledTimes(1);
+      expect(handlePrepare).toHaveBeenCalledTimes(1);
+    });
+
+    it('pass-through: a PAYMENT-SIGNATURE header suppresses the greeting (v2 paid → NOT 402)', async () => {
+      const { adapter, handlePrepare } = makeAdapter();
+      const req = new MockReq(serializePacket(createPrepare()), {
+        [X402_PAYMENT_SIGNATURE_HEADER.toLowerCase()]: 'eyJzb21lIjoicGF5bG9hZCJ9',
+      });
+      const res = new MockRes();
+      await run(adapter, req, res);
+
+      expect(res.statusCode).toBe(200);
+      expect(handlePrepare).toHaveBeenCalledTimes(1);
+    });
+
+    it('regression: non-terminated destination → NOT 402 (no greeting)', async () => {
+      const { adapter, handlePrepare } = makeAdapter(undefined, null);
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+      expect(res.statusCode).toBe(200);
+      expect(handlePrepare).toHaveBeenCalledTimes(1);
+    });
+
+    it('regression: resolveTermination undefined → unchanged behavior (no greeting)', async () => {
+      const handlePrepare = jest.fn(async () => fulfill);
+      const adapter = new IlpHttpAdapter({
+        logger: createMockLogger(),
+        nodeId: 'g.townhouse',
+        handlePrepare,
+        validateClaim: jest.fn(async () => null),
+        // resolveTermination intentionally omitted
+      });
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+      expect(res.statusCode).toBe(200);
+      expect(handlePrepare).toHaveBeenCalledTimes(1);
+    });
   });
 });
