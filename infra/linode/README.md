@@ -12,13 +12,15 @@ nginx + Let's Encrypt TLS in front of them.
 
 ## What runs
 
-| Service                     | From                            | Public endpoint                                            | Notes                                                                                                                                                                                         |
-| --------------------------- | ------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                                                                                           |
-| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`, `POST /api/request {address}` → 100 ETH + 10k USDC. **EVM only.**                                                                                             |
-| Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals)                                                               |
-| Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>` |
-| nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                                                                                       |
+| Service                     | From                            | Public endpoint                                            | Notes                                                                                                                                                                                                                                                                                      |
+| --------------------------- | ------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                                                                                                                                                                                        |
+| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`, `POST /api/request {address}` → 100 ETH + 10k USDC. **EVM only.**                                                                                                                                                                                          |
+| Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals)                                                                                                                                                            |
+| Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>`                                                                                              |
+| nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                                                                                                                                                                                    |
+| Terminator (paid /ilp)      | base compose `terminator`       | `https://terminator.<DOMAIN>/ilp`                          | **opt-in** (issue #222) — add `app-behind-terminator` to `COMPOSE_PROFILES`. Connector-as-terminator; PAID ILP writes (with an `ILP-Payment-Channel-Claim` header) enter here, settle EVM-only on this box's anvil, and reverse-proxy to the oblivious relay. Admin API (8081) NOT public. |
+| Relay (oblivious app)       | base compose `relay`            | `wss://relay-ws.<DOMAIN>` (free reads)                     | **opt-in** (issue #222) — `RELAY_IMAGE=ghcr.io/toon-protocol/relay:latest`, `RELAY_DEV_MODE=false` (enforces Nostr sig verify). Free Nostr WS reads are public; the PAID-write store port (3100) is **never published/proxied** — paid writes MUST flow through the terminator (AC2).      |
 
 ## Quick start (fresh Ubuntu/Debian Linode, as root)
 
@@ -111,13 +113,57 @@ Run the workflow with **`reset: true`** to deliberately skip the restore and iss
 a brand-new cert (spends one cert from the weekly budget — use sparingly). A plan
 change recreates the box (new IP → new domain → new cert).
 
+## App-behind-terminator edge (issue #222) — public paid round-trip
+
+Opt-in: set `COMPOSE_PROFILES=evm,solana,app-behind-terminator` (in `.env`, or pass
+`with_terminator: true` to the deploy workflow). This runs the connector-as-terminator
+
+- an oblivious relay on this **same box**, fronted by the same nginx + Let's Encrypt:
+
+* `https://terminator.<DOMAIN>/ilp` — the **paid** ILP-over-HTTP edge (RFC-0035). POST
+  a serialized ILP `PREPARE` addressed under `g.terminator.relay` carrying the inner
+  HTTP envelope (`POST /write`, body `{event}`) as `data`, with the per-packet claim in
+  the `ILP-Payment-Channel-Claim` header. The terminator validates the claim, settles
+  **EVM-only** on this box's anvil (deployer key + the public faucet — no Mina/Solana),
+  reverse-proxies the write to the relay, and returns an ILP `FULFILL`.
+* `wss://relay-ws.<DOMAIN>` — the relay's **free** Nostr WS reads (bypass the paid edge).
+* The relay's paid-write store port (`3100`) and the terminator admin API (`8081`) are
+  **never published or proxied** — paid writes MUST flow through the terminator (AC2).
+* `RELAY_IMAGE=ghcr.io/toon-protocol/relay:latest`, `RELAY_DEV_MODE=false` (the public
+  box enforces Nostr signature verification), and `RELAY_NOSTR_SECRET_KEY` is an
+  **ephemeral** Nostr identity generated per deploy (it is an identity, not money).
+
+### Deploy / destroy / probe
+
+`.github/workflows/devnet-deploy.yml` is `workflow_dispatch`-only and gated behind the
+`devnet` GitHub Environment (configure required reviewers there). Inputs:
+
+- `action: deploy | destroy` — `destroy` deletes the Linode by label (an idle VM bills
+  forever, so tear it down when finished).
+- `with_terminator: true` — also deploy this edge, add the two subdomains to the optional
+  `manage_dns` A-record loop, and — once trusted certs are in place (`letsencrypt_staging=0`)
+  — run the **CI acceptance probe**: a FULL paid round-trip against the public TLS edge
+  (fund a client wallet from the faucet → open/fund a channel → sign a claim → POST the
+  paid `PREPARE` → assert `FULFILL` → verify storage over `wss://relay-ws.<DOMAIN>`), plus
+  the negatives (unpaid write rejected; relay store not publicly reachable). The probe
+  fails the job on any failed assertion.
+
+The probe's reusable client lives in
+`packages/connector/test/integration/paid-roundtrip-client.ts` (shared with the #221
+local e2e); the CLI entry is `scripts/app-behind-terminator/ci-acceptance-probe.ts`
+(`DOMAIN=<domain> npm run probe:terminator-public --workspace=packages/connector`).
+
 ## Security
 
 - Public ports are **22 / 80 / 443 only**. The raw chain/faucet ports
-  (8545/8899/8900/3500) are published on the host by the base compose but
-  **blocked from the internet** by `firewall.sh` via `DOCKER-USER` iptables rules
-  (Docker bypasses `ufw`, so this is mandatory — `ufw` alone won't close them).
-- nginx rate-limits the RPC/faucet/WS vhosts per-IP.
+  (8545/8899/8900/3500) — and, with the terminator edge, 3000/8080/7100/3100 — are
+  published on the host by the base compose (or not at all, for 3100) but **blocked from
+  the internet** by `firewall.sh` via `DOCKER-USER` iptables rules (Docker bypasses
+  `ufw`, so this is mandatory — `ufw` alone won't close them). nginx reaches
+  `terminator:3000` / `relay:7100` by service name over the compose network, so their
+  loopback-only host publish is fine.
+- nginx rate-limits the RPC/faucet/WS vhosts per-IP; the paid `/ilp` edge uses a separate,
+  looser zone (the on-chain claim is the real cost gate).
 - The Mina vhost proxies **only** `/graphql` to `api.minascan.io`.
 
 ## USDC across chains

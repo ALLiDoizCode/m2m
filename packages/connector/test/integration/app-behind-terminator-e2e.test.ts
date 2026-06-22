@@ -40,6 +40,7 @@ import { promisify } from 'util';
 import * as net from 'net';
 import * as path from 'path';
 import { serializePacket, PacketType, type ILPPreparePacket } from '@toon-protocol/shared';
+import { PaidRoundTripClient, type ProbeStep } from './paid-roundtrip-client';
 
 const execFileAsync = promisify(execFile);
 
@@ -251,28 +252,27 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
   (HAVE_REAL_RELAY ? it : it.skip)(
     'AC3: a paid POST /ilp round-trips → FULFILL and the relay stores the write',
     async () => {
-      // SCAFFOLD — the relay store/read contract is now PINNED from relay#24
-      // (merged); the only remaining blocker is a published oblivious-capable
-      // relay image (see compose `relay` service note). Concrete steps:
-      //   1. Sign a payment-channel claim for the terminator's channel (via
-      //      PerPacketClaimService, as in ilp-http-settlement-e2e.test.ts).
-      //   2. Build the inner HTTP envelope the terminator will reverse-proxy:
-      //      request-line `POST /write`, `Content-Type: application/json`, body
-      //      `{ "event": <signed NostrEvent kind:1> }` (relay#24 store contract).
-      //   3. POST /ilp to the terminator edge with that envelope as the PREPARE
-      //      `data`, addressed under `g.terminator.relay`, claim attached via the
-      //      `ILP-Payment-Channel-Claim` header. Assert the terminator returns an
-      //      ILP FULFILL and the proxied 200 body contains `eventId == event.id`.
-      //   4. Verify storage over FREE reads: open `ws://127.0.0.1:${RELAY_WS_READ_PORT}`,
-      //      send `["REQ","ac3",{"kinds":[1]}]`, read until `["EOSE","ac3"]`, and
-      //      assert an `["EVENT","ac3",<toonString>]` whose <toonString> contains
-      //      `id: <event.id>` (relay#24 emits NIP-01 EVENT[2] as a TOON-encoded
-      //      string, not a JSON object — substring-match, do not JSON.parse).
-      throw new Error(
-        `AC3 paid round-trip not yet runnable: needs a published oblivious relay image ` +
-          `(store port ${RELAY_WRITE_PORT} POST /write, WS read ${RELAY_WS_READ_PORT}). ` +
-          `Contract pinned from relay#24; supply a real RELAY_IMAGE to enable.`
-      );
+      // The full paid round-trip lives in the SHARED `PaidRoundTripClient` so the
+      // exact same code path runs here (localhost compose) and in the #222 CI
+      // acceptance probe (remote public box). Pointed at the published compose
+      // ports: terminator /ilp 3000, anvil 8545, faucet 3500, relay free-read WS
+      // 7100 (RELAY_WS_READ_PORT). relay#24 store contract: POST /write, body
+      // `{event}`; EVENT[2] is a TOON-encoded string (substring id match).
+      const client = new PaidRoundTripClient({
+        terminatorIlpUrl: TERMINATOR_ILP_URL,
+        evmRpcUrl: ANVIL_RPC_URL,
+        faucetUrl: 'http://127.0.0.1:3500',
+        relayWsUrl: `ws://127.0.0.1:${RELAY_WS_READ_PORT}`,
+      });
+      try {
+        await client.start();
+        const steps = await client.runPaidRoundTrip();
+        for (const step of steps as ProbeStep[]) {
+          expect({ name: step.name, ok: step.ok, detail: step.detail }).toMatchObject({ ok: true });
+        }
+      } finally {
+        await client.stop();
+      }
     }
   );
 

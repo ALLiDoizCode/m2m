@@ -1,0 +1,23 @@
+{
+  "//": "ts-node project for the #222 CI acceptance probe. The probe imports the shared PaidRoundTripClient from test/integration and the connector src, which the main tsconfig (rootDir ./src, src-only include) excludes. This config widens rootDir to the repo so ts-node can resolve src + test + the scripts/ entrypoint, while inheriting strict settings from the base. transpileOnly is set on the ts-node side via the npm flag, so this only needs to satisfy module resolution.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "resolveJsonModule": true,
+    "skipLibCheck": true
+  },
+  "ts-node": {
+    "transpileOnly": true,
+    "files": true
+  },
+  "include": [
+    "src/**/*",
+    "test/integration/paid-roundtrip-client.ts",
+    "test/integration/multi-hop-helpers.ts",
+    "../../scripts/app-behind-terminator/ci-acceptance-probe.ts"
+  ]
+}
