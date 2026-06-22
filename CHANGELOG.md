@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.18.6](https://github.com/toon-protocol/connector/compare/v3.18.5...v3.18.6) (2026-06-22)
+
+### Performance Improvements
+
+- **devnet:** run on 2GB — swapfile for one-time Rust builds; recreate on plan change ([0cb4385](https://github.com/toon-protocol/connector/commit/0cb43855b687acc1921659c970dbe18d70262523))
+
 ## [3.18.5](https://github.com/toon-protocol/connector/compare/v3.18.4...v3.18.5) (2026-06-22)
 
 ### Bug Fixes
