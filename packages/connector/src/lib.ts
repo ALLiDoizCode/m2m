@@ -121,6 +121,11 @@ export type {
   ChainResolver,
 } from './core/handlers/http-proxy-handler';
 
+// Per-route termination config surface (#218): registry + canonical types.
+export { RouteTerminationRegistry } from './core/route-upstream-registry';
+export type { RouteTermination, TerminationChain } from './config/types';
+export { validateRouteTermination, toRouteTermination } from './config/types';
+
 // Re-export ILP packet types for library consumers
 export type { ILPPreparePacket, ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
 

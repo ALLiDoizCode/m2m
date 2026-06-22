@@ -83,6 +83,7 @@ export class AdminServer {
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
     getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
     registryStore?: import('./admin-api').RegistryPeerSink;
+    routeTerminationRegistry?: import('./admin-api').RouteTerminationSink;
   };
   private readonly _transportType: 'direct' | 'socks5';
 
@@ -135,6 +136,12 @@ export class AdminServer {
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
     getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
     registryStore?: import('./admin-api').RegistryPeerSink;
+    /**
+     * Issue #218: per-route local-termination registry. Forwarded to the admin
+     * router so PUT /admin/desired-state reconciles terminated routes into the
+     * same in-memory registry #216's HttpProxyHandler resolves against.
+     */
+    routeTerminationRegistry?: import('./admin-api').RouteTerminationSink;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -174,6 +181,7 @@ export class AdminServer {
       setPeerRelation,
       getPeerRelation,
       registryStore,
+      routeTerminationRegistry,
     } = this._options;
 
     this._app = express();
@@ -205,6 +213,7 @@ export class AdminServer {
       setPeerRelation,
       getPeerRelation,
       registryStore,
+      routeTerminationRegistry,
     });
 
     this._app.use('/admin', adminRouter);

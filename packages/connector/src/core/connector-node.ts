@@ -38,8 +38,11 @@ import {
   RemovePeerResult,
   DeploymentMode,
   TransportConfig,
+  RouteTermination,
   validateChainProviders,
+  toRouteTermination,
 } from '../config/types';
+import { RouteTerminationRegistry } from './route-upstream-registry';
 import {
   TransportProvider,
   DirectTransportProvider,
@@ -113,6 +116,11 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _config: ConnectorConfig;
   private readonly _logger: Logger;
   private readonly _routingTable: RoutingTable;
+  // Per-route local-termination config (issue #218). Seeded from the static
+  // YAML routes at construction and mutated at runtime by the admin
+  // desired-state reconciler. Consumed by #216's HttpProxyHandler (via its
+  // `upstreamResolver` seam) and by the #217/#220 greeting/price-binding layers.
+  private readonly _routeTerminationRegistry: RouteTerminationRegistry;
   private readonly _btpClientManager: BTPClientManager;
   private readonly _packetHandler: PacketHandler;
   private readonly _btpServer: BTPServer;
@@ -232,6 +240,19 @@ export class ConnectorNode implements HealthStatusProvider {
     this._routingTable = new RoutingTable(
       routingTableEntries,
       logger.child({ component: 'RoutingTable' })
+    );
+
+    // Initialize the route → upstream termination registry (issue #218) from the
+    // static-config routes. Only routes carrying termination config (`upstream`
+    // set) are registered; ordinary forwarding routes are ignored. This is the
+    // seam #216's HttpProxyHandler consumes via `registry.resolveUpstream`, and
+    // the source of price/chains/ilpAddress/settlementAddresses for the #217
+    // greeting and #220 price-binding.
+    this._routeTerminationRegistry = new RouteTerminationRegistry(
+      resolvedConfig.routes.map((route) => ({
+        prefix: route.prefix,
+        termination: toRouteTermination(route),
+      }))
     );
 
     // Initialize BTP client manager
@@ -1529,6 +1550,10 @@ export class ConnectorNode implements HealthStatusProvider {
           // registrations to the shared registry so they survive a restart.
           getPeerRelation: (peerId) => this._packetHandler.getPeerRelation(peerId),
           registryStore: this._registryStore ?? undefined,
+          // Issue #218: let PUT /admin/desired-state reconcile per-route
+          // local-termination config (upstream/price/chains/…) into the same
+          // in-memory registry #216's proxy handler resolves against.
+          routeTerminationRegistry: this._routeTerminationRegistry,
         });
 
         await this._adminServer.start();
@@ -1904,6 +1929,20 @@ export class ConnectorNode implements HealthStatusProvider {
    */
   get routingTable(): RoutingTable {
     return this._routingTable;
+  }
+
+  /**
+   * Get the route → upstream termination registry (issue #218).
+   *
+   * Exposed so callers can (a) bind `registry.resolveUpstream` as the
+   * `upstreamResolver` for a #216 {@link HttpProxyHandler}, and (b) read the
+   * full {@link RouteTermination} (price/chains/ilpAddress/settlementAddresses)
+   * for the #217 greeting / #220 price-binding layers.
+   *
+   * @returns RouteTerminationRegistry instance
+   */
+  get routeTerminationRegistry(): RouteTerminationRegistry {
+    return this._routeTerminationRegistry;
   }
 
   /**
@@ -2927,11 +2966,16 @@ export class ConnectorNode implements HealthStatusProvider {
       });
     }
     for (const route of this._config.routes) {
+      // Issue #218: persist any per-route termination config from static YAML so
+      // it is durably mirrored (the in-memory registry is already seeded from
+      // `_config.routes` at construction).
+      const termination = toRouteTermination(route);
       this._registryStore.saveRoute({
         prefix: route.prefix,
         nextHop: route.nextHop,
         priority: route.priority ?? 0,
         source: 'config',
+        terminationJson: termination ? JSON.stringify(termination) : undefined,
       });
     }
 
@@ -2980,6 +3024,25 @@ export class ConnectorNode implements HealthStatusProvider {
           nextHop: route.nextHop,
           priority: route.priority,
         });
+        // Issue #218: restore the route's local-termination config into the
+        // in-memory registry so #216's proxy handler resolves it post-restart.
+        if (route.terminationJson) {
+          try {
+            this._routeTerminationRegistry.set(
+              route.prefix,
+              JSON.parse(route.terminationJson) as RouteTermination
+            );
+          } catch (parseError) {
+            this._logger.warn(
+              {
+                event: 'registry_route_termination_replay_failed',
+                prefix: route.prefix,
+                error: parseError instanceof Error ? parseError.message : String(parseError),
+              },
+              `Failed to restore persisted route termination: ${route.prefix}`
+            );
+          }
+        }
         replayedRoutes++;
       } catch (error) {
         this._logger.warn(
