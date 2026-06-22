@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.2](https://github.com/toon-protocol/connector/compare/v3.20.1...v3.20.2) (2026-06-22)
+
+### Bug Fixes
+
+- **settlement:** 6-decimal default channel deposit (completes [#188](https://github.com/toon-protocol/connector/issues/188)/[#195](https://github.com/toon-protocol/connector/issues/195) USDC migration) ([#228](https://github.com/toon-protocol/connector/issues/228)) ([53950a5](https://github.com/toon-protocol/connector/commit/53950a5dc8e943a8763f36fe4d0c76d4f3adb384))
+
 ## [3.20.1](https://github.com/toon-protocol/connector/compare/v3.20.0...v3.20.1) (2026-06-22)
 
 ### Bug Fixes
