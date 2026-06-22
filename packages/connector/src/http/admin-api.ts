@@ -56,7 +56,6 @@ import type { BlockchainType } from '../btp/btp-claim-types';
 import { IlpSendHandler } from './ilp-send-handler';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
-import type { ManagedAnonClient } from '../transport/managed-anon-client';
 import type { PeerRelation, RouteTermination, TerminationChain } from '../config/types';
 import { validateRouteTermination, toRouteTermination } from '../config/types';
 
@@ -129,14 +128,6 @@ export interface AdminAPIConfig {
   metricsRegistry?: IlpMetricsRegistry;
 
   /**
-   * Optional managed anon client (Story 38.1). When provided AND configured
-   * for a hidden service, enables `GET /admin/hs-hostname` and
-   * `GET /admin/anon-hostname`. Otherwise those endpoints return
-   * 503 `{ error: "anon-disabled" }`.
-   */
-  managedAnonClient?: ManagedAnonClient;
-
-  /**
    * Optional on-chain token metadata resolver (Story 37.4).
    *
    * Called by GET /admin/earnings.json to resolve raw token identifiers
@@ -169,18 +160,6 @@ export interface AdminAPIConfig {
    * zero, the endpoint returns an empty `connectorFees` array.
    */
   connectorFeePercentage?: number;
-
-  /**
-   * Connector-level transport discriminator (`'direct' | 'socks5'`).
-   * Used to validate `POST /admin/peers { transport: ... }`: a peer
-   * requesting `'socks5'` on a connector with `transportType !== 'socks5'`
-   * is rejected with HTTP 400. Defaults to `'direct'` when omitted.
-   *
-   * Intentionally narrowed to the discriminator only — the admin API
-   * has no business reading the full `TransportConfig` (proxy URL,
-   * managed-lifecycle options, …).
-   */
-  transportType?: 'direct' | 'socks5';
 
   /**
    * Optional hook for propagating a peer's ILP relationship to the packet
@@ -320,21 +299,9 @@ export interface AddPeerRequest {
   settlement?: AdminSettlementConfig;
 
   /**
-   * Per-peer override of the connector-level transport.
-   *
-   * - `'direct'` — dial the peer URL with no SOCKS5 proxy, regardless of the
-   *   connector-level `transport.type`.
-   * - `'socks5'` — dial the peer URL via the connector's configured SOCKS5
-   *   proxy. Requires `config.transport.type === 'socks5'` on the connector,
-   *   otherwise the request is rejected with HTTP 400.
-   * - Omitted — inherit the connector-level `transport.type` (back-compat).
-   *
-   * Re-registration cannot change a peer's live transport: a re-registration
-   * POST with a different `transport` value returns 200 with the original
-   * (live) transport in the response payload. Use `DELETE` + `POST` to change.
-   * PUT `/admin/peers/:peerId` does NOT accept this field.
+   * Per-peer transport. Only direct TCP is supported.
    */
-  transport?: 'direct' | 'socks5';
+  transport?: 'direct';
 
   /**
    * ILP peering relationship for this peer (`'parent' | 'peer' | 'child'`).
@@ -488,42 +455,6 @@ export interface AdminMetricsJsonResponse {
   };
   peers: AdminMetricsJsonPeer[];
   timestamp: string;
-}
-
-/**
- * GET /admin/hs-hostname response (Story 38.1).
- *
- * Both fields are `null` until the anon process publishes the v3 hidden-service
- * descriptor (~30–90s after connector start). Once published, they are stable
- * for the connector process lifetime — key rotation requires a restart.
- *
- * When the connector has no hidden service configured (no `ManagedAnonClient`
- * at all, or one constructed without `hiddenServiceDir`), the endpoint returns
- * 503 with `{ error: "anon-disabled" }` instead of this shape.
- */
-export interface AdminHsHostnameResponse {
-  hostname: string | null;
-  publishedAt: string | null;
-}
-
-/**
- * GET /admin/anon-hostname response (Story 151).
- *
- * Hub-facing accessor for the connector's `.anon` hidden-service hostname.
- * `anonHostname` is redacted to `<redacted-anon>` unless the connector is
- * running at DEBUG or TRACE log level — preventing casual display of the
- * `.anon` address in hub status output.
- *
- * Both fields are `null` during the 30–90s bootstrap window. 503 with
- * `{ error: "anon-disabled" }` when no hidden service is configured.
- *
- * Note: this endpoint reduces accidental log exposure of the `.anon` address;
- * it is not a privacy enforcement boundary. `GET /admin/hs-hostname` returns
- * the same address unredacted to any caller with a valid `X-Api-Key`.
- */
-export interface AdminAnonHostnameResponse {
-  anonHostname: string | null;
-  publishedAt: string | null;
 }
 
 /**
@@ -683,10 +614,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     isReady,
     defaultSettlementTokenId,
     metricsRegistry,
-    managedAnonClient,
     resolveTokenMetadata,
     connectorFeePercentage,
-    transportType = 'direct',
     setPeerRelation,
     getPeerRelation,
     registryStore,
@@ -904,26 +833,11 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         }
       }
 
-      // Validate per-peer transport BEFORE the idempotent-re-reg short-circuit
-      // so a re-reg POST with `transport: 'socks5'` against a direct-global
-      // connector returns 400, not 200. Error strings must be byte-identical
-      // to the corresponding errors thrown by ConnectorNode.registerPeer() so
-      // AC-4 can assert it cross-surface.
-      if (
-        body.transport !== undefined &&
-        body.transport !== 'direct' &&
-        body.transport !== 'socks5'
-      ) {
+      // Validate per-peer transport. Only direct TCP is supported.
+      if (body.transport !== undefined && body.transport !== 'direct') {
         res.status(400).json({
           error: 'Bad request',
-          message: `Invalid transport: must be 'direct' or 'socks5' (got '${body.transport}')`,
-        });
-        return;
-      }
-      if (body.transport === 'socks5' && transportType !== 'socks5') {
-        res.status(400).json({
-          error: 'Bad request',
-          message: "transport: 'socks5' requires connector-level transport.type 'socks5'",
+          message: `Invalid transport: must be 'direct' (got '${String(body.transport)}')`,
         });
         return;
       }
@@ -1625,8 +1539,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         if (!peer.url.startsWith('ws://') && !peer.url.startsWith('wss://')) {
           return reject('URL must start with ws:// or wss://');
         }
-        if (peer.transport === 'socks5' && transportType !== 'socks5') {
-          return reject("transport: 'socks5' requires connector-level transport.type 'socks5'");
+        if (peer.transport !== undefined && peer.transport !== 'direct') {
+          return reject(`Invalid transport: must be 'direct' (got '${String(peer.transport)}')`);
         }
         if (
           peer.relation !== undefined &&
@@ -2462,59 +2376,6 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         message: error instanceof Error ? error.message : String(error),
       });
     }
-  });
-
-  /**
-   * GET /admin/hs-hostname
-   *
-   * Story 38.1 — exposes the connector's `.anyone` hidden-service hostname so
-   * the Townhouse host CLI can read it without `docker exec`-ing into the
-   * container. Returns nulls during the 30–90s post-boot window; 503 with
-   * `{ error: "anon-disabled" }` when no hidden service is configured.
-   */
-  router.get('/hs-hostname', (_req: Request, res: Response) => {
-    if (!managedAnonClient || !managedAnonClient.isHiddenServiceConfigured()) {
-      res.set('Cache-Control', 'no-store');
-      res.status(503).json({ error: 'anon-disabled' });
-      return;
-    }
-    const snapshot = managedAnonClient.getHostnameSnapshot();
-    res.set('Cache-Control', 'no-store');
-    if (snapshot.hostname === null) {
-      // Townhouse polls every ~2–3s during the bootstrap window; hint the
-      // cadence so naive clients can back off if they prefer.
-      res.set('Retry-After', '3');
-    }
-    res.json(snapshot satisfies AdminHsHostnameResponse);
-  });
-
-  /**
-   * GET /admin/anon-hostname
-   *
-   * Story 151 — hub-facing read accessor for the connector's `.anon`
-   * hidden-service hostname. Redacts the hostname to `<redacted-anon>` at
-   * INFO and above so it does not appear in operator log streams; full value
-   * is included in the response only when the connector runs at DEBUG or TRACE
-   * level.
-   */
-  router.get('/anon-hostname', (_req: Request, res: Response) => {
-    if (!managedAnonClient || !managedAnonClient.isHiddenServiceConfigured()) {
-      res.set('Cache-Control', 'no-store');
-      res.status(503).json({ error: 'anon-disabled' });
-      return;
-    }
-    const snapshot = managedAnonClient.getHostnameSnapshot();
-    const isVerboseLevel = log.level === 'debug' || log.level === 'trace';
-    const anonHostname =
-      snapshot.hostname !== null && !isVerboseLevel ? '<redacted-anon>' : snapshot.hostname;
-    res.set('Cache-Control', 'no-store');
-    if (snapshot.hostname === null) {
-      res.set('Retry-After', '3');
-    }
-    res.json({
-      anonHostname,
-      publishedAt: snapshot.publishedAt,
-    } satisfies AdminAnonHostnameResponse);
   });
 
   /**

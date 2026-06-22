@@ -73,12 +73,10 @@ export interface HealthStatus {
    * and after `stop()`.
    *
    * - `type: 'direct'` -- `healthy` is always `true`
-   * - `type: 'socks5'` -- `healthy` reflects the last SOCKS5 proxy probe
-   *   (false if the probe failed or the proxy is unreachable)
    */
   transport?: {
-    /** Active transport type from config. */
-    type: 'direct' | 'socks5';
+    /** Active transport type from config (direct TCP only). */
+    type: 'direct';
     /** Cached health probe result; false after an unexpected rejection. */
     healthy: boolean;
   };

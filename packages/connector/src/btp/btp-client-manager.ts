@@ -303,7 +303,7 @@ export class BTPClientManager {
    * need to surface the live (post-construction) transport — re-reads
    * from the `BTPClient`'s `_peer` record on every call.
    */
-  getPeerTransport(peerId: string): 'direct' | 'socks5' | undefined {
+  getPeerTransport(peerId: string): 'direct' | undefined {
     return this._clients.get(peerId)?.getTransport();
   }
 

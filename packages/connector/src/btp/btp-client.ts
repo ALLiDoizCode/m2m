@@ -47,12 +47,9 @@ export interface Peer {
   /** Timestamp of last successful communication */
   lastSeen: Date;
   /**
-   * Per-peer override of the connector-level transport — when omitted, the
-   * connector's global `transport.type` is used. Identical enum to
-   * `TransportConfig.type` so future transport kinds extend both surfaces
-   * in lockstep (Decision 1).
+   * Per-peer transport. Only direct TCP is supported.
    */
-  transport?: 'direct' | 'socks5';
+  transport?: 'direct';
 }
 
 /**
@@ -169,7 +166,7 @@ export class BTPClient extends EventEmitter {
    * (or `BTPClientManager.getPeerTransport`) rather than reaching into
    * private fields.
    */
-  getTransport(): 'direct' | 'socks5' | undefined {
+  getTransport(): 'direct' | undefined {
     return this._peer.transport;
   }
 

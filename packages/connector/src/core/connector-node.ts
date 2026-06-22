@@ -4,7 +4,6 @@
  */
 
 import { promises as fsPromises } from 'fs';
-import * as nodePath from 'path';
 import { Logger } from '../utils/logger';
 import { RoutingTable } from '../routing/routing-table';
 import {
@@ -45,15 +44,7 @@ import {
 } from '../config/types';
 import { RouteTerminationRegistry } from './route-upstream-registry';
 import { HttpProxyHandler } from './handlers/http-proxy-handler';
-import {
-  TransportProvider,
-  DirectTransportProvider,
-  SocksTransportProvider,
-  ManagedAnonClient,
-  createDefaultAnonFactory,
-  type AnonFactoryOptions,
-  type AnonSdkHandle,
-} from '../transport';
+import { TransportProvider, DirectTransportProvider } from '../transport';
 import { HttpPeerClientManager, type HttpPeer } from '../transport/http-peer-transport';
 import { PaymentHandler, createPaymentHandlerAdapter } from './payment-handler';
 import {
@@ -163,12 +154,8 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _startTime: Date = new Date();
   private _btpServerStarted: boolean = false;
   private _defaultSettlementTokenId: string = 'M2M';
-  // Epic 35 / Story 35.4: active transport provider + cached health
+  // Active transport provider (direct TCP only) + cached health
   private _transportProvider: TransportProvider | null = null;
-  // Story 38.1: reference to the constructed ManagedAnonClient (when the
-  // transport is `socks5` with `managed: true`), used by the admin server to
-  // serve `GET /admin/hs-hostname`. `null` for direct or non-managed transports.
-  private _managedAnonClient: ManagedAnonClient | null = null;
   // `_transportProviderReady` gates the public `transportProvider` getter so it
   // returns `null` during the in-flight `provider.start()` await window
   // (AC #11: "during start() before await transportProvider.start() resolves →
@@ -176,7 +163,7 @@ export class ConnectorNode implements HealthStatusProvider {
   // and flipped back to `false` at the start of stop()/rollback, before the
   // reference is nulled. This prevents exposing a half-initialized provider.
   private _transportProviderReady: boolean = false;
-  private _transportType: 'direct' | 'socks5' | null = null;
+  private _transportType: 'direct' | null = null;
   private _lastTransportHealthy: boolean = true;
   private _transportHealthInterval: NodeJS.Timeout | null = null;
   // Epic 35 / Story 35.6 T-35.6-INT-03: transport health-check interval (ms).
@@ -269,59 +256,15 @@ export class ConnectorNode implements HealthStatusProvider {
       resolvedConfig.nodeId,
       logger.child({ component: 'BTPClientManager' })
     );
-    // Story 35.4 + per-peer transport dispatch: wire an agent factory that
-    // (a) honors `peer.transport` as a per-peer override of the connector
-    // level `transport.type`, and (b) defaults to the connector-level
-    // `_transportType` when the peer field is omitted. Before start() or
-    // after stop(), `_transportProvider` and `_transportType` are both
-    // null, in which case the effective transport coalesces to `'direct'`
-    // and the factory returns undefined -- matching pre-Epic-35 default
-    // WebSocket behavior.
-    //
-    // Defense-in-depth (AC-11): if a peer requests `'socks5'` but the
-    // connector has no SOCKS5 provider wired (because validation was
-    // bypassed by a test fixture or future code path), the closure throws
-    // rather than silently dialing direct. The provisioning validators in
-    // POST /admin/peers, ConnectorNode.registerPeer(), and
-    // ConfigLoader.validatePeers() are the primary line of defense; this
-    // is the runtime backstop. The throw is caught by BTPClient.connect()
-    // and surfaced as a BTPConnectionError.
-    this._btpClientManager.setAgentFactory((peer) => {
-      const effective = peer.transport ?? this._transportType ?? 'direct';
+    // Direct TCP transport only: the agent factory always returns undefined so
+    // BTPClient dials each peer's WebSocket directly (pre-Epic-35 default).
+    this._btpClientManager.setAgentFactory(() => undefined);
 
-      if (
-        effective === 'socks5' &&
-        (!this._transportProvider || this._transportType !== 'socks5')
-      ) {
-        this._logger.error(
-          {
-            event: 'btp_agent_factory_invariant_violation',
-            peerId: peer.id,
-            requestedTransport: 'socks5',
-            connectorTransport: this._transportType,
-          },
-          'Peer requested SOCKS5 transport but connector has no SOCKS5 provider — refusing to fall through to direct dial'
-        );
-        throw new Error('SOCKS5 transport requested for peer but no SOCKS5 provider configured');
-      }
-
-      return effective === 'socks5' ? this._transportProvider!.createAgent(peer.url) : undefined;
-    });
-
-    // ILP-over-HTTP egress (Epic 38, Story 38.1). Consumes a thin live-adapter
-    // TransportProvider so HTTP egress composes with SOCKS5/ATOR identically to
-    // the BTP agent factory above: `createAgent` returns a SOCKS agent only when
-    // the connector-level transport is 'socks5' (and a provider is wired), else
-    // undefined → HttpPeerClientManager falls back to its pooled keep-alive
-    // agent. The other TransportProvider methods are not used by the HTTP egress
-    // and delegate to the live provider (or no-op before start()).
+    // ILP-over-HTTP egress (Epic 38, Story 38.1). With direct-only transport the
+    // provider never supplies a custom agent, so HttpPeerClientManager falls
+    // back to its pooled keep-alive agent.
     const httpEgressTransport: TransportProvider = {
-      createAgent: (httpUrl: string) => {
-        if (this._transportType === 'socks5' && this._transportProvider) {
-          return this._transportProvider.createAgent(httpUrl);
-        }
-        return undefined;
-      },
+      createAgent: () => undefined,
       getExternalUrl: () => this._transportProvider?.getExternalUrl() ?? '',
       start: async () => {},
       stop: async () => {},
@@ -1645,14 +1588,7 @@ export class ConnectorNode implements HealthStatusProvider {
           packetSender: (params) => this.sendPacket(params),
           isReady: () => this._btpServerStarted,
           metricsRegistry: this._ilpMetrics,
-          managedAnonClient: this._managedAnonClient ?? undefined,
           // Per-peer transport selection: forward the post-validation
-          // connector-level discriminator so POST /admin/peers can reject
-          // `transport: 'socks5'` when the connector has no SOCKS5 proxy.
-          // `_transportType` is null between init() and start(); coalesce
-          // to the safe default. AdminServer also defaults to 'direct'
-          // (belt-and-suspenders for test fixtures that omit the field).
-          transportType: this._transportType ?? 'direct',
           // Relationship-aware settlement gate (issue #76): POST /admin/peers
           // forwards a peer's relation to the PacketHandler so value-bearing
           // forwards to a 'child' next hop skip the mandatory per-packet claim.
@@ -2102,250 +2038,23 @@ export class ConnectorNode implements HealthStatusProvider {
   }
 
   /**
-   * Select and instantiate a TransportProvider from a validated
-   * `TransportConfig`.
-   *
-   * Uses an exhaustive `switch` on the discriminator so future transport
-   * types fail at compile-time if unhandled (leverages the Story 35.3
-   * discriminated union). When the config is absent, defaults to
-   * `DirectTransportProvider` -- preserving backward compatibility.
+   * Instantiate the TransportProvider. Only direct TCP is supported.
    *
    * `DirectTransportProvider` is given a synthesized `externalUrl` from
-   * `btpServerPort` because `ConnectorConfig` has no `publicUrl` field
-   * (Story 35.3 AC #9). The value is an internal placeholder; callers that
-   * consume `getExternalUrl()` from a direct provider should treat
-   * `ws://localhost:...` as "unknown public URL, do not advertise."
+   * `btpServerPort` because `ConnectorConfig` has no `publicUrl` field. The
+   * value is an internal placeholder; callers that consume `getExternalUrl()`
+   * from a direct provider should treat `ws://localhost:...` as "unknown public
+   * URL, do not advertise."
    *
-   * @param cfg - Validated transport config, possibly undefined.
-   * @returns A started-not-yet TransportProvider.
+   * @returns A not-yet-started TransportProvider.
    */
-  private _createTransportProvider(cfg: TransportConfig | undefined): TransportProvider {
-    if (cfg === undefined || cfg.type === 'direct') {
-      const externalUrl = `ws://localhost:${this._config.btpServerPort}`;
-      this._logger.debug(
-        { event: 'direct_transport_external_url_synthesized', externalUrl },
-        'DirectTransportProvider externalUrl synthesized from btpServerPort (local placeholder)'
-      );
-      return new DirectTransportProvider(externalUrl);
-    }
-    if (cfg.type === 'socks5') {
-      // Story 35.5: if `managed: true`, construct a ManagedAnonClient that
-      // lazy-imports the optional @anyone-protocol/anyone-client SDK and
-      // wraps it for lifecycle. Otherwise behave exactly as Story 35.2.
-      let managedClient: ManagedAnonClient | undefined;
-      let externalUrl = cfg.externalUrl;
-      if (cfg.managed === true) {
-        // Build a factory that defers SDK import until start() runs.
-        // createDefaultAnonFactory() is async and throws MODULE_NOT_FOUND if
-        // the SDK is missing; we capture that at factory-invocation time
-        // so ManagedAnonClient.start() can surface the canonical template.
-        let cachedFactory: ((opts: AnonFactoryOptions) => AnonSdkHandle) | undefined;
-        // Pre-warm the factory via `createDefaultAnonFactory()` which handles
-        // both CJS (`require()`) AND ESM-only (`ERR_REQUIRE_ESM` → dynamic
-        // `import()`) packages. This runs asynchronously; if it rejects with
-        // MODULE_NOT_FOUND we keep `cachedFactory` undefined so the synchronous
-        // `anonFactory` below can re-throw a MODULE_NOT_FOUND-shaped error and
-        // let `ManagedAnonClient.start()` emit the canonical install-guidance
-        // message.
-        let prewarmError: NodeJS.ErrnoException | undefined;
-        const prewarmPromise = createDefaultAnonFactory().then(
-          (f) => {
-            cachedFactory = f;
-          },
-          (err: unknown) => {
-            prewarmError = err as NodeJS.ErrnoException;
-          }
-        );
-        const anonFactory = (opts: AnonFactoryOptions): AnonSdkHandle => {
-          if (cachedFactory) {
-            return cachedFactory(opts);
-          }
-          if (prewarmError) {
-            if (prewarmError.code === 'MODULE_NOT_FOUND') {
-              throw prewarmError;
-            }
-            throw new Error(
-              `Failed to load optional dependency "@anyone-protocol/anyone-client": ` +
-                `${prewarmError.message ?? String(prewarmError)}`,
-              { cause: prewarmError }
-            );
-          }
-          // Pre-warm still in flight. Fall back to synchronous `require()` so
-          // we don't block the factory contract. This branch is the common
-          // case for CJS-compatible SDKs (require succeeds immediately; the
-          // async prewarm is a redundant belt-and-suspenders for ESM-only
-          // future versions).
-          try {
-            const pkg = '@anyone-protocol/anyone-client';
-            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-            const mod = require(pkg);
-            /* eslint-disable @typescript-eslint/no-explicit-any */
-            const AnonCtor =
-              (mod as any)?.Anon ?? (mod as any)?.default?.Anon ?? (mod as any)?.default;
-            /* eslint-enable @typescript-eslint/no-explicit-any */
-            if (typeof AnonCtor !== 'function') {
-              throw new Error(
-                '@anyone-protocol/anyone-client did not export an `Anon` constructor'
-              );
-            }
-            cachedFactory = (o: AnonFactoryOptions) => new AnonCtor(o) as AnonSdkHandle;
-            return cachedFactory(opts);
-          } catch (err) {
-            const cause = err as NodeJS.ErrnoException;
-            // True missing-module: re-throw unchanged so ManagedAnonClient
-            // can emit the canonical install-guidance error via its own
-            // MODULE_NOT_FOUND path.
-            if (cause?.code === 'MODULE_NOT_FOUND') {
-              throw cause;
-            }
-            // ERR_REQUIRE_ESM means the package is ESM-only; the async
-            // pre-warm above handles this correctly but may not have
-            // resolved yet. Surface a descriptive error suggesting the
-            // operator wait/retry rather than misleading them with install
-            // guidance.
-            if (cause?.code === 'ERR_REQUIRE_ESM') {
-              throw new Error(
-                `@anyone-protocol/anyone-client is an ESM-only package; ` +
-                  `the async lazy-import pre-warm had not completed when the factory ` +
-                  `was invoked. This is a timing bug — please file an issue.`,
-                { cause }
-              );
-            }
-            throw new Error(
-              `Failed to load optional dependency "@anyone-protocol/anyone-client": ` +
-                `${cause?.message ?? String(err)}`,
-              { cause }
-            );
-          }
-        };
-        // Reference prewarmPromise to silence unused-variable warnings; the
-        // promise runs to completion in the background and populates
-        // cachedFactory or prewarmError.
-        void prewarmPromise;
-        managedClient = new ManagedAnonClient({
-          socksProxy: cfg.socksProxy,
-          hiddenServiceDir: cfg.managedOptions?.hiddenServiceDir,
-          hiddenServicePort: cfg.managedOptions?.hiddenServicePort,
-          controlPort: cfg.managedOptions?.controlPort,
-          binaryPath: cfg.managedOptions?.binaryPath,
-          startupTimeoutMs: cfg.managedOptions?.startupTimeoutMs,
-          stopTimeoutMs: cfg.managedOptions?.stopTimeoutMs,
-          logger: this._logger,
-          anonFactory,
-        });
-        // Story 38.1: stash the reference so the admin server can serve
-        // `GET /admin/hs-hostname` once both subsystems are up.
-        this._managedAnonClient = managedClient;
-
-        // `externalUrl: 'auto'` resolution (AC #8) happens at start() time
-        // because we need the hostname file to exist. We install a resolver
-        // that the provider invokes AFTER the managed client has started and
-        // BEFORE the TCP probe; it reads the SDK-written `hostname` file and
-        // returns the final `wss://<hostname>/btp` URL.
-        //
-        // We deliberately do NOT embed `.anon` in the construction-time
-        // placeholder (AC #9 log-hygiene invariant — if the placeholder ever
-        // leaks into an error or log before resolution, it must not contain a
-        // simulated `.anon` host). Use `wss://pending.invalid/btp` instead.
-        if (externalUrl === 'auto') {
-          externalUrl = 'wss://pending.invalid/btp';
-        }
-      } else if (externalUrl === 'auto') {
-        // Defensive: schema should already reject this, but fail-closed here.
-        throw new Error(
-          '_createTransportProvider: transport.externalUrl "auto" requires managed: true'
-        );
-      }
-
-      // Build the auto-resolver if the operator asked for it. The resolver
-      // reads `${hiddenServiceDir}/hostname` (populated by `anon` on first
-      // successful start) and returns the full BTP wss:// URL. It runs
-      // AFTER managedClient.start() and BEFORE the TCP probe.
-      let resolveExternalUrlOnStart: (() => Promise<string>) | undefined;
-      if (cfg.externalUrl === 'auto') {
-        const hsDir = cfg.managedOptions?.hiddenServiceDir;
-        if (!hsDir) {
-          throw new Error(
-            '_createTransportProvider: transport.externalUrl "auto" requires managedOptions.hiddenServiceDir'
-          );
-        }
-        // The `anon` binary writes `${hsDir}/hostname` at some point after
-        // the SOCKS port binds — the exact ordering is version-dependent and
-        // not guaranteed to precede SOCKS readiness. Poll with a bounded
-        // deadline (default 30s; operators can override via
-        // managedOptions.startupTimeoutMs since it's the outer budget) to
-        // tolerate the race without hanging shutdown.
-        const hostnameReadDeadlineMs = cfg.managedOptions?.startupTimeoutMs ?? 30_000;
-        // Strict hostname validator for the contents of
-        // `${hiddenServiceDir}/hostname`. Defense against a corrupted,
-        // partially-written, or attacker-tampered hostname file producing a
-        // malformed `wss://` URL that enables request-smuggling or redirects
-        // the connector at an attacker-controlled peer. Per the ATOR / Tor
-        // hidden service address format, v3 onion addresses are 56 lowercase
-        // base32 chars followed by `.anon` (or `.onion` on upstream Tor);
-        // v2 (deprecated) was 16 chars. We accept either length and both
-        // TLDs defensively. No ports, no paths, no auth, no whitespace.
-        const HIDDEN_SERVICE_HOSTNAME_RE = /^[a-z2-7]{16}(?:[a-z2-7]{40})?\.(?:anon|onion)$/;
-        resolveExternalUrlOnStart = async (): Promise<string> => {
-          // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
-          // Epic 35 retro action item #7 (triage close): `hsDir` is
-          // validated at config load (validateManagedOptions rejects any
-          // `..` segment before and after normalization; see
-          // config-loader.ts). The joined filename is the static literal
-          // `'hostname'` with no user input. The file is read, not written,
-          // and the contents are further validated against a strict
-          // hidden-service regex below before use. Reviewed and closed.
-          const hostnameFile = nodePath.join(hsDir, 'hostname');
-          const deadline = Date.now() + hostnameReadDeadlineMs;
-          let lastErr: unknown;
-          while (Date.now() < deadline) {
-            try {
-              const raw = await fsPromises.readFile(hostnameFile, 'utf8');
-              // Take only the first line (anon writes "<addr>\n"; be tolerant
-              // of CRLF and of the file briefly containing additional tokens
-              // during rotation).
-              const firstLine = raw.split(/\r?\n/, 1)[0]?.trim() ?? '';
-              const hostname = firstLine;
-              if (!hostname) {
-                lastErr = new Error('hostname file is empty');
-              } else if (!HIDDEN_SERVICE_HOSTNAME_RE.test(hostname)) {
-                // Do NOT include the hostname in the error message — AC #9
-                // log-hygiene: the full .anon address must never reach
-                // INFO/WARN/ERROR. Include only the length as a breadcrumb.
-                lastErr = new Error(
-                  `hostname file contents did not match the expected hidden service format ` +
-                    `(length=${hostname.length}); ignoring and retrying`
-                );
-              } else {
-                return `wss://${hostname}/btp`;
-              }
-            } catch (err) {
-              lastErr = err;
-            }
-            await new Promise((r) => setTimeout(r, 250));
-          }
-          const reason = lastErr instanceof Error ? lastErr.message : String(lastErr ?? 'unknown');
-          throw new Error(
-            `hidden service hostname file "${hostnameFile}" did not become readable ` +
-              `within ${hostnameReadDeadlineMs}ms (last error: ${reason})`
-          );
-        };
-      }
-      return new SocksTransportProvider({
-        socksProxy: cfg.socksProxy,
-        externalUrl,
-        logger: this._logger,
-        managedClient,
-        resolveExternalUrlOnStart,
-      });
-    }
-    // Exhaustiveness guard: if a new variant is added to TransportConfig,
-    // TypeScript will error here at compile-time.
-    const _exhaustive: never = cfg;
-    throw new Error(
-      `Unsupported transport type: ${JSON.stringify(_exhaustive)} ` +
-        '(Story 35.4 _createTransportProvider exhaustiveness guard)'
+  private _createTransportProvider(_cfg: TransportConfig | undefined): TransportProvider {
+    const externalUrl = `ws://localhost:${this._config.btpServerPort}`;
+    this._logger.debug(
+      { event: 'direct_transport_external_url_synthesized', externalUrl },
+      'DirectTransportProvider externalUrl synthesized from btpServerPort (local placeholder)'
     );
+    return new DirectTransportProvider(externalUrl);
   }
 
   /**
@@ -2628,22 +2337,9 @@ export class ConnectorNode implements HealthStatusProvider {
       }
     }
 
-    // Validate per-peer transport against the connector-level transport type.
-    // Uses `_transportType` (the post-validation field at connector-node.ts:130),
-    // NOT `_config.transport.type` — `_config.transport` may be undefined for
-    // partial-config test callers, and `_transportType` is the canonical source
-    // of truth after start().
-    if (
-      config.transport !== undefined &&
-      config.transport !== 'direct' &&
-      config.transport !== 'socks5'
-    ) {
-      throw new Error(
-        `Invalid transport: must be 'direct' or 'socks5' (got '${config.transport}')`
-      );
-    }
-    if (config.transport === 'socks5' && this._transportType !== 'socks5') {
-      throw new Error("transport: 'socks5' requires connector-level transport.type 'socks5'");
+    // Validate per-peer transport. Only direct TCP is supported.
+    if (config.transport !== undefined && config.transport !== 'direct') {
+      throw new Error(`Invalid transport: must be 'direct' (got '${String(config.transport)}')`);
     }
 
     // Validate peer relation (issue #76). Error string is byte-identical to the
