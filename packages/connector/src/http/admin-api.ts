@@ -1318,11 +1318,18 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       res.json({
         nodeId,
         routeCount: routes.length,
-        routes: routes.map((r) => ({
-          prefix: r.prefix,
-          nextHop: r.nextHop,
-          priority: r.priority ?? 0,
-        })),
+        routes: routes.map((r) => {
+          // Enrich with local-termination config (issue #218) when this route is
+          // a terminated "app" route — lets `connector app ls` distinguish
+          // terminated routes (those carrying `upstream`) from transit routes.
+          const termination = routeTerminationRegistry?.lookup(r.prefix);
+          return {
+            prefix: r.prefix,
+            nextHop: r.nextHop,
+            priority: r.priority ?? 0,
+            ...(termination ? { termination } : {}),
+          };
+        }),
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
