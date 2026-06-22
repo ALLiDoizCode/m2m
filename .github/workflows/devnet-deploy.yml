@@ -1,0 +1,166 @@
+# Provision + deploy the TOON Linode devnet (manual trigger).
+#
+# Uses linode-cli to find-or-create a PERSISTENT Linode VM (idempotent by label),
+# then SSHes in and runs infra/linode/bootstrap.sh — installs Docker, firewalls
+# the box, brings up the EVM + Solana chains, mints the mock USDC, and issues
+# Let's Encrypt TLS for the public RPC endpoints. Re-running redeploys onto the
+# same box (pulls latest, re-bootstraps).
+#
+# ── Required secrets (set on the repo or org) ────────────────────────────────
+#   LINODE_TOKEN        Linode API personal access token (Linodes + Domains R/W)
+#   DEVNET_SSH_KEY      An SSH PRIVATE key; its public half is added to the VM's
+#                       authorized_keys on create, and used to SSH in.
+#   (If your existing secrets use different names, change the `env:` refs below.)
+#
+# ── DNS ──────────────────────────────────────────────────────────────────────
+#   Create A-records for evm-rpc / solana-rpc / solana-ws / faucet / mina under
+#   <domain> → the VM IP. Set `manage_dns: true` to have this workflow create
+#   them via Linode Domains (the domain must be hosted in your Linode account);
+#   otherwise create them yourself (the run prints the IP).
+
+name: devnet-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: 'Base domain for the devnet (e.g. devnet.toon-protocol.xyz)'
+        required: true
+      letsencrypt_email:
+        description: "Email for Let's Encrypt expiry notices"
+        required: true
+      region:
+        description: 'Linode region'
+        default: 'us-east'
+      plan:
+        description: 'Linode plan (8GB recommended — Solana build + validator + anvil)'
+        default: 'g6-standard-4'
+      label:
+        description: 'Linode label (persistent — reused on re-run)'
+        default: 'toon-devnet'
+      ref:
+        description: 'connector git ref to deploy'
+        default: 'main'
+      letsencrypt_staging:
+        description: "Use Let's Encrypt staging certs (1) until DNS verifies"
+        default: '1'
+      manage_dns:
+        description: 'Create Linode DNS A-records for the 5 subdomains'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency: devnet-deploy # never two deploys racing the same box
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60 # bootstrap installs Docker + builds the Solana program + issues TLS
+    env:
+      LINODE_CLI_TOKEN: ${{ secrets.LINODE_TOKEN }}
+      DOMAIN: ${{ inputs.domain }}
+      LABEL: ${{ inputs.label }}
+    steps:
+      - name: Install linode-cli + jq
+        run: |
+          pipx install linode-cli || pip install --user linode-cli
+          sudo apt-get update -y && sudo apt-get install -y jq openssh-client
+
+      - name: Load SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEVNET_SSH_KEY }}" > ~/.ssh/devnet
+          chmod 600 ~/.ssh/devnet
+          ssh-keygen -y -f ~/.ssh/devnet > ~/.ssh/devnet.pub
+          echo "PUBKEY=$(cat ~/.ssh/devnet.pub)" >> "$GITHUB_ENV"
+
+      - name: Find-or-create the Linode (idempotent by label)
+        run: |
+          set -euo pipefail
+          IP=$(linode-cli linodes list --label "$LABEL" --json 2>/dev/null | jq -r '.[0].ipv4[0] // empty')
+          if [ -n "$IP" ]; then
+            echo "Reusing existing Linode '$LABEL' at $IP"
+          else
+            echo "Creating Linode '$LABEL'…"
+            linode-cli linodes create \
+              --label "$LABEL" \
+              --region "${{ inputs.region }}" \
+              --type "${{ inputs.plan }}" \
+              --image linode/ubuntu24.04 \
+              --root_pass "$(openssl rand -base64 24)" \
+              --authorized_keys "$PUBKEY" \
+              --booted true >/dev/null
+            for i in $(seq 1 30); do
+              IP=$(linode-cli linodes list --label "$LABEL" --json | jq -r '.[0].ipv4[0] // empty')
+              STATUS=$(linode-cli linodes list --label "$LABEL" --json | jq -r '.[0].status // empty')
+              [ "$STATUS" = "running" ] && [ -n "$IP" ] && break
+              echo "  …waiting for VM (status=$STATUS) ($i)"; sleep 10
+            done
+          fi
+          [ -n "$IP" ] || { echo "::error::could not resolve VM IP"; exit 1; }
+          echo "IP=$IP" >> "$GITHUB_ENV"
+
+      - name: Wait for SSH
+        run: |
+          for i in $(seq 1 30); do
+            if nc -z -w5 "$IP" 22; then echo "SSH up"; break; fi
+            echo "  …waiting for sshd ($i)"; sleep 10
+          done
+          ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Bootstrap the devnet on the VM
+        run: |
+          ssh -i ~/.ssh/devnet root@"$IP" bash -s <<REMOTE
+          set -euo pipefail
+          command -v git >/dev/null || { apt-get update -y && apt-get install -y git; }
+          if [ -d connector/.git ]; then
+            cd connector && git fetch --all -q && git checkout "${{ inputs.ref }}" -q && git pull -q
+          else
+            git clone --branch "${{ inputs.ref }}" https://github.com/toon-protocol/connector.git
+            cd connector
+          fi
+          cat > infra/linode/.env <<ENV
+          DOMAIN=${{ inputs.domain }}
+          LETSENCRYPT_EMAIL=${{ inputs.letsencrypt_email }}
+          LETSENCRYPT_STAGING=${{ inputs.letsencrypt_staging }}
+          COMPOSE_PROFILES=evm,solana
+          PUBLIC_IFACE=eth0
+          ENV
+          bash infra/linode/bootstrap.sh
+          REMOTE
+
+      - name: Create DNS A-records (Linode Domains)
+        if: ${{ inputs.manage_dns }}
+        run: |
+          set -euo pipefail
+          DID=$(linode-cli domains list --json | jq -r --arg d "$DOMAIN" '.[] | select(.domain==$d) | .id' | head -1)
+          if [ -z "$DID" ]; then
+            DID=$(linode-cli domains create --type master --domain "$DOMAIN" --soa_email "${{ inputs.letsencrypt_email }}" --json | jq -r '.[0].id')
+          fi
+          for sub in evm-rpc solana-rpc solana-ws faucet mina; do
+            EXIST=$(linode-cli domains records-list "$DID" --json | jq -r --arg n "$sub" '.[] | select(.type=="A" and .name==$n) | .id' | head -1)
+            if [ -n "$EXIST" ]; then
+              linode-cli domains records-update "$DID" "$EXIST" --target "$IP" >/dev/null
+            else
+              linode-cli domains records-create "$DID" --type A --name "$sub" --target "$IP" --ttl_sec 300 >/dev/null
+            fi
+            echo "  A $sub.$DOMAIN -> $IP"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### TOON devnet deployed"
+            echo ""
+            echo "- VM: \`$LABEL\` @ \`$IP\`"
+            echo "- EVM RPC: https://evm-rpc.$DOMAIN"
+            echo "- Solana RPC: https://solana-rpc.$DOMAIN  (WS: wss://solana-ws.$DOMAIN)"
+            echo "- Faucet: https://faucet.$DOMAIN"
+            echo "- Mina (proxy): https://mina.$DOMAIN/graphql"
+            echo ""
+            if [ "${{ inputs.manage_dns }}" != "true" ]; then
+              echo "⚠️ Create A-records for evm-rpc/solana-rpc/solana-ws/faucet/mina.$DOMAIN -> $IP, then re-run with letsencrypt_staging=0 for trusted certs."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
