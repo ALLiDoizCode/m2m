@@ -17,12 +17,17 @@ RPC_URL="${4:-${SOLANA_RPC_URL:-http://localhost:8899}}"
 AUTH_KP="$HERE/usdc-authority.json"
 MINT_ADDR="$(solana-keygen pubkey "$HERE/usdc-mint.json")"
 
+# Throwaway config: the treasury authority is the default signer (transfer source
+# owner), so no fragile per-subcommand --owner placement and no global-config mutation.
+SOLCFG="$(mktemp)"
+trap 'rm -f "$SOLCFG"' EXIT
+solana -C "$SOLCFG" config set --keypair "$AUTH_KP" --url "$RPC_URL" >/dev/null
+
 echo "==> Airdropping $SOL_AMOUNT SOL to $RECIPIENT"
-solana airdrop "$SOL_AMOUNT" "$RECIPIENT" --url "$RPC_URL" || echo "    airdrop failed (continuing)"
+solana -C "$SOLCFG" airdrop "$SOL_AMOUNT" "$RECIPIENT" || echo "    airdrop failed (continuing)"
 
 echo "==> Transferring $USDC_AMOUNT USDC ($MINT_ADDR) to $RECIPIENT"
-spl-token --url "$RPC_URL" --fee-payer "$AUTH_KP" --owner "$AUTH_KP" \
-  transfer "$MINT_ADDR" "$USDC_AMOUNT" "$RECIPIENT" \
+spl-token --config "$SOLCFG" transfer "$MINT_ADDR" "$USDC_AMOUNT" "$RECIPIENT" \
   --fund-recipient --allow-unfunded-recipient
 
 echo "Funded $RECIPIENT: $SOL_AMOUNT SOL + $USDC_AMOUNT USDC"
