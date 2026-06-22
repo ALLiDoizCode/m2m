@@ -83,6 +83,8 @@ export class AdminServer {
     setPeerRelation?: (peerId: string, relation: import('../config/types').PeerRelation) => void;
     getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
     registryStore?: import('./admin-api').RegistryPeerSink;
+    httpPeerEgress?: import('../transport/http-peer-transport').PeerEgress;
+    setPeerProtocol?: (peerId: string, protocol: 'btp' | 'ilp-http') => void;
     routeTerminationRegistry?: import('./admin-api').RouteTerminationSink;
   };
   private readonly _transportType: 'direct' | 'socks5';
@@ -137,6 +139,14 @@ export class AdminServer {
     getPeerRelation?: (peerId: string) => import('../config/types').PeerRelation | undefined;
     registryStore?: import('./admin-api').RegistryPeerSink;
     /**
+     * ILP-over-HTTP egress (Epic 38, Story 38.1). Forwarded to the admin router
+     * so `POST /admin/peers { peerProtocol: 'ilp-http' }` registers the peer
+     * with the HTTP egress instead of opening a BTP connection. Omitted by test
+     * fixtures / connectors built without HTTP egress.
+     */
+    httpPeerEgress?: import('../transport/http-peer-transport').PeerEgress;
+    setPeerProtocol?: (peerId: string, protocol: 'btp' | 'ilp-http') => void;
+    /**
      * Issue #218: per-route local-termination registry. Forwarded to the admin
      * router so PUT /admin/desired-state reconciles terminated routes into the
      * same in-memory registry #216's HttpProxyHandler resolves against.
@@ -181,6 +191,8 @@ export class AdminServer {
       setPeerRelation,
       getPeerRelation,
       registryStore,
+      httpPeerEgress,
+      setPeerProtocol,
       routeTerminationRegistry,
     } = this._options;
 
@@ -213,6 +225,8 @@ export class AdminServer {
       setPeerRelation,
       getPeerRelation,
       registryStore,
+      httpPeerEgress,
+      setPeerProtocol,
       routeTerminationRegistry,
     });
 

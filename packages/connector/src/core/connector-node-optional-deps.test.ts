@@ -124,6 +124,10 @@ describe('ConnectorNode — minimal dependency startup', () => {
       // Issue #76: relationship-aware settlement gate
       setPeerRelation: jest.fn(),
       getPeerRelation: jest.fn().mockReturnValue(undefined),
+      // Epic 38, Story 38.1: ILP-over-HTTP egress wiring + per-peer protocol.
+      setHttpEgress: jest.fn(),
+      setPeerProtocol: jest.fn(),
+      getPeerProtocol: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {

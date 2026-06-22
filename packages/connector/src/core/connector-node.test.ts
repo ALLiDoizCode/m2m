@@ -235,6 +235,10 @@ describe('ConnectorNode', () => {
       // Relation↔route admission validation reads a peer's relation; undefined
       // (treated as 'peer') keeps these mock-based route tests unconstrained.
       getPeerRelation: jest.fn().mockReturnValue(undefined),
+      // Epic 38, Story 38.1: ILP-over-HTTP egress wiring + per-peer protocol.
+      setHttpEgress: jest.fn(),
+      setPeerProtocol: jest.fn(),
+      getPeerProtocol: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<PacketHandler>;
 
     mockHealthServer = {
