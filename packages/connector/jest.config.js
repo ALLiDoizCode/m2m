@@ -50,7 +50,21 @@ module.exports = {
   moduleFileExtensions: ['ts', 'js', 'json'],
   moduleNameMapper: {
     '^@toon-protocol/shared$': '<rootDir>/../shared/src/index.ts',
-    '^@toon-protocol/mina-zkapp$': '<rootDir>/../mina-zkapp/src/index.ts',
+    // Map the bare `@toon-protocol/mina-zkapp` specifier to the COMPILED `dist`,
+    // NOT the TS `src`. mina-zkapp's o1js `@state`/`@method` decorators only
+    // compile under its OWN tsconfig (`experimentalDecorators` +
+    // `emitDecoratorMetadata` + `useDefineForClassFields:false`); pointing this
+    // at `src` made ts-jest recompile that source with the CONNECTOR's tsconfig
+    // (which omits those), throwing TS1240 ("Unable to resolve signature of
+    // property decorator…") from `PaymentChannel.ts`. The SDK's load guard then
+    // swallowed that TSError and reported the misleading
+    // "@toon-protocol/mina-zkapp … is not installed", failing the Mina
+    // claim-gate / lightnet suites. The compiled `dist` is decorator-correct and
+    // is what the in-proof tests already import (`…/mina-zkapp/dist`); the
+    // nightly `npm run build` step produces it before the suites run. Run
+    // `npm run build -w @toon-protocol/mina-zkapp` (or root `npm run build`)
+    // before these suites locally.
+    '^@toon-protocol/mina-zkapp$': '<rootDir>/../mina-zkapp/dist/index.js',
   },
   transform: {
     '^.+\\.ts$': [
