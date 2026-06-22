@@ -354,12 +354,18 @@
             submitBtn.disabled = true;
           }
         } else if (chain === 'mina') {
-          a1L.textContent = 'Network:';
-          a1.textContent = `${c.network || 'devnet'} (public)`;
-          a2L.textContent = 'Funding:';
-          a2.textContent = 'public faucet link';
-          cL.textContent = 'Reads:';
-          cV.textContent = c.readGraphql || '-';
+          a1L.textContent = 'MINA per request:';
+          a1.textContent = c.enabled ? `${c.drips.mina} MINA` : 'disabled';
+          a2L.textContent = 'Network:';
+          a2.textContent = `${c.network || 'devnet'} (public)`;
+          cL.textContent = c.enabled ? 'Treasury:' : 'Public faucet:';
+          cV.textContent = c.enabled ? c.treasury : c.faucetUrl || '-';
+          if (!c.enabled) {
+            notReady.textContent =
+              '⚠️ Mina drip not configured on this host — use the public faucet link.';
+            notReady.style.display = 'block';
+            submitBtn.disabled = true;
+          }
         }
       }
 
@@ -434,11 +440,13 @@
             );
             addressInput.value = '';
           } else if (chain === 'mina') {
+            const p = data.payment;
             showMessage(
-              `ℹ️ ${data.message}<br/>` +
-                `<a class="tx-link" href="${data.faucetUrl}" target="_blank" rel="noopener">Open the public Mina faucet →</a>`,
+              `✅ Sent ${p.amount} MINA to ${address}<br/>` +
+                `<small>payment hash: ${p.hash || p.id}</small>`,
               'success'
             );
+            addressInput.value = '';
           }
         } catch (error) {
           showMessage(`❌ Request failed: ${error.message}`, 'error');

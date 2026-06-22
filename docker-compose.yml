@@ -121,6 +121,18 @@ services:
       SOLANA_USDC_MINT: H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
 
+      # ── Mina (native-MINA treasury drip) ──
+      # Signs a native payment client-side with mina-signer (no o1js proving) and
+      # submits it to the PUBLIC Mina devnet via sendPayment. Reads/writes go to
+      # MINA_GRAPHQL_URL. MINA_FAUCET_KEY is the treasury (HD index 2) base58
+      # PRIVATE key — a SECRET, passed through from the host environment (never
+      # hardcoded). When unset, the Mina route 503s with a public-faucet link, so
+      # an EVM/Solana-only deploy still boots. The faucet asserts the derived
+      # public key matches the treasury at startup (fail-loud on a wrong key).
+      MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
+      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
+      MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
+
     volumes:
       # Committed throwaway devnet treasury authority (mint authority + USDC
       # source). Read-only; only present/used under the solana profile.

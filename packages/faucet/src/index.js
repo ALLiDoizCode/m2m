@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { ethers, NonceManager } from 'ethers';
 import { createSolanaFaucet } from './solana.js';
-import { isValidMinaAddress, minaInfo, handleMinaRequest } from './mina.js';
+import { isValidMinaAddress, minaInfo, minaFallbackLink, createMinaFaucet } from './mina.js';
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -45,9 +45,18 @@ let tokenDecimals = 18;
 // Solana faucet (null when not configured — EVM-only deploys still work).
 const solanaFaucet = createSolanaFaucet();
 
+// Mina faucet (null when MINA_FAUCET_KEY unset — route 503s + links out then).
+// createMinaFaucet throws fail-loud ONLY when a WRONG key is configured (the
+// derived pubkey must equal the treasury), which we want to crash boot.
+const minaFaucet = createMinaFaucet();
+
 // Serialize Solana drips the same way EVM ones are, so concurrent requests
 // don't race the treasury's transaction signing / blockhash reuse.
 let solanaQueue = Promise.resolve();
+
+// Serialize Mina drips: the treasury nonce is read-then-spent, so concurrent
+// requests must not both read the same nonce (the second would be rejected).
+let minaQueue = Promise.resolve();
 
 // Initialize token contract.
 //
@@ -159,12 +168,7 @@ app.get('/api/info', async (req, res) => {
               rpcUrl: solanaFaucet.rpcUrl,
             }
           : { enabled: false, route: '/api/solana/request', ready: false },
-        mina: {
-          enabled: true,
-          route: '/api/mina/request',
-          ready: true,
-          ...minaInfo(),
-        },
+        mina: minaInfo(minaFaucet),
       },
     });
   } catch (error) {
@@ -297,17 +301,51 @@ app.post('/api/solana/request', (req, res) => {
 // ---------------------------------------------------------------------------
 // Mina route — POST /api/mina/request { address }
 //
-// The public Mina faucet is ZK-challenge-gated (see src/mina.js), so this
-// returns a ready-to-click link to the public faucet rather than auto-dripping.
+// Drips native MINA from the funded devnet treasury (signed client-side with
+// mina-signer, no o1js proving) and submits via the public devnet sendPayment
+// mutation. When MINA_FAUCET_KEY is unset the route 503s with the public-faucet
+// link as a documented fallback, so an unconfigured deploy still points users
+// somewhere useful.
 // ---------------------------------------------------------------------------
 app.post('/api/mina/request', (req, res) => {
   const { address } = req.body || {};
+
+  // Validate the recipient first (cheap, no key needed).
   if (!address || !isValidMinaAddress(address)) {
     res.status(400).json({ error: 'Invalid Mina address (expected B62… public key)' });
     return;
   }
-  console.log(`💧 Mina faucet request for ${address} (link path)`);
-  res.json(handleMinaRequest(address));
+
+  // Unconfigured deploy: graceful 503 + documented public-faucet fallback.
+  if (!minaFaucet) {
+    res.status(503).json({
+      error: 'Mina drip not configured',
+      message:
+        'Set MINA_FAUCET_KEY (treasury base58 private key) to enable native-MINA drips. ' +
+        'Until then, request devnet MINA from the public faucet link below.',
+      faucetUrl: minaFallbackLink(address),
+    });
+    return;
+  }
+
+  console.log(`💧 Mina faucet request for ${address}`);
+  minaQueue = minaQueue
+    .then(async () => {
+      const result = await minaFaucet.drip(address);
+      console.log(`  ✅ Mina faucet request completed for ${address}`);
+      res.json({ success: true, chain: 'mina', address, payment: result });
+    })
+    .catch((error) => {
+      console.error('❌ Mina faucet request failed:', error.message);
+      if (res.headersSent) return;
+      // Underfunded treasury is an operator problem (503 + which account to
+      // top up), not a client error — surface it clearly.
+      if (error.code === 'INSUFFICIENT_FUNDS') {
+        res.status(503).json({ error: 'Mina treasury underfunded', message: error.message });
+        return;
+      }
+      res.status(500).json({ error: 'Mina faucet request failed', message: error.message });
+    });
 });
 
 // Start server
@@ -321,7 +359,9 @@ app.listen(PORT, async () => {
   console.log(`   ETH per drip:  ${ETH_AMOUNT} ETH`);
   console.log(`   Token per drip: ${TOKEN_AMOUNT} ${tokenSymbol}`);
   console.log(`   Solana:        ${solanaFaucet ? 'enabled' : 'disabled'}`);
-  console.log(`   Mina:          link (public devnet faucet)`);
+  console.log(
+    `   Mina:          ${minaFaucet ? `drip ${minaFaucet.dripAmount} MINA (treasury)` : 'disabled (503 + public-faucet link)'}`
+  );
   console.log('═══════════════════════════════════════════════');
   console.log('');
 
