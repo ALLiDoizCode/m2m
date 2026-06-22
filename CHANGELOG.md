@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.0](https://github.com/toon-protocol/connector/compare/v3.19.0...v3.20.0) (2026-06-22)
+
+### Features
+
+- **faucet:** real native-MINA treasury drip via mina-signer ([de1ec91](https://github.com/toon-protocol/connector/commit/de1ec91fd2dfa6e7f38ea8b6853420de3469ab8b)), closes [#211](https://github.com/toon-protocol/connector/issues/211)
+
 ## [3.19.0](https://github.com/toon-protocol/connector/compare/v3.18.6...v3.19.0) (2026-06-22)
 
 ### Features
