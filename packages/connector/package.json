@@ -68,6 +68,7 @@
     "test:evm": "jest --testPathPattern='embedded-evm-settlement|per-packet-claims-e2e'",
     "test:embedded": "jest --testPathPattern='test/integration' --testPathIgnorePatterns='docker-|deployment|mesh-topology|full-stack'",
     "test:standalone": "jest --testPathPattern='standalone-(smoke|settlement)-e2e' --forceExit",
+    "test:cli": "jest --testPathPattern='cli-e2e' --forceExit",
     "test:standalone-docker": "jest --testPathPattern='standalone-container-e2e' --forceExit",
     "test:standalone-ator-public": "jest --testPathPattern='standalone-ator-public-container-e2e' --forceExit",
     "test:standalone-ator-p2p": "jest --testPathPattern='standalone-ator-public-p2p-container-e2e' --forceExit",

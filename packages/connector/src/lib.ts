@@ -67,6 +67,8 @@ export type {
   ConnectorAdminClientOptions,
   RegisterPeerInput,
   AdminRouteInput,
+  RouteInput,
+  RouteTerminationInput,
   FetchLike,
 } from './client/connector-admin-client';
 
