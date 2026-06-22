@@ -25,22 +25,28 @@ TREASURY_USDC="${SOLANA_USDC_TREASURY:-100000000}"   # 100M USDC minted to the a
 MINT_ADDR="$(solana-keygen pubkey "$MINT_KP")"
 AUTH_ADDR="$(solana-keygen pubkey "$AUTH_KP")"
 
+# Point a throwaway solana config at the authority keypair + RPC, so the authority
+# is the DEFAULT signer for every spl-token subcommand (mint authority + ATA owner).
+# This avoids per-subcommand signer-flag placement (spl-token 3.x wants
+# --mint-authority/--owner AFTER the subcommand) and never mutates the global config.
+SOLCFG="$(mktemp)"
+trap 'rm -f "$SOLCFG"' EXIT
+solana -C "$SOLCFG" config set --keypair "$AUTH_KP" --url "$RPC_URL" >/dev/null
+spl() { spl-token --config "$SOLCFG" "$@"; }
+
 echo "==> Funding mint authority $AUTH_ADDR with SOL (fees)"
-solana airdrop 100 "$AUTH_ADDR" --url "$RPC_URL" >/dev/null 2>&1 \
+solana -C "$SOLCFG" airdrop 100 "$AUTH_ADDR" >/dev/null 2>&1 \
   || echo "    airdrop skipped (already funded or faucet busy)"
 
-if solana account "$MINT_ADDR" --url "$RPC_URL" >/dev/null 2>&1; then
+if solana -C "$SOLCFG" account "$MINT_ADDR" >/dev/null 2>&1; then
   echo "==> USDC mint $MINT_ADDR already exists"
 else
   echo "==> Creating USDC mint $MINT_ADDR ($DECIMALS decimals)"
-  spl-token --url "$RPC_URL" --fee-payer "$AUTH_KP" \
-    create-token --decimals "$DECIMALS" --mint-authority "$AUTH_ADDR" "$MINT_KP"
+  spl create-token --decimals "$DECIMALS" "$MINT_KP"
 fi
 
 echo "==> Treasury ATA + minting $TREASURY_USDC USDC to $AUTH_ADDR"
-spl-token --url "$RPC_URL" --fee-payer "$AUTH_KP" --owner "$AUTH_KP" \
-  create-account "$MINT_ADDR" >/dev/null 2>&1 || true
-spl-token --url "$RPC_URL" --fee-payer "$AUTH_KP" --mint-authority "$AUTH_KP" \
-  mint "$MINT_ADDR" "$TREASURY_USDC"
+spl create-account "$MINT_ADDR" >/dev/null 2>&1 || true
+spl mint "$MINT_ADDR" "$TREASURY_USDC"
 
 echo "USDC mint ready: $MINT_ADDR  (decimals=$DECIMALS, authority=$AUTH_ADDR)"
