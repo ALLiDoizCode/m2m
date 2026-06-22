@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import { ethers, NonceManager } from 'ethers';
+import { createSolanaFaucet } from './solana.js';
+import { isValidMinaAddress, minaInfo, handleMinaRequest } from './mina.js';
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -39,6 +41,13 @@ const tokenWallet = new NonceManager(new ethers.Wallet(TOKEN_PRIVATE_KEY, provid
 let tokenContract = null;
 let tokenSymbol = 'USDC';
 let tokenDecimals = 18;
+
+// Solana faucet (null when not configured — EVM-only deploys still work).
+const solanaFaucet = createSolanaFaucet();
+
+// Serialize Solana drips the same way EVM ones are, so concurrent requests
+// don't race the treasury's transaction signing / blockhash reuse.
+let solanaQueue = Promise.resolve();
 
 // Initialize token contract.
 //
@@ -101,24 +110,62 @@ app.get('/health', (req, res) => {
 // Get faucet info
 app.get('/api/info', async (req, res) => {
   try {
-    const ethBalance = await provider.getBalance(ethWallet.address);
+    // EVM balances are best-effort: under a Solana-only deploy the EVM RPC is
+    // unreachable, but /api/info must still advertise the Solana/Mina routes.
+    // Never let an EVM RPC error 500 the whole capability map.
+    let ethBalance = null;
     let tokenBalance = '0';
-
-    if (tokenContract) {
-      const balance = await tokenContract.balanceOf(tokenWallet.address);
-      tokenBalance = ethers.formatUnits(balance, tokenDecimals);
+    try {
+      ethBalance = await provider.getBalance(ethWallet.address);
+      if (tokenContract) {
+        const balance = await tokenContract.balanceOf(tokenWallet.address);
+        tokenBalance = ethers.formatUnits(balance, tokenDecimals);
+      }
+    } catch {
+      // EVM unreachable — leave balances null/0 and report ready:false below.
     }
 
     res.json({
+      // ── EVM (legacy top-level fields kept for backwards compatibility) ──
       ethAmount: ETH_AMOUNT,
       tokenAmount: TOKEN_AMOUNT,
       tokenSymbol,
       tokenAddress: TOKEN_ADDRESS,
       faucetBalances: {
-        eth: ethers.formatEther(ethBalance),
+        eth: ethBalance === null ? null : ethers.formatEther(ethBalance),
         token: tokenBalance,
       },
       ready: !!tokenContract,
+
+      // ── Per-chain capability map ──
+      chains: {
+        evm: {
+          enabled: true,
+          route: '/api/request',
+          ready: !!tokenContract,
+          drips: { eth: ETH_AMOUNT, token: TOKEN_AMOUNT, tokenSymbol },
+          tokenAddress: TOKEN_ADDRESS,
+        },
+        solana: solanaFaucet
+          ? {
+              enabled: true,
+              route: '/api/solana/request',
+              ready: true,
+              drips: {
+                sol: String(solanaFaucet.solAmount),
+                usdc: String(solanaFaucet.usdcAmount),
+              },
+              usdcMint: solanaFaucet.mint,
+              rpcUrl: solanaFaucet.rpcUrl,
+            }
+          : { enabled: false, route: '/api/solana/request', ready: false },
+        mina: {
+          enabled: true,
+          route: '/api/mina/request',
+          ready: true,
+          ...minaInfo(),
+        },
+      },
     });
   } catch (error) {
     res.status(500).json({
@@ -208,6 +255,61 @@ app.post('/api/request', (req, res) => {
     });
 });
 
+// ---------------------------------------------------------------------------
+// Solana route — POST /api/solana/request { address }
+//
+// Airdrops SOL + transfers mock USDC from the devnet treasury. Returns a clear
+// 503 when Solana isn't configured for this deploy (so EVM-only still works).
+// ---------------------------------------------------------------------------
+app.post('/api/solana/request', (req, res) => {
+  if (!solanaFaucet) {
+    res.status(503).json({
+      error: 'Solana faucet not configured',
+      message: 'Set SOLANA_USDC_MINT and mount SOLANA_FAUCET_KEYPAIR to enable the Solana route.',
+    });
+    return;
+  }
+
+  const { address } = req.body || {};
+  if (!address || !solanaFaucet.isValidAddress(address)) {
+    res.status(400).json({ error: 'Invalid Solana address (expected base58 pubkey)' });
+    return;
+  }
+
+  console.log(`💧 Solana faucet request for ${address}`);
+  solanaQueue = solanaQueue
+    .then(async () => {
+      const result = await solanaFaucet.drip(address);
+      console.log(`  ✅ Solana faucet request completed for ${address}`);
+      res.json({ success: true, chain: 'solana', address, transactions: result });
+    })
+    .catch((error) => {
+      console.error('❌ Solana faucet request failed:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Solana faucet request failed',
+          message: error.message,
+        });
+      }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Mina route — POST /api/mina/request { address }
+//
+// The public Mina faucet is ZK-challenge-gated (see src/mina.js), so this
+// returns a ready-to-click link to the public faucet rather than auto-dripping.
+// ---------------------------------------------------------------------------
+app.post('/api/mina/request', (req, res) => {
+  const { address } = req.body || {};
+  if (!address || !isValidMinaAddress(address)) {
+    res.status(400).json({ error: 'Invalid Mina address (expected B62… public key)' });
+    return;
+  }
+  console.log(`💧 Mina faucet request for ${address} (link path)`);
+  res.json(handleMinaRequest(address));
+});
+
 // Start server
 app.listen(PORT, async () => {
   console.log('');
@@ -218,6 +320,8 @@ app.listen(PORT, async () => {
   console.log(`   RPC URL:       ${RPC_URL}`);
   console.log(`   ETH per drip:  ${ETH_AMOUNT} ETH`);
   console.log(`   Token per drip: ${TOKEN_AMOUNT} ${tokenSymbol}`);
+  console.log(`   Solana:        ${solanaFaucet ? 'enabled' : 'disabled'}`);
+  console.log(`   Mina:          link (public devnet faucet)`);
   console.log('═══════════════════════════════════════════════');
   console.log('');
 
