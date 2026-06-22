@@ -9,7 +9,10 @@ import { ConnectorNode, ConfigurationError, createLogger } from './lib';
 import type { Logger } from 'pino';
 
 // Export main function for testing
-export { main };
+// `startConnectorMode` is the reusable in-process boot path (config load →
+// ConnectorNode start → SIGTERM/SIGINT graceful shutdown). The `connector up`
+// CLI command calls it directly instead of reimplementing ConnectorNode startup.
+export { main, startConnectorMode };
 
 /**
  * Main entry point
@@ -120,8 +123,12 @@ async function startConnectorMode(configFile: string, logger: Logger): Promise<v
 }
 
 // Run main entry point only when executed directly (not imported)
-// Check if this file is the entry point (running as main script)
-const isMainModule = require.main === module || process.argv[1]?.includes('connector');
+// Check if this file is the entry point (running as main script). We match on
+// the `main.js`/`main.ts` entry filename rather than any path containing
+// "connector" — the latter would spuriously fire when `startConnectorMode` is
+// imported by the `connector` CLI bin (whose argv[1] path contains "connector").
+const entry = process.argv[1] ?? '';
+const isMainModule = require.main === module || /[/\\]main\.(js|ts)$/.test(entry);
 if (isMainModule) {
   void main();
 }

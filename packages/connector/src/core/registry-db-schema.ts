@@ -52,12 +52,28 @@ export const REGISTRY_ROUTES_SCHEMA = `
     next_hop TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 0,
     source TEXT NOT NULL,
+    termination_json TEXT,
     updated_at INTEGER NOT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_routes_next_hop ON routes(next_hop);
   CREATE INDEX IF NOT EXISTS idx_routes_source ON routes(source);
 `;
+
+/**
+ * Idempotent migration adding the issue #218 `termination_json` column to an
+ * existing `routes` table created before route-termination config existed.
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`, so we probe `PRAGMA table_info`
+ * first. Safe to run on every boot.
+ *
+ * @param db - SQLite database instance
+ */
+export function migrateRouteTerminationColumn(db: Database): void {
+  const columns = db.prepare(`PRAGMA table_info(routes)`).all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'termination_json')) {
+    db.exec(`ALTER TABLE routes ADD COLUMN termination_json TEXT`);
+  }
+}
 
 /**
  * Initialize the registry schema (peers + routes tables).
@@ -67,4 +83,6 @@ export const REGISTRY_ROUTES_SCHEMA = `
 export function initializeRegistrySchema(db: Database): void {
   db.exec(REGISTRY_PEERS_SCHEMA);
   db.exec(REGISTRY_ROUTES_SCHEMA);
+  // Idempotent column add for stores created before issue #218.
+  migrateRouteTerminationColumn(db);
 }

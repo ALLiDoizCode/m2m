@@ -318,7 +318,10 @@ export class ChannelManager extends EventEmitter {
     if (options?.initialDeposit !== undefined) {
       initialDeposit = options.initialDeposit;
     } else {
-      const defaultInitialDeposit = BigInt(1000000000000000000); // 1 ETH/token as default
+      // 1 USDC at 6 decimals (EXPECTED_USDC_DECIMALS). USDC is 6-decimal on every
+      // chain since #188/#195; the prior 1e18 default deposited 1e12 USDC and
+      // reverted on-chain with "Insufficient balance" (broke standalone settlement E2E).
+      const defaultInitialDeposit = BigInt(1000000); // 1 USDC (1e6 base units)
       initialDeposit = defaultInitialDeposit * BigInt(this.config.initialDepositMultiplier);
     }
 

@@ -38,8 +38,13 @@ import {
   RemovePeerResult,
   DeploymentMode,
   TransportConfig,
+  RouteTermination,
+  TerminationChain,
   validateChainProviders,
+  toRouteTermination,
 } from '../config/types';
+import { RouteTerminationRegistry } from './route-upstream-registry';
+import { HttpProxyHandler } from './handlers/http-proxy-handler';
 import {
   TransportProvider,
   DirectTransportProvider,
@@ -114,6 +119,11 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _config: ConnectorConfig;
   private readonly _logger: Logger;
   private readonly _routingTable: RoutingTable;
+  // Per-route local-termination config (issue #218). Seeded from the static
+  // YAML routes at construction and mutated at runtime by the admin
+  // desired-state reconciler. Consumed by #216's HttpProxyHandler (via its
+  // `upstreamResolver` seam) and by the #217/#220 greeting/price-binding layers.
+  private readonly _routeTerminationRegistry: RouteTerminationRegistry;
   private readonly _btpClientManager: BTPClientManager;
   /**
    * ILP-over-HTTP egress manager (Epic 38, Story 38.1). Handles forwarding to
@@ -241,6 +251,19 @@ export class ConnectorNode implements HealthStatusProvider {
       logger.child({ component: 'RoutingTable' })
     );
 
+    // Initialize the route → upstream termination registry (issue #218) from the
+    // static-config routes. Only routes carrying termination config (`upstream`
+    // set) are registered; ordinary forwarding routes are ignored. This is the
+    // seam #216's HttpProxyHandler consumes via `registry.resolveUpstream`, and
+    // the source of price/chains/ilpAddress/settlementAddresses for the #217
+    // greeting and #220 price-binding.
+    this._routeTerminationRegistry = new RouteTerminationRegistry(
+      resolvedConfig.routes.map((route) => ({
+        prefix: route.prefix,
+        termination: toRouteTermination(route),
+      }))
+    );
+
     // Initialize BTP client manager
     this._btpClientManager = new BTPClientManager(
       resolvedConfig.nodeId,
@@ -344,6 +367,59 @@ export class ConnectorNode implements HealthStatusProvider {
           process.env.LOCAL_DELIVERY_PER_HOP_NOTIFICATION === 'true',
       };
       this._packetHandler.setLocalDelivery(localDeliveryConfig);
+    }
+
+    // Wire the #216 HttpProxyHandler to the #218 RouteTerminationRegistry.
+    //
+    // When the operator has configured terminated routes (registry non-empty),
+    // construct a generic HTTP reverse-proxy local-delivery handler and feed it
+    // the registry's `resolveUpstream` seam. Per delivery, the handler asks the
+    // registry "what upstream serves this ILP destination?" — for terminated
+    // destinations it reverse-proxies the opaque HTTP envelope; for destinations
+    // with no terminated route the resolver returns undefined and the handler
+    // rejects with F02. `chainResolver` is left default (derives the chain from
+    // the ILP destination's 2nd label).
+    //
+    // PRECEDENCE / DO-NO-HARM: `setLocalDeliveryHandler()` registers a function
+    // handler that UNCONDITIONALLY short-circuits the HTTP `localDelivery.handlerUrl`
+    // client in PacketHandler (the function handler is checked first and always
+    // returns). A function handler cannot "fall through" to the HTTP client. So
+    // installing the proxy while a global `handlerUrl` is also configured would
+    // silently break the existing handlerUrl path for non-terminated destinations
+    // (they'd get F02 instead of reaching the configured app). To guarantee we
+    // never regress the existing path, we install the proxy ONLY when terminated
+    // routes exist AND no global HTTP localDelivery handler is configured. If BOTH
+    // are configured we PRESERVE the existing handlerUrl path and log a warning —
+    // reconciling the two (per-route proxy for terminated destinations, handlerUrl
+    // fallback for the rest) requires a fall-through seam in PacketHandler and is
+    // deferred to a human decision rather than over-engineered here.
+    if (this._routeTerminationRegistry.size > 0) {
+      if (localDeliveryEnabled) {
+        this._logger.warn(
+          {
+            event: 'route_termination_proxy_skipped',
+            terminatedRoutes: this._routeTerminationRegistry.size,
+            reason: 'global_local_delivery_handler_configured',
+          },
+          'Terminated routes are configured but a global localDelivery.handlerUrl ' +
+            'is also enabled; preserving the existing handlerUrl path and NOT ' +
+            'installing the per-route HTTP proxy (requires PacketHandler fall-through — human decision)'
+        );
+      } else {
+        const proxy = new HttpProxyHandler({
+          upstreamResolver: this._routeTerminationRegistry.resolveUpstream,
+          logger: this._logger,
+        });
+        this.setLocalDeliveryHandler(proxy.handler);
+        this._logger.info(
+          {
+            event: 'route_termination_proxy_installed',
+            terminatedRoutes: this._routeTerminationRegistry.size,
+            prefixes: this._routeTerminationRegistry.prefixes(),
+          },
+          'HttpProxyHandler installed as local-delivery handler for terminated routes'
+        );
+      }
     }
 
     // Link PacketHandler to BTPClientManager for incoming packet handling (resolves circular dependency)
@@ -1478,6 +1554,20 @@ export class ConnectorNode implements HealthStatusProvider {
         );
       }
 
+      // x402 v2 greeting (#217): map each x402-nameable settlement chain to the
+      // connector's internal namespaced chainId (`evm:<id>`, `solana:<cluster>`)
+      // so the greeting can derive CAIP-2 `network` ids. Sourced from
+      // chainProviders config — never hardcoded. Mina is intentionally absent
+      // (x402 has no Mina network id; mina rides the toon-channel upgrade only).
+      const terminationChainIds: Partial<Record<TerminationChain, string>> = {};
+      for (const cp of this._config.chainProviders ?? []) {
+        if (cp.chainType === 'evm' && !terminationChainIds.evm) {
+          terminationChainIds.evm = cp.chainId;
+        } else if (cp.chainType === 'solana' && !terminationChainIds.solana) {
+          terminationChainIds.solana = cp.chainId;
+        }
+      }
+
       // Enable ILP-over-HTTP (RFC-0035) on the same listener the BTP server
       // owns: POST /ilp terminates at the same claim gate + packet handler as
       // BTP. Wire before start() so the handler is live when the port opens.
@@ -1492,6 +1582,12 @@ export class ConnectorNode implements HealthStatusProvider {
         recordClaim: this._claimReceiver
           ? (peerId, protocolData) => this._claimReceiver!.ingestProtocolData(peerId, protocolData)
           : undefined,
+        // x402 v2 greeting (#217): resolve a destination's RouteTermination from
+        // the #218 registry so an unpaid request to a terminated route is greeted
+        // with a 402. `match` returns undefined → coalesce to null (no greeting).
+        resolveTermination: (prepare) =>
+          this._routeTerminationRegistry.match(prepare.destination) ?? null,
+        terminationChainIds,
       });
       this._btpServer.setIlpHttpHandler((req, res) => ilpHttpAdapter.handle(req, res));
 
@@ -1572,6 +1668,10 @@ export class ConnectorNode implements HealthStatusProvider {
           httpPeerEgress: this._httpPeerClientManager,
           setPeerProtocol: (peerId, protocol) =>
             this._packetHandler.setPeerProtocol(peerId, protocol),
+          // Issue #218: let PUT /admin/desired-state reconcile per-route
+          // local-termination config (upstream/price/chains/…) into the same
+          // in-memory registry #216's proxy handler resolves against.
+          routeTerminationRegistry: this._routeTerminationRegistry,
         });
 
         await this._adminServer.start();
@@ -1960,6 +2060,20 @@ export class ConnectorNode implements HealthStatusProvider {
    */
   get routingTable(): RoutingTable {
     return this._routingTable;
+  }
+
+  /**
+   * Get the route → upstream termination registry (issue #218).
+   *
+   * Exposed so callers can (a) bind `registry.resolveUpstream` as the
+   * `upstreamResolver` for a #216 {@link HttpProxyHandler}, and (b) read the
+   * full {@link RouteTermination} (price/chains/ilpAddress/settlementAddresses)
+   * for the #217 greeting / #220 price-binding layers.
+   *
+   * @returns RouteTerminationRegistry instance
+   */
+  get routeTerminationRegistry(): RouteTerminationRegistry {
+    return this._routeTerminationRegistry;
   }
 
   /**
@@ -3034,11 +3148,16 @@ export class ConnectorNode implements HealthStatusProvider {
       });
     }
     for (const route of this._config.routes) {
+      // Issue #218: persist any per-route termination config from static YAML so
+      // it is durably mirrored (the in-memory registry is already seeded from
+      // `_config.routes` at construction).
+      const termination = toRouteTermination(route);
       this._registryStore.saveRoute({
         prefix: route.prefix,
         nextHop: route.nextHop,
         priority: route.priority ?? 0,
         source: 'config',
+        terminationJson: termination ? JSON.stringify(termination) : undefined,
       });
     }
 
@@ -3087,6 +3206,25 @@ export class ConnectorNode implements HealthStatusProvider {
           nextHop: route.nextHop,
           priority: route.priority,
         });
+        // Issue #218: restore the route's local-termination config into the
+        // in-memory registry so #216's proxy handler resolves it post-restart.
+        if (route.terminationJson) {
+          try {
+            this._routeTerminationRegistry.set(
+              route.prefix,
+              JSON.parse(route.terminationJson) as RouteTermination
+            );
+          } catch (parseError) {
+            this._logger.warn(
+              {
+                event: 'registry_route_termination_replay_failed',
+                prefix: route.prefix,
+                error: parseError instanceof Error ? parseError.message : String(parseError),
+              },
+              `Failed to restore persisted route termination: ${route.prefix}`
+            );
+          }
+        }
         replayedRoutes++;
       } catch (error) {
         this._logger.warn(

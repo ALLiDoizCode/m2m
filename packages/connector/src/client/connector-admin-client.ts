@@ -13,7 +13,36 @@
  * @module client/connector-admin-client
  */
 
-import type { PeerRelation } from '../config/types';
+import type { PeerRelation, TerminationChain } from '../config/types';
+
+/**
+ * Local-termination fields (issue #218) that may accompany a route to mark it as
+ * a locally terminated "app" route. A route is terminated iff `upstream` is set;
+ * the connector then reverse-proxies matching deliveries to `upstream` instead
+ * of forwarding to a downstream peer. The connector validates the full shape
+ * server-side (`validateRouteTermination`); these are passed through verbatim.
+ */
+export interface RouteTerminationInput {
+  /** Upstream HTTP(S) base URL; presence marks the route as locally terminated. */
+  upstream?: string;
+  /** Price to terminate, decimal-string atomic units (nano-USDC, 6dp). */
+  price?: string;
+  /** Settlement chains accepted (subset of evm|solana|mina). */
+  chains?: TerminationChain[];
+  /** Connector's advertised ILP address for the toon-channel upgrade. */
+  ilpAddress?: string;
+  /** Chain → payTo settlement address (keys ⊆ chains). */
+  settlementAddresses?: Partial<Record<TerminationChain, string>>;
+  /** Optional chain → token (USDC) contract override (keys ⊆ chains). */
+  asset?: Partial<Record<TerminationChain, string>>;
+}
+
+/** A route descriptor for {@link ConnectorAdminClient.addRoute} / desired-state. */
+export interface RouteInput extends RouteTerminationInput {
+  prefix: string;
+  nextHop: string;
+  priority?: number;
+}
 
 /** Minimal `fetch` shape this client depends on. */
 export type FetchLike = (
@@ -99,8 +128,12 @@ export class ConnectorAdminClient {
     return this.send('GET', '/admin/peers');
   }
 
-  /** Add or update a route. `POST /admin/routes`. */
-  addRoute(route: { prefix: string; nextHop: string; priority?: number }): Promise<unknown> {
+  /**
+   * Add or update a route. `POST /admin/routes`. A route may additionally carry
+   * {@link RouteTerminationInput} fields (issue #218) — when `upstream` is set
+   * the route is registered as a locally terminated "app" route.
+   */
+  addRoute(route: RouteInput): Promise<unknown> {
     return this.send('POST', '/admin/routes', route);
   }
 
@@ -119,10 +152,7 @@ export class ConnectorAdminClient {
    * The connector converges to exactly the given peers and routes (removing
    * anything not listed, preserving its own local routes). Idempotent.
    */
-  setDesiredState(state: {
-    peers?: RegisterPeerInput[];
-    routes?: Array<{ prefix: string; nextHop: string; priority?: number }>;
-  }): Promise<unknown> {
+  setDesiredState(state: { peers?: RegisterPeerInput[]; routes?: RouteInput[] }): Promise<unknown> {
     return this.send('PUT', '/admin/desired-state', state);
   }
 

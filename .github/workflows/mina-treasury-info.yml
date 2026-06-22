@@ -1,0 +1,230 @@
+# Mina treasury wallet info — public B62 address + devnet balance
+#
+# Prints the Mina public address and its devnet balance for an account derived
+# from the org CI secret `E2E_DEV_MNEMONIC` (a single BIP-39 mnemonic that
+# derives keys on every chain). The treasury is account index 2.
+#
+# WHY a workflow: the mnemonic is an org Actions secret that is intentionally
+# NOT on disk anywhere, so the only way to resolve the real treasury address +
+# balance is to derive inside CI where the secret is injected as env.
+#
+# DERIVATION (the canonical, fund-matching one — see the verification block):
+#   We use the published `@toon-protocol/sdk` `fromMnemonicFull(mnemonic,
+#   { accountIndex })`, the same helper the toon stack uses everywhere to derive
+#   per-chain identities. Its Mina leg is:
+#       path  m/44'/12586'/{accountIndex}'/0/0   (BIP-32 secp256k1)
+#       clamp keyBytes[0] &= 0x3f                 (fit the Pallas field)
+#       hexToMinaBase58PrivateKey(...) -> mina-signer.derivePublicKey -> B62…
+#   Using the published SDK guarantees the printed address matches whatever the
+#   rest of the stack funds/spends from for that index (the published artifact
+#   was confirmed byte-identical in output to the toon `main` source build).
+#
+# SAFETY: this only ever prints PUBLIC data (B62 address + on-chain balance).
+#   The mnemonic and derived private key are NEVER echoed, logged, or written
+#   to the step summary. The derive script reads the mnemonic from env and only
+#   prints the public key.
+#
+# SELF-TEST GUARD: before deriving the real address, the script re-derives a
+#   well-known BIP-39 test mnemonic and asserts its EVM address matches the
+#   value `ethers` computes for the SAME path the SDK uses (m/44'/1237'/0'/0/i,
+#   NIP-06). A passing cross-check proves the mnemonic→key machinery is intact
+#   end-to-end; if it ever fails (e.g. a bad dependency upgrade) the job aborts
+#   instead of printing a wrong treasury address.
+#
+# Trigger: manual only.
+#   gh workflow run mina-treasury-info.yml            # treasury (index 2)
+#   gh workflow run mina-treasury-info.yml -f account_index=0
+
+name: mina-treasury-info
+
+on:
+  workflow_dispatch:
+    inputs:
+      account_index:
+        description: 'BIP-39 account index to derive (treasury = 2)'
+        required: false
+        default: '2'
+
+permissions:
+  contents: read
+
+jobs:
+  treasury-info:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+
+      # Install the canonical derivation libs in an isolated dir (no repo deps
+      # needed). Pin the SDK; mina-signer is an optional peer dep the SDK needs
+      # for the Mina leg; ethers is only for the self-test cross-check.
+      - name: Install derivation libs
+        run: |
+          mkdir -p "$RUNNER_TEMP/derive"
+          cd "$RUNNER_TEMP/derive"
+          echo '{ "type": "module" }' > package.json
+          npm install --no-audit --no-fund \
+            @toon-protocol/sdk@0.6.0 \
+            mina-signer@^3.0.0 \
+            ethers@^6.0.0
+
+      - name: Write derivation script
+        run: |
+          cat > "$RUNNER_TEMP/derive/derive.mjs" <<'SCRIPT'
+          import { fromMnemonicFull } from '@toon-protocol/sdk';
+          import { HDNodeWallet, Mnemonic } from 'ethers';
+
+          const fail = (msg) => {
+            console.error(`::error::${msg}`);
+            process.exit(1);
+          };
+
+          const mnemonic = process.env.E2E_DEV_MNEMONIC;
+          if (!mnemonic || !mnemonic.trim()) {
+            fail('E2E_DEV_MNEMONIC secret is empty or not set on this repo.');
+          }
+          const accountIndex = Number.parseInt(process.env.ACCOUNT_INDEX ?? '2', 10);
+          if (!Number.isInteger(accountIndex) || accountIndex < 0) {
+            fail(`Invalid account_index input: ${process.env.ACCOUNT_INDEX}`);
+          }
+
+          // --- SELF-TEST: prove the mnemonic->key machinery is intact ----------
+          // Re-derive a public BIP-39 test vector and cross-check the EVM address
+          // against ethers for the SAME path the SDK uses (NIP-06 m/44'/1237'/0'/0/i).
+          // This NEVER touches the real secret; it only validates the libraries.
+          const TEST_MNEMONIC =
+            'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+          for (const i of [0, 2]) {
+            const t = await fromMnemonicFull(TEST_MNEMONIC, { accountIndex: i });
+            const w = HDNodeWallet.fromMnemonic(
+              Mnemonic.fromPhrase(TEST_MNEMONIC),
+              `m/44'/1237'/0'/0/${i}`,
+            );
+            if (t.evmAddress.toLowerCase() !== w.address.toLowerCase()) {
+              fail(
+                `Self-test FAILED at index ${i}: SDK EVM ${t.evmAddress} != ethers ${w.address}. ` +
+                  `Refusing to print a possibly-wrong treasury address.`,
+              );
+            }
+            if (!t.mina || !/^B62q[1-9A-HJ-NP-Za-km-z]{40,}$/.test(t.mina.publicKey)) {
+              fail(`Self-test FAILED: index ${i} did not yield a valid B62 Mina address.`);
+            }
+          }
+          console.error('Self-test passed: EVM cross-check OK, Mina B62 well-formed.');
+
+          // --- REAL derivation -------------------------------------------------
+          const id = await fromMnemonicFull(mnemonic, { accountIndex });
+          if (!id.mina || !/^B62q[1-9A-HJ-NP-Za-km-z]{40,}$/.test(id.mina.publicKey)) {
+            fail('Mina derivation did not produce a valid B62 address.');
+          }
+          // ONLY the public address is emitted. Never the private key / mnemonic.
+          process.stdout.write(id.mina.publicKey);
+          SCRIPT
+
+      - name: Derive Mina public address
+        id: derive
+        env:
+          E2E_DEV_MNEMONIC: ${{ secrets.E2E_DEV_MNEMONIC }}
+          ACCOUNT_INDEX: ${{ github.event.inputs.account_index }}
+        run: |
+          cd "$RUNNER_TEMP/derive"
+          ADDR="$(node derive.mjs)"
+          if [ -z "$ADDR" ]; then
+            echo "::error::Derivation produced no address."
+            exit 1
+          fi
+          echo "address=$ADDR" >> "$GITHUB_OUTPUT"
+          echo "Derived Mina address: $ADDR"
+
+      - name: Query devnet balance
+        id: balance
+        env:
+          ADDR: ${{ steps.derive.outputs.address }}
+        run: |
+          set -euo pipefail
+          # Primary: Minascan devnet node; fallback: toon devnet proxy.
+          ENDPOINTS=(
+            "https://api.minascan.io/node/devnet/v1/graphql"
+            "https://mina.devnet.toonprotocol.dev/graphql"
+          )
+          QUERY="{\"query\":\"{ account(publicKey:\\\"${ADDR}\\\") { balance { total } } }\"}"
+
+          RESP=""
+          USED=""
+          for EP in "${ENDPOINTS[@]}"; do
+            echo "Querying ${EP} ..."
+            if RESP="$(curl -sS --max-time 30 -X POST "$EP" \
+              -H 'Content-Type: application/json' -d "$QUERY")" \
+              && [ -n "$RESP" ]; then
+              USED="$EP"
+              break
+            fi
+            echo "::warning::No response from ${EP}, trying next endpoint."
+          done
+
+          if [ -z "$RESP" ]; then
+            echo "::error::All devnet GraphQL endpoints failed."
+            exit 1
+          fi
+          echo "Endpoint used: ${USED}"
+          echo "Raw response: ${RESP}"
+
+          # balance.total is nanomina (string). Null account => unfunded (0).
+          NANO="$(printf '%s' "$RESP" | node -e '
+            let s = "";
+            process.stdin.on("data", (d) => (s += d));
+            process.stdin.on("end", () => {
+              try {
+                const j = JSON.parse(s);
+                if (j.errors) {
+                  console.error("::error::GraphQL errors: " + JSON.stringify(j.errors));
+                  process.exit(1);
+                }
+                const total = j?.data?.account?.balance?.total;
+                process.stdout.write(total == null ? "0" : String(total));
+              } catch (e) {
+                console.error("::error::Failed to parse GraphQL response: " + e.message);
+                process.exit(1);
+              }
+            });
+          ')"
+
+          # nanomina -> MINA (1e9). Integer + fractional, no float rounding.
+          MINA="$(node -e '
+            const n = BigInt(process.argv[1]);
+            const D = 1000000000n;
+            const whole = n / D;
+            const frac = (n % D).toString().padStart(9, "0").replace(/0+$/, "");
+            process.stdout.write(frac ? `${whole}.${frac}` : `${whole}`);
+          ' "$NANO")"
+
+          echo "endpoint=$USED" >> "$GITHUB_OUTPUT"
+          echo "nanomina=$NANO" >> "$GITHUB_OUTPUT"
+          echo "mina=$MINA" >> "$GITHUB_OUTPUT"
+
+      - name: Write step summary
+        env:
+          IDX: ${{ github.event.inputs.account_index }}
+          ADDR: ${{ steps.derive.outputs.address }}
+          MINA: ${{ steps.balance.outputs.mina }}
+          NANO: ${{ steps.balance.outputs.nanomina }}
+          EP: ${{ steps.balance.outputs.endpoint }}
+        run: |
+          {
+            echo "## Mina treasury wallet info"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Account index | \`${IDX:-2}\` |"
+            echo "| Public address (B62) | \`${ADDR}\` |"
+            echo "| Devnet balance | **${MINA} MINA** |"
+            echo "| Balance (nanomina) | \`${NANO}\` |"
+            echo "| Network | Mina devnet |"
+            echo "| GraphQL endpoint | ${EP} |"
+            echo ""
+            echo "_Derived from the \`E2E_DEV_MNEMONIC\` CI secret via \`@toon-protocol/sdk\` \`fromMnemonicFull\` (path \`m/44'/12586'/${IDX:-2}'/0/0\`). The private key and mnemonic are never logged._"
+          } >> "$GITHUB_STEP_SUMMARY"

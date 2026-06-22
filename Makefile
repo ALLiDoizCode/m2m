@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs ator-up ator-down ator-logs ator-test standalone-test standalone-test-docker standalone-test-ator-public standalone-test-ator-p2p standalone-test-allowlist infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs ator-up ator-down ator-logs ator-test standalone-test standalone-test-docker standalone-test-ator-public standalone-test-ator-p2p standalone-test-allowlist app-up app-down app-logs app-test infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -41,6 +41,12 @@ help:
 	@echo "  make ator-down            Stop ATOR network + purge named volumes (-v)"
 	@echo "  make ator-logs            Follow ATOR docker compose logs"
 	@echo "  make ator-test            Run real-binary ATOR integration suite (requires ator-up)"
+	@echo ""
+	@echo "App behind terminator (issue #221):"
+	@echo "  make app-up               One-command up: terminator + relay + anvil + faucet"
+	@echo "  make app-down             Tear down the app-behind-terminator stack"
+	@echo "  make app-logs             Follow app-behind-terminator docker compose logs"
+	@echo "  make app-test             Run the app-behind-terminator E2E (negative-path always; paid round-trip skips without a real RELAY_IMAGE)"
 	@echo ""
 	@echo "Local Blockchain (All Chains):"
 	@echo "  make infra-up             Start all chains (EVM + Solana + Mina + ATOR)"
@@ -116,6 +122,29 @@ standalone-test-ator-p2p:
 standalone-test-allowlist:
 	docker compose --profile standalone-allowlist build
 	STANDALONE_DOCKER=true npm run test:standalone-allowlist --workspace=packages/connector
+
+# App behind terminator (issue #221) — the "hello-world" of deploying an app
+# behind the connector locally. `make app-up` brings up a standalone
+# connector-as-terminator + an oblivious relay (app) + anvil + faucet with one
+# command (AC4). The relay image is env-overridable (`RELAY_IMAGE`) because the
+# decoupled relay image is not yet published; the terminator/anvil/faucet build
+# and start regardless.
+app-up:
+	docker compose --profile app-behind-terminator up -d --build
+
+app-down:
+	docker compose --profile app-behind-terminator down
+
+app-logs:
+	docker compose --profile app-behind-terminator logs -f
+
+# Run the app-behind-terminator E2E. The terminator + anvil + faucet portions
+# (compose-up, terminator health, AC2 negative-path assertions) always run. The
+# AC3 full paid-write round-trip SKIPS with a clear message unless a real
+# `RELAY_IMAGE` is supplied (the relay app does not exist in this repo yet).
+app-test:
+	docker compose --profile app-behind-terminator build terminator
+	APP_BEHIND_TERMINATOR=1 npm run test:app-behind-terminator --workspace=packages/connector
 
 # Run linter
 lint:

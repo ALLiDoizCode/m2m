@@ -41,6 +41,12 @@ export interface RouteRecord {
   nextHop: string;
   priority: number;
   source: RegistrySource;
+  /**
+   * Issue #218: per-route local-termination config
+   * ({@link ../config/types.RouteTermination}) serialized as JSON, or undefined
+   * for ordinary forwarding routes. Opaque to the store.
+   */
+  terminationJson?: string;
 }
 
 /**
@@ -100,15 +106,23 @@ export class RegistryStore {
     try {
       this.db
         .prepare(
-          `INSERT INTO routes (prefix, next_hop, priority, source, updated_at)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO routes (prefix, next_hop, priority, source, termination_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(prefix) DO UPDATE SET
              next_hop = excluded.next_hop,
              priority = excluded.priority,
              source = excluded.source,
+             termination_json = excluded.termination_json,
              updated_at = excluded.updated_at`
         )
-        .run(record.prefix, record.nextHop, record.priority, record.source, Date.now());
+        .run(
+          record.prefix,
+          record.nextHop,
+          record.priority,
+          record.source,
+          record.terminationJson ?? null,
+          Date.now()
+        );
     } catch (error) {
       this.logFailure('save_route', { prefix: record.prefix }, error);
     }
@@ -140,12 +154,13 @@ export class RegistryStore {
         source: RegistrySource;
       }>;
       const routeRows = this.db
-        .prepare(`SELECT prefix, next_hop, priority, source FROM routes`)
+        .prepare(`SELECT prefix, next_hop, priority, source, termination_json FROM routes`)
         .all() as Array<{
         prefix: string;
         next_hop: string;
         priority: number;
         source: RegistrySource;
+        termination_json: string | null;
       }>;
 
       return {
@@ -163,6 +178,7 @@ export class RegistryStore {
           nextHop: r.next_hop,
           priority: r.priority,
           source: r.source,
+          terminationJson: r.termination_json ?? undefined,
         })),
       };
     } catch (error) {

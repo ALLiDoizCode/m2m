@@ -67,6 +67,8 @@ export type {
   ConnectorAdminClientOptions,
   RegisterPeerInput,
   AdminRouteInput,
+  RouteInput,
+  RouteTerminationInput,
   FetchLike,
 } from './client/connector-admin-client';
 
@@ -103,6 +105,29 @@ export type { PaymentRequest, PaymentResponse, PaymentHandler } from './core/pay
 // Re-export ILP send handler types for library consumers
 export type { PacketSenderFn, IsReadyFn } from './http/ilp-send-handler';
 
+// Connector-as-terminator: generic HTTP reverse-proxy local-delivery handler (#216)
+export {
+  HttpProxyHandler,
+  EnvelopeDecodeError,
+  decodeHttpRequest,
+  encodeHttpRequest,
+  encodeHttpResponse,
+  TOON_PAYER_HEADER,
+  TOON_AMOUNT_HEADER,
+  TOON_CHAIN_HEADER,
+} from './core/handlers/http-proxy-handler';
+export type {
+  HttpProxyHandlerOptions,
+  HttpRequestEnvelope,
+  UpstreamResolver,
+  ChainResolver,
+} from './core/handlers/http-proxy-handler';
+
+// Per-route termination config surface (#218): registry + canonical types.
+export { RouteTerminationRegistry } from './core/route-upstream-registry';
+export type { RouteTermination, TerminationChain } from './config/types';
+export { validateRouteTermination, toRouteTermination } from './config/types';
+
 // Re-export ILP packet types for library consumers
 export type { ILPPreparePacket, ILPFulfillPacket, ILPRejectPacket } from '@toon-protocol/shared';
 
@@ -112,6 +137,7 @@ export type {
   InboundClaimValidateFn,
   HandlePrepareFn,
   IlpHttpAdapterDeps,
+  ResolveTerminationFn,
 } from './http/ilp-http-adapter';
 export type { PeerSecretDecision } from './auth/peer-secret-resolver';
 
@@ -123,3 +149,45 @@ export {
   DEFAULT_ILP_HTTP_EGRESS_PATH,
 } from './transport/http-peer-transport';
 export type { PeerEgress, HttpPeer } from './transport/http-peer-transport';
+
+// x402 v2 "402 Payment Required" greeting on the HTTP edge (#217).
+export {
+  buildX402Greeting,
+  chainToCaip2,
+  X402_VERSION,
+  X402_PAYMENT_SIGNATURE_HEADER,
+  X402_PAYMENT_REQUIRED_HEADER,
+  X402_DEFAULT_MAX_TIMEOUT_SECONDS,
+  TOON_CHANNEL_SCHEME,
+  TOON_CHANNEL_ENDPOINT,
+} from './http/x402-greeting';
+export type {
+  X402PaymentRequired,
+  X402PaymentRequirements,
+  X402ResourceInfo,
+  X402GreetingContext,
+  ToonChannelExtra,
+} from './http/x402-greeting';
+
+// RFC 9421 claim↔request binding (#220): net-new verifier/signer modules.
+// NOT yet wired into ilp-http-adapter.ts — that integration is gated on #218's
+// route-config and is done at merge time by the project lead.
+export {
+  verify as verifyRfc9421Signature,
+  computeContentDigest,
+  verifyContentDigest,
+  buildSignatureBase,
+  signRequest as signRfc9421Request,
+  publicKeyToKeyid,
+  COVERED_COMPONENTS as RFC9421_COVERED_COMPONENTS,
+  PRICE_HEADER as TOON_PRICE_HEADER,
+  PRICE_HEADER_WIRE as TOON_PRICE_HEADER_WIRE,
+  SIGNATURE_ALG as RFC9421_SIGNATURE_ALG,
+} from './auth/rfc9421';
+export type {
+  VerifyResult as Rfc9421VerifyResult,
+  VerifyOptions as Rfc9421VerifyOptions,
+  VerifyFailureCode as Rfc9421VerifyFailureCode,
+  SignRequestInput as Rfc9421SignRequestInput,
+  SignedHeaders as Rfc9421SignedHeaders,
+} from './auth/rfc9421';
