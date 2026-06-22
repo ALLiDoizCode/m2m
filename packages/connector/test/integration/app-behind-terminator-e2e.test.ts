@@ -6,7 +6,7 @@
  *
  *   anvil + faucet  (EVM devnet)
  *   terminator      (standalone connector-as-terminator; image connector:standalone-e2e)
- *   relay           (the oblivious app — env-overridable RELAY_IMAGE)
+ *   relay           (the oblivious app — ghcr.io/toon-protocol/relay:latest)
  *
  *   host ─curl/h402Fetch─▶ POST /ilp (3000) ─▶ terminator ─▶ HttpProxyHandler
  *                                                              ▼
@@ -15,22 +15,19 @@
  *                                                         relay (app)
  *
  * What this asserts:
- *   - AC1: the terminator + anvil + faucet come up (compose up + health waits).
- *   - AC2 (negative-path, ALWAYS run): the relay's paid-write store port is NOT
- *     reachable from the host (TCP-level failure, reusing the allowlist
- *     unreachable-port idiom), and an UNPAID `POST /ilp` to the terminator is
- *     REJECTED (F-class) by the inbound claim gate.
- *   - AC3 (full paid round-trip): SKIPPED with a clear console message unless a
- *     real `RELAY_IMAGE` is supplied — the decoupled relay image does not exist
- *     in this repo yet (separate "decouple relay" work, not yet published).
+ *   - AC1: the terminator + anvil + faucet + relay come up (compose up + health waits).
+ *   - AC2 (negative-path): the relay's paid-write store port is NOT reachable
+ *     from the host (TCP-level failure, reusing the allowlist unreachable-port
+ *     idiom), and an UNPAID `POST /ilp` to the terminator is REJECTED (F-class)
+ *     by the inbound claim gate.
+ *   - AC3 (full paid round-trip): a signed payment-channel claim rides the
+ *     `POST /ilp` edge; the terminator validates payment and reverse-proxies the
+ *     inner `POST /write` to the oblivious relay; the response deserializes to an
+ *     ILP FULFILL whose proxied body echoes `eventId === event.id`; and the
+ *     stored event is read back over the FREE Nostr WS (port 7100).
  *
- * Gate: APP_BEHIND_TERMINATOR=1
- *
- * Why no relay in the default compose-up: the default `RELAY_IMAGE`
- * (ghcr.io/toon-protocol/relay:oblivious) is not published, so a `--wait` on the
- * `relay` service would hang/fail. We therefore bring up ONLY
- * `terminator anvil faucet` here and start `relay` only when a real image is
- * supplied via `RELAY_IMAGE` (which also unlocks the AC3 round-trip).
+ * Gate: APP_BEHIND_TERMINATOR=1 (the published relay:latest is real, so AC3 runs
+ * by default; `RELAY_IMAGE` may still be overridden to pin a `sha-…` tag).
  *
  * @packageDocumentation
  */
@@ -39,19 +36,46 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as net from 'net';
 import * as path from 'path';
-import { serializePacket, PacketType, type ILPPreparePacket } from '@toon-protocol/shared';
+import Database from 'libsql';
+import WebSocket from 'ws';
+import { schnorr } from '@noble/curves/secp256k1';
+import { sha256 } from '@noble/hashes/sha2';
+import { bytesToHex } from '@noble/hashes/utils';
+import {
+  serializePacket,
+  deserializePacket,
+  PacketType,
+  type ILPPreparePacket,
+} from '@toon-protocol/shared';
+import { ConnectorNode } from '../../src/core/connector-node';
+import { createLogger } from '../../src/utils/logger';
+import type { ConnectorConfig } from '../../src/config/types';
+import { PerPacketClaimService } from '../../src/settlement/per-packet-claim-service';
+import {
+  SENT_CLAIMS_TABLE_SCHEMA,
+  SENT_CLAIMS_INDEXES,
+} from '../../src/settlement/claim-sender-db-schema';
+import {
+  ANVIL_CHAIN_ID,
+  ANVIL_RPC_URL as ANVIL_RPC_URL_LOCAL,
+  REGISTRY_ADDRESS,
+  TOKEN_ADDRESS,
+  PEER_PRIVATE_KEYS,
+  PEER_EVM_ADDRESSES,
+  fundPeerAccounts,
+  waitForAnvilReady,
+} from './multi-hop-helpers';
 
 const execFileAsync = promisify(execFile);
 
 const RUN = process.env.APP_BEHIND_TERMINATOR === '1';
 const describeApp = RUN ? describe : describe.skip;
 
-// A real relay image unlocks the AC3 paid round-trip. The default points at the
-// not-yet-published GHCR image; presence of an explicit override (any value
-// other than the default) means an operator has wired a real relay.
-const DEFAULT_RELAY_IMAGE = 'ghcr.io/toon-protocol/relay:oblivious';
-const RELAY_IMAGE = process.env.RELAY_IMAGE;
-const HAVE_REAL_RELAY = Boolean(RELAY_IMAGE && RELAY_IMAGE !== DEFAULT_RELAY_IMAGE);
+// The published relay image is real, so AC3 runs whenever the docker suite is
+// gated on (APP_BEHIND_TERMINATOR=1). The compose `relay` service defaults
+// RELAY_IMAGE to ghcr.io/toon-protocol/relay:latest; set RELAY_IMAGE in the
+// environment to pin a specific tag (e.g. `sha-…`) — compose consumes it and
+// this test needs no separate knowledge of the tag.
 
 jest.setTimeout(300_000);
 
@@ -66,11 +90,24 @@ const ANVIL_RPC_URL = 'http://127.0.0.1:8545';
 const FAUCET_HEALTH_URL = 'http://127.0.0.1:3500/health';
 
 // NOT published — only the terminator dials it over the compose network. The
-// host must NOT be able to reach it (this is AC2's posture). Per relay#24 the
-// oblivious-mode store port is 3100 (`TOON_BLS_PORT`, `POST /write`); the free-read
-// Nostr WS port 7100 (`TOON_RELAY_PORT`) IS published.
+// host must NOT be able to reach it (this is AC2's posture). The oblivious-mode
+// store port is 3100 (`TOON_BLS_PORT`, `POST /write`); the free-read Nostr WS
+// port 7100 (`TOON_RELAY_PORT`) IS published.
 const RELAY_WRITE_PORT = 3100;
 const RELAY_WS_READ_PORT = 7100;
+
+// The terminated route under test (see scripts/app-behind-terminator/terminator.yaml).
+const TERMINATED_PREFIX = 'g.terminator.relay';
+const ROUTE_PRICE = 1000n;
+
+// The terminator's on-chain settlement signer is Anvil account 0 (keyId
+// 0xac0974… in terminator.yaml). The test client opens a funded channel TOWARD
+// this address so the inbound claim's channel exists on-chain.
+const TERMINATOR_SETTLEMENT_ADDRESS = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+
+// The test client (an in-process ConnectorNode) uses Anvil account 2 as its
+// settlement wallet — it auto-opens + funds the channel and signs the claims.
+const CLIENT_KEY_INDEX = 0; // → PEER_PRIVATE_KEYS[0] / PEER_EVM_ADDRESSES[0] (account 2)
 
 async function compose(...args: string[]): Promise<void> {
   await execFileAsync('docker', [...PROFILE_ARGS, ...args], {
@@ -141,15 +178,87 @@ function buildPreparePacket(destination: string, amount: bigint, data: Buffer): 
   };
 }
 
+// ── Minimal NIP-01 signed event (kind:1) ────────────────────────────────────
+interface NostrEvent {
+  id: string;
+  pubkey: string;
+  created_at: number;
+  kind: number;
+  tags: string[][];
+  content: string;
+  sig: string;
+}
+
+/** Sign a minimal valid NIP-01 kind:1 event with secp256k1 schnorr. */
+function signNostrEvent(secretKey: Uint8Array, content: string): NostrEvent {
+  const pubkey = bytesToHex(schnorr.getPublicKey(secretKey));
+  const created_at = Math.floor(Date.now() / 1000);
+  const kind = 1;
+  const tags: string[][] = [];
+  // NIP-01 serialization: [0, pubkey, created_at, kind, tags, content]
+  const serialized = JSON.stringify([0, pubkey, created_at, kind, tags, content]);
+  const id = bytesToHex(sha256(new TextEncoder().encode(serialized)));
+  const sig = bytesToHex(schnorr.sign(id, secretKey));
+  return { id, pubkey, created_at, kind, tags, content, sig };
+}
+
+/**
+ * Read the free Nostr WS until EOSE, collecting every EVENT[2] payload. The
+ * relay emits NIP-01 EVENT[2] as a TOON-encoded STRING (not a JSON object), so
+ * callers substring-match the returned strings — they must NOT JSON.parse them.
+ */
+function readNostrEvents(
+  url: string,
+  subId: string,
+  filter: Record<string, unknown>,
+  timeoutMs: number
+): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const eventStrings: string[] = [];
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error(`Timed out reading Nostr events from ${url}`));
+    }, timeoutMs);
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify(['REQ', subId, filter]));
+    });
+    ws.on('message', (data: Buffer) => {
+      let msg: unknown;
+      try {
+        // The OUTER NIP-01 frame is JSON: ["EVENT",<subId>,<payload>] / ["EOSE",<subId>].
+        msg = JSON.parse(data.toString());
+      } catch {
+        return; // ignore non-JSON frames
+      }
+      if (!Array.isArray(msg)) return;
+      if (msg[0] === 'EVENT' && msg[1] === subId) {
+        // payload (msg[2]) is a TOON-encoded STRING — keep it verbatim.
+        eventStrings.push(String(msg[2]));
+      } else if (msg[0] === 'EOSE' && msg[1] === subId) {
+        clearTimeout(timer);
+        ws.close();
+        resolve(eventStrings);
+      }
+    });
+    ws.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 describeApp('App-behind-terminator E2E (Docker)', () => {
+  let client: ConnectorNode | undefined;
+  let claimSvc: PerPacketClaimService | undefined;
+  let settlementTokenId: string | undefined;
+
   beforeAll(async () => {
-    // The default RELAY_IMAGE is not published, so bring up only the services we
-    // can actually start. `relay` joins only when a real image is supplied.
+    // Bring up the full stack — the published relay image is real, so `relay`
+    // joins the `--wait` set and AC3 runs by default.
     await compose('build', 'terminator');
-    const upServices = HAVE_REAL_RELAY
-      ? ['up', '-d', '--wait', 'anvil', 'faucet', 'terminator', 'relay']
-      : ['up', '-d', '--wait', 'anvil', 'faucet', 'terminator'];
-    await compose(...upServices);
+    await compose('up', '-d', '--wait', 'anvil', 'faucet', 'terminator', 'relay');
 
     // AC1 — wait for anvil (eth_chainId), faucet /health, terminator /health.
     await waitForCondition(
@@ -183,9 +292,95 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
       120_000,
       'terminator /health responds'
     );
+
+    // ── AC3 client setup: an in-process ConnectorNode that auto-opens + funds an
+    // on-chain channel TOWARD the terminator's settlement address, and signs
+    // claims byte-identically to a real per-packet claim (self-describing EVM
+    // fields → the terminator's inbound gate verifies the signature without a
+    // pre-registered channel). Mirrors ilp-http-settlement-e2e.test.ts.
+    await waitForAnvilReady(60_000);
+    await fundPeerAccounts([PEER_EVM_ADDRESSES[CLIENT_KEY_INDEX]!]);
+
+    const base = 51_000 + Math.floor(Math.random() * 8_000);
+    const clientConfig: ConnectorConfig = {
+      nodeId: 'ac3-client',
+      btpServerPort: base,
+      healthCheckPort: base + 1,
+      logLevel: 'warn',
+      environment: 'development',
+      deploymentMode: 'standalone',
+      adminApi: { enabled: true, port: base + 2, host: '127.0.0.1' },
+      // The peer "terminator" maps to the terminator's settlement signer address;
+      // the client auto-opens + funds the channel toward it.
+      peers: [
+        {
+          id: 'terminator',
+          url: `ws://127.0.0.1:${base + 50}`, // unreachable — we never dial BTP; only sign claims
+          authToken: '',
+          evmAddress: TERMINATOR_SETTLEMENT_ADDRESS,
+          chain: `evm:${ANVIL_CHAIN_ID}`,
+        },
+      ],
+      routes: [{ prefix: 'g.terminator', nextHop: 'terminator' }],
+      settlement: {
+        connectorFeePercentage: 0.1,
+        enableSettlement: true,
+        tigerBeetleClusterId: 0,
+        tigerBeetleReplicas: [],
+        thresholds: { defaultThreshold: 5000n, pollingInterval: 100 },
+      },
+      chainProviders: [
+        {
+          chainType: 'evm',
+          chainId: `evm:${ANVIL_CHAIN_ID}`,
+          rpcUrl: ANVIL_RPC_URL_LOCAL,
+          registryAddress: REGISTRY_ADDRESS,
+          keyId: PEER_PRIVATE_KEYS[CLIENT_KEY_INDEX]!,
+          tokenAddress: TOKEN_ADDRESS,
+          settlementOptions: {
+            threshold: '5000',
+            pollingIntervalMs: 100,
+            settlementTimeoutSecs: 3600,
+            initialDepositMultiplier: 2,
+            ledgerSnapshotPath: `./data/ledger-ac3-client-${base}.json`,
+          },
+        },
+      ],
+    };
+
+    client = new ConnectorNode(clientConfig, createLogger('ac3-client', 'warn'));
+    await client.start();
+
+    // Open + fund the on-chain channel toward the terminator's settlement address
+    // on demand (there is no BTP link to trigger auto-open — we only sign claims).
+    settlementTokenId = client.defaultSettlementTokenId;
+    await waitForCondition(
+      async () => {
+        await client!.channelManager!.ensureChannelExists('terminator', settlementTokenId!, {
+          chain: `evm:${ANVIL_CHAIN_ID}`,
+        });
+        return client!.channelManager!.getChannelsForPeer('terminator').length > 0;
+      },
+      90_000,
+      'client opens on-chain channel toward terminator settlement address'
+    );
+
+    // Build a test-side claim signer over the client's real channel context.
+    const claimDb = new Database(':memory:') as unknown as import('better-sqlite3').Database;
+    claimDb.exec(SENT_CLAIMS_TABLE_SCHEMA);
+    for (const idx of SENT_CLAIMS_INDEXES) claimDb.exec(idx);
+    claimSvc = new PerPacketClaimService(
+      client.chainRegistry!,
+      client.channelManager!,
+      claimDb,
+      createLogger('ac3-claim', 'warn'),
+      'ac3-client',
+      new Map([['terminator', `evm:${ANVIL_CHAIN_ID}`]])
+    );
   });
 
   afterAll(async () => {
+    await client?.stop().catch(() => undefined);
     await compose('down', '--volumes').catch(() => undefined);
   });
 
@@ -199,7 +394,7 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
     // The relay's write/store port is never published — only the terminator
     // dials it over the compose network by service name. A direct host probe
     // must fail at the TCP layer. (Mirrors the allowlist unreachable-port
-    // assertion.) This holds whether or not the relay container is running.
+    // assertion.)
     const reachable = await tcpReachable('127.0.0.1', RELAY_WRITE_PORT, 2_000);
     expect(reachable).toBe(false);
   });
@@ -211,14 +406,14 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
     // edge returns 200 + a serialized ILP REJECT for an ILP-level outcome.
     const envelope = buildHttpEnvelope(
       'POST',
-      '/store',
+      '/write',
       [
         ['Host', 'relay'],
         ['Content-Type', 'application/json'],
       ],
       JSON.stringify({ note: 'unpaid write attempt' })
     );
-    const prepare = buildPreparePacket('g.terminator.relay.store', 1000n, envelope);
+    const prepare = buildPreparePacket(TERMINATED_PREFIX, ROUTE_PRICE, envelope);
     const body = serializePacket(prepare);
 
     const res = await fetch(TERMINATOR_ILP_URL, {
@@ -231,11 +426,10 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
 
     // The edge answers an ILP-level outcome as 200 + serialized REJECT; a
     // transport-level refusal (e.g. 4xx) is also acceptable proof the write did
-    // NOT succeed. What matters: the write was NOT accepted/fulfilled.
+    // NOT succeed.
     if (res.status === 200) {
       const buf = Buffer.from(await res.arrayBuffer());
-      // First byte of an ILP packet is the type tag. A FULFILL would mean the
-      // unpaid write slipped through — that must NOT happen.
+      // A FULFILL would mean the unpaid write slipped through — that must NOT happen.
       expect(buf.length).toBeGreaterThan(0);
       expect(buf[0]).not.toBe(PacketType.FULFILL);
       expect(buf[0]).toBe(PacketType.REJECT);
@@ -246,47 +440,72 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
   });
 
   // ──────────────────────────────────────────────────────────────────────────
-  // AC3 — full paid round-trip (FULFILL + relay stored). Gated on a real relay.
+  // AC3 — full paid round-trip (FULFILL + relay stored), verified over free reads.
   // ──────────────────────────────────────────────────────────────────────────
-  (HAVE_REAL_RELAY ? it : it.skip)(
-    'AC3: a paid POST /ilp round-trips → FULFILL and the relay stores the write',
-    async () => {
-      // SCAFFOLD — the relay store/read contract is now PINNED from relay#24
-      // (merged); the only remaining blocker is a published oblivious-capable
-      // relay image (see compose `relay` service note). Concrete steps:
-      //   1. Sign a payment-channel claim for the terminator's channel (via
-      //      PerPacketClaimService, as in ilp-http-settlement-e2e.test.ts).
-      //   2. Build the inner HTTP envelope the terminator will reverse-proxy:
-      //      request-line `POST /write`, `Content-Type: application/json`, body
-      //      `{ "event": <signed NostrEvent kind:1> }` (relay#24 store contract).
-      //   3. POST /ilp to the terminator edge with that envelope as the PREPARE
-      //      `data`, addressed under `g.terminator.relay`, claim attached via the
-      //      `ILP-Payment-Channel-Claim` header. Assert the terminator returns an
-      //      ILP FULFILL and the proxied 200 body contains `eventId == event.id`.
-      //   4. Verify storage over FREE reads: open `ws://127.0.0.1:${RELAY_WS_READ_PORT}`,
-      //      send `["REQ","ac3",{"kinds":[1]}]`, read until `["EOSE","ac3"]`, and
-      //      assert an `["EVENT","ac3",<toonString>]` whose <toonString> contains
-      //      `id: <event.id>` (relay#24 emits NIP-01 EVENT[2] as a TOON-encoded
-      //      string, not a JSON object — substring-match, do not JSON.parse).
-      throw new Error(
-        `AC3 paid round-trip not yet runnable: needs a published oblivious relay image ` +
-          `(store port ${RELAY_WRITE_PORT} POST /write, WS read ${RELAY_WS_READ_PORT}). ` +
-          `Contract pinned from relay#24; supply a real RELAY_IMAGE to enable.`
-      );
-    }
-  );
+  it('AC3: a paid POST /ilp round-trips → FULFILL and the relay stores the write', async () => {
+    expect(claimSvc).toBeDefined();
+    expect(settlementTokenId).toBeDefined();
 
-  it('AC3 gate: reports skip status for the paid round-trip', () => {
-    if (!HAVE_REAL_RELAY) {
-      // Explicit, non-silent skip notice (no silent pass) per issue #221.
-      // eslint-disable-next-line no-console
-      console.log(
-        '[app-behind-terminator] SKIPPING AC3 paid-write round-trip: no real RELAY_IMAGE ' +
-          `supplied (RELAY_IMAGE=${RELAY_IMAGE ?? '<unset>'}, default ${DEFAULT_RELAY_IMAGE} ` +
-          'is not published). The terminator + AC2 negative-path assertions still ran. ' +
-          'Set RELAY_IMAGE=<real relay> to exercise the full paid round-trip.'
-      );
-    }
-    expect(true).toBe(true);
+    // 1. Sign a payment-channel claim ≥ the route price for the terminator channel.
+    const claim = await claimSvc!.generateClaimForPacket(
+      'terminator',
+      settlementTokenId!,
+      ROUTE_PRICE
+    );
+    expect(claim).not.toBeNull();
+
+    // 2. Build the inner HTTP envelope: `POST /write`, JSON `{ event: <signed kind:1> }`.
+    const clientSecretKey = schnorr.utils.randomPrivateKey();
+    const event = signNostrEvent(clientSecretKey, `ac3 paid write ${Date.now()}`);
+    const innerBody = JSON.stringify({ event });
+    const envelope = buildHttpEnvelope(
+      'POST',
+      '/write',
+      [
+        ['Host', 'relay'],
+        ['Content-Type', 'application/json'],
+        ['Content-Length', String(Buffer.byteLength(innerBody))],
+      ],
+      innerBody
+    );
+
+    // 3. POST the ILP PREPARE (data = envelope) to the terminator edge, addressed
+    //    under the terminated route, with the claim in the wire header.
+    const prepare = buildPreparePacket(TERMINATED_PREFIX, ROUTE_PRICE, envelope);
+    const res = await fetch(TERMINATOR_ILP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'ILP-Payment-Channel-Claim': claim!.protocolData.data.toString('base64'),
+      },
+      body: serializePacket(prepare),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    expect(res.status).toBe(200);
+    const packetBuf = Buffer.from(await res.arrayBuffer());
+    const packet = deserializePacket(packetBuf);
+    expect(packet.type).toBe(PacketType.FULFILL);
+
+    // The FULFILL data is the proxied upstream HTTP response envelope. Its body
+    // is the relay's `POST /write` JSON: { eventId, storedAt, ... }.
+    const fulfillData = (packet as { data: Buffer }).data;
+    const fulfillText = fulfillData.toString('latin1');
+    // Parse out the JSON body after the response headers (CRLFCRLF separator).
+    const bodyStart = fulfillText.indexOf('\r\n\r\n');
+    expect(bodyStart).toBeGreaterThan(-1);
+    const jsonBody = fulfillText.slice(bodyStart + 4);
+    const writeResult = JSON.parse(jsonBody) as { eventId?: string };
+    expect(writeResult.eventId).toBe(event.id);
+
+    // 4. Verify storage over FREE reads (no terminator): the relay emits NIP-01
+    //    EVENT[2] as a TOON-encoded STRING containing `id: <eventId>`.
+    const eventStrings = await readNostrEvents(
+      `ws://127.0.0.1:${RELAY_WS_READ_PORT}`,
+      'ac3',
+      { kinds: [1] },
+      20_000
+    );
+    expect(eventStrings.some((s) => s.includes(`id: ${event.id}`))).toBe(true);
   });
 });
