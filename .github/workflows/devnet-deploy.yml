@@ -81,7 +81,8 @@ jobs:
       - name: Generate ephemeral SSH key for this run
         run: |
           ssh-keygen -t ed25519 -N '' -f ~/.ssh/devnet -q
-          { cat ~/.ssh/devnet.pub; [ -n "${{ inputs.ssh_pubkey }}" ] && echo "${{ inputs.ssh_pubkey }}"; } > ~/.ssh/authorized.txt
+          cp ~/.ssh/devnet.pub ~/.ssh/authorized.txt
+          if [ -n "${{ inputs.ssh_pubkey }}" ]; then echo "${{ inputs.ssh_pubkey }}" >> ~/.ssh/authorized.txt; fi
 
       - name: Provision (create new, or rebuild existing in place)
         run: |
