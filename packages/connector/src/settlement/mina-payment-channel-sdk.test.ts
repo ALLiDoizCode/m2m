@@ -1683,7 +1683,8 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
 
     it('should produce MinaChannelError code 9999 when mina-zkapp is not available', () => {
       const error = new MinaChannelError(
-        '@toon-protocol/mina-zkapp is required for Mina payment channels but is not installed.',
+        '@toon-protocol/mina-zkapp could not be loaded for Mina payment channels. ' +
+          'Underlying error: ERR_REQUIRE_ESM',
         MINA_ERROR_CODES.O1JS_NOT_AVAILABLE,
         'O1JS_NOT_AVAILABLE'
       );
@@ -1691,6 +1692,9 @@ describe('MinaPaymentChannelSDK (Story 34.4)', () => {
       expect(error.code).toBe(9999);
       expect(error.errorName).toBe('O1JS_NOT_AVAILABLE');
       expect(error.message).toContain('mina-zkapp');
+      // The guard now surfaces the underlying cause rather than a blanket
+      // "not installed", so load failures are diagnosable.
+      expect(error.message).toContain('Underlying error:');
     });
 
     it('should re-import o1js after _resetModuleCaches is called', async () => {

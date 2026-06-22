@@ -147,9 +147,16 @@ async function getPaymentChannelContract(): Promise<any> {
     try {
       const mod = await import('@toon-protocol/mina-zkapp');
       PaymentChannelContract = mod.PaymentChannel;
-    } catch {
+    } catch (err) {
+      // Surface the REAL underlying error. A blanket "not installed" masks the
+      // actual failure: e.g. a ts-jest decorator-compile error (TS1240) when the
+      // module resolves to mina-zkapp's TS `src` under the wrong tsconfig, or an
+      // `ERR_REQUIRE_ESM` from its ESM-only `mina-fungible-token` dep on a Node
+      // runtime without `require(esm)` — neither of which is "not installed".
+      const reason = err instanceof Error ? err.message : String(err);
       throw new MinaChannelError(
-        '@toon-protocol/mina-zkapp is required for Mina payment channels but is not installed.',
+        '@toon-protocol/mina-zkapp could not be loaded for Mina payment channels. ' +
+          `Underlying error: ${reason}`,
         MINA_ERROR_CODES.O1JS_NOT_AVAILABLE,
         'O1JS_NOT_AVAILABLE'
       );
@@ -183,10 +190,14 @@ async function getUsdcChannelTokenContract(): Promise<any> {
     try {
       const mod = await import('@toon-protocol/mina-zkapp');
       UsdcChannelTokenContract = mod.UsdcChannelToken;
-    } catch {
+    } catch (err) {
+      // Surface the REAL underlying error instead of a misleading "not
+      // installed" (see getPaymentChannelContract for the failure modes this
+      // masks).
+      const reason = err instanceof Error ? err.message : String(err);
       throw new MinaChannelError(
-        '@toon-protocol/mina-zkapp (UsdcChannelToken) is required for USDC-token Mina ' +
-          'payment channels but is not installed.',
+        '@toon-protocol/mina-zkapp (UsdcChannelToken) could not be loaded for USDC-token ' +
+          `Mina payment channels. Underlying error: ${reason}`,
         MINA_ERROR_CODES.O1JS_NOT_AVAILABLE,
         'O1JS_NOT_AVAILABLE'
       );
