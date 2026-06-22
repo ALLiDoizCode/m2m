@@ -25,6 +25,16 @@ apt-get update -y
 # iptables-persistent). firewall.sh persists the DOCKER-USER drops via a systemd unit.
 apt-get install -y git make jq gettext-base openssl ufw curl iptables
 
+# Swapfile so the one-time Rust builds (Solana program via solana-build, and
+# spl-token-cli via cargo install) don't OOM on a small 2GB box. Steady-state
+# (anvil + solana-test-validator + faucet + nginx) fits in RAM; swap just absorbs
+# the compile peaks. Idempotent.
+if ! swapon --show 2>/dev/null | grep -q '/swapfile'; then
+  fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo "    4G swapfile enabled"
+fi
+
 echo "==> [2/7] Firewall (public = 22/80/443 only; raw RPC ports blocked)"
 "$HERE/firewall.sh"
 
