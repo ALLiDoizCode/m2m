@@ -373,39 +373,6 @@ describe('Admin API Security Hardening', () => {
     });
   });
 
-  describe('Story 38.1: /admin/hs-hostname obeys admin security middleware', () => {
-    it('rejects /admin/hs-hostname without X-Api-Key when apiKey is configured', async () => {
-      const res = await request(appWithAuth).get('/admin/hs-hostname');
-      expect(res.status).toBe(401);
-    });
-
-    it('accepts /admin/hs-hostname with a valid X-Api-Key (returns 503 anon-disabled when no managed client wired)', async () => {
-      const res = await request(appWithAuth)
-        .get('/admin/hs-hostname')
-        .set('X-Api-Key', 'test-secret-key');
-
-      expect(res.status).toBe(503);
-      expect(res.body).toEqual({ error: 'anon-disabled' });
-    });
-
-    it('blocks /admin/hs-hostname when the requester IP is not in the allowlist', async () => {
-      const config: AdminAPIConfig = {
-        routingTable: mockRoutingTable,
-        btpClientManager: mockBTPClientManager,
-        logger: mockLogger,
-        nodeId: 'test-node',
-        allowedIPs: ['192.168.1.100'],
-        trustProxy: false,
-      };
-      const app = express();
-      app.use('/admin', await createAdminRouter(config));
-
-      const res = await request(app).get('/admin/hs-hostname');
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe('Forbidden');
-    });
-  });
-
   describe('IP Allowlist - Edge Cases', () => {
     it('should handle empty allowedIPs array (no restriction)', async () => {
       const config: AdminAPIConfig = {

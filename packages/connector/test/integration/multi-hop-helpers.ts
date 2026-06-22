@@ -300,14 +300,7 @@ export function createMultiHopTestNetwork(
         },
       ],
       ...(nip59Enabled ? { nip59: { enabled: true } } : {}),
-      ...(transport
-        ? {
-            transport:
-              transport.type === 'socks5'
-                ? { ...transport, externalUrl: `ws://localhost:${btpServerPort}` }
-                : transport,
-          }
-        : {}),
+      ...(transport ? { transport } : {}),
     };
 
     configs.push(config);

@@ -66,7 +66,7 @@ townhouse migration cycle and a CONNECTOR_MIGRATION.md row.
 
 ## Supply-chain signing
 
-Starting from `v3.6.0` (cut after PR [#66](https://github.com/toon-protocol/connector/pull/66) merged), every connector and ATOR sidecar image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
+Starting from `v3.6.0` (cut after PR [#66](https://github.com/toon-protocol/connector/pull/66) merged), every connector image is cosign-signed via **keyless OIDC** — no static keys, no secrets beyond the default `GITHUB_TOKEN`.
 
 ### Verifying a release image
 
@@ -78,15 +78,6 @@ DIGEST=$(docker buildx imagetools inspect ghcr.io/toon-protocol/connector:<tag> 
 cosign verify "ghcr.io/toon-protocol/connector@${DIGEST}" \
   --certificate-identity-regexp \
     'https://github\.com/toon-protocol/connector/\.github/workflows/(build-and-publish|release)\.yml@.*' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
-
-# ATOR sidecar (narrower regex — only build-and-publish.yml signs the sidecar)
-SIDECAR_DIGEST=$(docker buildx imagetools inspect ghcr.io/toon-protocol/ator-sidecar:<tag> \
-  --format '{{ json .Manifest }}' | jq -r '.digest')
-
-cosign verify "ghcr.io/toon-protocol/ator-sidecar@${SIDECAR_DIGEST}" \
-  --certificate-identity-regexp \
-    'https://github\.com/toon-protocol/connector/\.github/workflows/build-and-publish\.yml@.*' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
 ```
 

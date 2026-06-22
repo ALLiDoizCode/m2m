@@ -40,7 +40,6 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Blockchain (Mina):** o1js 2.2.0 (Mina settlement via `MinaPaymentChannelProvider` with zk-SNARK proofs)
 - **Mina zkApp:** o1js SmartContract (`packages/mina-zkapp/`) -- Poseidon commitments, zero-knowledge balance proofs
 - **Transport:** ws 8.16.0 (BTP over WebSocket, RFC-0023)
-- **Transport (Overlay):** socks-proxy-agent 8.0.5 (SOCKS5 HTTP agent), @anyone-protocol/anyone-client ^1.1.3 (optional dependency, managed `anon` binary lifecycle) -- Epic 35 complete
 - **Transport Privacy:** NIP-59-inspired three-layer encryption (ChaCha20-Poly1305, secp256k1 ECDH, HKDF-SHA256) via @noble/ciphers 1.3.0, @noble/curves 1.9.0, @noble/hashes 1.8.0
 - **HTTP:** Express 4.18.x (admin API, health checks, explorer)
 - **Logging:** Pino 8.21.0 (structured JSON)
@@ -83,7 +82,7 @@ connector/                          # Monorepo root
 │   │   │   │   ├── mina-payment-channel-sdk.ts    # Mina SDK wrapper (Epic 34)
 │   │   │   │   └── ...             # EVM SDK, claim services, channel manager, etc.
 │   │   │   ├── test-utils/         # Mock factories, isolated test environment
-│   │   │   ├── transport/          # TransportProvider abstraction: Direct + SOCKS5/ATOR (Epic 35)
+│   │   │   ├── transport/          # TransportProvider (Direct TCP) + ILP-over-HTTP egress
 │   │   │   ├── utils/              # Logger, connection pool, EVM RPC pool, optional-require
 │   │   │   └── wallet/             # Treasury wallet, seed management, wallet security
 │   │   └── test/
@@ -344,109 +343,6 @@ Epic 34 added full Mina protocol payment channel support -- an o1js SmartContrac
 - **Output type:** `WrappedClaim` with `ephemeralPublicKey` (hex), `encryptedPayload` (base64), randomized `timestamp`, `version: '1.0'`
 - Unit tests (~851 lines) in `nip59-claim-wrapper.test.ts`
 
-## ATOR Overlay Transport (Epic 35 -- Complete)
-
-Epic 35 delivered an optional SOCKS5-based transport layer enabling connectors to peer through ATOR (Anyone Protocol -- a Tor 0.4.9.x fork with token-incentivized relays) or system Tor `.anon` hidden services. Transport selection is orthogonal to settlement providers -- any chain provider works over any transport. All stories 35.1--35.7 are complete.
-
-### TransportProvider Interface (`transport/transport-provider.ts`)
-
-- **Interface:** `TransportProvider` with five methods:
-  - `createAgent(peerUrl): http.Agent | undefined` -- synchronous; returned agent is passed to the `ws` WebSocket constructor's `agent` option
-  - `getExternalUrl(): string` -- externally reachable URL for inbound peering
-  - `start(): Promise<void>` -- lifecycle init; MUST fail closed on misconfiguration
-  - `stop(): Promise<void>` -- lifecycle teardown; MUST be idempotent
-  - `healthCheck(): Promise<boolean>` -- never throws; returns false on any failure
-- **Story trail:** 35.1 (interface + DirectTransportProvider), 35.2 (SocksTransportProvider), 35.3 (config schema), 35.4 (ConnectorNode + BTPClient wiring), 35.5 (managed anon lifecycle), 35.6 (unit + integration tests), 35.7 (deployment guide + config reference)
-
-### DirectTransportProvider (`transport/direct-transport-provider.ts`)
-
-- Default transport; zero behavioral change for existing deployments
-- `createAgent()` returns `undefined` -- `ws` uses its built-in connection behavior
-- `start()`, `stop()` are no-ops; `healthCheck()` always resolves `true`
-- Constructor requires a non-empty `externalUrl` (synthesized from `btpServerPort` by `ConnectorNode._createTransportProvider()` when the config has no transport block)
-
-### SocksTransportProvider (`transport/socks-transport-provider.ts`, ~280 lines)
-
-- Routes outbound BTP WebSocket connections through a SOCKS5 proxy (e.g., ATOR / system Tor)
-- Constructor options: `socksProxy`, `externalUrl`, `logger`, optional `managedClient` (Story 35.5), optional `resolveExternalUrlOnStart` (for `externalUrl: 'auto'` hidden-service resolution)
-- `createAgent()` returns a **fresh** `SocksProxyAgent` on every call (no shared per-peer connection state); peer URLs logged at DEBUG only
-- `start()` ordering: (1) managed client boot (if present), (2) resolve `externalUrl: 'auto'` from hidden-service hostname file, (3) TCP probe proxy port -- fails closed with explicit error on any step
-- `stop()` emits `socks_transport_stopped`, then calls `managedClient.stop()` (idempotent, never throws)
-- `healthCheck()` never throws; when `managedClient` present requires BOTH managed health AND TCP probe to succeed; emits one-shot `managed_anon_crash_detected` WARN on healthy->unhealthy transition
-- Probe timeouts: 2000ms startup, 1000ms health-check
-- Unit tests (~598 lines) in `socks-transport-provider.test.ts`; security tests (~296 lines) in `transport-security.test.ts`
-
-### ManagedAnonClient (`transport/managed-anon-client.ts`, ~462 lines) -- Story 35.5
-
-- Optional in-process wrapper over `@anyone-protocol/anyone-client` SDK; boots/tears down the `anon` binary alongside the connector
-- SDK is loaded via dependency-injected `anonFactory` that performs lazy `await import('@anyone-protocol/anyone-client')`; connector never eagerly imports the SDK -- tests inject fake factories
-- `createDefaultAnonFactory()` produces the production factory; when the SDK is not installed, a canonical install-guidance error template is surfaced (not a bare `MODULE_NOT_FOUND`)
-- `AnonSdkHandle` interface: `start()`, `stop()`, `isRunning()`, `getSOCKSPort()` -- declared locally so the package builds without the optional dependency
-- Fails closed on SDK error, missing binary, or SOCKS port binding timeout (default 60s)
-- `stop()` never rejects -- a hung or throwing `sdk.stop()` (default 10s timeout) logs WARN, clears the reference, and allows shutdown to proceed
-- Hidden service config: optional `hiddenServiceDir` + `hiddenServicePort`; `.anon` hostname read at runtime from `${hiddenServiceDir}/hostname`
-- Unit tests (~371 lines) in `managed-anon-client.test.ts`
-
-### Transport Helpers
-
-- `probe-tcp-port.ts` (~102 lines): `probeTcpPort(host, port, timeoutMs)` one-shot connect probe; `waitForTcpPort(host, port, deadlineMs)` retry loop -- both always destroy the probe socket before return
-- `socks-url.ts` (~64 lines): `parseSocks5hUrl(url)` strict parser rejecting non-`socks5h://` schemes; returns `ParsedSocks5Url { host, port }`
-- Barrel export in `transport/index.ts` re-exports all public types/classes
-
-### Transport Config Schema (Story 35.3 -- `config/types.ts`, `config/config-loader.ts`)
-
-- `TransportConfig` is a **discriminated union** keyed on `type`:
-  - `{ type: 'direct' }` -- trivial branch
-  - `{ type: 'socks5'; socksProxy; externalUrl; managed; managedOptions? }` -- SOCKS5 branch
-- `ConnectorConfig.transport?: TransportConfig` is optional; `ConfigLoader.validateTransport()` defaults to `{ type: 'direct' }` when absent
-- **Validation rules** (`ConfigLoader.validateSocks5Transport()`):
-  - `socksProxy` MUST start with `socks5h://` (case-sensitive) -- `socks5://` is rejected to prevent DNS leaks
-  - `externalUrl` MUST start with `ws://` or `wss://` OR be the literal `"auto"` (Story 35.5)
-  - `"auto"` requires `managed: true` AND `managedOptions.hiddenServiceDir` set
-  - `managedOptions` is only permitted when `managed: true`
-  - `managedOptions.hiddenServiceDir` / `binaryPath` / `configFilePath` reject `..` path-traversal segments
-  - `managedOptions.hiddenServicePort` / `startupTimeoutMs` / `stopTimeoutMs` must be positive integers
-- Config tests (~826 lines) in `config/transport-config.test.ts`
-
-### ConnectorNode Integration (Story 35.4 -- `core/connector-node.ts`)
-
-- `_createTransportProvider(cfg)` uses an exhaustive `switch` on `type` -- adding a new transport type becomes a compile error until all call sites are updated (`_exhaustive` guard at end of function)
-- Transport provider lifecycle within `start()`:
-  1. Construct provider BEFORE any outbound I/O (so misconfig fails before settlement/BTP start)
-  2. Set `_transportType` + `_transportProvider` references
-  3. `await provider.start()` -- any throw triggers rollback (clears references, sets `_transportProviderReady = false`)
-  4. Set `_transportProviderReady = true` -- gates the public `transportProvider` getter
-  5. Schedule 30s `_transportHealthInterval` (configurable via `opts.transportHealthIntervalMs`); interval is `.unref()`'d so it does not hold the event loop
-- Shutdown: transport stopped LAST (after all outbound traffic has drained); `setInterval` cleared; references nulled
-- **BTP wiring:** `ConnectorNode` passes an `agentFactory: (peerUrl) => this._transportProvider?.createAgent(peerUrl)` to each `BTPClient` constructor (third arg). `BTPClient._agentFactory` is invoked on every `connect()` attempt (never cached) so SOCKS5 transports produce a fresh `SocksProxyAgent` per reconnect
-- **Health endpoint:** `getHealthStatus()` emits `{ transport: { type, healthy } }` when provider is ready; `direct` always reports `healthy: true`; `socks5` reports the cached `_lastTransportHealthy` value (updated every 30s by the health interval)
-- Public getter `transportProvider: TransportProvider | null` returns `null` until `_transportProviderReady === true`
-
-### Integration Tests (Story 35.6)
-
-- `test/integration/transport-socks5.test.ts` (~419 lines) -- E2E SOCKS5 integration: ConnectorNode wired end-to-end with a mock SOCKS5 proxy; validates fresh agent per connect, fail-closed semantics, health endpoint behavior
-- Unit test footprint per module listed above (direct: 176L, socks: 598L, managed: 371L, security: 296L, config: 826L)
-
-### Deployment Guide (`docs/ator-transport.md`, ~509 lines) -- Story 35.7
-
-- Audiences: operators setting up privacy-enabled peering; security reviewers validating Story 35.1--35.6 claims
-- Two installation paths: Option A (external `anon` or system `tor`) and Option B (managed `anon` via `@anyone-protocol/anyone-client`)
-- Three example configs: direct (default), SOCKS5 with external anon, SOCKS5 with managed anon + hidden service
-- Sections: `transport` block reference, peer discovery, privacy model, performance/timeout tuning, operational monitoring, troubleshooting, security model
-- Privacy hardware floor: Raspberry Pi class device (ATOR traverses NAT -- no port forwarding required)
-
-### Critical Transport Rules
-
-- **`socks5h://` scheme mandatory** -- the `h` forces DNS resolution through the proxy; `socks5://` resolves locally and would leak `.anon` destinations. Enforced in both config validation (`ConfigLoader.validateSocks5Transport()`) and parser (`parseSocks5hUrl()`).
-- **Fail closed, never fail open** -- any transport startup failure (unreachable proxy, SDK error, hidden-service resolver failure) throws from `ConnectorNode.start()`; there is NO silent fallback to direct connections.
-- **`.anon` addresses are DEBUG-only** -- hidden service addresses must never appear in INFO/WARN/ERROR/FATAL structured log fields. Peer URLs are logged at DEBUG when creating SOCKS agents; validation errors redact `.anon` values.
-- **Fresh `SocksProxyAgent` per connect** -- `createAgent()` is invoked on every BTP reconnect attempt; callers must NEVER cache the returned agent (no shared per-peer connection state).
-- **Transport is opt-in** -- default is `{ type: 'direct' }`; `transport` block is optional; existing YAML configs are unchanged.
-- **Optional SDK, optional dependency** -- `@anyone-protocol/anyone-client` is an `optionalDependencies` entry in `packages/connector/package.json`; the connector builds and runs with `transport.type: 'direct'` even when the SDK is absent. Managed mode (`managed: true`) installs it explicitly.
-- **Managed client lifecycle invariants** -- `start()` fails closed; `stop()` never rejects; `healthCheck()` never throws; `.anon` hostname read lazily from disk at `start()` time (not construction).
-- **ConnectorNode ordering** -- transport provider starts BEFORE settlement providers and BTP clients; stops AFTER them. Rollback on `start()` failure MUST clear `_transportProvider` + `_transportType` + `_transportProviderReady` so the public getter reports `null`.
-- **Exhaustiveness guard** -- `_createTransportProvider` uses a `_exhaustive: never` final arm; adding a new transport type is a compile error at every switch site until updated.
-
 ## Critical Implementation Rules
 
 ### TypeScript Rules
@@ -489,12 +385,9 @@ Epic 35 delivered an optional SOCKS5-based transport layer enabling connectors t
 - **Mina provider pre-compilation:** `MinaPaymentChannelProvider` pre-compiles the zkApp circuit during construction (fire-and-forget); proof generation takes 30-120s and runs asynchronously
 - **Mina chain-specific access:** use `instanceof MinaPaymentChannelProvider` to access `getMinaContext()` method (same pattern as EVM's `getSigningContext()`)
 - **NIP-59 privacy pattern:** `NIP59ClaimWrapper` is chain-agnostic and wraps any `BTPClaimMessage`; when `nip59Enabled` is false, `wrapClaim()` returns null (callers must handle null for passthrough); never include decrypted claim content in error messages or logs
-- **Transport provider pattern (Epic 35):** `ConnectorNode._createTransportProvider()` uses an exhaustive `switch` on `TransportConfig.type`; instantiates `DirectTransportProvider` or `SocksTransportProvider` based on the discriminator; never conditionally construct transports from other config fields
-- **Transport agent injection:** `BTPClient` receives an `agentFactory` callback as its third constructor arg; the factory is invoked on every `connect()` attempt (not cached) so SOCKS5 transports produce a fresh `SocksProxyAgent` per reconnect -- never cache the returned agent
+- **Transport provider pattern:** `ConnectorNode._createTransportProvider()` instantiates `DirectTransportProvider` (direct TCP is the only supported transport); never conditionally construct transports from other config fields
 - **Transport lifecycle ordering:** in `ConnectorNode.start()`, construct the transport BEFORE outbound I/O, `await provider.start()` BEFORE settlement/BTP init, set `_transportProviderReady = true` AFTER success; in `stop()`, stop the transport LAST (after BTP clients drain). Rollback on start failure must clear `_transportProvider`, `_transportType`, and `_transportProviderReady`.
 - **Transport health caching:** a 30s `setInterval` refreshes `_lastTransportHealthy` for the health endpoint; the interval is `.unref()`'d so it never blocks process exit; health endpoint reports `{ type, healthy }` and for `direct` always returns `healthy: true`
-- **Managed anon SDK injection:** `ManagedAnonClient` receives an `anonFactory` callback that lazily `await import('@anyone-protocol/anyone-client')` only on the managed path; the connector package NEVER eagerly imports the SDK; tests inject fake factories returning `AnonSdkHandle`-shaped objects
-- **Transport log hygiene:** `.anon` hidden service addresses and raw peer URLs (which may be `.anon`) are DEBUG-only; all SocksTransportProvider INFO/WARN logs use `{ proxyHost, proxyPort }` never `peerUrl` or `externalUrl`
 
 ### Testing Rules
 
@@ -583,12 +476,6 @@ Epic 35 delivered an optional SOCKS5-based transport layer enabling connectors t
 - **NIP-59 ephemeral keys** -- each wrapped claim uses a fresh one-time secp256k1 keypair for the outer Gift Wrap layer; never reuse ephemeral keys across messages
 - **NIP-59 passthrough mode** -- when `nip59Enabled` is false, `wrapClaim()` returns `null`; callers must check for null and send the claim in plaintext via the standard `payment-channel-claim` BTP protocol
 - **Transport defaults are load-bearing** -- `ConfigLoader.validateTransport()` defaults missing `transport` blocks to `{ type: 'direct' }`; existing deployments without a `transport:` key get unchanged behavior. Adding a `transport:` block is an opt-in.
-- **`socks5h://` is required, `socks5://` is rejected** -- both `ConfigLoader.validateSocks5Transport()` and `parseSocks5hUrl()` reject the plain `socks5://` scheme. The `h` suffix forces remote DNS resolution; the plain scheme would resolve `.anon` hostnames on the local resolver and leak peering topology.
-- **`externalUrl: "auto"` has strict preconditions** -- only valid when `managed: true` AND `managedOptions.hiddenServiceDir` is set; the literal `"auto"` resolves at runtime from `${hiddenServiceDir}/hostname` via the `resolveExternalUrlOnStart` callback AFTER the managed client has started (so the file exists).
-- **Transport fails closed, never fails open** -- `SocksTransportProvider.start()` throws (with the explicit `SOCKS5 proxy unreachable at host:port (reason)` message) if the proxy TCP probe fails; `ManagedAnonClient.start()` throws on SDK error, binary missing, or SOCKS port binding timeout; there is NO silent fallback to direct connections.
-- **Fresh SOCKS agent per connect** -- `SocksProxyAgent` instances are NOT shared across BTP reconnects; `BTPClient` calls `_agentFactory(peerUrl)` on every connect attempt to get a fresh agent, preventing cross-peer state contamination.
-- **`.anon` addresses are sensitive** -- never log at INFO/WARN/ERROR; use DEBUG only. Validation error messages that reference `externalUrl` must redact `.anon` values. The `getExternalUrl()` return value is safe to expose in peer exchange/discovery but not in general-purpose logs.
-- **Optional SDK, optional dependency** -- `@anyone-protocol/anyone-client` lives in `optionalDependencies`; the connector package builds without it. `ManagedAnonClient` uses dependency injection (`anonFactory`) so the SDK is loaded lazily only when `managed: true`; in tests, factories are faked.
 - **Transport provider starts before BTP clients, stops after** -- in `ConnectorNode.start()`, transport init runs BEFORE outbound I/O; in `stop()`, transport teardown runs LAST. Rollback on startup failure clears `_transportProvider`, `_transportType`, `_transportProviderReady` -- the public `transportProvider` getter reports `null` until ready.
 - **Transport exhaustiveness guard** -- `_createTransportProvider` ends with a `const _exhaustive: never = cfg;` arm. Adding a new `TransportConfig.type` variant is a compile error at every switch site until all are updated -- exploit this for safe transport extensions.
 

@@ -283,6 +283,34 @@ describeDocker('Admin API Surface E2E (every inventoried endpoint)', () => {
     });
   });
 
+  describe('AdminServer /admin/desired-state endpoint', () => {
+    it('PUT /admin/desired-state reconciles to the running state (200, no-op)', async () => {
+      const entry = ADMIN_API_INVENTORY.find(
+        (e) => e.server === 'AdminServer' && e.path === '/desired-state' && e.method === 'PUT'
+      )!;
+      markTested(entry);
+
+      // Echo the canonical peer1 fixture (peer2 + its `test.peer2` route) so the
+      // declarative reconciliation is an idempotent no-op that preserves the
+      // running peer1↔peer2 topology. The local `test.peer1` route (nextHop ===
+      // nodeId) is always preserved by the handler and need not be listed.
+      const { status, body } = await putJson<{
+        peers: { added: string[]; removed: string[]; total: number };
+        routes: { desired: string[]; removed: string[] };
+      }>(`${BASE_URL.AdminServer}/admin/desired-state`, {
+        peers: [{ id: 'peer2', url: 'ws://standalone-peer2:3000', authToken: '' }],
+        routes: [{ prefix: 'test.peer2', nextHop: 'peer2' }],
+      });
+
+      expect(status).toBe(200);
+      expect(body).toHaveProperty('peers');
+      expect(body).toHaveProperty('routes');
+      expect(body.peers.total).toBe(1);
+      // Idempotent: peer2 was already present, so nothing is added or removed.
+      expect(body.peers.removed).toEqual([]);
+    });
+  });
+
   describe('AdminServer /admin/routes endpoints', () => {
     it('GET /admin/routes returns 200 with routes array', async () => {
       const entry = ADMIN_API_INVENTORY.find(

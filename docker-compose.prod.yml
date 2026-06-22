@@ -6,7 +6,7 @@
 # BLS over the compose bridge network. See README → "Production Deployment".
 #
 # Usage:
-#   # 1. Customize config/connector.prod.yaml (peers, routes, optional ATOR).
+#   # 1. Customize config/connector.prod.yaml (peers, routes).
 #   # 2. Start the stack:
 #   docker compose -f docker-compose.prod.yml up -d
 #

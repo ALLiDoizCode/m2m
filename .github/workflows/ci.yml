@@ -282,9 +282,8 @@ jobs:
       - name: Install dependencies (including optional deps)
         # `npm ci` installs optionalDependencies by default on supported
         # platforms; we pass --include=optional explicitly so the audit below
-        # is guaranteed to see optional packages (e.g.,
-        # @anyone-protocol/anyone-client) regardless of any future default
-        # change. Epic 35 retro action item #2.
+        # is guaranteed to see optional packages regardless of any future
+        # default change.
         run: npm ci --ignore-scripts --include=optional
 
       # Security hardening: Check for high/critical vulnerabilities (Story 16.2)
@@ -1107,8 +1106,7 @@ jobs:
           echo "✅ All devbox tools resolved at expected versions"
 
       - name: Smoke build (npm ci + npm run build)
-        # --ignore-scripts: skip the @anyone-protocol/anyone-client postinstall,
-        # which makes an UNAUTHENTICATED api.github.com call and trips the anon
-        # rate limit (403) on shared runner IPs. Matches every other `npm ci` in
-        # this workflow; the build itself is an explicit script, unaffected.
+        # --ignore-scripts: skip dependency lifecycle scripts (none are required
+        # for the build). Matches every other `npm ci` in this workflow; the
+        # build itself is an explicit script, unaffected.
         run: devbox run -- bash -c "npm ci --ignore-scripts && npm run build"
