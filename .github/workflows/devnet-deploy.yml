@@ -38,8 +38,8 @@ on:
         description: 'Linode region'
         default: 'us-east'
       plan:
-        description: 'Linode plan (8GB+ — Solana build + validator + anvil + nginx)'
-        default: 'g6-standard-4'
+        description: 'Linode plan (2GB ok — bootstrap adds swap for the one-time Rust builds)'
+        default: 'g6-standard-1'
       label:
         description: 'Linode label (persistent — rebuilt in place on re-run)'
         default: 'toon-devnet'
@@ -89,6 +89,14 @@ jobs:
           set -euo pipefail
           mapfile -t KEYARGS < <(while IFS= read -r k; do [ -n "$k" ] && printf -- '--authorized_keys\n%s\n' "$k"; done < ~/.ssh/authorized.txt)
           ID=$(linode-cli linodes list --label "$LABEL" --json 2>/dev/null | jq -r '.[0].id // empty')
+          if [ -n "$ID" ]; then
+            CURTYPE=$(linode-cli linodes view "$ID" --json | jq -r '.[0].type')
+            if [ "$CURTYPE" != "${{ inputs.plan }}" ]; then
+              echo "Plan changed ($CURTYPE → ${{ inputs.plan }}) — deleting to recreate (devnet is disposable; IP will change)"
+              linode-cli linodes delete "$ID" >/dev/null
+              ID=""
+            fi
+          fi
           if [ -n "$ID" ]; then
             echo "Rebuilding existing Linode '$LABEL' (id=$ID) in place — preserves IP, wipes disk"
             linode-cli linodes rebuild "$ID" \
