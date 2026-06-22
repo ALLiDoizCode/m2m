@@ -72,6 +72,42 @@ describe('RegistryStore', () => {
     ]);
   });
 
+  it('round-trips a route with termination JSON (issue #218)', () => {
+    const terminationJson = JSON.stringify({
+      upstream: 'http://127.0.0.1:8080',
+      price: '1000',
+      chains: ['evm', 'solana', 'mina'],
+      ilpAddress: 'g.node.greet',
+      settlementAddresses: { evm: '0xabc' },
+    });
+    store.saveRoute({
+      prefix: 'g.node.greet',
+      nextHop: 'local',
+      priority: 0,
+      source: 'config',
+      terminationJson,
+    });
+
+    const { routes } = store.loadAll();
+    expect(routes).toHaveLength(1);
+    expect(routes[0]!.terminationJson).toBe(terminationJson);
+    const parsed = JSON.parse(routes[0]!.terminationJson!);
+    expect(parsed.chains).toEqual(['evm', 'solana', 'mina']);
+  });
+
+  it('clears termination JSON when a route is re-saved without it', () => {
+    store.saveRoute({
+      prefix: 'g.node.greet',
+      nextHop: 'local',
+      priority: 0,
+      source: 'config',
+      terminationJson: '{"upstream":"http://x"}',
+    });
+    store.saveRoute({ prefix: 'g.node.greet', nextHop: 'local', priority: 0, source: 'config' });
+    const { routes } = store.loadAll();
+    expect(routes[0]!.terminationJson).toBeUndefined();
+  });
+
   it('upserts a peer by id (no duplicate rows)', () => {
     store.savePeer({ id: 'p', url: 'wss://a', authToken: 't', source: 'runtime' });
     store.savePeer({ id: 'p', url: 'wss://b', authToken: 't2', source: 'runtime' });

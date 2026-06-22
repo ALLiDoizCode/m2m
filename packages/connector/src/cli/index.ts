@@ -1,21 +1,27 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 /**
- * M2M Connector CLI
+ * Connector CLI
  *
- * Command-line interface for the M2M ILP Connector.
- * Provides commands for setup, starting the connector, and health checks.
+ * Command-line interface for the ILP Connector. "Set up a connector as easily as
+ * nginx, add an app as easily as an nginx server block." A thin shell over the
+ * admin API for app/route management, plus an in-process standalone boot (`up`).
+ *
+ * Commands: setup, up (alias: start), app add|ls, route add|ls, health, validate.
  */
 
 import { Command } from 'commander';
 import { runOnboarding } from './onboarding-wizard';
 import type { HealthCheckResponse } from './types';
+import { buildAppCommand } from './commands/app';
+import { buildRouteCommand } from './commands/route';
+import { buildUpCommand } from './commands/up';
 
 const program = new Command();
 
 program
-  .name('m2m-connector')
-  .description('M2M ILP Connector CLI - Production deployment and management tool')
+  .name('connector')
+  .description('ILP Connector CLI - standalone setup and add-an-app management tool')
   .version('0.1.0');
 
 /**
@@ -35,22 +41,23 @@ program
   });
 
 /**
- * Start command - Start the connector
+ * up command - Boot a standalone connector in-process (alias: start).
+ * Reuses main.ts's startConnectorMode boot path (config load → ConnectorNode
+ * start → SIGTERM/SIGINT graceful shutdown).
  */
-program
-  .command('start')
-  .description('Start the connector with existing configuration')
-  .option('-c, --config <path>', 'Path to configuration file', 'config.yaml')
-  .action(async (options: { config: string }) => {
-    console.log(`Starting connector with config: ${options.config}`);
-    console.log('');
-    console.log('For production deployment, use Docker Compose:');
-    console.log('  docker-compose -f docker-compose-production.yml up -d');
-    console.log('');
-    console.log('For development, run directly:');
-    console.log('  npm run start --workspace=packages/connector');
-    console.log('');
-  });
+const upCommand = buildUpCommand();
+upCommand.aliases(['start']);
+program.addCommand(upCommand);
+
+/**
+ * app command group - manage locally terminated apps ("server blocks").
+ */
+program.addCommand(buildAppCommand());
+
+/**
+ * route command group - manage the generic routing table.
+ */
+program.addCommand(buildRouteCommand());
 
 /**
  * Health command - Check connector health status
@@ -170,6 +177,32 @@ program
       process.exit(1);
     }
   });
+
+program.addHelpText(
+  'after',
+  `
+Examples:
+  # Boot a standalone connector from a config file
+  $ connector up -c ./standalone.yaml
+
+  # Add an app (nginx-style server block): terminate g.node.greet to a local upstream
+  $ connector app add greet --upstream http://127.0.0.1:8080 --route g.node.greet \\
+      --price 1000 --chains base,solana,mina
+
+  # List terminated apps and generic routes
+  $ connector app ls --json
+  $ connector route ls
+
+  # Add a transit route to a peer
+  $ connector route add g.alice --next-hop alice-peer --priority 10
+
+  # Check a running connector's health
+  $ connector health -u http://localhost:8080/health
+
+Networked commands (app, route) default to admin API http://localhost:8081 and
+read the API key from --api-key or the ADMIN_API_KEY environment variable.
+`
+);
 
 // Parse command line arguments
 program.parse();

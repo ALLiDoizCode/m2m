@@ -175,10 +175,100 @@ export interface PeerConfig {
 }
 
 /**
+ * Settlement chains a locally-terminated route can accept payment on (issue #218).
+ *
+ * All three connector-supported chains are valid here. The x402 greeting layer
+ * (issue #217) maps `evm`/`solana` to CAIP-2 network ids (`eip155:<chainId>`,
+ * `solana:<genesis>`) for the vanilla x402 `exact` entry; **`mina` has no x402
+ * network id**, so a Mina-accepting route rides only the toon-channel upgrade
+ * (advertised in the greeting's `extra`), never the vanilla x402 entry. This
+ * type therefore carries all three chains so #217 can make that split — do not
+ * drop `mina`.
+ */
+export type TerminationChain = 'evm' | 'solana' | 'mina';
+
+/**
+ * Per-route local-termination config (issue #218).
+ *
+ * The keystone type consumed by every downstream terminator issue: #217
+ * (402 greeting), #220 (price-binding), #219 (CLI). A {@link RouteConfig} is
+ * "locally terminated" iff it carries one of these (i.e. `upstream` is set).
+ *
+ * Amounts are decimal-string atomic units (nano-USDC, 6dp) — bigint-safe and
+ * matching the repo's earnings-string convention; never a JS `number`.
+ *
+ * @example
+ * ```yaml
+ * routes:
+ *   - prefix: g.connector.greet
+ *     nextHop: local
+ *     # ── local-termination config (issue #218) ──
+ *     upstream: http://127.0.0.1:8080
+ *     price: '1000'                       # 0.001 USDC (nano-USDC, 6dp)
+ *     chains: [evm, solana, mina]
+ *     ilpAddress: g.connector.greet
+ *     settlementAddresses:
+ *       evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28'
+ *       solana: '7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2'
+ *       mina: 'B62q...'
+ *     asset:
+ *       evm: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+ * ```
+ */
+export interface RouteTermination {
+  /**
+   * Upstream HTTP(S) base URL the connector reverse-proxies the terminated
+   * request to (consumed by #216's {@link ../core/handlers/http-proxy-handler.HttpProxyHandler}).
+   * Its presence is what marks a route as locally-terminated.
+   */
+  upstream: string;
+
+  /**
+   * Price to terminate the route, as a decimal-string atomic-unit amount
+   * (nano-USDC, 6 decimal places). Non-negative integer string; bigint-safe.
+   */
+  price: string;
+
+  /** Settlement chains this route accepts payment on. Subset of {@link TerminationChain}. */
+  chains: TerminationChain[];
+
+  /** Connector's advertised ILP address for the toon-channel upgrade in the greeting. */
+  ilpAddress: string;
+
+  /**
+   * Chain → payTo settlement address advertised in the 402 greeting. Keys must
+   * be a subset of {@link chains}.
+   */
+  settlementAddresses: Partial<Record<TerminationChain, string>>;
+
+  /**
+   * Optional chain → token (USDC) contract address override. When omitted for a
+   * chain, downstream layers fall back to their default asset table.
+   */
+  asset?: Partial<Record<TerminationChain, string>>;
+
+  /**
+   * Opt-in enforcement of the RFC 9421 claim↔request binding (#220) on the paid
+   * terminated path. Default `false` (do-no-harm): when a signed request IS
+   * present the connector ALWAYS verifies it regardless of this flag; this flag
+   * only governs what happens when NO RFC 9421 signature is present — `true`
+   * rejects the unsigned request (F01, `missing_signature`), `false` (default)
+   * passes it through to the existing claim-only seams unchanged.
+   */
+  requireRequestBinding?: boolean;
+}
+
+/**
  * Route Configuration Interface
  *
  * Defines a routing table entry mapping ILP address prefixes
  * to peer connectors. Routes determine packet forwarding decisions.
+ *
+ * A route may additionally carry {@link RouteTermination} fields (issue #218) to
+ * mark it as locally terminated: the connector terminates payment and
+ * reverse-proxies to `upstream` instead of forwarding to a downstream peer. A
+ * route is terminated iff `upstream` is set; all such fields are optional and
+ * backward-compatible (a route without them is an ordinary forwarding route).
  *
  * @property prefix - ILP address prefix pattern (RFC-0015 format)
  * @property nextHop - Peer ID to forward packets to
@@ -193,7 +283,7 @@ export interface PeerConfig {
  * };
  * ```
  */
-export interface RouteConfig {
+export interface RouteConfig extends Partial<RouteTermination> {
   /**
    * ILP address prefix for route matching
    * Format: RFC-0015 compliant address prefix
@@ -1879,4 +1969,145 @@ export function validateChainProviders(config: ConnectorConfig, _logger?: Valida
       throw new Error(`Peer '${peer.id}' references unregistered chain: ${peer.chain}`);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Route Termination Validation (issue #218)
+// ---------------------------------------------------------------------------
+
+/** The set of valid {@link TerminationChain} values, for runtime membership checks. */
+export const TERMINATION_CHAINS: ReadonlySet<TerminationChain> = new Set<TerminationChain>([
+  'evm',
+  'solana',
+  'mina',
+]);
+
+/**
+ * Validate the optional local-termination fields on a single route, shared by
+ * the boot config loader (`config-loader.ts`) and the runtime admin desired-state
+ * handler (`admin-api.ts`) so the two paths are byte-for-byte identical.
+ *
+ * A route is "terminated" iff `upstream` is present. When `upstream` is absent
+ * the route is an ordinary forwarding route and this validator is a no-op
+ * (backward compatible). When `upstream` is present, the full termination shape
+ * is required and validated:
+ *   - `upstream` is an `http(s)://` URL,
+ *   - `price` is a non-negative integer string (atomic units),
+ *   - `chains` is a non-empty array ⊆ {evm,solana,mina},
+ *   - `ilpAddress` is a non-empty string,
+ *   - `settlementAddresses` keys ⊆ `chains`,
+ *   - `asset` keys (if present) ⊆ `chains`.
+ *
+ * @returns `{ ok: true }` when valid (including the no-op forwarding-route case),
+ *   or `{ ok: false, error }` with a human-readable reason otherwise. Returning a
+ *   result object (rather than throwing) lets the HTTP layer emit a 400 and the
+ *   boot loader translate it into a `ConfigurationError` — one source of truth.
+ */
+export function validateRouteTermination(
+  route: Partial<RouteTermination> & { prefix?: string },
+  isValidAmount: (value: string) => boolean
+): { ok: true } | { ok: false; error: string } {
+  // Not a terminated route → nothing to validate.
+  if (route.upstream === undefined) {
+    return { ok: true };
+  }
+
+  const where = route.prefix ? `route '${route.prefix}'` : 'route';
+
+  if (typeof route.upstream !== 'string' || route.upstream.length === 0) {
+    return { ok: false, error: `${where}: upstream must be a non-empty string` };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(route.upstream);
+  } catch {
+    return { ok: false, error: `${where}: upstream is not a valid URL: ${route.upstream}` };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return {
+      ok: false,
+      error: `${where}: upstream must be an http(s) URL (got ${parsed.protocol})`,
+    };
+  }
+
+  if (typeof route.price !== 'string' || !isValidAmount(route.price)) {
+    return {
+      ok: false,
+      error: `${where}: price must be a non-negative integer string (atomic units), got ${String(
+        route.price
+      )}`,
+    };
+  }
+
+  if (!Array.isArray(route.chains) || route.chains.length === 0) {
+    return { ok: false, error: `${where}: chains must be a non-empty array` };
+  }
+  for (const chain of route.chains) {
+    if (!TERMINATION_CHAINS.has(chain as TerminationChain)) {
+      return {
+        ok: false,
+        error: `${where}: unknown termination chain '${String(chain)}' (must be evm|solana|mina)`,
+      };
+    }
+  }
+  const chainSet = new Set<string>(route.chains);
+
+  if (typeof route.ilpAddress !== 'string' || route.ilpAddress.length === 0) {
+    return { ok: false, error: `${where}: ilpAddress must be a non-empty string` };
+  }
+
+  if (route.settlementAddresses !== undefined) {
+    if (typeof route.settlementAddresses !== 'object' || route.settlementAddresses === null) {
+      return { ok: false, error: `${where}: settlementAddresses must be an object` };
+    }
+    for (const key of Object.keys(route.settlementAddresses)) {
+      if (!chainSet.has(key)) {
+        return {
+          ok: false,
+          error: `${where}: settlementAddresses has key '${key}' not present in chains`,
+        };
+      }
+    }
+  }
+
+  if (route.asset !== undefined) {
+    if (typeof route.asset !== 'object' || route.asset === null) {
+      return { ok: false, error: `${where}: asset must be an object` };
+    }
+    for (const key of Object.keys(route.asset)) {
+      if (!chainSet.has(key)) {
+        return { ok: false, error: `${where}: asset has key '${key}' not present in chains` };
+      }
+    }
+  }
+
+  if (
+    route.requireRequestBinding !== undefined &&
+    typeof route.requireRequestBinding !== 'boolean'
+  ) {
+    return { ok: false, error: `${where}: requireRequestBinding must be a boolean` };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Extract the {@link RouteTermination} from a route that has passed
+ * {@link validateRouteTermination}. Returns `undefined` for ordinary
+ * (non-terminated) forwarding routes.
+ */
+export function toRouteTermination(route: Partial<RouteTermination>): RouteTermination | undefined {
+  if (route.upstream === undefined) {
+    return undefined;
+  }
+  return {
+    upstream: route.upstream,
+    price: route.price as string,
+    chains: route.chains as TerminationChain[],
+    ilpAddress: route.ilpAddress as string,
+    settlementAddresses: route.settlementAddresses ?? {},
+    asset: route.asset,
+    // Default false (do-no-harm): unsigned requests pass through unless opted in.
+    requireRequestBinding: route.requireRequestBinding ?? false,
+  };
 }

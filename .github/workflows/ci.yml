@@ -1107,4 +1107,8 @@ jobs:
           echo "✅ All devbox tools resolved at expected versions"
 
       - name: Smoke build (npm ci + npm run build)
-        run: devbox run -- bash -c "npm ci && npm run build"
+        # --ignore-scripts: skip the @anyone-protocol/anyone-client postinstall,
+        # which makes an UNAUTHENTICATED api.github.com call and trips the anon
+        # rate limit (403) on shared runner IPs. Matches every other `npm ci` in
+        # this workflow; the build itself is an explicit script, unaffected.
+        run: devbox run -- bash -c "npm ci --ignore-scripts && npm run build"

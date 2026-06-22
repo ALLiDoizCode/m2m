@@ -56,7 +56,8 @@ import { IlpSendHandler } from './ilp-send-handler';
 import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 import type { ManagedAnonClient } from '../transport/managed-anon-client';
-import type { PeerRelation } from '../config/types';
+import type { PeerRelation, RouteTermination, TerminationChain } from '../config/types';
+import { validateRouteTermination, toRouteTermination } from '../config/types';
 
 /**
  * Admin API Configuration
@@ -208,6 +209,30 @@ export interface AdminAPIConfig {
    * that the routing table does not see).
    */
   registryStore?: RegistryPeerSink;
+
+  /**
+   * Optional per-route local-termination registry (issue #218). When provided,
+   * `POST /admin/routes` and `PUT /admin/desired-state` reconcile terminated
+   * routes (upstream/price/chains/ilpAddress/settlementAddresses/asset) into the
+   * same in-memory registry #216's HttpProxyHandler resolves against — so a
+   * terminated route added at runtime takes effect with no restart. When
+   * omitted, route-termination fields in request bodies are still validated but
+   * not applied (the registry seam is simply absent).
+   */
+  routeTerminationRegistry?: RouteTerminationSink;
+}
+
+/**
+ * Minimal mutation surface the admin API needs from the route-termination
+ * registry. Satisfied structurally by
+ * {@link ../core/route-upstream-registry.RouteTerminationRegistry}; kept
+ * structural so the HTTP layer has no hard dependency on the core registry.
+ */
+export interface RouteTerminationSink {
+  set(prefix: string, termination: RouteTermination): void;
+  delete(prefix: string): boolean;
+  lookup(prefix: string): RouteTermination | undefined;
+  prefixes(): string[];
 }
 
 /**
@@ -226,6 +251,20 @@ export interface RegistryPeerSink {
     source: 'config' | 'runtime';
   }): void;
   deletePeer(id: string): void;
+  /**
+   * Optional route write-through (issue #218). The routing table already
+   * persists prefix/nextHop/priority via its own sink; this overload lets the
+   * admin API additionally persist a route's `terminationJson` so terminated
+   * routes survive a restart. Optional so test fixtures and the structural
+   * `RegistryPeerSink` callers that only need peer write-through can omit it.
+   */
+  saveRoute?(record: {
+    prefix: string;
+    nextHop: string;
+    priority: number;
+    source: 'config' | 'runtime';
+    terminationJson?: string;
+  }): void;
 }
 
 /**
@@ -303,6 +342,29 @@ export interface AddRouteRequest {
 
   /** Route priority (higher wins, default: 0) */
   priority?: number;
+
+  // ── Optional local-termination config (issue #218) ──
+  // Mirror the YAML `RouteTermination` shape 1:1. Present iff `upstream` is set,
+  // in which case the full shape is required and validated by
+  // `validateRouteTermination` (the same helper the boot loader uses).
+
+  /** Upstream HTTP(S) base URL; presence marks the route as locally terminated. */
+  upstream?: string;
+
+  /** Price to terminate, decimal-string atomic units (nano-USDC, 6dp). */
+  price?: string;
+
+  /** Settlement chains accepted (subset of evm|solana|mina). */
+  chains?: TerminationChain[];
+
+  /** Connector's advertised ILP address for the toon-channel upgrade. */
+  ilpAddress?: string;
+
+  /** Chain → payTo settlement address (keys ⊆ chains). */
+  settlementAddresses?: Partial<Record<TerminationChain, string>>;
+
+  /** Optional chain → token (USDC) contract override (keys ⊆ chains). */
+  asset?: Partial<Record<TerminationChain, string>>;
 }
 
 /**
@@ -596,6 +658,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     setPeerRelation,
     getPeerRelation,
     registryStore,
+    routeTerminationRegistry,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -1255,11 +1318,18 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       res.json({
         nodeId,
         routeCount: routes.length,
-        routes: routes.map((r) => ({
-          prefix: r.prefix,
-          nextHop: r.nextHop,
-          priority: r.priority ?? 0,
-        })),
+        routes: routes.map((r) => {
+          // Enrich with local-termination config (issue #218) when this route is
+          // a terminated "app" route — lets `connector app ls` distinguish
+          // terminated routes (those carrying `upstream`) from transit routes.
+          const termination = routeTerminationRegistry?.lookup(r.prefix);
+          return {
+            prefix: r.prefix,
+            nextHop: r.nextHop,
+            priority: r.priority ?? 0,
+            ...(termination ? { termination } : {}),
+          };
+        }),
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1313,9 +1383,35 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         return;
       }
 
+      // Validate optional local-termination config (issue #218) with the SAME
+      // helper the boot loader uses, so runtime and boot are identical. No-op
+      // for ordinary forwarding routes (no `upstream`).
+      const terminationValidation = validateRouteTermination(body, isValidNonNegativeIntegerString);
+      if (!terminationValidation.ok) {
+        res.status(400).json({ error: 'Bad request', message: terminationValidation.error });
+        return;
+      }
+
       // Add route (persisted via the RoutingTable write-through)
       const priority = body.priority ?? 0;
       routingTable.addRoute(body.prefix as ILPAddress, body.nextHop, priority);
+
+      // Apply (or clear) the route's termination config in the registry #216's
+      // proxy handler resolves against, and persist it (write-through) so a
+      // terminated route survives a restart.
+      const termination = toRouteTermination(body);
+      if (termination) {
+        routeTerminationRegistry?.set(body.prefix, termination);
+      } else {
+        routeTerminationRegistry?.delete(body.prefix);
+      }
+      registryStore?.saveRoute?.({
+        prefix: body.prefix,
+        nextHop: body.nextHop,
+        priority,
+        source: 'runtime',
+        terminationJson: termination ? JSON.stringify(termination) : undefined,
+      });
 
       log.info(
         { event: 'admin_route_added', prefix: body.prefix, nextHop: body.nextHop, priority },
@@ -1478,17 +1574,28 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         const relation = desiredRelations.get(route.nextHop) ?? getPeerRelation?.(route.nextHop);
         const v = validateRelationRoute(relation, localPrefixes, [route.prefix]);
         if (!v.ok) return reject(v.error);
+        // Local-termination config (issue #218) — validated atomically up front
+        // with the boot loader's helper; nothing is mutated if any route fails.
+        const tv = validateRouteTermination(route, isValidNonNegativeIntegerString);
+        if (!tv.ok) return reject(tv.error);
       }
 
       // ── Build the desired route set (peer routes + top-level routes) ──
-      const desiredRoutes = new Map<string, { nextHop: string; priority: number }>();
+      const desiredRoutes = new Map<
+        string,
+        { nextHop: string; priority: number; termination?: RouteTermination }
+      >();
       for (const peer of desiredPeers) {
         for (const r of peerEffectiveRoutes.get(peer.id) ?? []) {
           desiredRoutes.set(r.prefix, { nextHop: peer.id, priority: r.priority ?? 0 });
         }
       }
       for (const r of desiredTopRoutes) {
-        desiredRoutes.set(r.prefix, { nextHop: r.nextHop, priority: r.priority ?? 0 });
+        desiredRoutes.set(r.prefix, {
+          nextHop: r.nextHop,
+          priority: r.priority ?? 0,
+          termination: toRouteTermination(r),
+        });
       }
 
       // ── Reconcile peers: remove those not desired ──
@@ -1564,6 +1671,41 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
       }
       for (const [prefix, info] of desiredRoutes) {
         routingTable.addRoute(prefix as ILPAddress, info.nextHop, info.priority);
+      }
+
+      // ── Reconcile the route-termination registry (issue #218) ──
+      // Clear undesired terminated prefixes, then upsert desired ones. Mirrors
+      // the routing-table reconcile above so the proxy handler's upstream
+      // resolution converges with the routing table. Prefixes carried by routes
+      // without termination config are cleared (a route can flip from terminated
+      // to plain forwarding via a re-PUT). Local self-routes are never in the
+      // registry (they carry no termination), so they are implicitly preserved.
+      if (routeTerminationRegistry) {
+        for (const prefix of routeTerminationRegistry.prefixes()) {
+          if (!desiredRoutes.has(prefix) || !desiredRoutes.get(prefix)?.termination) {
+            routeTerminationRegistry.delete(prefix);
+          }
+        }
+        for (const [prefix, info] of desiredRoutes) {
+          if (info.termination) {
+            routeTerminationRegistry.set(prefix, info.termination);
+          }
+        }
+      }
+      // Persist terminated routes' config (write-through) so they survive a
+      // restart. prefix/nextHop/priority are already persisted by the routing
+      // table's own sink; this carries the termination JSON the routing table
+      // does not see.
+      for (const [prefix, info] of desiredRoutes) {
+        if (info.termination) {
+          registryStore?.saveRoute?.({
+            prefix,
+            nextHop: info.nextHop,
+            priority: info.priority,
+            source: 'runtime',
+            terminationJson: JSON.stringify(info.termination),
+          });
+        }
       }
 
       log.info(

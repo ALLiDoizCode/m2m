@@ -25,7 +25,9 @@ import {
   ChainProviderConfigEntry,
   TransportConfig,
 } from './types';
+import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
+import { isValidNonNegativeIntegerString } from '../settlement/types';
 
 /**
  * Custom Error Class for Configuration Errors
@@ -599,6 +601,14 @@ export class ConfigLoader {
         throw new ConfigurationError(
           `Invalid type for route.priority: expected number, got ${typeof route.priority}`
         );
+      }
+
+      // Validate optional local-termination fields (issue #218). Shared with the
+      // runtime admin desired-state path so boot and runtime are identical. A
+      // route without `upstream` is an ordinary forwarding route → no-op.
+      const termination = validateRouteTermination(route, isValidNonNegativeIntegerString);
+      if (!termination.ok) {
+        throw new ConfigurationError(`Invalid route termination config: ${termination.error}`);
       }
     }
   }

@@ -31,6 +31,7 @@ services:
     user: root
     profiles:
       - evm
+      - app-behind-terminator # issue #221 — reused by the terminator profile
     entrypoint: []
     command:
       - sh
@@ -96,6 +97,7 @@ services:
     profiles:
       - evm
       - solana
+      - app-behind-terminator # issue #221 — reused by the terminator profile
     environment:
       PORT: 3500
       RPC_URL: http://anvil:8545
@@ -787,6 +789,81 @@ services:
         condition: service_healthy
     networks:
       - standalone_allowlist_net
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # App-behind-terminator (issue #221) — the "hello-world" of deploying an
+  # app behind the connector locally. One `make app-up` brings up a standalone
+  # connector-as-terminator + an oblivious relay (app) + anvil + faucet.
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # AC1: this profile runs terminator + relay + anvil + faucet.
+  # AC2: the relay is reachable ONLY through the terminator for paid writes
+  #      (its write port is NOT published); free reads stay on the relay's
+  #      Nostr WS read port (published to 127.0.0.1).
+  #
+  # All four services live on the compose DEFAULT network (no `networks:` key),
+  # exactly like anvil + faucet above, so the terminator can dial `anvil:8545`,
+  # `faucet:3500`, and `relay:3100` by service name. Only `terminator` (POST
+  # /ilp) and the relay's WS read port are published to the host.
+  #
+  # NOTE: the oblivious relay image does NOT live in this repo (it is separate
+  # "decouple relay" work, not yet published). Reference it via an env override:
+  # `RELAY_IMAGE` (defaults to the not-yet-published GHCR coordinates). When no
+  # real relay image is available the AC3 full paid-write round-trip is SKIPPED
+  # with a clear message by the e2e test — the negative-path AC2 assertions still
+  # run against the terminator + a stub upstream where needed.
+  terminator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: connector:standalone-e2e
+    profiles: [app-behind-terminator]
+    environment:
+      CONFIG_FILE: /app/config/terminator.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./scripts/app-behind-terminator/terminator.yaml:/app/config/terminator.yaml:ro
+    ports:
+      # ONLY the ILP-over-HTTP edge (POST /ilp, RFC-0035) is published, and
+      # only to loopback. The admin API (8081) is intentionally NOT published —
+      # it binds inside the container and is gated by `allowedIPs` in the config.
+      - '127.0.0.1:3000:3000' # POST /ilp edge (paid writes enter here)
+      - '127.0.0.1:8080:8080' # health
+    depends_on:
+      anvil:
+        condition: service_healthy
+      faucet:
+        condition: service_healthy
+
+  # The oblivious app — relay#24 "oblivious mode" (MERGED). Contract pinned from
+  # that PR. NOTE: no oblivious-capable image is published yet (the relay's
+  # image-publish workflow is a follow-up, and the existing `bls` Dockerfile runs
+  # the embedded, NON-oblivious entrypoint). RELAY_IMAGE must point at an image
+  # whose entrypoint is the `relay` CLI (dist/cli.js) honoring TOON_OBLIVIOUS_MODE.
+  # Its paid-write HTTP store port (3100, `POST /write`) is NOT published — only
+  # the terminator dials it over the compose network (`relay:3100`), which enforces
+  # AC2. Its Nostr WS read port (7100) IS published so FREE reads bypass the
+  # terminator entirely.
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:oblivious}
+    profiles: [app-behind-terminator]
+    environment:
+      # Contract from relay#24: run the `relay` CLI in oblivious mode.
+      TOON_OBLIVIOUS_MODE: 'true'
+      TOON_BLS_PORT: '3100' # paid-write HTTP store (POST /write) — NOT published
+      TOON_RELAY_PORT: '7100' # free-read Nostr WS — published below
+      TOON_CHAIN: 'none' # oblivious forces relay-only; explicit for safety
+      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-} # relay CLI needs an identity key
+      TOON_DEV_MODE: ${RELAY_DEV_MODE:-true} # skip sig verify for local smoke fixtures
+    ports:
+      # Free reads: clients hit the relay's Nostr WS directly (no terminator).
+      # The paid-write port 3100 is deliberately ABSENT from this list (enforces AC2).
+      - '127.0.0.1:7100:7100'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Two-Home ATOR over LOCAL testnet — peer-to-peer over `make ator-up`
