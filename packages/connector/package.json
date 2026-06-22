@@ -73,6 +73,7 @@
     "test:standalone-ator-public": "jest --testPathPattern='standalone-ator-public-container-e2e' --forceExit",
     "test:standalone-ator-p2p": "jest --testPathPattern='standalone-ator-public-p2p-container-e2e' --forceExit",
     "test:standalone-allowlist": "jest --testPathPattern='standalone-admin-allowlist-e2e' --forceExit",
+    "test:app-behind-terminator": "jest --testPathPattern='app-behind-terminator-e2e' --forceExit",
     "test:admin-surface": "STANDALONE_DOCKER=true jest --testPathPattern='admin-api-surface-e2e' --forceExit",
     "test:cross-surface": "STANDALONE_DOCKER=true jest --testPathPattern='cross-surface-invariants' --forceExit",
     "test:packet-flow": "STANDALONE_DOCKER=true jest --testPathPattern='packet-flow-invariants' --forceExit",
