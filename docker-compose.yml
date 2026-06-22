@@ -90,8 +90,12 @@ services:
     build:
       context: ./packages/faucet
       dockerfile: Dockerfile
+    # Runs under BOTH evm and solana so a single host can drip every chain.
+    # The EVM init polls for the anvil token deploy; the Solana route NO-OPs
+    # with a clear 503 when its env isn't set — so an evm-only `up` still works.
     profiles:
       - evm
+      - solana
     environment:
       PORT: 3500
       RPC_URL: http://anvil:8545
@@ -109,11 +113,27 @@ services:
       ETH_AMOUNT: '100'
       TOKEN_AMOUNT: '10000'
 
+      # ── Solana (only active under the `solana` profile) ──
+      # Treasury authority keypair mounted below; deterministic devnet USDC mint
+      # from infra/solana/create-usdc-mint.sh. Drips SOL via airdrop + USDC from
+      # the treasury. Defaults: 2 SOL + 1000 USDC per request.
+      SOLANA_RPC_URL: http://solana-validator:8899
+      SOLANA_USDC_MINT: H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H
+      SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
+
+    volumes:
+      # Committed throwaway devnet treasury authority (mint authority + USDC
+      # source). Read-only; only present/used under the solana profile.
+      - ./infra/solana/usdc-authority.json:/keys/usdc-authority.json:ro
     ports:
       - '3500:3500'
     depends_on:
+      # required:false so the faucet can also run under the `solana` profile
+      # (where anvil isn't started) without compose erroring on the missing dep.
+      # Under the evm profile anvil IS started, so the health gate still applies.
       anvil:
         condition: service_healthy
+        required: false
     restart: unless-stopped
     healthcheck:
       test:
@@ -168,10 +188,10 @@ services:
     profiles:
       - mina
     ports:
-      - '3085:3085'   # GraphQL
-      - '8181:8181'   # Accounts manager
-      - '8282:8282'   # Explorer
-      - '5433:5432'   # Archive PostgreSQL (remapped to avoid conflicts with local Postgres on 5432)
+      - '3085:3085' # GraphQL
+      - '8181:8181' # Accounts manager
+      - '8282:8282' # Explorer
+      - '5433:5432' # Archive PostgreSQL (remapped to avoid conflicts with local Postgres on 5432)
     deploy:
       resources:
         limits:
@@ -458,7 +478,8 @@ services:
     networks:
       - standalone_net
     healthcheck:
-      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      test:
+        ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -477,7 +498,8 @@ services:
     networks:
       - standalone_net
     healthcheck:
-      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      test:
+        ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -549,7 +571,8 @@ services:
     networks:
       - standalone_ator_net
     healthcheck:
-      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      test:
+        ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -727,7 +750,8 @@ services:
     networks:
       - standalone_allowlist_net
     healthcheck:
-      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
+      test:
+        ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://127.0.0.1:3100/health || exit 1']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -777,7 +801,7 @@ services:
       TARGET_PORT: '3000'
       ANON_NETWORK: testnet-local
     volumes:
-      - ator_shared:/shared            # DirAuth fingerprints from `ator` profile
+      - ator_shared:/shared # DirAuth fingerprints from `ator` profile
       - two_home_local_a_data:/var/lib/anon
     networks:
       # Both networks: DirAuths/relays advertise their ator_host IPs in
@@ -786,9 +810,9 @@ services:
       - ator_net
       - ator_host
     ports:
-      - '127.0.0.1:18190:8080'         # connector-a health
-      - '127.0.0.1:18191:8081'         # connector-a admin
-      - '127.0.0.1:13311:3100'         # bls-a /received
+      - '127.0.0.1:18190:8080' # connector-a health
+      - '127.0.0.1:18191:8081' # connector-a admin
+      - '127.0.0.1:13311:3100' # bls-a /received
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'nc -z 127.0.0.1 9050 || exit 1']
@@ -921,8 +945,8 @@ services:
     networks:
       - ator_net
     ports:
-      - '127.0.0.1:18390:8081'         # admin
-      - '127.0.0.1:18391:8080'         # health
+      - '127.0.0.1:18390:8081' # admin
+      - '127.0.0.1:18391:8080' # health
     # Healthcheck on the admin API port so dependents can `depends_on:
     # condition: service_healthy` instead of racing the BTP server bind.
     healthcheck:
