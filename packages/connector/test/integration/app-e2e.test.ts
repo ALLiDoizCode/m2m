@@ -1,35 +1,35 @@
 /**
- * App-behind-terminator E2E (Docker compose) — issue #221
+ * App-behind-connector E2E (Docker compose) — issue #221
  *
  * The "hello-world" of deploying an app behind the connector locally. One
- * compose profile (`app-behind-terminator`) brings up:
+ * compose profile (`app`) brings up:
  *
  *   anvil + faucet  (EVM devnet)
- *   terminator      (standalone connector-as-terminator; image connector:standalone-e2e)
- *   relay           (the oblivious app — env-overridable RELAY_IMAGE)
+ *   connector       (standalone connector / paid reverse proxy; image connector:standalone-e2e)
+ *   app             (the oblivious app, a relay — env-overridable RELAY_IMAGE)
  *
- *   host ─curl/h402Fetch─▶ POST /ilp (3000) ─▶ terminator ─▶ HttpProxyHandler
- *                                                              ▼
- *                                              upstream http://relay:3100
- *                                                              ▼
- *                                                         relay (app)
+ *   host ─curl/h402Fetch─▶ POST /ilp (3000) ─▶ connector ─▶ HttpProxyHandler
+ *                                                             ▼
+ *                                              upstream http://app:3100
+ *                                                             ▼
+ *                                                          app (relay)
  *
  * What this asserts:
- *   - AC1: the terminator + anvil + faucet come up (compose up + health waits).
- *   - AC2 (negative-path, ALWAYS run): the relay's paid-write store port is NOT
+ *   - AC1: the connector + anvil + faucet come up (compose up + health waits).
+ *   - AC2 (negative-path, ALWAYS run): the app's paid-write store port is NOT
  *     reachable from the host (TCP-level failure, reusing the allowlist
- *     unreachable-port idiom), and an UNPAID `POST /ilp` to the terminator is
+ *     unreachable-port idiom), and an UNPAID `POST /ilp` to the connector is
  *     REJECTED (F-class) by the inbound claim gate.
  *   - AC3 (full paid round-trip): SKIPPED with a clear console message unless a
  *     real `RELAY_IMAGE` is supplied — the decoupled relay image does not exist
  *     in this repo yet (separate "decouple relay" work, not yet published).
  *
- * Gate: APP_BEHIND_TERMINATOR=1
+ * Gate: APP_E2E=1
  *
- * Why no relay in the default compose-up: the default `RELAY_IMAGE`
+ * Why no app in the default compose-up: the default `RELAY_IMAGE`
  * (ghcr.io/toon-protocol/relay:oblivious) is not published, so a `--wait` on the
- * `relay` service would hang/fail. We therefore bring up ONLY
- * `terminator anvil faucet` here and start `relay` only when a real image is
+ * `app` service would hang/fail. We therefore bring up ONLY
+ * `connector anvil faucet` here and start `app` only when a real image is
  * supplied via `RELAY_IMAGE` (which also unlocks the AC3 round-trip).
  *
  * @packageDocumentation
@@ -44,7 +44,7 @@ import { PaidRoundTripClient, type ProbeStep } from './paid-roundtrip-client';
 
 const execFileAsync = promisify(execFile);
 
-const RUN = process.env.APP_BEHIND_TERMINATOR === '1';
+const RUN = process.env.APP_E2E === '1';
 const describeApp = RUN ? describe : describe.skip;
 
 // A real relay image unlocks the AC3 paid round-trip. The default points at the
@@ -57,16 +57,16 @@ const HAVE_REAL_RELAY = Boolean(RELAY_IMAGE && RELAY_IMAGE !== DEFAULT_RELAY_IMA
 jest.setTimeout(300_000);
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
-const PROFILE = 'app-behind-terminator';
+const PROFILE = 'app';
 const PROFILE_ARGS = ['compose', '--profile', PROFILE];
 
 // Published to the host (127.0.0.1) by the compose profile.
-const TERMINATOR_ILP_URL = 'http://127.0.0.1:3000/ilp'; // POST /ilp edge
-const TERMINATOR_HEALTH_URL = 'http://127.0.0.1:8080/health';
+const CONNECTOR_ILP_URL = 'http://127.0.0.1:3000/ilp'; // POST /ilp edge
+const CONNECTOR_HEALTH_URL = 'http://127.0.0.1:8080/health';
 const ANVIL_RPC_URL = 'http://127.0.0.1:8545';
 const FAUCET_HEALTH_URL = 'http://127.0.0.1:3500/health';
 
-// NOT published — only the terminator dials it over the compose network. The
+// NOT published — only the connector dials it over the compose network. The
 // host must NOT be able to reach it (this is AC2's posture). Per relay#24 the
 // oblivious-mode store port is 3100 (`TOON_BLS_PORT`, `POST /write`); the free-read
 // Nostr WS port 7100 (`TOON_RELAY_PORT`) IS published.
@@ -142,17 +142,17 @@ function buildPreparePacket(destination: string, amount: bigint, data: Buffer): 
   };
 }
 
-describeApp('App-behind-terminator E2E (Docker)', () => {
+describeApp('App-behind-connector E2E (Docker)', () => {
   beforeAll(async () => {
     // The default RELAY_IMAGE is not published, so bring up only the services we
-    // can actually start. `relay` joins only when a real image is supplied.
-    await compose('build', 'terminator');
+    // can actually start. `app` joins only when a real image is supplied.
+    await compose('build', 'connector');
     const upServices = HAVE_REAL_RELAY
-      ? ['up', '-d', '--wait', 'anvil', 'faucet', 'terminator', 'relay']
-      : ['up', '-d', '--wait', 'anvil', 'faucet', 'terminator'];
+      ? ['up', '-d', '--wait', 'anvil', 'faucet', 'connector', 'app']
+      : ['up', '-d', '--wait', 'anvil', 'faucet', 'connector'];
     await compose(...upServices);
 
-    // AC1 — wait for anvil (eth_chainId), faucet /health, terminator /health.
+    // AC1 — wait for anvil (eth_chainId), faucet /health, connector /health.
     await waitForCondition(
       async () => {
         const res = await fetch(ANVIL_RPC_URL, {
@@ -178,11 +178,11 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
 
     await waitForCondition(
       async () => {
-        const res = await fetch(TERMINATOR_HEALTH_URL, { signal: AbortSignal.timeout(2_000) });
+        const res = await fetch(CONNECTOR_HEALTH_URL, { signal: AbortSignal.timeout(2_000) });
         return res.ok;
       },
       120_000,
-      'terminator /health responds'
+      'connector /health responds'
     );
   });
 
@@ -190,14 +190,14 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
     await compose('down', '--volumes').catch(() => undefined);
   });
 
-  it('AC1: the terminator edge (POST /ilp) is up and the admin API is NOT published', async () => {
+  it('AC1: the connector edge (POST /ilp) is up and the admin API is NOT published', async () => {
     // /ilp is published on 3000; the admin API (8081) is deliberately not.
     expect(await tcpReachable('127.0.0.1', 3000, 2_000)).toBe(true);
     expect(await tcpReachable('127.0.0.1', 8081, 2_000)).toBe(false);
   });
 
   it("AC2: the relay's paid-write port is NOT reachable from the host", async () => {
-    // The relay's write/store port is never published — only the terminator
+    // The relay's write/store port is never published — only the connector
     // dials it over the compose network by service name. A direct host probe
     // must fail at the TCP layer. (Mirrors the allowlist unreachable-port
     // assertion.) This holds whether or not the relay container is running.
@@ -205,7 +205,7 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
     expect(reachable).toBe(false);
   });
 
-  it('AC2: an UNPAID POST /ilp to the terminator is REJECTED (claim gate)', async () => {
+  it('AC2: an UNPAID POST /ilp to the connector is REJECTED (claim gate)', async () => {
     // A PREPARE addressed to the terminated route, carrying a valid HTTP
     // envelope but NO payment-channel claim header, must be rejected by the
     // inbound claim gate BEFORE it ever reaches the relay. The ILP-over-HTTP
@@ -219,10 +219,10 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
       ],
       JSON.stringify({ note: 'unpaid write attempt' })
     );
-    const prepare = buildPreparePacket('g.terminator.relay.store', 1000n, envelope);
+    const prepare = buildPreparePacket('g.connector.relay.store', 1000n, envelope);
     const body = serializePacket(prepare);
 
-    const res = await fetch(TERMINATOR_ILP_URL, {
+    const res = await fetch(CONNECTOR_ILP_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       // No `ILP-Payment-Channel-Claim` header — this is the unpaid attempt.
@@ -255,11 +255,11 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
       // The full paid round-trip lives in the SHARED `PaidRoundTripClient` so the
       // exact same code path runs here (localhost compose) and in the #222 CI
       // acceptance probe (remote public box). Pointed at the published compose
-      // ports: terminator /ilp 3000, anvil 8545, faucet 3500, relay free-read WS
+      // ports: connector /ilp 3000, anvil 8545, faucet 3500, relay free-read WS
       // 7100 (RELAY_WS_READ_PORT). relay#24 store contract: POST /write, body
       // `{event}`; EVENT[2] is a TOON-encoded string (substring id match).
       const client = new PaidRoundTripClient({
-        terminatorIlpUrl: TERMINATOR_ILP_URL,
+        connectorIlpUrl: CONNECTOR_ILP_URL,
         evmRpcUrl: ANVIL_RPC_URL,
         faucetUrl: 'http://127.0.0.1:3500',
         relayWsUrl: `ws://127.0.0.1:${RELAY_WS_READ_PORT}`,
@@ -281,9 +281,9 @@ describeApp('App-behind-terminator E2E (Docker)', () => {
       // Explicit, non-silent skip notice (no silent pass) per issue #221.
       // eslint-disable-next-line no-console
       console.log(
-        '[app-behind-terminator] SKIPPING AC3 paid-write round-trip: no real RELAY_IMAGE ' +
+        '[app-e2e] SKIPPING AC3 paid-write round-trip: no real RELAY_IMAGE ' +
           `supplied (RELAY_IMAGE=${RELAY_IMAGE ?? '<unset>'}, default ${DEFAULT_RELAY_IMAGE} ` +
-          'is not published). The terminator + AC2 negative-path assertions still ran. ' +
+          'is not published). The connector + AC2 negative-path assertions still ran. ' +
           'Set RELAY_IMAGE=<real relay> to exercise the full paid round-trip.'
       );
     }

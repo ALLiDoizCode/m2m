@@ -1,5 +1,5 @@
 /**
- * #222 AC2 CI acceptance probe — REMOTE public TLS terminator edge
+ * #222 AC2 CI acceptance probe — REMOTE public TLS connector edge
  *
  * Runs the SHARED `PaidRoundTripClient` (the same code path the local #221 e2e
  * exercises) against the PUBLIC box, not localhost: a full paid ILP round-trip
@@ -8,19 +8,19 @@
  *
  * Invocation (matches the repo's `tools/mina/*.ts` ts-node convention; an npm
  * alias is also provided — see `packages/connector/package.json`
- * "probe:terminator-public"):
+ * "probe:connector-public"):
  *
  *   # From the connector workspace (ts-node + its tsconfig resolve test/src deps):
  *   DOMAIN=example.com \
  *     npx ts-node --project packages/connector/tsconfig.json \
- *     scripts/app-behind-terminator/ci-acceptance-probe.ts
+ *     scripts/app/ci-acceptance-probe.ts
  *
  *   # Or via the npm alias (run from repo root):
- *   DOMAIN=example.com npm run probe:terminator-public --workspace=packages/connector
+ *   DOMAIN=example.com npm run probe:connector-public --workspace=packages/connector
  *
  * Env:
  *   DOMAIN                (required unless every explicit URL below is supplied)
- *   TERMINATOR_ILP_URL    default https://terminator.${DOMAIN}/ilp
+ *   CONNECTOR_ILP_URL     default https://connector.${DOMAIN}/ilp
  *   EVM_RPC_URL           default https://evm-rpc.${DOMAIN}
  *   FAUCET_URL            default https://faucet.${DOMAIN}
  *   RELAY_WS_URL          default wss://relay-ws.${DOMAIN}
@@ -38,7 +38,7 @@ import {
 } from '../../packages/connector/test/integration/paid-roundtrip-client';
 
 interface ResolvedConfig {
-  terminatorIlpUrl: string;
+  connectorIlpUrl: string;
   evmRpcUrl: string;
   faucetUrl: string;
   relayWsUrl: string;
@@ -62,10 +62,10 @@ function resolveConfig(): ResolvedConfig {
   };
 
   return {
-    terminatorIlpUrl: need(
-      process.env.TERMINATOR_ILP_URL,
-      (d) => `https://terminator.${d}/ilp`,
-      'TERMINATOR_ILP_URL'
+    connectorIlpUrl: need(
+      process.env.CONNECTOR_ILP_URL,
+      (d) => `https://connector.${d}/ilp`,
+      'CONNECTOR_ILP_URL'
     ),
     evmRpcUrl: need(process.env.EVM_RPC_URL, (d) => `https://evm-rpc.${d}`, 'EVM_RPC_URL'),
     faucetUrl: need(process.env.FAUCET_URL, (d) => `https://faucet.${d}`, 'FAUCET_URL'),
@@ -92,15 +92,15 @@ function printSteps(title: string, steps: ProbeStep[]): boolean {
 
 async function main(): Promise<void> {
   const cfg = resolveConfig();
-  console.log('[#222 acceptance probe] targeting REMOTE terminator edge:');
-  console.log(`  terminator /ilp : ${cfg.terminatorIlpUrl}`);
+  console.log('[#222 acceptance probe] targeting REMOTE connector edge:');
+  console.log(`  connector /ilp  : ${cfg.connectorIlpUrl}`);
   console.log(`  evm rpc         : ${cfg.evmRpcUrl}`);
   console.log(`  faucet          : ${cfg.faucetUrl}`);
   console.log(`  relay free-read : ${cfg.relayWsUrl}`);
   console.log(`  store probe (—) : ${cfg.relayStoreProbeUrl} (asserted unreachable)`);
 
   const client = new PaidRoundTripClient({
-    terminatorIlpUrl: cfg.terminatorIlpUrl,
+    connectorIlpUrl: cfg.connectorIlpUrl,
     evmRpcUrl: cfg.evmRpcUrl,
     faucetUrl: cfg.faucetUrl,
     relayWsUrl: cfg.relayWsUrl,

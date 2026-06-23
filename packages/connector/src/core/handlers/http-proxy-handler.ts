@@ -1,7 +1,7 @@
 /**
  * HTTP Reverse-Proxy Local-Delivery Handler (issue #216)
  *
- * The foundational "connector-as-terminator" handler. It terminates a payment
+ * The foundational connector paid-reverse-proxy handler. It terminates a payment
  * at the connector and reverse-proxies a transparent, literal HTTP request —
  * carried opaquely in the ILP PREPARE `data` field — to an oblivious upstream
  * over plain HTTP. The upstream answers a normal HTTP response; we serialize it

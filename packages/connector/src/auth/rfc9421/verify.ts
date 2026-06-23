@@ -66,7 +66,7 @@ export interface VerifyOptions {
   /** The absolute request path of THIS request (e.g. `/ilp/expensive`). */
   path: string;
   /**
-   * The price the terminator expects for THIS route (recomputed from #218 route
+   * The price the connector expects for THIS route (recomputed from #218 route
    * config by the caller). The signed `toon-price` MUST equal this string, else
    * `price_mismatch`. Compared as an exact ASCII string; the verifier does not
    * interpret numeric semantics.
