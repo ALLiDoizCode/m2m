@@ -61,6 +61,25 @@ payer ──POST /ilp (3000)──▶ connector ──proxies the paid HTTP requ
    USDC channel toward the connector, signs a per-packet claim, and asserts:
    paid `POST /ilp` → FULFILL carrying the backend echo, and unpaid → 402 REJECT.
 
+## Client endpoints — what a payer points to
+
+A client/agent paying this edge needs **three** URLs (live values for this deploy):
+
+| Purpose                                          | URL                                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| **Paid edge** — where paid requests go           | `https://connector.pay.toonprotocol.dev/ilp` (or call your origin and read the `402`) |
+| **Chain RPC** — to open/fund the payment channel | `https://evm-rpc.devnet.toonprotocol.dev` (+ `solana-rpc.*`, `mina.*/graphql`)        |
+| **Faucet** — to get test funds                   | `https://faucet.devnet.toonprotocol.dev` (`POST /api/request {"address":"0x…"}`)      |
+
+- **Payers speak ILP-over-HTTP, not plain HTTP.** A paid call serializes an ILP PREPARE
+  (the HTTP request in `data`) + a channel-claim header and POSTs it to `/ilp`. Use the
+  toon-client **`h402Fetch`** shim or `prove-roundtrip.ts` — there is no `curl` one-liner yet.
+- **No relay endpoint here.** pay-edge fronts a _generic_ HTTP backend, so there is **no
+  `relay-ws`** to point at. (`relay-ws.devnet.toonprotocol.dev` belongs to the separate
+  chains-box `with_connector_edge` deploy — its free-read Nostr WS — not to pay-edge.)
+- The public edge serves a **trusted** Let's Encrypt cert (Caddy); only the devnet _chain_
+  endpoints are self-signed (hence `NODE_TLS_REJECT_UNAUTHORIZED=0` for chain/faucet calls).
+
 ## Files
 
 | file                 | purpose                                                                              |
