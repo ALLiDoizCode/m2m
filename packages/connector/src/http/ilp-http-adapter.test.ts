@@ -445,6 +445,32 @@ describe('IlpHttpAdapter', () => {
       expect(exactEntries.map((a: { network: string }) => a.network)).toEqual(['eip155:8453']);
     });
 
+    it('emits httpEndpoint on the toon-channel entry when Host + X-Forwarded-Proto headers are present', async () => {
+      const { adapter } = makeAdapter();
+      const req = new MockReq(serializePacket(createPrepare()), {
+        host: 'proxy.devnet.toonprotocol.dev',
+        'x-forwarded-proto': 'https',
+      });
+      const res = new MockRes();
+      await run(adapter, req, res);
+
+      expect(res.statusCode).toBe(402);
+      const body = parseGreeting(res);
+      const toon = body.accepts.find((a: { scheme: string }) => a.scheme === 'toon-channel');
+      expect(toon?.httpEndpoint).toBe('https://proxy.devnet.toonprotocol.dev/ilp');
+    });
+
+    it('omits httpEndpoint from toon-channel entry when no Host header is present', async () => {
+      const { adapter } = makeAdapter();
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+
+      expect(res.statusCode).toBe(402);
+      const body = parseGreeting(res);
+      const toon = body.accepts.find((a: { scheme: string }) => a.scheme === 'toon-channel');
+      expect(toon?.httpEndpoint).toBeUndefined();
+    });
+
     it('pass-through: a present claim suppresses the greeting (terminated + claim → NOT 402)', async () => {
       const { adapter, handlePrepare, validateClaim } = makeAdapter();
       const req = new MockReq(serializePacket(createPrepare()), {
