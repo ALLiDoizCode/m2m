@@ -44,7 +44,7 @@ function isStrictDescendant(candidate: string, ancestor: string): boolean {
  * given the connector's own self-prefixes.
  *
  * - `child`  — every route must be a strict descendant of one of the
- *   connector's self-prefixes (e.g. `g.townhouse.town` under `g.townhouse`).
+ *   connector's self-prefixes (e.g. `g.connector.town` under `g.connector`).
  *   This is the guard against the F06/T00 mis-tagged-child trap.
  * - `parent` — no route may be a strict descendant of the connector's own
  *   subtree (a parent sits above us, not under us); broader/lateral prefixes
@@ -92,8 +92,8 @@ export function validateRelationRoute(
 
 /**
  * Derive a default child route when a `child` peer is registered without an
- * explicit route: `<connector self-prefix>.<peerId>` (e.g. apex `g.townhouse`
- * + child id `town` → `g.townhouse.town`). Returns null when no self-prefix is
+ * explicit route: `<connector self-prefix>.<peerId>` (e.g. apex `g.connector`
+ * + child id `town` → `g.connector.town`). Returns null when no self-prefix is
  * known (cannot derive without an anchor) or the relation is not `child`.
  */
 export function deriveDefaultChildRoute(

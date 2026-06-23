@@ -2733,7 +2733,7 @@ export class ConnectorNode implements HealthStatusProvider {
         routeCount: peerRoutes.length,
         // Per-peer transport override; `undefined` when the peer inherits
         // the connector-level default. Mirrors GET /admin/peers so SDK
-        // consumers (Townhouse, test fixtures, future BMad agents) keep
+        // consumers (connector SDK, test fixtures, future BMad agents) keep
         // parity with the admin API.
         transport: this._btpClientManager.getPeerTransport(peerId),
       };

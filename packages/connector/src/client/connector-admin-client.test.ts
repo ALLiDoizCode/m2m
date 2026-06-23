@@ -72,15 +72,15 @@ describe('ConnectorAdminClient', () => {
 
   it('lists routes through the typed client', async () => {
     mockRoutingTable.getAllRoutes.mockReturnValue([
-      { prefix: 'g.townhouse.town', nextHop: 'town', priority: 0 },
+      { prefix: 'g.connector.town', nextHop: 'town', priority: 0 },
     ]);
     const result = (await client.listRoutes()) as { routes: Array<{ prefix: string }> };
-    expect(result.routes).toEqual([{ prefix: 'g.townhouse.town', nextHop: 'town', priority: 0 }]);
+    expect(result.routes).toEqual([{ prefix: 'g.connector.town', nextHop: 'town', priority: 0 }]);
   });
 
   it('adds a route through the typed client', async () => {
-    await client.addRoute({ prefix: 'g.townhouse.mill', nextHop: 'mill', priority: 3 });
-    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.townhouse.mill', 'mill', 3);
+    await client.addRoute({ prefix: 'g.connector.mill', nextHop: 'mill', priority: 3 });
+    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.mill', 'mill', 3);
   });
 
   it('removes a peer through the typed client', async () => {

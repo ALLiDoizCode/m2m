@@ -52,17 +52,17 @@ version bump to expect for any change.
 | Image architecture addition (e.g. `arm64`) | none  | build-only change        |
 | Image architecture removal                 | MAJOR | breaks pinning consumers |
 
-### Townhouse pin discipline
+### Connector pin discipline
 
-Townhouse pins the connector image **by digest** in
-`packages/townhouse/dist/image-manifest.json` (built by the publish
+Connector pins the connector image **by digest** in
+`packages/connector/dist/image-manifest.json` (built by the publish
 workflow — Story 45.1). Each MINOR connector release triggers a manual
-digest-pin bump in townhouse, gated on the contract canary
+digest-pin bump in connector, gated on the contract canary
 (`pnpm --filter @toon-protocol/sdk test:integration -- tests/integration/connector-contract.test.ts`)
 passing at the new digest. Patch releases (`vX.Y.z → vX.Y.z+1`) do not
-require a townhouse bump unless the patch fixes a behavior townhouse
+require a connector bump unless the patch fixes a behavior connector
 actively relied on being broken. Major bumps require a deliberate
-townhouse migration cycle and a CONNECTOR_MIGRATION.md row.
+connector migration cycle and a CONNECTOR_MIGRATION.md row.
 
 ## Supply-chain signing
 
@@ -108,7 +108,7 @@ and follow standard semver-tag floating semantics.
 
 ## Staying current
 
-Downstream consumers (notably `toon-protocol/town`'s townhouse package)
+Downstream consumers (notably `toon-protocol/town`'s connector package)
 learn about new connector releases via:
 
 1. **GitHub UI subscription** — preferred: `Watch → Custom → Releases` on
@@ -122,8 +122,8 @@ learn about new connector releases via:
    ```
 
 Automated subscription (e.g. a GitHub Actions cron polling `gh release
-view` and opening a digest-bump PR into townhouse) is OUT OF SCOPE for
-v1 and tracked as Open Thread #2 in the Townhouse HS-Mode v1 epic.
+view` and opening a digest-bump PR into connector) is OUT OF SCOPE for
+v1 and tracked as Open Thread #2 in the Connector HS-Mode v1 epic.
 
 ## Historical tag corruption (releases prior to first post-#60 release)
 
@@ -204,5 +204,5 @@ Three mechanisms guard against future tag-vs-content drift:
 - PR [#48](https://github.com/toon-protocol/connector/pull/48) — earlier
   `npm-release` fix for the same class of bug
 - [PR #66 — cosign keyless OIDC signing](https://github.com/toon-protocol/connector/pull/66) (Story 44.3)
-- Townhouse Story 44.4 — downstream consumer-facing release contract
+- Connector Story 44.4 — downstream consumer-facing release contract
 - [Interledger Protocol V4 (RFC 0027)](https://github.com/interledger/rfcs/blob/master/0027-interledger-protocol-4/0027-interledger-protocol-4.md) — defines the ILP packet wire format referenced by the MAJOR-bump rule in [API stability](#api-stability)

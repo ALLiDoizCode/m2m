@@ -60,7 +60,7 @@ describe('RegistryStore', () => {
 
   it('round-trips a route', () => {
     store.saveRoute({
-      prefix: 'g.townhouse.town',
+      prefix: 'g.connector.town',
       nextHop: 'town',
       priority: 5,
       source: 'runtime',
@@ -68,7 +68,7 @@ describe('RegistryStore', () => {
 
     const { routes } = store.loadAll();
     expect(routes).toEqual([
-      { prefix: 'g.townhouse.town', nextHop: 'town', priority: 5, source: 'runtime' },
+      { prefix: 'g.connector.town', nextHop: 'town', priority: 5, source: 'runtime' },
     ]);
   });
 
