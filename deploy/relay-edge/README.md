@@ -89,12 +89,12 @@ relay's WS read port (7100) over `wss://relay-ws.toonprotocol.xyz`.
 
 ## Files
 
-| file                 | purpose                                                                                  |
-| -------------------- | ---------------------------------------------------------------------------------------- |
-| `docker-compose.yml` | connector (payment proxy) + real Nostr relay + Caddy; only 80/443 public                 |
-| `connector.yaml`     | connector config (route `g.connector.relay` → `http://relay:3100`), devnet RPC baked in  |
-| `Caddyfile`          | two auto-TLS vhosts: `connector.toonprotocol.xyz` (paid) + `relay-ws.toonprotocol.xyz`   |
-| `.env.example`       | copy to `.env`; `TOON_MNEMONIC` + `RELAY_NOSTR_SECRET_KEY` (required) + devnet URLs       |
+| file                 | purpose                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------- |
+| `docker-compose.yml` | connector (payment proxy) + real Nostr relay + Caddy; only 80/443 public                |
+| `connector.yaml`     | connector config (route `g.connector.relay` → `http://relay:3100`), devnet RPC baked in |
+| `Caddyfile`          | two auto-TLS vhosts: `connector.toonprotocol.xyz` (paid) + `relay-ws.toonprotocol.xyz`  |
+| `.env.example`       | copy to `.env`; `TOON_MNEMONIC` + `RELAY_NOSTR_SECRET_KEY` (required) + devnet URLs     |
 
 ## Privacy invariant
 
