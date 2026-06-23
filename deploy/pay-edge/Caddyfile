@@ -1,0 +1,7 @@
+# pay-edge public edge — auto-TLS via Let's Encrypt.
+# The domain resolves to this box and 80/443 are open, so Caddy provisions a
+# TRUSTED cert automatically and terminates TLS, reverse-proxying the paid
+# ILP-over-HTTP traffic to the connector's (unpublished) :3000 edge.
+connector.pay.toonprotocol.dev {
+	reverse_proxy connector:3000
+}
