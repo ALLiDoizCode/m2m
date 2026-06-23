@@ -69,23 +69,38 @@ import {
  * Anvil ACCOUNT 0 (`keyId 0xac0974…ff80`); its address is account 0's address.
  * The client opens its on-chain channel TOWARD this address.
  */
-export const TERMINATOR_EVM_ADDRESS = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+export const TERMINATOR_EVM_ADDRESS =
+  process.env.DEVNET_TERMINATOR_ADDR ?? '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 
 /**
  * The client's OWN settlement key — a funded Anvil account that is NOT account 0
  * (account 0 belongs to the terminator). `PEER_PRIVATE_KEYS[0]` = Anvil account 2
  * (address 0x3C44Cd…). It must be funded with USDC for channel deposits.
+ *
+ * Overridable via DEVNET_CLIENT_KEY / DEVNET_CLIENT_ADDR so the client can use a
+ * freshly generated BIP-39 seed (the env pair must be the same wallet).
  */
-export const CLIENT_PRIVATE_KEY = PEER_PRIVATE_KEYS[0]!;
+export const CLIENT_PRIVATE_KEY = process.env.DEVNET_CLIENT_KEY ?? PEER_PRIVATE_KEYS[0]!;
 
 /** Anvil account 2 address — the client's funded settlement wallet. */
-export const CLIENT_EVM_ADDRESS = '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC';
+export const CLIENT_EVM_ADDRESS =
+  process.env.DEVNET_CLIENT_ADDR ?? '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC';
 
 /** The peerId the client uses internally for the single terminator peer entry. */
 export const TERMINATOR_PEER_ID = 'terminator';
 
 /** The ILP address the relay store route terminates under (terminator.yaml). */
 export const RELAY_STORE_DESTINATION = 'g.terminator.relay.store';
+
+/**
+ * Which chain the client settles on for this run: 'evm' (default) or 'solana'.
+ * Selects the chainProvider + peer settlement address + channel-open chain. The
+ * claim-signing and POST /ilp transport are chain-agnostic.
+ */
+export const DEVNET_CHAIN = process.env.DEVNET_CHAIN ?? 'evm';
+
+/** The on-chain settlement chainId the claim/channel use for this run. */
+const SETTLEMENT_CHAIN = DEVNET_CHAIN === 'solana' ? 'solana:devnet' : `evm:${ANVIL_CHAIN_ID}`;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Config
@@ -390,6 +405,53 @@ export class PaidRoundTripClient {
   private buildConfig(): ConnectorConfig {
     const { localBtpPort, localPortBase } = this.opts;
     const nodeId = 'paid-roundtrip-client';
+    // The single peer represents the TERMINATOR. We never BTP-connect to it (the
+    // url is a dead local port); the channel is opened on-chain toward its
+    // settlement address and claims are delivered over HTTP — exactly as the
+    // ilp-http-settlement reference does with peer2 offline-for-BTP.
+    const deadUrl = `ws://127.0.0.1:${localBtpPort + 1}`;
+    const peer =
+      DEVNET_CHAIN === 'solana'
+        ? {
+            id: TERMINATOR_PEER_ID,
+            url: deadUrl,
+            authToken: '',
+            settlementAddress: process.env.DEVNET_TERMINATOR_SOL_ADDR!,
+            chain: 'solana:devnet',
+          }
+        : {
+            id: TERMINATOR_PEER_ID,
+            url: deadUrl,
+            authToken: '',
+            evmAddress: TERMINATOR_EVM_ADDRESS,
+            chain: `evm:${ANVIL_CHAIN_ID}`,
+          };
+    const chainProvider =
+      DEVNET_CHAIN === 'solana'
+        ? {
+            chainType: 'solana' as const,
+            chainId: 'solana:devnet',
+            rpcUrl: process.env.DEVNET_SOLANA_RPC!,
+            programId: process.env.DEVNET_SOLANA_PROGRAM_ID!,
+            keyId: process.env.DEVNET_CLIENT_SOL_KEY!,
+            cluster: 'devnet',
+            tokenMint: process.env.DEVNET_SOLANA_USDC_MINT!,
+          }
+        : {
+            chainType: 'evm' as const,
+            chainId: `evm:${ANVIL_CHAIN_ID}`,
+            rpcUrl: this.opts.evmRpcUrl,
+            registryAddress: REGISTRY_ADDRESS,
+            keyId: CLIENT_PRIVATE_KEY,
+            tokenAddress: TOKEN_ADDRESS,
+            settlementOptions: {
+              threshold: '5000',
+              pollingIntervalMs: 100,
+              settlementTimeoutSecs: 3600,
+              initialDepositMultiplier: 2,
+              ledgerSnapshotPath: `./data/ledger-paid-roundtrip-${localBtpPort}.json`,
+            },
+          };
     return {
       nodeId,
       btpServerPort: localBtpPort,
@@ -399,19 +461,7 @@ export class PaidRoundTripClient {
       deploymentMode: 'standalone',
       adminApi: { enabled: true, port: localPortBase + 2, host: '127.0.0.1' },
       // No local delivery handler: this node only PAYS; it never terminates.
-      peers: [
-        {
-          // The single peer represents the TERMINATOR. We never BTP-connect to it
-          // (the url is a dead local port); the channel is opened on-chain toward
-          // its evmAddress and claims are delivered over HTTP — exactly as the
-          // ilp-http-settlement reference does with peer2 offline-for-BTP.
-          id: TERMINATOR_PEER_ID,
-          url: `ws://127.0.0.1:${localBtpPort + 1}`,
-          authToken: '',
-          evmAddress: TERMINATOR_EVM_ADDRESS,
-          chain: `evm:${ANVIL_CHAIN_ID}`,
-        },
-      ],
+      peers: [peer],
       routes: [
         { prefix: `test.${nodeId}`, nextHop: nodeId },
         { prefix: `test.${TERMINATOR_PEER_ID}`, nextHop: TERMINATOR_PEER_ID },
@@ -423,24 +473,8 @@ export class PaidRoundTripClient {
         tigerBeetleReplicas: [],
         thresholds: { defaultThreshold: 5000n, pollingInterval: 100 },
       },
-      chainProviders: [
-        {
-          chainType: 'evm',
-          chainId: `evm:${ANVIL_CHAIN_ID}`,
-          rpcUrl: this.opts.evmRpcUrl,
-          registryAddress: REGISTRY_ADDRESS,
-          keyId: CLIENT_PRIVATE_KEY,
-          tokenAddress: TOKEN_ADDRESS,
-          settlementOptions: {
-            threshold: '5000',
-            pollingIntervalMs: 100,
-            settlementTimeoutSecs: 3600,
-            initialDepositMultiplier: 2,
-            ledgerSnapshotPath: `./data/ledger-paid-roundtrip-${localBtpPort}.json`,
-          },
-        },
-      ],
-    };
+      chainProviders: [chainProvider],
+    } as ConnectorConfig;
   }
 
   /**
@@ -456,7 +490,10 @@ export class PaidRoundTripClient {
   async start(channelOpenTimeoutMs = 90_000): Promise<void> {
     // 1. Fund the client's EVM wallet from the (possibly remote) faucet, checking
     //    the balance against the (possibly remote) RPC.
-    await fundEvmAddress(this.opts.faucetUrl, this.opts.evmRpcUrl, CLIENT_EVM_ADDRESS);
+    if (DEVNET_CHAIN === 'evm') {
+      await fundEvmAddress(this.opts.faucetUrl, this.opts.evmRpcUrl, CLIENT_EVM_ADDRESS);
+    }
+    // (Solana wallets are funded out-of-band via the faucet before the run.)
 
     // 2. Boot the embedded payer node — it auto-opens + funds the channel.
     this.node = new ConnectorNode(
@@ -464,6 +501,37 @@ export class PaidRoundTripClient {
       createLogger('paid-roundtrip-client', this.opts.logLevel)
     );
     await this.node.start();
+
+    // 2b. Explicitly open + fund the on-chain channel toward the terminator. The
+    //     auto-open-for-connected-peers path is gated on a live BTP connection,
+    //     which this client deliberately does not have (claims ride HTTP). Against
+    //     a real remote chain the auto-open never fires, so we trigger it directly.
+    //     Idempotent: a pre-existing channel (e.g. local auto-open) is fine.
+    const initialDeposit = process.env.DEVNET_INITIAL_DEPOSIT ?? '100000000'; // 100 USDC (6dp)
+    try {
+      await this.node.openChannel(
+        DEVNET_CHAIN === 'solana'
+          ? {
+              peerId: TERMINATOR_PEER_ID,
+              chain: 'solana:devnet',
+              peerAddress: process.env.DEVNET_TERMINATOR_SOL_ADDR!,
+              // Solana channel tokenId is the SPL mint.
+              token: process.env.DEVNET_SOLANA_USDC_MINT!,
+              initialDeposit,
+            }
+          : {
+              peerId: TERMINATOR_PEER_ID,
+              chain: `evm:${ANVIL_CHAIN_ID}`,
+              peerAddress: TERMINATOR_EVM_ADDRESS,
+              // The canonical tokenId is the resolved on-chain symbol (USDC), not
+              // the public openChannel() default of 'AGENT'. Both sides must agree.
+              token: process.env.DEVNET_TOKEN_ID ?? 'USDC',
+              initialDeposit,
+            }
+      );
+    } catch (err) {
+      if (!/already exists/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
 
     // 3. Wait for the on-chain channel toward the terminator and capture tokenId.
     await waitForCondition(
@@ -488,7 +556,7 @@ export class PaidRoundTripClient {
       claimDb,
       createLogger('paid-roundtrip-claim', this.opts.logLevel),
       'paid-roundtrip-client',
-      new Map([[TERMINATOR_PEER_ID, `evm:${ANVIL_CHAIN_ID}`]])
+      new Map([[TERMINATOR_PEER_ID, SETTLEMENT_CHAIN]])
     );
   }
 
