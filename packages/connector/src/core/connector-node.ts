@@ -96,6 +96,7 @@ import {
 } from '../settlement/claim-sender-db-schema';
 import { InboundClaimValidator } from '../btp/inbound-claim-validator';
 import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
+import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
 import { hexToBytes } from '@noble/hashes/utils';
 import { promises as dns } from 'dns';
 // Import package.json for version information
@@ -172,6 +173,11 @@ export class ConnectorNode implements HealthStatusProvider {
   // proxy-down assertion fires in CI-acceptable time without reaching into
   // private state. This is the ONLY production-code seam Story 35.6 introduces.
   private readonly _transportHealthIntervalMs: number;
+  // Optional mnemonic override (mnemonic signing mode). When set, takes
+  // precedence over `process.env.TOON_MNEMONIC` at boot so multi-node tests can
+  // derive distinct settlement keys without mutating global env. NEVER logged.
+  private readonly _mnemonicOverride?: string;
+  private readonly _mnemonicAccountIndex?: number;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -190,12 +196,26 @@ export class ConnectorNode implements HealthStatusProvider {
   constructor(
     config: ConnectorConfig | string,
     logger: Logger,
-    opts?: { transportHealthIntervalMs?: number }
+    opts?: {
+      transportHealthIntervalMs?: number;
+      /**
+       * Mnemonic signing mode override. When provided, this BIP-39 mnemonic
+       * derives the per-chain settlement keys at boot, taking precedence over
+       * `process.env.TOON_MNEMONIC`. Intended for multi-node test isolation so
+       * tests don't mutate global env. Production injects the mnemonic via
+       * `TOON_MNEMONIC` instead. NEVER logged or persisted.
+       */
+      mnemonic?: string;
+      /** Optional account index for mnemonic derivation (default 0). */
+      mnemonicAccountIndex?: number;
+    }
   ) {
     // Story 35.6: optional seam for integration tests. Default preserves
     // pre-35.6 behavior (30s). All existing callers (2-arg form) continue to
     // work unchanged — new arg is optional.
     this._transportHealthIntervalMs = opts?.transportHealthIntervalMs ?? 30000;
+    this._mnemonicOverride = opts?.mnemonic;
+    this._mnemonicAccountIndex = opts?.mnemonicAccountIndex;
     // Load and validate configuration
     let resolvedConfig: ConnectorConfig;
     try {
@@ -605,6 +625,78 @@ export class ConnectorNode implements HealthStatusProvider {
   }
 
   /**
+   * Mnemonic signing mode (operator-provided runtime secret).
+   *
+   * When `process.env.TOON_MNEMONIC` (or the constructor `mnemonic` override for
+   * tests) is set, derive the connector's EVM/Solana/Mina settlement keys from
+   * that single BIP-39 mnemonic using the canonical multi-chain paths (matching
+   * `@toon-protocol/sdk`'s `fromMnemonicFull`), and inject them into the
+   * matching `chainProviders[].keyId` slots. The production image ships keyless;
+   * the operator injects the seed phrase at deploy time via container env / a
+   * secret manager. The mnemonic is sourced from the environment directly —
+   * never from the YAML config (the loader does not interpolate `${...}`, and a
+   * production seed must never live in a config file or the image).
+   *
+   * Additive and backward-compatible: when no mnemonic is present this is a
+   * no-op and existing per-chain `keyId` configs boot unchanged. When a mnemonic
+   * IS present, derived keys overwrite any per-chain `keyId` already in the
+   * config (the mnemonic is the single source of truth for that node's keys).
+   *
+   * SECURITY: never logs the mnemonic or any derived private key.
+   */
+  private _applyMnemonicSigningMode(): void {
+    const mnemonic = this._mnemonicOverride ?? process.env.TOON_MNEMONIC;
+    if (!mnemonic) {
+      return; // mnemonic mode inactive — keep existing per-chain keyId behavior
+    }
+
+    const providers = this._config.chainProviders;
+    if (!providers || providers.length === 0) {
+      this._logger.warn(
+        { event: 'mnemonic_mode_no_chain_providers' },
+        'TOON_MNEMONIC is set but no chainProviders are configured; no settlement keys to derive'
+      );
+      return;
+    }
+
+    const keys = deriveChainKeysFromMnemonic(mnemonic, this._mnemonicAccountIndex ?? 0);
+
+    let evmInjected = false;
+    let solanaInjected = false;
+    let minaInjected = false;
+    for (const provider of providers) {
+      switch (provider.chainType) {
+        case 'evm':
+          provider.keyId = keys.evm.privateKey;
+          evmInjected = true;
+          break;
+        case 'solana':
+          provider.keyId = keys.solana.privateKey;
+          solanaInjected = true;
+          break;
+        case 'mina':
+          provider.keyId = keys.mina.privateKey;
+          minaInjected = true;
+          break;
+      }
+    }
+
+    // Log only non-secret context: which chains got a derived key, and the
+    // PUBLIC EVM/Solana addresses (never the private keys / mnemonic).
+    this._logger.info(
+      {
+        event: 'mnemonic_signing_mode_enabled',
+        evm: evmInjected,
+        solana: solanaInjected,
+        mina: minaInjected,
+        evmAddress: evmInjected ? keys.evm.address : undefined,
+        solanaAddress: solanaInjected ? keys.solana.address : undefined,
+      },
+      'Mnemonic signing mode active: derived per-chain settlement keys from TOON_MNEMONIC'
+    );
+  }
+
+  /**
    * Start connector and establish peer connections
    * Starts BTP server and connects to all configured peers
    */
@@ -623,6 +715,14 @@ export class ConnectorNode implements HealthStatusProvider {
       // Validate chain provider configuration (checks chainType, duplicate chainIds,
       // required fields, and peer chain references)
       validateChainProviders(this._config, this._logger);
+
+      // Mnemonic signing mode: when a single operator-provided BIP-39 mnemonic
+      // is present (env `TOON_MNEMONIC` or the test override), derive the
+      // EVM/Solana/Mina settlement keys and inject them into the
+      // `chainProviders[].keyId` slots BEFORE the settlement stack consumes them
+      // below. Additive and backward-compatible: absent a mnemonic, existing
+      // per-chain `keyId` configs boot unchanged.
+      this._applyMnemonicSigningMode();
 
       // Epic 35 / Story 35.4: initialize the transport provider BEFORE any
       // outbound subsystem (BTP server, settlement init, admin server, peer
