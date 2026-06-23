@@ -55,6 +55,15 @@ const TERMINATOR_PEER_ID = 'terminator';
 
 const PRICE = 1000n; // route price in connector-multichain.yaml
 
+// PREPARE expiry window (ms). Mina-specific: the FIRST claim against a freshly
+// registered channel triggers a full on-chain channel verification against the
+// GraphQL node (~60s on devnet); subsequent claims hit the ~0.6s fast path. A 60s
+// window (the default used by the EVM/Solana harnesses) expires before that first
+// round-trip completes → `R00 Packet has expired`, even though the claim itself
+// validates and stores. Raise to 300s so the first Mina claim round-trips cleanly
+// (connector #237). Override via MINA_PREPARE_EXPIRY_MS if devnet latency drifts.
+const PREPARE_EXPIRY_MS = Number(process.env.MINA_PREPARE_EXPIRY_MS) || 300000;
+
 const log = (...a) => console.log('[mina-e2e]', ...a);
 
 // ── HTTP POST raw OER body ───────────────────────────────────────────────────
@@ -218,7 +227,7 @@ async function main() {
     type: PacketType.PREPARE,
     destination: RELAY_STORE_DESTINATION,
     amount: PRICE,
-    expiresAt: new Date(Date.now() + 300000),
+    expiresAt: new Date(Date.now() + PREPARE_EXPIRY_MS),
     data: envelope,
   };
   const res = await postRaw(TERMINATOR_ILP_URL, serializePacket(prepare), {
@@ -249,7 +258,7 @@ async function main() {
 
   // 5. Negative: UNPAID POST (no claim header) must NOT fulfill.
   const unpaidEnv = buildStoreWriteEnvelope(signEphemeralKind1Event(`unpaid ${new Date().toISOString()}`));
-  const unpaidPrepare = { type: PacketType.PREPARE, destination: RELAY_STORE_DESTINATION, amount: PRICE, expiresAt: new Date(Date.now() + 300000), data: unpaidEnv };
+  const unpaidPrepare = { type: PacketType.PREPARE, destination: RELAY_STORE_DESTINATION, amount: PRICE, expiresAt: new Date(Date.now() + PREPARE_EXPIRY_MS), data: unpaidEnv };
   const ures = await postRaw(TERMINATOR_ILP_URL, serializePacket(unpaidPrepare), {});
   let notFulfilled, udetail;
   if (ures.status === 200) {

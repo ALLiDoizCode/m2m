@@ -166,11 +166,15 @@ infra-down:
 	docker compose --profile evm --profile solana --profile mina down
 
 # Solana Payment Channel Program
+# Prepend the Solana CLI bin dir (ships `cargo-build-sbf`) to PATH so the build
+# works even when that dir isn't on the caller's PATH (issue #238). Harmless if
+# already present or absent.
+SOLANA_BIN := $(HOME)/.local/share/solana/install/active_release/bin
 solana-build:
-	cd packages/solana-program && cargo build-sbf
+	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo build-sbf
 
 solana-test:
-	cd packages/solana-program && cargo test-sbf
+	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo test-sbf
 
 solana-deploy-devnet:
 ifndef DEPLOYER_KEYPAIR

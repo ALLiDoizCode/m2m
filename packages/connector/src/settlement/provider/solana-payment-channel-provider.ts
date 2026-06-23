@@ -618,9 +618,10 @@ export function createSolanaProviderFactory(
     if (config.chainType !== 'solana') {
       throw new Error(`Solana factory received non-Solana config: ${config.chainType}`);
     }
-    // Note: SDK auto-derives wsUrl from rpcUrl (http->ws). config.wsUrl is ignored for now.
-    // Supporting custom wsUrl requires SDK constructor change (deferred).
-    const sdk = new SolanaPaymentChannelSDK(config.rpcUrl, config.programId, logger);
+    // Honor an explicit config.wsUrl when present (hosted devnets often expose the
+    // PubSub WebSocket on a different host than the RPC); otherwise the SDK derives
+    // the WebSocket endpoint from rpcUrl via a scheme/port swap.
+    const sdk = new SolanaPaymentChannelSDK(config.rpcUrl, config.programId, logger, config.wsUrl);
     const cluster = config.cluster ?? 'devnet';
     const chainId = `solana:${cluster}`;
     const resolvedTokenMint = config.tokenMint ?? tokenMint;

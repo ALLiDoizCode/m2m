@@ -205,13 +205,20 @@ jobs:
           sudo apt-get update -y && sudo apt-get install -y jq netcat-openbsd openssh-client
 
       - name: Configure s3cmd for Linode Object Storage (cert backup)
-        # Only when creds + a bucket are provided; otherwise cert backup/restore
-        # is skipped and a rebuild falls back to re-issuing (old behavior).
+        # Cert backup/restore is BEST-EFFORT and must never fail the deploy (issue
+        # #239). It is enabled only when (a) a bucket is configured, (b) both
+        # LINODE_OBJ_* secrets are non-empty, AND (c) those creds actually
+        # authenticate. If any check fails we set OBJ_ENABLED=false, emit a
+        # ::warning:: (so the cert simply won't persist across the next rebuild and
+        # gets re-issued — old behavior), and exit 0 so the job keeps going. This
+        # `continue-on-error` belt-and-suspenders covers the case where even the
+        # auth probe itself errors unexpectedly.
         if: ${{ env.OBJ_BUCKET != '' }}
+        continue-on-error: true
         run: |
           if [ -z "${LINODE_OBJ_ACCESS_KEY:-}" ] || [ -z "${LINODE_OBJ_SECRET_KEY:-}" ]; then
             echo "OBJ_ENABLED=false" >> "$GITHUB_ENV"
-            echo "::notice::OBJ_BUCKET set but LINODE_OBJ_ACCESS_KEY/SECRET_KEY missing — cert backup/restore disabled."
+            echo "::warning::OBJ_BUCKET set but LINODE_OBJ_ACCESS_KEY/SECRET_KEY missing — cert backup/restore DISABLED; the LE cert will NOT persist across rebuilds (it will be re-issued)."
             exit 0
           fi
           HOST="${OBJ_REGION}.linodeobjects.com"
@@ -224,8 +231,23 @@ jobs:
           use_https = True
           CFG
           chmod 600 ~/.s3cfg
-          # Ensure the bucket exists (idempotent).
+          # Probe the credentials up front (issue #239): if the keys are invalid or
+          # expired, Linode returns 403 InvalidAccessKeyId here — disable backup
+          # rather than letting a later `s3cmd put` 403 fail the whole deploy. A
+          # successful `ls` proves the creds authenticate against this region.
+          if ! s3cmd ls "s3://" >/dev/null 2>s3probe.err; then
+            echo "OBJ_ENABLED=false" >> "$GITHUB_ENV"
+            echo "::warning::LINODE_OBJ_ACCESS_KEY/SECRET_KEY did not authenticate against ${HOST} ($(tr -d '\n' < s3probe.err | tail -c 200)) — cert backup/restore DISABLED. ROTATE the keys (see job summary). The LE cert will be re-issued on the next rebuild until fixed."
+            exit 0
+          fi
+          # Ensure the bucket exists (idempotent). `mb` is harmless if it already does.
           s3cmd mb "s3://${OBJ_BUCKET}" 2>/dev/null || true
+          # Confirm the target bucket is reachable with these creds.
+          if ! s3cmd info "s3://${OBJ_BUCKET}" >/dev/null 2>s3bucket.err; then
+            echo "OBJ_ENABLED=false" >> "$GITHUB_ENV"
+            echo "::warning::Bucket s3://${OBJ_BUCKET} not reachable on ${HOST} ($(tr -d '\n' < s3bucket.err | tail -c 200)) — confirm the bucket exists in region '${OBJ_REGION}'. Cert backup/restore DISABLED."
+            exit 0
+          fi
           echo "OBJ_ENABLED=true" >> "$GITHUB_ENV"
           echo "Object Storage cert backup enabled → s3://${OBJ_BUCKET} (${HOST})"
 
@@ -423,7 +445,16 @@ jobs:
         # /etc/letsencrypt tree as-is; correctness is enforced on RESTORE, where
         # init-letsencrypt.sh's guard rejects a self-signed/expired/wrong-SAN cert
         # and issues a fresh one — so even a dummy in the backup is harmless.
+        #
+        # continue-on-error (issue #239): the deploy itself (provisioning + chains)
+        # is already done and healthy by this point — a failed cert backup must NOT
+        # flip the whole run to `failure`. The Configure step above already probes
+        # the creds and disables OBJ_ENABLED on a 403, so reaching here means the
+        # creds authenticated; this is the backstop for a transient S3 error (or a
+        # key that gets revoked mid-run). We turn off `set -e` around the put so an
+        # S3 error is reported as a ::warning:: instead of a hard non-zero exit.
         if: ${{ env.OBJ_ENABLED == 'true' }}
+        continue-on-error: true
         run: |
           set -euo pipefail
           # Tar the cert volume off the box (quoted heredoc → no CI-side expansion).
@@ -433,8 +464,15 @@ jobs:
             sh -c 'cd /etc/letsencrypt && tar czf - .'
           REMOTE
           if [ -s /tmp/le.tar.gz ]; then
-            s3cmd put /tmp/le.tar.gz "s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz"
-            echo "Backed up cert volume → s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz"
+            set +e
+            s3cmd put /tmp/le.tar.gz "s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz" 2>s3put.err
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "Backed up cert volume → s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz"
+            else
+              echo "::warning::Cert-volume backup to s3://${OBJ_BUCKET}/${DOMAIN}/letsencrypt.tar.gz FAILED ($(tr -d '\n' < s3put.err | tail -c 200)). Deploy is otherwise healthy; the cert just won't persist to the NEXT rebuild (it will be re-issued). ROTATE the LINODE_OBJ_* keys to fix — see job summary."
+            fi
           else
             echo "::notice::Cert volume empty — nothing to back up."
           fi

@@ -45,11 +45,20 @@ echo "==> [3/7] Build the Solana program + ensure host CLIs (solana, spl-token)"
 # image has neither). Skipped entirely for EVM-only deployments.
 case ",${COMPOSE_PROFILES}," in
   *,solana,*)
-    make -C "$ROOT" solana-build || echo "    solana-build failed — solana chain may come up without its program"
+    # The Solana installer ships `cargo-build-sbf` (the backend for `cargo
+    # build-sbf` that `make solana-build` invokes). Install it FIRST and put its
+    # bin dir on PATH before building, otherwise the build fails with
+    # "cargo-build-sbf: command not found" (Error 127) and target/deploy stays
+    # empty (issue #238). Prepend idempotently without clobbering existing PATH.
+    SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
     if ! command -v solana >/dev/null 2>&1; then
       echo "    Installing Solana CLI…"; sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-      export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
     fi
+    case ":${PATH}:" in
+      *":${SOLANA_BIN}:"*) ;;
+      *) export PATH="${SOLANA_BIN}:$PATH" ;;
+    esac
+    make -C "$ROOT" solana-build || echo "    solana-build failed — solana chain may come up without its program"
     if ! command -v spl-token >/dev/null 2>&1; then
       echo "    Installing spl-token CLI (cargo)…"
       command -v cargo >/dev/null 2>&1 || { echo "    NEED Rust/cargo for spl-token-cli — install rustup, then re-run."; }

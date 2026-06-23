@@ -79,6 +79,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=0 NODE_PATH=$PWD/node_modules \
 | `MINA_CLIENT_PRIV`                                                    | mina          | funded Mina key (`EK…`) — **required**                                                               |
 | `DEVNET_SOLANA_RPC` / `DEVNET_SOLANA_WS`                              | solana        | RPC + the **separate** PubSub WS host (`solana-ws.*`, not `solana-rpc.*` — see connector #236)       |
 | `MINA_GRAPHQL` / `MINA_CHANNEL` / `MINA_TOKEN_ID` / `MINA_ESM_DIR`    | mina          | GraphQL (use `api.minascan.io`, not the `mina.*` proxy), channel zkApp, USDC tokenId, ESM helper dir |
+| `MINA_PREPARE_EXPIRY_MS`                                              | mina          | PREPARE expiry window (ms); default `300000` — covers the ~60s first-claim on-chain verify (#237)    |
 | `TERMINATOR_ILP_URL` / `RELAY_WS_URL`                                 | all           | terminator `/ilp` + relay WS                                                                         |
 
 ## Caveats
@@ -90,6 +91,9 @@ NODE_TLS_REJECT_UNAUTHORIZED=0 NODE_PATH=$PWD/node_modules \
 - **No private keys are committed** — `SOL_CLIENT_PRIV` / `MINA_CLIENT_PRIV` are
   required at runtime and must be funded devnet throwaway keys.
 - Mina is slow (~3-min devnet slots); the first claim per channel triggers a full
-  on-chain verify (~60s) that can exceed the default PREPARE expiry (connector
-  #237). The channel-deploy/USDC-mint setup helpers are one-time and devnet-
-  specific (kept out of this dir).
+  on-chain verify (~60s) that exceeds the 60s PREPARE expiry the EVM/Solana
+  harnesses use (connector #237). `mina-roundtrip.cjs` therefore signs its PREPAREs
+  with a 300s expiry (`PREPARE_EXPIRY_MS`, override via `MINA_PREPARE_EXPIRY_MS`) so
+  the first claim round-trips cleanly; subsequent claims hit the ~0.6s fast path.
+  The channel-deploy/USDC-mint setup helpers are one-time and devnet-specific (kept
+  out of this dir).

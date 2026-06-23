@@ -2,23 +2,23 @@
  * Paid round-trip client (issue #222, AC2 acceptance probe)
  *
  * A REUSABLE "payer" that drives a full paid ILP round-trip with on-chain EVM
- * settlement against a terminator edge — local OR remote (public TLS). It is the
+ * settlement against a connector edge — local OR remote (public TLS). It is the
  * shared code path exercised by:
  *
- *   - the local #221 e2e (`app-behind-terminator-e2e.test.ts`, AC3), pointed at
+ *   - the local #221 e2e (`app-e2e.test.ts`, AC3), pointed at
  *     127.0.0.1 compose ports, and
- *   - the #222 CI acceptance probe (`scripts/app-behind-terminator/ci-acceptance-probe.ts`),
- *     pointed at `https://terminator.${DOMAIN}/ilp` and friends on the public box.
+ *   - the #222 CI acceptance probe (`scripts/app/ci-acceptance-probe.ts`),
+ *     pointed at `https://connector.${DOMAIN}/ilp` and friends on the public box.
  *
  * NOTHING here hardcodes localhost — every reachable endpoint is a constructor
- * parameter (`terminatorIlpUrl`, `evmRpcUrl`, `faucetUrl`, `relayWsUrl`).
+ * parameter (`connectorIlpUrl`, `evmRpcUrl`, `faucetUrl`, `relayWsUrl`).
  *
  * The client plays the PEER1 role from `ilp-http-settlement-e2e.test.ts`: it runs
  * a LOCAL `ConnectorNode` whose only EVM provider points at the (possibly remote)
- * anvil, auto-opens + funds an on-chain channel toward the terminator's
+ * anvil, auto-opens + funds an on-chain channel toward the connector's
  * settlement address, then signs per-packet claims with a test-side
  * `PerPacketClaimService` over that node's real `channelManager` / `chainRegistry`
- * and delivers them to the terminator over HTTP (POST /ilp + claim header) —
+ * and delivers them to the connector over HTTP (POST /ilp + claim header) —
  * byte-identical to what it would attach to a BTP write, but delivered to a peer
  * that we never BTP-connect to (a dead BTP url, exactly as the reference test
  * does with peer1→peer2 with peer2 offline-for-BTP).
@@ -60,21 +60,21 @@ import {
 } from './multi-hop-helpers';
 
 // ────────────────────────────────────────────────────────────────────────────
-// Fixed Anvil identities (mirrors ilp-http-settlement-e2e + terminator.yaml)
+// Fixed Anvil identities (mirrors ilp-http-settlement-e2e + connector.yaml)
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * The TERMINATOR's on-chain settlement key. The terminator config
- * (`scripts/app-behind-terminator/terminator.yaml`) signs/redeems channels with
+ * The CONNECTOR's on-chain settlement key. The connector config
+ * (`scripts/app/connector.yaml`) signs/redeems channels with
  * Anvil ACCOUNT 0 (`keyId 0xac0974…ff80`); its address is account 0's address.
  * The client opens its on-chain channel TOWARD this address.
  */
-export const TERMINATOR_EVM_ADDRESS =
+export const CONNECTOR_EVM_ADDRESS =
   process.env.DEVNET_TERMINATOR_ADDR ?? '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 
 /**
  * The client's OWN settlement key — a funded Anvil account that is NOT account 0
- * (account 0 belongs to the terminator). `PEER_PRIVATE_KEYS[0]` = Anvil account 2
+ * (account 0 belongs to the connector). `PEER_PRIVATE_KEYS[0]` = Anvil account 2
  * (address 0x3C44Cd…). It must be funded with USDC for channel deposits.
  *
  * Overridable via DEVNET_CLIENT_KEY / DEVNET_CLIENT_ADDR so the client can use a
@@ -86,11 +86,11 @@ export const CLIENT_PRIVATE_KEY = process.env.DEVNET_CLIENT_KEY ?? PEER_PRIVATE_
 export const CLIENT_EVM_ADDRESS =
   process.env.DEVNET_CLIENT_ADDR ?? '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC';
 
-/** The peerId the client uses internally for the single terminator peer entry. */
-export const TERMINATOR_PEER_ID = 'terminator';
+/** The peerId the client uses internally for the single connector peer entry. */
+export const CONNECTOR_PEER_ID = 'connector';
 
-/** The ILP address the relay store route terminates under (terminator.yaml). */
-export const RELAY_STORE_DESTINATION = 'g.terminator.relay.store';
+/** The ILP address the relay store route terminates under (connector.yaml). */
+export const RELAY_STORE_DESTINATION = 'g.connector.relay.store';
 
 /**
  * Which chain the client settles on for this run: 'evm' (default) or 'solana'.
@@ -107,9 +107,9 @@ const SETTLEMENT_CHAIN = DEVNET_CHAIN === 'solana' ? 'solana:devnet' : `evm:${AN
 // ────────────────────────────────────────────────────────────────────────────
 
 export interface PaidRoundTripClientOptions {
-  /** Terminator ILP-over-HTTP edge, e.g. `http://127.0.0.1:3000/ilp` or
-   *  `https://terminator.example.com/ilp`. POST target for paid PREPAREs. */
-  terminatorIlpUrl: string;
+  /** Connector ILP-over-HTTP edge, e.g. `http://127.0.0.1:3000/ilp` or
+   *  `https://connector.example.com/ilp`. POST target for paid PREPAREs. */
+  connectorIlpUrl: string;
   /** EVM JSON-RPC the local ConnectorNode dials for channel ops, e.g.
    *  `http://127.0.0.1:8545` or `https://evm-rpc.example.com`. */
   evmRpcUrl: string;
@@ -249,7 +249,7 @@ function postRaw(
 // Inner HTTP envelope (relay#24 store contract — POST /write, body {event})
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Build the literal HTTP/1.1 request envelope the terminator reverse-proxies. */
+/** Build the literal HTTP/1.1 request envelope the connector reverse-proxies. */
 export function buildHttpEnvelope(
   method: string,
   target: string,
@@ -369,7 +369,7 @@ export function verifyEventStoredViaWs(
 
 /**
  * Drives the full #222 paid round-trip. Lifecycle: `start()` (boots the embedded
- * node + opens the on-chain channel toward the terminator), then
+ * node + opens the on-chain channel toward the connector), then
  * `runPaidRoundTrip()` / `runNegatives()`, then `stop()`.
  */
 export class PaidRoundTripClient {
@@ -377,7 +377,7 @@ export class PaidRoundTripClient {
   private claimSvc?: PerPacketClaimService;
   private tokenId?: string;
   private readonly opts: Required<
-    Pick<PaidRoundTripClientOptions, 'terminatorIlpUrl' | 'evmRpcUrl' | 'faucetUrl' | 'relayWsUrl'>
+    Pick<PaidRoundTripClientOptions, 'connectorIlpUrl' | 'evmRpcUrl' | 'faucetUrl' | 'relayWsUrl'>
   > & {
     localBtpPort: number;
     localPortBase: number;
@@ -387,7 +387,7 @@ export class PaidRoundTripClient {
   constructor(options: PaidRoundTripClientOptions) {
     const localBtpPort = options.localBtpPort ?? 40000 + Math.floor(Math.random() * 9000);
     this.opts = {
-      terminatorIlpUrl: options.terminatorIlpUrl,
+      connectorIlpUrl: options.connectorIlpUrl,
       evmRpcUrl: options.evmRpcUrl,
       faucetUrl: options.faucetUrl,
       relayWsUrl: options.relayWsUrl,
@@ -405,7 +405,7 @@ export class PaidRoundTripClient {
   private buildConfig(): ConnectorConfig {
     const { localBtpPort, localPortBase } = this.opts;
     const nodeId = 'paid-roundtrip-client';
-    // The single peer represents the TERMINATOR. We never BTP-connect to it (the
+    // The single peer represents the CONNECTOR. We never BTP-connect to it (the
     // url is a dead local port); the channel is opened on-chain toward its
     // settlement address and claims are delivered over HTTP — exactly as the
     // ilp-http-settlement reference does with peer2 offline-for-BTP.
@@ -413,17 +413,17 @@ export class PaidRoundTripClient {
     const peer =
       DEVNET_CHAIN === 'solana'
         ? {
-            id: TERMINATOR_PEER_ID,
+            id: CONNECTOR_PEER_ID,
             url: deadUrl,
             authToken: '',
             settlementAddress: process.env.DEVNET_TERMINATOR_SOL_ADDR!,
             chain: 'solana:devnet',
           }
         : {
-            id: TERMINATOR_PEER_ID,
+            id: CONNECTOR_PEER_ID,
             url: deadUrl,
             authToken: '',
-            evmAddress: TERMINATOR_EVM_ADDRESS,
+            evmAddress: CONNECTOR_EVM_ADDRESS,
             chain: `evm:${ANVIL_CHAIN_ID}`,
           };
     const chainProvider =
@@ -464,7 +464,7 @@ export class PaidRoundTripClient {
       peers: [peer],
       routes: [
         { prefix: `test.${nodeId}`, nextHop: nodeId },
-        { prefix: `test.${TERMINATOR_PEER_ID}`, nextHop: TERMINATOR_PEER_ID },
+        { prefix: `test.${CONNECTOR_PEER_ID}`, nextHop: CONNECTOR_PEER_ID },
       ],
       settlement: {
         connectorFeePercentage: 0.1,
@@ -479,7 +479,7 @@ export class PaidRoundTripClient {
 
   /**
    * Fund the client wallet, boot the embedded node, wait for the on-chain
-   * channel toward the terminator to exist, and build the test-side claim signer.
+   * channel toward the connector to exist, and build the test-side claim signer.
    *
    * CONFIRM ON FIRST DEPLOY: that `channelManager.getChannelsForPeer()` is
    * populated by the node's auto-open path WITHOUT a live BTP peer. The reference
@@ -502,7 +502,7 @@ export class PaidRoundTripClient {
     );
     await this.node.start();
 
-    // 2b. Explicitly open + fund the on-chain channel toward the terminator. The
+    // 2b. Explicitly open + fund the on-chain channel toward the connector. The
     //     auto-open-for-connected-peers path is gated on a live BTP connection,
     //     which this client deliberately does not have (claims ride HTTP). Against
     //     a real remote chain the auto-open never fires, so we trigger it directly.
@@ -512,7 +512,7 @@ export class PaidRoundTripClient {
       await this.node.openChannel(
         DEVNET_CHAIN === 'solana'
           ? {
-              peerId: TERMINATOR_PEER_ID,
+              peerId: CONNECTOR_PEER_ID,
               chain: 'solana:devnet',
               peerAddress: process.env.DEVNET_TERMINATOR_SOL_ADDR!,
               // Solana channel tokenId is the SPL mint.
@@ -520,9 +520,9 @@ export class PaidRoundTripClient {
               initialDeposit,
             }
           : {
-              peerId: TERMINATOR_PEER_ID,
+              peerId: CONNECTOR_PEER_ID,
               chain: `evm:${ANVIL_CHAIN_ID}`,
-              peerAddress: TERMINATOR_EVM_ADDRESS,
+              peerAddress: CONNECTOR_EVM_ADDRESS,
               // The canonical tokenId is the resolved on-chain symbol (USDC), not
               // the public openChannel() default of 'AGENT'. Both sides must agree.
               token: process.env.DEVNET_TOKEN_ID ?? 'USDC',
@@ -533,16 +533,16 @@ export class PaidRoundTripClient {
       if (!/already exists/i.test(err instanceof Error ? err.message : String(err))) throw err;
     }
 
-    // 3. Wait for the on-chain channel toward the terminator and capture tokenId.
+    // 3. Wait for the on-chain channel toward the connector and capture tokenId.
     await waitForCondition(
       () =>
         Promise.resolve(
-          (this.node!.channelManager?.getChannelsForPeer(TERMINATOR_PEER_ID).length ?? 0) > 0
+          (this.node!.channelManager?.getChannelsForPeer(CONNECTOR_PEER_ID).length ?? 0) > 0
         ),
       channelOpenTimeoutMs,
-      'client auto-opens on-chain channel toward terminator'
+      'client auto-opens on-chain channel toward connector'
     );
-    this.tokenId = this.node!.channelManager!.getChannelsForPeer(TERMINATOR_PEER_ID)[0]!.tokenId;
+    this.tokenId = this.node!.channelManager!.getChannelsForPeer(CONNECTOR_PEER_ID)[0]!.tokenId;
 
     // 4. Build a test-side claim signer over the node's REAL channel context.
     //    libsql is a better-sqlite3-compatible drop-in at runtime (same cast the
@@ -556,15 +556,15 @@ export class PaidRoundTripClient {
       claimDb,
       createLogger('paid-roundtrip-claim', this.opts.logLevel),
       'paid-roundtrip-client',
-      new Map([[TERMINATOR_PEER_ID, SETTLEMENT_CHAIN]])
+      new Map([[CONNECTOR_PEER_ID, SETTLEMENT_CHAIN]])
     );
   }
 
   /**
    * Execute the full paid round-trip:
-   *   1. Sign a per-packet claim for the terminator channel.
+   *   1. Sign a per-packet claim for the connector channel.
    *   2. Build the inner `POST /write` envelope with a signed kind:1 event.
-   *   3. POST the PREPARE (addressed `g.terminator.relay.store`) + claim header.
+   *   3. POST the PREPARE (addressed `g.connector.relay.store`) + claim header.
    *   4. Assert the response deserializes to FULFILL.
    *   5. Verify the write over the relay free-read WS (substring id match).
    *
@@ -579,7 +579,7 @@ export class PaidRoundTripClient {
 
     // 1. Sign claim.
     const claim = await this.claimSvc.generateClaimForPacket(
-      TERMINATOR_PEER_ID,
+      CONNECTOR_PEER_ID,
       this.tokenId,
       1000n
     );
@@ -602,8 +602,8 @@ export class PaidRoundTripClient {
       expiresAt: new Date(Date.now() + 60_000),
       data: envelope,
     };
-    const res = await postRaw(this.opts.terminatorIlpUrl, serializePacket(prepare), {
-      'ilp-peer-id': TERMINATOR_PEER_ID,
+    const res = await postRaw(this.opts.connectorIlpUrl, serializePacket(prepare), {
+      'ilp-peer-id': CONNECTOR_PEER_ID,
       'ilp-payment-channel-claim': claim.protocolData.data.toString('base64'),
     });
 
@@ -688,7 +688,7 @@ export class PaidRoundTripClient {
       data: envelope,
     };
     // No `ilp-payment-channel-claim` header — this is the unpaid attempt.
-    const res = await postRaw(this.opts.terminatorIlpUrl, serializePacket(prepare), {});
+    const res = await postRaw(this.opts.connectorIlpUrl, serializePacket(prepare), {});
 
     let notFulfilled: boolean;
     let detail: string;

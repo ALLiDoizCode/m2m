@@ -115,7 +115,7 @@ export interface IlpHttpAdapterDeps {
    * (sourced from the connector's `RouteTerminationRegistry` in connector-node)
    * an UNPAID request to a terminated route is greeted with an x402 v2 `402
    * Payment Required`. Optional: when absent the adapter behaves exactly as
-   * before (no greeting), so non-terminator deployments are unaffected.
+   * before (no greeting), so deployments without paid routes are unaffected.
    */
   resolveTermination?: ResolveTerminationFn;
   /**
@@ -135,7 +135,7 @@ export const ILP_HTTP_PATH = '/ilp';
 
 /**
  * Map an RFC 9421 verification failure (#220) to the ILP error code the
- * terminator rejects the PREPARE with. A `price_mismatch` is an
+ * connector rejects the PREPARE with. A `price_mismatch` is an
  * amount/price-class failure → F03 (invalid amount); every other binding
  * failure (digest/signature/keyid/covered-set/malformed/missing) is a packet
  * integrity failure → F01 (invalid packet). The original failure `code` is
@@ -325,7 +325,7 @@ export class IlpHttpAdapter {
 
     try {
       // --- RFC 9421 claim↔request binding (#220) ---
-      // Terminator path only: when this destination is a locally-terminated
+      // Paid-route path only: when this destination is a locally-terminated
       // route we bind the prepaid claim to the INNER HTTP request that #216
       // proxies (the literal HTTP envelope carried in PREPARE `data`), NOT the
       // outer `POST /ilp`. The signature, content-digest, and `TOON-Price`

@@ -224,7 +224,7 @@ export type TerminationChain = 'evm' | 'solana' | 'mina';
 /**
  * Per-route local-termination config (issue #218).
  *
- * The keystone type consumed by every downstream terminator issue: #217
+ * The keystone type consumed by every downstream connector issue: #217
  * (402 greeting), #220 (price-binding), #219 (CLI). A {@link RouteConfig} is
  * "locally terminated" iff it carries one of these (i.e. `upstream` is set).
  *

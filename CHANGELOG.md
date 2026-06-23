@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.24.1](https://github.com/toon-protocol/connector/compare/v3.24.0...v3.24.1) (2026-06-23)
+
+### Bug Fixes
+
+- **devnet:** stable solana validator + buildable program ([#235](https://github.com/toon-protocol/connector/issues/235)) ([a129eaf](https://github.com/toon-protocol/connector/commit/a129eafe3e0c645a12e2b250e4d109cce7a614e7))
+
 ## [3.24.0](https://github.com/toon-protocol/connector/compare/v3.23.0...v3.24.0) (2026-06-23)
 
 ### Features
