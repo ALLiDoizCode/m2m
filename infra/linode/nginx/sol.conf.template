@@ -10,10 +10,14 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
-map $host $backend {
-    default                  "";
-    solana-rpc.${DOMAIN}     "http://solana-validator:8899";
-    solana-ws.${DOMAIN}      "http://solana-validator:8900";
+# Route solana-rpc WS upgrades to port 8900 (JSON-RPC HTTP stays on 8899).
+# @solana/web3.js derives wss://solana-rpc.* from the RPC URL for confirmations.
+map "$host:$http_upgrade" $backend {
+    default                          "";
+    "solana-rpc.${DOMAIN}:websocket" "http://solana-validator:8900";
+    "solana-rpc.${DOMAIN}:"          "http://solana-validator:8899";
+    "solana-ws.${DOMAIN}:websocket"  "http://solana-validator:8900";
+    "solana-ws.${DOMAIN}:"           "http://solana-validator:8900";
 }
 
 server {
