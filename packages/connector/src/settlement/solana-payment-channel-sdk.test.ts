@@ -1049,6 +1049,23 @@ describe('SolanaPaymentChannelSDK - Unit Tests (Story 33.4)', () => {
         () => new SolanaPaymentChannelSDK('http://localhost:8899', TEST_PROGRAM_ID, logger)
       ).not.toThrow();
     });
+
+    it('accepts an explicit wsUrl override (issue #236)', () => {
+      // Given: an RPC host and a distinct PubSub WebSocket host (hosted devnet shape)
+      // When: new SolanaPaymentChannelSDK is created with an explicit wsUrl
+      // Then: no error is thrown (the override is used instead of deriveWsUrl)
+
+      const logger = createMockLogger();
+      expect(
+        () =>
+          new SolanaPaymentChannelSDK(
+            'https://solana-rpc.example.com',
+            TEST_PROGRAM_ID,
+            logger,
+            'wss://solana-ws.example.com'
+          )
+      ).not.toThrow();
+    });
   });
 
   // -------------------------------------------------------------------------
