@@ -13,7 +13,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_TLS_REJECT_UNAUTHORIZED: '0'
     volumes:
-      - ./infra/linode-node/connector.yaml:/app/config/connector.yaml:ro
+      - ./connector.yaml:/app/config/connector.yaml:ro
       - connector_data:/app/data
     ports:
       - '3000:3000'
@@ -45,7 +45,7 @@ services:
 
   faucet:
     build:
-      context: ./packages/faucet
+      context: ../../packages/faucet
       dockerfile: Dockerfile
     environment:
       PORT: 3500
@@ -65,7 +65,7 @@ services:
       MINA_GRAPHQL_URL: https://mina.${DOMAIN:-devnet.toonprotocol.dev}/graphql
       MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
     volumes:
-      - ./infra/solana/usdc-authority.json:/keys/usdc-authority.json:ro
+      - ../../infra/solana/usdc-authority.json:/keys/usdc-authority.json:ro
     ports:
       - '3500:3500'
     restart: unless-stopped
@@ -87,7 +87,7 @@ services:
       - '80:80'
       - '443:443'
     volumes:
-      - ./infra/linode-node/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - node_certbot_conf:/etc/letsencrypt:ro
       - node_certbot_www:/var/www/certbot:ro
     command: >
