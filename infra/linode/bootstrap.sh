@@ -75,23 +75,9 @@ echo "==> [5/7] Start the chains (${COMPOSE_PROFILES})"
 DC=(docker compose -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/linode/docker-compose.linode.yml")
 profile_args=(); IFS=',' read -ra _p <<< "$COMPOSE_PROFILES"; for p in "${_p[@]}"; do profile_args+=(--profile "$p"); done
 
-# Issue #222: when the app profile is active, the `connector`
-# service builds the connector image from ./Dockerfile. Build it up-front (it's a
-# one-time, slow Rust/TS build that the 4G swapfile above absorbs) so `up` doesn't
-# silently block on it, and so a build failure surfaces here rather than as a stuck
-# container.
-case ",${COMPOSE_PROFILES}," in
-  *,app,*)
-    echo "    Building the connector image (connector:standalone-e2e)…"
-    ( cd "$ROOT" && "${DC[@]}" "${profile_args[@]}" build connector ) \
-      || echo "    connector build failed — the app edge may not come up."
-    ;;
-esac
-
 # Bring up every service in the active profiles. The explicit-named first attempt
 # (EVM-only optimisation) is kept as a fast path; its failure (e.g. solana-validator
-# absent under evm-only) falls through to a full profile up which also starts the
-# connector + relay when that profile is on.
+# absent under evm-only) falls through to a full profile up.
 ( cd "$ROOT" && "${DC[@]}" "${profile_args[@]}" up -d anvil faucet solana-validator 2>/dev/null; "${DC[@]}" "${profile_args[@]}" up -d )
 
 echo "==> [6/7] Wait for chain health + bootstrap the mock-USDC SPL mint"

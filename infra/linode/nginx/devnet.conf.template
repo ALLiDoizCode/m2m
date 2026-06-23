@@ -12,12 +12,6 @@
 # Per-IP rate limits for the public RPC/faucet endpoints (devnet abuse guard).
 limit_req_zone $binary_remote_addr zone=rpc:10m rate=30r/s;
 
-# Looser per-IP limit for the PAID connector edge (issue #222). A paid round-trip
-# is a burst of paid PREPAREs (POST /ilp) plus the inner reverse-proxied write; the
-# real cost gate is the on-chain payment-channel claim, NOT nginx — so the /ilp edge
-# gets its own, more generous zone than the 30 r/s RPC one.
-limit_req_zone $binary_remote_addr zone=ilp:10m rate=100r/s;
-
 # WebSocket upgrade plumbing (used by the Solana WS endpoint; harmless elsewhere).
 map $http_upgrade $connection_upgrade {
     default upgrade;
@@ -25,18 +19,14 @@ map $http_upgrade $connection_upgrade {
 }
 
 # Subdomain -> chain backend (Docker service name + port on the shared network).
-# connector/relay-ws are the issue #222 app-behind-connector edge: nginx reaches
-# them by SERVICE NAME over the compose network, so their host ports staying on
-# 127.0.0.1 is fine. The app's PAID-write store port (3100) and the connector's
-# admin API (8081) are deliberately ABSENT here — they must stay internal (AC2).
+# Chains-only: the connector/relay app edge deploys separately (deploy/relay-edge +
+# deploy/pay-edge) and is NOT fronted here.
 map $host $backend {
     default               "";
     evm-rpc.${DOMAIN}     "http://anvil:8545";
     solana-rpc.${DOMAIN}  "http://solana-validator:8899";
     solana-ws.${DOMAIN}   "http://solana-validator:8900";
     faucet.${DOMAIN}      "http://faucet:3500";
-    connector.${DOMAIN}   "http://connector:3000";
-    relay-ws.${DOMAIN}    "http://app:7100";
 }
 
 # ── Port 80: ACME challenge + redirect everything else to HTTPS ──────────────
@@ -44,8 +34,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name evm-rpc.${DOMAIN} solana-rpc.${DOMAIN} solana-ws.${DOMAIN}
-                faucet.${DOMAIN} mina.${DOMAIN}
-                connector.${DOMAIN} relay-ws.${DOMAIN};
+                faucet.${DOMAIN} mina.${DOMAIN};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -109,47 +98,4 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
     location / { return 404; }                     # only proxy /graphql
-}
-
-# ── Port 443: app-behind-connector (issue #222) — PAID edge + free WS reads ─
-# Two public faces of the #221 app profile:
-#   connector.${DOMAIN}   → connector:3000  (POST /ilp — PAID writes enter here)
-#   relay-ws.${DOMAIN}    → app:7100        (free Nostr WS reads, bypass the paid edge)
-# nginx dials both BY SERVICE NAME over the compose network, so their host ports
-# staying on 127.0.0.1 is fine. The app's paid-write store port (3100) and the
-# connector admin API (8081) are NOT proxied anywhere here — they stay internal
-# (AC2: paid writes MUST flow through the connector; admin stays private).
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
-    server_name connector.${DOMAIN} relay-ws.${DOMAIN};
-
-    ssl_certificate     /etc/letsencrypt/live/evm-rpc.${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/evm-rpc.${DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    resolver 127.0.0.11 valid=10s ipv6=off;
-
-    location / {
-        if ($backend = "") { return 404; }       # unknown subdomain
-        # Paid edge gets the looser `ilp` zone; the on-chain claim is the real gate.
-        limit_req zone=ilp burst=200 nodelay;
-
-        proxy_pass $backend;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-
-        # WebSocket upgrade (relay-ws.* free Nostr WS reads).
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_read_timeout 1h;
-
-        # POST /ilp carries a full inner HTTP envelope (request line + headers +
-        # body) inside the ILP PREPARE `data`, so allow a larger body than the
-        # JSON-RPC ceiling.
-        client_max_body_size 16m;
-    }
 }
