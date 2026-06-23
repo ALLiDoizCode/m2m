@@ -116,7 +116,7 @@ change recreates the box (new IP → new domain → new cert).
 ## App-behind-connector edge (issue #222) — public paid round-trip
 
 Opt-in: set `COMPOSE_PROFILES=evm,solana,app` (in `.env`, or pass
-`with_app: true` to the deploy workflow). This runs the connector acting as a paid reverse proxy
+`with_connector_edge: true` to the deploy workflow). This runs the connector acting as a paid reverse proxy
 
 - an oblivious relay on this **same box**, fronted by the same nginx + Let's Encrypt:
 
@@ -140,13 +140,20 @@ Opt-in: set `COMPOSE_PROFILES=evm,solana,app` (in `.env`, or pass
 
 - `action: deploy | destroy` — `destroy` deletes the Linode by label (an idle VM bills
   forever, so tear it down when finished).
-- `with_app: true` — also deploy this edge, add the two subdomains to the optional
+- `with_connector_edge: true` — also deploy this edge, add the two subdomains to the optional
   `manage_dns` A-record loop, and — once trusted certs are in place (`letsencrypt_staging=0`)
   — run the **CI acceptance probe**: a FULL paid round-trip against the public TLS edge
   (fund a client wallet from the faucet → open/fund a channel → sign a claim → POST the
   paid `PREPARE` → assert `FULFILL` → verify storage over `wss://relay-ws.<DOMAIN>`), plus
   the negatives (unpaid write rejected; relay store not publicly reachable). The probe
   fails the job on any failed assertion.
+- `manage_dns: true` — create/refresh the subdomain A-records → the box IP automatically
+  (skip it and the workflow just prints the records to create yourself). `dns_provider`
+  picks which API to hit: `linode` (default, domain hosted on Linode Domains — uses the
+  existing `LINODE_CLI_TOKEN`) or `porkbun` (domain hosted on Porkbun, e.g.
+  `devnet.toonprotocol.dev` — needs the `PORKBUN_API_KEY` / `PORKBUN_SECRET` secrets).
+  Both upsert the same subdomain set idempotently; with `sslip.io` (blank `domain`) no
+  DNS is needed at all.
 
 The probe's reusable client lives in
 `packages/connector/test/integration/paid-roundtrip-client.ts` (shared with the #221

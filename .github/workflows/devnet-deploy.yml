@@ -44,8 +44,10 @@
 #
 # ── DNS ──────────────────────────────────────────────────────────────────────
 #   A-records for evm-rpc / solana-rpc / solana-ws / faucet / mina under <domain>
-#   → the VM IP. Set `manage_dns: true` to create them via Linode Domains (domain
-#   must be hosted in your Linode account); else create them yourself (IP is
+#   → the VM IP. Set `manage_dns: true` to create them via the host given by
+#   `dns_provider`: `linode` = Linode Domains (domain must be hosted in your Linode
+#   account); `porkbun` = Porkbun API (e.g. devnet.toonprotocol.dev — needs the
+#   PORKBUN_API_KEY / PORKBUN_SECRET secrets). Else create them yourself (IP is
 #   printed). DNS must resolve before real (non-staging) TLS can be issued.
 
 name: devnet-deploy
@@ -119,9 +121,16 @@ on:
         description: "Use Let's Encrypt staging certs (1) until DNS verifies, else 0"
         default: '1'
       manage_dns:
-        description: 'Create/refresh Linode DNS A-records for the subdomains (incl. connector/relay-ws when with_connector_edge)'
+        description: 'Create/refresh DNS A-records for the subdomains (incl. connector/relay-ws when with_connector_edge)'
         type: boolean
         default: false
+      dns_provider:
+        description: 'Where <domain> is hosted, so manage_dns hits the right API. linode = Linode Domains (default); porkbun = Porkbun (e.g. devnet.toonprotocol.dev) — needs PORKBUN_API_KEY/PORKBUN_SECRET.'
+        type: choice
+        options:
+          - linode
+          - porkbun
+        default: linode
       ssh_pubkey:
         description: 'Optional extra SSH public key to authorize (manual debugging)'
         default: ''
@@ -382,7 +391,8 @@ jobs:
           REMOTE
 
       - name: Create DNS A-records (Linode Domains)
-        if: ${{ inputs.manage_dns && inputs.domain != '' }} # sslip.io needs no DNS
+        # sslip.io needs no DNS; only when the domain is hosted on Linode Domains.
+        if: ${{ inputs.manage_dns && inputs.domain != '' && inputs.dns_provider == 'linode' }}
         run: |
           set -euo pipefail
           DID=$(linode-cli domains list --json | jq -r --arg d "$DOMAIN" '.[] | select(.domain==$d) | .id' | head -1)
@@ -400,6 +410,76 @@ jobs:
               linode-cli domains records-create "$DID" --type A --name "$sub" --target "$IP" --ttl_sec 300 >/dev/null
             fi
             echo "  A $sub.$DOMAIN -> $IP"
+          done
+
+      - name: Create DNS A-records (Porkbun)
+        # Same subdomain list as the Linode path, but for a Porkbun-hosted domain
+        # (e.g. devnet.toonprotocol.dev). sslip.io needs no DNS; only runs when the
+        # domain is hosted on Porkbun. Idempotent per subdomain: editByNameType when
+        # an A-record already exists, else create. Porkbun's API v3 auth is a JSON
+        # body on EVERY call ({"apikey","secretapikey"}) — both come from secrets and
+        # are masked so they never leak into logs.
+        if: ${{ inputs.manage_dns && inputs.domain != '' && inputs.dns_provider == 'porkbun' }}
+        env:
+          PORKBUN_API_KEY: ${{ secrets.PORKBUN_API_KEY }}
+          PORKBUN_SECRET: ${{ secrets.PORKBUN_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PORKBUN_API_KEY:-}" ] || [ -z "${PORKBUN_SECRET:-}" ]; then
+            echo "::warning::dns_provider=porkbun but PORKBUN_API_KEY/PORKBUN_SECRET are not set — skipping DNS. Set them (gh secret set PORKBUN_API_KEY/PORKBUN_SECRET) or create the A-records yourself; the IP is printed in the summary."
+            exit 0
+          fi
+          # Mask the creds defensively (they should be masked as secrets already, but
+          # this guards against any value that slipped in via a different path).
+          echo "::add-mask::$PORKBUN_API_KEY"
+          echo "::add-mask::$PORKBUN_SECRET"
+          API="https://api.porkbun.com/api/json/v3"
+          # Auth blob reused as the prefix of every JSON body. -n keeps it on one line.
+          AUTH=$(jq -cn --arg k "$PORKBUN_API_KEY" --arg s "$PORKBUN_SECRET" '{apikey:$k,secretapikey:$s}')
+          # Porkbun addresses the REGISTERED domain (the root in your account) in the URL,
+          # with the record `name` being the prefix relative to it — unlike Linode, which
+          # treats $DOMAIN as its own delegated zone. $DOMAIN here may be a subdomain (e.g.
+          # devnet.toonprotocol.dev), so split it: ROOT = last two labels (toonprotocol.dev),
+          # PREFIX = the leading labels (devnet). An `evm-rpc` record under $DOMAIN is then
+          # the Porkbun name `evm-rpc.devnet` on domain `toonprotocol.dev`. (Assumes a
+          # two-label root: fine for .dev/.com/.io; multi-part TLDs like .co.uk are not
+          # handled — create those records manually.)
+          ROOT=$(echo "$DOMAIN" | awk -F. '{ if (NF>=2) print $(NF-1)"."$NF; else print $0 }')
+          PREFIX=""
+          case "$DOMAIN" in
+            "$ROOT") PREFIX="" ;;
+            *."$ROOT") PREFIX=".${DOMAIN%."$ROOT"}" ;;
+          esac
+          # Sanity/auth check (also echoes the caller IP). Soft-fail: a flaky ping
+          # shouldn't necessarily block, but a clear auth error should surface.
+          PING=$(curl -fsS -X POST "$API/ping" -H 'Content-Type: application/json' -d "$AUTH" 2>/dev/null || true)
+          if [ "$(echo "$PING" | jq -r '.status // "ERROR"')" != "SUCCESS" ]; then
+            echo "::warning::Porkbun /ping did not return SUCCESS ($(echo "$PING" | jq -r '.message // "no response"')) — check PORKBUN_API_KEY/PORKBUN_SECRET and that API access is enabled for $ROOT. Attempting record upserts anyway."
+          fi
+          SUBS="evm-rpc solana-rpc solana-ws faucet mina"
+          # issue #222: the app edge needs its two subdomains too.
+          if [ "${{ inputs.with_connector_edge }}" = "true" ]; then SUBS="$SUBS connector relay-ws"; fi
+          for sub in $SUBS; do
+            NAME="$sub$PREFIX"   # name relative to ROOT, e.g. evm-rpc.devnet
+            # Does an A-record already exist for this name? retrieveByNameType
+            # returns {"status":"SUCCESS","records":[...]} (empty array when none).
+            EXISTING=$(curl -fsS -X POST "$API/dns/retrieveByNameType/$ROOT/A/$NAME" \
+              -H 'Content-Type: application/json' -d "$AUTH" 2>/dev/null || true)
+            HAVE=$(echo "$EXISTING" | jq -r '(.records // []) | length')
+            if [ "${HAVE:-0}" -gt 0 ]; then
+              BODY=$(echo "$AUTH" | jq -c --arg ip "$IP" '. + {content:$ip, ttl:"300"}')
+              RESP=$(curl -fsS -X POST "$API/dns/editByNameType/$ROOT/A/$NAME" \
+                -H 'Content-Type: application/json' -d "$BODY" 2>/dev/null || true)
+            else
+              BODY=$(echo "$AUTH" | jq -c --arg n "$NAME" --arg ip "$IP" '. + {name:$n, type:"A", content:$ip, ttl:"300"}')
+              RESP=$(curl -fsS -X POST "$API/dns/create/$ROOT" \
+                -H 'Content-Type: application/json' -d "$BODY" 2>/dev/null || true)
+            fi
+            if [ "$(echo "$RESP" | jq -r '.status // "ERROR"')" = "SUCCESS" ]; then
+              echo "  A $sub.$DOMAIN -> $IP"
+            else
+              echo "::warning::Porkbun upsert for $sub.$DOMAIN failed ($(echo "$RESP" | jq -r '.message // "no response"')) — create it manually: A $sub.$DOMAIN -> $IP"
+            fi
           done
 
       - name: Bootstrap the devnet on the VM
