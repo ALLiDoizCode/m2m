@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.25.1](https://github.com/toon-protocol/connector/compare/v3.25.0...v3.25.1) (2026-06-23)
+
+### Bug Fixes
+
+- **x402:** hoist httpEndpoint to top-level toon-channel entry in 402 greeting ([#251](https://github.com/toon-protocol/connector/issues/251)) ([4fde6e8](https://github.com/toon-protocol/connector/commit/4fde6e89e4f8fa22680dd51db60db7cb8efb0be2))
+
 ## [3.25.0](https://github.com/toon-protocol/connector/compare/v3.24.2...v3.25.0) (2026-06-23)
 
 ### Features
