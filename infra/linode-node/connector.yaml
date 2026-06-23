@@ -53,10 +53,10 @@ chainProviders:
     chainId: mina:devnet
     network: devnet
     graphqlUrl: https://mina.devnet.toonprotocol.dev/graphql
-    # PaymentChannel + USDC token deployed to Mina lightnet — addresses set
-    # after first lightnet deploy (deploy-usdc-token.ts + deploy-payment-channel.ts).
-    # Update zkAppAddress / tokenAddress / tokenId after lightnet deployment.
-    zkAppAddress: 'PLACEHOLDER_MINA_PAYMENT_CHANNEL_ADDR'
+    # PaymentChannel deployed to Mina lightnet 2026-06-23.
+    # USDC FungibleToken: needs deploy-usdc-token.ts run from dev machine (ESM/CJS
+    # conflict blocks it on server). Update tokenAddress + tokenId after deploy.
+    zkAppAddress: 'B62qoMNmZQQYSxuoNx42JnZtNZwHfwL16wxUYNEuLGyrVq1bXfS15Rn'
     tokenAddress: 'PLACEHOLDER_MINA_USDC_TOKEN_ADDR'
     tokenId: 'PLACEHOLDER_MINA_TOKEN_ID'
     keyId: 'placeholder-overwritten-by-mnemonic'
