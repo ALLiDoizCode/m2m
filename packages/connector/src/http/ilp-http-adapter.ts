@@ -313,7 +313,7 @@ export class IlpHttpAdapter {
     if (this.resolveTermination) {
       const termination = this.resolveTermination(prepare);
       if (termination && this.isUnpaid(protocolData, req)) {
-        this.respond402(res, termination);
+        this.respond402(res, termination, req);
         this.logger.info(
           { event: 'ilp_http_x402_greeting', peerId, destination: prepare.destination },
           'ILP-over-HTTP unpaid terminated request greeted with x402 402'
@@ -469,12 +469,24 @@ export class IlpHttpAdapter {
    * route. The v2 `PaymentRequired` object is both serialized into the JSON body
    * (so a client/test can read `accepts` directly) and base64-encoded into the
    * `PAYMENT-REQUIRED` response header per the v2 HTTP transport spec.
+   *
+   * The connector's own `POST /ilp` URL is derived from the incoming request's
+   * `Host` and `X-Forwarded-Proto` headers (set by nginx) so clients can read
+   * the payment endpoint directly from the top-level `toon-channel` entry.
    */
-  private respond402(res: ServerResponse, termination: RouteTermination): void {
+  private respond402(
+    res: ServerResponse,
+    termination: RouteTermination,
+    req: IncomingMessage
+  ): void {
+    const proto = firstHeader(req.headers['x-forwarded-proto']) ?? 'https';
+    const host = firstHeader(req.headers['host']);
+    const httpEndpoint = host ? `${proto}://${host}${ILP_HTTP_PATH}` : undefined;
     const body = buildX402Greeting(termination, {
       chainIds: this.terminationChainIds,
       resourceUrl: termination.ilpAddress,
       error: `${X402_PAYMENT_SIGNATURE_HEADER} header is required`,
+      httpEndpoint,
     });
     const json = JSON.stringify(body);
     res.writeHead(402, {
