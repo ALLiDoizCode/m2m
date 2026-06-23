@@ -32,11 +32,10 @@ import Client from 'mina-signer';
 // nanomina per MINA (Mina's UInt64 on-chain unit).
 const NANO = 1_000_000_000n;
 
-// The ONE treasury this faucet is allowed to drip from (Mina HD index 2).
-// We derive the public key from MINA_FAUCET_KEY at startup and assert it equals
-// this — a wrong key configured is a fail-loud misconfiguration, not a silent
-// drain of some other account.
-const EXPECTED_TREASURY = 'B62qqEMaUpm1aZ5M2weUoGXQRGbF3j6VjEtaEdzfM1NAWmeHnywiC2P';
+// Optional: if MINA_TREASURY_ADDRESS is set, the faucet asserts the provided
+// key derives that exact public address (fail-loud guard against misconfiguration).
+// Leave unset to accept any valid funded key (e.g. lightnet genesis accounts).
+const EXPECTED_TREASURY = process.env.MINA_TREASURY_ADDRESS || null;
 
 const MINA_NETWORK = process.env.MINA_NETWORK || 'devnet';
 const MINA_GRAPHQL_URL =
@@ -103,10 +102,10 @@ export function createMinaFaucet() {
     // Don't echo the key or the raw error (which may embed it).
     throw new Error('MINA_FAUCET_KEY is not a valid base58 Mina private key.');
   }
-  if (derived !== EXPECTED_TREASURY) {
+  if (EXPECTED_TREASURY && derived !== EXPECTED_TREASURY) {
     throw new Error(
-      `MINA_FAUCET_KEY derives ${derived} but the faucet treasury must be ${EXPECTED_TREASURY}. ` +
-        'Set MINA_FAUCET_KEY to the treasury (HD index 2) base58 private key.'
+      `MINA_FAUCET_KEY derives ${derived} but MINA_TREASURY_ADDRESS is set to ${EXPECTED_TREASURY}. ` +
+        'Set MINA_FAUCET_KEY to the correct treasury private key, or unset MINA_TREASURY_ADDRESS.'
     );
   }
 
