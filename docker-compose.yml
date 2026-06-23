@@ -172,9 +172,12 @@ services:
       # stays deterministic via the mounted program keypair in /programs.
       # See infra/solana/entrypoint.sh.
       - ./packages/solana-program/target/deploy:/programs:ro
-    tmpfs:
-      # Validator ledger (genesis keypairs + state) lives here; cleared on restart.
-      - /workspace/test-ledger
+    # Validator ledger (genesis keypairs + state) lives in the container's
+    # writable layer (DISK), not tmpfs. A RAM-backed tmpfs ledger fills under the
+    # accounts/snapshot growth and the validator FREEZES after a few thousand
+    # slots (observed on 2GB and 8GB alike); disk-backed keeps it producing. The
+    # entrypoint's `--reset` still wipes it on every start, so chains stay
+    # deterministic. `--limit-ledger-size` (entrypoint) caps growth.
     ports:
       - '8899:8899'
       - '8900:8900'
