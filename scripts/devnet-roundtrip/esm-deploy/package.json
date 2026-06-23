@@ -1,0 +1,5 @@
+{
+  "name": "mina-esm-deploy",
+  "type": "module",
+  "private": true
+}
