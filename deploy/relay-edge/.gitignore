@@ -1,0 +1,5 @@
+# Local secrets / runtime — never commit
+.env
+data/
+caddy_data/
+caddy_config/
