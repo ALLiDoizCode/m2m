@@ -1,4 +1,4 @@
-# Connector Admin API — Response to Townhouse Dashboard Requirements
+# Connector Admin API — Response to Connector Dashboard Requirements
 
 **Author:** `@toon-protocol/connector` maintainers
 **Audience:** Town project (Epic 21, Story 21.8 — Fastify REST + WebSocket Metrics API)
@@ -139,7 +139,7 @@ To keep scope tight, these are explicitly **not** part of the cross-team discuss
 - Historical time-series storage on the connector. Grafana / Prometheus remains the answer.
 - Per-packet event streaming. 1 Hz is enough.
 - Changing the admin API auth model. API-key allowlist stays.
-- The townhouse-internal `ConnectorAdminClient` refactor (Town's §7) — that's entirely Town's call; we'll just document the endpoints it consumes.
+- The connector-internal `ConnectorAdminClient` refactor (Town's §7) — that's entirely Town's call; we'll just document the endpoints it consumes.
 
 ---
 
@@ -168,7 +168,7 @@ To keep scope tight, these are explicitly **not** part of the cross-team discuss
 
 ## 9. Town response — 2026-04-21
 
-**Author:** Town / Epic 21 (Townhouse)
+**Author:** Town / Epic 21 (Connector)
 **Scope:** Accept the re-scoping of Ask 1; answer §4 questions; flag one cross-repo anomaly.
 
 ### 9.1 Acknowledgement — "no Prom collector exists yet" is material for both sides
@@ -177,21 +177,21 @@ Thank you for catching this. The requirements doc §5.1 was written from the ass
 
 This finding has immediate consequences on Town's side too:
 
-- **Story 21.3's integration test** (`packages/townhouse/src/__integration__/connector-integration.test.ts:98-103`, "T-020") asserts `metrics.packetsForwarded >= 0` against the real connector Docker image. If the image's `/metrics` serves no body (middleware slot empty), the test's `response.json()` call throws and the test fails. Either that test has never been run green against the current image, or the standalone connector image wires a metrics middleware the connector package's `src/` does not. **We'd like joint verification of what the standalone image actually returns on `GET /metrics`** — combines naturally with your §3.2 plan to verify `accountManager` in the Docker entrypoint.
+- **Story 21.3's integration test** (`packages/connector/src/__integration__/connector-integration.test.ts:98-103`, "T-020") asserts `metrics.packetsForwarded >= 0` against the real connector Docker image. If the image's `/metrics` serves no body (middleware slot empty), the test's `response.json()` call throws and the test fails. Either that test has never been run green against the current image, or the standalone connector image wires a metrics middleware the connector package's `src/` does not. **We'd like joint verification of what the standalone image actually returns on `GET /metrics`** — combines naturally with your §3.2 plan to verify `accountManager` in the Docker entrypoint.
 - Regardless of outcome, Town will treat `/metrics` JSON as unavailable in Story 21.8's code review fixes (review item P4 / P5). The interim `MetricsPayload` becomes `{ packetsForwarded: 0, packetsRejected: 0, bytesSent: 0, attribution: 'aggregate', available: false }` — `available: false` until C-21.8-b lands, flipped by the Town-side follow-up story `21.8.5 — ConnectorAdminClient v2`.
 
 ### 9.2 Answers to §4 open questions
 
-**Q1 — Label cardinality / peer-count ceiling.** Town's local connector fronts exactly 3 child peers by default (`town`, `mill`, `dvm`). Operators may add remote peers via `POST /admin/peers` (see `docker/src/shared.ts:325`), but the townhouse dashboard is a per-operator local view — realistic ceiling is **≤ 10 peers**. `prom-client` with default Registry is safe at this cardinality. If the connector is ever deployed as a shared hub fronting hundreds of peers, that's a different deployment profile than townhouse serves.
+**Q1 — Label cardinality / peer-count ceiling.** Town's local connector fronts exactly 3 child peers by default (`town`, `mill`, `dvm`). Operators may add remote peers via `POST /admin/peers` (see `docker/src/shared.ts:325`), but the connector dashboard is a per-operator local view — realistic ceiling is **≤ 10 peers**. `prom-client` with default Registry is safe at this cardinality. If the connector is ever deployed as a shared hub fronting hundreds of peers, that's a different deployment profile than connector serves.
 
 **Q2 — `lastPacketAt` semantics.** **Last seen in either direction.** Rationale: a Town-type node that only consumes events (no outbound publishing) would otherwise appear idle even when actively routing. "Is this node doing work?" is the operator question the field is designed to answer. A single `lastPacketAt: ISO-8601 | null` is enough; Town does not need separate `lastSentAt` / `lastReceivedAt` fields.
 
 **Q3 — Auth on `/admin/metrics.json`.** This needs a short thread of its own because Town's current wrapper doesn't match your assumption:
 
-- `packages/townhouse/src/connector/admin-client.ts` sends **no Authorization / X-Api-Key header** on any of its three current calls (`/health`, `/metrics`, `/peers`). The townhouse connector container and the townhouse API share a Docker-internal network; Town has been treating the admin port as already protected by network-level isolation + Docker port-binding to `127.0.0.1`.
-- The only place townhouse-land does send an auth token is `docker/src/shared.ts:325-340` where `POST /admin/peers` sends `authToken` in the body (not a header).
+- `packages/connector/src/connector/admin-client.ts` sends **no Authorization / X-Api-Key header** on any of its three current calls (`/health`, `/metrics`, `/peers`). The connector connector container and the connector API share a Docker-internal network; Town has been treating the admin port as already protected by network-level isolation + Docker port-binding to `127.0.0.1`.
+- The only place connector-land does send an auth token is `docker/src/shared.ts:325-340` where `POST /admin/peers` sends `authToken` in the body (not a header).
 - For the new `GET /admin/metrics.json` + the future `WS /admin/events`, **please tell us the auth model you want Town to adopt.** Two options work for us:
-  - **Option A — header-based API key** (`X-Api-Key: <token>` on every request, same header on WS upgrade). Requires Town to plumb a new `apiKey` field through `TownhouseConfig.connector`, persist it next to the existing admin port, and pass it on every client call. Roughly 1 day of Town-side work.
+  - **Option A — header-based API key** (`X-Api-Key: <token>` on every request, same header on WS upgrade). Requires Town to plumb a new `apiKey` field through `ConnectorConfig.connector`, persist it next to the existing admin port, and pass it on every client call. Roughly 1 day of Town-side work.
   - **Option B — keep the "loopback + Docker isolation" model** for read-only endpoints (`/health`, `/metrics.json`, `/peers`, `/balances`, `/channels`) and require a key only for mutating ones (`POST /peers`, `POST /channels`, etc.). Zero new work on Town's side for the dashboard, but arguably less defensible from a security review.
 - Our lean is **Option A** — one code path, auditable. We'd like your call here since it's your security surface.
 
@@ -238,7 +238,7 @@ If this is acceptable, section 2 of this file ("Purpose of this doc") can upgrad
 1. **Ship Story 21.8 with the narrowed `MetricsPayload`** (`available: false` label) per the review-findings patch plan.
 2. **Open Story 21.8.5 — `ConnectorAdminClient v2`** — wrappers for `/admin/balances/:peerId`, `/admin/channels`, `/admin/channels/:channelId`, plus the new `/admin/metrics.json` once C-21.8-b lands. Story depends on C-21.8-b + C-balances-404-fix.
 3. **Audit `connector-integration.test.ts` T-020** against whatever the standalone image actually returns; fix or re-gate per §9.1 outcome.
-4. **If §9.2 Q3 lands as Option A**, open Story 21.8.6 — `ConnectorAdminClient API-key auth` — to plumb the key through `TownhouseConfig` and all three current call sites.
+4. **If §9.2 Q3 lands as Option A**, open Story 21.8.6 — `ConnectorAdminClient API-key auth` — to plumb the key through `ConnectorConfig` and all three current call sites.
 
 ### 9.5 Open — awaiting your response
 
@@ -272,7 +272,7 @@ Evidence:
 
 ### 10.2 Auth decision — Option A, header-based `X-Api-Key` on everything
 
-We accept your lean. **Going with Option A.** Rationale: one code path, auditable, consistent with how the admin API already handles mutating routes' API-key allowlist, and the "loopback + Docker isolation" argument for Option B stops holding the moment anyone runs the townhouse container on a machine that also runs untrusted code (browser extensions, other containers on the same bridge network, etc.). The marginal Town-side work (~1 day plumbing through `TownhouseConfig.connector`) is small enough that the security posture win is worth it.
+We accept your lean. **Going with Option A.** Rationale: one code path, auditable, consistent with how the admin API already handles mutating routes' API-key allowlist, and the "loopback + Docker isolation" argument for Option B stops holding the moment anyone runs the connector container on a machine that also runs untrusted code (browser extensions, other containers on the same bridge network, etc.). The marginal Town-side work (~1 day plumbing through `ConnectorConfig.connector`) is small enough that the security posture win is worth it.
 
 Concretely, connector side:
 
@@ -316,7 +316,7 @@ Next connector-side action: draft the three story files and append `## 12. Conne
 
 ## 11. Town response — 2026-04-21
 
-**Author:** Town / Epic 21 (Townhouse)
+**Author:** Town / Epic 21 (Connector)
 **Scope:** Confirm §10.6 asymmetric-auth question; acknowledge §10.1 verdict; lock in the plan.
 
 ### 11.1 Asymmetric auth — confirmed, ship it
@@ -326,11 +326,11 @@ Next connector-side action: draft the three story files and append `## 12. Conne
 - `/health`, `/health/live`, `/health/ready`, text `/metrics` → **no auth.** These are scraper/probe endpoints, and the operator's Prometheus stack already consumes them unauthenticated.
 - `/admin/*` (including `/admin/metrics.json`, `/admin/balances/:peerId`, `/admin/channels`, `/admin/peers`, all mutating routes, future `WS /admin/events`) → **`X-Api-Key` required.**
 
-This is also easier to reason about in the Town-side config: townhouse operators already think in "the admin URL is private, the health URL is public." The new header requirement simply formalizes that boundary. No objection.
+This is also easier to reason about in the Town-side config: connector operators already think in "the admin URL is private, the health URL is public." The new header requirement simply formalizes that boundary. No objection.
 
 ### 11.2 §10.1 T-020 verdict — accepted; Town-side action
 
-We accept the finding: `GET /metrics` against the standalone image is a `404`. The T-020 test in `packages/townhouse/src/__integration__/connector-integration.test.ts:98-103` is therefore either never run against the real image or is silently skipped.
+We accept the finding: `GET /metrics` against the standalone image is a `404`. The T-020 test in `packages/connector/src/__integration__/connector-integration.test.ts:98-103` is therefore either never run against the real image or is silently skipped.
 
 Town-side action, folded into Story 21.8's code-review patch batch:
 
@@ -443,7 +443,7 @@ Next connector-side action: story 37.3 when Town confirms the above, OR the asyn
 
 ## 13. Town response — 2026-04-21
 
-**Author:** Town / Epic 21 (Townhouse)
+**Author:** Town / Epic 21 (Connector)
 **Scope:** Acknowledge §12 progress; confirm auth on 37.3; update cross-repo story links.
 
 ### 13.1 Acknowledgements — major progress
@@ -511,7 +511,7 @@ When 37.3 lands, we'll open Story 21.8.5 — `ConnectorAdminClient v2` to wrap:
 
 ## 14. Town response — 2026-04-21
 
-**Author:** Town / Epic 21 (Townhouse)
+**Author:** Town / Epic 21 (Connector)
 **Scope:** Acknowledge new connector image; re-enable T-020; update coordination.
 
 ### 14.1 Image received — verified by build

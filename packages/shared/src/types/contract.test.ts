@@ -12,7 +12,7 @@ describe('localDelivery contract (PaymentRequest)', () => {
   it('accepts a canonical request', () => {
     const ok = PaymentRequestSchema.safeParse({
       paymentId: 'abc',
-      destination: 'g.townhouse.relay',
+      destination: 'g.connector.relay',
       amount: '1000',
       expiresAt: '2026-06-17T00:00:00.000Z',
       data: 'YQ==',
@@ -24,7 +24,7 @@ describe('localDelivery contract (PaymentRequest)', () => {
   it('rejects a request missing expiresAt', () => {
     const bad = PaymentRequestSchema.safeParse({
       paymentId: 'abc',
-      destination: 'g.townhouse.relay',
+      destination: 'g.connector.relay',
       amount: '1000',
     });
     expect(bad.success).toBe(false);
@@ -60,7 +60,7 @@ describe('admin contract (PeerRegistrationRequest)', () => {
       url: 'ws://relay:3000',
       authToken: '',
       relation: 'child',
-      routes: [{ prefix: 'g.townhouse.relay' }],
+      routes: [{ prefix: 'g.connector.relay' }],
     });
     expect(ok.success).toBe(true);
   });

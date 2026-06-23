@@ -197,11 +197,11 @@ describe('InboundClaimValidator branch coverage', () => {
       const packet = createPreparePacket(1_000_000n);
 
       // No claim protocol data — a parent forwards value to children claim-less.
-      const result = await validator.validate([], packet, 'g.townhouse');
+      const result = await validator.validate([], packet, 'g.connector');
 
       expect(result).toBeNull();
       expect(mockLogger.debug).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'inbound_claim_skip_parent', peerId: 'g.townhouse' }),
+        expect.objectContaining({ event: 'inbound_claim_skip_parent', peerId: 'g.connector' }),
         'Skipping inbound claim requirement for packet forwarded by parent peer'
       );
     });
