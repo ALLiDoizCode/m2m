@@ -44,7 +44,7 @@ chainProviders:
     chainId: solana:devnet
     rpcUrl: https://solana-rpc.devnet.toonprotocol.dev
     wsUrl: wss://solana-ws.devnet.toonprotocol.dev
-    programId: '7CLmNaK9z6QgUWQpCFdeUTqfwXeZH5ssohAKtyXKY4Hp'
+    programId: 'D2Z35z8ShA4K7odczUysBYRP5hXQGDp6r5c2EBSxRsHh'
     tokenMint: 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H'
     keyId: 'placeholder-overwritten-by-mnemonic'
     cluster: devnet
@@ -57,8 +57,8 @@ chainProviders:
     # USDC FungibleToken: needs deploy-usdc-token.ts run from dev machine (ESM/CJS
     # conflict blocks it on server). Update tokenAddress + tokenId after deploy.
     zkAppAddress: 'B62qoMNmZQQYSxuoNx42JnZtNZwHfwL16wxUYNEuLGyrVq1bXfS15Rn'
-    tokenAddress: 'PLACEHOLDER_MINA_USDC_TOKEN_ADDR'
-    tokenId: 'PLACEHOLDER_MINA_TOKEN_ID'
+    tokenAddress: 'B62qjfa5osSnjaAhgiJTu5WRg7RCw66mY6bhaxZecyMTTtESKBwQ4x3'
+    tokenId: '26807032406297178681731937210594998657168795100878204131916024453275711913842'
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
