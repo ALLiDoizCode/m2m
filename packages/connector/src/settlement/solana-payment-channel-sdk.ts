@@ -441,11 +441,13 @@ export class SolanaPaymentChannelSDK {
   private readonly _logger: Logger;
   private readonly _sendAndConfirmTransaction: ReturnType<typeof sendAndConfirmTransactionFactory>;
 
-  constructor(rpcUrl: string, programId: string, logger: Logger) {
+  constructor(rpcUrl: string, programId: string, logger: Logger, wsUrl?: string) {
     this._programId = address(programId);
     this._logger = logger.child({ component: 'solana-payment-channel-sdk' });
     this._rpc = createSolanaRpc(rpcUrl);
-    this._rpcSubscriptions = createSolanaRpcSubscriptions(deriveWsUrl(rpcUrl));
+    // Honor an explicit WebSocket endpoint when provided (e.g. hosted devnets where
+    // the PubSub host differs from the RPC host); otherwise derive it from rpcUrl.
+    this._rpcSubscriptions = createSolanaRpcSubscriptions(wsUrl ?? deriveWsUrl(rpcUrl));
     this._sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
       rpc: this._rpc,
       rpcSubscriptions: this._rpcSubscriptions,
