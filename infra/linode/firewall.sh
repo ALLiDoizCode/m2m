@@ -11,13 +11,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ -f .env ] && set -a && . ./.env && set +a
 IFACE="${PUBLIC_IFACE:-eth0}"
-# anvil, solana RPC, solana WS, faucet, + issue #222 app ports:
-# connector /ilp (3000) & health (8080), relay free-read WS (7100), relay paid
-# store (3100). Belt-and-suspenders: the #221 compose publishes these only to
-# 127.0.0.1 (or not at all, for 3100), so they are not internet-reachable to begin
-# with — nginx fronts connector:3000 and app:7100 by service name. 3100 (paid
-# store) and 8081 (connector admin) are never published and never proxied (AC2).
-RAW_PORTS=(8545 8899 8900 3500 3000 8080 7100 3100)
+# Chains-only raw ports: anvil (8545), solana RPC (8899), solana WS (8900), faucet
+# (3500). The base compose publishes these on 0.0.0.0, and Docker's iptables rules
+# bypass ufw — so drop them explicitly here; nginx (80/443) is the only public face.
+RAW_PORTS=(8545 8899 8900 3500)
 
 echo "==> ufw: allow SSH + HTTP/HTTPS, deny the rest"
 if command -v ufw >/dev/null 2>&1; then
