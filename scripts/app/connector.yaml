@@ -1,33 +1,33 @@
 # =============================================================================
-# Connector-as-Terminator — "app behind the terminator" local compose config
+# Connector paid reverse proxy — "app behind the connector" local compose config
 # =============================================================================
-# Bind-mounted into the `terminator` service at /app/config/terminator.yaml
+# Bind-mounted into the `connector` service at /app/config/connector.yaml
 # (issue #221). This is the standalone connector that fronts ONE oblivious app
-# (the `relay` service) for PAID writes.
+# (the `app` service) for PAID writes.
 #
 # Topology:
 #
-#   host ─curl/h402Fetch─▶ POST /ilp (3000) ─▶ terminator ─▶ HttpProxyHandler
-#                                                              │
-#                                              upstream: http://relay:3100
-#                                                              ▼
-#                                                         relay (app)
+#   host ─curl/h402Fetch─▶ POST /ilp (3000) ─▶ connector ─▶ HttpProxyHandler
+#                                                            │
+#                                            upstream: http://app:3100
+#                                                            ▼
+#                                                       app (relay)
 #
-# - The terminator's edge is `POST /ilp` (ILP-over-HTTP, RFC-0035) served on
+# - The connector's edge is `POST /ilp` (ILP-over-HTTP, RFC-0035) served on
 #   `btpServerPort`. That is the ONLY port published to the host (127.0.0.1).
 # - The admin API (8081) binds inside the container but is NOT published.
-# - Free reads do NOT come through here at all — clients hit the relay's Nostr
-#   WS read port directly (published by the compose `relay` service).
+# - Free reads do NOT come through here at all — clients hit the app's Nostr
+#   WS read port directly (published by the compose `app` service).
 #
 # The single `routes:` entry below carries the issue #218 termination fields
 # (`upstream`, `price`, `chains`, `ilpAddress`, `settlementAddresses`). Because
 # the route registry is non-empty AND no global `localDelivery.handlerUrl` is
 # configured, ConnectorNode installs the #216 HttpProxyHandler as the
-# local-delivery handler: a paid PREPARE addressed to `g.terminator.relay.*`
+# local-delivery handler: a paid PREPARE addressed to `g.connector.relay.*`
 # terminates here and is reverse-proxied to `upstream`.
 # =============================================================================
 
-nodeId: terminator
+nodeId: connector
 btpServerPort: 3000
 healthCheckPort: 8080
 environment: development
@@ -47,7 +47,7 @@ adminApi:
 # NOTE: deliberately NO `localDelivery:` block. A global localDelivery handler
 # would short-circuit the per-route HttpProxyHandler (see ConnectorNode wiring,
 # issue #216/#218). Leaving it unset lets the terminated route below drive the
-# HTTP reverse-proxy to the relay.
+# HTTP reverse-proxy to the app.
 
 # ── Settlement / chain providers ─────────────────────────────────────────────
 # A single EVM entry pointing at the compose `anvil` service. The deterministic
@@ -74,24 +74,24 @@ chainProviders:
       pollingIntervalMs: 100
       settlementTimeoutSecs: 3600
       initialDepositMultiplier: 2
-      ledgerSnapshotPath: ./data/ledger-terminator.json
+      ledgerSnapshotPath: ./data/ledger-connector.json
 
 peers: []
 
 # ── Routes ──────────────────────────────────────────────────────────────────
-# ONE terminated route (issue #218 fields). `upstream` points at the relay's
+# ONE terminated route (issue #218 fields). `upstream` points at the app's
 # oblivious-mode HTTP store port (3100, per relay#24) over the compose network by
-# service name — the host can never reach `relay:3100` directly (that port is NOT
+# service name — the host can never reach `app:3100` directly (that port is NOT
 # published), which is what enforces AC2: paid writes MUST flow through the
-# terminator. The store endpoint (`POST /write`, body `{event}`) is carried in the
+# connector. The store endpoint (`POST /write`, body `{event}`) is carried in the
 # forwarded HTTP envelope; this only needs the base host:port.
 routes:
-  - prefix: g.terminator.relay
-    nextHop: terminator
-    upstream: http://relay:3100
+  - prefix: g.connector.relay
+    nextHop: connector
+    upstream: http://app:3100
     price: '1000'
     chains:
       - evm
-    ilpAddress: g.terminator.relay
+    ilpAddress: g.connector.relay
     settlementAddresses:
       evm: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'

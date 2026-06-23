@@ -47,7 +47,7 @@ probe() { # url, label
   if curl -fsS -m 8 -o /dev/null "$1" 2>/dev/null; then echo "  OK   $2  ($1)"; else echo "  DOWN $2  ($1)"; fi
 }
 
-# Probe a TLS edge that has no GET-able health path (e.g. the terminator's POST-only
+# Probe a TLS edge that has no GET-able health path (e.g. the connector's POST-only
 # /ilp). We only need to know the TLS handshake + nginx routing work: ANY HTTP status
 # (even 404/405) means UP; only a connection/TLS failure means DOWN.
 probe_tls() { # url, label
@@ -81,20 +81,20 @@ write_endpoints() {
   [ -n "$mina_token" ] && mina_token_json="\"${mina_token}\""
   [ -n "$mina_token_id" ] && mina_token_id_json="\"${mina_token_id}\""
 
-  # Issue #222: the app-behind-terminator edge (only when that profile is active).
-  # The terminator settles EVM-only on this box's anvil via the public deployer key
+  # Issue #222: the app edge (only when that profile is active).
+  # The connector settles EVM-only on this box's anvil via the public deployer key
   # + the HTTP faucet — no Mina/Solana settlement is wired for this route. `route`
-  # and `price` mirror scripts/app-behind-terminator/terminator.yaml.
-  local terminator_json="null"
-  if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q app-behind-terminator; then
-    terminator_json=$(cat <<TERM
+  # and `price` mirror scripts/app/connector.yaml.
+  local connector_json="null"
+  if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q app; then
+    connector_json=$(cat <<TERM
 {
-    "ilpUrl": "https://terminator.${DOMAIN}/ilp",
+    "ilpUrl": "https://connector.${DOMAIN}/ilp",
     "relayWsUrl": "wss://relay-ws.${DOMAIN}",
-    "route": "g.terminator.relay",
+    "route": "g.connector.relay",
     "price": "1000",
     "settlementChain": "evm:31337",
-    "_note": "App-behind-terminator (issue #222): POST a paid ILP PREPARE (with an ILP-Payment-Channel-Claim header) to ilpUrl; free Nostr reads hit relayWsUrl directly. EVM-only settlement on this box's anvil. The relay paid-write store port and the terminator admin API are NOT public."
+    "_note": "App-behind-connector (issue #222): POST a paid ILP PREPARE (with an ILP-Payment-Channel-Claim header) to ilpUrl; free Nostr reads hit relayWsUrl directly. EVM-only settlement on this box's anvil. The relay paid-write store port and the connector admin API are NOT public."
   }
 TERM
 )
@@ -128,7 +128,7 @@ TERM
     "_fund": "infra/mina/fund-mina-usdc.sh <b58> [usdc] — admin-mints USDC on the public devnet",
     "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.ts → infra/mina/usdc-token.json); null here means not yet deployed."
   },
-  "terminator": ${terminator_json}
+  "connector": ${connector_json}
 }
 JSON
   echo "Wrote $HERE/endpoints.json"
@@ -157,10 +157,10 @@ case "${1:-}" in
     probe "https://solana-rpc.${DOMAIN}/health" "solana-rpc"
     probe "https://faucet.${DOMAIN}/health"     "faucet"
     probe "https://mina.${DOMAIN}/graphql"      "mina-proxy"
-    if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q app-behind-terminator; then
+    if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q app; then
       # The /ilp edge is POST-only (a GET yields 404/405), so use probe_tls: any
-      # HTTP status proves the TLS edge + nginx route to terminator:3000 are up.
-      probe_tls "https://terminator.${DOMAIN}/ilp" "terminator-ilp"
+      # HTTP status proves the TLS edge + nginx route to connector:3000 are up.
+      probe_tls "https://connector.${DOMAIN}/ilp" "connector-ilp"
     fi
     ;;
   endpoints) write_endpoints;;

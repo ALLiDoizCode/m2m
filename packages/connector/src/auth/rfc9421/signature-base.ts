@@ -15,7 +15,7 @@
  * is injected by the connector *toward the upstream* (#216 HttpProxyHandler) and
  * is not part of the inbound, client-signed surface. `TOON-Price` is set and
  * signed by the client and carries the price the claim is paying for; the
- * terminator later recomputes the expected price from #218 route config and
+ * connector later recomputes the expected price from #218 route config and
  * rejects on mismatch (`price_mismatch`). The value is an opaque ASCII string
  * (e.g. a decimal amount); this module does not interpret it.
  *

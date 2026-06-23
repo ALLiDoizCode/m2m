@@ -105,7 +105,7 @@ export type { PaymentRequest, PaymentResponse, PaymentHandler } from './core/pay
 // Re-export ILP send handler types for library consumers
 export type { PacketSenderFn, IsReadyFn } from './http/ilp-send-handler';
 
-// Connector-as-terminator: generic HTTP reverse-proxy local-delivery handler (#216)
+// Connector paid reverse proxy: generic HTTP reverse-proxy local-delivery handler (#216)
 export {
   HttpProxyHandler,
   EnvelopeDecodeError,

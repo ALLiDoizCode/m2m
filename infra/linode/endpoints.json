@@ -25,13 +25,13 @@
     "_fund": "infra/mina/fund-mina-usdc.sh <b58> [usdc] — admin-mints USDC on the public devnet",
     "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). The USDC token zkApp is deployed ONCE to public devnet by tools/mina/deploy-usdc-token.ts; tokenAddress/tokenId here are PLACEHOLDERS — replace with the live deploy output."
   },
-  "terminator": {
-    "ilpUrl": "https://terminator.<DOMAIN>/ilp",
+  "connector": {
+    "ilpUrl": "https://connector.<DOMAIN>/ilp",
     "relayWsUrl": "wss://relay-ws.<DOMAIN>",
-    "route": "g.terminator.relay",
+    "route": "g.connector.relay",
     "price": "1000",
     "settlementChain": "evm:31337",
-    "_note": "App-behind-terminator (issue #222): present only when COMPOSE_PROFILES includes `app-behind-terminator`. POST a paid ILP PREPARE (with an ILP-Payment-Channel-Claim header) to ilpUrl; free Nostr reads hit relayWsUrl directly. EVM-only settlement on this box's anvil. The relay paid-write store port and the terminator admin API are NOT public."
+    "_note": "App-behind-connector (issue #222): present only when COMPOSE_PROFILES includes `app`. POST a paid ILP PREPARE (with an ILP-Payment-Channel-Claim header) to ilpUrl; free Nostr reads hit relayWsUrl directly. EVM-only settlement on this box's anvil. The relay paid-write store port and the connector admin API are NOT public."
   },
   "_decimalsNote": "USDC is 6-decimal on every chain (EVM + Solana), so claim base units are uniform — no cross-chain normalization needed."
 }
