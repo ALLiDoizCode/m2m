@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.24.2](https://github.com/toon-protocol/connector/compare/v3.24.1...v3.24.2) (2026-06-23)
+
+### Bug Fixes
+
+- **devnet:** raise Mina round-trip PREPARE expiry to 300s for first claim ([#242](https://github.com/toon-protocol/connector/issues/242)) ([5cf8d27](https://github.com/toon-protocol/connector/commit/5cf8d2765dffcbb89099cba1acbbf92a1c9e2bb5)), closes [#237](https://github.com/toon-protocol/connector/issues/237)
+- **infra:** put Solana CLI bin on PATH for devnet bootstrap build ([#243](https://github.com/toon-protocol/connector/issues/243)) ([858bf5c](https://github.com/toon-protocol/connector/commit/858bf5c51249aaf11528f320e760feaf5d0df44d)), closes [#238](https://github.com/toon-protocol/connector/issues/238)
+- **solana:** honor explicit wsUrl override in SDK and provider factory ([#241](https://github.com/toon-protocol/connector/issues/241)) ([dad890b](https://github.com/toon-protocol/connector/commit/dad890ba8858e0d5636586523e2c1fddc2b40df2)), closes [#236](https://github.com/toon-protocol/connector/issues/236)
+
 ## [3.24.1](https://github.com/toon-protocol/connector/compare/v3.24.0...v3.24.1) (2026-06-23)
 
 ### Bug Fixes
