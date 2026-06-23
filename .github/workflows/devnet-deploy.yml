@@ -44,18 +44,20 @@
 #
 # ── DNS ──────────────────────────────────────────────────────────────────────
 #   A-records for evm-rpc / solana-rpc / solana-ws / faucet / mina under <domain>
-#   → the VM IP. Set `manage_dns: true` to create them via Linode Domains (domain
-#   must be hosted in your Linode account); else create them yourself (IP is
+#   → the VM IP. Set `manage_dns: true` to create them via the host given by
+#   `dns_provider`: `linode` = Linode Domains (domain must be hosted in your Linode
+#   account); `porkbun` = Porkbun API (e.g. devnet.toonprotocol.dev — needs the
+#   PORKBUN_API_KEY / PORKBUN_SECRET secrets). Else create them yourself (IP is
 #   printed). DNS must resolve before real (non-staging) TLS can be issued.
 
 name: devnet-deploy
 
-# ── app-behind-terminator (issue #222) ───────────────────────────────────────
-#   Set `with_terminator: true` to ALSO run the connector-as-terminator + the
-#   oblivious relay on this SAME box (adds `app-behind-terminator` to
-#   COMPOSE_PROFILES). It publishes a PUBLIC paid edge `https://terminator.<DOMAIN>/ilp`
+# ── app (issue #222) ───────────────────────────────────────
+#   Set `with_connector_edge: true` to ALSO run the connector edge + the
+#   oblivious relay on this SAME box (adds `app` to
+#   COMPOSE_PROFILES). It publishes a PUBLIC paid edge `https://connector.<DOMAIN>/ilp`
 #   and free Nostr reads `wss://relay-ws.<DOMAIN>`. The relay paid-write store port
-#   and the terminator admin API are NEVER published/proxied. The relay's Nostr
+#   and the connector admin API are NEVER published/proxied. The relay's Nostr
 #   identity key (RELAY_NOSTR_SECRET_KEY) is generated EPHEMERALLY per-run (it is an
 #   identity, not money — mirrors the ephemeral SSH key). RELAY_DEV_MODE=false so the
 #   public box enforces Nostr signature verification. After a successful deploy a CI
@@ -89,8 +91,8 @@ on:
         description: "Email for Let's Encrypt expiry notices"
         required: false
         default: ''
-      with_terminator:
-        description: 'Also run the app-behind-terminator edge (terminator + oblivious relay) on this box, publish https://terminator.<DOMAIN>/ilp + wss://relay-ws.<DOMAIN>, and run the paid round-trip probe (issue #222).'
+      with_connector_edge:
+        description: 'Also run the app edge (connector + oblivious relay) on this box, publish https://connector.<DOMAIN>/ilp + wss://relay-ws.<DOMAIN>, and run the paid round-trip probe (issue #222).'
         type: boolean
         default: false
       region:
@@ -119,9 +121,16 @@ on:
         description: "Use Let's Encrypt staging certs (1) until DNS verifies, else 0"
         default: '1'
       manage_dns:
-        description: 'Create/refresh Linode DNS A-records for the subdomains (incl. terminator/relay-ws when with_terminator)'
+        description: 'Create/refresh DNS A-records for the subdomains (incl. connector/relay-ws when with_connector_edge)'
         type: boolean
         default: false
+      dns_provider:
+        description: 'Where <domain> is hosted, so manage_dns hits the right API. linode = Linode Domains (default); porkbun = Porkbun (e.g. devnet.toonprotocol.dev) — needs PORKBUN_API_KEY/PORKBUN_SECRET.'
+        type: choice
+        options:
+          - linode
+          - porkbun
+        default: linode
       ssh_pubkey:
         description: 'Optional extra SSH public key to authorize (manual debugging)'
         default: ''
@@ -258,18 +267,18 @@ jobs:
           if [ -n "${{ inputs.ssh_pubkey }}" ]; then echo "${{ inputs.ssh_pubkey }}" >> ~/.ssh/authorized.txt; fi
 
       - name: Resolve COMPOSE_PROFILES + ephemeral relay identity (issue #222)
-        # When with_terminator is on, add the app-behind-terminator profile and
+        # When with_connector_edge is on, add the app profile and
         # generate an EPHEMERAL Nostr identity key for the relay (it is an identity,
         # not money — mirrors the ephemeral SSH key above; never stored as a secret).
         run: |
           set -euo pipefail
-          if [ "${{ inputs.with_terminator }}" = "true" ]; then
-            echo "COMPOSE_PROFILES=evm,solana,app-behind-terminator" >> "$GITHUB_ENV"
+          if [ "${{ inputs.with_connector_edge }}" = "true" ]; then
+            echo "COMPOSE_PROFILES=evm,solana,app" >> "$GITHUB_ENV"
             # 32-byte hex Nostr secret key. Masked so it never prints in logs.
             RNSK="$(openssl rand -hex 32)"
             echo "::add-mask::$RNSK"
             echo "RELAY_NOSTR_SECRET_KEY=$RNSK" >> "$GITHUB_ENV"
-            echo "with_terminator: app-behind-terminator profile + ephemeral relay identity enabled."
+            echo "with_connector_edge: app profile + ephemeral relay identity enabled."
           else
             echo "COMPOSE_PROFILES=evm,solana" >> "$GITHUB_ENV"
             echo "RELAY_NOSTR_SECRET_KEY=" >> "$GITHUB_ENV"
@@ -382,7 +391,8 @@ jobs:
           REMOTE
 
       - name: Create DNS A-records (Linode Domains)
-        if: ${{ inputs.manage_dns && inputs.domain != '' }} # sslip.io needs no DNS
+        # sslip.io needs no DNS; only when the domain is hosted on Linode Domains.
+        if: ${{ inputs.manage_dns && inputs.domain != '' && inputs.dns_provider == 'linode' }}
         run: |
           set -euo pipefail
           DID=$(linode-cli domains list --json | jq -r --arg d "$DOMAIN" '.[] | select(.domain==$d) | .id' | head -1)
@@ -390,8 +400,8 @@ jobs:
             DID=$(linode-cli domains create --type master --domain "$DOMAIN" --soa_email "${{ inputs.letsencrypt_email }}" --json | jq -r '.[0].id')
           fi
           SUBS="evm-rpc solana-rpc solana-ws faucet mina"
-          # issue #222: the app-behind-terminator edge needs its two subdomains too.
-          if [ "${{ inputs.with_terminator }}" = "true" ]; then SUBS="$SUBS terminator relay-ws"; fi
+          # issue #222: the app edge needs its two subdomains too.
+          if [ "${{ inputs.with_connector_edge }}" = "true" ]; then SUBS="$SUBS connector relay-ws"; fi
           for sub in $SUBS; do
             EID=$(linode-cli domains records-list "$DID" --json | jq -r --arg n "$sub" '.[] | select(.type=="A" and .name==$n) | .id' | head -1)
             if [ -n "$EID" ]; then
@@ -400,6 +410,76 @@ jobs:
               linode-cli domains records-create "$DID" --type A --name "$sub" --target "$IP" --ttl_sec 300 >/dev/null
             fi
             echo "  A $sub.$DOMAIN -> $IP"
+          done
+
+      - name: Create DNS A-records (Porkbun)
+        # Same subdomain list as the Linode path, but for a Porkbun-hosted domain
+        # (e.g. devnet.toonprotocol.dev). sslip.io needs no DNS; only runs when the
+        # domain is hosted on Porkbun. Idempotent per subdomain: editByNameType when
+        # an A-record already exists, else create. Porkbun's API v3 auth is a JSON
+        # body on EVERY call ({"apikey","secretapikey"}) — both come from secrets and
+        # are masked so they never leak into logs.
+        if: ${{ inputs.manage_dns && inputs.domain != '' && inputs.dns_provider == 'porkbun' }}
+        env:
+          PORKBUN_API_KEY: ${{ secrets.PORKBUN_API_KEY }}
+          PORKBUN_SECRET: ${{ secrets.PORKBUN_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PORKBUN_API_KEY:-}" ] || [ -z "${PORKBUN_SECRET:-}" ]; then
+            echo "::warning::dns_provider=porkbun but PORKBUN_API_KEY/PORKBUN_SECRET are not set — skipping DNS. Set them (gh secret set PORKBUN_API_KEY/PORKBUN_SECRET) or create the A-records yourself; the IP is printed in the summary."
+            exit 0
+          fi
+          # Mask the creds defensively (they should be masked as secrets already, but
+          # this guards against any value that slipped in via a different path).
+          echo "::add-mask::$PORKBUN_API_KEY"
+          echo "::add-mask::$PORKBUN_SECRET"
+          API="https://api.porkbun.com/api/json/v3"
+          # Auth blob reused as the prefix of every JSON body. -n keeps it on one line.
+          AUTH=$(jq -cn --arg k "$PORKBUN_API_KEY" --arg s "$PORKBUN_SECRET" '{apikey:$k,secretapikey:$s}')
+          # Porkbun addresses the REGISTERED domain (the root in your account) in the URL,
+          # with the record `name` being the prefix relative to it — unlike Linode, which
+          # treats $DOMAIN as its own delegated zone. $DOMAIN here may be a subdomain (e.g.
+          # devnet.toonprotocol.dev), so split it: ROOT = last two labels (toonprotocol.dev),
+          # PREFIX = the leading labels (devnet). An `evm-rpc` record under $DOMAIN is then
+          # the Porkbun name `evm-rpc.devnet` on domain `toonprotocol.dev`. (Assumes a
+          # two-label root: fine for .dev/.com/.io; multi-part TLDs like .co.uk are not
+          # handled — create those records manually.)
+          ROOT=$(echo "$DOMAIN" | awk -F. '{ if (NF>=2) print $(NF-1)"."$NF; else print $0 }')
+          PREFIX=""
+          case "$DOMAIN" in
+            "$ROOT") PREFIX="" ;;
+            *."$ROOT") PREFIX=".${DOMAIN%."$ROOT"}" ;;
+          esac
+          # Sanity/auth check (also echoes the caller IP). Soft-fail: a flaky ping
+          # shouldn't necessarily block, but a clear auth error should surface.
+          PING=$(curl -fsS -X POST "$API/ping" -H 'Content-Type: application/json' -d "$AUTH" 2>/dev/null || true)
+          if [ "$(echo "$PING" | jq -r '.status // "ERROR"')" != "SUCCESS" ]; then
+            echo "::warning::Porkbun /ping did not return SUCCESS ($(echo "$PING" | jq -r '.message // "no response"')) — check PORKBUN_API_KEY/PORKBUN_SECRET and that API access is enabled for $ROOT. Attempting record upserts anyway."
+          fi
+          SUBS="evm-rpc solana-rpc solana-ws faucet mina"
+          # issue #222: the app edge needs its two subdomains too.
+          if [ "${{ inputs.with_connector_edge }}" = "true" ]; then SUBS="$SUBS connector relay-ws"; fi
+          for sub in $SUBS; do
+            NAME="$sub$PREFIX"   # name relative to ROOT, e.g. evm-rpc.devnet
+            # Does an A-record already exist for this name? retrieveByNameType
+            # returns {"status":"SUCCESS","records":[...]} (empty array when none).
+            EXISTING=$(curl -fsS -X POST "$API/dns/retrieveByNameType/$ROOT/A/$NAME" \
+              -H 'Content-Type: application/json' -d "$AUTH" 2>/dev/null || true)
+            HAVE=$(echo "$EXISTING" | jq -r '(.records // []) | length')
+            if [ "${HAVE:-0}" -gt 0 ]; then
+              BODY=$(echo "$AUTH" | jq -c --arg ip "$IP" '. + {content:$ip, ttl:"300"}')
+              RESP=$(curl -fsS -X POST "$API/dns/editByNameType/$ROOT/A/$NAME" \
+                -H 'Content-Type: application/json' -d "$BODY" 2>/dev/null || true)
+            else
+              BODY=$(echo "$AUTH" | jq -c --arg n "$NAME" --arg ip "$IP" '. + {name:$n, type:"A", content:$ip, ttl:"300"}')
+              RESP=$(curl -fsS -X POST "$API/dns/create/$ROOT" \
+                -H 'Content-Type: application/json' -d "$BODY" 2>/dev/null || true)
+            fi
+            if [ "$(echo "$RESP" | jq -r '.status // "ERROR"')" = "SUCCESS" ]; then
+              echo "  A $sub.$DOMAIN -> $IP"
+            else
+              echo "::warning::Porkbun upsert for $sub.$DOMAIN failed ($(echo "$RESP" | jq -r '.message // "no response"')) — create it manually: A $sub.$DOMAIN -> $IP"
+            fi
           done
 
       - name: Bootstrap the devnet on the VM
@@ -428,9 +508,9 @@ jobs:
           # devnet.sh/bootstrap.sh `set -a; . .env` exports it so docker compose
           # substitutes it into the faucet container's MINA_FAUCET_KEY.
           MINA_FAUCET_KEY=${{ secrets.MINA_FAUCET_KEY }}
-          # app-behind-terminator (issue #222). RELAY_NOSTR_SECRET_KEY is the
+          # app (issue #222). RELAY_NOSTR_SECRET_KEY is the
           # ephemeral relay identity generated for THIS run (empty when
-          # with_terminator is off). RELAY_DEV_MODE=false → the public box enforces
+          # with_connector_edge is off). RELAY_DEV_MODE=false → the public box enforces
           # Nostr sig verification. RELAY_IMAGE is the public oblivious relay image.
           RELAY_IMAGE=ghcr.io/toon-protocol/relay:latest
           RELAY_DEV_MODE=false
@@ -478,41 +558,41 @@ jobs:
           fi
 
       # ── CI acceptance probe (issue #222) — FULL paid round-trip ──────────────
-      # Only when the terminator edge was deployed. Runs FROM THE RUNNER against the
-      # PUBLIC TLS edge (https://terminator.$DOMAIN/ilp): funds a client EVM wallet
+      # Only when the connector edge was deployed. Runs FROM THE RUNNER against the
+      # PUBLIC TLS edge (https://connector.$DOMAIN/ilp): funds a client EVM wallet
       # from the public faucet, opens/funds a channel, signs a claim, POSTs the paid
       # PREPARE+envelope, asserts FULFILL, verifies storage over wss://relay-ws.$DOMAIN,
       # and runs the negatives (unpaid write rejected; relay store not public). The
       # probe `process.exit(1)`s on any failure, so this step (and the job) goes red.
       # Skipped with staging certs (the client's TLS calls would fail cert validation).
       - name: Checkout connector (for the acceptance probe)
-        if: ${{ inputs.with_terminator && inputs.letsencrypt_staging == '0' }}
+        if: ${{ inputs.with_connector_edge && inputs.letsencrypt_staging == '0' }}
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
 
       - name: Setup Node
-        if: ${{ inputs.with_terminator && inputs.letsencrypt_staging == '0' }}
+        if: ${{ inputs.with_connector_edge && inputs.letsencrypt_staging == '0' }}
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
 
       - name: Acceptance probe — paid round-trip against the public edge
-        if: ${{ inputs.with_terminator && inputs.letsencrypt_staging == '0' }}
+        if: ${{ inputs.with_connector_edge && inputs.letsencrypt_staging == '0' }}
         env:
           DOMAIN: ${{ env.DOMAIN }}
         run: |
           set -euo pipefail
           npm ci
           npm run build
-          echo "Running the #222 paid round-trip probe against https://terminator.${DOMAIN}/ilp"
-          npm run probe:terminator-public --workspace=packages/connector
+          echo "Running the #222 paid round-trip probe against https://connector.${DOMAIN}/ilp"
+          npm run probe:connector-public --workspace=packages/connector
           echo "PROBE_OK=true" >> "$GITHUB_ENV"
 
       - name: Note when the probe was skipped on staging certs
-        if: ${{ inputs.with_terminator && inputs.letsencrypt_staging != '0' }}
-        run: echo "::notice::with_terminator deployed, but the paid round-trip probe was SKIPPED because letsencrypt_staging != 0 (untrusted certs fail the client's TLS calls). Re-run with letsencrypt_staging=0 once DNS resolves to exercise it."
+        if: ${{ inputs.with_connector_edge && inputs.letsencrypt_staging != '0' }}
+        run: echo "::notice::with_connector_edge deployed, but the paid round-trip probe was SKIPPED because letsencrypt_staging != 0 (untrusted certs fail the client's TLS calls). Re-run with letsencrypt_staging=0 once DNS resolves to exercise it."
 
       - name: Summary
         if: ${{ always() && env.IP != '' }}
@@ -527,25 +607,25 @@ jobs:
             echo "| Solana WS | wss://solana-ws.$DOMAIN |"
             echo "| Faucet | https://faucet.$DOMAIN (EVM + Solana + native-MINA drip) |"
             echo "| Mina (proxy) | https://mina.$DOMAIN/graphql |"
-            if [ "${{ inputs.with_terminator }}" = "true" ]; then
-              echo "| Terminator (paid /ilp) | https://terminator.$DOMAIN/ilp |"
+            if [ "${{ inputs.with_connector_edge }}" = "true" ]; then
+              echo "| Connector (paid /ilp) | https://connector.$DOMAIN/ilp |"
               echo "| Relay WS (free reads) | wss://relay-ws.$DOMAIN |"
             fi
             echo ""
-            if [ "${{ inputs.with_terminator }}" = "true" ]; then
+            if [ "${{ inputs.with_connector_edge }}" = "true" ]; then
               if [ "${{ inputs.letsencrypt_staging }}" = "0" ] && [ "${PROBE_OK:-}" = "true" ]; then
-                echo "✅ app-behind-terminator (issue #222): paid round-trip probe PASSED against the public TLS edge."
+                echo "✅ app (issue #222): paid round-trip probe PASSED against the public TLS edge."
               elif [ "${{ inputs.letsencrypt_staging }}" = "0" ]; then
-                echo "❌ app-behind-terminator (issue #222): the paid round-trip probe did not pass — see the probe step logs."
+                echo "❌ app (issue #222): the paid round-trip probe did not pass — see the probe step logs."
               else
-                echo "ℹ️ app-behind-terminator (issue #222) deployed, but the paid round-trip probe was SKIPPED (staging certs). Re-run with \`letsencrypt_staging=0\`."
+                echo "ℹ️ app (issue #222) deployed, but the paid round-trip probe was SKIPPED (staging certs). Re-run with \`letsencrypt_staging=0\`."
               fi
             fi
             echo ""
             if [ -z "${{ inputs.domain }}" ]; then
               echo "ℹ️ Using **sslip.io** (\`$DOMAIN\`) — resolves to \`$IP\` automatically, no DNS to set up. For trusted (non-staging) certs, re-run with \`letsencrypt_staging=0\`; if Let's Encrypt's shared sslip.io rate limit blocks it, staging certs still work (or switch to your own domain)."
             elif [ "${{ inputs.manage_dns }}" != "true" ]; then
-              echo "⚠️ Create A-records (evm-rpc/solana-rpc/solana-ws/faucet/mina$( [ "${{ inputs.with_terminator }}" = "true" ] && echo "/terminator/relay-ws" )).$DOMAIN → \`$IP\`, then re-run with \`letsencrypt_staging=0\` for trusted certs."
+              echo "⚠️ Create A-records (evm-rpc/solana-rpc/solana-ws/faucet/mina$( [ "${{ inputs.with_connector_edge }}" = "true" ] && echo "/connector/relay-ws" )).$DOMAIN → \`$IP\`, then re-run with \`letsencrypt_staging=0\` for trusted certs."
             fi
             echo ""
             echo "🧹 When you're done, re-run this workflow with **action: destroy** to delete the VM (an idle Linode bills forever)."

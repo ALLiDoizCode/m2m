@@ -70,7 +70,7 @@ import {
  * The client opens its on-chain channel TOWARD this address.
  */
 export const CONNECTOR_EVM_ADDRESS =
-  process.env.DEVNET_TERMINATOR_ADDR ?? '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+  process.env.DEVNET_CONNECTOR_ADDR ?? '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 
 /**
  * The client's OWN settlement key — a funded Anvil account that is NOT account 0
@@ -416,7 +416,7 @@ export class PaidRoundTripClient {
             id: CONNECTOR_PEER_ID,
             url: deadUrl,
             authToken: '',
-            settlementAddress: process.env.DEVNET_TERMINATOR_SOL_ADDR!,
+            settlementAddress: process.env.DEVNET_CONNECTOR_SOL_ADDR!,
             chain: 'solana:devnet',
           }
         : {
@@ -514,7 +514,7 @@ export class PaidRoundTripClient {
           ? {
               peerId: CONNECTOR_PEER_ID,
               chain: 'solana:devnet',
-              peerAddress: process.env.DEVNET_TERMINATOR_SOL_ADDR!,
+              peerAddress: process.env.DEVNET_CONNECTOR_SOL_ADDR!,
               // Solana channel tokenId is the SPL mint.
               token: process.env.DEVNET_SOLANA_USDC_MINT!,
               initialDeposit,

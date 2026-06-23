@@ -35,11 +35,11 @@ help:
 	@echo "  make mina-logs            Follow Mina docker compose logs"
 	@echo ""
 		@echo ""
-	@echo "App behind terminator (issue #221):"
-	@echo "  make app-up               One-command up: terminator + relay + anvil + faucet"
-	@echo "  make app-down             Tear down the app-behind-terminator stack"
-	@echo "  make app-logs             Follow app-behind-terminator docker compose logs"
-	@echo "  make app-test             Run the app-behind-terminator E2E (negative-path always; paid round-trip skips without a real RELAY_IMAGE)"
+	@echo "App behind connector (issue #221):"
+	@echo "  make app-up               One-command up: connector + relay + anvil + faucet"
+	@echo "  make app-down             Tear down the app stack"
+	@echo "  make app-logs             Follow app docker compose logs"
+	@echo "  make app-test             Run the app E2E (negative-path always; paid round-trip skips without a real RELAY_IMAGE)"
 	@echo ""
 	@echo "Local Blockchain (All Chains):"
 	@echo "  make infra-up             Start all chains (EVM + Solana + Mina)"
@@ -96,28 +96,28 @@ standalone-test-allowlist:
 	docker compose --profile standalone-allowlist build
 	STANDALONE_DOCKER=true npm run test:standalone-allowlist --workspace=packages/connector
 
-# App behind terminator (issue #221) — the "hello-world" of deploying an app
+# App behind connector (issue #221) — the "hello-world" of deploying an app
 # behind the connector locally. `make app-up` brings up a standalone
-# connector-as-terminator + an oblivious relay (app) + anvil + faucet with one
+# connector + an oblivious relay (app) + anvil + faucet with one
 # command (AC4). The relay image is env-overridable (`RELAY_IMAGE`) because the
-# decoupled relay image is not yet published; the terminator/anvil/faucet build
+# decoupled relay image is not yet published; the connector/anvil/faucet build
 # and start regardless.
 app-up:
-	docker compose --profile app-behind-terminator up -d --build
+	docker compose --profile app up -d --build
 
 app-down:
-	docker compose --profile app-behind-terminator down
+	docker compose --profile app down
 
 app-logs:
-	docker compose --profile app-behind-terminator logs -f
+	docker compose --profile app logs -f
 
-# Run the app-behind-terminator E2E. The terminator + anvil + faucet portions
-# (compose-up, terminator health, AC2 negative-path assertions) always run. The
+# Run the app E2E. The connector + anvil + faucet portions
+# (compose-up, connector health, AC2 negative-path assertions) always run. The
 # AC3 full paid-write round-trip SKIPS with a clear message unless a real
 # `RELAY_IMAGE` is supplied (the relay app does not exist in this repo yet).
 app-test:
-	docker compose --profile app-behind-terminator build terminator
-	APP_BEHIND_TERMINATOR=1 npm run test:app-behind-terminator --workspace=packages/connector
+	docker compose --profile app build connector
+	APP_E2E=1 npm run test:app --workspace=packages/connector
 
 # Run linter
 lint:

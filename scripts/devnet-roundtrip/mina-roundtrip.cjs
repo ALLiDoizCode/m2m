@@ -1,5 +1,5 @@
 /**
- * MINA paid round-trip through the already-running local terminator (e2e-connector).
+ * MINA paid round-trip through the already-running local connector (e2e-connector).
  *
  * The Mina analogue of the GREEN Solana round-trip. Transport (envelope, WS read-back,
  * PREPARE POST, claim header) is IDENTICAL to solana-roundtrip.cjs — the only
@@ -11,11 +11,11 @@
  *   3. Build a MinaClaimMessage in the exact PerPacketClaimService shape; `proof` is
  *      base64(JSON of that signBalanceProof output) per the Issue #90 wire format.
  *   4. POST a paid ILP PREPARE (POST /write envelope w/ signed Nostr kind:1 event) to
- *      the terminator's /ilp edge with the claim header. Assert FULFILL (type 13).
+ *      the connector's /ilp edge with the claim header. Assert FULFILL (type 13).
  *   5. Read the event back from the relay free-read WS.
  *   6. Negative: UNPAID POST must NOT fulfill (402 / REJECT).
  *
- * The terminator's Mina FULFILL gate (InboundClaimValidator.verifyMinaClaim ->
+ * The connector's Mina FULFILL gate (InboundClaimValidator.verifyMinaClaim ->
  * MinaPaymentChannelProvider.verifyBalanceProof) is signature-only + channel-existence +
  * nonce-advance: it reads the on-chain channelHash & nonceField, verifies the claim's
  * `proof` signature against `signerPublicKey` over [commitment, nonce, channelHash], and
@@ -35,7 +35,7 @@ const WebSocket = require('ws');
 const { finalizeEvent, generateSecretKey } = require('nostr-tools');
 const { serializePacket, deserializePacket, PacketType } = require('@toon-protocol/shared');
 
-// ── Live devnet + terminator constants ──────────────────────────────────────
+// ── Live devnet + connector constants ──────────────────────────────────────
 const MINA_GRAPHQL = process.env.MINA_GRAPHQL || 'https://api.minascan.io/node/devnet/v1/graphql';
 const CHANNEL = process.env.MINA_CHANNEL || 'B62qigQwEwBAsSZad4GhSun8CAwkh3GUbx2YN2TbUHU8tzVFcFTE95x';
 const USDC_TOKEN_ID =
@@ -48,10 +48,10 @@ if (!CLIENT_MINA_PRIV) throw new Error('set MINA_CLIENT_PRIV to a funded devnet 
 
 const ESM_DIR = process.env.MINA_ESM_DIR || require('path').resolve(__dirname, 'esm-deploy');
 
-const TERMINATOR_ILP_URL = process.env.TERMINATOR_ILP_URL || 'http://127.0.0.1:3000/ilp';
+const CONNECTOR_ILP_URL = process.env.CONNECTOR_ILP_URL || 'http://127.0.0.1:3000/ilp';
 const RELAY_WS_URL = process.env.RELAY_WS_URL || 'ws://127.0.0.1:7100';
-const RELAY_STORE_DESTINATION = 'g.terminator.relay.store';
-const TERMINATOR_PEER_ID = 'terminator';
+const RELAY_STORE_DESTINATION = 'g.connector.relay.store';
+const CONNECTOR_PEER_ID = 'connector';
 
 const PRICE = 1000n; // route price in connector-multichain.yaml
 
@@ -89,7 +89,7 @@ function postRaw(url, body, headers) {
   });
 }
 
-// ── inner HTTP envelope the terminator reverse-proxies (POST /write {event}) ─
+// ── inner HTTP envelope the connector reverse-proxies (POST /write {event}) ─
 // (verbatim from solana-roundtrip.cjs / the paid-roundtrip-client exports)
 function buildHttpEnvelope(method, target, headers, bodyStr) {
   const CRLF = '\r\n';
@@ -230,8 +230,8 @@ async function main() {
     expiresAt: new Date(Date.now() + PREPARE_EXPIRY_MS),
     data: envelope,
   };
-  const res = await postRaw(TERMINATOR_ILP_URL, serializePacket(prepare), {
-    'ilp-peer-id': TERMINATOR_PEER_ID,
+  const res = await postRaw(CONNECTOR_ILP_URL, serializePacket(prepare), {
+    'ilp-peer-id': CONNECTOR_PEER_ID,
     'ilp-payment-channel-claim': Buffer.from(JSON.stringify(claim), 'utf8').toString('base64'),
   });
   let isFulfill = false, outcome = `HTTP ${res.status}`;
@@ -259,7 +259,7 @@ async function main() {
   // 5. Negative: UNPAID POST (no claim header) must NOT fulfill.
   const unpaidEnv = buildStoreWriteEnvelope(signEphemeralKind1Event(`unpaid ${new Date().toISOString()}`));
   const unpaidPrepare = { type: PacketType.PREPARE, destination: RELAY_STORE_DESTINATION, amount: PRICE, expiresAt: new Date(Date.now() + PREPARE_EXPIRY_MS), data: unpaidEnv };
-  const ures = await postRaw(TERMINATOR_ILP_URL, serializePacket(unpaidPrepare), {});
+  const ures = await postRaw(CONNECTOR_ILP_URL, serializePacket(unpaidPrepare), {});
   let notFulfilled, udetail;
   if (ures.status === 200) {
     notFulfilled = ures.body.length > 0 && ures.body[0] !== PacketType.FULFILL;
