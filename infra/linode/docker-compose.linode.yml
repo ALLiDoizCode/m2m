@@ -23,11 +23,12 @@
 services:
   nginx:
     image: nginx:alpine
-    profiles: [evm, solana]
+    profiles: [evm, solana, mina]
     restart: unless-stopped
     depends_on:
       anvil:
         condition: service_started
+        required: false
     ports:
       - '80:80'
       - '443:443'
@@ -42,7 +43,7 @@ services:
 
   certbot:
     image: certbot/certbot
-    profiles: [evm, solana]
+    profiles: [evm, solana, mina]
     restart: unless-stopped
     volumes:
       - linode_certbot_conf:/etc/letsencrypt
