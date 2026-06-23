@@ -11,7 +11,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ -f .env ] && set -a && . ./.env && set +a
 IFACE="${PUBLIC_IFACE:-eth0}"
-RAW_PORTS=(8545 8899 8900 3500)   # anvil, solana RPC, solana WS, faucet
+# anvil, solana RPC, solana WS, faucet, + issue #222 app-behind-terminator ports:
+# terminator /ilp (3000) & health (8080), relay free-read WS (7100), relay paid
+# store (3100). Belt-and-suspenders: the #221 compose publishes these only to
+# 127.0.0.1 (or not at all, for 3100), so they are not internet-reachable to begin
+# with — nginx fronts terminator:3000 and relay:7100 by service name. 3100 (paid
+# store) and 8081 (terminator admin) are never published and never proxied (AC2).
+RAW_PORTS=(8545 8899 8900 3500 3000 8080 7100 3100)
 
 echo "==> ufw: allow SSH + HTTP/HTTPS, deny the rest"
 if command -v ufw >/dev/null 2>&1; then

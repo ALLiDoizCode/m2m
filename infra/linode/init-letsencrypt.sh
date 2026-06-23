@@ -33,7 +33,11 @@ set +a
 
 DC=(docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml)
 PRIMARY="evm-rpc.${DOMAIN}"
-DOMAINS=("evm-rpc.${DOMAIN}" "solana-rpc.${DOMAIN}" "solana-ws.${DOMAIN}" "faucet.${DOMAIN}" "mina.${DOMAIN}")
+# NB: terminator/relay-ws are added for the issue #222 app-behind-terminator edge.
+# PRIMARY stays evm-rpc.${DOMAIN} so the cert path is unchanged; adding SANs to an
+# existing cert is a SAN-set change, so the first deploy after this lands re-issues
+# ONCE (the existing-cert guard rejects the now-missing-SAN cert), then reuses.
+DOMAINS=("evm-rpc.${DOMAIN}" "solana-rpc.${DOMAIN}" "solana-ws.${DOMAIN}" "faucet.${DOMAIN}" "mina.${DOMAIN}" "terminator.${DOMAIN}" "relay-ws.${DOMAIN}")
 CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
 # Renew (request anew) only when within this many days of expiry. Matches the
 # certbot renewer's 30-day window so we never request a duplicate of a healthy cert.
