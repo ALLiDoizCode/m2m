@@ -1,6 +1,6 @@
-# Connector-as-terminator, settling on the LIVE Linode devnet — EVM + SOLANA.
+# Connector settling on the LIVE Linode devnet — EVM + SOLANA.
 # Both per-chain settlement keys are derived from TOON_MNEMONIC (mnemonic mode).
-nodeId: terminator
+nodeId: connector
 btpServerPort: 3000
 healthCheckPort: 8080
 environment: development
@@ -56,15 +56,15 @@ chainProviders:
 peers: []
 
 routes:
-  - prefix: g.terminator.relay
-    nextHop: terminator
+  - prefix: g.connector.relay
+    nextHop: connector
     upstream: http://e2e-relay:3100
     price: '1000'
     chains:
       - evm
       - solana
       - mina
-    ilpAddress: g.terminator.relay
+    ilpAddress: g.connector.relay
     settlementAddresses:
       evm: '0x51D35a8A80377D0E70c226Dc7abb97e200C68f04'
       solana: '4hb7gurrpDCTdvACxxeB6dNJGC4Ybnk26jH7BUmU8x9c'

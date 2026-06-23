@@ -1,13 +1,13 @@
 /**
- * SOLANA paid round-trip through the already-running local terminator (e2e-connector).
+ * SOLANA paid round-trip through the already-running local connector (e2e-connector).
  *
  * Approach A (direct connector Solana SDK). Mirrors the EVM `runPaidRoundTrip` POST,
  * but the chain-specific part is producing a Solana payment-channel claim:
- *   1. Open + deposit a Solana payment channel (client -> terminator) on the live devnet.
+ *   1. Open + deposit a Solana payment channel (client -> connector) on the live devnet.
  *   2. Sign a Solana balance-proof (Ed25519 over PDA||nonce_LE||transferred_LE).
  *   3. Build a SolanaClaimMessage JSON in the exact shape PerPacketClaimService emits.
  *   4. POST a paid ILP PREPARE (carrying a POST /write envelope w/ a signed Nostr
- *      kind:1 event) to the terminator's /ilp edge with the claim header.
+ *      kind:1 event) to the connector's /ilp edge with the claim header.
  *   5. Assert FULFILL (type 13); read the event back from the relay free-read WS.
  *   6. Sanity-check: an UNPAID POST gets a REJECT / x402.
  *
@@ -36,7 +36,7 @@ const {
 } = require('@solana/kit');
 const { findAssociatedTokenPda, getCreateAssociatedTokenIdempotentInstructionAsync } = require('@solana-program/token');
 
-// ── Live devnet + terminator constants ──────────────────────────────────────
+// ── Live devnet + connector constants ──────────────────────────────────────
 const RPC = process.env.DEVNET_SOLANA_RPC || 'https://solana-rpc.97-107-135-110.sslip.io';
 // The hosted devnet serves the Solana PubSub WebSocket on a SEPARATE host
 // (solana-ws.*) — NOT rpcUrl with the scheme swapped. The SDK's internal
@@ -49,12 +49,12 @@ const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const CLIENT_SOL_KEY = process.env.SOL_CLIENT_PRIV;
 if (!CLIENT_SOL_KEY) throw new Error('set SOL_CLIENT_PRIV to a funded devnet Solana keypair (base58)');
 const CLIENT_ADDR = 'HpHXY4wXdYJxyVTouE6Y9XpQHp5L5xtzYPuSFt4zp1WA';
-const TERMINATOR_SOL_ADDR = '4hb7gurrpDCTdvACxxeB6dNJGC4Ybnk26jH7BUmU8x9c';
+const CONNECTOR_SOL_ADDR = '4hb7gurrpDCTdvACxxeB6dNJGC4Ybnk26jH7BUmU8x9c';
 
-const TERMINATOR_ILP_URL = process.env.TERMINATOR_ILP_URL || 'http://127.0.0.1:3000/ilp';
+const CONNECTOR_ILP_URL = process.env.CONNECTOR_ILP_URL || 'http://127.0.0.1:3000/ilp';
 const RELAY_WS_URL = process.env.RELAY_WS_URL || 'ws://127.0.0.1:7100';
-const RELAY_STORE_DESTINATION = 'g.terminator.relay.store';
-const TERMINATOR_PEER_ID = 'terminator';
+const RELAY_STORE_DESTINATION = 'g.connector.relay.store';
+const CONNECTOR_PEER_ID = 'connector';
 
 const PRICE = 1000n; // route price in connector-multichain.yaml
 const DEPOSIT = process.env.DEVNET_INITIAL_DEPOSIT || '100000000'; // 100 USDC (6dp)
@@ -97,7 +97,7 @@ function postRaw(url, body, headers) {
   });
 }
 
-// ── inner HTTP envelope the terminator reverse-proxies (POST /write {event}) ─
+// ── inner HTTP envelope the connector reverse-proxies (POST /write {event}) ─
 function buildHttpEnvelope(method, target, headers, bodyStr) {
   const CRLF = '\r\n';
   const head = [`${method} ${target} HTTP/1.1`, ...headers.map(([n, v]) => `${n}: ${v}`)].join(CRLF);
@@ -159,8 +159,8 @@ async function main() {
   sdk._sendAndConfirmTransaction = sendAndConfirmTransactionFactory({ rpc: sdk._rpc, rpcSubscriptions: patchedSubs });
   log('patched SDK RPC-subscriptions WS ->', RPC_WS);
 
-  // 1. Derive the channel PDA (client <-> terminator, USDC mint).
-  const { pda: channelPDA, bump } = SolanaPaymentChannelSDK.deriveChannelPDA(CLIENT_ADDR, TERMINATOR_SOL_ADDR, MINT, PROGRAM);
+  // 1. Derive the channel PDA (client <-> connector, USDC mint).
+  const { pda: channelPDA, bump } = SolanaPaymentChannelSDK.deriveChannelPDA(CLIENT_ADDR, CONNECTOR_SOL_ADDR, MINT, PROGRAM);
   const { pda: vaultPDA } = SolanaPaymentChannelSDK.deriveVaultPDA(channelPDA, PROGRAM);
   log('channelPDA', channelPDA, 'bump', bump, 'vaultPDA', vaultPDA);
 
@@ -173,7 +173,7 @@ async function main() {
     log('channel already exists on-chain, state =', existing.state, 'depositA', existing.depositA.toString(), 'depositB', existing.depositB.toString());
   } catch (e) {
     log('channel not found on-chain, opening:', e.message);
-    const r = await sdk.openChannel(signer, CLIENT_ADDR, TERMINATOR_SOL_ADDR, MINT, CHALLENGE_SECS);
+    const r = await sdk.openChannel(signer, CLIENT_ADDR, CONNECTOR_SOL_ADDR, MINT, CHALLENGE_SECS);
     openTx = r.txSignature;
     log('OPEN tx', openTx, 'pda', r.channelPDA);
   }
@@ -260,8 +260,8 @@ async function main() {
     expiresAt: new Date(Date.now() + 60000),
     data: envelope,
   };
-  const res = await postRaw(TERMINATOR_ILP_URL, serializePacket(prepare), {
-    'ilp-peer-id': TERMINATOR_PEER_ID,
+  const res = await postRaw(CONNECTOR_ILP_URL, serializePacket(prepare), {
+    'ilp-peer-id': CONNECTOR_PEER_ID,
     'ilp-payment-channel-claim': Buffer.from(JSON.stringify(claim), 'utf8').toString('base64'),
   });
   let isFulfill = false, outcome = `HTTP ${res.status}`;
@@ -289,7 +289,7 @@ async function main() {
   // 7. Negative: UNPAID POST (no claim header) must NOT fulfill.
   const unpaidEnv = buildStoreWriteEnvelope(signEphemeralKind1Event(`unpaid ${new Date().toISOString()}`));
   const unpaidPrepare = { type: PacketType.PREPARE, destination: RELAY_STORE_DESTINATION, amount: PRICE, expiresAt: new Date(Date.now() + 60000), data: unpaidEnv };
-  const ures = await postRaw(TERMINATOR_ILP_URL, serializePacket(unpaidPrepare), {});
+  const ures = await postRaw(CONNECTOR_ILP_URL, serializePacket(unpaidPrepare), {});
   let notFulfilled, udetail;
   if (ures.status === 200) {
     notFulfilled = ures.body.length > 0 && ures.body[0] !== PacketType.FULFILL;

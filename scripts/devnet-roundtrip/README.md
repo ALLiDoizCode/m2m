@@ -1,10 +1,10 @@
 # Multi-chain paid round-trip against the live devnet
 
-End-to-end proof that a **client → connector(terminator) → relay(app)** paid HTTP
+End-to-end proof that a **client → connector(connector) → relay(app)** paid HTTP
 write settles on-chain across **EVM, Solana, and Mina**, then the written Nostr
 event is read back from the relay's free-read WebSocket.
 
-Each run: open/deposit an on-chain payment channel toward the terminator → sign a
+Each run: open/deposit an on-chain payment channel toward the connector → sign a
 per-packet balance-proof claim → `POST /ilp` (an ILP PREPARE carrying an HTTP
 `POST /write` envelope) with the claim header → assert ILP **FULFILL** → assert
 the event is stored (WS read-back) → assert an **unpaid** POST gets x402 **402**.
@@ -16,7 +16,7 @@ lives in `../../packages/connector/test/integration/paid-roundtrip-client.ts`
 
 ## Topology
 
-A standalone connector runs as a paid reverse proxy ("terminator") in front of an
+A standalone connector runs as a paid reverse proxy ("connector") in front of an
 oblivious relay. Bring it up with the multichain config here:
 
 ```bash
@@ -26,7 +26,7 @@ docker run -d --name e2e-relay --network e2e-net \
   -e TOON_OBLIVIOUS_MODE=true -e TOON_BLS_PORT=3100 -e TOON_RELAY_PORT=7100 \
   -e TOON_CHAIN=none -e TOON_DEV_MODE=false -e TOON_MNEMONIC="<relay seed>" \
   -p 127.0.0.1:7100:7100 ghcr.io/toon-protocol/relay:latest
-# connector (terminator): /ilp on :3000; derives per-chain settlement keys from TOON_MNEMONIC
+# connector (connector): /ilp on :3000; derives per-chain settlement keys from TOON_MNEMONIC
 docker run -d --name e2e-connector --network e2e-net \
   -e CONFIG_FILE=/app/config/connector-multichain.yaml \
   -e TOON_MNEMONIC="<connector seed>" -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
@@ -35,8 +35,8 @@ docker run -d --name e2e-connector --network e2e-net \
 ```
 
 `connector-multichain.yaml` registers `evm` + `solana` + `mina` chainProviders and
-one terminated route (`g.terminator.relay` → the relay's `/write`) that settles on
-all three. The terminator's per-chain settlement addresses must match the keys
+one terminated route (`g.connector.relay` → the relay's `/write`) that settles on
+all three. The connector's per-chain settlement addresses must match the keys
 derived from its `TOON_MNEMONIC` (mnemonic signing mode).
 
 ## Run
@@ -48,8 +48,8 @@ cd ../../packages/connector   # for node_modules / dist resolution
 
 # EVM — env-driven; the EVM client channel is opened by the embedded node
 NODE_TLS_REJECT_UNAUTHORIZED=0 DEVNET_CHAIN=evm \
-  DEVNET_TERMINATOR_ADDR=0x... DEVNET_CLIENT_KEY=0x... DEVNET_CLIENT_ADDR=0x... \
-  TERMINATOR_ILP_URL=http://127.0.0.1:3000/ilp EVM_RPC_URL=https://evm-rpc.<devnet> \
+  DEVNET_CONNECTOR_ADDR=0x... DEVNET_CLIENT_KEY=0x... DEVNET_CLIENT_ADDR=0x... \
+  CONNECTOR_ILP_URL=http://127.0.0.1:3000/ilp EVM_RPC_URL=https://evm-rpc.<devnet> \
   FAUCET_URL=https://faucet.<devnet> RELAY_WS_URL=ws://127.0.0.1:7100 \
   npx ts-node --project packages/connector/tsconfig.json \
   ../../scripts/devnet-roundtrip/devnet-run.ts
@@ -60,7 +60,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=0 NODE_PATH=$PWD/node_modules \
   SOL_CLIENT_PRIV=<funded base58 keypair> \
   node ../../scripts/devnet-roundtrip/solana-roundtrip.cjs
 
-# Mina — needs a pre-deployed client↔terminator USDC PaymentChannel zkApp + the
+# Mina — needs a pre-deployed client↔connector USDC PaymentChannel zkApp + the
 # client funded with USDC; signs the o1js Schnorr claim via esm-deploy/sign-claim.mts.
 cd ../../scripts/devnet-roundtrip/esm-deploy && npm i   # one-time (o1js, ts-node)
 cd -
@@ -71,16 +71,16 @@ NODE_TLS_REJECT_UNAUTHORIZED=0 NODE_PATH=$PWD/node_modules \
 
 ## Env vars
 
-| Var                                                                   | Used by       | Meaning                                                                                              |
-| --------------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------- |
-| `DEVNET_CHAIN`                                                        | devnet-run.ts | `evm` (default) or `solana`                                                                          |
-| `DEVNET_CLIENT_KEY` / `DEVNET_CLIENT_ADDR` / `DEVNET_TERMINATOR_ADDR` | EVM           | client key+addr, terminator settlement addr                                                          |
-| `SOL_CLIENT_PRIV`                                                     | solana        | funded Solana keypair (base58) — **required**                                                        |
-| `MINA_CLIENT_PRIV`                                                    | mina          | funded Mina key (`EK…`) — **required**                                                               |
-| `DEVNET_SOLANA_RPC` / `DEVNET_SOLANA_WS`                              | solana        | RPC + the **separate** PubSub WS host (`solana-ws.*`, not `solana-rpc.*` — see connector #236)       |
-| `MINA_GRAPHQL` / `MINA_CHANNEL` / `MINA_TOKEN_ID` / `MINA_ESM_DIR`    | mina          | GraphQL (use `api.minascan.io`, not the `mina.*` proxy), channel zkApp, USDC tokenId, ESM helper dir |
-| `MINA_PREPARE_EXPIRY_MS`                                              | mina          | PREPARE expiry window (ms); default `300000` — covers the ~60s first-claim on-chain verify (#237)    |
-| `TERMINATOR_ILP_URL` / `RELAY_WS_URL`                                 | all           | terminator `/ilp` + relay WS                                                                         |
+| Var                                                                  | Used by       | Meaning                                                                                              |
+| -------------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------- |
+| `DEVNET_CHAIN`                                                       | devnet-run.ts | `evm` (default) or `solana`                                                                          |
+| `DEVNET_CLIENT_KEY` / `DEVNET_CLIENT_ADDR` / `DEVNET_CONNECTOR_ADDR` | EVM           | client key+addr, connector settlement addr                                                           |
+| `SOL_CLIENT_PRIV`                                                    | solana        | funded Solana keypair (base58) — **required**                                                        |
+| `MINA_CLIENT_PRIV`                                                   | mina          | funded Mina key (`EK…`) — **required**                                                               |
+| `DEVNET_SOLANA_RPC` / `DEVNET_SOLANA_WS`                             | solana        | RPC + the **separate** PubSub WS host (`solana-ws.*`, not `solana-rpc.*` — see connector #236)       |
+| `MINA_GRAPHQL` / `MINA_CHANNEL` / `MINA_TOKEN_ID` / `MINA_ESM_DIR`   | mina          | GraphQL (use `api.minascan.io`, not the `mina.*` proxy), channel zkApp, USDC tokenId, ESM helper dir |
+| `MINA_PREPARE_EXPIRY_MS`                                             | mina          | PREPARE expiry window (ms); default `300000` — covers the ~60s first-claim on-chain verify (#237)    |
+| `CONNECTOR_ILP_URL` / `RELAY_WS_URL`                                 | all           | connector `/ilp` + relay WS                                                                          |
 
 ## Caveats
 
