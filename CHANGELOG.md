@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.24.0](https://github.com/toon-protocol/connector/compare/v3.23.0...v3.24.0) (2026-06-23)
+
+### Features
+
+- **connector:** mnemonic signing mode for multi-chain settlement keys ([#233](https://github.com/toon-protocol/connector/issues/233)) ([3f63f4a](https://github.com/toon-protocol/connector/commit/3f63f4a0b92980410dedea47b53e225360b1ae22))
+
 ## [3.23.0](https://github.com/toon-protocol/connector/compare/v3.22.1...v3.23.0) (2026-06-23)
 
 ### Features
