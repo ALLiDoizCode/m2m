@@ -38,6 +38,9 @@ import Database from 'libsql';
 // the `pure` signing primitives and resolves under the connector's classic
 // `moduleResolution: node` (the `/pure` subpath only resolves under node16/bundler).
 import { finalizeEvent, generateSecretKey, getPublicKey, type Event } from 'nostr-tools';
+
+/** Kind for a NIP-90 Arweave blob-storage DVM request (store kind:5094). */
+const BLOB_STORAGE_REQUEST_KIND = 5094;
 import { ConnectorNode } from '../../src/core/connector-node';
 import { createLogger } from '../../src/utils/logger';
 import type { ConnectorConfig } from '../../src/config/types';
@@ -93,6 +96,12 @@ export const CONNECTOR_PEER_ID = 'connector';
 export const RELAY_STORE_DESTINATION = 'g.connector.relay.store';
 
 /**
+ * The ILP address the store route terminates under (the store deploy's
+ * connector.yaml route `g.connector.store`, + a `.blob` request label).
+ */
+export const STORE_DESTINATION = 'g.connector.store.blob';
+
+/**
  * Which chain the client settles on for this run: 'evm' (default) or 'solana'.
  * Selects the chainProvider + peer settlement address + channel-open chain. The
  * claim-signing and POST /ilp transport are chain-agnostic.
@@ -117,8 +126,10 @@ export interface PaidRoundTripClientOptions {
    *  `https://faucet.example.com`. Used to fund the client's EVM wallet. */
   faucetUrl: string;
   /** Relay free-read Nostr WS endpoint, e.g. `ws://127.0.0.1:7100` or
-   *  `wss://relay-ws.example.com`. Used to verify the stored write. */
-  relayWsUrl: string;
+   *  `wss://relay-ws.example.com`. Used to verify the stored write. Required only
+   *  for the relay round-trip (`runPaidRoundTrip`); the store round-trip
+   *  (`runPaidStoreRoundTrip`) verifies via the FULFILL body instead. */
+  relayWsUrl?: string;
   /** Local BTP server port for the client node (dead BTP url toward the peer is
    *  derived from this + 1; we never actually BTP-connect). Default: random. */
   localBtpPort?: number;
@@ -298,6 +309,68 @@ export function buildStoreWriteEnvelope(event: Event): Buffer {
   );
 }
 
+/**
+ * Sign an ephemeral kind:5094 Arweave blob-storage DVM request. Tag layout (per
+ * `@toon-protocol/core` arweave-storage): `['i', base64Blob, 'blob']`,
+ * `['bid', amount, 'usdc']`, `['output', contentType]` — the minimum
+ * `parseBlobStorageRequest` needs for a single-packet upload. Signed with the
+ * same `nostr-tools` crypto so the store backend's `verifyEvent` accepts it.
+ */
+export function signEphemeralKind5094Event(
+  blob: Buffer,
+  contentType = 'application/octet-stream',
+  bid = '10'
+): Event {
+  const sk = generateSecretKey();
+  return finalizeEvent(
+    {
+      kind: BLOB_STORAGE_REQUEST_KIND,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['i', blob.toString('base64'), 'blob'],
+        ['bid', bid, 'usdc'],
+        ['output', contentType],
+      ],
+      content: '',
+    },
+    sk
+  );
+}
+
+/** Build the `POST /store` envelope carrying a signed kind:5094 event. */
+export function buildStoreJobEnvelope(event: Event): Buffer {
+  return buildHttpEnvelope(
+    'POST',
+    '/store',
+    [
+      ['Host', 'store'],
+      ['Content-Type', 'application/json'],
+    ],
+    JSON.stringify({ event })
+  );
+}
+
+/**
+ * Extract the JSON body from a byte-faithful HTTP/1.1 response message (the
+ * connector serializes the store backend's `POST /store` response into the ILP
+ * FULFILL `data` via `encodeHttpResponse`). Returns the parsed object, or null
+ * if the body is absent / not JSON.
+ */
+export function parseHttpResponseBody(data: Buffer): Record<string, unknown> | null {
+  const delimiter = data.indexOf('\r\n\r\n');
+  if (delimiter === -1) return null;
+  const body = data
+    .subarray(delimiter + 4)
+    .toString('utf8')
+    .trim();
+  if (!body) return null;
+  try {
+    return JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // WS read verification (relay#24: EVENT[2] is a TOON-encoded STRING)
 // ────────────────────────────────────────────────────────────────────────────
@@ -377,8 +450,9 @@ export class PaidRoundTripClient {
   private claimSvc?: PerPacketClaimService;
   private tokenId?: string;
   private readonly opts: Required<
-    Pick<PaidRoundTripClientOptions, 'connectorIlpUrl' | 'evmRpcUrl' | 'faucetUrl' | 'relayWsUrl'>
+    Pick<PaidRoundTripClientOptions, 'connectorIlpUrl' | 'evmRpcUrl' | 'faucetUrl'>
   > & {
+    relayWsUrl?: string;
     localBtpPort: number;
     localPortBase: number;
     logLevel: 'debug' | 'info' | 'warn' | 'error';
@@ -628,11 +702,99 @@ export class PaidRoundTripClient {
     if (!isFulfill) return steps;
 
     // 5. WS-read verification.
+    if (!this.opts.relayWsUrl) {
+      throw new Error('runPaidRoundTrip() requires relayWsUrl (the relay free-read WS endpoint)');
+    }
     const stored = await verifyEventStoredViaWs(this.opts.relayWsUrl, event.id);
     steps.push({
       name: 'relay stored the write (WS free-read, id substring match)',
       ok: stored,
       detail: stored ? `found id: ${event.id}` : `id ${event.id} not seen before EOSE`,
+    });
+
+    return steps;
+  }
+
+  /**
+   * Execute the full paid round-trip against the STORE (Arweave DVM) deploy:
+   *   1. Sign a per-packet claim for the connector channel.
+   *   2. Build the inner `POST /store` envelope with a signed kind:5094 event.
+   *   3. POST the PREPARE (addressed `g.connector.store.blob`) + claim header.
+   *   4. Assert the response deserializes to FULFILL.
+   *   5. Decode the FULFILL `data` (the store backend's byte-faithful HTTP
+   *      response) and assert the body reports `accept:true` with a `txId`.
+   *
+   * The store backend (`DVM_BACKEND_MODE=http`) uploads to Arweave and returns
+   * `{ txId }`; the ephemeral free-tier yields a real tx id for ≤100KB blobs with
+   * no funded wallet. Returns the ordered step results.
+   */
+  async runPaidStoreRoundTrip(
+    blob: Buffer = Buffer.from('hello toon store')
+  ): Promise<ProbeStep[]> {
+    if (!this.claimSvc || !this.tokenId) {
+      throw new Error('runPaidStoreRoundTrip() called before start() completed');
+    }
+    const steps: ProbeStep[] = [];
+
+    // 1. Sign claim (route price is '10' in the store deploy's connector.yaml).
+    const claim = await this.claimSvc.generateClaimForPacket(CONNECTOR_PEER_ID, this.tokenId, 10n);
+    steps.push({
+      name: 'sign per-packet claim',
+      ok: claim !== null,
+      detail: claim ? undefined : 'generateClaimForPacket returned null (no channel?)',
+    });
+    if (!claim) return steps;
+
+    // 2. Build the inner POST /store envelope with a signed kind:5094 event.
+    const event = signEphemeralKind5094Event(blob);
+    const envelope = buildStoreJobEnvelope(event);
+
+    // 3. POST the PREPARE + claim header.
+    const prepare: ILPPreparePacket = {
+      type: PacketType.PREPARE,
+      destination: STORE_DESTINATION,
+      amount: 10n,
+      expiresAt: new Date(Date.now() + 60_000),
+      data: envelope,
+    };
+    const res = await postRaw(this.opts.connectorIlpUrl, serializePacket(prepare), {
+      'ilp-peer-id': CONNECTOR_PEER_ID,
+      'ilp-payment-channel-claim': claim.protocolData.data.toString('base64'),
+    });
+
+    // 4. Assert FULFILL + capture the FULFILL data (the store's HTTP response).
+    let isFulfill = false;
+    let fulfillData: Buffer | undefined;
+    let outcomeDetail = `HTTP ${res.status}`;
+    if (res.status === 200 && res.body.length > 0) {
+      try {
+        const packet = deserializePacket(res.body);
+        isFulfill = packet.type === PacketType.FULFILL;
+        if (isFulfill) fulfillData = (packet as { data: Buffer }).data;
+        outcomeDetail = `HTTP 200, ILP type ${res.body[0]}`;
+      } catch (err) {
+        outcomeDetail = `HTTP 200 but undeserializable: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+      }
+    }
+    steps.push({
+      name: 'paid POST /ilp round-trips to FULFILL',
+      ok: isFulfill,
+      detail: outcomeDetail,
+    });
+    if (!isFulfill) return steps;
+
+    // 5. Decode the store backend's HTTP response from the FULFILL data.
+    const body = fulfillData ? parseHttpResponseBody(fulfillData) : null;
+    const txId = body && typeof body['txId'] === 'string' ? (body['txId'] as string) : undefined;
+    const accepted = body?.['accept'] === true;
+    steps.push({
+      name: 'store backend uploaded the blob (FULFILL body has txId)',
+      ok: accepted && !!txId,
+      detail: txId
+        ? `txId=${txId}`
+        : `body=${body ? JSON.stringify(body).slice(0, 160) : '(unparseable)'}`,
     });
 
     return steps;
@@ -699,6 +861,67 @@ export class PaidRoundTripClient {
       detail = `HTTP 200, ILP type ${res.body[0]} (REJECT=${PacketType.REJECT})`;
     } else {
       // Any non-2xx is also a valid "not accepted" outcome.
+      notFulfilled = res.status >= 400;
+      detail = `HTTP ${res.status}`;
+    }
+    steps.push({ name: 'UNPAID POST /ilp is REJECTED (not FULFILLED)', ok: notFulfilled, detail });
+
+    return steps;
+  }
+
+  /**
+   * Store-deploy negatives (mirror of {@link runNegatives} for `g.connector.store`):
+   *   (a) Optional: the store backend (3300) must NOT answer 2xx publicly.
+   *   (b) An UNPAID POST /ilp (no claim header) to the store is NOT FULFILLED.
+   *
+   * @param storeProbeUrl Optional HTTP(S) URL that SHOULD NOT resolve to a
+   *   working store backend (e.g. `http://localhost:3300/store`). If reachable
+   *   with 2xx, the check fails. Omit to skip the posture sub-check.
+   */
+  async runStoreNegatives(storeProbeUrl?: string): Promise<ProbeStep[]> {
+    const steps: ProbeStep[] = [];
+
+    // (a) Optional: a public store backend surface must NOT answer 2xx.
+    if (storeProbeUrl) {
+      let reachable2xx = false;
+      let detail = 'no public store backend (connection refused / DNS failure) — expected';
+      try {
+        const r = await fetch(storeProbeUrl, {
+          method: 'GET',
+          signal: AbortSignal.timeout(5_000),
+        });
+        reachable2xx = r.ok;
+        detail = `unexpectedly reachable: HTTP ${r.status}`;
+      } catch {
+        // Connection refused / DNS failure / timeout — the desired posture.
+      }
+      steps.push({
+        name: 'store backend (3300) NOT publicly reachable',
+        ok: !reachable2xx,
+        detail,
+      });
+    }
+
+    // (b) UNPAID POST /ilp to the store must not FULFILL.
+    const envelope = buildStoreJobEnvelope(
+      signEphemeralKind5094Event(Buffer.from(`unpaid attempt ${new Date().toISOString()}`))
+    );
+    const prepare: ILPPreparePacket = {
+      type: PacketType.PREPARE,
+      destination: STORE_DESTINATION,
+      amount: 10n,
+      expiresAt: new Date(Date.now() + 60_000),
+      data: envelope,
+    };
+    // No `ilp-payment-channel-claim` header — this is the unpaid attempt.
+    const res = await postRaw(this.opts.connectorIlpUrl, serializePacket(prepare), {});
+
+    let notFulfilled: boolean;
+    let detail: string;
+    if (res.status === 200) {
+      notFulfilled = res.body.length > 0 && res.body[0] !== PacketType.FULFILL;
+      detail = `HTTP 200, ILP type ${res.body[0]} (REJECT=${PacketType.REJECT})`;
+    } else {
       notFulfilled = res.status >= 400;
       detail = `HTTP ${res.status}`;
     }
