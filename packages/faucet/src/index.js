@@ -372,7 +372,10 @@ app.post('/api/mina/request', (req, res) => {
         try {
           usdc = await minaUsdcMinter.mint(address);
         } catch (mintErr) {
-          console.error('  ⚠️  Mina USDC mint failed (native drip still succeeded):', mintErr.message);
+          console.error(
+            '  ⚠️  Mina USDC mint failed (native drip still succeeded):',
+            mintErr.message
+          );
           usdc = { error: 'USDC mint failed', message: mintErr.message };
         }
       } else {
