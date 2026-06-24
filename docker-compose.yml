@@ -188,6 +188,17 @@ services:
     security_opt:
       - seccomp=unconfined
     restart: unless-stopped
+    # Cap the json-file logs so a chatty or crash-looping validator can't fill the
+    # devnet box's disk via /var/lib/docker (the ledger is bounded separately by
+    # --limit-ledger-size in entrypoint.sh).
+    logging:
+      driver: json-file
+      options:
+        max-size: '50m'
+        max-file: '3'
+    # NB: /health returning "ok" only proves RPC is up — it does NOT prove the
+    # validator is still producing blocks. A disk-full validator freezes its slot
+    # yet stays "healthy" here; monitor getSlot advancing (and disk) out-of-band.
     healthcheck:
       test: ['CMD-SHELL', 'curl -sf http://localhost:8899/health | grep -q ok']
       interval: 10s
