@@ -30,13 +30,14 @@ done
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
 DOMAIN="${DOMAIN:-devnet.toonprotocol.dev}"
 BRANCH="${BRANCH:-feat/devnet-multi-node}"
-# Distinct settlement identity for the store (DVM) box connector. It PEERS with
-# the apex, so its keys MUST differ from the apex TOON_MNEMONIC — else the
-# bilateral peer channel self-settles to 0xC0E55…. Devnet throwaway seed;
-# override via env. Derived (acct 0): evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e,
-# sol 4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt,
-# mina B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt.
-STORE_TOON_MNEMONIC="${STORE_TOON_MNEMONIC:-portion symbol pencil track twenty vault love raccoon rigid gravity glide aerobic}"
+# STORE_TOON_MNEMONIC — the store (DVM) box connector's settlement seed. The
+# store box PEERS with the apex, so this MUST be set (env-required; guarded in the
+# `up` and `store` deploy paths) and MUST differ from the apex TOON_MNEMONIC, or
+# the bilateral peer channel self-settles to 0xC0E55…. NOT committed. Its acct-0
+# addresses (filled into the connector.yaml peer/route entries) are:
+#   evm  0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e
+#   sol  4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt
+#   mina B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt
 REPO_URL="https://github.com/toon-protocol/connector.git"
 LINODE_API="https://api.linode.com/v4"
 PORKBUN_API="https://api.porkbun.com/api/json/v3"
@@ -199,6 +200,7 @@ case "${1:-help}" in
 
 up)
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
+  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC — the store box's DISTINCT settlement seed (must differ from the apex TOON_MNEMONIC; expected acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e)}"
   echo "==> [1/4] Provision boxes"
   for key in evm sol mina toon store; do create_box "$key"; done
   for key in evm sol mina toon store; do wait_box_running "${NODE_LABELS[$key]}"; done
@@ -255,6 +257,7 @@ store)
   # store node without `up` re-running bootstrap on the live chain/toon boxes
   # (which would re-pull images and re-provision the Mina lightnet).
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
+  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC — the store box's DISTINCT settlement seed (must differ from the apex TOON_MNEMONIC; expected acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e)}"
   echo "==> [1/3] Provision store box"
   create_box store
   wait_box_running "${NODE_LABELS[store]}"

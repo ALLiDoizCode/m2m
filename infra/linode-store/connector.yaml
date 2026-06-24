@@ -77,8 +77,12 @@ chainProviders:
 # path (g.proxy.relay.store) — added in Stage 3.
 peers:
   - id: toon-apex
+    # BTP dial target — the apex public edge (nginx upgrades ws → connector:3000).
     url: wss://proxy.devnet.toonprotocol.dev
     relation: peer
+    # No-auth BTP (devnet default). Prod: matching BTP_PEER_TOON_APEX_SECRET on
+    # both ends + BTP_ALLOW_NOAUTH=false.
+    authToken: ''
     chain: evm:31337
     # Apex (toon box) settlement address, derived from the demo TOON_MNEMONIC.
     settlementAddress: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'

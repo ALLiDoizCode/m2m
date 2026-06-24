@@ -76,8 +76,12 @@ peers:
   # run a DISTINCT mnemonic from this apex — otherwise the channel settles to the
   # same address (0xC0E55…) and the "fee" is self-to-self.
   - id: store-box
+    # BTP dial target — the store box's public edge (nginx upgrades ws → connector:3000).
     url: wss://proxy.store.devnet.toonprotocol.dev
     relation: peer
+    # No-auth BTP (devnet default: BTP_ALLOW_NOAUTH on). For prod, keep '' here and
+    # set a matching BTP_PEER_STORE_BOX_SECRET env on both ends + BTP_ALLOW_NOAUTH=false.
+    authToken: ''
     chain: evm:31337
     # store-box distinct identity, derived from STORE_TOON_MNEMONIC (acct 0).
     settlementAddress: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
