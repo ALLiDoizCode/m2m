@@ -31,12 +31,15 @@ services:
       start_period: 15s
 
   store:
-    # Arweave DVM (kind:5094). Built from store repo Dockerfile.dvm, published by
-    # store/.github/workflows/publish-dvm-image.yml. Standalone HTTP mode:
-    #   3300 — HTTP ILP handler (connector free-forwards paid packets here)
-    #   3400 — BLS / health
-    image: ghcr.io/toon-protocol/dvm:latest
+    # Arweave store/DVM (kind:5094). Built from store repo Dockerfile.store,
+    # published as ghcr.io/toon-protocol/store (renamed from dvm). HTTP-backend
+    # mode (DVM_BACKEND_MODE=http): a payment-oblivious POST /store backend on
+    # 3300 that the connector RouteTermination reverse-proxies to — matching the
+    # connector's payment-proxy model (closes the raw-TOON vs HTTP-envelope gap).
+    #   3300 — POST /store HTTP backend       3400 — BLS / health
+    image: ghcr.io/toon-protocol/store:latest
     environment:
+      DVM_BACKEND_MODE: http
       BLS_PORT: '3400'
       HANDLER_PORT: '3300'
       NODE_TLS_REJECT_UNAUTHORIZED: '0'
