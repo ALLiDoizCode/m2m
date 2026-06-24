@@ -89,6 +89,15 @@ peers:
     settlementAddress: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
 
 routes:
+  # Upstream/default route: anything under g.proxy this box doesn't terminate
+  # locally goes to the apex peer. Needed so the DVM can publish its kind:10032
+  # to g.proxy.relay (the relay) — without it the connector returns F02 "no route".
+  # Longest-prefix: g.proxy.store / g.proxy.relay.store (below) are more specific
+  # and still terminate here; g.proxy.relay and the rest forward to the apex.
+  - prefix: g.proxy
+    nextHop: toon-apex
+    priority: 10
+
   # Direct path: clients paying g.proxy.store settle on this box.
   - prefix: g.proxy.store
     nextHop: toon-devnet-store
