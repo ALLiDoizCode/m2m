@@ -157,6 +157,13 @@ export interface X402GreetingContext {
   resourceMimeType?: string;
   /** Optional `error` string explaining why payment is required. */
   error?: string;
+  /**
+   * Full absolute URL of the connector's `POST /ilp` endpoint (e.g.
+   * `https://proxy.example.com/ilp`). When provided, emitted as `httpEndpoint`
+   * on the top-level `toon-channel` accepts entry so TOON-aware clients can
+   * locate the payment endpoint without parsing `extra`.
+   */
+  httpEndpoint?: string;
 }
 
 /**
@@ -204,7 +211,7 @@ export function buildX402Greeting(
     chains: termination.chains,
     settlementAddresses: termination.settlementAddresses,
   };
-  accepts.push({
+  const toonEntry: X402PaymentRequirements & { httpEndpoint?: string } = {
     scheme: TOON_CHANNEL_SCHEME,
     // The upgrade is multi-chain and not bound to a single CAIP-2 network; we
     // surface the connector's ILP address here so the entry is self-describing.
@@ -213,7 +220,11 @@ export function buildX402Greeting(
     payTo: termination.ilpAddress,
     maxTimeoutSeconds: X402_DEFAULT_MAX_TIMEOUT_SECONDS,
     extra: toonExtra as unknown as Record<string, unknown>,
-  });
+  };
+  // Hoist the POST /ilp URL to the top level so clients can read it without
+  // traversing `extra` (which is a connector-specific extension object).
+  if (ctx.httpEndpoint) toonEntry.httpEndpoint = ctx.httpEndpoint;
+  accepts.push(toonEntry);
 
   const resource: X402ResourceInfo = { url: ctx.resourceUrl };
   if (ctx.resourceDescription) resource.description = ctx.resourceDescription;

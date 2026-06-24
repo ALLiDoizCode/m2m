@@ -2381,7 +2381,7 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
   /**
    * GET /admin/earnings.json
    *
-   * Per-peer per-asset earnings projection for the Townhouse node-operator
+   * Per-peer per-asset earnings projection for the connector node-operator
    * dashboard (Story 37.4). Sources:
    *   - Per-asset cumulative volume: AccountManager.getPeerVolumeTotals()
    *     reads raw TigerBeetle `debits_posted` / `credits_posted` counters

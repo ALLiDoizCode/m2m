@@ -23,7 +23,7 @@ describe('Admin API — relation/route admission + persistence', () => {
   let relationByPeer: Map<string, PeerRelation>;
 
   // The connector's own address: a route that terminates locally (nextHop === nodeId).
-  const selfRoute = { prefix: 'g.townhouse', nextHop: 'test-node', priority: 0 };
+  const selfRoute = { prefix: 'g.connector', nextHop: 'test-node', priority: 0 };
 
   beforeEach(async () => {
     relationByPeer = new Map();
@@ -96,8 +96,8 @@ describe('Admin API — relation/route admission + persistence', () => {
       .send({ id: 'town', url: 'ws://town:3000', authToken: 't', relation: 'child' });
 
     expect(res.status).toBe(201);
-    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.townhouse.town', 'town', 0);
-    expect(res.body.routes).toContain('g.townhouse.town');
+    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.town', 'town', 0);
+    expect(res.body.routes).toContain('g.connector.town');
   });
 
   it('accepts a child peer whose route is under the connector address', async () => {
@@ -108,11 +108,11 @@ describe('Admin API — relation/route admission + persistence', () => {
         url: 'ws://town:3000',
         authToken: 't',
         relation: 'child',
-        routes: [{ prefix: 'g.townhouse.town' }],
+        routes: [{ prefix: 'g.connector.town' }],
       });
 
     expect(res.status).toBe(201);
-    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.townhouse.town', 'town', 0);
+    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.town', 'town', 0);
   });
 
   it('writes the peer through to the registry store on registration', async () => {

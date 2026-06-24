@@ -1,0 +1,106 @@
+# =============================================================================
+# relay-edge — a real Nostr RELAY deployed BEHIND TOON (the canonical deploy)
+# =============================================================================
+# A self-contained deploy of the TOON connector as a PAYMENT PROXY (the
+# "nginx-for-payments" edge) in front of a real, payment-oblivious Nostr RELAY.
+# The connector monetizes WRITES; READS are free and hit the relay's WS directly.
+#
+#   payer ──POST /ilp──▶ connector ──POST /write──▶ relay:3100  (paid store; PRIVATE)
+#   reader ──wss REQ (free)───────────────────────▶ relay:7100  (Nostr reads; PUBLIC)
+#
+# Caddy is the ONLY public surface (80/443) and provisions TRUSTED Let's Encrypt
+# certs for two vhosts:
+#   - connector.toonprotocol.xyz  → connector:3000   (paid POST /ilp edge)
+#   - relay-ws.toonprotocol.xyz   → relay:7100        (free Nostr read WS)
+#
+# PRIVACY INVARIANT (enforced by construction):
+#   - relay :3100 (paid-write store)  → NEVER host-published; only connector:3100
+#   - connector :3000 / :8080 / admin :8081 → NEVER host-published; only via Caddy
+#   - relay :7100 (free reads) → reachable ONLY through Caddy's relay-ws vhost
+#   The only ports bound on the host are Caddy's 80/443.
+# =============================================================================
+
+services:
+  # ── The payment proxy ───────────────────────────────────────────────────────
+  # Image: the published connector. Override with CONNECTOR_IMAGE to pin a tag.
+  # NO host `ports:` — reachable only as connector:3000 over the compose network
+  # (via Caddy). This is what keeps the paid edge + admin API private.
+  connector:
+    image: ${CONNECTOR_IMAGE:-ghcr.io/toon-protocol/connector:latest}
+    environment:
+      CONFIG_FILE: /app/config/connector.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # "Drop in your seedphrase": the connector's on-chain settlement key is
+      # derived from this BIP-39 mnemonic at boot (overwrites connector.yaml's
+      # keyId). Leave empty to use the keyless anvil-account-0 devnet fallback.
+      TOON_MNEMONIC: ${TOON_MNEMONIC:-}
+      # The shared devnet serves a SELF-SIGNED cert — devnet-only shortcut so the
+      # connector's RPC/faucet calls don't fail TLS verification. DEVNET-ONLY.
+      NODE_TLS_REJECT_UNAUTHORIZED: ${NODE_TLS_REJECT_UNAUTHORIZED:-0}
+    volumes:
+      - ./connector.yaml:/app/config/connector.yaml:ro
+    expose:
+      - '3000' # POST /ilp edge — reachable only as connector:3000 (via Caddy)
+    depends_on:
+      relay:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The oblivious relay (real Nostr relay) ──────────────────────────────────
+  # Published relay image (relay#26 "oblivious mode"). Its entrypoint is the
+  # `relay` CLI, which runs as a standalone oblivious read/write relay. The
+  # paid-write HTTP store port (3100, POST /write) is NOT published — only the
+  # connector dials it over the compose network (relay:3100), which enforces the
+  # privacy invariant. Its Nostr WS read port (7100) is NOT host-published either:
+  # free reads reach it ONLY through Caddy's relay-ws vhost.
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:latest}
+    environment:
+      TOON_OBLIVIOUS_MODE: 'true'
+      TOON_BLS_PORT: '3100' # paid-write HTTP store (POST /write) — PRIVATE
+      TOON_RELAY_PORT: '7100' # free-read Nostr WS — public via Caddy only
+      TOON_CHAIN: 'none' # oblivious forces relay-only; explicit for safety
+      # The relay CLI REQUIRES an identity key to boot (this is IDENTITY, not
+      # money). Generate an ephemeral 32-byte hex into RELAY_NOSTR_SECRET_KEY in
+      # .env. The compose maps RELAY_* → the image's NOSTR_SECRET_KEY / TOON_DEV_MODE.
+      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:?set RELAY_NOSTR_SECRET_KEY in .env (32-byte hex)}
+      # Enforce Nostr signature verification on writes (public deploy → false).
+      TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
+    expose:
+      - '3100' # paid-write store — PRIVATE (connector dials relay:3100)
+      - '7100' # free-read Nostr WS — public ONLY via Caddy relay-ws vhost
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── The public edge (Caddy auto-TLS) ────────────────────────────────────────
+  # The ONLY public surface. Auto-provisions TRUSTED Let's Encrypt certs for both
+  # vhosts (the domains resolve to this box; 80/443 are open) and reverse-proxies:
+  #   connector.toonprotocol.xyz → connector:3000  (paid /ilp)
+  #   relay-ws.toonprotocol.xyz  → relay:7100       (free WS; upgrade auto-handled)
+  caddy:
+    image: caddy:2
+    depends_on:
+      - connector
+      - relay
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp' # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # persists issued certs across restarts
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  default:
+    name: relay_edge_net

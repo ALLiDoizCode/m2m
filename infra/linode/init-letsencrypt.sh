@@ -33,8 +33,13 @@ set +a
 
 DC=(docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml)
 # CERT_PRIMARY / CERT_DOMAINS can be set in .env to customise per-box issuance
-# (e.g. an EVM-only box only needs evm-rpc.DOMAIN). Fallback = the original
-# all-in-one monolithic list.
+# (e.g. an EVM-only box only needs evm-rpc.DOMAIN) for the multi-node layout.
+# Fallback = the chains-only list below.
+#
+# Chains-only default: the cert covers ONLY the chain subdomains. The connector/relay
+# app edge deploys separately (deploy/relay-edge + deploy/pay-edge) with its own TLS,
+# so connector.${DOMAIN}/relay-ws.${DOMAIN} are NOT requested here — including SANs
+# whose A-records this box never creates would fail HTTP-01 and sink the whole cert.
 PRIMARY="${CERT_PRIMARY:-evm-rpc.${DOMAIN}}"
 if [ -n "${CERT_DOMAINS:-}" ]; then
   read -ra DOMAINS <<< "$CERT_DOMAINS"

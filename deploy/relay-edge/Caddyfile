@@ -1,0 +1,17 @@
+# relay-edge public edge — auto-TLS via Let's Encrypt.
+# Both domains resolve to this box and 80/443 are open, so Caddy provisions
+# TRUSTED certs automatically and terminates TLS for two vhosts.
+
+# Paid edge: ILP-over-HTTP paid WRITES enter here and are reverse-proxied to the
+# connector's (unpublished) :3000 edge. The connector terminates the payment and
+# forwards POST /write to the relay's private store port.
+connector.toonprotocol.xyz {
+	reverse_proxy connector:3000
+}
+
+# Free reads: the relay's Nostr WS read port. Caddy's reverse_proxy auto-handles
+# the WebSocket upgrade, so a Nostr client points at wss://relay-ws.toonprotocol.xyz.
+# This is the ONLY public path to the relay; its store port (3100) is never exposed.
+relay-ws.toonprotocol.xyz {
+	reverse_proxy relay:7100
+}

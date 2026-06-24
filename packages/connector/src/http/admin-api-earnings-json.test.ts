@@ -1,7 +1,7 @@
 /**
  * Unit Tests for Admin API /admin/earnings.json Endpoint (Story 37.4)
  *
- * Covers AC 1–8 of the Townhouse per-peer earnings projection.
+ * Covers AC 1–8 of the Connector per-peer earnings projection.
  *
  * Testing strategy:
  * - Use a real in-memory SQLite for ClaimReceiver so the SQL paths execute.

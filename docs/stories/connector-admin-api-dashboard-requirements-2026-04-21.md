@@ -4,13 +4,13 @@
 **Audience:** `@toon-protocol/connector` maintainers
 **Date:** 2026-04-21
 **Status:** Proposed — awaiting connector-team review
-**Consumer:** `packages/townhouse` (node-operator dashboard) in the `town` repo
+**Consumer:** `packages/connector` (node-operator dashboard) in the `town` repo
 
 ---
 
 ## 1. Context
 
-Epic 21 (Townhouse) builds a node-operator dashboard that binds to `127.0.0.1:9400` and surfaces the live state of the operator's local Town / Mill / DVM nodes. The dashboard reads **exclusively** from the connector's admin API — the dashboard never talks to the BLS containers directly for metrics.
+Epic 21 (Connector) builds a node-operator dashboard that binds to `127.0.0.1:9400` and surfaces the live state of the operator's local Town / Mill / DVM nodes. The dashboard reads **exclusively** from the connector's admin API — the dashboard never talks to the BLS containers directly for metrics.
 
 Story 21.8 (Fastify REST + WebSocket Metrics API) exposes five routes to the dashboard SPA:
 
@@ -87,9 +87,9 @@ Verified from `packages/connector/src/http/` in the connector repo at `/home/jon
 
 ---
 
-## 3. What `@toon-protocol/connector`'s current `ConnectorAdminClient` wrapper in townhouse expects
+## 3. What `@toon-protocol/connector`'s current `ConnectorAdminClient` wrapper in connector expects
 
-The townhouse wrapper at `packages/townhouse/src/connector/admin-client.ts` (added in Story 21.3) today treats `/metrics` as JSON with this strict shape:
+The connector wrapper at `packages/connector/src/connector/admin-client.ts` (added in Story 21.3) today treats `/metrics` as JSON with this strict shape:
 
 ```ts
 interface MetricsResponse {
@@ -99,7 +99,7 @@ interface MetricsResponse {
 }
 ```
 
-**This is incorrect against the real connector.** The connector's `/metrics` ships Prometheus text format, not JSON. The townhouse wrapper's `response.json()` call will either throw on the `text/plain; version=0.0.4` content-type, or silently receive garbage. This is a pre-existing defect in Story 21.3 that 21.8 inherited.
+**This is incorrect against the real connector.** The connector's `/metrics` ships Prometheus text format, not JSON. The connector wrapper's `response.json()` call will either throw on the `text/plain; version=0.0.4` content-type, or silently receive garbage. This is a pre-existing defect in Story 21.3 that 21.8 inherited.
 
 ---
 
@@ -175,7 +175,7 @@ The dashboard needs to distinguish three states:
 
 The current implementation at `admin-api.ts:1392` returns `503` when `accountManager` is not wired up. Please confirm:
 
-- Is `accountManager` wired up in the standalone connector image that townhouse runs? (If not, townhouse can't rely on this endpoint.)
+- Is `accountManager` wired up in the standalone connector image that connector runs? (If not, connector can't rely on this endpoint.)
 - What status does the endpoint return for an **unknown peerId** vs. a **known peerId with no activity**?
 
 If the current behavior collapses both cases into `503` or `500`, please separate them.
@@ -204,7 +204,7 @@ Either is strictly additive and doesn't change existing endpoints. If neither is
 
 ## 7. Town-side follow-up regardless of connector changes
 
-These are fixes the town team will make in `packages/townhouse/src/connector/admin-client.ts` **independently** of this request, so the connector team can schedule on their own cadence:
+These are fixes the town team will make in `packages/connector/src/connector/admin-client.ts` **independently** of this request, so the connector team can schedule on their own cadence:
 
 1. Fix the `getMetrics()` JSON-parsing bug — detect `text/plain` Prometheus output and either parse it or route to the new `/admin/metrics.json` once it lands.
 2. Extend `ConnectorAdminClient` with wrappers for `/admin/balances/:peerId`, `/admin/channels` (list + filter by peerId), `/admin/channels/:channelId`. These already exist on the connector; the wrapper class is just catching up.
@@ -226,13 +226,13 @@ Follow-up tracking will be a new story in Epic 21 (tentatively `21.8.5 — Conne
 
 ## 9. Contact
 
-- **Town-side owner of this doc:** Epic 21 (Townhouse). Source of truth lives in the `town` repo at `/home/jonathan/Documents/town`.
+- **Town-side owner of this doc:** Epic 21 (Connector). Source of truth lives in the `town` repo at `/home/jonathan/Documents/town`.
   - Story file: `_bmad-output/implementation-artifacts/21-8-fastify-rest-websocket-metrics-api.md` (§ "Review Findings" captures the decision that produced this ask)
   - Epic: `_bmad-output/planning-artifacts/epics.md` § Epic 21
   - Relevant town source:
-    - `packages/townhouse/src/api/routes/nodes.ts`
-    - `packages/townhouse/src/api/routes/metrics-ws.ts`
-    - `packages/townhouse/src/connector/admin-client.ts`
+    - `packages/connector/src/api/routes/nodes.ts`
+    - `packages/connector/src/api/routes/metrics-ws.ts`
+    - `packages/connector/src/connector/admin-client.ts`
 - **Connector-side files referenced in §§2 & 5** (paths in this repo):
   - `packages/connector/src/http/admin-api.ts` — existing `/admin/*` routes
   - `packages/connector/src/http/health-server.ts` — Prometheus middleware mount point (§5.1 adapter target)

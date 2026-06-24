@@ -44,7 +44,7 @@ const createMockLogger = (): jest.Mocked<Logger> =>
 const prepare = (): ILPPreparePacket => ({
   type: PacketType.PREPARE,
   amount: BigInt(1000),
-  destination: 'g.townhouse.town',
+  destination: 'g.connector.town',
   expiresAt: new Date(Date.now() + 10000),
   data: Buffer.from('hi'),
 });
@@ -156,7 +156,7 @@ describe('ILP-over-HTTP + BTP upgrade (shared listener)', () => {
     btpServer = new BTPServer(logger, packetHandler);
     const adapter = new IlpHttpAdapter({
       logger,
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare: (p, id, pd) => packetHandler.handlePreparePacket(p, id, pd),
     });
     btpServer.setIlpHttpHandler((req, res) => adapter.handle(req, res));
@@ -195,7 +195,7 @@ describe('ILP-over-HTTP + BTP upgrade (shared listener)', () => {
     });
     expect(result.type).toBe(PacketType.FULFILL);
     expect(packetHandler.handlePreparePacket).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: 'g.townhouse.town' }),
+      expect.objectContaining({ destination: 'g.connector.town' }),
       'p1'
     );
   });

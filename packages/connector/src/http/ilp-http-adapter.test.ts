@@ -45,7 +45,7 @@ const createMockLogger = (): jest.Mocked<Logger> =>
 const createPrepare = (): ILPPreparePacket => ({
   type: PacketType.PREPARE,
   amount: BigInt(1000),
-  destination: 'g.townhouse.town',
+  destination: 'g.connector.town',
   expiresAt: new Date(Date.now() + 10000),
   data: Buffer.from('hello'),
 });
@@ -109,7 +109,7 @@ describe('IlpHttpAdapter', () => {
     const handlePrepare = jest.fn(async () => fulfill);
     const adapter = new IlpHttpAdapter({
       logger: createMockLogger(),
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare,
       validateClaim,
     });
@@ -133,7 +133,7 @@ describe('IlpHttpAdapter', () => {
     expect(claimEntry).toBeDefined();
     expect(claimEntry!.contentType).toBe(BTP_CLAIM_PROTOCOL.CONTENT_TYPE);
     expect(claimEntry!.data.toString('utf8')).toBe(claimJson);
-    expect(ilpPacket.destination).toBe('g.townhouse.town');
+    expect(ilpPacket.destination).toBe('g.connector.town');
     expect(peerId).toBe('connector-b'); // authenticated via header (no-auth secret)
 
     // Response is 200 + the serialized FULFILL in the body (RFC-0035).
@@ -152,7 +152,7 @@ describe('IlpHttpAdapter', () => {
     });
     const adapter = new IlpHttpAdapter({
       logger: createMockLogger(),
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare: jest.fn(async () => fulfill),
       validateClaim,
       recordClaim,
@@ -178,7 +178,7 @@ describe('IlpHttpAdapter', () => {
     const recordClaim = jest.fn(async () => {});
     const adapter = new IlpHttpAdapter({
       logger: createMockLogger(),
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare: jest.fn(async () => fulfill),
       recordClaim,
     });
@@ -190,14 +190,14 @@ describe('IlpHttpAdapter', () => {
     const reject: ILPRejectPacket = {
       type: PacketType.REJECT,
       code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
-      triggeredBy: 'g.townhouse',
+      triggeredBy: 'g.connector',
       message: 'No payment channel claim attached to packet',
       data: Buffer.alloc(0),
     };
     const handlePrepare = jest.fn(async () => fulfill);
     const adapter = new IlpHttpAdapter({
       logger: createMockLogger(),
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare,
       validateClaim: jest.fn(async () => reject),
     });
@@ -217,7 +217,7 @@ describe('IlpHttpAdapter', () => {
     const validateClaim = jest.fn(async () => null);
     const adapter = new IlpHttpAdapter({
       logger: createMockLogger(),
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare: jest.fn(async () => fulfill),
       validateClaim,
     });
@@ -235,7 +235,7 @@ describe('IlpHttpAdapter', () => {
     const handlePrepare = jest.fn(async () => fulfill);
     const adapter = new IlpHttpAdapter({
       logger: createMockLogger(),
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare,
       validateClaim: jest.fn(async () => null),
     });
@@ -256,7 +256,7 @@ describe('IlpHttpAdapter', () => {
   it('returns HTTP 400 for a malformed ILP body', async () => {
     const adapter = new IlpHttpAdapter({
       logger: createMockLogger(),
-      nodeId: 'g.townhouse',
+      nodeId: 'g.connector',
       handlePrepare: jest.fn(async () => fulfill),
     });
     const req = new MockReq(Buffer.from([0xff, 0x00, 0x01]));
@@ -280,7 +280,7 @@ describe('IlpHttpAdapter', () => {
       upstream: 'http://127.0.0.1:8080',
       price: '1000', // atomic nano-USDC; must be advertised byte-identical
       chains: ['evm', 'solana', 'mina'],
-      ilpAddress: 'g.townhouse.town',
+      ilpAddress: 'g.connector.town',
       settlementAddresses: {
         evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28',
         solana: '7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2',
@@ -297,7 +297,7 @@ describe('IlpHttpAdapter', () => {
       const validateClaim = jest.fn(async () => null);
       const adapter = new IlpHttpAdapter({
         logger: createMockLogger(),
-        nodeId: 'g.townhouse',
+        nodeId: 'g.connector',
         handlePrepare,
         validateClaim,
         resolveTermination: () => term,
@@ -340,7 +340,7 @@ describe('IlpHttpAdapter', () => {
       const body = parseGreeting(res);
 
       expect(body.x402Version).toBe(2);
-      expect(body.resource).toEqual({ url: 'g.townhouse.town' });
+      expect(body.resource).toEqual({ url: 'g.connector.town' });
       expect(body.error).toBe(`${X402_PAYMENT_SIGNATURE_HEADER} header is required`);
       for (const entry of body.accepts) {
         expect(entry).toHaveProperty('scheme');
@@ -445,6 +445,32 @@ describe('IlpHttpAdapter', () => {
       expect(exactEntries.map((a: { network: string }) => a.network)).toEqual(['eip155:8453']);
     });
 
+    it('emits httpEndpoint on the toon-channel entry when Host + X-Forwarded-Proto headers are present', async () => {
+      const { adapter } = makeAdapter();
+      const req = new MockReq(serializePacket(createPrepare()), {
+        host: 'proxy.devnet.toonprotocol.dev',
+        'x-forwarded-proto': 'https',
+      });
+      const res = new MockRes();
+      await run(adapter, req, res);
+
+      expect(res.statusCode).toBe(402);
+      const body = parseGreeting(res);
+      const toon = body.accepts.find((a: { scheme: string }) => a.scheme === 'toon-channel');
+      expect(toon?.httpEndpoint).toBe('https://proxy.devnet.toonprotocol.dev/ilp');
+    });
+
+    it('omits httpEndpoint from toon-channel entry when no Host header is present', async () => {
+      const { adapter } = makeAdapter();
+      const res = new MockRes();
+      await run(adapter, new MockReq(serializePacket(createPrepare())), res);
+
+      expect(res.statusCode).toBe(402);
+      const body = parseGreeting(res);
+      const toon = body.accepts.find((a: { scheme: string }) => a.scheme === 'toon-channel');
+      expect(toon?.httpEndpoint).toBeUndefined();
+    });
+
     it('pass-through: a present claim suppresses the greeting (terminated + claim → NOT 402)', async () => {
       const { adapter, handlePrepare, validateClaim } = makeAdapter();
       const req = new MockReq(serializePacket(createPrepare()), {
@@ -482,7 +508,7 @@ describe('IlpHttpAdapter', () => {
       const handlePrepare = jest.fn(async () => fulfill);
       const adapter = new IlpHttpAdapter({
         logger: createMockLogger(),
-        nodeId: 'g.townhouse',
+        nodeId: 'g.connector',
         handlePrepare,
         validateClaim: jest.fn(async () => null),
         // resolveTermination intentionally omitted
@@ -512,7 +538,7 @@ describe('IlpHttpAdapter', () => {
       upstream: 'http://127.0.0.1:8080',
       price: BIND_PRICE,
       chains: ['evm'],
-      ilpAddress: 'g.townhouse.town',
+      ilpAddress: 'g.connector.town',
       settlementAddresses: { evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28' },
       ...overrides,
     });
@@ -524,7 +550,7 @@ describe('IlpHttpAdapter', () => {
       const validateClaim = jest.fn(async () => null);
       const adapter = new IlpHttpAdapter({
         logger: createMockLogger(),
-        nodeId: 'g.townhouse',
+        nodeId: 'g.connector',
         handlePrepare,
         validateClaim,
         resolveTermination: () => term,
@@ -549,7 +575,7 @@ describe('IlpHttpAdapter', () => {
       const prepare: ILPPreparePacket = {
         type: PacketType.PREPARE,
         amount: BigInt(1000),
-        destination: 'g.townhouse.town',
+        destination: 'g.connector.town',
         expiresAt: new Date(Date.now() + 10000),
         data: encodeHttpRequest(envelope),
       };

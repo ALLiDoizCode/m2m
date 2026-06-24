@@ -84,6 +84,29 @@ describe('buildX402Greeting', () => {
     });
   });
 
+  it('hoists httpEndpoint to top-level toon-channel entry when provided in context', () => {
+    const body = buildX402Greeting(termination, {
+      ...ctx,
+      httpEndpoint: 'https://proxy.example.com/ilp',
+    });
+    const toon = body.accepts.find((a) => a.scheme === 'toon-channel') as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(toon?.['httpEndpoint']).toBe('https://proxy.example.com/ilp');
+    // extra is unchanged — endpoint stays relative inside extra
+    expect(toon?.['extra']).toMatchObject({ endpoint: '/ilp' });
+  });
+
+  it('omits httpEndpoint from toon-channel entry when not provided', () => {
+    const body = buildX402Greeting(termination, ctx);
+    const toon = body.accepts.find((a) => a.scheme === 'toon-channel') as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(toon?.['httpEndpoint']).toBeUndefined();
+  });
+
   it('attaches per-chain asset override when present', () => {
     const withAsset: RouteTermination = {
       ...termination,

@@ -3,7 +3,7 @@
  *
  * The admin endpoints (`/admin/peers`, `/admin/routes`, …) are the operator
  * control plane for runtime peer/route management. Until now every consumer
- * (integration tests, the townhouse CLI/MCP) hand-rolled `fetch` calls against
+ * (integration tests, the connector CLI/MCP) hand-rolled `fetch` calls against
  * them. This client centralizes the URL shapes, the `X-Api-Key` header, and the
  * request/response types so those consumers share one tested surface.
  *
