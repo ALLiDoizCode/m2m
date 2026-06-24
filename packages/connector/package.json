@@ -73,6 +73,7 @@
     "test:standalone-allowlist": "jest --testPathPattern='standalone-admin-allowlist-e2e' --forceExit",
     "test:app": "jest --testPathPattern='app-e2e' --forceExit",
     "probe:connector-public": "ts-node --project tsconfig.probe.json ../../scripts/app/ci-acceptance-probe.ts",
+    "probe:store": "ts-node --project tsconfig.probe.json ../../scripts/app/ci-acceptance-probe-store.ts",
     "test:admin-surface": "STANDALONE_DOCKER=true jest --testPathPattern='admin-api-surface-e2e' --forceExit",
     "test:cross-surface": "STANDALONE_DOCKER=true jest --testPathPattern='cross-surface-invariants' --forceExit",
     "test:packet-flow": "STANDALONE_DOCKER=true jest --testPathPattern='packet-flow-invariants' --forceExit",

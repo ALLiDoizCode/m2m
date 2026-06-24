@@ -1,5 +1,15 @@
 # relay-edge — a real Nostr relay deployed BEHIND TOON
 
+> **Where each app's deploy lives now.** This directory is the canonical
+> **Caddy-fronted** reference (connector + relay + auto-TLS edge on one box). The
+> **relay** and **store** repos now each own a leaner, production-faithful
+> `deploy/` compose — the published connector image with that app's
+> `connector.yaml` **baked into a derived image** (`relay-connector` /
+> `store-connector`), connector + app only, **no Caddy** (TLS terminated by the
+> deployment environment). See `relay/deploy/` and `store/deploy/`. Keep this
+> directory as the full-edge reference; use the per-app composes for the
+> app-owned deployments.
+
 The canonical TOON relay deployment: the **connector (payment proxy, "nginx for
 payments")** sits in front of a real, payment-oblivious **Nostr relay**. The
 connector **monetizes WRITES**; **READS are free** and hit the relay's WS
