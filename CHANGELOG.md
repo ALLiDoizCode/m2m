@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.27.0](https://github.com/toon-protocol/connector/compare/v3.26.1...v3.27.0) (2026-06-24)
+
+### Features
+
+- **probe:** add store paid round-trip acceptance probe ([#258](https://github.com/toon-protocol/connector/issues/258)) ([ab5df02](https://github.com/toon-protocol/connector/commit/ab5df02ba87742a4f7fcb5bcd1776e179dd15ad8))
+
 ## [3.26.1](https://github.com/toon-protocol/connector/compare/v3.26.0...v3.26.1) (2026-06-24)
 
 ### Bug Fixes
