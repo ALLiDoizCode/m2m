@@ -85,9 +85,12 @@ update_dns() {  # subdomain → ip
   local sub=$1 ip=$2
   local auth="{\"apikey\":\"$PORKBUN_API_KEY\",\"secretapikey\":\"$PORKBUN_SECRET\"}"
   local body; body=$(printf '%s' "$auth" | jq ". + {\"name\": \"$sub\", \"type\": \"A\", \"content\": \"$ip\", \"ttl\": \"600\"}")
-  local r; r=$(porkbun "dns/editByNameType/$DOMAIN/A/$sub" "$body")
+  # Try edit-in-place first (avoids duplicate records). For a BRAND-NEW subdomain
+  # the edit 4xx's, so `|| true` keeps `set -e` from killing us before the create
+  # fallback runs. (curl -sf returns empty on failure → grep below is false.)
+  local r; r=$(porkbun "dns/editByNameType/$DOMAIN/A/$sub" "$body" 2>/dev/null || true)
   if printf '%s' "$r" | grep -q '"SUCCESS"'; then echo "  DNS $sub → $ip"; return; fi
-  porkbun "dns/create/$DOMAIN" "$body" | jq -r '"  DNS \(.status) \("'"$sub"'") → '"$ip"'"'
+  porkbun "dns/create/$DOMAIN" "$body" 2>/dev/null | jq -r '"  DNS \(.status) \("'"$sub"'") → '"$ip"'"' || echo "  DNS create failed for $sub"
 }
 
 ssh_run() {   # ip, command
@@ -160,7 +163,7 @@ deploy_store_node() {  # ip, toon_mnemonic
 DOMAIN=$DOMAIN
 LETSENCRYPT_STAGING=0
 LETSENCRYPT_EMAIL=dev.jonathan.green@gmail.com
-TOON_MNEMONIC=$mnemonic
+TOON_MNEMONIC=\"$mnemonic\"
 LOG_LEVEL=info
 ENV
     chmod +x infra/linode-store/bootstrap.sh infra/linode-store/init-letsencrypt.sh infra/linode-store/firewall.sh
