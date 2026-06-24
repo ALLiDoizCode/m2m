@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.26.1](https://github.com/toon-protocol/connector/compare/v3.26.0...v3.26.1) (2026-06-24)
+
+### Bug Fixes
+
+- **devnet:** bound Solana test-validator ledger to stop it filling the box disk ([#255](https://github.com/toon-protocol/connector/issues/255)) ([9d3b3e8](https://github.com/toon-protocol/connector/commit/9d3b3e8642de85319f2e0dbedb0e709e8726d6db))
+
 ## [3.26.0](https://github.com/toon-protocol/connector/compare/v3.25.1...v3.26.0) (2026-06-24)
 
 ### Features
