@@ -43,6 +43,17 @@ done
 
 "$HERE/init-letsencrypt.sh"
 
+# ── Deploy the Mina zkApps to the (fresh) lightnet + wire connector.yaml/faucet ──
+# The lightnet RESETS on box recreate, so this runs every provisioning. It is
+# idempotent (skips when the configured USDC token is already live). Non-fatal:
+# the connector's Mina verify hot-path only needs the per-claim channelAccount, so
+# a transient deploy hiccup must not block bringing the node up (re-run manually:
+#   ./infra/linode-node/provision-mina-lightnet.sh ).
+chmod +x "$HERE/provision-mina-lightnet.sh"
+echo "==> Deploying Mina lightnet zkApps + wiring config"
+DOMAIN="$DOMAIN" "$HERE/provision-mina-lightnet.sh" || \
+  echo "⚠️  Mina lightnet provisioning failed — re-run infra/linode-node/provision-mina-lightnet.sh"
+
 echo
 echo "✅ TOON connector node up."
 echo "   Relay WS : wss://relay-ws.${DOMAIN}"
