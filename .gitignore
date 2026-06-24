@@ -80,3 +80,8 @@ packages/connector/terms-agreement
 # .bmad-infrastructure-devops/
 # .claude/
 .auto-bmad-tmp/
+
+# Mina zkApp ESM build (faucet USDC-mint single-instance bundle) — built at image time
+packages/mina-zkapp/dist-esm/
+# Per-recreate lightnet zkApp deploy result (contains sensitive admin/token keys)
+infra/linode-node/mina-lightnet.json

@@ -1,0 +1,122 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TOON connector node — relay + proxy + faucet + TLS.
+# Run from the CONNECTOR REPO ROOT:
+#   docker compose -f infra/linode-node/docker-compose.node.yml up -d
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+services:
+  connector:
+    image: ghcr.io/toon-protocol/connector:latest
+    environment:
+      CONFIG_FILE: /app/config/connector.yaml
+      TOON_MNEMONIC: ${TOON_MNEMONIC}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_TLS_REJECT_UNAUTHORIZED: '0'
+    volumes:
+      - ./connector.yaml:/app/config/connector.yaml:ro
+      - connector_data:/app/data
+    ports:
+      - '3000:3000'
+      - '8080:8080'
+    restart: unless-stopped
+    healthcheck:
+      # wget (not curl): the connector slim image has no curl, so a curl-based
+      # check always reports "unhealthy" even when /health is up. Mirrors the
+      # relay/faucet wget checks below.
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:8080/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  relay:
+    image: ghcr.io/toon-protocol/relay:latest
+    environment:
+      TOON_OBLIVIOUS_MODE: 'true'
+      TOON_BLS_PORT: '3100'
+      TOON_RELAY_PORT: '7100'
+      TOON_CHAIN: 'none'
+      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
+      TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  faucet:
+    # Build context is the REPO ROOT (not packages/faucet): the multi-stage
+    # Dockerfile builds the mina-zkapp ESM bundle (dist-esm/) the USDC mint path
+    # imports, so it needs packages/mina-zkapp/ in context. See the Dockerfile head.
+    build:
+      context: ../..
+      dockerfile: packages/faucet/Dockerfile
+    environment:
+      PORT: 3500
+      # EVM — points at the dedicated EVM box over HTTPS
+      RPC_URL: https://evm-rpc.${DOMAIN:-devnet.toonprotocol.dev}
+      ETH_PRIVATE_KEY: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'
+      TOKEN_PRIVATE_KEY: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+      TOKEN_ADDRESS: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+      ETH_AMOUNT: '100'
+      TOKEN_AMOUNT: '10000'
+      # Solana — points at the dedicated Solana box over HTTPS
+      SOLANA_RPC_URL: https://solana-rpc.${DOMAIN:-devnet.toonprotocol.dev}
+      SOLANA_USDC_MINT: H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H
+      SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
+      # Mina — points at the dedicated Mina lightnet box over HTTPS
+      MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
+      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://mina.${DOMAIN:-devnet.toonprotocol.dev}/graphql}
+      MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
+      # Mina USDC admin-mint (o1js proving) — set by provision-mina-lightnet.sh
+      # after the lightnet zkApp deploy (the admin key can mint unlimited USDC, so
+      # it is injected from the box .env, never committed). Unset → native MINA only.
+      MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-}
+      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
+      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
+      MINA_USDC_AMOUNT: ${MINA_USDC_AMOUNT:-1000}
+      MINA_TX_FEE: ${MINA_TX_FEE:-0.2}
+    volumes:
+      - ../../infra/solana/usdc-authority.json:/keys/usdc-authority.json:ro
+    ports:
+      - '3500:3500'
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3500/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      connector:
+        condition: service_healthy
+        required: false
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - node_certbot_conf:/etc/letsencrypt:ro
+      - node_certbot_www:/var/www/certbot:ro
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - node_certbot_conf:/etc/letsencrypt
+      - node_certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+
+volumes:
+  connector_data:
+  node_certbot_conf:
+  node_certbot_www:

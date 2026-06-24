@@ -32,12 +32,20 @@ set -a
 set +a
 
 DC=(docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml)
-PRIMARY="evm-rpc.${DOMAIN}"
-# Chains-only: the cert covers ONLY the chain subdomains. The connector/relay app
-# edge deploys separately (deploy/relay-edge + deploy/pay-edge) with its own TLS,
+# CERT_PRIMARY / CERT_DOMAINS can be set in .env to customise per-box issuance
+# (e.g. an EVM-only box only needs evm-rpc.DOMAIN) for the multi-node layout.
+# Fallback = the chains-only list below.
+#
+# Chains-only default: the cert covers ONLY the chain subdomains. The connector/relay
+# app edge deploys separately (deploy/relay-edge + deploy/pay-edge) with its own TLS,
 # so connector.${DOMAIN}/relay-ws.${DOMAIN} are NOT requested here — including SANs
 # whose A-records this box never creates would fail HTTP-01 and sink the whole cert.
-DOMAINS=("evm-rpc.${DOMAIN}" "solana-rpc.${DOMAIN}" "solana-ws.${DOMAIN}" "faucet.${DOMAIN}" "mina.${DOMAIN}")
+PRIMARY="${CERT_PRIMARY:-evm-rpc.${DOMAIN}}"
+if [ -n "${CERT_DOMAINS:-}" ]; then
+  read -ra DOMAINS <<< "$CERT_DOMAINS"
+else
+  DOMAINS=("evm-rpc.${DOMAIN}" "solana-rpc.${DOMAIN}" "solana-ws.${DOMAIN}" "faucet.${DOMAIN}" "mina.${DOMAIN}")
+fi
 CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
 # Renew (request anew) only when within this many days of expiry. Matches the
 # certbot renewer's 30-day window so we never request a duplicate of a healthy cert.

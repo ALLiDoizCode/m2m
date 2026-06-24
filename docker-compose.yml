@@ -85,8 +85,12 @@ services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   faucet:
     build:
-      context: ./packages/faucet
-      dockerfile: Dockerfile
+      # Build context is the repo ROOT (not packages/faucet): the multi-stage
+      # Dockerfile compiles the mina-zkapp ESM bundle from packages/mina-zkapp/
+      # so the faucet's USDC admin-mint shares ONE o1js instance. See the
+      # Dockerfile header and infra/linode-node/docker-compose.node.yml.
+      context: .
+      dockerfile: packages/faucet/Dockerfile
     # Runs under BOTH evm and solana so a single host can drip every chain.
     # The EVM init polls for the anvil token deploy; the Solana route NO-OPs
     # with a clear 503 when its env isn't set — so an evm-only `up` still works.

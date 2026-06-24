@@ -69,7 +69,7 @@ esac
 
 echo "==> [4/7] Render nginx config for ${DOMAIN}"
 mkdir -p "$HERE/nginx/conf.d"
-envsubst '${DOMAIN}' < "$HERE/nginx/devnet.conf.template" > "$HERE/nginx/conf.d/devnet.conf"
+envsubst '${DOMAIN}' < "$HERE/nginx/${NGINX_TEMPLATE:-devnet.conf.template}" > "$HERE/nginx/conf.d/devnet.conf"
 
 echo "==> [5/7] Start the chains (${COMPOSE_PROFILES})"
 DC=(docker compose -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/linode/docker-compose.linode.yml")
