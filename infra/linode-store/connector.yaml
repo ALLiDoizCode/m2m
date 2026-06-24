@@ -1,0 +1,104 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TOON store (Arweave DVM) box connector config — multichain EVM + Solana + Mina.
+# This connector is the apex for g.proxy.store: clients paying g.proxy.store
+# settle here and are free-forwarded to the DVM (http://store:3300).
+# It ALSO terminates g.proxy.relay.store — packets that arrive via the relay hop
+# (g.proxy -> g.proxy.relay -> g.proxy.relay.store) land here and hit the same DVM.
+# All settlement keys derive from TOON_MNEMONIC (mnemonic mode).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+nodeId: toon-devnet-store
+btpServerPort: 3000
+healthCheckPort: 8080
+environment: production
+deploymentMode: standalone
+logLevel: info
+
+adminApi:
+  enabled: true
+  host: 0.0.0.0
+  port: 8081
+  allowedIPs:
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
+settlement:
+  connectorFeePercentage: 0.0
+  enableSettlement: true
+  thresholds:
+    defaultThreshold: '5000'
+    pollingInterval: 100
+
+chainProviders:
+  - chainType: evm
+    chainId: evm:31337
+    rpcUrl: https://evm-rpc.devnet.toonprotocol.dev
+    registryAddress: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'
+    tokenAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+    keyId: 'placeholder-overwritten-by-mnemonic'
+    settlementOptions:
+      threshold: '5000'
+      pollingIntervalMs: 100
+      settlementTimeoutSecs: 3600
+      initialDepositMultiplier: 2
+      ledgerSnapshotPath: /app/data/ledger-evm.json
+
+  - chainType: solana
+    chainId: solana:devnet
+    rpcUrl: https://solana-rpc.devnet.toonprotocol.dev
+    wsUrl: wss://solana-ws.devnet.toonprotocol.dev
+    programId: 'D2Z35z8ShA4K7odczUysBYRP5hXQGDp6r5c2EBSxRsHh'
+    tokenMint: 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H'
+    keyId: 'placeholder-overwritten-by-mnemonic'
+    cluster: devnet
+
+  - chainType: mina
+    chainId: mina:devnet
+    network: devnet
+    graphqlUrl: https://mina.devnet.toonprotocol.dev/graphql
+    zkAppAddress: 'B62qoMNmZQQYSxuoNx42JnZtNZwHfwL16wxUYNEuLGyrVq1bXfS15Rn'
+    tokenAddress: 'B62qjfa5osSnjaAhgiJTu5WRg7RCw66mY6bhaxZecyMTTtESKBwQ4x3'
+    tokenId: '26807032406297178681731937210594998657168795100878204131916024453275711913842'
+    keyId: 'placeholder-overwritten-by-mnemonic'
+    txFeeNanomina: '100000000'
+
+# The relay-connector (g.proxy.relay, on the toon box) peers IN here over BTP as
+# the upstream of the relay hop. Added in Stage 3 once the relay-connector's
+# settlement address + reachable BTP URL are known. Until then the direct
+# g.proxy.store path works on its own.
+peers: []
+
+routes:
+  # Direct path: clients paying g.proxy.store settle on this box.
+  - prefix: g.proxy.store
+    nextHop: toon-devnet-store
+    upstream: http://store:3300
+    price: '1000'
+    chains:
+      - evm
+      - solana
+      - mina
+    ilpAddress: g.proxy.store
+    settlementAddresses:
+      # Derived from TOON_MNEMONIC (account index 0).
+      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
+      mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
+
+  # Relay-hop path: packets forwarded by the relay-connector arrive addressed
+  # g.proxy.relay.store and terminate at the same DVM. The relay's hop fee is
+  # added upstream by the relay-connector (toon box); this box charges only the
+  # DVM job price.
+  - prefix: g.proxy.relay.store
+    nextHop: toon-devnet-store
+    upstream: http://store:3300
+    price: '1000'
+    chains:
+      - evm
+      - solana
+      - mina
+    ilpAddress: g.proxy.relay.store
+    settlementAddresses:
+      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
+      mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
