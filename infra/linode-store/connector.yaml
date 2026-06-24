@@ -97,9 +97,9 @@ routes:
     settlementAddresses:
       # The store's OWN income addresses — derive from the store-box DISTINCT
       # mnemonic (NOT the apex demo seed), then fund them from the faucet.
-      evm: '<STORE_BOX_EVM_ADDR>'
-      solana: '<STORE_BOX_SOL_ADDR>'
-      mina: '<STORE_BOX_MINA_ADDR>'
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
+      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
 
   # Relay-hop path: packets forwarded by the relay-connector arrive addressed
   # g.proxy.relay.store and terminate at the same DVM. The relay's hop fee is
@@ -116,6 +116,6 @@ routes:
     ilpAddress: g.proxy.relay.store
     settlementAddresses:
       # Same store-box DISTINCT identity as the g.proxy.store route above.
-      evm: '<STORE_BOX_EVM_ADDR>'
-      solana: '<STORE_BOX_SOL_ADDR>'
-      mina: '<STORE_BOX_MINA_ADDR>'
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
+      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'

@@ -30,6 +30,13 @@ done
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
 DOMAIN="${DOMAIN:-devnet.toonprotocol.dev}"
 BRANCH="${BRANCH:-feat/devnet-multi-node}"
+# Distinct settlement identity for the store (DVM) box connector. It PEERS with
+# the apex, so its keys MUST differ from the apex TOON_MNEMONIC — else the
+# bilateral peer channel self-settles to 0xC0E55…. Devnet throwaway seed;
+# override via env. Derived (acct 0): evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e,
+# sol 4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt,
+# mina B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt.
+STORE_TOON_MNEMONIC="${STORE_TOON_MNEMONIC:-portion symbol pencil track twenty vault love raccoon rigid gravity glide aerobic}"
 REPO_URL="https://github.com/toon-protocol/connector.git"
 LINODE_API="https://api.linode.com/v4"
 PORKBUN_API="https://api.porkbun.com/api/json/v3"
@@ -230,7 +237,7 @@ up)
   deploy_toon_node "$TOON_IP" "$TOON_MNEMONIC" &
   PID_TOON=$!
 
-  deploy_store_node "$STORE_IP" "$TOON_MNEMONIC" &
+  deploy_store_node "$STORE_IP" "$STORE_TOON_MNEMONIC" &
   PID_STORE=$!
 
   wait $PID_EVM   && echo "  ✅ EVM done"   || echo "  ❌ EVM failed"
@@ -256,7 +263,7 @@ store)
   update_dns "proxy.store.devnet" "$STORE_IP"
   update_dns "dvm.devnet"         "$STORE_IP"
   echo "==> [3/3] Deploy store node"
-  deploy_store_node "$STORE_IP" "$TOON_MNEMONIC"
+  deploy_store_node "$STORE_IP" "$STORE_TOON_MNEMONIC"
   "$0" status
   ;;
 

@@ -79,7 +79,8 @@ peers:
     url: wss://proxy.store.devnet.toonprotocol.dev
     relation: peer
     chain: evm:31337
-    settlementAddress: '<STORE_BOX_EVM_ADDR — derive from the store-box distinct mnemonic>'
+    # store-box distinct identity, derived from STORE_TOON_MNEMONIC (acct 0).
+    settlementAddress: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
 
 routes:
   - prefix: g.proxy.relay
