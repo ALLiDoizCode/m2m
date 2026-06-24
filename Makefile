@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs standalone-test standalone-test-docker standalone-test-allowlist app-up app-down app-logs app-test infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs standalone-test standalone-test-docker standalone-test-allowlist infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -35,11 +35,8 @@ help:
 	@echo "  make mina-logs            Follow Mina docker compose logs"
 	@echo ""
 		@echo ""
-	@echo "App behind connector (issue #221):"
-	@echo "  make app-up               One-command up: connector + relay + anvil + faucet"
-	@echo "  make app-down             Tear down the app stack"
-	@echo "  make app-logs             Follow app docker compose logs"
-	@echo "  make app-test             Run the app E2E (negative-path always; paid round-trip skips without a real RELAY_IMAGE)"
+	@echo "App behind connector: composition lives in the app repos"
+	@echo "  (relay/store deploy/docker-compose.yml = connector + that app)."
 	@echo ""
 	@echo "Local Blockchain (All Chains):"
 	@echo "  make infra-up             Start all chains (EVM + Solana + Mina)"
@@ -96,28 +93,10 @@ standalone-test-allowlist:
 	docker compose --profile standalone-allowlist build
 	STANDALONE_DOCKER=true npm run test:standalone-allowlist --workspace=packages/connector
 
-# App behind connector (issue #221) — the "hello-world" of deploying an app
-# behind the connector locally. `make app-up` brings up a standalone
-# connector + an oblivious relay (app) + anvil + faucet with one
-# command (AC4). The relay image is env-overridable (`RELAY_IMAGE`) because the
-# decoupled relay image is not yet published; the connector/anvil/faucet build
-# and start regardless.
-app-up:
-	docker compose --profile app up -d --build
-
-app-down:
-	docker compose --profile app down
-
-app-logs:
-	docker compose --profile app logs -f
-
-# Run the app E2E. The connector + anvil + faucet portions
-# (compose-up, connector health, AC2 negative-path assertions) always run. The
-# AC3 full paid-write round-trip SKIPS with a clear message unless a real
-# `RELAY_IMAGE` is supplied (the relay app does not exist in this repo yet).
-app-test:
-	docker compose --profile app build connector
-	APP_E2E=1 npm run test:app --workspace=packages/connector
+# NOTE: "app behind the connector" composition now lives in the APP repos
+# (relay/store `deploy/docker-compose.yml` = connector + that app). The connector
+# repo builds only the connector image; verify an app edge with the acceptance
+# probes (scripts/app/ci-acceptance-probe*.ts) against the app repo's compose.
 
 # Run linter
 lint:

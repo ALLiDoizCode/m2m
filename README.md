@@ -860,67 +860,28 @@ The production compose ships secure-by-default:
 
 If your deployment publishes the admin API (e.g., behind a reverse proxy), you **must** additionally set `adminApi.apiKey` in the config and inject the value from a secrets manager — do not commit keys to the YAML.
 
-### Local "App behind the Connector" (issue #221)
+### App behind the Connector — lives in the app repos
 
-The "hello-world" of deploying an app behind the connector locally: one command brings up a standalone **connector** (acting as a paid reverse proxy) that fronts a single oblivious **app** (a relay) for _paid writes_, plus a local EVM devnet. This is the simplest demonstration of the paid-reverse-proxy pattern (issues #216 / #218): a paid `POST /ilp` request is validated by the connector, then reverse-proxied to the app over the compose network; the app never sees ILP, payment, or settlement.
+The connector is the **payment proxy** (nginx-for-payments); **apps own the
+connector+app composition.** Each app repo ships a `deploy/docker-compose.yml`
+that runs the published connector image in front of that app (RouteTermination —
+a paid `POST /ilp` is validated by the connector, then reverse-proxied to the
+app; the app never sees ILP/payment/settlement). See:
 
-**Four services** (compose profile `app` in `docker-compose.yml`):
+- **relay** — `relay/deploy/` (connector + relay; `ghcr.io/toon-protocol/relay-connector`)
+- **store** — `store/deploy/` (connector + store; `ghcr.io/toon-protocol/store-connector`)
 
-| Service     | Role                                                     | Host-published port              | Notes                                                                        |
-| ----------- | -------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------- |
-| `anvil`     | EVM devnet + deployed contracts                          | `127.0.0.1:8545`                 | Reused from the `evm` profile.                                               |
-| `faucet`    | ETH/USDC faucet                                          | `127.0.0.1:3500`                 | Reused from the `evm` profile.                                               |
-| `connector` | Standalone connector (paid reverse proxy)                | `127.0.0.1:3000` (`POST /ilp`)   | Admin API (8081) is **not** published. Config: `scripts/app/connector.yaml`. |
-| `app`       | The oblivious app (`ghcr.io/toon-protocol/relay:latest`) | `127.0.0.1:7100` (Nostr WS read) | Paid-write store port (`3100`, `POST /write`) is **not** published.          |
-
-**One command up / down**
-
-```bash
-make app-up      # build + start connector + app + anvil + faucet
-make app-logs    # follow logs
-make app-down    # tear down
-```
-
-**The app is reachable ONLY through the connector for paid writes**
-
-The app's paid-write store port (`3100`, oblivious-mode `POST /write`, per relay#24) is **never published** to the host — only the connector dials it over the compose network by service name (`http://app:3100`, set as the route's `upstream` in `connector.yaml`). So a paid write MUST flow through the connector:
+To verify an app edge end-to-end (paid round-trip + negatives), run the
+acceptance probes from this repo against the app repo's compose:
 
 ```bash
-# A paid write enters at the connector's POST /ilp edge. The ILP PREPARE
-# `data` carries a literal HTTP request envelope; a signed payment-channel
-# claim rides in the `ILP-Payment-Channel-Claim` header. The connector
-# validates the payment, then reverse-proxies the HTTP request to the app.
-curl -X POST http://127.0.0.1:3000/ilp \
-  -H 'Content-Type: application/octet-stream' \
-  -H 'ILP-Payment-Channel-Claim: <base64 signed claim>' \
-  --data-binary @paid-prepare.bin
-# → 200 + serialized ILP FULFILL once the connector validates and the app stores.
-
-# An UNPAID POST /ilp (no claim header) is rejected by the inbound claim gate
-# BEFORE it ever reaches the app → serialized ILP REJECT (F-class).
+# relay edge:  scripts/app/ci-acceptance-probe.ts
+# store edge:  scripts/app/ci-acceptance-probe-store.ts
+CONNECTOR_ILP_URL=http://localhost:3000/ilp \
+EVM_RPC_URL=… FAUCET_URL=… \
+  npx ts-node --project packages/connector/tsconfig.probe.json \
+    scripts/app/ci-acceptance-probe.ts
 ```
-
-In production this is what `h402Fetch` drives for you; the `curl` above is the underlying wire call.
-
-**Free reads stay on the app's Nostr WS**
-
-Free reads do **not** go through the connector at all. Clients connect directly to the app's Nostr WS read port, published at `ws://127.0.0.1:7100`. Only _paid writes_ are gated by the connector.
-
-**Overriding the relay image**
-
-The relay image is built from the separate relay repo and published as `ghcr.io/toon-protocol/relay:latest` (the compose default). Its entrypoint is the `relay` CLI, which runs as a standalone oblivious read/write relay out of the box. Pin a specific build via the `RELAY_IMAGE` env override:
-
-```bash
-RELAY_IMAGE=ghcr.io/toon-protocol/relay:sha-b8ec120 make app-up
-```
-
-**Smoke test**
-
-```bash
-make app-test
-```
-
-Under `APP_E2E=1` the full suite runs against the real relay image: AC1 (compose-up + connector health), AC2 (the app's write port is unreachable from the host, and an unpaid `POST /ilp` is rejected), and AC3 (the full paid-write round-trip — a signed payment-channel claim rides the `POST /ilp` edge, the connector reverse-proxies the write to the app's `POST /write`, and the stored event is read back over the free Nostr WS).
 
 ## Development
 
