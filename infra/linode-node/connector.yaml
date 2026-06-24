@@ -20,7 +20,12 @@ adminApi:
     - 192.168.0.0/16
 
 settlement:
-  connectorFeePercentage: 0.0
+  # Routing fee the apex EARNS on every value-bearing PEER forward — e.g. each
+  # packet it routes to the store-box peer for g.proxy.store. 0.1 = 0.1%.
+  # (Was 0.0.) Does NOT apply to locally-terminated routes like g.proxy.relay,
+  # which charge their own `price`; and a `child` next-hop would free-forward
+  # (no claim, no fee). This is the "collect fees for routing" knob.
+  connectorFeePercentage: 0.1
   enableSettlement: true
   thresholds:
     defaultThreshold: '5000'
@@ -62,7 +67,19 @@ chainProviders:
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
-peers: []
+peers:
+  # The store-box connector (Arweave DVM, g.proxy.store) as a lateral PEER —
+  # bilateral settlement with a per-forward claim, so THIS apex earns
+  # connectorFeePercentage on every packet it routes to g.proxy.store. A `child`
+  # relation would free-forward and earn nothing (that's the parent→child case).
+  # Requires a funded bilateral channel apex <-> store-box, and the store-box MUST
+  # run a DISTINCT mnemonic from this apex — otherwise the channel settles to the
+  # same address (0xC0E55…) and the "fee" is self-to-self.
+  - id: store-box
+    url: wss://proxy.store.devnet.toonprotocol.dev
+    relation: peer
+    chain: evm:31337
+    settlementAddress: '<STORE_BOX_EVM_ADDR — derive from the store-box distinct mnemonic>'
 
 routes:
   - prefix: g.proxy.relay
@@ -79,3 +96,11 @@ routes:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
       solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
+
+  # Forward g.proxy.store to the store-box PEER. No `upstream` => not locally
+  # terminated; the apex routes it onward and applies connectorFeePercentage as
+  # its routing fee. The store-box terminates it (-> http://store:3300) and
+  # charges the DVM job price on top.
+  - prefix: g.proxy.store
+    nextHop: store-box
+    priority: 100
