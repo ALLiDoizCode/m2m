@@ -200,7 +200,7 @@ case "${1:-help}" in
 
 up)
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
-  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC — the store box's DISTINCT settlement seed (must differ from the apex TOON_MNEMONIC; expected acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e)}"
+  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC to the store box DISTINCT settlement seed — must differ from the apex TOON_MNEMONIC, acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e}"
   echo "==> [1/4] Provision boxes"
   for key in evm sol mina toon store; do create_box "$key"; done
   for key in evm sol mina toon store; do wait_box_running "${NODE_LABELS[$key]}"; done
@@ -257,7 +257,7 @@ store)
   # store node without `up` re-running bootstrap on the live chain/toon boxes
   # (which would re-pull images and re-provision the Mina lightnet).
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
-  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC — the store box's DISTINCT settlement seed (must differ from the apex TOON_MNEMONIC; expected acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e)}"
+  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC to the store box DISTINCT settlement seed — must differ from the apex TOON_MNEMONIC, acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e}"
   echo "==> [1/3] Provision store box"
   create_box store
   wait_box_running "${NODE_LABELS[store]}"
