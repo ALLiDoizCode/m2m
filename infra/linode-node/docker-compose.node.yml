@@ -20,7 +20,10 @@ services:
       - '8080:8080'
     restart: unless-stopped
     healthcheck:
-      test: ['CMD-SHELL', 'curl -sf http://localhost:8080/health || exit 1']
+      # wget (not curl): the connector slim image has no curl, so a curl-based
+      # check always reports "unhealthy" even when /health is up. Mirrors the
+      # relay/faucet wget checks below.
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:8080/health || exit 1']
       interval: 10s
       timeout: 5s
       retries: 5
