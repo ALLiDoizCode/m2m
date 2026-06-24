@@ -78,7 +78,8 @@ chainProviders:
 peers:
   - id: toon-apex
     # BTP dial target — the apex public edge (nginx upgrades ws → connector:3000).
-    url: wss://proxy.devnet.toonprotocol.dev
+    # Port required by the config validator; 443 = the nginx TLS listener.
+    url: wss://proxy.devnet.toonprotocol.dev:443
     relation: peer
     # No-auth BTP (devnet default). Prod: matching BTP_PEER_TOON_APEX_SECRET on
     # both ends + BTP_ALLOW_NOAUTH=false.

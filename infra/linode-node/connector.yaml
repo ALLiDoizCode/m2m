@@ -77,7 +77,8 @@ peers:
   # same address (0xC0E55…) and the "fee" is self-to-self.
   - id: store-box
     # BTP dial target — the store box's public edge (nginx upgrades ws → connector:3000).
-    url: wss://proxy.store.devnet.toonprotocol.dev
+    # Port required by the config validator; 443 = the nginx TLS listener.
+    url: wss://proxy.store.devnet.toonprotocol.dev:443
     relation: peer
     # No-auth BTP (devnet default: BTP_ALLOW_NOAUTH on). For prod, keep '' here and
     # set a matching BTP_PEER_STORE_BOX_SECRET env on both ends + BTP_ALLOW_NOAUTH=false.
