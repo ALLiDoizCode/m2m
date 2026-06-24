@@ -34,7 +34,9 @@ const NANO = 1_000_000_000n;
 
 // Optional: if MINA_TREASURY_ADDRESS is set, the faucet asserts the provided
 // key derives that exact public address (fail-loud guard against misconfiguration).
-// Leave unset to accept any valid funded key (e.g. lightnet genesis accounts).
+// Leave unset to accept any valid funded key (e.g. lightnet genesis accounts,
+// which the provisioning acquires fresh on each reset — their address is not
+// known ahead of time, so a hardcoded treasury would break the lightnet drip).
 const EXPECTED_TREASURY = process.env.MINA_TREASURY_ADDRESS || null;
 
 const MINA_NETWORK = process.env.MINA_NETWORK || 'devnet';
@@ -202,8 +204,12 @@ export function createMinaFaucet() {
 }
 
 // Capability descriptor surfaced at /api/info. `faucet` is the live
-// createMinaFaucet() (or null when unconfigured).
-export function minaInfo(faucet) {
+// createMinaFaucet() (or null when unconfigured). `usdcInfo` is the optional
+// fragment from `minaUsdcInfo(minter)` (mina-usdc.mjs) describing the admin-mint
+// USDC capability — when the minter is configured this advertises `drips.usdc`
+// and `usdcMint: true` alongside the native-MINA drip; when it's null we still
+// advertise the native drip and set `usdcMint: false`.
+export function minaInfo(faucet, usdcInfo = { usdcMint: false }) {
   if (faucet) {
     return {
       enabled: true,
@@ -214,7 +220,17 @@ export function minaInfo(faucet) {
       drip: true,
       mode: 'treasury-drip', // real native-MINA drip from a funded treasury
       treasury: faucet.treasury,
-      drips: { mina: faucet.dripAmount },
+      drips: usdcInfo.usdcMint
+        ? { mina: faucet.dripAmount, usdc: usdcInfo.usdcAmount }
+        : { mina: faucet.dripAmount },
+      usdcMint: !!usdcInfo.usdcMint,
+      ...(usdcInfo.usdcMint
+        ? {
+            usdcToken: usdcInfo.usdcToken,
+            usdcTokenId: usdcInfo.usdcTokenId,
+            mintAuthority: usdcInfo.mintAuthority,
+          }
+        : {}),
       graphqlUrl: faucet.graphqlUrl,
     };
   }
@@ -225,6 +241,7 @@ export function minaInfo(faucet) {
     network: MINA_NETWORK,
     chain: 'public-devnet',
     drip: false,
+    usdcMint: !!usdcInfo.usdcMint,
     mode: 'link', // unconfigured: link out to the public faucet
     faucetUrl: MINA_PUBLIC_FAUCET_URL,
     note:
