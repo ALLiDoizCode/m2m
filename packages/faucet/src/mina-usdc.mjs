@@ -43,6 +43,7 @@ import {
   Mina,
   PrivateKey,
   PublicKey,
+  TokenId,
   UInt64,
 } from 'o1js';
 
@@ -189,7 +190,15 @@ export function createMinaUsdcMinter() {
   const Network = Mina.Network({ mina: MINA_GRAPHQL_URL });
   Mina.setActiveInstance(Network);
   const token = new UsdcChannelToken(tokenPubKey);
-  const tokenIdField = token.deriveTokenId().toString();
+  const derivedTokenId = token.deriveTokenId();
+  // Decimal string for display / the /api/info capability descriptor (mirrors how
+  // deploy-lightnet-zkapps.mjs records tokenId).
+  const tokenIdField = derivedTokenId.toString();
+  // Base58-encoded tokenId for the Mina GraphQL `TokenId!` scalar (the account
+  // balance probe). Mina GraphQL expects the base58 encoding, NOT the decimal
+  // Field string — a decimal value silently fails the lookup, so the probe would
+  // always fall back to fundRecipient=true. Use TokenId.toBase58 for the query.
+  const tokenIdBase58 = TokenId.toBase58(derivedTokenId);
 
   console.log('✅ Mina USDC mint enabled (admin-mint via o1js proving)');
   console.log(`   Mint authority: ${adminPubKey.toBase58()}`);
@@ -252,7 +261,7 @@ export function createMinaUsdcMinter() {
       // "already exists" retry below.
       let fundRecipient = true;
       try {
-        fundRecipient = !(await tokenAccountExists(recipientB58, tokenIdField));
+        fundRecipient = !(await tokenAccountExists(recipientB58, tokenIdBase58));
       } catch (probeErr) {
         console.log(
           `  ⚠️  Could not probe recipient token account (${probeErr.message}); ` +
