@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.26.0](https://github.com/toon-protocol/connector/compare/v3.25.1...v3.26.0) (2026-06-24)
+
+### Features
+
+- multi-node Mina-lightnet provisioning + faucet native-MINA & USDC drip ([#254](https://github.com/toon-protocol/connector/issues/254)) ([0d93a41](https://github.com/toon-protocol/connector/commit/0d93a4112c43607671521bb4ee5ce21d2388ff9e)), closes [#235](https://github.com/toon-protocol/connector/issues/235) [#236](https://github.com/toon-protocol/connector/issues/236) [#240](https://github.com/toon-protocol/connector/issues/240)
+
 ## [3.25.1](https://github.com/toon-protocol/connector/compare/v3.25.0...v3.25.1) (2026-06-23)
 
 ### Bug Fixes
