@@ -31,6 +31,15 @@ done
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
 DOMAIN="${DOMAIN:-devnet.toonprotocol.dev}"
 BRANCH="${BRANCH:-feat/devnet-multi-node}"
+# STORE_TOON_MNEMONIC — the store (DVM) box connector's settlement seed. The
+# store box PEERS with the apex (so the apex earns connectorFeePercentage on each
+# forward), which means this MUST be set (env-required; guarded in the `up` and
+# `store` deploy paths) and MUST differ from the apex TOON_MNEMONIC — otherwise
+# the bilateral peer channel self-settles to the apex's 0xC0E55…. NOT committed.
+# Its acct-0 addresses (filled into the connector.yaml peer/route entries) are:
+#   evm  0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e
+#   sol  4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt
+#   mina B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt
 REPO_URL="https://github.com/toon-protocol/connector.git"
 LINODE_API="https://api.linode.com/v4"
 PORKBUN_API="https://api.porkbun.com/api/json/v3"
@@ -257,6 +266,7 @@ case "${1:-help}" in
 
 up)
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
+  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC to the store box DISTINCT settlement seed — must differ from the apex TOON_MNEMONIC, acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e}"
   echo "==> [1/4] Provision boxes"
   for key in evm sol mina toon store; do create_box "$key"; done
   for key in evm sol mina toon store; do wait_box_running "${NODE_LABELS[$key]}"; done
@@ -295,7 +305,7 @@ up)
   deploy_toon_node "$TOON_IP" "$TOON_MNEMONIC" &
   PID_TOON=$!
 
-  deploy_store_node "$STORE_IP" "$TOON_MNEMONIC" &
+  deploy_store_node "$STORE_IP" "$STORE_TOON_MNEMONIC" &
   PID_STORE=$!
 
   wait $PID_EVM   && echo "  ✅ EVM done"   || echo "  ❌ EVM failed"
@@ -316,6 +326,7 @@ store)
   # store node without `up` re-running bootstrap on the live chain/toon boxes
   # (which would re-pull images and re-provision the Mina lightnet).
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
+  : "${STORE_TOON_MNEMONIC:?Set STORE_TOON_MNEMONIC to the store box DISTINCT settlement seed — must differ from the apex TOON_MNEMONIC, acct-0 evm 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e}"
   echo "==> [1/3] Provision store box"
   create_box store
   wait_box_running "${NODE_LABELS[store]}"
@@ -324,7 +335,7 @@ store)
   update_dns "proxy.store.devnet" "$STORE_IP"
   update_dns "dvm.devnet"         "$STORE_IP"
   echo "==> [3/3] Deploy store node"
-  deploy_store_node "$STORE_IP" "$TOON_MNEMONIC"
+  deploy_store_node "$STORE_IP" "$STORE_TOON_MNEMONIC"
   "$0" status
   ;;
 

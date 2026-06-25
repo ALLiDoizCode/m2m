@@ -1,10 +1,13 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON store (Arweave DVM) box connector config — multichain EVM + Solana + Mina.
-# This connector is the apex for g.proxy.store: clients paying g.proxy.store
-# settle here and are free-forwarded to the DVM (http://store:3300).
-# It ALSO terminates g.proxy.relay.store — packets that arrive via the relay hop
-# (g.proxy -> g.proxy.relay -> g.proxy.relay.store) land here and hit the same DVM.
-# All settlement keys derive from TOON_MNEMONIC (mnemonic mode).
+# This connector TERMINATES g.proxy.store (-> the DVM at http://store:3300). It is
+# NOT a standalone apex: clients pay the g.proxy apex (toon box), which routes to
+# this box as a PEER (earning connectorFeePercentage) and announces this box's
+# kind:10032 to the shared relay so g.proxy.store is discoverable.
+# It also terminates g.proxy.relay.store (the relay-hop path, Stage 3).
+# All settlement keys derive from TOON_MNEMONIC (mnemonic mode) — this box MUST
+# use a DISTINCT mnemonic from the apex (STORE_TOON_MNEMONIC), or the bilateral
+# peer channel settles to the same address and the routing "fee" is self-to-self.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 nodeId: toon-devnet-store
@@ -62,13 +65,38 @@ chainProviders:
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
-# The relay-connector (g.proxy.relay, on the toon box) peers IN here over BTP as
-# the upstream of the relay hop. Added in Stage 3 once the relay-connector's
-# settlement address + reachable BTP URL are known. Until then the direct
-# g.proxy.store path works on its own.
-peers: []
+# PEER (not parent/child) of the toon-box apex, so the apex earns a routing fee
+# (connectorFeePercentage) when it forwards g.proxy.store traffic here. Bilateral
+# settlement: a per-forward claim flows over a funded channel apex <-> store-box.
+#
+# IMPORTANT: this box MUST run a DISTINCT mnemonic from the apex (see header).
+# With the same mnemonic both ends are 0xC0E55… and the peer channel is self-pay.
+#
+# The relay-connector (g.proxy.relay) will ALSO peer in here for the relay-hop
+# path (g.proxy.relay.store) — added in Stage 3.
+peers:
+  - id: toon-apex
+    # BTP dial target — the apex public edge (nginx upgrades ws → connector:3000).
+    # Port required by the config validator; 443 = the nginx TLS listener.
+    url: wss://proxy.devnet.toonprotocol.dev:443
+    relation: peer
+    # No-auth BTP (devnet default). Prod: matching BTP_PEER_TOON_APEX_SECRET on
+    # both ends + BTP_ALLOW_NOAUTH=false.
+    authToken: ''
+    chain: evm:31337
+    # Apex (toon box) settlement address, derived from the demo TOON_MNEMONIC.
+    settlementAddress: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
 
 routes:
+  # Upstream/default route: anything under g.proxy this box doesn't terminate
+  # locally goes to the apex peer. Needed so the DVM can publish its kind:10032
+  # to g.proxy.relay (the relay) — without it the connector returns F02 "no route".
+  # Longest-prefix: g.proxy.store / g.proxy.relay.store (below) are more specific
+  # and still terminate here; g.proxy.relay and the rest forward to the apex.
+  - prefix: g.proxy
+    nextHop: toon-apex
+    priority: 10
+
   # Direct path: clients paying g.proxy.store settle on this box.
   - prefix: g.proxy.store
     nextHop: toon-devnet-store
@@ -80,10 +108,12 @@ routes:
       - mina
     ilpAddress: g.proxy.store
     settlementAddresses:
-      # Derived from TOON_MNEMONIC (account index 0).
-      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
-      mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
+      # The store's OWN income addresses — derive from the store-box DISTINCT
+      # mnemonic (STORE_TOON_MNEMONIC acct 0), NOT the apex demo seed, then fund
+      # them from the faucet.
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
+      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
 
   # Relay-hop path: packets forwarded by the relay-connector arrive addressed
   # g.proxy.relay.store and terminate at the same DVM. The relay's hop fee is
@@ -99,6 +129,7 @@ routes:
       - mina
     ilpAddress: g.proxy.relay.store
     settlementAddresses:
-      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
-      mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
+      # Same store-box DISTINCT identity as the g.proxy.store route above.
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
+      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'

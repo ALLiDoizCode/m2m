@@ -20,7 +20,13 @@ adminApi:
     - 192.168.0.0/16
 
 settlement:
-  connectorFeePercentage: 0.0
+  # Routing fee the apex EARNS on every value-bearing PEER forward — e.g. each
+  # packet it routes to the store-box peer for g.proxy.store. 0.1 = 0.1%. (Was
+  # 0.0 = free-forward.) Does NOT apply to locally-terminated routes like
+  # g.proxy.relay, which charge their own `price`. Turning this on requires the
+  # store-box peer to run a DISTINCT mnemonic and a funded bilateral channel
+  # (see this PR's gating checklist) — otherwise the peer claim self-settles.
+  connectorFeePercentage: 0.1
   enableSettlement: true
   thresholds:
     defaultThreshold: '5000'
