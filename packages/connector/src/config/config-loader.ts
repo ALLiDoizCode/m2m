@@ -23,6 +23,7 @@ import {
   LocalDeliveryConfig,
   ChainProviderConfigEntry,
   TransportConfig,
+  SelfAnnounceConfig,
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
@@ -211,6 +212,9 @@ export class ConfigLoader {
       chainProviders: rawConfig.chainProviders as ChainProviderConfigEntry[] | undefined,
       deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
       nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
+      // relay#37 / store#22: opt-in kind:10032 self-announce. Passed through
+      // unchanged; the SelfAnnounceService validates required fields at start.
+      selfAnnounce: rawConfig.selfAnnounce as SelfAnnounceConfig | undefined,
       transport,
     };
 

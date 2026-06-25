@@ -620,6 +620,115 @@ export interface ConnectorConfig {
    * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop BLS notification (default: false)
    */
   localDelivery?: LocalDeliveryConfig;
+
+  /**
+   * Optional self-announce configuration (relay#37 / store#22).
+   *
+   * When enabled, the connector builds, signs, and continuously republishes a
+   * `kind:10032` `IlpPeerInfo` announcement describing its OWN apex routes to a
+   * relay's event store, so a client holding only the genesis seed can discover
+   * the publish/store routes + settlement info out of band (instead of falling
+   * back to hardcoded `publishDestination`/`storeDestination`). Disabled by
+   * default — absent this block the connector announces nothing.
+   *
+   * @see SelfAnnounceConfig
+   */
+  selfAnnounce?: SelfAnnounceConfig;
+}
+
+/**
+ * Self-Announce Configuration Interface (relay#37 / store#22)
+ *
+ * Drives the connector's `kind:10032` `IlpPeerInfo` self-announcement. The
+ * advertised peer info is DERIVED from the connector's own config (its
+ * locally-terminated routes' `ilpAddress` + `settlementAddresses`, the
+ * `chainProviders` chain ids, and the BTP endpoint) — the operator does not
+ * re-type it. The optional overrides below cover only the values the connector
+ * cannot infer (its public BTP/HTTP/relay hostnames, terminated behind TLS) or
+ * wishes to pin explicitly.
+ *
+ * @example
+ * ```yaml
+ * selfAnnounce:
+ *   enabled: true
+ *   writeUrl: http://relay:3100/write   # relay private POST /write store
+ *   refreshIntervalSecs: 300            # republish every 5m; TTL = 2x = 10m
+ *   btpEndpoint: wss://proxy.devnet.toonprotocol.dev:443
+ *   relayUrl: wss://relay.devnet.toonprotocol.dev
+ * ```
+ */
+export interface SelfAnnounceConfig {
+  /**
+   * Whether self-announce is enabled. When false (default), the connector
+   * publishes no `kind:10032` announcement.
+   */
+  enabled: boolean;
+
+  /**
+   * HTTP `POST /write` endpoint of the relay's PRIVATE event store (default
+   * relay port 3100). The connector POSTs `{ "event": <NostrEvent> }` here; the
+   * relay verifies the event signature and stores it, after which it is served
+   * on the relay's FREE read WS (port 7100). This is the same upstream the
+   * connector already reverse-proxies paid writes to. The relay's free read WS
+   * rejects `EVENT` writes (writes are monetized), so the private `/write` store
+   * is the correct internal publish channel. For a store-connector deploy with
+   * no local relay, point this at the apex relay's `/write` endpoint.
+   *
+   * Example: `http://relay:3100/write`
+   */
+  writeUrl: string;
+
+  /**
+   * Seconds between republishes. The announcement carries a NIP-40 `expiration`
+   * tag of `2 × refreshIntervalSecs`, so each refresh lands a fresh, unexpired
+   * event at half the TTL and the announcement never goes stale while the node
+   * is up. Default: 300 (5 minutes → 10-minute TTL).
+   */
+  refreshIntervalSecs?: number;
+
+  /**
+   * Public BTP WebSocket endpoint to advertise (e.g.
+   * `wss://proxy.devnet.toonprotocol.dev:443`). The connector cannot infer its
+   * own public hostname behind TLS termination, so set this for clients/peers to
+   * dial. When omitted, `btpEndpoint` is left out of the announcement.
+   */
+  btpEndpoint?: string;
+
+  /**
+   * Public ILP-over-HTTP ingress endpoint to advertise (RFC-0035 `POST /ilp`),
+   * for stateless one-shot writes. Optional.
+   */
+  httpEndpoint?: string;
+
+  /**
+   * Public Nostr relay read WS URL to advertise for FREE reads (e.g.
+   * `wss://relay.devnet.toonprotocol.dev`). Lets a client discover where to
+   * subscribe without out-of-band config. Optional.
+   */
+  relayUrl?: string;
+
+  /**
+   * Asset code advertised in the announcement. Default: `USDC`.
+   */
+  assetCode?: string;
+
+  /**
+   * Asset scale (decimal places) advertised. Default: 6 (USDC).
+   */
+  assetScale?: number;
+
+  /**
+   * Optional explicit route-hint overrides. When omitted, the publish/store
+   * route addresses are DERIVED from the connector's configured routes (the
+   * `.relay` route is the publish address; the direct `.store` route is the
+   * store address). Override only for non-standard topologies.
+   */
+  routes?: {
+    /** ILP address a client should PUBLISH (Nostr writes) to, e.g. `g.proxy.relay`. */
+    publish?: string;
+    /** ILP address a client should STORE (blob uploads) to, e.g. `g.proxy.store`. */
+    store?: string;
+  };
 }
 
 /**

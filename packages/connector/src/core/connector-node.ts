@@ -97,6 +97,7 @@ import {
 import { InboundClaimValidator } from '../btp/inbound-claim-validator';
 import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
+import { SelfAnnounceService } from '../discovery/self-announce-service';
 import { hexToBytes } from '@noble/hashes/utils';
 import { promises as dns } from 'dns';
 // Import package.json for version information
@@ -178,6 +179,10 @@ export class ConnectorNode implements HealthStatusProvider {
   // derive distinct settlement keys without mutating global env. NEVER logged.
   private readonly _mnemonicOverride?: string;
   private readonly _mnemonicAccountIndex?: number;
+  // Self-announce service (relay#37 / store#22). When `selfAnnounce.enabled` is
+  // set, publishes + refreshes this node's own kind:10032 IlpPeerInfo. Null when
+  // disabled or no signing identity is available.
+  private _selfAnnounceService: SelfAnnounceService | null = null;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -694,6 +699,94 @@ export class ConnectorNode implements HealthStatusProvider {
       },
       'Mnemonic signing mode active: derived per-chain settlement keys from TOON_MNEMONIC'
     );
+  }
+
+  /**
+   * Resolve the connector's Nostr secret key (NIP-06) for self-announce signing.
+   *
+   * The NIP-06 Nostr key IS the connector's secp256k1 EVM settlement key
+   * (`m/44'/1237'/0'/0/0`), so the self-announcement is signed under the SAME
+   * identity the node settles with — matching how the devnet store apex pubkey
+   * (`f9308a019258…036f9`) is derived. Resolution order:
+   *
+   * 1. The EVM `chainProviders[].keyId` (a raw 0x-hex private key). After
+   *    `_applyMnemonicSigningMode()`, this already holds the mnemonic-derived
+   *    key, so this branch covers both raw-key and mnemonic deploys.
+   * 2. Otherwise derive directly from the mnemonic (env `TOON_MNEMONIC` or the
+   *    test override).
+   *
+   * Returns null (with a warning) when no signing identity is available.
+   *
+   * SECURITY: never logs the key bytes or the mnemonic.
+   */
+  private _resolveNostrSecretKey(): Uint8Array | null {
+    const evmProvider = this._config.chainProviders?.find((p) => p.chainType === 'evm');
+    const keyId = (evmProvider as { keyId?: string } | undefined)?.keyId;
+    if (keyId && /^(0x)?[0-9a-fA-F]{64}$/.test(keyId)) {
+      return hexToBytes(keyId.replace(/^0x/, ''));
+    }
+
+    const mnemonic = this._mnemonicOverride ?? process.env.TOON_MNEMONIC;
+    if (mnemonic) {
+      try {
+        const keys = deriveChainKeysFromMnemonic(mnemonic, this._mnemonicAccountIndex ?? 0);
+        return hexToBytes(keys.evm.privateKey.replace(/^0x/, ''));
+      } catch (err) {
+        this._logger.warn(
+          {
+            event: 'self_announce_key_derive_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'Failed to derive Nostr key for self-announce'
+        );
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Start the self-announce service (relay#37 / store#22) when configured.
+   *
+   * Opt-in via `selfAnnounce.enabled`. Builds the kind:10032 IlpPeerInfo from
+   * this node's own routes/chainProviders/endpoints, signs with the NIP-06 key,
+   * and publishes + refreshes it to the relay store. Best-effort: any failure
+   * logs and skips so startup is never blocked.
+   */
+  private _startSelfAnnounce(): void {
+    const selfAnnounce = this._config.selfAnnounce;
+    if (!selfAnnounce?.enabled) {
+      return;
+    }
+
+    const secretKey = this._resolveNostrSecretKey();
+    if (!secretKey) {
+      this._logger.warn(
+        { event: 'self_announce_no_identity' },
+        'selfAnnounce.enabled but no Nostr signing identity (set TOON_MNEMONIC or an EVM keyId); not announcing'
+      );
+      return;
+    }
+
+    try {
+      this._selfAnnounceService = new SelfAnnounceService({
+        config: this._config,
+        selfAnnounce,
+        secretKey,
+        logger: this._logger,
+      });
+      this._selfAnnounceService.start();
+    } catch (err) {
+      this._selfAnnounceService = null;
+      this._logger.warn(
+        {
+          event: 'self_announce_start_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start self-announce service; continuing without it'
+      );
+    }
   }
 
   /**
@@ -1828,6 +1921,13 @@ export class ConnectorNode implements HealthStatusProvider {
         );
       }
 
+      // Self-announce (relay#37 / store#22): publish + refresh this node's own
+      // kind:10032 IlpPeerInfo so its apex routes are discoverable out of band.
+      // Started last (after the BTP/HTTP/admin surfaces are up) so the
+      // announcement reflects a fully-running node. Best-effort: a build/key
+      // failure logs and skips rather than aborting startup.
+      this._startSelfAnnounce();
+
       // Update health status to healthy after all components started
       this._updateHealthStatus();
 
@@ -1905,6 +2005,12 @@ export class ConnectorNode implements HealthStatusProvider {
     );
 
     try {
+      // Stop the self-announce refresh loop first (clears its unref'd timer).
+      if (this._selfAnnounceService) {
+        this._selfAnnounceService.stop();
+        this._selfAnnounceService = null;
+      }
+
       // Stop settlement monitor FIRST to stop polling the ledger during drain.
       // The executor already unsubscribes in its own stop(), so no new events fire.
       if (this._settlementMonitor) {
