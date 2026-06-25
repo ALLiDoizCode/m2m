@@ -9,6 +9,7 @@
 #   ./devnet-manage.sh destroy   Delete all Linode boxes (loses chain state)
 #   ./devnet-manage.sh status    Probe every public HTTPS endpoint
 #   ./devnet-manage.sh redeploy  Pull latest images + restart containers
+#   ./devnet-manage.sh verify-routes  Assert apex forwards g.proxy.relay.store + g.proxy.store → store-box
 #   ./devnet-manage.sh ips       Print current box IPs
 #   ./devnet-manage.sh endpoints Generate endpoints.json from live nodes
 set -euo pipefail
@@ -184,6 +185,73 @@ print_ips() {
   done
 }
 
+# Post-deploy regression guard for the apex routing table. The apex once dropped
+# its store forward routes and paid writes to g.proxy.relay.store silently 404'd on
+# the relay (the TOON client's DEFAULT write dest is g.proxy.relay.store, which —
+# being MORE specific than the locally-terminated g.proxy.relay route — falls
+# through to that terminate route under longest-prefix matching unless an explicit
+# forward route exists). This queries the apex connector's LIVE route table via its
+# keyless admin API from inside the toon box's docker network and asserts the store
+# forward routes survived the deploy. Exits non-zero on a missing/mis-pointed route
+# so a redeploy that drops them fails LOUDLY instead of silently misrouting.
+#   g.proxy.relay.store -> store-box   (the client default write dest)
+#   g.proxy.store       -> store-box
+verify_routes() {
+  local ip; ip=$(get_box_ip "${NODE_LABELS[toon]}")
+  if [ -z "$ip" ]; then
+    echo "  ❌  verify-routes: toon (apex) box not found" >&2
+    return 1
+  fi
+  echo "==> Verifying apex route table (g.proxy.relay.store, g.proxy.store → store-box)"
+  # Discover the connector container (compose names it *connector*) and dump the
+  # live admin route table from inside the box's docker network (port 8081, keyless,
+  # bound to the docker bridge only — not reachable from off-box).
+  local routes_json
+  routes_json="$(ssh_run "$ip" '
+    c="$(docker ps --filter name=connector --format "{{.Names}}" | head -1)"
+    [ -z "$c" ] && { echo "NO_CONNECTOR_CONTAINER" >&2; exit 3; }
+    docker exec "$c" wget -qO- http://127.0.0.1:8081/admin/routes
+  ' 2>/dev/null || true)"
+
+  if [ -z "$routes_json" ] || printf '%s' "$routes_json" | grep -q NO_CONNECTOR_CONTAINER; then
+    echo "  ❌  verify-routes: could not read /admin/routes from the apex connector" >&2
+    return 1
+  fi
+
+  # GET /admin/routes returns Array<{prefix,nextHop,priority}>; use python3 for a
+  # robust JSON check (avoids brittle ordering-dependent greps).
+  local ok=1 prefix
+  for prefix in g.proxy.relay.store g.proxy.store; do
+    if printf '%s' "$routes_json" | ROUTES_PREFIX="$prefix" python3 -c '
+import json, os, sys
+prefix = os.environ["ROUTES_PREFIX"]
+try:
+    routes = json.load(sys.stdin)
+except Exception as e:
+    sys.stderr.write("  bad JSON from /admin/routes: %s\n" % e)
+    sys.exit(2)
+routes = routes.get("routes", routes) if isinstance(routes, dict) else routes
+match = next((r for r in routes if r.get("prefix") == prefix), None)
+if match is None:
+    sys.exit(1)
+sys.exit(0 if match.get("nextHop") == "store-box" else 1)
+'; then
+      echo "  ✅  route $prefix → store-box"
+    else
+      echo "  ❌  route $prefix → store-box  (MISSING or wrong nextHop)"
+      ok=0
+    fi
+  done
+
+  if [ "$ok" != 1 ]; then
+    echo "  FAIL: apex routing regression — a required store forward route is missing." >&2
+    echo "        Re-apply infra/linode-node/connector.yaml and redeploy the toon node." >&2
+    return 1
+  fi
+  echo "  PASS: apex store forward routes intact."
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 case "${1:-help}" in
 
@@ -238,6 +306,9 @@ up)
 
   echo "==> [4/4] Status check"
   "$0" status
+
+  echo "==> [post-deploy] Route guard"
+  verify_routes
   ;;
 
 store)
@@ -324,7 +395,12 @@ redeploy)
   done
   wait
   "$0" status
+
+  echo "==> [post-deploy] Route guard"
+  verify_routes
   ;;
+
+verify-routes) verify_routes ;;
 
 ips) print_ips ;;
 

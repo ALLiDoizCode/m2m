@@ -62,7 +62,15 @@ chainProviders:
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
-peers: []
+# The Arweave store runs on its own box. The apex peers with it over BTP so it
+# can FORWARD store-bound writes (the apex earns the configured hop fee).
+peers:
+  - id: store-box
+    url: wss://proxy.store.devnet.toonprotocol.dev:443
+    relation: peer
+    authToken: ''
+    chain: evm:31337
+    settlementAddress: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
 
 routes:
   - prefix: g.proxy.relay
@@ -79,3 +87,25 @@ routes:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
       solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
+
+  # Store forwards. `g.proxy.relay.store` MUST be listed (it is more specific than
+  # `g.proxy.relay`) so longest-prefix routing forwards it to the store box instead
+  # of falling through to the relay terminate route above (which 404s on /store).
+  # The store box's own connector terminates these → POST /store → Arweave.
+  - prefix: g.proxy.relay.store
+    nextHop: store-box
+    price: '1000'
+    chains:
+      - evm
+    ilpAddress: g.proxy.relay.store
+    settlementAddresses:
+      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
+
+  - prefix: g.proxy.store
+    nextHop: store-box
+    price: '1000'
+    chains:
+      - evm
+    ilpAddress: g.proxy.store
+    settlementAddresses:
+      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
