@@ -1,0 +1,5 @@
+# Secrets + machine-rendered artifacts (generated on the box at deploy time)
+.env
+connector.yaml
+nginx/conf.d/
+*.bak-*

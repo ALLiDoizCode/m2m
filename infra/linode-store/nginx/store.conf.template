@@ -1,0 +1,52 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TOON store node nginx config.
+# Serves: store.DOMAIN → the connector's POST /ilp paid edge.
+# (The store is a DVM — paid writes only; there is no free-read WS.)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+limit_req_zone $binary_remote_addr zone=store:10m rate=30r/s;
+
+map $host $backend {
+    default            "";
+    store.${DOMAIN}    "http://connector:3000";
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name store.${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name store.${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/store.${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/store.${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location / {
+        if ($backend = "") { return 404; }
+        limit_req zone=store burst=60 nodelay;
+
+        proxy_pass $backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 1h;
+
+        client_max_body_size 4m;
+    }
+}

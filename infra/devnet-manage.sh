@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON devnet lifecycle manager — provision, deploy, tear down, or probe the
-# four-node devnet (EVM / Solana / Mina / TOON connector).
+# five-node devnet (EVM / Solana / Mina chains + toon[relay] / store apps).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#   ./devnet-manage.sh up        Provision boxes + deploy all nodes
+#   ./devnet-manage.sh chains    (Re)deploy ONLY the chain boxes (EVM/Solana/Mina)
+#   ./devnet-manage.sh apps      (Re)deploy ONLY the app nodes (toon[relay] + store);
+#                                injects the current chain config (Mina captured
+#                                from the toon node) — run AFTER `chains`
+#   ./devnet-manage.sh up        Full devnet = chains then apps
 #   ./devnet-manage.sh down      Stop containers (boxes stay, restart is fast)
 #   ./devnet-manage.sh destroy   Delete all Linode boxes (loses chain state)
 #   ./devnet-manage.sh status    Probe every public HTTPS endpoint
-#   ./devnet-manage.sh redeploy  Pull latest images + restart containers
+#   ./devnet-manage.sh redeploy  Pull latest images + restart ALL boxes (back-compat)
 #   ./devnet-manage.sh ips       Print current box IPs
 #   ./devnet-manage.sh endpoints Generate endpoints.json from live nodes
 set -euo pipefail
@@ -34,9 +38,13 @@ LINODE_API="https://api.linode.com/v4"
 PORKBUN_API="https://api.porkbun.com/api/json/v3"
 
 # Node definitions: label | type | profile | boot-script-path | subdomains
-declare -A NODE_LABELS=( [evm]=toon-devnet-evm [sol]=toon-devnet-sol [mina]=toon-devnet-mina [toon]=toon )
-declare -A NODE_TYPES=(  [evm]=g6-standard-1   [sol]=g6-standard-2  [mina]=g6-standard-4   [toon]=g6-standard-1 )
-declare -A NODE_PASSWORDS=( [evm]="T00nDevN3t!EVM2026" [sol]="T00nDevN3t!SOL2026" [mina]="T00nDevN3t!MINA2026" [toon]="T00nDevN3t!N0DE2026" )
+declare -A NODE_LABELS=( [evm]=toon-devnet-evm [sol]=toon-devnet-sol [mina]=toon-devnet-mina [toon]=toon [store]=store )
+declare -A NODE_TYPES=(  [evm]=g6-standard-1   [sol]=g6-standard-2  [mina]=g6-standard-4   [toon]=g6-standard-1 [store]=g6-standard-1 )
+declare -A NODE_PASSWORDS=( [evm]="T00nDevN3t!EVM2026" [sol]="T00nDevN3t!SOL2026" [mina]="T00nDevN3t!MINA2026" [toon]="T00nDevN3t!N0DE2026" [store]="T00nDevN3t!ST0RE2026" )
+
+# Node groups for the split chains/apps lifecycle.
+CHAIN_KEYS=(evm sol mina)
+APP_KEYS=(toon store)
 
 # ── Linode helpers ─────────────────────────────────────────────────────────
 linode_get() { curl -sf -H "Authorization: Bearer $LINODE_CLI_TOKEN" "$LINODE_API/$1"; }
@@ -147,6 +155,105 @@ ENV
   "
 }
 
+# Read the Mina addresses the toon node deployed to the (shared) lightnet, so the
+# store node can reference the SAME token + PaymentChannel zkApps. Echoes four
+# space-separated values: graphqlUrl zkAppAddress tokenAddress tokenId (empty on
+# failure — the caller warns). The toon bootstrap writes mina-lightnet.json.
+capture_mina_addrs() {  # toon_ip → "gql zk tok tid"
+  local ip=$1
+  local json
+  json="$(ssh_run "$ip" "cat /root/connector/infra/linode-node/mina-lightnet.json 2>/dev/null || true" 2>/dev/null || true)"
+  [ -n "$json" ] || { echo "  ⚠️  no mina-lightnet.json on toon node — store Mina will be unconfigured" >&2; echo "https://mina.${DOMAIN}/graphql   "; return; }
+  local zk tok tid
+  zk="$(printf '%s' "$json"  | jq -r '.paymentChannel.zkAppAddress // ""')"
+  tok="$(printf '%s' "$json" | jq -r '.usdc.tokenAddress // ""')"
+  tid="$(printf '%s' "$json" | jq -r '.usdc.tokenId // ""')"
+  echo "https://mina.${DOMAIN}/graphql $zk $tok $tid"
+}
+
+deploy_store_node() {  # ip, mnemonic, mina_gql, mina_zk, mina_tok, mina_tid
+  local ip=$1 mnemonic=$2 gql=$3 zk=$4 tok=$5 tid=$6
+  wait_ssh "$ip"
+  ssh_run "$ip" "
+    set -e
+    command -v git >/dev/null || apt-get install -y git curl
+    [ -d /root/connector ] || git clone -b '$BRANCH' '$REPO_URL' /root/connector
+    cd /root/connector && git pull --ff-only origin '$BRANCH' 2>/dev/null || true
+    cat > infra/linode-store/.env <<ENV
+DOMAIN=$DOMAIN
+LETSENCRYPT_STAGING=0
+LETSENCRYPT_EMAIL=dev.jonathan.green@gmail.com
+TOON_MNEMONIC=$mnemonic
+STORE_NOSTR_SECRET_KEY=0000000000000000000000000000000000000000000000000000000000000003
+STORE_ARWEAVE_JWK_B64=
+FEE_PER_JOB=10
+MINA_GRAPHQL_URL=$gql
+MINA_ZKAPP_ADDRESS=$zk
+MINA_TOKEN_ADDRESS=$tok
+MINA_TOKEN_ID=$tid
+LOG_LEVEL=info
+ENV
+    chmod +x infra/linode-store/bootstrap.sh infra/linode-store/init-letsencrypt.sh infra/linode-store/firewall.sh
+    ./infra/linode-store/bootstrap.sh
+  "
+}
+
+# ── Group lifecycle: chains (evm/sol/mina) and apps (toon/store) ──────────────
+do_chains() {
+  echo "==> [chains] Provision EVM / Solana / Mina boxes"
+  for key in "${CHAIN_KEYS[@]}"; do create_box "$key"; done
+  for key in "${CHAIN_KEYS[@]}"; do wait_box_running "${NODE_LABELS[$key]}"; done
+  local EVM_IP SOL_IP MINA_IP
+  EVM_IP=$(get_box_ip toon-devnet-evm); SOL_IP=$(get_box_ip toon-devnet-sol); MINA_IP=$(get_box_ip toon-devnet-mina)
+
+  echo "==> [chains] DNS"
+  update_dns "evm-rpc.devnet"    "$EVM_IP"
+  update_dns "solana-rpc.devnet" "$SOL_IP"
+  update_dns "solana-ws.devnet"  "$SOL_IP"
+  update_dns "mina.devnet"          "$MINA_IP"
+  update_dns "mina-accounts.devnet" "$MINA_IP"
+
+  echo "==> [chains] Deploy chain nodes (parallel)"
+  deploy_chains_box "$EVM_IP"  "evm"    "evm.conf.template" \
+    "evm-rpc.$DOMAIN" "evm-rpc.$DOMAIN" & local p1=$!
+  deploy_chains_box "$SOL_IP"  "solana" "sol.conf.template" \
+    "solana-rpc.$DOMAIN" "solana-rpc.$DOMAIN solana-ws.$DOMAIN" & local p2=$!
+  deploy_chains_box "$MINA_IP" "mina"   "mina.conf.template" \
+    "mina.$DOMAIN" "mina.$DOMAIN mina-accounts.$DOMAIN" & local p3=$!
+  wait $p1 && echo "  ✅ EVM"  || echo "  ❌ EVM failed"
+  wait $p2 && echo "  ✅ Sol"  || echo "  ❌ Sol failed"
+  wait $p3 && echo "  ✅ Mina" || echo "  ❌ Mina failed"
+}
+
+do_apps() {
+  local mnemonic="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
+  echo "==> [apps] Provision toon + store boxes"
+  for key in "${APP_KEYS[@]}"; do create_box "$key"; done
+  for key in "${APP_KEYS[@]}"; do wait_box_running "${NODE_LABELS[$key]}"; done
+  local TOON_IP STORE_IP
+  TOON_IP=$(get_box_ip toon); STORE_IP=$(get_box_ip store)
+
+  echo "==> [apps] DNS"
+  update_dns "relay-ws.devnet" "$TOON_IP"
+  update_dns "proxy.devnet"    "$TOON_IP"
+  update_dns "faucet.devnet"   "$TOON_IP"
+  update_dns "store.devnet"    "$STORE_IP"
+
+  # The toon node deploys the Mina zkApps to the shared lightnet (idempotent) and
+  # writes mina-lightnet.json — do it FIRST so the store can reuse those addrs.
+  echo "==> [apps] Deploy toon node (relay + proxy + faucet; deploys Mina zkApps)"
+  deploy_toon_node "$TOON_IP" "$mnemonic" && echo "  ✅ toon" || echo "  ❌ toon failed"
+
+  echo "==> [apps] Capture Mina addresses from toon node"
+  local MINA_GQL MINA_ZK MINA_TOK MINA_TID
+  read -r MINA_GQL MINA_ZK MINA_TOK MINA_TID <<<"$(capture_mina_addrs "$TOON_IP")"
+  echo "  Mina: zkApp=$MINA_ZK token=$MINA_TOK"
+
+  echo "==> [apps] Deploy store node (connector + store; reuses Mina addrs)"
+  deploy_store_node "$STORE_IP" "$mnemonic" "$MINA_GQL" "$MINA_ZK" "$MINA_TOK" "$MINA_TID" \
+    && echo "  ✅ store" || echo "  ❌ store failed"
+}
+
 probe() {  # url, label
   if curl -fsS -m 10 -o /dev/null "$1" 2>/dev/null; then
     printf "  ✅  %-40s %s\n" "$2" "$1"
@@ -156,7 +263,7 @@ probe() {  # url, label
 }
 
 print_ips() {
-  for key in evm sol mina toon; do
+  for key in evm sol mina toon store; do
     local label="${NODE_LABELS[$key]}"
     local ip; ip=$(get_box_ip "$label")
     printf "  %-20s %s\n" "$label" "${ip:-not-found}"
@@ -166,55 +273,37 @@ print_ips() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 case "${1:-help}" in
 
+chains)
+  # Provision/(re)deploy ONLY the blockchain boxes (EVM / Solana / Mina).
+  # Does NOT touch the toon/store app nodes. The Mina lightnet resets when its
+  # box is recreated; the zkApps are (re)deployed by `apps` (on the toon node),
+  # which captures the fresh addresses for the store node.
+  do_chains
+  echo "==> [chains] Status"
+  "$0" status
+  ;;
+
+apps)
+  # Provision/(re)deploy ONLY the app nodes (toon = relay, store). Reads the
+  # current chain config: EVM/Solana are deterministic (baked in connector.yaml);
+  # Mina is dynamic, so the toon node deploys the zkApps and `apps` injects the
+  # resulting addresses into the store node's connector.yaml. Run AFTER `chains`.
+  do_apps
+  echo "==> [apps] Status"
+  "$0" status
+  ;;
+
 up)
-  TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
-  echo "==> [1/4] Provision boxes"
-  for key in evm sol mina toon; do create_box "$key"; done
-  for key in evm sol mina toon; do wait_box_running "${NODE_LABELS[$key]}"; done
-
-  EVM_IP=$(get_box_ip toon-devnet-evm)
-  SOL_IP=$(get_box_ip toon-devnet-sol)
-  MINA_IP=$(get_box_ip toon-devnet-mina)
-  TOON_IP=$(get_box_ip toon)
-
-  echo "==> [2/4] Update DNS"
-  update_dns "evm-rpc.devnet"       "$EVM_IP"
-  update_dns "solana-rpc.devnet"    "$SOL_IP"
-  update_dns "solana-ws.devnet"     "$SOL_IP"
-  update_dns "mina.devnet"          "$MINA_IP"
-  update_dns "mina-accounts.devnet" "$MINA_IP"
-  update_dns "relay-ws.devnet"      "$TOON_IP"
-  update_dns "proxy.devnet"         "$TOON_IP"
-  update_dns "faucet.devnet"        "$TOON_IP"
-
-  echo "==> [3/4] Deploy all nodes (parallel)"
-  deploy_chains_box "$EVM_IP"  "evm"    "evm.conf.template" \
-    "evm-rpc.$DOMAIN" "evm-rpc.$DOMAIN" &
-  PID_EVM=$!
-
-  deploy_chains_box "$SOL_IP"  "solana" "sol.conf.template" \
-    "solana-rpc.$DOMAIN" "solana-rpc.$DOMAIN solana-ws.$DOMAIN" &
-  PID_SOL=$!
-
-  deploy_chains_box "$MINA_IP" "mina"   "mina.conf.template" \
-    "mina.$DOMAIN" "mina.$DOMAIN mina-accounts.$DOMAIN" &
-  PID_MINA=$!
-
-  deploy_toon_node "$TOON_IP" "$TOON_MNEMONIC" &
-  PID_TOON=$!
-
-  wait $PID_EVM  && echo "  ✅ EVM done"  || echo "  ❌ EVM failed"
-  wait $PID_SOL  && echo "  ✅ Sol done"  || echo "  ❌ Sol failed"
-  wait $PID_MINA && echo "  ✅ Mina done" || echo "  ❌ Mina failed"
-  wait $PID_TOON && echo "  ✅ TOON done" || echo "  ❌ TOON failed"
-
-  echo "==> [4/4] Status check"
+  # Full devnet: chains first (so the Mina lightnet exists), then the app nodes.
+  do_chains
+  do_apps
+  echo "==> Status check"
   "$0" status
   ;;
 
 down)
   echo "==> Stopping containers on all nodes"
-  for key in evm sol mina toon; do
+  for key in evm sol mina toon store; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
@@ -223,6 +312,8 @@ down)
       cd /root/connector 2>/dev/null || exit 0
       if [ '$key' = 'toon' ]; then
         docker compose -f infra/linode-node/docker-compose.node.yml down 2>/dev/null || true
+      elif [ '$key' = 'store' ]; then
+        docker compose -f infra/linode-store/docker-compose.store.yml down 2>/dev/null || true
       else
         . infra/linode/.env 2>/dev/null || true
         docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml \
@@ -236,7 +327,7 @@ destroy)
   echo "==> Deleting all devnet boxes (irreversible)"
   read -r -p "Are you sure? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
-  for key in evm sol mina toon; do
+  for key in evm sol mina toon store; do
     local_label="${NODE_LABELS[$key]}"
     id=$(get_box_id "$local_label") || continue
     [ -z "$id" ] && echo "  $local_label: not found" && continue
@@ -254,19 +345,24 @@ status)
   probe "https://mina.$DOMAIN/graphql"           "mina-graphql"
   probe "https://mina-accounts.$DOMAIN/list-acquired-accounts" "mina-accounts"
   probe "https://faucet.$DOMAIN/health"          "faucet"
-  probe "https://proxy.$DOMAIN/health"           "proxy/connector"
-  probe "https://relay-ws.$DOMAIN"               "relay-ws"
+  probe "https://proxy.$DOMAIN/health"           "proxy/connector (toon)"
+  probe "https://relay-ws.$DOMAIN"               "relay-ws (toon)"
+  probe "https://store.$DOMAIN/health"           "store proxy"
   ;;
 
 redeploy)
+  # Back-compat: redeploy every box. Prefer the scoped `chains` / `apps`
+  # commands (they also re-render config + re-capture Mina addrs).
   echo "==> Redeploying containers on all nodes (pulls latest images)"
-  for key in evm sol mina toon; do
+  for key in evm sol mina toon store; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
     echo "  Redeploying $local_label ($ip)..."
     if [ "$key" = "toon" ]; then
       ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-node/docker-compose.node.yml pull && docker compose -f infra/linode-node/docker-compose.node.yml up --build -d" &
+    elif [ "$key" = "store" ]; then
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-store/docker-compose.store.yml pull && docker compose -f infra/linode-store/docker-compose.store.yml up -d" &
     else
       ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && source infra/linode/.env && docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml --profile \$COMPOSE_PROFILES pull && docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml --profile \$COMPOSE_PROFILES up -d" &
     fi
@@ -283,6 +379,7 @@ dns)
   SOL_IP=$(get_box_ip toon-devnet-sol)
   MINA_IP=$(get_box_ip toon-devnet-mina)
   TOON_IP=$(get_box_ip toon)
+  STORE_IP=$(get_box_ip store)
   [ -n "$EVM_IP" ]  && update_dns "evm-rpc.devnet" "$EVM_IP"       || echo "  toon-devnet-evm not found"
   [ -n "$SOL_IP" ]  && update_dns "solana-rpc.devnet" "$SOL_IP"    || echo "  toon-devnet-sol not found"
   [ -n "$SOL_IP" ]  && update_dns "solana-ws.devnet" "$SOL_IP"     || true
@@ -291,6 +388,7 @@ dns)
   [ -n "$TOON_IP" ] && update_dns "relay-ws.devnet" "$TOON_IP"     || echo "  toon not found"
   [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || true
   [ -n "$TOON_IP" ] && update_dns "faucet.devnet" "$TOON_IP"       || true
+  [ -n "$STORE_IP" ] && update_dns "store.devnet" "$STORE_IP"      || echo "  store not found"
   echo "Done."
   ;;
 
@@ -299,6 +397,7 @@ endpoints)
   SOL_IP=$(get_box_ip toon-devnet-sol)
   MINA_IP=$(get_box_ip toon-devnet-mina)
   TOON_IP=$(get_box_ip toon)
+  STORE_IP=$(get_box_ip store)
   # Pull the live Mina zkApp addresses the toon node was provisioned with (the
   # lightnet deploy is per-recreate, so read them from the box's connector.yaml).
   MINA_TOKEN=""; MINA_TOKENID=""; MINA_CHANNEL=""
@@ -349,6 +448,17 @@ endpoints)
     },
     "nodeIp": "${TOON_IP}"
   },
+  "store": {
+    "proxyIlp": "https://store.${DOMAIN}/ilp",
+    "ilpAddress": "g.proxy.store",
+    "settlementAddresses": {
+      "evm": "0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab",
+      "solana": "A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK",
+      "mina": "B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq"
+    },
+    "nodeIp": "${STORE_IP}",
+    "_note": "Arweave DVM (kind:5094); paid writes only (no free-read WS). Reuses the toon node's Mina zkApps."
+  },
   "faucet": {
     "evmUrl": "https://faucet.${DOMAIN}/api/request",
     "solanaUrl": "https://faucet.${DOMAIN}/api/solana/request",
@@ -359,7 +469,7 @@ JSON
   ;;
 
 help|*)
-  sed -n '2,10p' "$0"
+  sed -n '2,16p' "$0"
   exit 1
   ;;
 esac
