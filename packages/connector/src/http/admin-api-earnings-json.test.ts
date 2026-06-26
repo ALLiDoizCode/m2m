@@ -612,7 +612,12 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
         settlementTokens: ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'],
         tokenAddress: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
       });
-      mockBTPClientManager.getPeerIds.mockReturnValue(['relay-01', 'swap-01', 'store-01', 'sol-01']);
+      mockBTPClientManager.getPeerIds.mockReturnValue([
+        'relay-01',
+        'swap-01',
+        'store-01',
+        'sol-01',
+      ]);
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
           ['relay-01', true],
@@ -653,7 +658,12 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
         settlementTokens: [tokenId],
         tokenAddress: tokenId,
       });
-      mockBTPClientManager.getPeerIds.mockReturnValue(['relay-01', 'swap-01', 'store-01', 'mina-01']);
+      mockBTPClientManager.getPeerIds.mockReturnValue([
+        'relay-01',
+        'swap-01',
+        'store-01',
+        'mina-01',
+      ]);
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
           ['relay-01', true],

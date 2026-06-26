@@ -79,7 +79,9 @@ describe('Admin API — PUT /admin/desired-state', () => {
   it('adds desired peers + their auto-derived child routes', async () => {
     const res = await request(app)
       .put('/admin/desired-state')
-      .send({ peers: [{ id: 'relay', url: 'ws://relay:3000', authToken: 't', relation: 'child' }] });
+      .send({
+        peers: [{ id: 'relay', url: 'ws://relay:3000', authToken: 't', relation: 'child' }],
+      });
 
     expect(res.status).toBe(200);
     expect(res.body.peers.added).toEqual(['relay']);
@@ -96,7 +98,9 @@ describe('Admin API — PUT /admin/desired-state', () => {
 
     const res = await request(app)
       .put('/admin/desired-state')
-      .send({ peers: [{ id: 'relay', url: 'ws://relay:3000', authToken: 't', relation: 'child' }] });
+      .send({
+        peers: [{ id: 'relay', url: 'ws://relay:3000', authToken: 't', relation: 'child' }],
+      });
 
     expect(res.status).toBe(200);
     expect(res.body.peers.removed).toEqual(['swap']);
