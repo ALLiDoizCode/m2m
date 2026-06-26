@@ -153,7 +153,7 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _settlementPeers: Map<string, SettlementPeerConfig> = new Map();
   // Persistent peer/route registry (Epic: persistent registry). Mirrors every
   // runtime peer/route mutation to SQLite so they survive a restart instead of
-  // being dropped (the "re-POST the town route" RUNBOOK workaround). Stays null
+  // being dropped (the "re-POST the relay route" RUNBOOK workaround). Stays null
   // when `libsql` is unavailable — registration then degrades to in-memory only.
   private _registryStore: RegistryStore | null = null;
   private _healthStatus: 'healthy' | 'unhealthy' | 'starting' = 'starting';
@@ -1918,7 +1918,7 @@ export class ConnectorNode implements HealthStatusProvider {
       }
 
       // Replay any runtime-added peers/routes from a previous run so they
-      // survive this restart (instead of the "re-POST the town route" RUNBOOK
+      // survive this restart (instead of the "re-POST the relay route" RUNBOOK
       // recovery). The store itself was opened earlier (before the admin server)
       // so the admin HTTP surface shares it. Best-effort.
       await this._reconcileRegistry();
@@ -3042,7 +3042,7 @@ export class ConnectorNode implements HealthStatusProvider {
    *     refresh of the mirror — it never re-applies them.
    *  2. Replay every `source='runtime'` peer/route that isn't already present.
    *     These are the admin-API additions from a previous run; without this they
-   *     would be lost on restart (the "re-POST the town route" RUNBOOK step).
+   *     would be lost on restart (the "re-POST the relay route" RUNBOOK step).
    *
    * Best-effort: if `libsql` is unavailable the store stays null and the
    * connector keeps today's in-memory-only behavior.

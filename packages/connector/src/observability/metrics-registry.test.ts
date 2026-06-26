@@ -19,15 +19,15 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
 
   describe('registerPeer / getKnownPeers', () => {
     it('declares a peer and primes all counter labels to zero', async () => {
-      metrics.registerPeer('town');
+      metrics.registerPeer('relay');
 
-      expect(metrics.getKnownPeers()).toEqual(['town']);
+      expect(metrics.getKnownPeers()).toEqual(['relay']);
       const text = await metrics.register.metrics();
-      expect(text).toContain('toon_packets_forwarded_total{peer="town"} 0');
-      expect(text).toContain('toon_packets_rejected_total{peer="town"} 0');
-      expect(text).toContain('toon_bytes_sent_total{peer="town"} 0');
-      expect(text).toContain('toon_bytes_received_total{peer="town"} 0');
-      expect(text).toContain('toon_last_packet_timestamp_seconds{peer="town"} 0');
+      expect(text).toContain('toon_packets_forwarded_total{peer="relay"} 0');
+      expect(text).toContain('toon_packets_rejected_total{peer="relay"} 0');
+      expect(text).toContain('toon_bytes_sent_total{peer="relay"} 0');
+      expect(text).toContain('toon_bytes_received_total{peer="relay"} 0');
+      expect(text).toContain('toon_last_packet_timestamp_seconds{peer="relay"} 0');
     });
 
     it('is idempotent — calling twice does not double-prime counters', async () => {
@@ -55,16 +55,16 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
   describe('recordInbound', () => {
     it('increments bytes_received and updates lastPacketAt', async () => {
       const before = Date.now() / 1000;
-      metrics.recordInbound('town', 250);
+      metrics.recordInbound('relay', 250);
       const after = Date.now() / 1000;
 
       const snapshot = await metrics.snapshotPeers();
-      const town = snapshot[0];
-      expect(town).toBeDefined();
-      expect(town!.peerId).toBe('town');
-      expect(town!.bytesReceived).toBe(250);
-      expect(town!.lastPacketAtUnixSeconds).toBeGreaterThanOrEqual(before);
-      expect(town!.lastPacketAtUnixSeconds).toBeLessThanOrEqual(after);
+      const relay = snapshot[0];
+      expect(relay).toBeDefined();
+      expect(relay!.peerId).toBe('relay');
+      expect(relay!.bytesReceived).toBe(250);
+      expect(relay!.lastPacketAtUnixSeconds).toBeGreaterThanOrEqual(before);
+      expect(relay!.lastPacketAtUnixSeconds).toBeLessThanOrEqual(after);
     });
 
     it('is a no-op for peerId "unknown" (matches PacketHandler convention)', async () => {
@@ -133,27 +133,27 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
   describe('snapshotPeers', () => {
     it('returns peers sorted alphabetically', async () => {
       metrics.registerPeer('swap');
-      metrics.registerPeer('town');
+      metrics.registerPeer('relay');
       metrics.registerPeer('store');
 
       const snapshot = await metrics.snapshotPeers();
-      expect(snapshot.map((p) => p.peerId)).toEqual(['store', 'swap', 'town']);
+      expect(snapshot.map((p) => p.peerId)).toEqual(['relay', 'store', 'swap']);
     });
 
     it('unions known peers with peers seen via counter activity', async () => {
-      metrics.registerPeer('town');
+      metrics.registerPeer('relay');
       metrics.recordForwardFulfill('swap', 100); // swap never explicitly registered
       const snapshot = await metrics.snapshotPeers();
-      expect(snapshot.map((p) => p.peerId).sort()).toEqual(['swap', 'town']);
+      expect(snapshot.map((p) => p.peerId).sort()).toEqual(['relay', 'swap']);
     });
   });
 
   describe('snapshotAggregate', () => {
     it('sums counters across all peers', async () => {
-      metrics.recordForwardFulfill('town', 100);
+      metrics.recordForwardFulfill('relay', 100);
       metrics.recordForwardFulfill('swap', 200);
       metrics.recordForwardReject('swap', 50);
-      metrics.recordInbound('town', 75); // bytesReceived — not in aggregate
+      metrics.recordInbound('relay', 75); // bytesReceived — not in aggregate
 
       expect(await metrics.snapshotAggregate()).toEqual({
         packetsForwarded: 2,
@@ -173,16 +173,16 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
     });
 
     it('serves 200 with Prometheus text content-type', async () => {
-      metrics.registerPeer('town');
-      metrics.recordForwardFulfill('town', 42);
+      metrics.registerPeer('relay');
+      metrics.recordForwardFulfill('relay', 42);
 
       const res = await request(app).get('/metrics');
 
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/^text\/plain/);
       expect(res.headers['content-type']).toMatch(/version=0\.0\.4/);
-      expect(res.text).toContain('toon_packets_forwarded_total{peer="town"} 1');
-      expect(res.text).toContain('toon_bytes_sent_total{peer="town"} 42');
+      expect(res.text).toContain('toon_packets_forwarded_total{peer="relay"} 1');
+      expect(res.text).toContain('toon_bytes_sent_total{peer="relay"} 42');
     });
 
     it('emits HELP and TYPE comment lines per OpenMetrics', async () => {

@@ -58,7 +58,7 @@ Verified from `packages/connector/src/http/` in the connector repo at `/home/jon
 
 ```json
 {
-  "peerId": "town",
+  "peerId": "relay",
   "balances": [
     {
       "tokenId": "M2M",
@@ -76,7 +76,7 @@ Verified from `packages/connector/src/http/` in the connector repo at `/home/jon
 [
   {
     "channelId": "0xabc…",
-    "peerId": "town",
+    "peerId": "relay",
     "chain": "ethereum",
     "status": "open",
     "deposit": "1000000000000000000",
@@ -161,7 +161,7 @@ interface AdminMetricsJson {
 
 **Rationale.** The per-peer counters are the only piece the dashboard cannot reconstruct from what's already there. `/admin/peers` gives connected-state but no counters. `/admin/balances/:peerId` gives _money_ but not _packets_. Operators will ask "is my swap actually routing anything?" — that needs per-peer packets, not aggregate.
 
-**Implementation hint.** The Prometheus collector already tracks per-peer counters by label (the Prometheus `/metrics` output will contain lines like `toon_packets_forwarded{peer="town"} 42`). Exposing the same map as JSON is a straightforward adapter over the existing registry.
+**Implementation hint.** The Prometheus collector already tracks per-peer counters by label (the Prometheus `/metrics` output will contain lines like `toon_packets_forwarded{peer="relay"} 42`). Exposing the same map as JSON is a straightforward adapter over the existing registry.
 
 **Acceptance test the dashboard will run.** `curl http://127.0.0.1:$ADMIN_PORT/admin/metrics.json` returns a parseable JSON body with `peers[].packetsForwarded` ≥ 0 for each registered peer within 500 ms.
 
