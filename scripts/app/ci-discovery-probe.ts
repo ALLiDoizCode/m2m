@@ -113,31 +113,69 @@ function regexUnix(raw: string, label: string): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
+/**
+ * Parse the announcement's CONTENT (a JSON `IlpPeerInfo` blob) for the TOP-LEVEL
+ * `ilpAddress` — the announcement's OWN address — plus the route hints. This is
+ * what tells apex (`g.proxy.relay`) and store (`g.proxy.store`) apart precisely;
+ * raw-substring matching can't, because both announcements name BOTH addresses in
+ * their `routes` hints (so substring-matching the store address also hits the apex
+ * event). Returns {} when content isn't recoverable.
+ */
+function parseContentInfo(contentJson: string | undefined): {
+  ilpAddress?: string;
+  routes?: { publish?: string; store?: string };
+} {
+  if (!contentJson) return {};
+  try {
+    const info = JSON.parse(contentJson) as {
+      ilpAddress?: string;
+      routes?: { publish?: string; store?: string };
+    };
+    return { ilpAddress: info.ilpAddress, routes: info.routes };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Recover the CONTENT JSON string from a TOON-text payload, where the event is
+ * rendered as a YAML-ish block and `content` appears as an escaped JSON-string
+ * literal: `content: "{\"ilpAddress\":\"g.proxy.store\",...}"`. We capture that
+ * string literal (handling escaped quotes) and JSON-unescape it once to get the
+ * inner JSON text. THIS relay (relay#24) serves EVENT[2] as TOON text, so without
+ * this the structured `ilpAddress` is unavailable and apex/store can't be
+ * distinguished — see `test/integration/paid-roundtrip-client.ts`.
+ */
+function extractToonContent(raw: string): string | undefined {
+  const m = raw.match(/content:\s*("(?:[^"\\]|\\.)*")/);
+  if (!m?.[1]) return undefined;
+  try {
+    return JSON.parse(m[1]) as string;
+  } catch {
+    return undefined;
+  }
+}
+
 function toAnnouncement(payload: unknown): Announcement {
   const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
   const ev = tryDecodeEvent(payload);
   if (!ev) {
-    // TOON text — recover what we can by regex.
+    // TOON text — recover the structured content (incl. top-level ilpAddress) from
+    // the raw block so apex/store disambiguation stays exact; timestamps via regex.
+    const { ilpAddress, routes } = parseContentInfo(extractToonContent(raw));
     return {
       raw,
+      ilpAddress,
+      routes,
       createdAt: regexUnix(raw, 'created_at'),
       expiration: regexUnix(raw, 'expiration'),
       structured: false,
     };
   }
   // Structured event. content is a JSON IlpPeerInfo blob; tags carry expiration.
-  let ilpAddress: string | undefined;
-  let routes: { publish?: string; store?: string } | undefined;
-  try {
-    const info = JSON.parse(String(ev.content ?? '{}')) as {
-      ilpAddress?: string;
-      routes?: { publish?: string; store?: string };
-    };
-    ilpAddress = info.ilpAddress;
-    routes = info.routes;
-  } catch {
-    /* content not JSON — leave structural fields undefined, raw still matched */
-  }
+  const { ilpAddress, routes } = parseContentInfo(
+    typeof ev.content === 'string' ? ev.content : JSON.stringify(ev.content ?? {})
+  );
   const tags = Array.isArray(ev.tags) ? (ev.tags as unknown[][]) : [];
   const expTag = tags.find((t) => Array.isArray(t) && t[0] === 'expiration');
   return {
@@ -201,12 +239,15 @@ function fetchAnnouncements(relayWsUrl: string, timeoutMs: number): Promise<Anno
 
 /** Find the freshest announcement for a given ILP address. */
 function pickFor(anns: Announcement[], ilp: string): Announcement | undefined {
-  // Structured match on the announcement's OWN ilpAddress is exact; otherwise
-  // fall back to: the raw text mentions this ilp AND (for store/relay
-  // disambiguation) is not better explained by the other. We keep it simple —
-  // exact structural match first, then any raw mention — and pick freshest.
+  // Match on the announcement's OWN top-level ilpAddress (recovered even from
+  // TOON-text payloads). Only fall back to a raw mention for events whose
+  // ilpAddress couldn't be parsed AT ALL — never for events that DO carry an
+  // ilpAddress, since those would be route-hint false matches (every announcement
+  // names both addresses in its hints). Among candidates, pick the freshest.
   const exact = anns.filter((a) => a.ilpAddress === ilp);
-  const pool = exact.length ? exact : anns.filter((a) => a.raw.includes(ilp));
+  const pool = exact.length
+    ? exact
+    : anns.filter((a) => a.ilpAddress === undefined && a.raw.includes(ilp));
   if (!pool.length) return undefined;
   return pool.reduce((best, a) => ((a.createdAt ?? 0) > (best.createdAt ?? 0) ? a : best));
 }
@@ -230,7 +271,9 @@ function checkOne(
   steps.push({
     name: `${label}: ${ilp} announcement present`,
     ok: true,
-    detail: ann.structured ? 'structurally decoded' : 'matched raw (TOON text)',
+    detail: ann.ilpAddress
+      ? `ilpAddress=${ann.ilpAddress}${ann.structured ? '' : ' (TOON text)'}`
+      : 'raw-substring only (content unrecoverable)',
   });
 
   // Route hints: content must carry BOTH publish + store so a genesis-only
