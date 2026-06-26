@@ -41,14 +41,14 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
     });
 
     it('unregisterPeer removes from known set but preserves historical counters', async () => {
-      metrics.registerPeer('dvm');
-      metrics.recordForwardFulfill('dvm', 42);
-      metrics.unregisterPeer('dvm');
+      metrics.registerPeer('store');
+      metrics.recordForwardFulfill('store', 42);
+      metrics.unregisterPeer('store');
 
       expect(metrics.getKnownPeers()).toEqual([]);
-      // Snapshot still includes dvm because counter label state persists.
+      // Snapshot still includes store because counter label state persists.
       const snapshot = await metrics.snapshotPeers();
-      expect(snapshot.find((p) => p.peerId === 'dvm')?.packetsForwarded).toBe(1);
+      expect(snapshot.find((p) => p.peerId === 'store')?.packetsForwarded).toBe(1);
     });
   });
 
@@ -134,10 +134,10 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
     it('returns peers sorted alphabetically', async () => {
       metrics.registerPeer('mill');
       metrics.registerPeer('town');
-      metrics.registerPeer('dvm');
+      metrics.registerPeer('store');
 
       const snapshot = await metrics.snapshotPeers();
-      expect(snapshot.map((p) => p.peerId)).toEqual(['dvm', 'mill', 'town']);
+      expect(snapshot.map((p) => p.peerId)).toEqual(['mill', 'store', 'town']);
     });
 
     it('unions known peers with peers seen via counter activity', async () => {
