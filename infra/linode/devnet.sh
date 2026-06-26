@@ -10,6 +10,7 @@
 #   ./devnet.sh status    Probe every backend + every public TLS URL
 #   ./devnet.sh wait      Block until chains report healthy
 #   ./devnet.sh endpoints Regenerate endpoints.json from .env + live values
+#   ./devnet.sh mina-provision  Check Mina USDC token is live + faucet/admin funded
 #   ./devnet.sh fund-sol  <pubkey> [usdc] [sol]  Airdrop SOL + transfer USDC
 #   ./devnet.sh fund-mina <b58> [usdc]           Admin-mint USDC on Mina devnet
 #   ./devnet.sh logs [svc]  Follow logs
@@ -19,6 +20,30 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 set -a; . "$HERE/.env"; set +a
+
+# ── Mina USDC token addresses for the faucet's USDC admin-mint ────────────────
+# The faucet container admin-mints USDC (see packages/faucet/src/mina-usdc.mjs),
+# which needs the deployed token + admin-contract addresses. Resolve them (env
+# overrides win, else the committed live deploy result infra/mina/usdc-token.json)
+# and EXPORT them so docker compose substitutes ${MINA_USDC_TOKEN} /
+# ${MINA_USDC_ADMIN_CONTRACT} into the faucet service. (MINA_USDC_ADMIN_KEY — the
+# mint authority private key — is a SECRET that comes from .env / the CI secret,
+# never from this file.) Empty when not yet deployed → faucet drips native only.
+MINA_USDC_TOKEN_JSON="$ROOT/infra/mina/usdc-token.json"
+MINA_ENDPOINTS_JSON="$HERE/endpoints.json"
+if command -v jq >/dev/null 2>&1; then
+  # Prefer the gitignored live deploy result; else fall back to the committed
+  # endpoints.json (which pins the same PUBLIC live token/admin-contract — the
+  # token is deployed ONCE to public devnet and survives box rebuilds).
+  if [ -f "$MINA_USDC_TOKEN_JSON" ]; then
+    : "${MINA_USDC_TOKEN:=$(jq -r '.tokenAddress // empty' "$MINA_USDC_TOKEN_JSON")}"
+    : "${MINA_USDC_ADMIN_CONTRACT:=$(jq -r '.adminContractAddress // empty' "$MINA_USDC_TOKEN_JSON")}"
+  elif [ -f "$MINA_ENDPOINTS_JSON" ]; then
+    : "${MINA_USDC_TOKEN:=$(jq -r '.mina.tokenAddress // empty' "$MINA_ENDPOINTS_JSON")}"
+    : "${MINA_USDC_ADMIN_CONTRACT:=$(jq -r '.mina.adminContractAddress // empty' "$MINA_ENDPOINTS_JSON")}"
+  fi
+  export MINA_USDC_TOKEN MINA_USDC_ADMIN_CONTRACT
+fi
 
 DC=(docker compose -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/linode/docker-compose.linode.yml")
 PROFILE_ARGS=(); IFS=',' read -ra _P <<< "${COMPOSE_PROFILES:-evm,solana}"; for p in "${_P[@]}"; do PROFILE_ARGS+=(--profile "$p"); done
@@ -68,15 +93,32 @@ write_endpoints() {
   # Mina USDC token zkApp is deployed ONCE to the public devnet (we only proxy it,
   # no node here) by tools/mina/deploy-usdc-token.ts, which writes the deploy
   # result to infra/mina/usdc-token.json. Read tokenAddress/tokenId from it.
-  local mina_token="" mina_token_id=""
+  #
+  # Source order: the gitignored live deploy result (usdc-token.json) wins; else
+  # reuse the values already in this endpoints.json (so a regen on a box that has
+  # only the committed PUBLIC live values — no usdc-token.json — preserves them).
+  local mina_token="" mina_token_id="" mina_admin_contract="" mina_admin_authority=""
+  local src=""
   if [ -f "$ROOT/infra/mina/usdc-token.json" ] && command -v jq >/dev/null 2>&1; then
-    mina_token="$(jq -r '.tokenAddress // empty' "$ROOT/infra/mina/usdc-token.json" 2>/dev/null || true)"
-    mina_token_id="$(jq -r '.tokenId // empty' "$ROOT/infra/mina/usdc-token.json" 2>/dev/null || true)"
+    src="$ROOT/infra/mina/usdc-token.json"
+    mina_token="$(jq -r '.tokenAddress // empty' "$src" 2>/dev/null || true)"
+    mina_token_id="$(jq -r '.tokenId // empty' "$src" 2>/dev/null || true)"
+    mina_admin_contract="$(jq -r '.adminContractAddress // empty' "$src" 2>/dev/null || true)"
+    mina_admin_authority="$(jq -r '.adminAuthority // empty' "$src" 2>/dev/null || true)"
+  elif [ -f "$HERE/endpoints.json" ] && command -v jq >/dev/null 2>&1; then
+    src="$HERE/endpoints.json"
+    mina_token="$(jq -r '.mina.tokenAddress // empty' "$src" 2>/dev/null || true)"
+    mina_token_id="$(jq -r '.mina.tokenId // empty' "$src" 2>/dev/null || true)"
+    mina_admin_contract="$(jq -r '.mina.adminContractAddress // empty' "$src" 2>/dev/null || true)"
+    mina_admin_authority="$(jq -r '.mina.adminAuthority // empty' "$src" 2>/dev/null || true)"
   fi
   # Emit JSON values: a quoted string when known, literal null when not.
   local mina_token_json="null" mina_token_id_json="null"
+  local mina_admin_contract_json="null" mina_admin_authority_json="null"
   [ -n "$mina_token" ] && mina_token_json="\"${mina_token}\""
   [ -n "$mina_token_id" ] && mina_token_id_json="\"${mina_token_id}\""
+  [ -n "$mina_admin_contract" ] && mina_admin_contract_json="\"${mina_admin_contract}\""
+  [ -n "$mina_admin_authority" ] && mina_admin_authority_json="\"${mina_admin_authority}\""
 
   cat > "$HERE/endpoints.json" <<JSON
 {
@@ -102,9 +144,11 @@ write_endpoints() {
     "upstream": "https://api.minascan.io/node/devnet/v1/graphql",
     "tokenAddress": ${mina_token_json},
     "tokenId": ${mina_token_id_json},
+    "adminContractAddress": ${mina_admin_contract_json},
+    "adminAuthority": ${mina_admin_authority_json},
     "tokenDecimals": 6,
-    "_fund": "infra/mina/fund-mina-usdc.sh <b58> [usdc] — admin-mints USDC on the public devnet",
-    "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.ts → infra/mina/usdc-token.json); null here means not yet deployed."
+    "_fund": "POST {address} to https://faucet.${DOMAIN}/api/mina/request — drips native MINA AND admin-mints USDC. Or infra/mina/fund-mina-usdc.sh <b58> [usdc] from the box.",
+    "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.ts → infra/mina/usdc-token.json); null here means not yet deployed. The faucet admin-mints USDC via tools/mina/fund-usdc.ts's mint path using MINA_USDC_ADMIN_KEY (a CI secret); adminAuthority is its derived public key."
   }
 }
 JSON
@@ -119,12 +163,22 @@ mint_usdc() {
   fi
 }
 
+# Idempotent Mina settlement check: the USDC token zkApp is deployed ONCE to the
+# public devnet (survives box rebuilds), so this DETECTS-and-warns rather than
+# recreating — and checks the faucet/admin accounts are funded with native MINA
+# (an unfunded treasury/admin is what silently broke the Mina round-trip before).
+# Always exits 0 (warnings only) so EVM/Solana stay green if Mina needs attention.
+provision_mina() {
+  "$ROOT/infra/mina/provision-mina.sh" || true
+}
+
 case "${1:-}" in
-  up)        envsubst '${DOMAIN}' < "$HERE/nginx/${NGINX_TEMPLATE:-devnet.conf.template}" > "$HERE/nginx/conf.d/devnet.conf"; dc up -d; wait_health; mint_usdc; write_endpoints;;
+  up)        envsubst '${DOMAIN}' < "$HERE/nginx/${NGINX_TEMPLATE:-devnet.conf.template}" > "$HERE/nginx/conf.d/devnet.conf"; dc up -d; wait_health; mint_usdc; provision_mina; write_endpoints;;
   down)      dc down;;
-  redeploy)  dc down; dc up -d; wait_health; mint_usdc; write_endpoints;;
+  redeploy)  dc down; dc up -d; wait_health; mint_usdc; provision_mina; write_endpoints;;
   wait)      wait_health;;
   mint)      mint_usdc;;
+  mina-provision) provision_mina;;
   fund-sol)  shift; "$ROOT/infra/solana/fund-solana.sh" "$@";;
   fund-mina) shift; "$ROOT/infra/mina/fund-mina-usdc.sh" "$@";;
   status)
