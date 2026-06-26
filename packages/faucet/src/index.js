@@ -3,6 +3,10 @@ import cors from 'cors';
 import { ethers, NonceManager } from 'ethers';
 import { createSolanaFaucet } from './solana.js';
 import { isValidMinaAddress, minaInfo, minaFallbackLink, createMinaFaucet } from './mina.js';
+// Mina USDC admin-mint lives in a SEPARATE pure-ESM module (`mina-usdc.mjs`)
+// because it pulls in o1js for zk-proving. It is loaded via a dynamic import so
+// a deploy that lacks the compiled mina-zkapp ESM build (or runs on a non-glibc
+// base) degrades to native-MINA-only instead of crashing boot. See mina-usdc.mjs.
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -49,6 +53,30 @@ const solanaFaucet = createSolanaFaucet();
 // createMinaFaucet throws fail-loud ONLY when a WRONG key is configured (the
 // derived pubkey must equal the treasury), which we want to crash boot.
 const minaFaucet = createMinaFaucet();
+
+// Mina USDC admin-minter (null when MINA_USDC_* env is unset — native MINA still
+// drips). Loaded via dynamic import so the o1js dependency only loads when the
+// module is present; a failed load is logged and treated as "USDC mint disabled"
+// rather than crashing the whole faucet (which also drips EVM + Solana).
+let minaUsdcMinter = null;
+let minaUsdcInfoFn = () => ({ usdcMint: false });
+{
+  let mod;
+  try {
+    // Only the IMPORT (loading o1js + the compiled mina-zkapp ESM build) is
+    // soft-failed — a missing build or non-glibc base degrades to MINA-only.
+    mod = await import('./mina-usdc.mjs');
+  } catch (error) {
+    console.error('⚠️  Mina USDC mint unavailable (module load failed):', error.message);
+  }
+  if (mod) {
+    minaUsdcInfoFn = mod.minaUsdcInfo;
+    // createMinaUsdcMinter() returns null when MINA_USDC_* is unset (fine), and
+    // throws fail-loud on a structurally invalid admin key (operator
+    // misconfiguration we WANT to crash boot — not swallowed here).
+    minaUsdcMinter = mod.createMinaUsdcMinter();
+  }
+}
 
 // Serialize Solana drips the same way EVM ones are, so concurrent requests
 // don't race the treasury's transaction signing / blockhash reuse.
@@ -168,7 +196,7 @@ app.get('/api/info', async (req, res) => {
               rpcUrl: solanaFaucet.rpcUrl,
             }
           : { enabled: false, route: '/api/solana/request', ready: false },
-        mina: minaInfo(minaFaucet),
+        mina: minaInfo(minaFaucet, minaUsdcInfoFn(minaUsdcMinter)),
       },
     });
   } catch (error) {
@@ -331,9 +359,36 @@ app.post('/api/mina/request', (req, res) => {
   console.log(`💧 Mina faucet request for ${address}`);
   minaQueue = minaQueue
     .then(async () => {
+      // 1. Native-MINA treasury drip (mina-signer, no proving).
       const result = await minaFaucet.drip(address);
+
+      // 2. ALSO admin-mint USDC when configured (o1js proving). This is
+      //    independent of the native drip and must NOT fail the whole route when
+      //    the minter is unconfigured — we just note it was skipped. A USDC mint
+      //    FAILURE (when configured) is surfaced in the response (usdc.error) but
+      //    still returns 200 because the native drip already succeeded.
+      let usdc;
+      if (minaUsdcMinter) {
+        try {
+          usdc = await minaUsdcMinter.mint(address);
+        } catch (mintErr) {
+          console.error(
+            '  ⚠️  Mina USDC mint failed (native drip still succeeded):',
+            mintErr.message
+          );
+          usdc = { error: 'USDC mint failed', message: mintErr.message };
+        }
+      } else {
+        usdc = {
+          skipped: true,
+          note:
+            'USDC minting is not configured on this host (set MINA_USDC_ADMIN_KEY + ' +
+            'MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT to enable). Native MINA was dripped.',
+        };
+      }
+
       console.log(`  ✅ Mina faucet request completed for ${address}`);
-      res.json({ success: true, chain: 'mina', address, payment: result });
+      res.json({ success: true, chain: 'mina', address, payment: result, usdc });
     })
     .catch((error) => {
       console.error('❌ Mina faucet request failed:', error.message);
@@ -361,6 +416,9 @@ app.listen(PORT, async () => {
   console.log(`   Solana:        ${solanaFaucet ? 'enabled' : 'disabled'}`);
   console.log(
     `   Mina:          ${minaFaucet ? `drip ${minaFaucet.dripAmount} MINA (treasury)` : 'disabled (503 + public-faucet link)'}`
+  );
+  console.log(
+    `   Mina USDC:     ${minaUsdcMinter ? `admin-mint ${minaUsdcMinter.usdcAmount} USDC (o1js)` : 'disabled (native MINA only)'}`
   );
   console.log('═══════════════════════════════════════════════');
   console.log('');

@@ -3,12 +3,13 @@
  *
  * A REUSABLE "payer" that drives a full paid ILP round-trip with on-chain EVM
  * settlement against a connector edge — local OR remote (public TLS). It is the
- * shared code path exercised by:
- *
- *   - the local #221 e2e (`app-e2e.test.ts`, AC3), pointed at
- *     127.0.0.1 compose ports, and
- *   - the #222 CI acceptance probe (`scripts/app/ci-acceptance-probe.ts`),
- *     pointed at `https://connector.${DOMAIN}/ilp` and friends on the public box.
+ * shared code path exercised by the acceptance probes
+ * (`scripts/app/ci-acceptance-probe.ts` for the relay edge,
+ * `scripts/app/ci-acceptance-probe-store.ts` for the store edge), pointed at a
+ * connector edge — local (the app repo's `deploy/docker-compose.yml`, e.g.
+ * `http://localhost:3000/ilp`) OR remote (`https://connector.${DOMAIN}/ilp`).
+ * "App behind the connector" composition lives in the app repos (relay/store
+ * `deploy/`), not here — this repo builds only the connector image.
  *
  * NOTHING here hardcodes localhost — every reachable endpoint is a constructor
  * parameter (`connectorIlpUrl`, `evmRpcUrl`, `faucetUrl`, `relayWsUrl`).
@@ -67,10 +68,10 @@ import {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * The CONNECTOR's on-chain settlement key. The connector config
- * (`scripts/app/connector.yaml`) signs/redeems channels with
- * Anvil ACCOUNT 0 (`keyId 0xac0974…ff80`); its address is account 0's address.
- * The client opens its on-chain channel TOWARD this address.
+ * The CONNECTOR's on-chain settlement key. The app repos' deploy `connector.yaml`
+ * signs/redeems channels with Anvil ACCOUNT 0 (`keyId 0xac0974…ff80`); its
+ * address is account 0's address. The client opens its on-chain channel TOWARD
+ * this address. Override via DEVNET_CONNECTOR_ADDR for a non-devnet edge.
  */
 export const CONNECTOR_EVM_ADDRESS =
   process.env.DEVNET_CONNECTOR_ADDR ?? '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';

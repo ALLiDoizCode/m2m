@@ -29,14 +29,22 @@ EVM_TOKEN="0x5FbDB2315678afecb367f032d93F642f64180aa3"
 EVM_REGISTRY="0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"
 
 wait_health() {
-  echo "Waiting for chains to be healthy (up to ~120s)..."
-  for i in $(seq 1 60); do
-    local anvil_ok=1 sol_ok=1
-    dc exec -T anvil cast client --rpc-url http://localhost:8545 2>/dev/null | grep -q anvil || anvil_ok=0
+  # Mina lightnet takes ~3 minutes to start; extend the timeout for it.
+  local max_iters=60
+  printf '%s' "${COMPOSE_PROFILES:-}" | grep -q mina && max_iters=120
+  echo "Waiting for chains to be healthy (up to ~$((max_iters * 2))s)..."
+  for i in $(seq 1 $max_iters); do
+    local anvil_ok=1 sol_ok=1 mina_ok=1
+    if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q evm; then
+      dc exec -T anvil cast client --rpc-url http://localhost:8545 2>/dev/null | grep -q anvil || anvil_ok=0
+    fi
     if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q solana; then
       dc exec -T solana-validator curl -sf http://localhost:8899/health 2>/dev/null | grep -q ok || sol_ok=0
     fi
-    if [ "$anvil_ok" = 1 ] && [ "$sol_ok" = 1 ]; then echo "Chains healthy."; return 0; fi
+    if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q mina; then
+      dc exec -T mina-lightnet curl -sf http://localhost:8181/list-acquired-accounts 2>/dev/null | grep -q . || mina_ok=0
+    fi
+    if [ "$anvil_ok" = 1 ] && [ "$sol_ok" = 1 ] && [ "$mina_ok" = 1 ]; then echo "Chains healthy."; return 0; fi
     sleep 2
   done
   echo "WARNING: chains not healthy after timeout; check '$0 logs'." >&2
@@ -45,17 +53,6 @@ wait_health() {
 
 probe() { # url, label
   if curl -fsS -m 8 -o /dev/null "$1" 2>/dev/null; then echo "  OK   $2  ($1)"; else echo "  DOWN $2  ($1)"; fi
-}
-
-# Probe a TLS edge that has no GET-able health path (e.g. the connector's POST-only
-# /ilp). We only need to know the TLS handshake + nginx routing work: ANY HTTP status
-# (even 404/405) means UP; only a connection/TLS failure means DOWN.
-probe_tls() { # url, label
-  if curl -sS -m 8 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null | grep -qE '^[1-5][0-9][0-9]$'; then
-    echo "  OK   $2  ($1)"
-  else
-    echo "  DOWN $2  ($1)"
-  fi
 }
 
 write_endpoints() {
@@ -80,25 +77,6 @@ write_endpoints() {
   local mina_token_json="null" mina_token_id_json="null"
   [ -n "$mina_token" ] && mina_token_json="\"${mina_token}\""
   [ -n "$mina_token_id" ] && mina_token_id_json="\"${mina_token_id}\""
-
-  # Issue #222: the app edge (only when that profile is active).
-  # The connector settles EVM-only on this box's anvil via the public deployer key
-  # + the HTTP faucet — no Mina/Solana settlement is wired for this route. `route`
-  # and `price` mirror scripts/app/connector.yaml.
-  local connector_json="null"
-  if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q app; then
-    connector_json=$(cat <<TERM
-{
-    "ilpUrl": "https://connector.${DOMAIN}/ilp",
-    "relayWsUrl": "wss://relay-ws.${DOMAIN}",
-    "route": "g.connector.relay",
-    "price": "1000",
-    "settlementChain": "evm:31337",
-    "_note": "App-behind-connector (issue #222): POST a paid ILP PREPARE (with an ILP-Payment-Channel-Claim header) to ilpUrl; free Nostr reads hit relayWsUrl directly. EVM-only settlement on this box's anvil. The relay paid-write store port and the connector admin API are NOT public."
-  }
-TERM
-)
-  fi
 
   cat > "$HERE/endpoints.json" <<JSON
 {
@@ -127,8 +105,7 @@ TERM
     "tokenDecimals": 6,
     "_fund": "infra/mina/fund-mina-usdc.sh <b58> [usdc] — admin-mints USDC on the public devnet",
     "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.ts → infra/mina/usdc-token.json); null here means not yet deployed."
-  },
-  "connector": ${connector_json}
+  }
 }
 JSON
   echo "Wrote $HERE/endpoints.json"
@@ -143,7 +120,7 @@ mint_usdc() {
 }
 
 case "${1:-}" in
-  up)        envsubst '${DOMAIN}' < "$HERE/nginx/devnet.conf.template" > "$HERE/nginx/conf.d/devnet.conf"; dc up -d; wait_health; mint_usdc; write_endpoints;;
+  up)        envsubst '${DOMAIN}' < "$HERE/nginx/${NGINX_TEMPLATE:-devnet.conf.template}" > "$HERE/nginx/conf.d/devnet.conf"; dc up -d; wait_health; mint_usdc; write_endpoints;;
   down)      dc down;;
   redeploy)  dc down; dc up -d; wait_health; mint_usdc; write_endpoints;;
   wait)      wait_health;;
@@ -157,11 +134,6 @@ case "${1:-}" in
     probe "https://solana-rpc.${DOMAIN}/health" "solana-rpc"
     probe "https://faucet.${DOMAIN}/health"     "faucet"
     probe "https://mina.${DOMAIN}/graphql"      "mina-proxy"
-    if printf '%s' "${COMPOSE_PROFILES:-}" | grep -q app; then
-      # The /ilp edge is POST-only (a GET yields 404/405), so use probe_tls: any
-      # HTTP status proves the TLS edge + nginx route to connector:3000 are up.
-      probe_tls "https://connector.${DOMAIN}/ilp" "connector-ilp"
-    fi
     ;;
   endpoints) write_endpoints;;
   logs)      shift; dc logs -f "$@";;

@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.27.0](https://github.com/toon-protocol/connector/compare/v3.26.1...v3.27.0) (2026-06-24)
+
+### Features
+
+- **probe:** add store paid round-trip acceptance probe ([#258](https://github.com/toon-protocol/connector/issues/258)) ([ab5df02](https://github.com/toon-protocol/connector/commit/ab5df02ba87742a4f7fcb5bcd1776e179dd15ad8))
+
+## [3.26.1](https://github.com/toon-protocol/connector/compare/v3.26.0...v3.26.1) (2026-06-24)
+
+### Bug Fixes
+
+- **devnet:** bound Solana test-validator ledger to stop it filling the box disk ([#255](https://github.com/toon-protocol/connector/issues/255)) ([9d3b3e8](https://github.com/toon-protocol/connector/commit/9d3b3e8642de85319f2e0dbedb0e709e8726d6db))
+
+## [3.26.0](https://github.com/toon-protocol/connector/compare/v3.25.1...v3.26.0) (2026-06-24)
+
+### Features
+
+- multi-node Mina-lightnet provisioning + faucet native-MINA & USDC drip ([#254](https://github.com/toon-protocol/connector/issues/254)) ([0d93a41](https://github.com/toon-protocol/connector/commit/0d93a4112c43607671521bb4ee5ce21d2388ff9e)), closes [#235](https://github.com/toon-protocol/connector/issues/235) [#236](https://github.com/toon-protocol/connector/issues/236) [#240](https://github.com/toon-protocol/connector/issues/240)
+
+## [3.25.1](https://github.com/toon-protocol/connector/compare/v3.25.0...v3.25.1) (2026-06-23)
+
+### Bug Fixes
+
+- **x402:** hoist httpEndpoint to top-level toon-channel entry in 402 greeting ([#251](https://github.com/toon-protocol/connector/issues/251)) ([4fde6e8](https://github.com/toon-protocol/connector/commit/4fde6e89e4f8fa22680dd51db60db7cb8efb0be2))
+
+## [3.25.0](https://github.com/toon-protocol/connector/compare/v3.24.2...v3.25.0) (2026-06-23)
+
+### Features
+
+- **deploy:** pay-edge — turnkey payment-proxy in front of any app ([#252](https://github.com/toon-protocol/connector/issues/252)) ([d14b3f6](https://github.com/toon-protocol/connector/commit/d14b3f6c198ca17d57fa71ad6e5d821f3c32db45))
+- **deploy:** relay-edge — a real Nostr relay deployed behind TOON ([#248](https://github.com/toon-protocol/connector/issues/248)) ([346b40f](https://github.com/toon-protocol/connector/commit/346b40f4f7fcae1b83cf46e2100f1c550993d556))
+
 ## [3.24.2](https://github.com/toon-protocol/connector/compare/v3.24.1...v3.24.2) (2026-06-23)
 
 ### Bug Fixes
