@@ -84,11 +84,10 @@ services:
   # Token Faucet - Provides ETH and USDC tokens for testing
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   faucet:
+    # Build context is the repo ROOT (not packages/faucet): the image builds the
+    # mina-zkapp ESM bundle for the Mina USDC admin-mint path, so the Dockerfile
+    # COPYs packages/mina-zkapp + packages/faucet. See packages/faucet/Dockerfile.
     build:
-      # Build context is the repo ROOT (not packages/faucet): the multi-stage
-      # Dockerfile compiles the mina-zkapp ESM bundle from packages/mina-zkapp/
-      # so the faucet's USDC admin-mint shares ONE o1js instance. See the
-      # Dockerfile header and infra/linode-node/docker-compose.node.yml.
       context: .
       dockerfile: packages/faucet/Dockerfile
     # Runs under BOTH evm and solana so a single host can drip every chain.
@@ -134,6 +133,19 @@ services:
       MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
       MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
       MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
+
+      # ── Mina USDC admin-mint (o1js zk-proving) ──
+      # When MINA_USDC_ADMIN_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT are
+      # all set, the /api/mina/request route ALSO admin-mints USDC (compiling the
+      # UsdcChannelToken + FungibleTokenAdmin circuits once, ~6s, on the first
+      # mint). MINA_USDC_ADMIN_KEY is the FUNDED mint-authority base58 PRIVATE key
+      # (a SECRET — pass through from the host env, never hardcoded). When unset,
+      # the route keeps dripping native MINA only. Reuses MINA_GRAPHQL_URL above.
+      MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-}
+      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
+      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
+      MINA_USDC_AMOUNT: ${MINA_USDC_AMOUNT:-1000}
+      MINA_TX_FEE: ${MINA_TX_FEE:-}
 
     volumes:
       # Committed throwaway devnet treasury authority (mint authority + USDC

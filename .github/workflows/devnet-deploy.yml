@@ -17,6 +17,18 @@
 #                       so a redeploy re-uses the existing cert instead of asking
 #                       Let's Encrypt for a fresh one. Without them a rebuild
 #                       re-issues the cert as before.
+# ── Optional secrets (Mina faucet — native MINA + USDC drips) ─────────────────
+#   MINA_FAUCET_KEY     base58 private key of the native-MINA drip treasury (HD
+#                       index 2). When set, the faucet drips native MINA. MUST be
+#                       FUNDED on public devnet (top up at faucet.minaprotocol.com).
+#   MINA_USDC_ADMIN_KEY base58 private key of the USDC mint AUTHORITY. When set,
+#                       the faucet ALSO admin-mints USDC on every Mina drip
+#                       (matching EVM ETH+USDC / Solana SOL+USDC). MUST be FUNDED
+#                       (it pays each recipient's token-account creation fee). The
+#                       USDC token + admin-contract ADDRESSES are public (pinned in
+#                       infra/linode/endpoints.json), so only this key is a secret.
+#                       Both unset → the Mina route 503s + links to the public
+#                       faucet; EVM/Solana unaffected.
 #
 # ── Redeploy semantics ───────────────────────────────────────────────────────
 #   Re-running on an existing VM (same `label`, same plan) REBUILDS it in place:
@@ -485,6 +497,15 @@ jobs:
           # devnet.sh/bootstrap.sh `set -a; . .env` exports it so docker compose
           # substitutes it into the faucet container's MINA_FAUCET_KEY.
           MINA_FAUCET_KEY=${{ secrets.MINA_FAUCET_KEY }}
+          # Mina USDC mint AUTHORITY private key (base58) — lets the faucet
+          # admin-mint USDC (native + USDC, matching EVM/Solana) on every Mina
+          # drip. SECRET — set it with:
+          #   gh secret set MINA_USDC_ADMIN_KEY --repo toon-protocol/connector
+          # MUST be a FUNDED account (it pays each recipient's token-account
+          # creation fee). When unset the faucet drips native MINA only. The token
+          # + admin-contract ADDRESSES are PUBLIC (pinned in endpoints.json) and
+          # resolved by devnet.sh, so only the key is a secret.
+          MINA_USDC_ADMIN_KEY=${{ secrets.MINA_USDC_ADMIN_KEY }}
           ENV
           bash infra/linode/bootstrap.sh
           REMOTE
