@@ -620,6 +620,136 @@ export interface ConnectorConfig {
    * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop BLS notification (default: false)
    */
   localDelivery?: LocalDeliveryConfig;
+
+  /**
+   * Optional self-announce configuration (relay#37 / store#22).
+   *
+   * When enabled, the connector builds, signs, and continuously republishes a
+   * `kind:10032` `IlpPeerInfo` announcement describing its OWN apex routes to a
+   * relay's event store, so a client holding only the genesis seed can discover
+   * the publish/store routes + settlement info out of band (instead of falling
+   * back to hardcoded `publishDestination`/`storeDestination`). Disabled by
+   * default — absent this block the connector announces nothing.
+   *
+   * @see SelfAnnounceConfig
+   */
+  selfAnnounce?: SelfAnnounceConfig;
+}
+
+/**
+ * Self-Announce Configuration Interface (relay#37 / store#22)
+ *
+ * Drives the connector's `kind:10032` `IlpPeerInfo` self-announcement. The
+ * advertised peer info is DERIVED from the connector's own config (its
+ * locally-terminated routes' `ilpAddress` + `settlementAddresses`, the
+ * `chainProviders` chain ids, and the BTP endpoint) — the operator does not
+ * re-type it. The optional overrides below cover only the values the connector
+ * cannot infer (its public BTP/HTTP/relay hostnames, terminated behind TLS) or
+ * wishes to pin explicitly.
+ *
+ * The publish TRANSPORT is the connector's own routing: `announceTo` names the
+ * ILP address to write the announcement THROUGH, and the connector resolves it
+ * against its own routing table — a locally-terminated route delivers the write
+ * FREE through its `RouteTermination` upstream, while a remote route originates
+ * a PAID write over ILP funded from the connector's own settlement channel
+ * (exactly how it would pay for any write). There is no raw private-port URL in
+ * config.
+ *
+ * @example
+ * ```yaml
+ * selfAnnounce:
+ *   enabled: true
+ *   announceTo: g.proxy.relay           # ILP route to publish the write THROUGH
+ *   refreshIntervalSecs: 300            # republish every 5m; TTL = 2x = 10m
+ *   btpEndpoint: wss://proxy.devnet.toonprotocol.dev:443
+ *   relayUrl: wss://relay.devnet.toonprotocol.dev
+ * ```
+ */
+export interface SelfAnnounceConfig {
+  /**
+   * Whether self-announce is enabled. When false (default), the connector
+   * publishes no `kind:10032` announcement.
+   */
+  enabled: boolean;
+
+  /**
+   * The ILP address (relay/publish route) to publish the kind:10032 write
+   * THROUGH. The connector resolves it against its OWN routing table and writes
+   * the SAME way it handles any write:
+   * - **Locally terminated** (this connector fronts the relay — e.g. an apex
+   *   whose `g.proxy.relay` route has a `RouteTermination` `upstream`) → the
+   *   write is delivered through that termination = **FREE** (no payment; the
+   *   upstream comes from the resolved route, not config).
+   * - **Forwarded** (a remote relay — e.g. the store box writing through
+   *   `g.proxy.relay`, which forwards to the apex) → a **PAID** write is
+   *   originated over ILP, funded from the connector's own settlement channel to
+   *   its next hop (`announcePrice` below).
+   *
+   * Distinct from the announcement CONTENT's own `ilpAddress` (derived from this
+   * node's terminated routes): e.g. the store box sets `announceTo: g.proxy.relay`
+   * (where to write) while announcing its own `g.proxy.store` peer info.
+   */
+  announceTo: string;
+
+  /**
+   * Price to pay (atomic units, e.g. nano-USDC, decimal-string) when `announceTo`
+   * resolves to a REMOTE (forwarded) route — the connector pays this for its own
+   * write, like any client. Must be ≥ the remote relay route's price. IGNORED
+   * when `announceTo` is locally terminated (that path is free). Default `'1000'`.
+   */
+  announcePrice?: string;
+
+  /**
+   * Seconds between republishes. The announcement carries a NIP-40 `expiration`
+   * tag of `2 × refreshIntervalSecs`, so each refresh lands a fresh, unexpired
+   * event at half the TTL and the announcement never goes stale while the node
+   * is up. Default: 300 (5 minutes → 10-minute TTL).
+   */
+  refreshIntervalSecs?: number;
+
+  /**
+   * Public BTP WebSocket endpoint to advertise (e.g.
+   * `wss://proxy.devnet.toonprotocol.dev:443`). The connector cannot infer its
+   * own public hostname behind TLS termination, so set this for clients/peers to
+   * dial. When omitted, `btpEndpoint` is left out of the announcement.
+   */
+  btpEndpoint?: string;
+
+  /**
+   * Public ILP-over-HTTP ingress endpoint to advertise (RFC-0035 `POST /ilp`),
+   * for stateless one-shot writes. Optional.
+   */
+  httpEndpoint?: string;
+
+  /**
+   * Public Nostr relay read WS URL to advertise for FREE reads (e.g.
+   * `wss://relay.devnet.toonprotocol.dev`). Lets a client discover where to
+   * subscribe without out-of-band config. Optional.
+   */
+  relayUrl?: string;
+
+  /**
+   * Asset code advertised in the announcement. Default: `USDC`.
+   */
+  assetCode?: string;
+
+  /**
+   * Asset scale (decimal places) advertised. Default: 6 (USDC).
+   */
+  assetScale?: number;
+
+  /**
+   * Optional explicit route-hint overrides. When omitted, the publish/store
+   * route addresses are DERIVED from the connector's configured routes (the
+   * `.relay` route is the publish address; the direct `.store` route is the
+   * store address). Override only for non-standard topologies.
+   */
+  routes?: {
+    /** ILP address a client should PUBLISH (Nostr writes) to, e.g. `g.proxy.relay`. */
+    publish?: string;
+    /** ILP address a client should STORE (blob uploads) to, e.g. `g.proxy.store`. */
+    store?: string;
+  };
 }
 
 /**
