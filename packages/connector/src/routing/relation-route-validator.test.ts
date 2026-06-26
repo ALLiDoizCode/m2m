@@ -67,7 +67,7 @@ describe('validateRelationRoute', () => {
   });
 
   it('validates every route prefix, not just the first', () => {
-    const result = validateRelationRoute('child', self, ['g.connector.town', 'g.other.mill']);
+    const result = validateRelationRoute('child', self, ['g.connector.town', 'g.other.swap']);
     expect(result.ok).toBe(false);
   });
 });

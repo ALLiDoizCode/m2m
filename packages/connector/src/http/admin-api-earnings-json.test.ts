@@ -177,11 +177,11 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     mockBTPClientManager = {
       addPeer: jest.fn().mockResolvedValue(undefined),
       removePeer: jest.fn().mockResolvedValue(undefined),
-      getPeerIds: jest.fn().mockReturnValue(['town-01', 'mill-01', 'store-01']),
+      getPeerIds: jest.fn().mockReturnValue(['town-01', 'swap-01', 'store-01']),
       getPeerStatus: jest.fn().mockReturnValue(
         new Map([
           ['town-01', true],
-          ['mill-01', true],
+          ['swap-01', true],
           ['store-01', false],
         ])
       ),
@@ -221,7 +221,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     initializeClaimReceiverSchema(claimsDb);
     claimReceiver = new ClaimReceiver(claimsDb, stubRegistry, mockLogger);
 
-    // Settlement peer config: town-01 declares USDC+ETH, mill-01 declares USDC,
+    // Settlement peer config: town-01 declares USDC+ETH, swap-01 declares USDC,
     // store-01 has no settlement config (idle).
     settlementPeers = new Map<string, SettlementPeerConfig>();
     settlementPeers.set('town-01', {
@@ -231,17 +231,17 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
       settlementTokens: ['0xUSDC', '0xETH'],
       tokenAddress: '0xUSDC',
     });
-    settlementPeers.set('mill-01', {
-      peerId: 'mill-01',
-      address: 'g.mill-01',
+    settlementPeers.set('swap-01', {
+      peerId: 'swap-01',
+      address: 'g.swap-01',
       settlementPreference: 'evm',
       settlementTokens: ['0xUSDC'],
       tokenAddress: '0xUSDC',
     });
 
-    // Seed some packet-forward volume for town-01 and mill-01, leave store-01 idle.
+    // Seed some packet-forward volume for town-01 and swap-01, leave store-01 idle.
     // town-01 received 1_000_000 from us (outgoing) in USDC and sent us 500_000
-    // (incoming) in USDC. mill-01 received 2_000_000 from us in USDC.
+    // (incoming) in USDC. swap-01 received 2_000_000 from us in USDC.
     await accountManager.recordPacketTransfers(
       'town-01', // fromPeer (sent to us)
       'bob', // toPeer (downstream, unused in this test but needed by API)
@@ -266,7 +266,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     );
     await accountManager.recordPacketTransfers(
       'alice',
-      'mill-01',
+      'swap-01',
       '0xUSDC',
       2_000_000n,
       2_000_000n,
@@ -278,7 +278,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
 
     // Seed a few verified claims for the lastClaimAt and recentClaims paths.
     // town-01 has sent 2 USDC claims on the same channel: 100_000 then 250_000
-    // cumulative. mill-01 has one claim.
+    // cumulative. swap-01 has one claim.
     insertClaim({
       messageId: 'msg-1',
       peerId: 'town-01',
@@ -299,8 +299,8 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     });
     insertClaim({
       messageId: 'msg-3',
-      peerId: 'mill-01',
-      channelId: '0xchan-mill-usdc',
+      peerId: 'swap-01',
+      channelId: '0xchan-swap-usdc',
       tokenAddress: '0xUSDC',
       transferredAmount: '75000',
       receivedAt: 1_700_000_120_000, // 120s after msg-1
@@ -420,7 +420,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
       });
       mockBTPClientManager.getPeerIds.mockReturnValue([
         'town-01',
-        'mill-01',
+        'swap-01',
         'store-01',
         'idle-peer',
       ]);
@@ -450,7 +450,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     it('returns proportional fee totals when a fee percentage is configured', async () => {
       // Total cumulative-inbound USDC across peers:
       //   town-01: max-nonce on 0xchan-town-usdc = 250_000
-      //   mill-01: max-nonce on 0xchan-mill-usdc =  75_000
+      //   swap-01: max-nonce on 0xchan-swap-usdc =  75_000
       //   sum = 325_000. At 1% fee (basis points 100), expected = 3_250.
       const feeApp = await createApp({ connectorFeePercentage: 1 });
       const res = await request(feeApp).get('/admin/earnings.json').expect(200);
@@ -612,11 +612,11 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
         settlementTokens: ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'],
         tokenAddress: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
       });
-      mockBTPClientManager.getPeerIds.mockReturnValue(['town-01', 'mill-01', 'store-01', 'sol-01']);
+      mockBTPClientManager.getPeerIds.mockReturnValue(['town-01', 'swap-01', 'store-01', 'sol-01']);
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
           ['town-01', true],
-          ['mill-01', true],
+          ['swap-01', true],
           ['store-01', false],
           ['sol-01', true],
         ])
@@ -655,14 +655,14 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
       });
       mockBTPClientManager.getPeerIds.mockReturnValue([
         'town-01',
-        'mill-01',
+        'swap-01',
         'store-01',
         'mina-01',
       ]);
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
           ['town-01', true],
-          ['mill-01', true],
+          ['swap-01', true],
           ['store-01', false],
           ['mina-01', true],
         ])
@@ -709,7 +709,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
       });
       mockBTPClientManager.getPeerIds.mockReturnValue([
         'town-01',
-        'mill-01',
+        'swap-01',
         'store-01',
         'sol-01',
         'mina-01',
@@ -717,7 +717,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
           ['town-01', true],
-          ['mill-01', true],
+          ['swap-01', true],
           ['store-01', false],
           ['sol-01', true],
           ['mina-01', true],

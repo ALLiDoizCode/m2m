@@ -79,8 +79,8 @@ describe('ConnectorAdminClient', () => {
   });
 
   it('adds a route through the typed client', async () => {
-    await client.addRoute({ prefix: 'g.connector.mill', nextHop: 'mill', priority: 3 });
-    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.mill', 'mill', 3);
+    await client.addRoute({ prefix: 'g.connector.swap', nextHop: 'swap', priority: 3 });
+    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.swap', 'swap', 3);
   });
 
   it('removes a peer through the typed client', async () => {

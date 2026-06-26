@@ -182,7 +182,7 @@ This finding has immediate consequences on Town's side too:
 
 ### 9.2 Answers to §4 open questions
 
-**Q1 — Label cardinality / peer-count ceiling.** Town's local connector fronts exactly 3 child peers by default (`town`, `mill`, `store`). Operators may add remote peers via `POST /admin/peers` (see `docker/src/shared.ts:325`), but the connector dashboard is a per-operator local view — realistic ceiling is **≤ 10 peers**. `prom-client` with default Registry is safe at this cardinality. If the connector is ever deployed as a shared hub fronting hundreds of peers, that's a different deployment profile than connector serves.
+**Q1 — Label cardinality / peer-count ceiling.** Town's local connector fronts exactly 3 child peers by default (`town`, `swap`, `store`). Operators may add remote peers via `POST /admin/peers` (see `docker/src/shared.ts:325`), but the connector dashboard is a per-operator local view — realistic ceiling is **≤ 10 peers**. `prom-client` with default Registry is safe at this cardinality. If the connector is ever deployed as a shared hub fronting hundreds of peers, that's a different deployment profile than connector serves.
 
 **Q2 — `lastPacketAt` semantics.** **Last seen in either direction.** Rationale: a Town-type node that only consumes events (no outbound publishing) would otherwise appear idle even when actively routing. "Is this node doing work?" is the operator question the field is designed to answer. A single `lastPacketAt: ISO-8601 | null` is enough; Town does not need separate `lastSentAt` / `lastReceivedAt` fields.
 

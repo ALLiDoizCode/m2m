@@ -221,7 +221,7 @@ function deriveMina(seed: Uint8Array, accountIndex: number): DerivedChainKeys['m
   const keyBytes = new Uint8Array(hdKey.privateKey);
   // Clamp the top 2 bits so the big-endian scalar is within the Pallas
   // base-field order (a raw BIP-32 child scalar can exceed it). Matches the
-  // SDK/client/mill derivation so all produce the SAME Mina key.
+  // SDK/client/swap derivation so all produce the SAME Mina key.
   keyBytes[0] = (keyBytes[0] ?? 0) & 0x3f;
   const hexKey = bytesToHex(keyBytes);
 

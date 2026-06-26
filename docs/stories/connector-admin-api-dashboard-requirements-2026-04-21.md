@@ -118,7 +118,7 @@ From Story 21.8 Acceptance Criteria + the Dev Notes "per-node attribution" discu
 | **Per-peer credit / debit balance**     | per-node earnings                       | `/admin/balances/:peerId`                                   | ✅ available              |
 | **Per-peer channel list + deposit**     | liquidity view                          | `/admin/channels?peerId=…`                                  | ✅ available              |
 | Channel claim history                   | settlement audit                        | `/admin/channels/:id/claims`                                | ✅ available              |
-| Peer connectivity state                 | "is mill reachable?"                    | `/admin/peers` (existing `connected` field in `PeerStatus`) | ✅ available              |
+| Peer connectivity state                 | "is swap reachable?"                    | `/admin/peers` (existing `connected` field in `PeerStatus`) | ✅ available              |
 | Connector restart / state events (push) | real-time dashboard                     | _polling only_                                              | ❌ missing (see §5.3)     |
 
 The dashboard is content to read **per-peer attribution** rather than "events received / events written" semantics — the renamings in the 21.8 `MetricsPayload` were speculative and are being withdrawn.
@@ -159,7 +159,7 @@ interface AdminMetricsJson {
 }
 ```
 
-**Rationale.** The per-peer counters are the only piece the dashboard cannot reconstruct from what's already there. `/admin/peers` gives connected-state but no counters. `/admin/balances/:peerId` gives _money_ but not _packets_. Operators will ask "is my mill actually routing anything?" — that needs per-peer packets, not aggregate.
+**Rationale.** The per-peer counters are the only piece the dashboard cannot reconstruct from what's already there. `/admin/peers` gives connected-state but no counters. `/admin/balances/:peerId` gives _money_ but not _packets_. Operators will ask "is my swap actually routing anything?" — that needs per-peer packets, not aggregate.
 
 **Implementation hint.** The Prometheus collector already tracks per-peer counters by label (the Prometheus `/metrics` output will contain lines like `toon_packets_forwarded{peer="town"} 42`). Exposing the same map as JSON is a straightforward adapter over the existing registry.
 
