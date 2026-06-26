@@ -35,7 +35,8 @@ describe('ConfigLoader — selfAnnounce passthrough', () => {
       ...baseRaw(),
       selfAnnounce: {
         enabled: true,
-        writeUrl: 'http://relay:3100/write',
+        announceTo: 'g.proxy.relay',
+        announcePrice: '1000',
         refreshIntervalSecs: 300,
         btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
         relayUrl: 'wss://relay.devnet.toonprotocol.dev',
@@ -44,7 +45,8 @@ describe('ConfigLoader — selfAnnounce passthrough', () => {
     const config: ConnectorConfig = ConfigLoader.validateConfig(raw);
     expect(config.selfAnnounce).toEqual({
       enabled: true,
-      writeUrl: 'http://relay:3100/write',
+      announceTo: 'g.proxy.relay',
+      announcePrice: '1000',
       refreshIntervalSecs: 300,
       btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
       relayUrl: 'wss://relay.devnet.toonprotocol.dev',

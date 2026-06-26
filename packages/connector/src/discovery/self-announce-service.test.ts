@@ -3,15 +3,14 @@
  *
  * Covers:
  * - refresh/expiration timing: TTL = 2× refresh; default cadence.
- * - publish path: a boot publish POSTs `{ event }` to the configured writeUrl;
- *   the body is a signed, verifiable kind:10032 carrying the route hints.
- * - the refresh loop republishes on the interval and stop() clears the timer.
- * - opt-in/guards: disabled or missing writeUrl → no publish.
- * - resilience: a non-ok response or a fetch rejection never throws.
+ * - build: a signed, verifiable kind:10032 carrying the route hints.
+ * - the injected publish path: the boot publish + interval republish call the
+ *   PublishFn; stop() clears the timer; disabled / missing-announceTo guards.
+ * - resilience: a rejected outcome or a throwing PublishFn never throws.
  *
- * Per the repo's mock-free policy, the relay write target is a real
- * hand-written `FetchLike` recorder (not a network/library mock) and the events
- * are built + signed with the real `nostr-tools` primitives.
+ * Per the repo's mock-free policy, the publish target is a real hand-written
+ * `PublishFn` recorder (not a network/library mock) and events are built +
+ * signed with the real `nostr-tools` primitives.
  *
  * @module discovery/self-announce-service.test
  */
@@ -22,7 +21,8 @@ import type { ConnectorConfig, SelfAnnounceConfig } from '../config/types';
 import {
   SelfAnnounceService,
   DEFAULT_REFRESH_INTERVAL_SECS,
-  type FetchLike,
+  type PublishFn,
+  type PublishOutcome,
 } from './self-announce-service';
 
 const logger = createLogger('self-announce-test', 'silent');
@@ -67,43 +67,37 @@ function config(): ConnectorConfig {
 
 const selfAnnounce: SelfAnnounceConfig = {
   enabled: true,
-  writeUrl: 'http://relay:3100/write',
+  announceTo: 'g.proxy.relay',
   refreshIntervalSecs: 300,
   btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
 };
 
-/** A real FetchLike recorder: captures calls, returns a configurable result. */
-function recorder(
-  result: { ok: boolean; status: number; body?: string } = { ok: true, status: 200 }
-): {
-  calls: { url: string; body: string; headers: Record<string, string> }[];
-  fetchImpl: FetchLike;
+/** A real PublishFn recorder: captures each published event, returns a fixed outcome. */
+function recorder(outcome: PublishOutcome = { mode: 'local-free', ok: true }): {
+  events: { id: string; kind: number }[];
+  publish: PublishFn;
 } {
-  const calls: { url: string; body: string; headers: Record<string, string> }[] = [];
-  const fetchImpl: FetchLike = async (url, init) => {
-    calls.push({ url, body: init.body, headers: init.headers });
-    return {
-      ok: result.ok,
-      status: result.status,
-      text: async () => result.body ?? '',
-    };
+  const events: { id: string; kind: number }[] = [];
+  const publish: PublishFn = async (event) => {
+    events.push({ id: event.id, kind: event.kind });
+    return outcome;
   };
-  return { calls, fetchImpl };
+  return { events, publish };
 }
 
 function makeService(
   overrides: Partial<SelfAnnounceConfig> = {},
-  fetchImpl?: FetchLike
-): { service: SelfAnnounceService; calls: ReturnType<typeof recorder>['calls'] } {
+  publish?: PublishFn
+): { service: SelfAnnounceService; events: ReturnType<typeof recorder>['events'] } {
   const rec = recorder();
   const service = new SelfAnnounceService({
     config: config(),
     selfAnnounce: { ...selfAnnounce, ...overrides },
     secretKey: sk,
+    publish: publish ?? rec.publish,
     logger,
-    fetchImpl: fetchImpl ?? rec.fetchImpl,
   });
-  return { service, calls: rec.calls };
+  return { service, events: rec.events };
 }
 
 describe('SelfAnnounceService — timing', () => {
@@ -147,37 +141,31 @@ describe('SelfAnnounceService — build', () => {
 });
 
 describe('SelfAnnounceService — publish path', () => {
-  it('POSTs { event } to the configured writeUrl', async () => {
-    const { service, calls } = makeService();
+  it('passes the signed event to the injected PublishFn', async () => {
+    const { service, events } = makeService();
     await service.publish();
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe('http://relay:3100/write');
-    const parsed = JSON.parse(calls[0]!.body) as { event: { kind: number; sig: string } };
-    expect(parsed.event.kind).toBe(10032);
-    expect(parsed.event.sig).toBeDefined();
-    // Self-write carries the connector's own pubkey as payer, amount 0.
-    expect(calls[0]!.headers['X-TOON-Payer']).toBe(getPublicKey(sk));
-    expect(calls[0]!.headers['X-TOON-Amount']).toBe('0');
+    expect(events).toHaveLength(1);
+    expect(events[0]!.kind).toBe(10032);
   });
 
-  it('does not throw when the relay rejects the write (non-ok)', async () => {
-    const rec = recorder({ ok: false, status: 402, body: 'payment required' });
+  it('does not throw when the publish outcome is a rejection', async () => {
+    const rec = recorder({ mode: 'remote-paid', ok: false, detail: 'F99: Insufficient Payment' });
     const service = new SelfAnnounceService({
       config: config(),
       selfAnnounce,
       secretKey: sk,
+      publish: rec.publish,
       logger,
-      fetchImpl: rec.fetchImpl,
     });
     await expect(service.publish()).resolves.toBeUndefined();
-    expect(rec.calls).toHaveLength(1);
+    expect(rec.events).toHaveLength(1);
   });
 
-  it('does not throw when the fetch itself rejects', async () => {
-    const throwingFetch: FetchLike = async () => {
-      throw new Error('ECONNREFUSED');
+  it('does not throw when the PublishFn itself rejects', async () => {
+    const throwingPublish: PublishFn = async () => {
+      throw new Error('no payment channel available for peer');
     };
-    const { service } = makeService({}, throwingFetch);
+    const { service } = makeService({}, throwingPublish);
     await expect(service.publish()).resolves.toBeUndefined();
   });
 });
@@ -190,52 +178,52 @@ describe('SelfAnnounceService — lifecycle', () => {
   });
 
   it('publishes immediately on start and republishes on the interval', async () => {
-    const { service, calls } = makeService({ refreshIntervalSecs: 300 });
+    const { service, events } = makeService({ refreshIntervalSecs: 300 });
     service.start();
     expect(service.running).toBe(true);
     // Boot publish is fire-and-forget; flush microtasks.
     await Promise.resolve();
-    expect(calls).toHaveLength(1);
+    expect(events).toHaveLength(1);
 
     // Advance one full interval → one more publish.
     jest.advanceTimersByTime(300_000);
     await Promise.resolve();
-    expect(calls).toHaveLength(2);
+    expect(events).toHaveLength(2);
 
     jest.advanceTimersByTime(300_000);
     await Promise.resolve();
-    expect(calls).toHaveLength(3);
+    expect(events).toHaveLength(3);
 
     service.stop();
   });
 
   it('stop() clears the timer so no further publishes occur', async () => {
-    const { service, calls } = makeService({ refreshIntervalSecs: 300 });
+    const { service, events } = makeService({ refreshIntervalSecs: 300 });
     service.start();
     await Promise.resolve();
-    expect(calls).toHaveLength(1);
+    expect(events).toHaveLength(1);
 
     service.stop();
     expect(service.running).toBe(false);
 
     jest.advanceTimersByTime(900_000);
     await Promise.resolve();
-    expect(calls).toHaveLength(1); // unchanged after stop
+    expect(events).toHaveLength(1); // unchanged after stop
   });
 
   it('does not publish when disabled', async () => {
-    const { service, calls } = makeService({ enabled: false });
+    const { service, events } = makeService({ enabled: false });
     service.start();
     await Promise.resolve();
     expect(service.running).toBe(false);
-    expect(calls).toHaveLength(0);
+    expect(events).toHaveLength(0);
   });
 
-  it('does not publish when writeUrl is missing', async () => {
-    const { service, calls } = makeService({ writeUrl: '' });
+  it('does not publish when announceTo is missing', async () => {
+    const { service, events } = makeService({ announceTo: '' });
     service.start();
     await Promise.resolve();
     expect(service.running).toBe(false);
-    expect(calls).toHaveLength(0);
+    expect(events).toHaveLength(0);
   });
 });

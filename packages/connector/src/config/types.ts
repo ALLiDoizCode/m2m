@@ -647,11 +647,19 @@ export interface ConnectorConfig {
  * cannot infer (its public BTP/HTTP/relay hostnames, terminated behind TLS) or
  * wishes to pin explicitly.
  *
+ * The publish TRANSPORT is the connector's own routing: `announceTo` names the
+ * ILP address to write the announcement THROUGH, and the connector resolves it
+ * against its own routing table — a locally-terminated route delivers the write
+ * FREE through its `RouteTermination` upstream, while a remote route originates
+ * a PAID write over ILP funded from the connector's own settlement channel
+ * (exactly how it would pay for any write). There is no raw private-port URL in
+ * config.
+ *
  * @example
  * ```yaml
  * selfAnnounce:
  *   enabled: true
- *   writeUrl: http://relay:3100/write   # relay private POST /write store
+ *   announceTo: g.proxy.relay           # ILP route to publish the write THROUGH
  *   refreshIntervalSecs: 300            # republish every 5m; TTL = 2x = 10m
  *   btpEndpoint: wss://proxy.devnet.toonprotocol.dev:443
  *   relayUrl: wss://relay.devnet.toonprotocol.dev
@@ -665,18 +673,31 @@ export interface SelfAnnounceConfig {
   enabled: boolean;
 
   /**
-   * HTTP `POST /write` endpoint of the relay's PRIVATE event store (default
-   * relay port 3100). The connector POSTs `{ "event": <NostrEvent> }` here; the
-   * relay verifies the event signature and stores it, after which it is served
-   * on the relay's FREE read WS (port 7100). This is the same upstream the
-   * connector already reverse-proxies paid writes to. The relay's free read WS
-   * rejects `EVENT` writes (writes are monetized), so the private `/write` store
-   * is the correct internal publish channel. For a store-connector deploy with
-   * no local relay, point this at the apex relay's `/write` endpoint.
+   * The ILP address (relay/publish route) to publish the kind:10032 write
+   * THROUGH. The connector resolves it against its OWN routing table and writes
+   * the SAME way it handles any write:
+   * - **Locally terminated** (this connector fronts the relay — e.g. an apex
+   *   whose `g.proxy.relay` route has a `RouteTermination` `upstream`) → the
+   *   write is delivered through that termination = **FREE** (no payment; the
+   *   upstream comes from the resolved route, not config).
+   * - **Forwarded** (a remote relay — e.g. the store box writing through
+   *   `g.proxy.relay`, which forwards to the apex) → a **PAID** write is
+   *   originated over ILP, funded from the connector's own settlement channel to
+   *   its next hop (`announcePrice` below).
    *
-   * Example: `http://relay:3100/write`
+   * Distinct from the announcement CONTENT's own `ilpAddress` (derived from this
+   * node's terminated routes): e.g. the store box sets `announceTo: g.proxy.relay`
+   * (where to write) while announcing its own `g.proxy.store` peer info.
    */
-  writeUrl: string;
+  announceTo: string;
+
+  /**
+   * Price to pay (atomic units, e.g. nano-USDC, decimal-string) when `announceTo`
+   * resolves to a REMOTE (forwarded) route — the connector pays this for its own
+   * write, like any client. Must be ≥ the remote relay route's price. IGNORED
+   * when `announceTo` is locally terminated (that path is free). Default `'1000'`.
+   */
+  announcePrice?: string;
 
   /**
    * Seconds between republishes. The announcement carries a NIP-40 `expiration`

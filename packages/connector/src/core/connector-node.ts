@@ -97,8 +97,13 @@ import {
 import { InboundClaimValidator } from '../btp/inbound-claim-validator';
 import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
-import { SelfAnnounceService } from '../discovery/self-announce-service';
+import { SelfAnnounceService, type PublishOutcome } from '../discovery/self-announce-service';
+import { planAnnouncePublish } from '../discovery/self-announce-publish';
+import type { NostrEvent } from 'nostr-tools';
 import { hexToBytes } from '@noble/hashes/utils';
+
+/** Round-trip timeout (ms) for a self-announce write PREPARE. */
+const SELF_ANNOUNCE_PREPARE_TIMEOUT_MS = 30_000;
 import { promises as dns } from 'dns';
 // Import package.json for version information
 import packageJson from '../../package.json';
@@ -751,8 +756,9 @@ export class ConnectorNode implements HealthStatusProvider {
    *
    * Opt-in via `selfAnnounce.enabled`. Builds the kind:10032 IlpPeerInfo from
    * this node's own routes/chainProviders/endpoints, signs with the NIP-06 key,
-   * and publishes + refreshes it to the relay store. Best-effort: any failure
-   * logs and skips so startup is never blocked.
+   * and publishes + refreshes it THROUGH this connector's own routing via
+   * {@link _publishAnnouncement}. Best-effort: any failure logs and skips so
+   * startup is never blocked.
    */
   private _startSelfAnnounce(): void {
     const selfAnnounce = this._config.selfAnnounce;
@@ -774,6 +780,9 @@ export class ConnectorNode implements HealthStatusProvider {
         config: this._config,
         selfAnnounce,
         secretKey,
+        // Route the write through THIS connector's own pipe: a locally-terminated
+        // announceTo delivers free; a remote announceTo pays from our channel.
+        publish: (event) => this._publishAnnouncement(event),
         logger: this._logger,
       });
       this._selfAnnounceService.start();
@@ -787,6 +796,51 @@ export class ConnectorNode implements HealthStatusProvider {
         'Failed to start self-announce service; continuing without it'
       );
     }
+  }
+
+  /**
+   * Publish a signed kind:10032 announcement THROUGH this connector's own
+   * routing (relay#37 / store#22). The same write path any client uses:
+   *
+   * - `announceTo` resolves to a LOCAL terminated route (this connector fronts
+   *   the relay) → `sendPacket` with amount `0` → routed to this node's local
+   *   delivery handler (the route's `HttpProxyHandler`), which reverse-proxies
+   *   the inner `POST /write` to the route's resolved upstream. Local delivery
+   *   returns before the forward/claim path, so it is **free**.
+   * - `announceTo` is REMOTE (forwarded) → `sendPacket` with amount =
+   *   `announcePrice` (> 0) → forwarded to the next-hop peer, where the forward
+   *   path attaches a per-packet settlement claim funded from THIS connector's
+   *   own channel. The connector **pays for its own write**.
+   *
+   * `routeTerminationRegistry.match(announceTo)` is the local-vs-remote signal;
+   * `planAnnouncePublish` turns it into the `sendPacket` amount + envelope. The
+   * write is delivered through `sendPacket`, never a raw POST to a private port.
+   */
+  private async _publishAnnouncement(event: NostrEvent): Promise<PublishOutcome> {
+    const selfAnnounce = this._config.selfAnnounce!;
+    const announceTo = selfAnnounce.announceTo;
+    const isLocallyTerminated = this._routeTerminationRegistry.match(announceTo) !== undefined;
+
+    const plan = planAnnouncePublish({
+      announceTo,
+      event,
+      isLocallyTerminated,
+      ...(selfAnnounce.announcePrice ? { remotePriceAtomic: selfAnnounce.announcePrice } : {}),
+    });
+
+    const expiresAt = new Date(Date.now() + SELF_ANNOUNCE_PREPARE_TIMEOUT_MS);
+    const response = await this.sendPacket({
+      destination: plan.destination,
+      amount: plan.amount,
+      expiresAt,
+      data: plan.data,
+    });
+
+    if (response.type === PacketType.FULFILL) {
+      return { mode: plan.mode, ok: true };
+    }
+    const reject = response as ILPRejectPacket;
+    return { mode: plan.mode, ok: false, detail: `${reject.code}: ${reject.message ?? ''}`.trim() };
   }
 
   /**

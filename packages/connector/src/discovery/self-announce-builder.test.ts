@@ -104,7 +104,7 @@ function storeConnectorConfig(): ConnectorConfig {
 
 const baseSelfAnnounce: SelfAnnounceConfig = {
   enabled: true,
-  writeUrl: 'http://relay:3100/write',
+  announceTo: 'g.proxy.relay',
   btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
 };
 

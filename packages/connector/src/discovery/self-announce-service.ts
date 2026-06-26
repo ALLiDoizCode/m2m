@@ -4,21 +4,19 @@
  * On boot (and on an interval), builds, signs, and publishes a fresh
  * `kind:10032` `IlpPeerInfo` announcement describing the connector's OWN apex
  * routes — refreshing it BEFORE the NIP-40 `expiration` lapses so discovery
- * never goes dark. The announcement is written to the relay's PRIVATE
- * `POST /write` event store (the same upstream the connector reverse-proxies
- * paid writes to); once stored it is served on the relay's FREE read WS, so a
- * client holding only the genesis seed can discover the publish/store routes +
- * settlement info out of band instead of hardcoding `publishDestination` /
- * `storeDestination`.
+ * never goes dark.
  *
- * The relay's free read WS rejects `EVENT` writes (writes are monetized), so
- * the private `/write` store is the correct internal publish channel — and it
- * is configurable (`writeUrl`) so a store-connector deploy with no local relay
- * can point at the apex relay.
+ * This service owns ONLY the event lifecycle: derive the announcement from
+ * config, sign it (NIP-06), and drive the refresh loop. The publish TRANSPORT
+ * is injected as a `PublishFn` so the connector can route the write through its
+ * OWN pipe — a locally-terminated `announceTo` delivers free through the route's
+ * `RouteTermination`, a remote `announceTo` originates a paid write funded from
+ * the connector's settlement channel (see `self-announce-publish.ts`). The
+ * service never reaches the relay's private port directly.
  *
- * Identity: the connector signs with its Nostr key derived from its mnemonic
- * via NIP-06 (the SAME secp256k1 key it settles with). `kind:10032` is a
- * replaceable event (10000-19999), so each refresh supersedes the last.
+ * Identity: signed with the connector's Nostr key derived from its mnemonic via
+ * NIP-06 (the SAME secp256k1 key it settles with). `kind:10032` is a replaceable
+ * event (10000-19999), so each refresh supersedes the last.
  *
  * @module discovery/self-announce-service
  */
@@ -32,11 +30,24 @@ import { buildSelfAnnouncementInfo } from './self-announce-builder';
 /** Default republish cadence (seconds). TTL = 2 × this. */
 export const DEFAULT_REFRESH_INTERVAL_SECS = 300;
 
-/** Minimal `fetch` shape, so tests can inject a stub without a network. */
-export type FetchLike = (
-  input: string,
-  init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }
-) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
+/**
+ * Outcome of a publish attempt, returned by the injected {@link PublishFn} for
+ * logging. `mode` records whether routing resolved to a free local delivery or
+ * a paid remote forward; `ok` is whether the write was accepted (FULFILL).
+ */
+export interface PublishOutcome {
+  mode: 'local-free' | 'remote-paid';
+  ok: boolean;
+  /** Optional detail (e.g. an ILP reject code) for logging. */
+  detail?: string;
+}
+
+/**
+ * Publishes a signed announcement event through the connector's own routing.
+ * Injected by `ConnectorNode` so the service stays transport-agnostic. May
+ * throw; the service catches and logs (never-throw publish loop).
+ */
+export type PublishFn = (event: NostrEvent) => Promise<PublishOutcome>;
 
 export interface SelfAnnounceServiceDeps {
   /** The full connector config (routes + chainProviders) the announcement derives from. */
@@ -45,10 +56,10 @@ export interface SelfAnnounceServiceDeps {
   selfAnnounce: SelfAnnounceConfig;
   /** The 32-byte Nostr secret key (NIP-06 key) to sign the announcement with. */
   secretKey: Uint8Array;
+  /** Routes the signed event through the connector's own pipe (free local / paid remote). */
+  publish: PublishFn;
   /** Pino logger. */
   logger: Logger;
-  /** Injectable fetch (defaults to global `fetch`). */
-  fetchImpl?: FetchLike;
 }
 
 /**
@@ -58,8 +69,8 @@ export class SelfAnnounceService {
   private readonly _config: ConnectorConfig;
   private readonly _selfAnnounce: SelfAnnounceConfig;
   private readonly _secretKey: Uint8Array;
+  private readonly _publish: PublishFn;
   private readonly _logger: Logger;
-  private readonly _fetch: FetchLike;
   private readonly _refreshIntervalSecs: number;
   private readonly _ttlSeconds: number;
 
@@ -70,8 +81,8 @@ export class SelfAnnounceService {
     this._config = deps.config;
     this._selfAnnounce = deps.selfAnnounce;
     this._secretKey = deps.secretKey;
+    this._publish = deps.publish;
     this._logger = deps.logger.child({ component: 'SelfAnnounceService' });
-    this._fetch = deps.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
 
     const refresh =
       deps.selfAnnounce.refreshIntervalSecs && deps.selfAnnounce.refreshIntervalSecs > 0
@@ -115,8 +126,8 @@ export class SelfAnnounceService {
       this._logger.info('Self-announce disabled');
       return;
     }
-    if (!this._selfAnnounce.writeUrl) {
-      this._logger.warn('Self-announce enabled but no writeUrl configured; not announcing');
+    if (!this._selfAnnounce.announceTo) {
+      this._logger.warn('Self-announce enabled but no announceTo configured; not announcing');
       return;
     }
 
@@ -124,7 +135,7 @@ export class SelfAnnounceService {
     this._logger.info(
       {
         event: 'self_announce_started',
-        writeUrl: this._selfAnnounce.writeUrl,
+        announceTo: this._selfAnnounce.announceTo,
         refreshIntervalSecs: this._refreshIntervalSecs,
         ttlSeconds: this._ttlSeconds,
       },
@@ -154,9 +165,10 @@ export class SelfAnnounceService {
   }
 
   /**
-   * Build, sign, and write a fresh announcement to the relay's `POST /write`
-   * store. Never throws — failures are logged so a transient relay outage does
-   * not crash the connector or abort the refresh loop.
+   * Build, sign, and publish a fresh announcement through the connector's pipe.
+   * Never throws — a build error or a publish failure (rejected write, no
+   * channel, transient outage) is logged so it does not crash the connector or
+   * abort the refresh loop.
    */
   async publish(): Promise<void> {
     let event: NostrEvent;
@@ -171,51 +183,38 @@ export class SelfAnnounceService {
     }
 
     try {
-      const response = await this._fetch(this._selfAnnounce.writeUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          // The relay echoes these without re-validating payment; the
-          // self-announce is the connector writing on its OWN behalf.
-          'X-TOON-Payer': event.pubkey,
-          'X-TOON-Amount': '0',
-        },
-        body: JSON.stringify({ event }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
+      const outcome = await this._publish(event);
+      if (outcome.ok) {
+        this._logger.info(
+          {
+            event: 'self_announce_published',
+            id: event.id.slice(0, 16),
+            mode: outcome.mode,
+            announceTo: this._selfAnnounce.announceTo,
+            expiresInSecs: this._ttlSeconds,
+          },
+          'Published self-announce kind:10032 through connector routing'
+        );
+      } else {
         this._logger.warn(
           {
-            event: 'self_announce_write_rejected',
-            status: response.status,
-            writeUrl: this._selfAnnounce.writeUrl,
-            body: text.slice(0, 200),
+            event: 'self_announce_rejected',
+            id: event.id.slice(0, 16),
+            mode: outcome.mode,
+            announceTo: this._selfAnnounce.announceTo,
+            detail: outcome.detail,
           },
-          'Self-announce write was rejected by the relay store'
+          'Self-announce write was rejected (will retry on next refresh)'
         );
-        return;
       }
-
-      this._logger.info(
-        {
-          event: 'self_announce_published',
-          id: event.id.slice(0, 16),
-          ilpAddress: extractIlpAddress(event),
-          expiresInSecs: this._ttlSeconds,
-        },
-        'Published self-announce kind:10032 to relay store'
-      );
     } catch (err) {
       this._logger.warn(
         {
-          event: 'self_announce_write_failed',
+          event: 'self_announce_publish_failed',
           err: errMsg(err),
-          writeUrl: this._selfAnnounce.writeUrl,
+          announceTo: this._selfAnnounce.announceTo,
         },
-        'Failed to write self-announce to the relay store (will retry on next refresh)'
+        'Failed to publish self-announce through connector routing (will retry on next refresh)'
       );
     }
   }
@@ -223,14 +222,4 @@ export class SelfAnnounceService {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Best-effort pull of `ilpAddress` from the event content for logging only. */
-function extractIlpAddress(event: NostrEvent): string | undefined {
-  try {
-    const parsed = JSON.parse(event.content) as { ilpAddress?: string };
-    return parsed.ilpAddress;
-  } catch {
-    return undefined;
-  }
 }
