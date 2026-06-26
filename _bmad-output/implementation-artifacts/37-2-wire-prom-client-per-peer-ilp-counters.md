@@ -36,7 +36,7 @@ Scenario: prom-client is a production dependency of packages/connector
 
 ```gherkin
 Scenario: ILP forwarding path records per-peer counters
-  Given a PacketHandler processing an ILP PREPARE from peer 'town'
+  Given a PacketHandler processing an ILP PREPARE from peer 'relay'
   When the packet is forwarded to peer 'swap'
   Then toon_packets_forwarded_total{peer="swap"} increments by 1
   And toon_bytes_sent_total{peer="swap"} increments by packet.byteLength

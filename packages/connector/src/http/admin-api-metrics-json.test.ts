@@ -52,22 +52,22 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
       removeRoutesForPeer: jest.fn(),
     } as unknown as jest.Mocked<RoutingTable>;
 
-    // AC 4: peerStatus reflects 'town' as connected, 'swap'/'store' as disconnected.
+    // AC 4: peerStatus reflects 'relay' as connected, 'swap'/'store' as disconnected.
     // Real BTPClientManager.getPeerStatus() always returns an entry for every peer
     // in getPeerIds() — mock must mirror that contract.
     mockBTPClientManager = {
       addPeer: jest.fn().mockResolvedValue(undefined),
       removePeer: jest.fn().mockResolvedValue(undefined),
-      getPeerIds: jest.fn().mockReturnValue(['town', 'swap', 'store']),
+      getPeerIds: jest.fn().mockReturnValue(['relay', 'swap', 'store']),
       getPeerStatus: jest.fn().mockReturnValue(
         new Map([
-          ['town', true],
+          ['relay', true],
           ['swap', false],
           ['store', false],
         ])
       ),
-      isConnected: jest.fn().mockImplementation((peerId: string) => peerId === 'town'),
-      getConnectedPeers: jest.fn().mockReturnValue(['town']),
+      isConnected: jest.fn().mockImplementation((peerId: string) => peerId === 'relay'),
+      getConnectedPeers: jest.fn().mockReturnValue(['relay']),
       getClientForPeer: jest.fn(),
     } as unknown as jest.Mocked<BTPClientManager>;
 
@@ -87,16 +87,16 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
     // Create fresh metrics registry for each test
     metricsRegistry = new IlpMetricsRegistry({ collectDefaults: false });
 
-    // Register peers known in config (Story 37.2) - 'town' and 'store' have activity, 'swap' is idle
-    metricsRegistry.registerPeer('town');
+    // Register peers known in config (Story 37.2) - 'relay' and 'store' have activity, 'swap' is idle
+    metricsRegistry.registerPeer('relay');
     metricsRegistry.registerPeer('swap');
     metricsRegistry.registerPeer('store');
     metricsRegistry.registerPeer('dvm2'); // Extra peer with no activity
 
-    // Record some activity for 'town' peer
-    metricsRegistry.recordForwardFulfill('town', 1500); // 1500 bytes sent
-    metricsRegistry.recordForwardReject('town', 500);
-    metricsRegistry.recordInbound('town', 2000); // 2000 bytes received
+    // Record some activity for 'relay' peer
+    metricsRegistry.recordForwardFulfill('relay', 1500); // 1500 bytes sent
+    metricsRegistry.recordForwardReject('relay', 500);
+    metricsRegistry.recordInbound('relay', 2000); // 2000 bytes received
 
     // Record activity for 'store' peer (registerPeer already called above for AC 3)
     metricsRegistry.recordForwardFulfill('store', 3000);
@@ -152,10 +152,10 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
     it('should include all fields for each peer', async () => {
       const response = await request(app).get('/admin/metrics.json').expect(200);
 
-      // Verify 'town' has correct structure
-      const townPeer = response.body.peers.find((p: { peerId: string }) => p.peerId === 'town');
-      expect(townPeer).toMatchObject({
-        peerId: 'town',
+      // Verify 'relay' has correct structure
+      const relayPeer = response.body.peers.find((p: { peerId: string }) => p.peerId === 'relay');
+      expect(relayPeer).toMatchObject({
+        peerId: 'relay',
         connected: true,
         packetsForwarded: 1,
         packetsRejected: 1,
@@ -237,18 +237,18 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
 
       // Response peer list must match getPeerIds() exactly (sorted).
       const peerIds = response.body.peers.map((p: { peerId: string }) => p.peerId);
-      expect(peerIds).toEqual(['store', 'swap', 'town']);
+      expect(peerIds).toEqual(['relay', 'store', 'swap']);
     });
   });
 
   // --- AC 4: connected flag reflects BTPClientManager state ---
 
   describe('AC 4: connected flag reflects live connection state', () => {
-    it('should reflect connected=true for town peer', async () => {
+    it('should reflect connected=true for relay peer', async () => {
       const response = await request(app).get('/admin/metrics.json').expect(200);
 
-      const townPeer = response.body.peers.find((p: { peerId: string }) => p.peerId === 'town');
-      expect(townPeer.connected).toBe(true);
+      const relayPeer = response.body.peers.find((p: { peerId: string }) => p.peerId === 'relay');
+      expect(relayPeer.connected).toBe(true);
     });
 
     it('should reflect connected=false for swap peer', async () => {
@@ -320,9 +320,9 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
     it('should be ISO-8601 string for peer with activity', async () => {
       const response = await request(app).get('/admin/metrics.json').expect(200);
 
-      const townPeer = response.body.peers.find((p: { peerId: string }) => p.peerId === 'town');
-      expect(townPeer.lastPacketAt).toBeDefined();
-      expect(townPeer.lastPacketAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      const relayPeer = response.body.peers.find((p: { peerId: string }) => p.peerId === 'relay');
+      expect(relayPeer.lastPacketAt).toBeDefined();
+      expect(relayPeer.lastPacketAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
     it('should be null for peer with no activity', async () => {

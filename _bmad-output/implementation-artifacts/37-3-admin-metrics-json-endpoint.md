@@ -23,7 +23,7 @@ Final shape locked in response doc §9.4 + §10.3. Auth model locked in §10.2 (
 
 ```gherkin
 Scenario: GET /admin/metrics.json returns the AdminMetricsJson shape
-  Given a connector with peers ['town', 'swap'] and some packet activity
+  Given a connector with peers ['relay', 'swap'] and some packet activity
   When GET /admin/metrics.json is requested with a valid X-Api-Key
   Then the response status is 200
   And the body conforms to:
@@ -67,9 +67,9 @@ Scenario: A registered but idle peer still appears in the peers array
 
 ```gherkin
 Scenario: peers[].connected reflects live connection state
-  Given btpClientManager.getPeerStatus() reports 'town' => true, 'swap' => false
+  Given btpClientManager.getPeerStatus() reports 'relay' => true, 'swap' => false
   When GET /admin/metrics.json is requested
-  Then peers[peerId='town'].connected is true
+  Then peers[peerId='relay'].connected is true
   And peers[peerId='swap'].connected is false
 ```
 

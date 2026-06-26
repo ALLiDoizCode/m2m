@@ -8,7 +8,7 @@
  *
  * This is the end-to-end proof of the Phase-1 persistence + boot-reconcile path
  * (`ConnectorNode._openRegistryStore` / `_reconcileRegistry`), replacing the old
- * "re-POST the town route after a restart" RUNBOOK recovery. Infra-free: no
+ * "re-POST the relay route after a restart" RUNBOOK recovery. Infra-free: no
  * Docker, no chain containers — settlement is disabled so start() boots in
  * routing-only mode.
  *
@@ -75,12 +75,12 @@ describe('Registry restart survival (routing-only, in-process)', () => {
   });
 
   it('replays a runtime-added peer + route across a restart', async () => {
-    // ── Boot A, register a runtime child peer (auto-derives g.<self>.town) ──
+    // ── Boot A, register a runtime child peer (auto-derives g.<self>.relay) ──
     nodeA = new ConnectorNode(routingOnlyConfig(basePort), silentLogger);
     await nodeA.start();
 
     await nodeA.registerPeer({
-      id: 'town',
+      id: 'relay',
       // Points at a non-listening port; BTP connect retries in the background
       // and never resolves, which is fine — registration + persistence do not
       // depend on the connection succeeding.
@@ -90,7 +90,7 @@ describe('Registry restart survival (routing-only, in-process)', () => {
     });
 
     // Sanity: the route exists on A before restart.
-    expect(nodeA.listRoutes().map((r) => r.prefix)).toContain(`${SELF_PREFIX}.town`);
+    expect(nodeA.listRoutes().map((r) => r.prefix)).toContain(`${SELF_PREFIX}.relay`);
 
     await nodeA.stop();
     nodeA = null;
@@ -100,11 +100,11 @@ describe('Registry restart survival (routing-only, in-process)', () => {
     await nodeB.start();
 
     const routes = nodeB.listRoutes();
-    const townRoute = routes.find((r) => r.prefix === `${SELF_PREFIX}.town`);
-    expect(townRoute).toBeDefined();
-    expect(townRoute?.nextHop).toBe('town');
+    const relayRoute = routes.find((r) => r.prefix === `${SELF_PREFIX}.relay`);
+    expect(relayRoute).toBeDefined();
+    expect(relayRoute?.nextHop).toBe('relay');
 
     const peerIds = nodeB.listPeers().map((p) => p.id);
-    expect(peerIds).toContain('town');
+    expect(peerIds).toContain('relay');
   });
 });

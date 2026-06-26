@@ -78,11 +78,11 @@ describe('Admin API — relation/route admission + persistence', () => {
     const res = await request(app)
       .post('/admin/peers')
       .send({
-        id: 'town',
-        url: 'ws://town:3000',
+        id: 'relay',
+        url: 'ws://relay:3000',
         authToken: 't',
         relation: 'child',
-        routes: [{ prefix: 'g.other.town' }],
+        routes: [{ prefix: 'g.other.relay' }],
       });
 
     expect(res.status).toBe(400);
@@ -93,49 +93,49 @@ describe('Admin API — relation/route admission + persistence', () => {
   it('auto-derives <self>.<peerId> for a child peer registered without a route', async () => {
     const res = await request(app)
       .post('/admin/peers')
-      .send({ id: 'town', url: 'ws://town:3000', authToken: 't', relation: 'child' });
+      .send({ id: 'relay', url: 'ws://relay:3000', authToken: 't', relation: 'child' });
 
     expect(res.status).toBe(201);
-    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.town', 'town', 0);
-    expect(res.body.routes).toContain('g.connector.town');
+    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.relay', 'relay', 0);
+    expect(res.body.routes).toContain('g.connector.relay');
   });
 
   it('accepts a child peer whose route is under the connector address', async () => {
     const res = await request(app)
       .post('/admin/peers')
       .send({
-        id: 'town',
-        url: 'ws://town:3000',
+        id: 'relay',
+        url: 'ws://relay:3000',
         authToken: 't',
         relation: 'child',
-        routes: [{ prefix: 'g.connector.town' }],
+        routes: [{ prefix: 'g.connector.relay' }],
       });
 
     expect(res.status).toBe(201);
-    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.town', 'town', 0);
+    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.relay', 'relay', 0);
   });
 
   it('writes the peer through to the registry store on registration', async () => {
     await request(app)
       .post('/admin/peers')
-      .send({ id: 'town', url: 'ws://town:3000', authToken: 't', relation: 'child' });
+      .send({ id: 'relay', url: 'ws://relay:3000', authToken: 't', relation: 'child' });
 
     expect(registryStore.savePeer).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'town', relation: 'child', source: 'runtime' })
+      expect.objectContaining({ id: 'relay', relation: 'child', source: 'runtime' })
     );
   });
 
   it('deletes the peer from the registry store on removal', async () => {
-    mockBTPClientManager.getPeerIds.mockReturnValue(['town']);
-    await request(app).delete('/admin/peers/town');
-    expect(registryStore.deletePeer).toHaveBeenCalledWith('town');
+    mockBTPClientManager.getPeerIds.mockReturnValue(['relay']);
+    await request(app).delete('/admin/peers/relay');
+    expect(registryStore.deletePeer).toHaveBeenCalledWith('relay');
   });
 
   it('rejects POST /admin/routes when the nextHop child route escapes the subtree (400)', async () => {
-    relationByPeer.set('town', 'child');
+    relationByPeer.set('relay', 'child');
     const res = await request(app)
       .post('/admin/routes')
-      .send({ prefix: 'g.other.town', nextHop: 'town' });
+      .send({ prefix: 'g.other.relay', nextHop: 'relay' });
 
     expect(res.status).toBe(400);
     expect(res.body.message).toContain("must be under the connector's own address");
