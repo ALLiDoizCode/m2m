@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.28.0](https://github.com/toon-protocol/connector/compare/v3.27.0...v3.28.0) (2026-06-26)
+
+### Features
+
+- **discovery:** connector self-announce (kind:10032 IlpPeerInfo) ([#265](https://github.com/toon-protocol/connector/issues/265)) ([4436178](https://github.com/toon-protocol/connector/commit/44361783b7457675ac8ca7a1958c120022d76b5e)), closes [toon-protocol/relay#37](https://github.com/toon-protocol/relay/issues/37) [toon-protocol/store#22](https://github.com/toon-protocol/store/issues/22) [#259](https://github.com/toon-protocol/connector/issues/259)
+- **probe:** kind:10032 self-announce discovery acceptance probe ([#266](https://github.com/toon-protocol/connector/issues/266)) ([6910f04](https://github.com/toon-protocol/connector/commit/6910f040a999f114ff3c3ac595770e3b11bc2beb)), closes [relay#37](https://github.com/toon-protocol/relay/issues/37) [store#22](https://github.com/toon-protocol/store/issues/22) [toon-meta#69](https://github.com/toon-protocol/toon-meta/issues/69) [store#22](https://github.com/toon-protocol/store/issues/22)
+
 ## [3.27.0](https://github.com/toon-protocol/connector/compare/v3.26.1...v3.27.0) (2026-06-24)
 
 ### Features
