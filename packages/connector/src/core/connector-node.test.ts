@@ -1305,15 +1305,15 @@ describe('ConnectorNode', () => {
 
       // Act
       const result = await connectorNode.registerPeer({
-        id: 'mill',
+        id: 'swap',
         // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
-        url: 'ws://mill:3000',
-        authToken: 'token-mill',
+        url: 'ws://swap:3000',
+        authToken: 'token-swap',
         relation: 'child',
       });
 
       // Assert
-      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('mill', 'child');
+      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('swap', 'child');
       expect(result.relation).toBe('child');
     });
 

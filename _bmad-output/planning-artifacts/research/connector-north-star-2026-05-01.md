@@ -130,4 +130,4 @@ Phases 1 and 2 are in scope for the current planning horizon. Phase 3 is a strat
 - `connector-directives-ilp-as-tcp-2026-05-01.md` — connector's authoritative spec for Tier 1 (the local-delivery pipeline)
 - `technical-http-sigs-webauthn-nostr-research-2026-05-01.md` — research basis for Tier 2 (Architecture B / Pattern E) and Tier 3 (Architecture C)
 - `technical-tor-onion-routing-research-2026-04-13.md` — research basis for the ATOR overlay transport layer of the concrete realization (Epic 35; shipping in `transport.type: "socks5"`)
-- `toon-ilp-as-tcp-townhub-design-2026-05-01.md` — Townhouse's full architecture spec (TownHub registry, mill NIP, DVM splitting, dashboard UX)
+- `toon-ilp-as-tcp-townhub-design-2026-05-01.md` — Townhouse's full architecture spec (TownHub registry, swap NIP, DVM splitting, dashboard UX)

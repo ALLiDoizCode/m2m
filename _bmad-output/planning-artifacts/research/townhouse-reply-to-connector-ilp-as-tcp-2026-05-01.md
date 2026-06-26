@@ -17,7 +17,7 @@ Mea culpa first: the original handoff doc had three stale premises. You caught a
 
 Plus a fact you asked about:
 
-**The SDK has no `SettlementMonitor`.** Verified via `grep -rn "SettlementMonitor\|class.*Monitor" packages/sdk/src` returning zero results. The SDK's `settlement/` directory is `buildSettlementTx()` (Story 12.6 — mill-side settlement transaction *building* from accumulated claims). Different concern, different layer. **There is no fork to clean up, no re-export, no deprecation work.** Your `SettlementMonitor` is canonical and stays put.
+**The SDK has no `SettlementMonitor`.** Verified via `grep -rn "SettlementMonitor\|class.*Monitor" packages/sdk/src` returning zero results. The SDK's `settlement/` directory is `buildSettlementTx()` (Story 12.6 — swap-side settlement transaction *building* from accumulated claims). Different concern, different layer. **There is no fork to clean up, no re-export, no deprecation work.** Your `SettlementMonitor` is canonical and stays put.
 
 Given that, the actual delta is exactly what your §4 revised scope describes. The eight design gaps are answered below. We add three things to the spec that were not in the original handoff.
 
@@ -61,7 +61,7 @@ The original spec conflated two concerns. The split:
 - `pubkey` — the node's own Nostr pubkey. Used for: TownHub registry advertisement (kind:30400 events), NIP-58 badge attribution, routing endpoint key, signing outbound async result events (kind:6xxx, kind:23197). Required field.
 - `accept_from` — optional allowlist of sender pubkeys this node will accept payments from. Absent or empty array → accept any sender (open mode, current behavior). Present → connector rejects packets from senders not in the list with `F00_BAD_REQUEST` and `message: "sender not authorized"`.
 
-**Why ship `accept_from` in v1, not v2:** the use cases are real and immediate (private relays, paid newsletters, friends-and-family deployments, mill nodes that only accept routing from known peers). The cost is a few lines of zod schema + one set membership check before the pricing gate. Operators who don't need it just omit the field. Cost of deferring: operators hand-roll middleware, we inherit divergence.
+**Why ship `accept_from` in v1, not v2:** the use cases are real and immediate (private relays, paid newsletters, friends-and-family deployments, swap nodes that only accept routing from known peers). The cost is a few lines of zod schema + one set membership check before the pricing gate. Operators who don't need it just omit the field. Cost of deferring: operators hand-roll middleware, we inherit divergence.
 
 **File:** `packages/connector/src/config/toon-config-schema.ts` (new, zod).
 **Validation site:** `local-delivery-client.ts` before nonce check.
@@ -177,7 +177,7 @@ The chain is determined by the channel the sender opened. Each ILP packet carrie
 
 For unmodified `strfry` (the acceptance test), there's an additional safety net: **strfry's own event-id rejection**. Nostr relays reject duplicate event IDs by NIP-01. Duplicate POSTs return 200 OK on the second attempt because the event already exists. So even if the connector's dedup misses, the relay's content-addressed storage catches it.
 
-But we want the connector dedup as the authoritative layer because it covers non-relay nodes (DVM, mill) too.
+But we want the connector dedup as the authoritative layer because it covers non-relay nodes (DVM, swap) too.
 
 **Schema (extends `local_delivery_nonces` from Gap 3):**
 ```sql
@@ -316,7 +316,7 @@ Direct answers to your §6 asks:
 | Your ask | Our answer |
 |---|---|
 | Resolve §3 gaps | Done above |
-| SDK `SettlementMonitor` situation | **None exists.** Verified by grep. SDK's `settlement/` is `buildSettlementTx()` (Story 12.6, mill-side). Your `SettlementMonitor` is canonical, no fork, no deprecation. |
+| SDK `SettlementMonitor` situation | **None exists.** Verified by grep. SDK's `settlement/` is `buildSettlementTx()` (Story 12.6, swap-side). Your `SettlementMonitor` is canonical, no fork, no deprecation. |
 | Envelope migration strategy | Option 1 (config flag, dual-mode) |
 | Tiered per-kind pricing in v1 | Reserved schema, single-rate runtime. v2 flip is one line. |
 

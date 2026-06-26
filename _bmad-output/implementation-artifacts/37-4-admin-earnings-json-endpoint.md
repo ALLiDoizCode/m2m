@@ -40,7 +40,7 @@ Townhouse D21-010 specifies this endpoint is the dashboard's sole source of earn
 
 ```gherkin
 Scenario: GET /admin/earnings.json returns the AdminEarningsJson shape
-  Given a connector with peers ['town-01', 'mill-01', 'store-01'] that have received claims in USDC and ETH
+  Given a connector with peers ['town-01', 'swap-01', 'store-01'] that have received claims in USDC and ETH
   When GET /admin/earnings.json is requested with a valid X-Api-Key
   Then the response status is 200
   And the body conforms to:

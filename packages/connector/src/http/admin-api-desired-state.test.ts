@@ -90,19 +90,19 @@ describe('Admin API — PUT /admin/desired-state', () => {
   });
 
   it('removes peers and their routes not in the desired set', async () => {
-    // Seed an existing peer 'mill' with a route.
-    peerIds = ['mill'];
-    routes = [selfRoute, { prefix: 'g.connector.mill', nextHop: 'mill', priority: 0 }];
+    // Seed an existing peer 'swap' with a route.
+    peerIds = ['swap'];
+    routes = [selfRoute, { prefix: 'g.connector.swap', nextHop: 'swap', priority: 0 }];
 
     const res = await request(app)
       .put('/admin/desired-state')
       .send({ peers: [{ id: 'town', url: 'ws://town:3000', authToken: 't', relation: 'child' }] });
 
     expect(res.status).toBe(200);
-    expect(res.body.peers.removed).toEqual(['mill']);
-    expect(mockBTPClientManager.removePeer).toHaveBeenCalledWith('mill');
-    expect(registryStore.deletePeer).toHaveBeenCalledWith('mill');
-    // mill's route gone, town's route present, self route preserved.
+    expect(res.body.peers.removed).toEqual(['swap']);
+    expect(mockBTPClientManager.removePeer).toHaveBeenCalledWith('swap');
+    expect(registryStore.deletePeer).toHaveBeenCalledWith('swap');
+    // swap's route gone, town's route present, self route preserved.
     const prefixes = routes.map((r) => r.prefix).sort();
     expect(prefixes).toEqual(['g.connector', 'g.connector.town']);
   });

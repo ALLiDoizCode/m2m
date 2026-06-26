@@ -31,13 +31,13 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
     });
 
     it('is idempotent — calling twice does not double-prime counters', async () => {
-      metrics.registerPeer('mill');
-      metrics.registerPeer('mill');
-      metrics.recordForwardFulfill('mill', 100);
+      metrics.registerPeer('swap');
+      metrics.registerPeer('swap');
+      metrics.recordForwardFulfill('swap', 100);
 
       const snapshot = await metrics.snapshotPeers();
-      const mill = snapshot.find((p) => p.peerId === 'mill')!;
-      expect(mill.packetsForwarded).toBe(1); // not 0+1+1=2
+      const swap = snapshot.find((p) => p.peerId === 'swap')!;
+      expect(swap.packetsForwarded).toBe(1); // not 0+1+1=2
     });
 
     it('unregisterPeer removes from known set but preserves historical counters', async () => {
@@ -81,30 +81,30 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
 
   describe('recordForwardFulfill', () => {
     it('increments packetsForwarded, bytes_sent, and updates lastPacketAt', async () => {
-      metrics.recordForwardFulfill('mill', 512);
-      metrics.recordForwardFulfill('mill', 256);
+      metrics.recordForwardFulfill('swap', 512);
+      metrics.recordForwardFulfill('swap', 256);
 
       const snapshot = await metrics.snapshotPeers();
-      const mill = snapshot[0];
-      expect(mill).toMatchObject({
-        peerId: 'mill',
+      const swap = snapshot[0];
+      expect(swap).toMatchObject({
+        peerId: 'swap',
         packetsForwarded: 2,
         packetsRejected: 0,
         bytesSent: 768,
         bytesReceived: 0,
       });
-      expect(mill!.lastPacketAtUnixSeconds).toBeGreaterThan(0);
+      expect(swap!.lastPacketAtUnixSeconds).toBeGreaterThan(0);
     });
   });
 
   describe('recordForwardReject', () => {
     it('increments packetsRejected and bytes_sent (bytes count even on reject)', async () => {
-      metrics.recordForwardReject('mill', 128);
+      metrics.recordForwardReject('swap', 128);
 
       const snapshot = await metrics.snapshotPeers();
-      const mill = snapshot[0];
-      expect(mill).toMatchObject({
-        peerId: 'mill',
+      const swap = snapshot[0];
+      expect(swap).toMatchObject({
+        peerId: 'swap',
         packetsForwarded: 0,
         packetsRejected: 1,
         bytesSent: 128,
@@ -132,27 +132,27 @@ describe('IlpMetricsRegistry (Story 37.2)', () => {
 
   describe('snapshotPeers', () => {
     it('returns peers sorted alphabetically', async () => {
-      metrics.registerPeer('mill');
+      metrics.registerPeer('swap');
       metrics.registerPeer('town');
       metrics.registerPeer('store');
 
       const snapshot = await metrics.snapshotPeers();
-      expect(snapshot.map((p) => p.peerId)).toEqual(['mill', 'store', 'town']);
+      expect(snapshot.map((p) => p.peerId)).toEqual(['store', 'swap', 'town']);
     });
 
     it('unions known peers with peers seen via counter activity', async () => {
       metrics.registerPeer('town');
-      metrics.recordForwardFulfill('mill', 100); // mill never explicitly registered
+      metrics.recordForwardFulfill('swap', 100); // swap never explicitly registered
       const snapshot = await metrics.snapshotPeers();
-      expect(snapshot.map((p) => p.peerId).sort()).toEqual(['mill', 'town']);
+      expect(snapshot.map((p) => p.peerId).sort()).toEqual(['swap', 'town']);
     });
   });
 
   describe('snapshotAggregate', () => {
     it('sums counters across all peers', async () => {
       metrics.recordForwardFulfill('town', 100);
-      metrics.recordForwardFulfill('mill', 200);
-      metrics.recordForwardReject('mill', 50);
+      metrics.recordForwardFulfill('swap', 200);
+      metrics.recordForwardReject('swap', 50);
       metrics.recordInbound('town', 75); // bytesReceived — not in aggregate
 
       expect(await metrics.snapshotAggregate()).toEqual({
