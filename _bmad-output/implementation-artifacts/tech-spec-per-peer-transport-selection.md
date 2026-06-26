@@ -80,7 +80,7 @@ test_patterns:
 
 When the connector is configured with `transport.type: socks5` (HS / anon mode), its outbound BTP client routes **every** peer connection through the configured SOCKS5 proxy — including peers whose `url` is a Docker-internal hostname (e.g. `ws://townhouse-hs-town:3000`). The anon SOCKS5 proxy only knows how to route `.anyone` destinations, so the dial fails with `Socks5 proxy rejected connection - HostUnreachable` and the peer stays `connected: false` indefinitely.
 
-This is the last remaining blocker on Townhouse Story 46.4 (Epic 46 — *lazy peer node provisioning*), which registers child peer containers (`town`, `mill`, `dvm`) over the shared Docker network alongside `.anyone` peers reached through anon. Today, an HS-mode apex connector cannot host **any** locally-provisioned sibling peer; the gating live E2E times out asserting `peer.connected === true`.
+This is the last remaining blocker on Townhouse Story 46.4 (Epic 46 — *lazy peer node provisioning*), which registers child peer containers (`town`, `mill`, `store`) over the shared Docker network alongside `.anyone` peers reached through anon. Today, an HS-mode apex connector cannot host **any** locally-provisioned sibling peer; the gating live E2E times out asserting `peer.connected === true`.
 
 Upstream issue: [toon-protocol/connector#69](https://github.com/toon-protocol/connector/issues/69) — *"BTP client routes all peers through SOCKS5 in HS mode — blocks Docker-internal peer connectivity"*.
 

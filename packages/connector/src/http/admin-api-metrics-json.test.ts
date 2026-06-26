@@ -52,18 +52,18 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
       removeRoutesForPeer: jest.fn(),
     } as unknown as jest.Mocked<RoutingTable>;
 
-    // AC 4: peerStatus reflects 'town' as connected, 'mill'/'dvm' as disconnected.
+    // AC 4: peerStatus reflects 'town' as connected, 'mill'/'store' as disconnected.
     // Real BTPClientManager.getPeerStatus() always returns an entry for every peer
     // in getPeerIds() — mock must mirror that contract.
     mockBTPClientManager = {
       addPeer: jest.fn().mockResolvedValue(undefined),
       removePeer: jest.fn().mockResolvedValue(undefined),
-      getPeerIds: jest.fn().mockReturnValue(['town', 'mill', 'dvm']),
+      getPeerIds: jest.fn().mockReturnValue(['town', 'mill', 'store']),
       getPeerStatus: jest.fn().mockReturnValue(
         new Map([
           ['town', true],
           ['mill', false],
-          ['dvm', false],
+          ['store', false],
         ])
       ),
       isConnected: jest.fn().mockImplementation((peerId: string) => peerId === 'town'),
@@ -87,10 +87,10 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
     // Create fresh metrics registry for each test
     metricsRegistry = new IlpMetricsRegistry({ collectDefaults: false });
 
-    // Register peers known in config (Story 37.2) - 'town' and 'dvm' have activity, 'mill' is idle
+    // Register peers known in config (Story 37.2) - 'town' and 'store' have activity, 'mill' is idle
     metricsRegistry.registerPeer('town');
     metricsRegistry.registerPeer('mill');
-    metricsRegistry.registerPeer('dvm');
+    metricsRegistry.registerPeer('store');
     metricsRegistry.registerPeer('dvm2'); // Extra peer with no activity
 
     // Record some activity for 'town' peer
@@ -98,8 +98,8 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
     metricsRegistry.recordForwardReject('town', 500);
     metricsRegistry.recordInbound('town', 2000); // 2000 bytes received
 
-    // Record activity for 'dvm' peer (registerPeer already called above for AC 3)
-    metricsRegistry.recordForwardFulfill('dvm', 3000);
+    // Record activity for 'store' peer (registerPeer already called above for AC 3)
+    metricsRegistry.recordForwardFulfill('store', 3000);
 
     app = await createApp();
   });
@@ -237,7 +237,7 @@ describe('Admin API GET /admin/metrics.json (Story 37.3)', () => {
 
       // Response peer list must match getPeerIds() exactly (sorted).
       const peerIds = response.body.peers.map((p: { peerId: string }) => p.peerId);
-      expect(peerIds).toEqual(['dvm', 'mill', 'town']);
+      expect(peerIds).toEqual(['mill', 'store', 'town']);
     });
   });
 
