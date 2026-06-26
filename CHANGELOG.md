@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.28.2](https://github.com/toon-protocol/connector/compare/v3.28.1...v3.28.2) (2026-06-26)
+
+### Code Refactoring
+
+- rename legacy `mill` node-type vocabulary to `swap` ([#272](https://github.com/toon-protocol/connector/issues/272)) ([c08f57d](https://github.com/toon-protocol/connector/commit/c08f57ded0c8123208815ac42d4a9e58d6b3c1db)), closes [#268](https://github.com/toon-protocol/connector/issues/268)
+
 ## [3.28.1](https://github.com/toon-protocol/connector/compare/v3.28.0...v3.28.1) (2026-06-26)
 
 ### Bug Fixes
