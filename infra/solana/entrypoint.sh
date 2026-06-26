@@ -43,6 +43,10 @@ trap cleanup TERM INT
 # while /health still returns "ok", so faucet/settlement writes hang then 500.
 # 10,000,000 shreds bounds the ledger to ~12-13 GB (~1.26 KB/shred observed) —
 # generous recent history for claim verification, with wide headroom on disk.
+# Verified accepted by this image's validator (agave 4.0.3, ghcr.io/beeman/
+# solana-test-validator): `--limit-ledger-size` defaults to only 10000 shreds and
+# enforces NO 50M minimum (that floor is the full `solana-validator`, not the
+# test validator), so 10,000,000 starts cleanly — no crash-loop risk.
 solana-test-validator --reset --ledger "$LEDGER_DIR" --limit-ledger-size 10000000 &
 VALIDATOR_PID=$!
 
