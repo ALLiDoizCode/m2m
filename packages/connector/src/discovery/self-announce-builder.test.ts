@@ -187,4 +187,71 @@ describe('resolveRouteHints', () => {
       store: 'g.connector.greet',
     });
   });
+
+  it('derives the store hint from a publish-only (.relay) route by swapping the label', () => {
+    // Only a `.relay` route, no `.store` route → store = publish with `.relay`
+    // swapped for `.store` (the `if (!store && publish)` branch).
+    const relayOnly = [
+      { prefix: 'g.proxy.relay', nextHop: 'connector', ilpAddress: 'g.proxy.relay' },
+    ] as ConnectorConfig['routes'];
+    expect(resolveRouteHints(relayOnly)).toEqual({
+      publish: 'g.proxy.relay',
+      store: 'g.proxy.store',
+    });
+  });
+
+  it('falls back store to the publish value when publish does not end in .relay', () => {
+    // A publish override that is NOT a `.relay` address and no `.store` route →
+    // the `: publish` fallback of the store derivation (store == publish).
+    expect(resolveRouteHints([], { publish: 'g.custom.pub' })).toEqual({
+      publish: 'g.custom.pub',
+      store: 'g.custom.pub',
+    });
+  });
+
+  it('derives publish from a non-.store store override (publish == store)', () => {
+    // store override not ending in `.store` and no `.relay` route → the
+    // `if (!publish && store)` block takes the `: store` fallback.
+    expect(resolveRouteHints([], { store: 'g.flat.target' })).toEqual({
+      publish: 'g.flat.target',
+      store: 'g.flat.target',
+    });
+  });
+});
+
+describe('buildSelfAnnouncementInfo — minimal / optional-omitted config', () => {
+  it('omits optional fields and uses route prefixes when nothing is set', () => {
+    // Forwarding-only routes (no `upstream` → no terminated routes), no
+    // chainProviders, no settlementAddresses, no btpEndpoint — exercises every
+    // "omitted" branch (supportedChains/settlementAddresses spreads, the
+    // `?? prefix`, `?? []`, `?? ''` fallbacks, and the non-terminated source).
+    const minimal: ConnectorConfig = {
+      nodeId: 'connector',
+      btpServerPort: 3000,
+      environment: 'development',
+      peers: [],
+      routes: [{ prefix: 'g.fwd.only', nextHop: 'peer' }],
+    };
+    const info = buildSelfAnnouncementInfo(minimal, {
+      enabled: true,
+      announceTo: 'g.fwd.only',
+    });
+    expect(info.ilpAddress).toBe('g.fwd.only'); // from prefix (no ilpAddress)
+    expect(info.btpEndpoint).toBe(''); // omitted → ''
+    expect(info.supportedChains).toBeUndefined();
+    expect(info.settlementAddresses).toBeUndefined();
+    expect(info.ilpAddresses).toBeUndefined();
+  });
+
+  it('yields an empty ilpAddress when there are no routes at all', () => {
+    const noRoutes: ConnectorConfig = {
+      nodeId: 'connector',
+      btpServerPort: 3000,
+      environment: 'development',
+      peers: [],
+      routes: [],
+    };
+    const info = buildSelfAnnouncementInfo(noRoutes, { enabled: true, announceTo: 'g.x' });
+    expect(info.ilpAddress).toBe(''); // ilpAddresses[0] ?? ''
+  });
 });

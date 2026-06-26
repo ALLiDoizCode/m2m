@@ -168,6 +168,30 @@ describe('SelfAnnounceService — publish path', () => {
     const { service } = makeService({}, throwingPublish);
     await expect(service.publish()).resolves.toBeUndefined();
   });
+
+  it('does not throw when the PublishFn throws a non-Error value', async () => {
+    // Exercises the `String(err)` side of errMsg (err is not an Error instance).
+    const throwingPublish: PublishFn = async () => {
+      throw 'plain string failure'; // eslint-disable-line @typescript-eslint/no-throw-literal
+    };
+    const { service } = makeService({}, throwingPublish);
+    await expect(service.publish()).resolves.toBeUndefined();
+  });
+
+  it('does not throw or publish when building the event fails', async () => {
+    // An invalid (wrong-length) secret key makes buildIlpPeerInfoEvent throw
+    // inside buildEvent(); publish() must catch it and skip (never publish).
+    const rec = recorder();
+    const badService = new SelfAnnounceService({
+      config: config(),
+      selfAnnounce,
+      secretKey: new Uint8Array(31), // not a valid 32-byte Nostr secret key
+      publish: rec.publish,
+      logger,
+    });
+    await expect(badService.publish()).resolves.toBeUndefined();
+    expect(rec.events).toHaveLength(0); // build failed → nothing published
+  });
 });
 
 describe('SelfAnnounceService — lifecycle', () => {
@@ -175,6 +199,18 @@ describe('SelfAnnounceService — lifecycle', () => {
   afterEach(() => {
     jest.clearAllTimers();
     jest.useRealTimers();
+  });
+
+  it('ignores a second start() while already running (no double boot publish)', async () => {
+    const { service, events } = makeService({ refreshIntervalSecs: 300 });
+    service.start();
+    await Promise.resolve();
+    expect(events).toHaveLength(1);
+    // Second start() hits the already-running guard: no extra publish/timer.
+    service.start();
+    await Promise.resolve();
+    expect(events).toHaveLength(1);
+    service.stop();
   });
 
   it('publishes immediately on start and republishes on the interval', async () => {
