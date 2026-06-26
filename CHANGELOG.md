@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.28.1](https://github.com/toon-protocol/connector/compare/v3.28.0...v3.28.1) (2026-06-26)
+
+### Bug Fixes
+
+- **probe:** recover content.ilpAddress from TOON-text payloads ([#274](https://github.com/toon-protocol/connector/issues/274)) ([01bb397](https://github.com/toon-protocol/connector/commit/01bb397f2e27d61ef78552b85b3626cbc75061e6))
+
 ## [3.28.0](https://github.com/toon-protocol/connector/compare/v3.27.0...v3.28.0) (2026-06-26)
 
 ### Features
