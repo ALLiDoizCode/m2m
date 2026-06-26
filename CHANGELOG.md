@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.28.3](https://github.com/toon-protocol/connector/compare/v3.28.2...v3.28.3) (2026-06-26)
+
+### Code Refactoring
+
+- rename legacy `town` node-type vocab to `relay` ([#273](https://github.com/toon-protocol/connector/issues/273)) ([1a751a7](https://github.com/toon-protocol/connector/commit/1a751a7cfda44d5eff50dc02d17f0076adce2886)), closes [#267](https://github.com/toon-protocol/connector/issues/267) [#264](https://github.com/toon-protocol/connector/issues/264)
+
 ## [3.28.2](https://github.com/toon-protocol/connector/compare/v3.28.1...v3.28.2) (2026-06-26)
 
 ### Code Refactoring
