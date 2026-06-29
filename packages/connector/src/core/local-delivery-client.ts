@@ -1,9 +1,9 @@
 /**
  * Local Delivery Client
  *
- * HTTP client for forwarding ILP packets to an external business logic server
+ * HTTP client for forwarding ILP packets to an external app
  * for local delivery handling. Sends simplified PaymentRequest/PaymentResponse
- * (no ILP knowledge required on the BLS side) and handles reject code mapping
+ * (no ILP knowledge required on the app side) and handles reject code mapping
  * and data validation internally.
  */
 
@@ -33,7 +33,7 @@ export type { LocalDeliveryRequest, LocalDeliveryResponse } from '../config/type
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 
 /**
- * Client for forwarding local delivery to an external business logic server.
+ * Client for forwarding local delivery to an external app.
  */
 export class LocalDeliveryClient {
   private readonly config: Required<LocalDeliveryConfig>;
@@ -62,14 +62,14 @@ export class LocalDeliveryClient {
   }
 
   /**
-   * Check if per-hop BLS notification is enabled for transit packets.
+   * Check if per-hop app notification is enabled for transit packets.
    */
   isPerHopNotificationEnabled(): boolean {
     return this.config.perHopNotification;
   }
 
   /**
-   * Forward a packet to the business logic server for local delivery.
+   * Forward a packet to the app handler for local delivery.
    *
    * Sends a simplified PaymentRequest (no ILP internals exposed) and maps
    * the PaymentResponse back to ILP fulfill/reject packets internally.
@@ -113,7 +113,7 @@ export class LocalDeliveryClient {
 
     this.logger.debug(
       { paymentId, destination: request.destination, amount: request.amount, url },
-      'Forwarding packet to business logic server'
+      'Forwarding packet to app handler'
     );
 
     try {
@@ -148,14 +148,14 @@ export class LocalDeliveryClient {
             destination: request.destination,
             errorBody: errorDetails,
           },
-          'Business logic server returned error status'
+          'App handler returned error status'
         );
 
         return {
           type: PacketType.REJECT,
           code: ILPErrorCode.T00_INTERNAL_ERROR,
           triggeredBy: '',
-          message: `Business logic server returned status ${response.status}: ${errorDetails}`,
+          message: `App handler returned status ${response.status}: ${errorDetails}`,
           data: Buffer.alloc(0),
         };
       }
@@ -166,14 +166,14 @@ export class LocalDeliveryClient {
       if (typeof result.accept !== 'boolean') {
         this.logger.error(
           { paymentId, destination: request.destination },
-          'Business logic server returned malformed response (missing accept field)'
+          'App handler returned malformed response (missing accept field)'
         );
 
         return {
           type: PacketType.REJECT,
           code: ILPErrorCode.T00_INTERNAL_ERROR,
           triggeredBy: '',
-          message: 'Malformed response from business logic server',
+          message: 'Malformed response from app handler',
           data: Buffer.alloc(0),
         };
       }
@@ -183,7 +183,7 @@ export class LocalDeliveryClient {
 
         this.logger.info(
           { paymentId, destination: request.destination, amount: request.amount },
-          'Packet fulfilled by business logic server'
+          'Packet fulfilled by app handler'
         );
 
         return {
@@ -198,7 +198,7 @@ export class LocalDeliveryClient {
 
         this.logger.info(
           { paymentId, destination: request.destination, code: ilpCode, message },
-          'Packet rejected by business logic server'
+          'Packet rejected by app handler'
         );
 
         return {
@@ -212,7 +212,7 @@ export class LocalDeliveryClient {
     } catch (error) {
       this.logger.error(
         { paymentId, destination: request.destination, error },
-        'Failed to forward packet to business logic server'
+        'Failed to forward packet to app handler'
       );
 
       if (error instanceof Error && error.name === 'AbortError') {
@@ -220,7 +220,7 @@ export class LocalDeliveryClient {
           type: PacketType.REJECT,
           code: ILPErrorCode.R00_TRANSFER_TIMED_OUT,
           triggeredBy: '',
-          message: 'Business logic server request timed out',
+          message: 'App handler request timed out',
           data: Buffer.alloc(0),
         };
       }
@@ -236,7 +236,7 @@ export class LocalDeliveryClient {
   }
 
   /**
-   * Check if the business logic server is healthy.
+   * Check if the app handler is healthy.
    */
   async healthCheck(): Promise<boolean> {
     if (!this.config.enabled) {

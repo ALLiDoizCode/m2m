@@ -158,10 +158,10 @@ export class PacketHandler {
   private settlementConfig: SettlementConfig | null;
 
   /**
-   * Local delivery client for forwarding to BLS via HTTP (optional)
+   * Local delivery client for forwarding to app handler via HTTP (optional)
    * @remarks
    * When enabled, packets destined for local addresses are forwarded
-   * via HTTP to an external BLS instead of auto-fulfilling.
+   * via HTTP to an external app instead of auto-fulfilling.
    */
   private localDeliveryClient: LocalDeliveryClient | null = null;
 
@@ -362,12 +362,12 @@ export class PacketHandler {
   }
 
   /**
-   * Set LocalDeliveryClient for forwarding local packets to BLS
+   * Set LocalDeliveryClient for forwarding local packets to app handler
    * @param config - Local delivery configuration
    * @remarks
    * When enabled, packets destined for local addresses (nextHop === nodeId || 'local')
-   * are forwarded via HTTP to an external BLS instead of auto-fulfilling.
-   * This allows custom business logic to handle payments.
+   * are forwarded via HTTP to an external app instead of auto-fulfilling.
+   * This allows the app to handle payments.
    */
   setLocalDelivery(config: LocalDeliveryConfig): void {
     if (config.enabled) {
@@ -1207,16 +1207,16 @@ export class PacketHandler {
         return localResponse;
       }
 
-      // If local delivery client is enabled, forward to BLS via HTTP
+      // If local delivery client is enabled, forward to app handler via HTTP
       if (this.isLocalDeliveryEnabled() && this.localDeliveryClient) {
         this.logger.debug(
           { correlationId, destination: packet.destination },
-          'Forwarding to BLS for local delivery'
+          'Forwarding to app handler for local delivery'
         );
 
         const response = await this.localDeliveryClient.deliver(packet, sourcePeerId);
 
-        // Inject preimage into FULFILL (BLS doesn't have NIP-59 keys)
+        // Inject preimage into FULFILL (app handler doesn't have NIP-59 keys)
         if (response.type === PacketType.FULFILL && preimage) {
           (response as ILPFulfillPacket).fulfillment = preimage;
         }
@@ -1230,8 +1230,8 @@ export class PacketHandler {
             timestamp: Date.now(),
           },
           response.type === PacketType.FULFILL
-            ? 'Packet fulfilled by BLS'
-            : 'Packet rejected by BLS'
+            ? 'Packet fulfilled by app handler'
+            : 'Packet rejected by app handler'
         );
 
         if (response.type === PacketType.FULFILL) {
@@ -1406,7 +1406,7 @@ export class PacketHandler {
       };
     }
 
-    // Fire-and-forget BLS notification for transit packets (per-hop notification)
+    // Fire-and-forget app notification for transit packets (per-hop notification)
     const perHopEnabled = this.localDeliveryClient?.isPerHopNotificationEnabled() ?? false;
     if (perHopEnabled) {
       if (this.localDeliveryHandler) {
