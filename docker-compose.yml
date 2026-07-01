@@ -14,6 +14,23 @@
 #   make infra-up      Start all chains (EVM + Solana + Mina)
 #   make infra-down    Stop all chains (EVM + Solana + Mina; preserves volumes)
 
+# ── Shared json-file log rotation for the long-running dev-chain services ──
+# Incident 2026-06-26: on the self-hosted devnet box the solana-validator wrote
+# a 121 MB UNROTATED Docker json log (it prints a status line ~30x/sec) on top
+# of an oversized rocksdb ledger, which helped fill the box disk to 100%. A full
+# disk silently FREEZES Solana block production (slot stops advancing) while
+# /health still returns "ok", so faucet/settlement writes hang then 500
+# ("Transaction was not confirmed in 30s") with no obvious cause. anvil, faucet
+# and mina-lightnet are similarly chatty. Cap every such service's container log
+# at 30 MB total (10 MB x 3 rotated files) so logs can never fill /var/lib/docker.
+# (The solana ledger itself is bounded separately by --limit-ledger-size in
+# infra/solana/entrypoint.sh — the two together are the durable disk-full fix.)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
 services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Anvil - Local Ethereum Node with Auto-Deployed Contracts
@@ -69,6 +86,7 @@ services:
     ports:
       - '8545:8545'
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test:
         [
@@ -161,6 +179,7 @@ services:
         condition: service_healthy
         required: false
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test:
         ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://localhost:3500/health || exit 1']
@@ -200,14 +219,13 @@ services:
     security_opt:
       - seccomp=unconfined
     restart: unless-stopped
-    # Cap the json-file logs so a chatty or crash-looping validator can't fill the
-    # devnet box's disk via /var/lib/docker (the ledger is bounded separately by
-    # --limit-ledger-size in entrypoint.sh).
-    logging:
-      driver: json-file
-      options:
-        max-size: '50m'
-        max-file: '3'
+    # Bounded json-file logs (10m x 3 = 30 MB) so a chatty or crash-looping
+    # validator can't fill the box disk via /var/lib/docker. The validator was
+    # observed writing a 121 MB UNROTATED log; the prior 50m x 3 cap (~150 MB)
+    # still allowed that, so this tightens it to a true 30 MB. The ledger itself
+    # is bounded separately by --limit-ledger-size in entrypoint.sh. See the
+    # x-logging anchor at the top of this file for the full incident note.
+    logging: *default-logging
     # NB: /health returning "ok" only proves RPC is up — it does NOT prove the
     # validator is still producing blocks. A disk-full validator freezes its slot
     # yet stays "healthy" here; monitor getSlot advancing (and disk) out-of-band.
@@ -237,6 +255,7 @@ services:
         limits:
           memory: 8g
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ['CMD-SHELL', 'curl -sf http://localhost:8181/list-acquired-accounts || exit 1']
       interval: 15s
