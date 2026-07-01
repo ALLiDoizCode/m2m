@@ -323,7 +323,7 @@ export class ConnectorNode implements HealthStatusProvider {
     // Link BTPServer to PacketHandler for bidirectional forwarding (resolves circular dependency)
     this._packetHandler.setBTPServer(this._btpServer);
 
-    // Configure local delivery if enabled (forwards local packets to agent runtime)
+    // Configure local delivery if enabled (forwards local packets to app handler)
     const localDeliveryEnabled =
       resolvedConfig.localDelivery?.enabled || process.env.LOCAL_DELIVERY_ENABLED === 'true';
     if (localDeliveryEnabled) {
@@ -484,13 +484,13 @@ export class ConnectorNode implements HealthStatusProvider {
    *    - Other combinations → defaults to 'embedded'
    *
    * **Deployment Modes:**
-   * - **embedded**: Connector runs in same process as business logic
+   * - **embedded**: Connector runs in same process as the app
    *   - Use `setPacketHandler()` or `setLocalDeliveryHandler()` for incoming packets
    *   - Use `node.sendPacket()` for outgoing packets
    *   - Admin API typically disabled
    *
    * - **standalone**: Connector runs as separate process/container
-   *   - Incoming packets forwarded via HTTP to `/handle-packet` on external BLS
+   *   - Incoming packets forwarded via HTTP to `/handle-packet` on external app
    *   - Outgoing packets sent via HTTP to `/admin/ilp/send` on connector admin API
    *   - Admin API enabled for external control
    *
@@ -536,7 +536,7 @@ export class ConnectorNode implements HealthStatusProvider {
   /**
    * Check if the connector is running in embedded mode.
    *
-   * Embedded mode means the connector runs in the same process as business logic:
+   * Embedded mode means the connector runs in the same process as the app:
    * - Incoming packets handled via `setPacketHandler()` or `setLocalDeliveryHandler()`
    * - Outgoing packets sent via `node.sendPacket()` library calls
    * - Admin API typically disabled (not needed for in-process communication)
@@ -562,10 +562,10 @@ export class ConnectorNode implements HealthStatusProvider {
    * Check if the connector is running in standalone mode.
    *
    * Standalone mode means the connector runs as a separate process/container:
-   * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external BLS
+   * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external app
    * - Outgoing packets sent via HTTP POST to `/admin/ilp/send` on connector admin API
    * - Admin API enabled for external control
-   * - Local delivery enabled with `handlerUrl` pointing to external BLS
+   * - Local delivery enabled with `handlerUrl` pointing to external app
    *
    * @returns true if deployment mode is 'standalone', false otherwise
    *
@@ -574,7 +574,7 @@ export class ConnectorNode implements HealthStatusProvider {
    * if (node.isStandalone()) {
    *   console.log('Connector running in standalone mode');
    *   console.log('Admin API:', node._config.adminApi?.port);
-   *   console.log('BLS URL:', node._config.localDelivery?.handlerUrl);
+   *   console.log('App URL:', node._config.localDelivery?.handlerUrl);
    * }
    * ```
    */

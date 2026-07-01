@@ -968,7 +968,7 @@ describe('PacketHandler', () => {
     });
   });
 
-  describe('handlePreparePacket() - Per-Hop BLS Notification', () => {
+  describe('handlePreparePacket() - Per-Hop App Notification', () => {
     let routingTable: RoutingTable;
     let mockLogger: jest.Mocked<Logger>;
     let btpClientManager: jest.Mocked<BTPClientManager>;
