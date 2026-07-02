@@ -4,14 +4,14 @@
  * Complements the in-process standalone-smoke-e2e test by exercising the
  * target production topology: the connector runs inside a Docker container
  * built from the repo Dockerfile, peers with another containerized connector
- * over the compose network, and forwards packets to a containerized BLS.
+ * over the compose network, and forwards packets to a containerized app.
  *
  * What this proves that the in-process test cannot:
  *   - Dockerfile + image entrypoint work (CONFIG_FILE, main.ts, WORKDIR, user)
  *   - YAML config loading in production mode
  *   - BTP WebSocket connectivity across Docker network DNS
  *   - Admin API + local delivery HTTP across container boundaries
- *   - Process isolation between connector and BLS
+ *   - Process isolation between connector and app
  *
  *   [bls1 container] <-- /handle-packet -- [peer1 container]
  *                                                ^
@@ -309,7 +309,7 @@ describeDocker('Standalone Mode Container E2E (Docker compose)', () => {
     expect(text).toContain('# HELP');
   });
 
-  it('POST /admin/ilp/send → BTP → container BLS /handle-packet fulfills', async () => {
+  it('POST /admin/ilp/send → BTP → container app /handle-packet fulfills', async () => {
     const before = await getJson<ReceivedResponse>(BLS2_RECEIVED);
     const { status, body } = await postJson<{ accepted: boolean }>(
       `${PEER1_ADMIN}/admin/ilp/send`,

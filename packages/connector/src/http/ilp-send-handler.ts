@@ -1,7 +1,7 @@
 /**
  * ILP Send Handler
  *
- * Handles `POST /admin/ilp/send` requests from the BLS to initiate outbound ILP packets.
+ * Handles `POST /admin/ilp/send` requests from the app to initiate outbound ILP packets.
  * Validates the request, constructs an ILP Prepare packet, sends it via the injected
  * `sendPacket` callback, and maps the response back to HTTP.
  *

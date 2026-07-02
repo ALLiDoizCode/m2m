@@ -54,7 +54,7 @@ const describeEvm = RUN_EVM ? describe : describe.skip;
 jest.setTimeout(180_000);
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test BLS — tracks packets that leak past the claim gate (should be zero)
+// Test app — tracks packets that leak past the claim gate (should be zero)
 // ────────────────────────────────────────────────────────────────────────────
 
 interface TestBls {
@@ -266,7 +266,7 @@ describeEvm('Standalone Claim Validation Gate E2E', () => {
     await bls2?.stop().catch(() => undefined);
   });
 
-  it('BTP prepare without a signed claim → F06 reject, BLS not invoked', async () => {
+  it('BTP prepare without a signed claim → F06 reject, app not invoked', async () => {
     const ws = await connectRawBTPClient(peer2BtpPort, 'peer1');
     try {
       const beforeCount = bls2.received.length;
@@ -281,7 +281,7 @@ describeEvm('Standalone Claim Validation Gate E2E', () => {
       // code that carries this semantic.
       expect(reject.code.startsWith('F')).toBe(true);
 
-      // Critical: BLS must NOT have been called — the gate must reject
+      // Critical: the app must NOT have been called — the gate must reject
       // BEFORE the packet reaches localDelivery.
       expect(bls2.received.length).toBe(beforeCount);
     } finally {

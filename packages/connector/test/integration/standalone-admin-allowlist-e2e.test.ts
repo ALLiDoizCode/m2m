@@ -1,10 +1,10 @@
 /**
  * Tier-3 Admin API Allowlist E2E (Docker compose)
  *
- * Proves the simplest secure topology for "local BLS calls the connector's
+ * Proves the simplest secure topology for "local app calls the connector's
  * admin API":
  *
- *   [host:13401] ---> BLS container --(compose DNS)--> connector container
+ *   [host:13401] ---> app container --(compose DNS)--> connector container
  *                                                               ^
  *                                                       admin API
  *                                                       binds 0.0.0.0:8081
@@ -12,7 +12,7 @@
  *                                                       NOT published to host
  *
  * What this asserts:
- *   1. BLS, running as a sibling container on the same compose bridge
+ *   1. The app, running as a sibling container on the same compose bridge
  *      network, can POST to the connector's /admin/ilp/send because its
  *      source IP is in `allowedIPs` (172.16.0.0/12 OR 192.168.0.0/16).
  *   2. The connector's admin port is NOT exposed on the host — any external
@@ -74,7 +74,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
     await compose('up', '-d', '--wait');
 
     // Wait until the connector is ready — we can't hit its admin API directly
-    // (not published), but the BLS's /trigger-admin-send will fail until the
+    // (not published), but the app's /trigger-admin-send will fail until the
     // connector starts responding.
     await waitForCondition(
       async () => {
@@ -90,7 +90,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
         return res.status === 200;
       },
       60_000,
-      'connector admin API reachable from BLS container'
+      'connector admin API reachable from app container'
     );
   });
 
@@ -98,7 +98,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
     await compose('down', '--volumes').catch(() => undefined);
   });
 
-  it('BLS on the bridge network can POST /admin/ilp/send (allowlist accepts)', async () => {
+  it('the app on the bridge network can POST /admin/ilp/send (allowlist accepts)', async () => {
     const res = await fetch(`${BLS_HOST_URL}/trigger-admin-send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -129,7 +129,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
     expect(reachable).toBe(false);
   });
 
-  it('received packet appears in the BLS capture log', async () => {
+  it('received packet appears in the app capture log', async () => {
     // Seed a fresh packet, then verify it surfaced via /received.
     const before = (await (await fetch(`${BLS_HOST_URL}/received`)).json()) as {
       count: number;
@@ -153,7 +153,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
         return after.count === before.count + 1;
       },
       5_000,
-      'BLS records the delivered packet'
+      'app records the delivered packet'
     );
   });
 });

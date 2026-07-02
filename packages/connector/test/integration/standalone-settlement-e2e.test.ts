@@ -47,7 +47,7 @@ const describeEvm = RUN_EVM ? describe : describe.skip;
 jest.setTimeout(180_000);
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test BLS Server (minimal /handle-packet responder)
+// Test App Server (minimal /handle-packet responder)
 // ────────────────────────────────────────────────────────────────────────────
 
 interface TestBls {

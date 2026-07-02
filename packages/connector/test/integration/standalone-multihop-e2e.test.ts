@@ -16,7 +16,7 @@
  * embedded mode with real Anvil settlement. This test proves the *routing
  * surface* works in standalone mode — packets submitted via one peer's
  * `/admin/ilp/send` traverse two BTP hops and are delivered to the far
- * peer's BLS via `/handle-packet`.
+ * peer's app via `/handle-packet`.
  *
  * Scope: zero-amount packets to isolate HTTP + BTP routing from the
  * settlement path (covered separately by standalone-settlement-e2e).
@@ -33,7 +33,7 @@ import type { ConnectorConfig } from '../../src/config/types';
 jest.setTimeout(90_000);
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test BLS fixtures
+// Test app fixtures
 // ────────────────────────────────────────────────────────────────────────────
 
 interface CapturedRequest {
@@ -264,7 +264,7 @@ describe('Standalone Mode Multi-Hop E2E (3-peer linear chain)', () => {
     }
   });
 
-  it('peer1 → peer3: packet traverses 2 BTP hops, lands at peer3 BLS (not peer1/peer2)', async () => {
+  it('peer1 → peer3: packet traverses 2 BTP hops, lands at peer3 app (not peer1/peer2)', async () => {
     const peer1 = chain.peers[0]!;
     const peer2 = chain.peers[1]!;
     const peer3 = chain.peers[2]!;
@@ -278,7 +278,7 @@ describe('Standalone Mode Multi-Hop E2E (3-peer linear chain)', () => {
     expect(peer3.bls.received.length).toBe(before3 + 1);
     expect(peer3.bls.received[before3]!.destination).toBe('test.peer3.receiver');
 
-    // Intermediate peers should NOT get final delivery — their BLS only sees
+    // Intermediate peers should NOT get final delivery — their app only sees
     // the packet if `localDelivery.perHopNotification` is enabled, which it
     // is not in our config.
     expect(peer1.bls.received).toEqual([]);

@@ -298,9 +298,9 @@ function logStagingWarnings(config: ConnectorConfig): void {
  *
  * When `deploymentMode` is explicitly set to `'standalone'`:
  * - **ERROR** if `localDelivery.enabled` is true but `handlerUrl` is missing
- *   → Standalone mode requires BLS endpoint for HTTP forwarding
+ *   → Standalone mode requires app endpoint for HTTP forwarding
  * - **WARNING** if `adminApi.enabled` is false
- *   → External BLS typically needs admin API to send packets
+ *   → External app typically needs admin API to send packets
  * - **WARNING** if `localDelivery.enabled` is false
  *   → Standalone deployments typically use HTTP for incoming packets
  *
@@ -348,9 +348,9 @@ function validateDeploymentMode(config: ConnectorConfig): void {
     if (config.localDelivery?.enabled && !config.localDelivery.handlerUrl) {
       throw new ConfigurationError(
         'deploymentMode is set to "standalone" with localDelivery.enabled=true ' +
-          'but localDelivery.handlerUrl is missing. Standalone mode requires a ' +
-          'business logic server endpoint for HTTP packet forwarding. ' +
-          'Set localDelivery.handlerUrl to the BLS /handle-packet endpoint ' +
+          'but localDelivery.handlerUrl is missing. Standalone mode requires an ' +
+          'app endpoint for HTTP packet forwarding. ' +
+          'Set localDelivery.handlerUrl to the app /handle-packet endpoint ' +
           '(e.g., "http://business-logic:8080").'
       );
     }
@@ -360,8 +360,8 @@ function validateDeploymentMode(config: ConnectorConfig): void {
       logger.warn(
         '⚠️  deploymentMode is "standalone" but adminApi.enabled is false. ' +
           'Standalone deployments typically enable the admin API so the external ' +
-          'business logic server can send packets via POST /admin/ilp/send. ' +
-          'Without the admin API, the external BLS cannot initiate outgoing payments.'
+          'app can send packets via POST /admin/ilp/send. ' +
+          'Without the admin API, the external app cannot initiate outgoing payments.'
       );
     }
 
@@ -370,7 +370,7 @@ function validateDeploymentMode(config: ConnectorConfig): void {
       logger.warn(
         '⚠️  deploymentMode is "standalone" but localDelivery.enabled is false. ' +
           'Standalone deployments typically forward incoming packets to an external ' +
-          'business logic server via HTTP POST to /handle-packet. ' +
+          'app via HTTP POST to /handle-packet. ' +
           'If you intend to use function handlers (setPacketHandler), consider ' +
           'setting deploymentMode to "embedded" instead.'
       );
