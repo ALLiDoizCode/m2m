@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.28.5](https://github.com/toon-protocol/connector/compare/v3.28.4...v3.28.5) (2026-07-02)
+
+### Bug Fixes
+
+- **discovery:** emit schema-compliant settlementAddresses keys in kind:10032 announces ([#290](https://github.com/toon-protocol/connector/issues/290)) ([d1ade55](https://github.com/toon-protocol/connector/commit/d1ade557f22fc4c077b0ac6de7dca47aa2892ff8)), closes [#289](https://github.com/toon-protocol/connector/issues/289) [toon-protocol/toon#56](https://github.com/toon-protocol/toon/issues/56)
+
 ## [3.28.4](https://github.com/toon-protocol/connector/compare/v3.28.3...v3.28.4) (2026-07-01)
 
 ### Bug Fixes
