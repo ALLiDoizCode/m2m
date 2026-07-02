@@ -109,7 +109,9 @@ export class SelfAnnounceService {
    * and for callers that want to inspect the announcement.
    */
   buildEvent(): NostrEvent {
-    const info = buildSelfAnnouncementInfo(this._config, this._selfAnnounce);
+    const info = buildSelfAnnouncementInfo(this._config, this._selfAnnounce, (context, message) =>
+      this._logger.warn(context, message)
+    );
     return buildIlpPeerInfoEvent(info, this._secretKey, { ttlSeconds: this._ttlSeconds });
   }
 

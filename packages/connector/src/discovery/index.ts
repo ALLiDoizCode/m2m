@@ -19,8 +19,12 @@ export type {
 // through its own pipe (free local terminate / paid remote forward).
 export { SelfAnnounceService, DEFAULT_REFRESH_INTERVAL_SECS } from './self-announce-service';
 export type { SelfAnnounceServiceDeps, PublishFn, PublishOutcome } from './self-announce-service';
-export { buildSelfAnnouncementInfo, resolveRouteHints } from './self-announce-builder';
-export type { IlpRouteHints, SelfAnnouncementInfo } from './self-announce-builder';
+export {
+  buildSelfAnnouncementInfo,
+  normalizeSettlementAddressKeys,
+  resolveRouteHints,
+} from './self-announce-builder';
+export type { AnnounceWarnFn, IlpRouteHints, SelfAnnouncementInfo } from './self-announce-builder';
 export {
   planAnnouncePublish,
   encodeWriteEnvelope,

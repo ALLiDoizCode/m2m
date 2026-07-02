@@ -62,7 +62,12 @@ export interface IlpPeerInfo {
   assetScale: number;
   /** Supported settlement chain identifiers (e.g. `["evm:31337"]`). */
   supportedChains?: string[];
-  /** Maps chain identifier → the peer's settlement address on that chain. */
+  /**
+   * Maps chain identifier → the peer's settlement address on that chain. Keys
+   * MUST be fully-qualified 2–3 segment chain ids (`evm:31337`, never bare
+   * `evm`) and members of `supportedChains` when that field is present — core's
+   * `parseIlpPeerInfo` rejects the whole event otherwise (#289).
+   */
   settlementAddresses?: Record<string, string>;
   /** Maps chain identifier → preferred token contract address. */
   preferredTokens?: Record<string, string>;
