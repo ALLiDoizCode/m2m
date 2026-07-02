@@ -57,7 +57,7 @@ const describeEvm = RUN_EVM ? describe : describe.skip;
 
 jest.setTimeout(180_000);
 
-// ── Minimal BLS that records delivered packets ──────────────────────────────
+// ── Minimal app that records delivered packets ──────────────────────────────
 interface TestBls {
   received: Array<{ destination: string; amount: string }>;
   stop(): Promise<void>;
@@ -309,7 +309,7 @@ describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
     await bls2?.stop().catch(() => undefined);
   });
 
-  it('POST /ilp with a signed claim fulfills end-to-end and reaches the BLS', async () => {
+  it('POST /ilp with a signed claim fulfills end-to-end and reaches the app', async () => {
     const before = bls2.received.length;
     const amount = 1000n;
     const claim = await claimSvc.generateClaimForPacket('peer2', settlementTokenId, amount);

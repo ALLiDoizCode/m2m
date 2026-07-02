@@ -493,7 +493,7 @@ export interface ConnectorConfig {
    *
    * - **standalone**: Connector runs as separate process/container
    *   → Validates that `localDelivery.handlerUrl` is set (required for HTTP forwarding)
-   *   → Warns if `adminApi.enabled` is false (external BLS typically needs admin API)
+   *   → Warns if `adminApi.enabled` is false (external app typically needs admin API)
    *   → Use with HTTP endpoints: `/handle-packet` (incoming) and `/admin/ilp/send` (outgoing)
    *
    * When omitted, mode is **inferred** from configuration flags (backward compatible):
@@ -616,8 +616,8 @@ export interface ConnectorConfig {
    * - LOCAL_DELIVERY_ENABLED: Enable/disable local delivery (default: false)
    * - LOCAL_DELIVERY_URL: URL to agent runtime (e.g., "http://connector:3100")
    * - LOCAL_DELIVERY_TIMEOUT: Request timeout in ms (default: 30000)
-   * - LOCAL_DELIVERY_AUTH_TOKEN: Bearer token for BLS authentication (no default)
-   * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop BLS notification (default: false)
+   * - LOCAL_DELIVERY_AUTH_TOKEN: Bearer token for app authentication (no default)
+   * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop app notification (default: false)
    */
   localDelivery?: LocalDeliveryConfig;
 
@@ -1022,12 +1022,12 @@ export type Environment = 'development' | 'staging' | 'production';
  *
  * **Standalone Mode** (`'standalone'`):
  * - Connector runs as a separate process/container from business logic
- * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external BLS
+ * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external app
  * - Outgoing packets sent via HTTP POST to `/admin/ilp/send` on connector's admin API
  * - Admin API enabled for external control
- * - Local delivery enabled with `handlerUrl` pointing to BLS
+ * - Local delivery enabled with `handlerUrl` pointing to the app
  * - **Use cases**: Microservices, multi-language integrations, process isolation
- * - **Example**: Connector container + separate Python/Go/Rust business logic server
+ * - **Example**: Connector container + separate Python/Go/Rust app
  *
  * **Configuration Behavior**:
  * - When `deploymentMode` is **specified**: Configuration is validated against mode expectations
@@ -1624,7 +1624,7 @@ export interface LocalDeliveryConfig {
   enabled?: boolean;
 
   /**
-   * URL to the business logic server's base endpoint
+   * URL to the app's base endpoint
    * The connector will POST to {handlerUrl}/handle-packet
    * Environment variable: LOCAL_DELIVERY_URL
    * Example: 'http://localhost:8080'
@@ -1640,18 +1640,18 @@ export interface LocalDeliveryConfig {
   timeout?: number;
 
   /**
-   * Optional bearer token for authenticating outbound requests to the BLS
+   * Optional bearer token for authenticating outbound requests to the app
    * When set, the connector sends `Authorization: Bearer {authToken}` on
-   * all outbound HTTP requests to the business logic server
+   * all outbound HTTP requests to the app
    * Environment variable: LOCAL_DELIVERY_AUTH_TOKEN (no default)
    */
   authToken?: string;
 
   /**
-   * Enable per-hop BLS notification for transit packets
-   * When enabled, intermediate connectors fire a non-blocking POST to the BLS
+   * Enable per-hop app notification for transit packets
+   * When enabled, intermediate connectors fire a non-blocking POST to the app
    * for packets transiting through, in addition to forwarding via BTP.
-   * The BLS notification is fire-and-forget — failures do not affect forwarding.
+   * The app notification is fire-and-forget — failures do not affect forwarding.
    * Environment variable: LOCAL_DELIVERY_PER_HOP_NOTIFICATION (default: 'false')
    * Default: false
    */
@@ -1696,7 +1696,7 @@ export interface LocalDeliveryConfig {
  * ```
  */
 /**
- * Request sent to BLS for local delivery.
+ * Request sent to the app for local delivery.
  */
 export interface LocalDeliveryRequest {
   /** Full ILP destination address */
@@ -1714,7 +1714,7 @@ export interface LocalDeliveryRequest {
 }
 
 /**
- * Response from BLS.
+ * Response from the app.
  */
 export interface LocalDeliveryResponse {
   /** Fulfill response (mutually exclusive with reject) */
@@ -1852,7 +1852,7 @@ export interface RemovePeerResult {
 
 /**
  * Request body for `POST /admin/ilp/send`.
- * Used by the BLS to initiate outbound ILP packets through the connector.
+ * Used by the app to initiate outbound ILP packets through the connector.
  *
  * @property destination - Valid ILP address (RFC-0015 format)
  * @property amount - Non-negative integer string (smallest currency unit)

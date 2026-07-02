@@ -13,7 +13,7 @@
  * The test exercises the full HTTP surface that standalone mode depends on:
  *   - `POST /admin/ilp/send` on peer1 (outbound packet submission)
  *   - BTP peering between the two standalone connectors
- *   - `POST /handle-packet` on peer2's BLS (inbound local delivery)
+ *   - `POST /handle-packet` on peer2's app (inbound local delivery)
  *
  * No settlement / anvil — that's covered by `standalone-settlement-e2e.test.ts`.
  *
@@ -29,7 +29,7 @@ import type { ConnectorConfig } from '../../src/config/types';
 jest.setTimeout(60_000);
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test BLS Server
+// Test App Server
 // ────────────────────────────────────────────────────────────────────────────
 
 interface CapturedRequest {
@@ -245,7 +245,7 @@ describe('Standalone Mode Smoke E2E', () => {
 
   // Zero-amount packets bypass the per-packet claim service (which requires
   // chainProviders settlement setup). Stage 1 validates the pure HTTP surface
-  // — admin API → BTP → local delivery HTTP client → BLS /handle-packet.
+  // — admin API → BTP → local delivery HTTP client → app /handle-packet.
   // Non-zero amounts are exercised in standalone-settlement-e2e.test.ts.
 
   it('POST /admin/ilp/send → BTP → POST /handle-packet → fulfill', async () => {
@@ -267,7 +267,7 @@ describe('Standalone Mode Smoke E2E', () => {
     expect(captured.paymentId).toBeTruthy();
   });
 
-  it('BLS reject propagates as accepted:false with F99', async () => {
+  it('app reject propagates as accepted:false with F99', async () => {
     bls2.setResponder(() => ({ accept: false }));
 
     const { status, body } = await ilpSend(peer1AdminPort, {
@@ -280,7 +280,7 @@ describe('Standalone Mode Smoke E2E', () => {
     expect(body.code).toBe('F99');
   });
 
-  it('BLS echoes response data on fulfill', async () => {
+  it('app echoes response data on fulfill', async () => {
     const echo = Buffer.from('hello-standalone').toString('base64');
     bls2.setResponder(() => ({ accept: true, data: echo }));
 
