@@ -134,8 +134,10 @@ describe('SelfAnnounceService — build', () => {
     const content = JSON.parse(event.content);
     expect(content.ilpAddress).toBe('g.proxy.relay');
     expect(content.routes).toEqual({ publish: 'g.proxy.relay', store: 'g.proxy.store' });
+    // Keys are qualified to the chainProviders chain ids so the event parses
+    // under core's kind:10032 schema (#289).
     expect(content.settlementAddresses).toEqual({
-      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab',
+      'evm:31337': '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab',
     });
   });
 });

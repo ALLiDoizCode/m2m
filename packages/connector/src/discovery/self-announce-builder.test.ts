@@ -12,7 +12,11 @@
  */
 
 import type { ConnectorConfig, SelfAnnounceConfig } from '../config/types';
-import { buildSelfAnnouncementInfo, resolveRouteHints } from './self-announce-builder';
+import {
+  buildSelfAnnouncementInfo,
+  normalizeSettlementAddressKeys,
+  resolveRouteHints,
+} from './self-announce-builder';
 
 const APEX_EVM = '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab';
 const STORE_EVM = '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e';
@@ -120,7 +124,9 @@ describe('buildSelfAnnouncementInfo — relay-connector apex', () => {
   it('derives supportedChains, settlement, asset, and endpoints from config', () => {
     const info = buildSelfAnnouncementInfo(relayConnectorConfig(), baseSelfAnnounce);
     expect(info.supportedChains).toEqual(['evm:31337']);
-    expect(info.settlementAddresses).toEqual({ evm: APEX_EVM });
+    // Keys are re-keyed from the config's bare `evm` to the qualified chain id
+    // so the event parses under core's kind:10032 schema (#289).
+    expect(info.settlementAddresses).toEqual({ 'evm:31337': APEX_EVM });
     expect(info.assetCode).toBe('USDC');
     expect(info.assetScale).toBe(6);
     expect(info.btpEndpoint).toBe('wss://proxy.devnet.toonprotocol.dev:443');
@@ -147,7 +153,7 @@ describe('buildSelfAnnouncementInfo — store-connector apex', () => {
     const info = buildSelfAnnouncementInfo(storeConnectorConfig(), baseSelfAnnounce);
     expect(info.ilpAddress).toBe('g.proxy.store');
     expect(info.ilpAddresses).toEqual(['g.proxy.store', 'g.proxy.relay.store']);
-    expect(info.settlementAddresses).toEqual({ evm: STORE_EVM });
+    expect(info.settlementAddresses).toEqual({ 'evm:31337': STORE_EVM });
   });
 
   it('derives route hints: publish swapped from store, store=direct g.proxy.store', () => {
@@ -216,6 +222,72 @@ describe('resolveRouteHints', () => {
       publish: 'g.flat.target',
       store: 'g.flat.target',
     });
+  });
+});
+
+describe('normalizeSettlementAddressKeys (#289)', () => {
+  const ADDR = '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab';
+
+  it('re-keys a bare namespace to the qualified supported chain id', () => {
+    expect(normalizeSettlementAddressKeys({ evm: ADDR }, ['evm:31337'])).toEqual({
+      'evm:31337': ADDR,
+    });
+  });
+
+  it('expands a bare namespace to EVERY supported chain in that namespace', () => {
+    // An EVM account address is valid on every EVM chain, so a bare `evm` key
+    // fans out to each announced eip-style chain id.
+    expect(
+      normalizeSettlementAddressKeys({ evm: ADDR, solana: 'So1addr' }, [
+        'evm:31337',
+        'evm:84532',
+        'solana:devnet',
+      ])
+    ).toEqual({ 'evm:31337': ADDR, 'evm:84532': ADDR, 'solana:devnet': 'So1addr' });
+  });
+
+  it('passes an already-qualified key through when it is supported', () => {
+    expect(normalizeSettlementAddressKeys({ 'evm:31337': ADDR }, ['evm:31337'])).toEqual({
+      'evm:31337': ADDR,
+    });
+  });
+
+  it('keeps a qualified key when no supportedChains are announced (core skips the membership check)', () => {
+    expect(normalizeSettlementAddressKeys({ 'evm:31337': ADDR }, [])).toEqual({
+      'evm:31337': ADDR,
+    });
+  });
+
+  it('drops (and warns about) a qualified key not in supportedChains', () => {
+    const warn = jest.fn();
+    expect(normalizeSettlementAddressKeys({ 'evm:84532': ADDR }, ['evm:31337'], warn)).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatchObject({
+      event: 'self_announce_settlement_key_dropped',
+      key: 'evm:84532',
+    });
+  });
+
+  it('drops (and warns about) a bare key with no matching supported chain', () => {
+    const warn = jest.fn();
+    // No chainProviders → a bare `evm` key cannot be qualified, and emitting it
+    // bare would make core reject the whole event — so it is dropped.
+    expect(normalizeSettlementAddressKeys({ evm: ADDR }, [], warn)).toEqual({});
+    expect(normalizeSettlementAddressKeys({ mina: 'B62q' }, ['evm:31337'], warn)).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('is wired into buildSelfAnnouncementInfo (warn sink reaches the caller)', () => {
+    const warn = jest.fn();
+    const config = relayConnectorConfig();
+    // Give the terminated route an un-announceable extra key.
+    config.routes[0]!.settlementAddresses = {
+      evm: APEX_EVM,
+      mina: 'B62qUnannounceable',
+    };
+    const info = buildSelfAnnouncementInfo(config, baseSelfAnnounce, warn);
+    expect(info.settlementAddresses).toEqual({ 'evm:31337': APEX_EVM });
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });
 
