@@ -43,13 +43,13 @@ interface CapturedRequest {
   isTransit?: boolean;
 }
 
-interface TestBls {
+interface TestApp {
   port: number;
   received: CapturedRequest[];
   stop(): Promise<void>;
 }
 
-async function startBls(port: number): Promise<TestBls> {
+async function startApp(port: number): Promise<TestApp> {
   const app = express();
   app.use(express.json());
   const received: CapturedRequest[] = [];
@@ -147,7 +147,7 @@ function randomPortBase(): number {
 
 interface PeerCtx {
   node: ConnectorNode;
-  app: TestBls;
+  app: TestApp;
   adminPort: number;
 }
 
@@ -162,11 +162,11 @@ async function buildChain(): Promise<StandaloneChain> {
   const btp = (i: number) => base + i;
   const admin = (i: number) => base + 3 + i;
   const health = (i: number) => base + 6 + i;
-  const blsPort = (i: number) => base + 9 + i;
+  const appPort = (i: number) => base + 9 + i;
 
-  const blsInstances: TestBls[] = [];
+  const appInstances: TestApp[] = [];
   for (let i = 0; i < 3; i++) {
-    blsInstances.push(await startBls(blsPort(i)));
+    appInstances.push(await startApp(appPort(i)));
   }
 
   const buildConfig = (i: number): ConnectorConfig => {
@@ -202,7 +202,7 @@ async function buildChain(): Promise<StandaloneChain> {
       adminApi: { enabled: true, port: admin(i), host: '127.0.0.1' },
       localDelivery: {
         enabled: true,
-        handlerUrl: `http://127.0.0.1:${blsPort(i)}`,
+        handlerUrl: `http://127.0.0.1:${appPort(i)}`,
       },
       peers,
       routes,
@@ -226,7 +226,7 @@ async function buildChain(): Promise<StandaloneChain> {
 
   const peers: PeerCtx[] = nodes.map((node, i) => ({
     node,
-    app: blsInstances[i]!,
+    app: appInstances[i]!,
     adminPort: admin(i),
   }));
 
@@ -236,7 +236,7 @@ async function buildChain(): Promise<StandaloneChain> {
       for (const peer of peers) {
         await peer.node.stop().catch(() => undefined);
       }
-      for (const app of blsInstances) {
+      for (const app of appInstances) {
         await app.stop().catch(() => undefined);
       }
     },
