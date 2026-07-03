@@ -4,7 +4,7 @@
  * Proves that two ConnectorNode instances in `deploymentMode: 'standalone'`
  * achieve functional parity with embedded mode for packet delivery:
  *
- *   [Test BLS2] <-- POST /handle-packet -- [Peer2 Connector]
+ *   [Test App2] <-- POST /handle-packet -- [Peer2 Connector]
  *                                                ^
  *                                              BTP
  *                                                v
@@ -41,14 +41,14 @@ interface CapturedRequest {
   isTransit?: boolean;
 }
 
-interface TestBlsServer {
+interface TestAppServer {
   port: number;
   received: CapturedRequest[];
   setResponder(fn: (req: CapturedRequest) => { accept: boolean; data?: string }): void;
   stop(): Promise<void>;
 }
 
-async function startTestBls(port: number): Promise<TestBlsServer> {
+async function startTestApp(port: number): Promise<TestAppServer> {
   const app = express();
   app.use(express.json());
 
@@ -155,8 +155,8 @@ async function waitForPeerConnected(
 describe('Standalone Mode Smoke E2E', () => {
   let peer1: ConnectorNode;
   let peer2: ConnectorNode;
-  let bls1: TestBlsServer;
-  let bls2: TestBlsServer;
+  let app1: TestAppServer;
+  let app2: TestAppServer;
   let peer1AdminPort: number;
 
   beforeAll(async () => {
@@ -165,20 +165,20 @@ describe('Standalone Mode Smoke E2E', () => {
     const peer2Btp = base + 1;
     peer1AdminPort = base + 2;
     const peer2AdminPort = base + 3;
-    const bls1Port = base + 4;
-    const bls2Port = base + 5;
+    const app1Port = base + 4;
+    const app2Port = base + 5;
     const peer1Health = base + 6;
     const peer2Health = base + 7;
 
-    bls1 = await startTestBls(bls1Port);
-    bls2 = await startTestBls(bls2Port);
+    app1 = await startTestApp(app1Port);
+    app2 = await startTestApp(app2Port);
 
     const buildConfig = (opts: {
       nodeId: string;
       btpPort: number;
       adminPort: number;
       healthPort: number;
-      blsPort: number;
+      appPort: number;
       peer: { id: string; port: number };
     }): ConnectorConfig => ({
       nodeId: opts.nodeId,
@@ -190,7 +190,7 @@ describe('Standalone Mode Smoke E2E', () => {
       adminApi: { enabled: true, port: opts.adminPort, host: '127.0.0.1' },
       localDelivery: {
         enabled: true,
-        handlerUrl: `http://127.0.0.1:${opts.blsPort}`,
+        handlerUrl: `http://127.0.0.1:${opts.appPort}`,
       },
       peers: [
         {
@@ -210,7 +210,7 @@ describe('Standalone Mode Smoke E2E', () => {
       btpPort: peer1Btp,
       adminPort: peer1AdminPort,
       healthPort: peer1Health,
-      blsPort: bls1Port,
+      appPort: app1Port,
       peer: { id: 'peer2', port: peer2Btp },
     });
     const peer2Config = buildConfig({
@@ -218,7 +218,7 @@ describe('Standalone Mode Smoke E2E', () => {
       btpPort: peer2Btp,
       adminPort: peer2AdminPort,
       healthPort: peer2Health,
-      blsPort: bls2Port,
+      appPort: app2Port,
       peer: { id: 'peer1', port: peer1Btp },
     });
 
@@ -234,8 +234,8 @@ describe('Standalone Mode Smoke E2E', () => {
   afterAll(async () => {
     await peer1?.stop().catch(() => undefined);
     await peer2?.stop().catch(() => undefined);
-    await bls1?.stop().catch(() => undefined);
-    await bls2?.stop().catch(() => undefined);
+    await app1?.stop().catch(() => undefined);
+    await app2?.stop().catch(() => undefined);
   });
 
   it('should report standalone deployment mode', () => {
@@ -249,8 +249,8 @@ describe('Standalone Mode Smoke E2E', () => {
   // Non-zero amounts are exercised in standalone-settlement-e2e.test.ts.
 
   it('POST /admin/ilp/send → BTP → POST /handle-packet → fulfill', async () => {
-    bls2.setResponder(() => ({ accept: true }));
-    const before = bls2.received.length;
+    app2.setResponder(() => ({ accept: true }));
+    const before = app2.received.length;
 
     const { status, body } = await ilpSend(peer1AdminPort, {
       destination: 'test.peer2.receiver',
@@ -260,15 +260,15 @@ describe('Standalone Mode Smoke E2E', () => {
     expect(status).toBe(200);
     expect(body.accepted).toBe(true);
 
-    expect(bls2.received.length).toBe(before + 1);
-    const captured = bls2.received[before]!;
+    expect(app2.received.length).toBe(before + 1);
+    const captured = app2.received[before]!;
     expect(captured.destination).toBe('test.peer2.receiver');
     expect(captured.amount).toBe('0');
     expect(captured.paymentId).toBeTruthy();
   });
 
   it('app reject propagates as accepted:false with F99', async () => {
-    bls2.setResponder(() => ({ accept: false }));
+    app2.setResponder(() => ({ accept: false }));
 
     const { status, body } = await ilpSend(peer1AdminPort, {
       destination: 'test.peer2.receiver',
@@ -282,7 +282,7 @@ describe('Standalone Mode Smoke E2E', () => {
 
   it('app echoes response data on fulfill', async () => {
     const echo = Buffer.from('hello-standalone').toString('base64');
-    bls2.setResponder(() => ({ accept: true, data: echo }));
+    app2.setResponder(() => ({ accept: true, data: echo }));
 
     const { status, body } = await ilpSend(peer1AdminPort, {
       destination: 'test.peer2.receiver',

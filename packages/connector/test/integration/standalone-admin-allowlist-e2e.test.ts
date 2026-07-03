@@ -39,7 +39,7 @@ jest.setTimeout(300_000);
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const PROFILE_ARGS = ['compose', '--profile', 'standalone-allowlist'];
 
-const BLS_HOST_URL = 'http://127.0.0.1:13401';
+const APP_HOST_URL = 'http://127.0.0.1:13401';
 const CONNECTOR_ADMIN_HOST_URL = 'http://127.0.0.1:8081'; // Intentionally NOT published
 
 async function compose(...args: string[]): Promise<void> {
@@ -78,7 +78,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
     // connector starts responding.
     await waitForCondition(
       async () => {
-        const res = await fetch(`${BLS_HOST_URL}/trigger-admin-send`, {
+        const res = await fetch(`${APP_HOST_URL}/trigger-admin-send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -99,7 +99,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
   });
 
   it('the app on the bridge network can POST /admin/ilp/send (allowlist accepts)', async () => {
-    const res = await fetch(`${BLS_HOST_URL}/trigger-admin-send`, {
+    const res = await fetch(`${APP_HOST_URL}/trigger-admin-send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -131,11 +131,11 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
 
   it('received packet appears in the app capture log', async () => {
     // Seed a fresh packet, then verify it surfaced via /received.
-    const before = (await (await fetch(`${BLS_HOST_URL}/received`)).json()) as {
+    const before = (await (await fetch(`${APP_HOST_URL}/received`)).json()) as {
       count: number;
     };
 
-    const sendRes = await fetch(`${BLS_HOST_URL}/trigger-admin-send`, {
+    const sendRes = await fetch(`${APP_HOST_URL}/trigger-admin-send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -147,7 +147,7 @@ describeDocker('Tier-3 Admin API Allowlist E2E (Docker)', () => {
 
     await waitForCondition(
       async () => {
-        const after = (await (await fetch(`${BLS_HOST_URL}/received`)).json()) as {
+        const after = (await (await fetch(`${APP_HOST_URL}/received`)).json()) as {
           count: number;
         };
         return after.count === before.count + 1;

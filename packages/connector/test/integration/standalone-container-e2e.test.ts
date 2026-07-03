@@ -13,7 +13,7 @@
  *   - Admin API + local delivery HTTP across container boundaries
  *   - Process isolation between connector and app
  *
- *   [bls1 container] <-- /handle-packet -- [peer1 container]
+ *   [app1 container] <-- /handle-packet -- [peer1 container]
  *                                                ^
  *                                              BTP (compose net)
  *                                                v
@@ -21,7 +21,7 @@
  *                                                v
  *                                              BTP
  *                                                v
- *   [bls2 container] <-- /handle-packet -- [peer2 container]
+ *   [app2 container] <-- /handle-packet -- [peer2 container]
  *
  * Prerequisites:
  *   Docker + docker compose installed, this project's images buildable.
@@ -118,8 +118,8 @@ const PEER1_ADMIN = 'http://127.0.0.1:18081';
 const PEER2_ADMIN = 'http://127.0.0.1:28081';
 const PEER1_HEALTH = 'http://127.0.0.1:18080';
 const PEER2_HEALTH = 'http://127.0.0.1:28080';
-const BLS1_RECEIVED = 'http://127.0.0.1:13101/received';
-const BLS2_RECEIVED = 'http://127.0.0.1:13102/received';
+const APP1_RECEIVED = 'http://127.0.0.1:13101/received';
+const APP2_RECEIVED = 'http://127.0.0.1:13102/received';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -310,7 +310,7 @@ describeDocker('Standalone Mode Container E2E (Docker compose)', () => {
   });
 
   it('POST /admin/ilp/send → BTP → container app /handle-packet fulfills', async () => {
-    const before = await getJson<ReceivedResponse>(BLS2_RECEIVED);
+    const before = await getJson<ReceivedResponse>(APP2_RECEIVED);
     const { status, body } = await postJson<{ accepted: boolean }>(
       `${PEER1_ADMIN}/admin/ilp/send`,
       { destination: 'test.peer2.receiver', amount: '0', data: '' }
@@ -321,21 +321,21 @@ describeDocker('Standalone Mode Container E2E (Docker compose)', () => {
     // Poll — HTTP forwarding between containers is fast but not instantaneous.
     await waitForCondition(
       async () => {
-        const after = await getJson<ReceivedResponse>(BLS2_RECEIVED);
+        const after = await getJson<ReceivedResponse>(APP2_RECEIVED);
         return after.count === before.count + 1;
       },
       5_000,
-      'BLS2 receives forwarded packet'
+      'App2 receives forwarded packet'
     );
 
-    const after = await getJson<ReceivedResponse>(BLS2_RECEIVED);
+    const after = await getJson<ReceivedResponse>(APP2_RECEIVED);
     const latest = after.received[after.received.length - 1]!;
     expect(latest.destination).toBe('test.peer2.receiver');
     expect(latest.amount).toBe('0');
   });
 
   it('reverse direction peer2 → peer1 also works (symmetric topology)', async () => {
-    const before = await getJson<ReceivedResponse>(BLS1_RECEIVED);
+    const before = await getJson<ReceivedResponse>(APP1_RECEIVED);
     const { status, body } = await postJson<{ accepted: boolean }>(
       `${PEER2_ADMIN}/admin/ilp/send`,
       { destination: 'test.peer1.receiver', amount: '0', data: '' }
@@ -345,11 +345,11 @@ describeDocker('Standalone Mode Container E2E (Docker compose)', () => {
 
     await waitForCondition(
       async () => {
-        const after = await getJson<ReceivedResponse>(BLS1_RECEIVED);
+        const after = await getJson<ReceivedResponse>(APP1_RECEIVED);
         return after.count === before.count + 1;
       },
       5_000,
-      'BLS1 receives forwarded packet'
+      'App1 receives forwarded packet'
     );
   });
 });
