@@ -724,7 +724,7 @@ jobs:
           echo "Exercised: deploymentMode='standalone', admin API, BTP, local delivery HTTP, chainProviders→ChannelManager settlement"
 
   # Container-based standalone E2E — builds the connector image and runs two
-  # connector containers + two BLS containers, asserting the admin API + BTP +
+  # connector containers + two app containers, asserting the admin API + BTP +
   # local delivery HTTP work across real container boundaries.
   standalone-container-e2e:
     name: Standalone Container E2E (Docker)

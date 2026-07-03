@@ -501,7 +501,7 @@ Perfect for development and debugging. Disable in production.
 
 ```
 ┌──────────────┐   /handle-packet   ┌──────────────┐
-│  Your BLS    │◄──────────────────│  @toon-protocol/ │
+│  Your app    │◄──────────────────│  @toon-protocol/ │
 │              │                    │  connector   │
 │  Outbound:   │  /admin/ilp/send  │              │
 │  POST ───────│──────────────────►│              │
@@ -514,18 +514,18 @@ Perfect for development and debugging. Disable in production.
 
 ## Docker Deployment
 
-The simplest production-ready topology is a **standalone connector paired with your Business Logic Server (BLS)**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships this pattern out of the box.
+The simplest production-ready topology is a **standalone connector paired with your app**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships this pattern out of the box.
 
 Two compose files ship at the repo root:
 
 | Compose file              | Purpose                                                                                                                                                                                                                                                                  |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `docker-compose.prod.yml` | **Production deployment.** Connector + BLS, secure by default.                                                                                                                                                                                                           |
+| `docker-compose.prod.yml` | **Production deployment.** Connector + app, secure by default.                                                                                                                                                                                                           |
 | `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, the standalone-mode E2E test profiles (`standalone-e2e`, `standalone-allowlist`), and the `app` profile (see [Local "App behind the Connector"](#local-app-behind-the-connector-issue-221)). Not for production use. |
 
-### Production Deployment: Standalone Connector + BLS
+### Production Deployment: Standalone Connector + App
 
-The production stack runs a single connector and your BLS on an isolated Docker bridge network. The admin API is reachable only from the BLS container — it is **not** published to the host interface.
+The production stack runs a single connector and your app on an isolated Docker bridge network. The admin API is reachable only from the app container — it is **not** published to the host interface.
 
 **Step 1 — Pull the image** (or build locally)
 
@@ -558,7 +558,7 @@ adminApi:
 
 localDelivery:
   enabled: true
-  handlerUrl: http://bls:3100 # compose-DNS resolves to sibling container
+  handlerUrl: http://app:3100 # compose-DNS resolves to sibling container
 
 peers: []
 routes: []
@@ -572,20 +572,20 @@ docker compose -f docker-compose.prod.yml up -d
 # Verify both containers are healthy:
 docker compose -f docker-compose.prod.yml ps
 
-# The BLS health endpoint is the only host-exposed port:
+# The app health endpoint is the only host-exposed port:
 curl http://127.0.0.1:3100/health
 ```
 
-**Step 4 — Verify the BLS can call the admin API**
+**Step 4 — Verify the app can call the admin API**
 
 ```bash
-# The BLS container drives admin calls over the compose network:
+# The app container drives admin calls over the compose network:
 curl -X POST http://127.0.0.1:3100/trigger-admin-send \
   -H 'Content-Type: application/json' \
   -d '{"destination":"test.prod-connector.self","amount":"0"}'
 # → {"accepted":false,"code":"F02","message":"No route to destination: ..."}
 # (F02 is expected with an empty routes list — it proves the admin API accepted
-# the call from the BLS but had nowhere to forward it.)
+# the call from the app but had nowhere to forward it.)
 
 # Direct access to the admin API from the host is refused:
 curl -m 2 http://127.0.0.1:8081/admin/peers
@@ -599,9 +599,9 @@ docker compose -f docker-compose.prod.yml down           # preserves the connect
 docker compose -f docker-compose.prod.yml down --volumes  # wipes the data volume too
 ```
 
-### Writing Your Own BLS
+### Writing Your Own App
 
-The compose file ships a minimal BLS (`scripts/standalone-e2e/bls.js`) that fulfills every inbound packet — fine for smoke-testing, not for production. Your real BLS is a plain HTTP server that speaks two endpoints. Any language works: if it can serve HTTP + JSON, it can be a BLS.
+The compose file ships a minimal app (`scripts/standalone-e2e/app.js`) that fulfills every inbound packet — fine for smoke-testing, not for production. Your real app is a plain HTTP server that speaks two endpoints. Any language works: if it can serve HTTP + JSON, it can be an app.
 
 #### The HTTP contract
 
@@ -658,18 +658,18 @@ Your business `code` is auto-mapped to an ILP error code by the connector:
 | `timeout`            | `T00` | operation timed out         |
 | _(anything else)_    | `F99` | fallback                    |
 
-#### Minimal Node.js BLS (drop-in replacement)
+#### Minimal Node.js App (drop-in replacement)
 
-Create a `bls/` directory alongside `docker-compose.prod.yml`:
+Create an `app/` directory alongside `docker-compose.prod.yml`:
 
 ```text
-bls/
+app/
 ├── Dockerfile
 ├── package.json
 └── server.js
 ```
 
-`bls/server.js`:
+`app/server.js`:
 
 ```javascript
 import express from 'express';
@@ -682,7 +682,7 @@ app.get('/health', (_req, res) => res.json({ status: 'healthy' }));
 app.post('/handle-packet', async (req, res) => {
   const { paymentId, destination, amount, data, isTransit } = req.body;
   console.log(
-    `[BLS] ${isTransit ? 'transit' : 'deliver'} ${amount} → ${destination} (${paymentId})`
+    `[App] ${isTransit ? 'transit' : 'deliver'} ${amount} → ${destination} (${paymentId})`
   );
 
   // Your business logic here. Return accept:true/false based on whatever
@@ -713,21 +713,21 @@ app.post('/send', async (req, res) => {
 });
 
 app.listen(Number(process.env.PORT ?? 3100), '0.0.0.0', () =>
-  console.log(`BLS listening on :${process.env.PORT ?? 3100}`)
+  console.log(`App listening on :${process.env.PORT ?? 3100}`)
 );
 ```
 
-`bls/package.json`:
+`app/package.json`:
 
 ```json
 {
-  "name": "my-bls",
+  "name": "my-app",
   "type": "module",
   "dependencies": { "express": "^4.19.0" }
 }
 ```
 
-`bls/Dockerfile`:
+`app/Dockerfile`:
 
 ```dockerfile
 FROM node:22-alpine
@@ -739,11 +739,11 @@ EXPOSE 3100
 CMD ["node", "server.js"]
 ```
 
-#### Minimal Python BLS (Flask)
+#### Minimal Python App (Flask)
 
 If you prefer Python, the contract is identical:
 
-`bls/app.py`:
+`app/app.py`:
 
 ```python
 import os
@@ -760,7 +760,7 @@ def handle_packet():
     body = request.get_json()
     amount = int(body['amount'])   # amount is a string; parse carefully
     destination = body['destination']
-    print(f"[BLS] {amount} → {destination} ({body['paymentId']})")
+    print(f"[App] {amount} → {destination} ({body['paymentId']})")
 
     if amount > 100_000:
         return jsonify(accept=False, rejectReason={
@@ -772,7 +772,7 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 3100)))
 ```
 
-`bls/Dockerfile`:
+`app/Dockerfile`:
 
 ```dockerfile
 FROM python:3.12-alpine
@@ -785,12 +785,12 @@ CMD ["python", "app.py"]
 
 #### Wire it into `docker-compose.prod.yml`
 
-Replace the sample BLS block with your own:
+Replace the sample app block with your own:
 
 ```yaml
 services:
-  bls:
-    build: ./bls # your Dockerfile above
+  app:
+    build: ./app # your Dockerfile above
     restart: unless-stopped
     environment:
       PORT: '3100'
@@ -811,33 +811,33 @@ services:
       - app_net
 ```
 
-Everything else in the compose file stays as-is — same network, same allowlist picks up your BLS's bridge-subnet IP automatically, same admin API reachable at `http://connector:8081`.
+Everything else in the compose file stays as-is — same network, same allowlist picks up your app's bridge-subnet IP automatically, same admin API reachable at `http://connector:8081`.
 
 #### Run it
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
 
-# Health check your BLS:
+# Health check your app:
 curl http://127.0.0.1:3100/health
 
-# Drive a test packet from your BLS through the connector:
+# Drive a test packet from your app through the connector:
 curl -X POST http://127.0.0.1:3100/send \
   -H 'Content-Type: application/json' \
   -d '{"destination":"test.peer-b.user","amount":"10"}'
 
-# Follow BLS logs to see inbound `/handle-packet` calls:
-docker compose -f docker-compose.prod.yml logs -f bls
+# Follow app logs to see inbound `/handle-packet` calls:
+docker compose -f docker-compose.prod.yml logs -f app
 ```
 
-That's the whole integration. The connector handles ILP routing, settlement, claim validation, transport, and admin APIs. Your BLS handles the part that matters to your application: _what do we do with this payment?_
+That's the whole integration. The connector handles ILP routing, settlement, claim validation, transport, and admin APIs. Your app handles the part that matters to your application: _what do we do with this payment?_
 
 ### Troubleshooting
 
 ```bash
 # Follow logs:
 docker compose -f docker-compose.prod.yml logs -f connector
-docker compose -f docker-compose.prod.yml logs -f bls
+docker compose -f docker-compose.prod.yml logs -f app
 
 # Rebuild from source after local changes:
 docker compose -f docker-compose.prod.yml build --no-cache connector
@@ -854,7 +854,7 @@ The production compose ships secure-by-default:
 | ----------------------------- | ---------------------------------------------------------------- |
 | Admin API reachable on host   | **No** — port 8081 is not published                              |
 | Admin API reachable cross-net | **No** — `allowedIPs` restricts callers to docker bridge subnets |
-| Packet-delivery BLS exposed   | Loopback only — `127.0.0.1:3100`                                 |
+| Packet-delivery app exposed   | Loopback only — `127.0.0.1:3100`                                 |
 | Connector runs as root        | **No** — image runs as non-root user `node` (uid 1000)           |
 | Secrets in YAML               | None in the template — `apiKey` is commented out by default      |
 

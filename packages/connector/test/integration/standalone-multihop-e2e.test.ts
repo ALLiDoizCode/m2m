@@ -6,7 +6,7 @@
  * Three ConnectorNode instances in `deploymentMode: 'standalone'` form a
  * linear chain:
  *
- *   [BLS1] <-- peer1 <-- BTP --> peer2 <-- BTP --> peer3 --> [BLS3]
+ *   [App1] <-- peer1 <-- BTP --> peer2 <-- BTP --> peer3 --> [App3]
  *                ^                                       ^
  *          admin API                               admin API
  *                ^                                       ^
@@ -43,13 +43,13 @@ interface CapturedRequest {
   isTransit?: boolean;
 }
 
-interface TestBls {
+interface TestApp {
   port: number;
   received: CapturedRequest[];
   stop(): Promise<void>;
 }
 
-async function startBls(port: number): Promise<TestBls> {
+async function startApp(port: number): Promise<TestApp> {
   const app = express();
   app.use(express.json());
   const received: CapturedRequest[] = [];
@@ -147,7 +147,7 @@ function randomPortBase(): number {
 
 interface PeerCtx {
   node: ConnectorNode;
-  bls: TestBls;
+  app: TestApp;
   adminPort: number;
 }
 
@@ -158,15 +158,15 @@ interface StandaloneChain {
 
 async function buildChain(): Promise<StandaloneChain> {
   const base = randomPortBase();
-  // 3 peers × 4 ports each (btp, admin, health, bls) = 12 consecutive ports.
+  // 3 peers × 4 ports each (btp, admin, health, app) = 12 consecutive ports.
   const btp = (i: number) => base + i;
   const admin = (i: number) => base + 3 + i;
   const health = (i: number) => base + 6 + i;
-  const blsPort = (i: number) => base + 9 + i;
+  const appPort = (i: number) => base + 9 + i;
 
-  const blsInstances: TestBls[] = [];
+  const appInstances: TestApp[] = [];
   for (let i = 0; i < 3; i++) {
-    blsInstances.push(await startBls(blsPort(i)));
+    appInstances.push(await startApp(appPort(i)));
   }
 
   const buildConfig = (i: number): ConnectorConfig => {
@@ -202,7 +202,7 @@ async function buildChain(): Promise<StandaloneChain> {
       adminApi: { enabled: true, port: admin(i), host: '127.0.0.1' },
       localDelivery: {
         enabled: true,
-        handlerUrl: `http://127.0.0.1:${blsPort(i)}`,
+        handlerUrl: `http://127.0.0.1:${appPort(i)}`,
       },
       peers,
       routes,
@@ -226,7 +226,7 @@ async function buildChain(): Promise<StandaloneChain> {
 
   const peers: PeerCtx[] = nodes.map((node, i) => ({
     node,
-    bls: blsInstances[i]!,
+    app: appInstances[i]!,
     adminPort: admin(i),
   }));
 
@@ -236,8 +236,8 @@ async function buildChain(): Promise<StandaloneChain> {
       for (const peer of peers) {
         await peer.node.stop().catch(() => undefined);
       }
-      for (const bls of blsInstances) {
-        await bls.stop().catch(() => undefined);
+      for (const app of appInstances) {
+        await app.stop().catch(() => undefined);
       }
     },
   };
@@ -269,44 +269,44 @@ describe('Standalone Mode Multi-Hop E2E (3-peer linear chain)', () => {
     const peer2 = chain.peers[1]!;
     const peer3 = chain.peers[2]!;
 
-    const before3 = peer3.bls.received.length;
+    const before3 = peer3.app.received.length;
 
     const { status, body } = await ilpSend(peer1.adminPort, 'test.peer3.receiver');
     expect(status).toBe(200);
     expect(body.accepted).toBe(true);
 
-    expect(peer3.bls.received.length).toBe(before3 + 1);
-    expect(peer3.bls.received[before3]!.destination).toBe('test.peer3.receiver');
+    expect(peer3.app.received.length).toBe(before3 + 1);
+    expect(peer3.app.received[before3]!.destination).toBe('test.peer3.receiver');
 
     // Intermediate peers should NOT get final delivery — their app only sees
     // the packet if `localDelivery.perHopNotification` is enabled, which it
     // is not in our config.
-    expect(peer1.bls.received).toEqual([]);
-    expect(peer2.bls.received).toEqual([]);
+    expect(peer1.app.received).toEqual([]);
+    expect(peer2.app.received).toEqual([]);
   });
 
   it('peer3 → peer1: reverse direction routes the other way', async () => {
     const peer1 = chain.peers[0]!;
     const peer3 = chain.peers[2]!;
 
-    const before1 = peer1.bls.received.length;
+    const before1 = peer1.app.received.length;
     const { status, body } = await ilpSend(peer3.adminPort, 'test.peer1.receiver');
     expect(status).toBe(200);
     expect(body.accepted).toBe(true);
 
-    expect(peer1.bls.received.length).toBe(before1 + 1);
-    expect(peer1.bls.received[before1]!.destination).toBe('test.peer1.receiver');
+    expect(peer1.app.received.length).toBe(before1 + 1);
+    expect(peer1.app.received[before1]!.destination).toBe('test.peer1.receiver');
   });
 
   it('peer1 → peer2: single-hop delivery to middle peer also works', async () => {
     const peer1 = chain.peers[0]!;
     const peer2 = chain.peers[1]!;
 
-    const before2 = peer2.bls.received.length;
+    const before2 = peer2.app.received.length;
     const { status, body } = await ilpSend(peer1.adminPort, 'test.peer2.receiver');
     expect(status).toBe(200);
     expect(body.accepted).toBe(true);
-    expect(peer2.bls.received.length).toBe(before2 + 1);
+    expect(peer2.app.received.length).toBe(before2 + 1);
   });
 
   it('unknown destination prefix gets rejected (no matching route)', async () => {

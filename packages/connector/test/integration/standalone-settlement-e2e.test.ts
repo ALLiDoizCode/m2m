@@ -7,7 +7,7 @@
  *   - `POST /admin/ilp/send` with amount > 0 routes through BTP and settles
  *   - Per-packet claim service works in standalone mode (chainProviders wired)
  *
- *   [BLS2] <-- /handle-packet -- [Peer2 standalone + chainProviders]
+ *   [App2] <-- /handle-packet -- [Peer2 standalone + chainProviders]
  *                                          ^
  *                                        BTP
  *                                          v
@@ -50,15 +50,15 @@ jest.setTimeout(180_000);
 // Test App Server (minimal /handle-packet responder)
 // ────────────────────────────────────────────────────────────────────────────
 
-interface TestBls {
+interface TestApp {
   received: Array<{ destination: string; amount: string }>;
   stop(): Promise<void>;
 }
 
-async function startBls(port: number): Promise<TestBls> {
+async function startApp(port: number): Promise<TestApp> {
   const app = express();
   app.use(express.json());
-  const received: TestBls['received'] = [];
+  const received: TestApp['received'] = [];
   app.post('/handle-packet', (req: Request, res: Response) => {
     const body = req.body as { destination: string; amount: string };
     received.push({ destination: body.destination, amount: body.amount });
@@ -128,8 +128,8 @@ async function waitForCondition(
 describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
   let peer1: ConnectorNode;
   let peer2: ConnectorNode;
-  let bls1: TestBls;
-  let bls2: TestBls;
+  let app1: TestApp;
+  let app2: TestApp;
   let peer1Admin: number;
   let peer2Admin: number;
 
@@ -142,20 +142,20 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
     const peer2Btp = base + 1;
     peer1Admin = base + 2;
     peer2Admin = base + 3;
-    const bls1Port = base + 4;
-    const bls2Port = base + 5;
+    const app1Port = base + 4;
+    const app2Port = base + 5;
     const peer1Health = base + 6;
     const peer2Health = base + 7;
 
-    bls1 = await startBls(bls1Port);
-    bls2 = await startBls(bls2Port);
+    app1 = await startApp(app1Port);
+    app2 = await startApp(app2Port);
 
     const buildConfig = (opts: {
       nodeId: string;
       btpPort: number;
       adminPort: number;
       healthPort: number;
-      blsPort: number;
+      appPort: number;
       peer: { id: string; port: number; evmAddress: string };
       keyId: string;
     }): ConnectorConfig => ({
@@ -168,7 +168,7 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
       adminApi: { enabled: true, port: opts.adminPort, host: '127.0.0.1' },
       localDelivery: {
         enabled: true,
-        handlerUrl: `http://127.0.0.1:${opts.blsPort}`,
+        handlerUrl: `http://127.0.0.1:${opts.appPort}`,
       },
       peers: [
         {
@@ -217,7 +217,7 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
       btpPort: peer2Btp,
       adminPort: peer2Admin,
       healthPort: peer2Health,
-      blsPort: bls2Port,
+      appPort: app2Port,
       peer: { id: 'peer1', port: peer1Btp, evmAddress: PEER_EVM_ADDRESSES[0]! },
       keyId: PEER_PRIVATE_KEYS[1]!,
     });
@@ -226,7 +226,7 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
       btpPort: peer1Btp,
       adminPort: peer1Admin,
       healthPort: peer1Health,
-      blsPort: bls1Port,
+      appPort: app1Port,
       peer: { id: 'peer2', port: peer2Btp, evmAddress: PEER_EVM_ADDRESSES[1]! },
       keyId: PEER_PRIVATE_KEYS[0]!,
     });
@@ -254,8 +254,8 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
   afterAll(async () => {
     await peer1?.stop().catch(() => undefined);
     await peer2?.stop().catch(() => undefined);
-    await bls1?.stop().catch(() => undefined);
-    await bls2?.stop().catch(() => undefined);
+    await app1?.stop().catch(() => undefined);
+    await app2?.stop().catch(() => undefined);
   });
 
   it('reports standalone deployment mode on both peers', () => {
@@ -294,7 +294,7 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
   });
 
   it('POST /admin/ilp/send with amount > 0 fulfills end-to-end', async () => {
-    const before = bls2.received.length;
+    const before = app2.received.length;
 
     const { status, body } = await adminPost<{ accepted: boolean; code?: string }>(
       peer1Admin,
@@ -308,14 +308,14 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
 
     expect(status).toBe(200);
     expect(body.accepted).toBe(true);
-    expect(bls2.received.length).toBe(before + 1);
-    // Peer1 deducts a 0.1% connector fee before forwarding to peer2, so BLS2
+    expect(app2.received.length).toBe(before + 1);
+    // Peer1 deducts a 0.1% connector fee before forwarding to peer2, so App2
     // sees amount = 1000 - floor(1000 * 10 / 10000) = 999.
-    expect(bls2.received[before]!.amount).toBe('999');
+    expect(app2.received[before]!.amount).toBe('999');
   });
 
   it('multiple non-zero packets succeed (per-packet claim service is live)', async () => {
-    const before = bls2.received.length;
+    const before = app2.received.length;
     for (let i = 0; i < 3; i++) {
       const { body } = await adminPost<{ accepted: boolean }>(peer1Admin, '/admin/ilp/send', {
         destination: 'test.peer2.receiver',
@@ -324,7 +324,7 @@ describeEvm('Standalone Mode Settlement E2E (real Anvil)', () => {
       });
       expect(body.accepted).toBe(true);
     }
-    expect(bls2.received.length).toBe(before + 3);
+    expect(app2.received.length).toBe(before + 3);
   });
 
   it('settlement threshold triggers successful on-chain claimFromChannel', async () => {

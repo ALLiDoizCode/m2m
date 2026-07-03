@@ -16,7 +16,7 @@ help:
 	@echo "  make test-unit            Run unit tests only"
 	@echo "  make standalone-test      Run standalone-mode E2E (smoke + settlement; requires anvil-up)"
 	@echo "  make standalone-test-docker Run container-based standalone E2E (builds image + docker compose)"
-	@echo "  make standalone-test-allowlist   Run Tier-3 admin-API allowlist E2E (BLS + connector in separate containers)"
+	@echo "  make standalone-test-allowlist   Run Tier-3 admin-API allowlist E2E (app + connector in separate containers)"
 	@echo "  make lint                 Run linter"
 	@echo ""
 	@echo "Local Blockchain (EVM):"
@@ -78,17 +78,17 @@ standalone-test:
 	EVM_INTEGRATION=true npm run test:standalone --workspace=packages/connector
 
 # Run container-based standalone E2E — builds the connector Docker image,
-# brings up the compose stack (2 connector containers + 2 BLS containers),
+# brings up the compose stack (2 connector containers + 2 app containers),
 # exercises the admin API + BTP + local delivery across container boundaries.
 # The test itself owns compose lifecycle; we only need docker available.
 standalone-test-docker:
 	docker compose --profile standalone-e2e build
 	STANDALONE_DOCKER=true npm run test:standalone-docker --workspace=packages/connector
 
-# Run Tier-3 admin-API allowlist E2E — BLS + connector in separate containers
-# on one compose bridge network. Admin port NOT published to host; BLS
+# Run Tier-3 admin-API allowlist E2E — app + connector in separate containers
+# on one compose bridge network. Admin port NOT published to host; app
 # reaches it via compose DNS; connector's `allowedIPs` accepts bridge subnet.
-# Zero-secret "local BLS" topology; cheap and deterministic.
+# Zero-secret "local app" topology; cheap and deterministic.
 standalone-test-allowlist:
 	docker compose --profile standalone-allowlist build
 	STANDALONE_DOCKER=true npm run test:standalone-allowlist --workspace=packages/connector
