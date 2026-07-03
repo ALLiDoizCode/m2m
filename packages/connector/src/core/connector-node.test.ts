@@ -1999,7 +1999,7 @@ describe('ConnectorNode', () => {
       it('should infer standalone when localDelivery.enabled=true and adminApi.enabled=true', () => {
         // Arrange
         const config = createTestConfig({
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: true, port: 8081 },
         });
         const node = new ConnectorNode(config, mockLogger);
@@ -2056,7 +2056,7 @@ describe('ConnectorNode', () => {
       it('should default to embedded for hybrid config (adminApi.enabled=false, localDelivery.enabled=true)', () => {
         // Arrange
         const config = createTestConfig({
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: false },
         });
         const node = new ConnectorNode(config, mockLogger);
@@ -2072,7 +2072,7 @@ describe('ConnectorNode', () => {
         // Arrange - explicit embedded but flags suggest standalone
         const config = createTestConfig({
           deploymentMode: 'embedded',
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: true, port: 8081 },
         });
         const node = new ConnectorNode(config, mockLogger);
@@ -2133,7 +2133,7 @@ describe('ConnectorNode', () => {
       it('should return true when mode is inferred as standalone', () => {
         // Arrange
         const config = createTestConfig({
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: true, port: 8081 },
         });
         const node = new ConnectorNode(config, mockLogger);

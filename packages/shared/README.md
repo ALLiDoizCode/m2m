@@ -95,7 +95,7 @@ All events share a `type` discriminator and are combined in the `TelemetryEvent`
 | `PACKET_FORWARDED`               | `PacketForwardedEvent`             | ILP packet forwarded to next hop                        |
 | `PACKET_FULFILLED`               | `PacketFulfilledEvent`             | ILP packet successfully fulfilled                       |
 | `PACKET_REJECTED`                | `PacketRejectedEvent`              | ILP packet rejected with error code                     |
-| `PER_HOP_NOTIFICATION`           | `PerHopNotificationEvent`          | Transit BLS notification dispatched at intermediate hop |
+| `PER_HOP_NOTIFICATION`           | `PerHopNotificationEvent`          | Transit app notification dispatched at intermediate hop |
 | `ACCOUNT_BALANCE`                | `AccountBalanceEvent`              | Account balance changed                                 |
 | `SETTLEMENT_TRIGGERED`           | `SettlementTriggeredEvent`         | Settlement threshold exceeded                           |
 | `SETTLEMENT_COMPLETED`           | `SettlementCompletedEvent`         | Settlement execution completed                          |
@@ -119,7 +119,7 @@ All events share a `type` discriminator and are combined in the `TelemetryEvent`
 
 ## What's New in 1.1.0
 
-- Added `PerHopNotificationEvent` telemetry type — emitted when a connector dispatches a fire-and-forget BLS notification at an intermediate hop
+- Added `PerHopNotificationEvent` telemetry type — emitted when a connector dispatches a fire-and-forget app notification at an intermediate hop
 - Added `PER_HOP_NOTIFICATION` to `TelemetryEventType` enum
 
 ## Monorepo
