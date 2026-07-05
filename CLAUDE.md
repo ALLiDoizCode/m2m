@@ -60,8 +60,11 @@ make solana-up     # Start Solana container only
 make mina-up       # Start Mina container only
 
 # Run tests against live containers
-npm run test:e2e
-npm run test:integration
+npm run test:integration --workspace=packages/connector
+npm run test:admin-surface --workspace=packages/connector
+npm run test:cross-surface --workspace=packages/connector
+npm run test:packet-flow --workspace=packages/connector
+npm run test:standalone-docker --workspace=packages/connector
 
 make infra-down    # Stop all containers
 ```
@@ -132,7 +135,8 @@ When the user asks about Interledger protocols or RFCs, **immediately activate**
 
 There is **no production or staging deploy target yet.** `.github/workflows/cd.yml`
 (`appleboy/ssh-action`) fails on every push to `main` with `missing server host`
-because the `DEPLOY_HOST` secret is intentionally unset. **This is expected, not a
-regression** — do not flag the failing CD run as quality drift or open issues for it
-until a real deploy target is configured. (On-chain contract deployment for
-Solana/Mina is unrelated — see "Chain-Specific Build & Deploy" above.)
+because the `STAGING_HOST` and `PRODUCTION_HOST` secrets are intentionally unset.
+**This is expected, not a regression** — do not flag the failing CD run as quality
+drift or open issues for it until a real deploy target is configured. (On-chain
+contract deployment for Solana/Mina is unrelated — see "Chain-Specific Build &
+Deploy" above.)
