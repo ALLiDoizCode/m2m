@@ -1,4 +1,4 @@
-# Contributing to connector
+# Contributing to Connector
 
 Thank you for your interest in contributing to the Multi-node Interledger Connector project! This document provides guidelines for contributing code, documentation, and bug reports.
 
@@ -68,7 +68,7 @@ After reading the documentation above:
    ```
 3. Add upstream remote:
    ```bash
-   git remote add upstream https://github.com/ALLiDoizCode/connector.git
+   git remote add upstream https://github.com/toon-protocol/connector.git
    ```
 4. Install dependencies:
    ```bash
@@ -459,7 +459,7 @@ Past failures and their resolutions are documented in `docs/qa/`:
 
 If you discover a bug or systematic issue:
 
-1. **Check Existing Issues**: Search [GitHub Issues](https://github.com/ALLiDoizCode/connector/issues) for similar reports
+1. **Check Existing Issues**: Search [GitHub Issues](https://github.com/toon-protocol/connector/issues) for similar reports
 2. **Provide Context**:
    - Clear description of the problem
    - Steps to reproduce
@@ -472,7 +472,7 @@ If you discover a bug or systematic issue:
 ### Getting Help
 
 - **Documentation**: Start with [Developer Documentation Index](docs/development/README.md)
-- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/ALLiDoizCode/connector/discussions)
+- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/toon-protocol/connector/discussions)
 - **CI Failures**: Use [CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)
 - **Epic Branch Issues**: See [Epic Branch Workflow](docs/development/developer-guide.md#epic-branch-workflow)
 
@@ -513,4 +513,4 @@ See `docs/architecture/coding-standards.md` for complete standards. Key rules:
 
 ---
 
-Thank you for contributing to connector! Your efforts help make Interledger education and testing better for everyone.
+Thank you for contributing to Connector! Your efforts help make Interledger education and testing better for everyone.
