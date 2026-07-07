@@ -1,4 +1,4 @@
-# Contributing to M2M
+# Contributing to connector
 
 Thank you for your interest in contributing to the Multi-node Interledger Connector project! This document provides guidelines for contributing code, documentation, and bug reports.
 
@@ -48,7 +48,7 @@ After reading the documentation above:
 
 ### Prerequisites
 
-- **Node.js** 20.11.0 or higher (LTS)
+- **Node.js** >= 22.11.0
 - **npm** 10.x or higher
 - **Git** 2.x
 - **Docker**:
@@ -63,12 +63,12 @@ After reading the documentation above:
 1. Fork the repository on GitHub
 2. Clone your fork locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/m2m.git
-   cd m2m
+   git clone https://github.com/YOUR_USERNAME/connector.git
+   cd connector
    ```
 3. Add upstream remote:
    ```bash
-   git remote add upstream https://github.com/ORIGINAL_OWNER/m2m.git
+   git remote add upstream https://github.com/ALLiDoizCode/connector.git
    ```
 4. Install dependencies:
    ```bash
@@ -459,7 +459,7 @@ Past failures and their resolutions are documented in `docs/qa/`:
 
 If you discover a bug or systematic issue:
 
-1. **Check Existing Issues**: Search [GitHub Issues](https://github.com/USERNAME/m2m/issues) for similar reports
+1. **Check Existing Issues**: Search [GitHub Issues](https://github.com/ALLiDoizCode/connector/issues) for similar reports
 2. **Provide Context**:
    - Clear description of the problem
    - Steps to reproduce
@@ -472,7 +472,7 @@ If you discover a bug or systematic issue:
 ### Getting Help
 
 - **Documentation**: Start with [Developer Documentation Index](docs/development/README.md)
-- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/USERNAME/m2m/discussions)
+- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/ALLiDoizCode/connector/discussions)
 - **CI Failures**: Use [CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)
 - **Epic Branch Issues**: See [Epic Branch Workflow](docs/development/developer-guide.md#epic-branch-workflow)
 
@@ -513,4 +513,4 @@ See `docs/architecture/coding-standards.md` for complete standards. Key rules:
 
 ---
 
-Thank you for contributing to M2M! Your efforts help make Interledger education and testing better for everyone.
+Thank you for contributing to connector! Your efforts help make Interledger education and testing better for everyone.
