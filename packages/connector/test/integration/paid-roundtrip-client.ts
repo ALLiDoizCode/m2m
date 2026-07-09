@@ -373,14 +373,17 @@ export function parseHttpResponseBody(data: Buffer): Record<string, unknown> | n
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// WS read verification (relay#24: EVENT[2] is a TOON-encoded STRING)
+// WS read verification (accepts both NIP-01 JSON-object and relay#24
+// TOON-encoded string EVENT payloads)
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
  * Open the relay free-read WS, REQ kind:1, read until EOSE, and assert that some
- * `["EVENT","<subId>",<toonString>]` frame's <toonString> substring-contains
- * `id: <eventId>`. relay#24 emits the EVENT payload as a TOON-encoded STRING — do
- * NOT JSON.parse it; substring-match the raw string.
+ * `["EVENT","<subId>",<payload>]` frame matches `eventId`. The deployed relay
+ * emits a standard NIP-01 JSON object (`payload.id === eventId`); relay#24
+ * additionally proposes a TOON-encoded STRING payload, substring-matched by
+ * `id: <eventId>`. Accept either form so the probe doesn't false-negative on
+ * whichever encoding the relay under test happens to emit.
  *
  * Resolves true if found before EOSE (or a final fallback timeout), else false.
  */
@@ -421,9 +424,15 @@ export function verifyEventStoredViaWs(
       if (!Array.isArray(frame)) return;
       const [kind, sub, payload] = frame as [string, string, unknown];
       if (sub !== subId) return;
-      if (kind === 'EVENT' && typeof payload === 'string') {
-        // relay#24: payload is a TOON-encoded STRING, substring-match by id.
-        if (payload.includes(`id: ${eventId}`)) {
+      if (kind === 'EVENT') {
+        // NIP-01 JSON-object payload (current relay), or relay#24's proposed
+        // TOON-encoded string payload — accept either encoding.
+        const hit =
+          (typeof payload === 'string' && payload.includes(`id: ${eventId}`)) ||
+          (typeof payload === 'object' &&
+            payload !== null &&
+            (payload as { id?: unknown }).id === eventId);
+        if (hit) {
           finish(true);
         }
       } else if (kind === 'EOSE') {
