@@ -662,7 +662,7 @@ export interface ConnectorConfig {
  *   announceTo: g.proxy.relay           # ILP route to publish the write THROUGH
  *   refreshIntervalSecs: 300            # republish every 5m; TTL = 2x = 10m
  *   btpEndpoint: wss://proxy.devnet.toonprotocol.dev:443
- *   relayUrl: wss://relay.devnet.toonprotocol.dev
+ *   relayUrl: wss://relay-ws.devnet.toonprotocol.dev
  * ```
  */
 export interface SelfAnnounceConfig {
@@ -723,7 +723,7 @@ export interface SelfAnnounceConfig {
 
   /**
    * Public Nostr relay read WS URL to advertise for FREE reads (e.g.
-   * `wss://relay.devnet.toonprotocol.dev`). Lets a client discover where to
+   * `wss://relay-ws.devnet.toonprotocol.dev`). Lets a client discover where to
    * subscribe without out-of-band config. Optional.
    */
   relayUrl?: string;

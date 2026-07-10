@@ -39,7 +39,7 @@ describe('ConfigLoader — selfAnnounce passthrough', () => {
         announcePrice: '1000',
         refreshIntervalSecs: 300,
         btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
-        relayUrl: 'wss://relay.devnet.toonprotocol.dev',
+        relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
       },
     };
     const config: ConnectorConfig = ConfigLoader.validateConfig(raw);
@@ -49,7 +49,7 @@ describe('ConfigLoader — selfAnnounce passthrough', () => {
       announcePrice: '1000',
       refreshIntervalSecs: 300,
       btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
-      relayUrl: 'wss://relay.devnet.toonprotocol.dev',
+      relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
     });
   });
 

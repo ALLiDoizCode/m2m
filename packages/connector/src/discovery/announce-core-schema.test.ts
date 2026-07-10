@@ -222,7 +222,7 @@ const selfAnnounce: SelfAnnounceConfig = {
   announceTo: 'g.proxy.relay',
   btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
   httpEndpoint: 'https://proxy.devnet.toonprotocol.dev/ilp',
-  relayUrl: 'wss://relay.devnet.toonprotocol.dev',
+  relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
 };
 
 function buildSignedAnnounce(config: ConnectorConfig) {
