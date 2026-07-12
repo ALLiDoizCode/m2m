@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.28.6](https://github.com/toon-protocol/connector/compare/v3.28.5...v3.28.6) (2026-07-12)
+
+### Bug Fixes
+
+- **cli:** unbreak npm publish — pin inquirer to CJS v8 (ERR_REQUIRE_ESM in publish gate) ([8d3c3f9](https://github.com/toon-protocol/connector/commit/8d3c3f944f471204e8a311cd0e7209787f1e54d0)), closes [toon-protocol/toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145) [#310](https://github.com/toon-protocol/connector/issues/310)
+
 ## [3.28.5](https://github.com/toon-protocol/connector/compare/v3.28.4...v3.28.5) (2026-07-02)
 
 ### Bug Fixes
