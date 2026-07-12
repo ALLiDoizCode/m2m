@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.29.1](https://github.com/toon-protocol/connector/compare/v3.29.0...v3.29.1) (2026-07-12)
+
+### Bug Fixes
+
+- **docker:** stop running node under QEMU in multi-arch builds (arm64 SIGILL) ([d99dc6f](https://github.com/toon-protocol/connector/commit/d99dc6f18193b7cc7bad88ec4890c62c22d07f1c)), closes [npm/cli#4828](https://github.com/npm/cli/issues/4828)
+
 ## [3.29.0](https://github.com/toon-protocol/connector/compare/v3.28.6...v3.29.0) (2026-07-12)
 
 ### Features
