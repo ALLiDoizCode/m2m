@@ -13,6 +13,7 @@ import {
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
+  validateFulfillment,
 } from './payment-handler';
 
 const createMockLogger = (): jest.Mocked<Logger> =>
@@ -129,6 +130,35 @@ describe('validateResponseData', () => {
   });
 });
 
+describe('validateFulfillment (issue #309)', () => {
+  let logger: jest.Mocked<Logger>;
+
+  beforeEach(() => {
+    logger = createMockLogger();
+  });
+
+  it('should pass through a valid 32-byte base64 preimage', () => {
+    const preimage = Buffer.alloc(32, 0x42).toString('base64');
+    expect(validateFulfillment(preimage, logger)).toBe(preimage);
+  });
+
+  it('should return undefined for absent values', () => {
+    expect(validateFulfillment(undefined, logger)).toBeUndefined();
+    expect(validateFulfillment('', logger)).toBeUndefined();
+  });
+
+  it('should reject non-base64 input', () => {
+    expect(validateFulfillment('!!!not-base64!!!', logger)).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('should reject preimages that are not exactly 32 bytes', () => {
+    expect(validateFulfillment(Buffer.alloc(31, 1).toString('base64'), logger)).toBeUndefined();
+    expect(validateFulfillment(Buffer.alloc(33, 1).toString('base64'), logger)).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
 describe('createPaymentHandlerAdapter', () => {
   let logger: jest.Mocked<Logger>;
   let handler: jest.MockedFunction<PaymentHandler>;
@@ -209,6 +239,67 @@ describe('createPaymentHandlerAdapter', () => {
       const result = await adapter(packet, 'peerA');
 
       expect(result.fulfill!.data).toBe(responseData);
+    });
+  });
+
+  describe('sender-chosen execution conditions (issue #309)', () => {
+    const preimageB64 = Buffer.alloc(32, 0x42).toString('base64');
+    const conditionB64 = Buffer.alloc(32, 0xab).toString('base64');
+
+    it('should pass executionCondition through to the PaymentRequest', async () => {
+      let capturedRequest: PaymentRequest | undefined;
+      handler.mockImplementation(async (req) => {
+        capturedRequest = req;
+        return { accept: true, fulfillment: preimageB64 };
+      });
+
+      const adapter = createPaymentHandlerAdapter(handler, logger);
+      await adapter(createTestPacket({ executionCondition: conditionB64 }), 'peerA');
+
+      expect(capturedRequest!.executionCondition).toBe(conditionB64);
+    });
+
+    it('should not set executionCondition on the PaymentRequest when absent (legacy)', async () => {
+      let capturedRequest: PaymentRequest | undefined;
+      handler.mockImplementation(async (req) => {
+        capturedRequest = req;
+        return { accept: true };
+      });
+
+      const adapter = createPaymentHandlerAdapter(handler, logger);
+      await adapter(createTestPacket(), 'peerA');
+
+      expect(capturedRequest!.executionCondition).toBeUndefined();
+    });
+
+    it('should pass a valid 32-byte fulfillment through on accept', async () => {
+      handler.mockResolvedValue({ accept: true, fulfillment: preimageB64 });
+
+      const adapter = createPaymentHandlerAdapter(handler, logger);
+      const result = await adapter(createTestPacket({ executionCondition: conditionB64 }), 'peerA');
+
+      expect(result.fulfill!.fulfillment).toBe(preimageB64);
+    });
+
+    it('should omit a non-32-byte fulfillment (treated as withheld)', async () => {
+      handler.mockResolvedValue({
+        accept: true,
+        fulfillment: Buffer.from('short').toString('base64'),
+      });
+
+      const adapter = createPaymentHandlerAdapter(handler, logger);
+      const result = await adapter(createTestPacket({ executionCondition: conditionB64 }), 'peerA');
+
+      expect(result.fulfill!.fulfillment).toBeUndefined();
+    });
+
+    it('should omit a non-base64 fulfillment (treated as withheld)', async () => {
+      handler.mockResolvedValue({ accept: true, fulfillment: '!!!not-base64!!!' });
+
+      const adapter = createPaymentHandlerAdapter(handler, logger);
+      const result = await adapter(createTestPacket({ executionCondition: conditionB64 }), 'peerA');
+
+      expect(result.fulfill!.fulfillment).toBeUndefined();
     });
   });
 

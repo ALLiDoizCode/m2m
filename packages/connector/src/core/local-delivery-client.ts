@@ -102,6 +102,15 @@ export class LocalDeliveryClient {
     const url = `${this.config.handlerUrl}/handle-packet`;
     const paymentId = generatePaymentId();
 
+    // Sender-chosen execution condition (issue #309): forwarded to the app iff
+    // the PREPARE carries a non-zero condition. The app must answer an accept
+    // with the matching preimage in PaymentResponse.fulfillment; the
+    // PacketHandler enforces sha256(fulfillment) == condition on the way back.
+    const executionCondition =
+      packet.executionCondition && !Buffer.from(packet.executionCondition).every((b) => b === 0)
+        ? Buffer.from(packet.executionCondition).toString('base64')
+        : undefined;
+
     const request: PaymentRequest = {
       paymentId,
       destination: packet.destination,
@@ -109,6 +118,7 @@ export class LocalDeliveryClient {
       expiresAt: packet.expiresAt.toISOString(),
       data: packet.data.length > 0 ? packet.data.toString('base64') : undefined,
       isTransit: options?.isTransit,
+      executionCondition,
     };
 
     this.logger.debug(
@@ -188,6 +198,9 @@ export class LocalDeliveryClient {
 
         return {
           type: PacketType.FULFILL,
+          // App-supplied FULFILL preimage (issue #309) — required when the
+          // request carried executionCondition; verified by the PacketHandler.
+          fulfillment: this.decodeFulfillment(result.fulfillment, paymentId),
           data: validatedData ? Buffer.from(validatedData, 'base64') : Buffer.alloc(0),
         };
       } else {
@@ -233,6 +246,30 @@ export class LocalDeliveryClient {
         data: Buffer.alloc(0),
       };
     }
+  }
+
+  /**
+   * Decode an app-supplied base64 fulfillment preimage (issue #309).
+   * Returns the 32-byte preimage, or undefined when absent/malformed —
+   * a malformed preimage is treated as withheld (the PacketHandler then
+   * rejects with F99 when a sender-chosen condition required it).
+   */
+  private decodeFulfillment(
+    fulfillment: string | undefined,
+    paymentId: string
+  ): Uint8Array | undefined {
+    if (!fulfillment) {
+      return undefined;
+    }
+    const decoded = Buffer.from(fulfillment, 'base64');
+    if (decoded.length !== 32) {
+      this.logger.warn(
+        { paymentId, decodedLength: decoded.length },
+        'App-supplied fulfillment is not 32 bytes after base64 decode; treating as withheld'
+      );
+      return undefined;
+    }
+    return new Uint8Array(decoded);
   }
 
   /**

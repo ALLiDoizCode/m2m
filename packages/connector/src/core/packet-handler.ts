@@ -799,6 +799,94 @@ export class PacketHandler {
   }
 
   /**
+   * Extract the sender-chosen execution condition from a PREPARE (issue #309).
+   *
+   * Returns the condition bytes when the packet carries a NON-ZERO
+   * `executionCondition` — i.e. an end-to-end condition minted by the original
+   * sender (e.g. a rolling-swap fill packet, toon-meta#145 §3 R1/R2). Returns
+   * `null` for an absent or all-zero condition, which is the legacy path:
+   * zero conditions are skipped by verification everywhere today and MUST keep
+   * behaving that way for backward compatibility.
+   */
+  private senderConditionOf(packet: ILPPreparePacket): Uint8Array | null {
+    const condition = packet.executionCondition;
+    if (!condition || Buffer.from(condition).every((b) => b === 0)) {
+      return null;
+    }
+    return new Uint8Array(condition);
+  }
+
+  /**
+   * Enforce `sha256(fulfillment) === executionCondition` on a local-delivery
+   * FULFILL for a sender-chosen condition (issue #309; toon-meta#145 §3 R6).
+   *
+   * The preimage MUST have been supplied by the terminating application — the
+   * caller must NOT have injected the NIP-59/HKDF-derived preimage on this
+   * path (it could never satisfy a sender-minted condition and would turn
+   * every coupled packet into an F99). A missing or mismatching preimage
+   * converts the FULFILL into an F99 REJECT so no value movement is recorded.
+   */
+  private verifyLocalFulfillment(
+    fulfill: ILPFulfillPacket,
+    senderCondition: Uint8Array,
+    correlationId: string
+  ): ILPFulfillPacket | ILPRejectPacket {
+    const fulfillmentBytes = fulfill.fulfillment;
+    if (!fulfillmentBytes || fulfillmentBytes.length !== 32) {
+      this.logger.error(
+        {
+          correlationId,
+          event: 'local_fulfillment_missing',
+          hasFulfillment: !!fulfillmentBytes,
+        },
+        'Local delivery FULFILL missing app-supplied fulfillment for sender-chosen execution condition'
+      );
+      return this.generateReject(
+        ILPErrorCode.F99_APPLICATION_ERROR,
+        'Fulfillment does not match execution condition',
+        this.nodeId
+      );
+    }
+    const expectedCondition = sha256(new Uint8Array(fulfillmentBytes));
+    if (!Buffer.from(expectedCondition).equals(Buffer.from(senderCondition))) {
+      this.logger.error(
+        {
+          correlationId,
+          event: 'local_fulfillment_verification_failed',
+        },
+        'Local delivery fulfillment does not match sender-chosen execution condition'
+      );
+      return this.generateReject(
+        ILPErrorCode.F99_APPLICATION_ERROR,
+        'Fulfillment does not match execution condition',
+        this.nodeId
+      );
+    }
+    return fulfill;
+  }
+
+  /**
+   * Decode an app-supplied base64 fulfillment preimage (issue #309).
+   * Returns the 32-byte preimage, or undefined when absent/malformed —
+   * a malformed preimage is treated as withheld and surfaces as F99
+   * downstream when a sender-chosen condition required it.
+   */
+  private decodeAppFulfillment(fulfillment: string | undefined): Uint8Array | undefined {
+    if (!fulfillment) {
+      return undefined;
+    }
+    const decoded = Buffer.from(fulfillment, 'base64');
+    if (decoded.length !== 32) {
+      this.logger.warn(
+        { event: 'local_fulfillment_malformed', decodedLength: decoded.length },
+        'App-supplied fulfillment is not 32 bytes after base64 decode; treating as withheld'
+      );
+      return undefined;
+    }
+    return new Uint8Array(decoded);
+  }
+
+  /**
    * Convert LocalDeliveryResponse to ILP packet.
    * Handles fulfill, reject, and invalid (neither) cases.
    */
@@ -808,6 +896,7 @@ export class PacketHandler {
     if (result.fulfill) {
       return {
         type: PacketType.FULFILL,
+        fulfillment: this.decodeAppFulfillment(result.fulfill.fulfillment),
         data: result.fulfill.data ? Buffer.from(result.fulfill.data, 'base64') : Buffer.alloc(0),
       };
     } else if (result.reject) {
@@ -1177,6 +1266,13 @@ export class PacketHandler {
       // Derive preimage from incoming NIP-59 wrapped claim (if present)
       const preimage = this._derivePreimageFromProtocolData(incomingProtocolData);
 
+      // Sender-chosen execution condition (issue #309): when the terminating
+      // PREPARE carries a non-zero condition, the fulfillment preimage MUST
+      // come from the terminating application — the NIP-59/HKDF-derived
+      // preimage is recipient authentication for the zero-condition path and
+      // could never satisfy a sender-minted condition (toon-meta#145 §3 R6).
+      const senderCondition = this.senderConditionOf(packet);
+
       // Check for function handler first (in-process delivery, no HTTP)
       if (this.localDeliveryHandler) {
         const request: LocalDeliveryRequest = {
@@ -1186,13 +1282,26 @@ export class PacketHandler {
           expiresAt: packet.expiresAt.toISOString(),
           data: packet.data.toString('base64'),
           sourcePeer: sourcePeerId,
+          executionCondition: senderCondition
+            ? Buffer.from(senderCondition).toString('base64')
+            : undefined,
         };
         let localResponse: ILPFulfillPacket | ILPRejectPacket;
         try {
           const result = await this.localDeliveryHandler(request, sourcePeerId);
           localResponse = this.convertLocalDeliveryResponse(result);
-          if (localResponse.type === PacketType.FULFILL && preimage) {
-            (localResponse as ILPFulfillPacket).fulfillment = preimage;
+          if (localResponse.type === PacketType.FULFILL) {
+            if (senderCondition) {
+              // App-supplied preimage only; enforce sha256(fulfillment) == condition.
+              localResponse = this.verifyLocalFulfillment(
+                localResponse as ILPFulfillPacket,
+                senderCondition,
+                correlationId
+              );
+            } else if (preimage) {
+              // Legacy zero-condition path: NIP-59 receiver-side injection.
+              (localResponse as ILPFulfillPacket).fulfillment = preimage;
+            }
           }
         } catch (error) {
           localResponse = this.generateReject(
@@ -1214,11 +1323,22 @@ export class PacketHandler {
           'Forwarding to app handler for local delivery'
         );
 
-        const response = await this.localDeliveryClient.deliver(packet, sourcePeerId);
+        let response = await this.localDeliveryClient.deliver(packet, sourcePeerId);
 
-        // Inject preimage into FULFILL (app handler doesn't have NIP-59 keys)
-        if (response.type === PacketType.FULFILL && preimage) {
-          (response as ILPFulfillPacket).fulfillment = preimage;
+        if (response.type === PacketType.FULFILL) {
+          if (senderCondition) {
+            // Sender-chosen condition (issue #309): the app must have supplied
+            // the preimage in PaymentResponse.fulfillment; verify, F99 on mismatch.
+            response = this.verifyLocalFulfillment(
+              response as ILPFulfillPacket,
+              senderCondition,
+              correlationId
+            );
+          } else if (preimage) {
+            // Legacy zero-condition path: inject NIP-59-derived preimage
+            // (app handler doesn't have NIP-59 keys)
+            (response as ILPFulfillPacket).fulfillment = preimage;
+          }
         }
 
         this.logger.info(
@@ -1238,6 +1358,26 @@ export class PacketHandler {
           this.ilpMetrics?.recordLocalDeliver(sourcePeerId);
         }
         return response;
+      }
+
+      // Sender-chosen condition with no app handler registered (issue #309):
+      // the auto-fulfill stub cannot mint the preimage, and fabricating one is
+      // impossible by construction — reject instead of emitting a FULFILL that
+      // upstream verification would convert to F99 anyway.
+      if (senderCondition) {
+        this.logger.error(
+          {
+            correlationId,
+            event: 'local_delivery_no_handler_for_condition',
+            destination: packet.destination,
+          },
+          'PREPARE carries sender-chosen execution condition but no local delivery handler is registered'
+        );
+        return this.generateReject(
+          ILPErrorCode.F99_APPLICATION_ERROR,
+          'No local delivery handler available to satisfy execution condition',
+          this.nodeId
+        );
       }
 
       // Fallback: auto-fulfill local packets (educational/testing purposes)
