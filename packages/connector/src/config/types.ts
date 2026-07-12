@@ -1786,6 +1786,24 @@ export interface SendPacketParams {
   expiresAt: Date;
   /** Optional application data payload */
   data?: Buffer;
+  /**
+   * Optional sender-chosen SHA-256 execution condition (egress symmetry for
+   * issue #309/PR #310; toon-meta#145 §3 R4 — e.g. a rolling-swap leg-B
+   * PREPARE carrying leg A's condition). Accepts raw bytes (`Uint8Array`) or
+   * a base64-encoded string; MUST decode to exactly 32 bytes and MUST NOT be
+   * all-zero (all-zero is the wire encoding for "no condition" and would be
+   * replaced by the connector-derived condition — omit the field instead).
+   * Invalid values throw `InvalidExecutionConditionError` before any packet
+   * is sent.
+   *
+   * When present, the condition rides the outgoing PREPARE verbatim — the
+   * claim/NIP-59 derivation path only sets its own condition when none exists
+   * (PR #310's rule) — and the resolved FULFILL's `fulfillment` preimage is
+   * returned on the ILPFulfillPacket result so the caller can verify
+   * `sha256(fulfillment) === executionCondition`. When absent, behavior is
+   * unchanged (zero/derived condition per existing semantics).
+   */
+  executionCondition?: Uint8Array | string;
 }
 
 /** Re-export AdminSettlementConfig for use in PeerRegistrationRequest */

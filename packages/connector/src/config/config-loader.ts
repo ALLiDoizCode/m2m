@@ -63,6 +63,19 @@ export class ConnectorNotStartedError extends Error {
 }
 
 /**
+ * Error thrown when `SendPacketParams.executionCondition` is malformed:
+ * not valid base64, not exactly 32 bytes after decode, or all-zero
+ * (all-zero is the wire encoding for "no condition" — omit the field instead).
+ * Thrown synchronously by `ConnectorNode.sendPacket()` before any packet is sent.
+ */
+export class InvalidExecutionConditionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidExecutionConditionError';
+  }
+}
+
+/**
  * Configuration Loader Class
  *
  * Static class providing methods to load and validate connector
