@@ -57,6 +57,7 @@ import {
   ConfigLoader,
   ConfigurationError,
   ConnectorNotStartedError,
+  InvalidExecutionConditionError,
 } from '../config/config-loader';
 import { HealthServer } from '../http/health-server';
 import { IlpHttpAdapter, type InboundClaimValidateFn } from '../http/ilp-http-adapter';
@@ -586,14 +587,25 @@ export class ConnectorNode implements HealthStatusProvider {
    * Send an ILP Prepare packet through the connector's routing logic.
    * Routes through PacketHandler using RoutingTable longest-prefix matching.
    *
+   * When `params.executionCondition` is provided (sender-chosen condition,
+   * issue #309/PR #310 egress symmetry; toon-meta#145 §3 R4), it rides the
+   * outgoing PREPARE verbatim — the claim/NIP-59 path never overwrites an
+   * existing condition — and the resolved FULFILL carries the terminating
+   * application's `fulfillment` preimage so the caller can verify
+   * `sha256(fulfillment) === executionCondition`.
+   *
    * @param params - Packet parameters (destination, amount, condition, expiry, data)
    * @returns ILP Fulfill or Reject packet
    * @throws ConnectorNotStartedError if connector has not been started
+   * @throws InvalidExecutionConditionError if `executionCondition` is malformed
+   *   (not base64 / not exactly 32 bytes / all-zero)
    */
   async sendPacket(params: SendPacketParams): Promise<ILPFulfillPacket | ILPRejectPacket> {
     if (!this._btpServerStarted) {
       throw new ConnectorNotStartedError();
     }
+
+    const executionCondition = this._decodeExecutionCondition(params.executionCondition);
 
     const packet: ILPPreparePacket = {
       type: PacketType.PREPARE,
@@ -601,6 +613,7 @@ export class ConnectorNode implements HealthStatusProvider {
       amount: params.amount,
       expiresAt: params.expiresAt,
       data: params.data ?? Buffer.alloc(0),
+      ...(executionCondition ? { executionCondition } : {}),
     };
 
     this._logger.info(
@@ -609,6 +622,7 @@ export class ConnectorNode implements HealthStatusProvider {
         destination: params.destination,
         amount: params.amount.toString(),
         expiresAt: params.expiresAt.toISOString(),
+        hasExecutionCondition: !!executionCondition,
       },
       'Sending packet via public API'
     );
@@ -632,6 +646,54 @@ export class ConnectorNode implements HealthStatusProvider {
         data: Buffer.alloc(0),
       } as ILPRejectPacket;
     }
+  }
+
+  /**
+   * Decode and validate a caller-supplied execution condition for
+   * {@link sendPacket} (issue #309/PR #310 egress symmetry).
+   *
+   * Accepts raw bytes or a base64 string; returns `undefined` when absent.
+   * Enforces exactly 32 bytes after decode and rejects an all-zero condition:
+   * all-zero is the wire encoding for "no condition" (the OER codec drops it
+   * on decode and the claim path would replace it with a derived condition),
+   * so it can never ride verbatim — callers wanting legacy behavior must omit
+   * the field instead.
+   *
+   * @throws InvalidExecutionConditionError on malformed input
+   */
+  private _decodeExecutionCondition(
+    condition: Uint8Array | string | undefined
+  ): Uint8Array | undefined {
+    if (condition === undefined) {
+      return undefined;
+    }
+
+    let bytes: Uint8Array;
+    if (typeof condition === 'string') {
+      const decoded = Buffer.from(condition, 'base64');
+      // Round-trip check: Buffer.from(..., 'base64') silently tolerates
+      // invalid input; mirror the admin API's strict base64 validation.
+      if (decoded.toString('base64') !== condition) {
+        throw new InvalidExecutionConditionError('executionCondition must be valid base64');
+      }
+      bytes = new Uint8Array(decoded);
+    } else {
+      bytes = new Uint8Array(condition);
+    }
+
+    if (bytes.length !== 32) {
+      throw new InvalidExecutionConditionError(
+        `executionCondition must be exactly 32 bytes, got ${bytes.length}`
+      );
+    }
+    if (bytes.every((b) => b === 0)) {
+      throw new InvalidExecutionConditionError(
+        'executionCondition must not be all-zero (all-zero means "no condition" on the wire); ' +
+          'omit the field for unconditional packets'
+      );
+    }
+
+    return bytes;
   }
 
   /**

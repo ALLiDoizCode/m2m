@@ -132,6 +132,24 @@ describe('consumer-types compilation test', () => {
       expect(params.amount).toBe(1000n);
     });
 
+    it('should type-check SendPacketParams.executionCondition as Uint8Array or base64 string', () => {
+      const withBytes: SendPacketParams = {
+        destination: 'g.test.receiver',
+        amount: 1000n,
+        expiresAt: new Date(),
+        executionCondition: new Uint8Array(32).fill(1),
+      };
+      const withBase64: SendPacketParams = {
+        destination: 'g.test.receiver',
+        amount: 1000n,
+        expiresAt: new Date(),
+        executionCondition: Buffer.alloc(32, 1).toString('base64'),
+      };
+
+      expect(withBytes.executionCondition).toBeInstanceOf(Uint8Array);
+      expect(typeof withBase64.executionCondition).toBe('string');
+    });
+
     it('should type-check LocalDeliveryConfig', () => {
       const localDelivery: LocalDeliveryConfig = {
         enabled: true,

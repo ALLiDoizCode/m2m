@@ -70,12 +70,28 @@ own condition when the packet doesn't already carry a non-zero one
 against whatever condition was forwarded. Regression-tested in
 `packet-handler.test.ts` ("Condition/Fulfillment Verification").
 
+## Egress (sender role) — public `sendPacket` API
+
+The sender-side mirror of this contract: `ConnectorNode.sendPacket()` (and the
+`POST /admin/ilp/send` `condition` field) accepts an optional
+`executionCondition` — `Uint8Array` or base64 string, exactly 32 bytes, non-zero
+(all-zero is the wire encoding for the legacy class; omit the field instead;
+malformed values throw `InvalidExecutionConditionError` / return HTTP 400 before
+any packet is sent). The condition rides the outgoing PREPARE verbatim (the
+claim-generation block never overwrites an existing condition, spec R3/R4), and
+the resolved FULFILL carries the terminating application's preimage on
+`ILPFulfillPacket.fulfillment` (`fulfillment` base64 field on the admin API
+response) so the sender can verify `sha256(fulfillment) === executionCondition`.
+This is how a rolling-swap engine sends leg-B PREPAREs carrying leg A's `C_i`
+(toon-meta#145 §3 R4) without reaching into `handlePreparePacket`. When omitted,
+egress behavior is byte-for-byte the legacy class.
+
 ## Sequence (rolling-swap maker, leg A termination)
 
 ```
 sender ── PREPARE(amount δ, condition C_i) ──▶ apex ── forward (C_i unchanged) ──▶ maker connector
 maker connector ── LocalDeliveryRequest{..., executionCondition: b64(C_i)} ──▶ swap handler
-swap handler: sends leg-B PREPARE (same C_i), learns P_i from leg-B FULFILL
+swap handler: sends leg-B PREPARE via sendPacket({executionCondition: C_i}), learns P_i from leg-B FULFILL
 swap handler ── {fulfill: {fulfillment: b64(P_i)}} ──▶ maker connector
 maker connector: sha256(P_i) == C_i ? FULFILL(P_i) upstream : F99, nothing delivered
 ```
