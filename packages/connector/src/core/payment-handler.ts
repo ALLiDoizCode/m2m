@@ -143,6 +143,43 @@ export function validateResponseData(data: string | undefined, logger: Logger): 
   }
 }
 
+/**
+ * Validate an app-supplied FULFILL preimage (issue #309).
+ * Returns the base64 string unchanged when it round-trips and decodes to
+ * exactly 32 bytes. Returns undefined (with warning log) otherwise —
+ * a malformed preimage is treated as withheld, which surfaces as an F99
+ * reject when the request carried a sender-chosen execution condition.
+ *
+ * @param fulfillment - Base64-encoded 32-byte preimage
+ * @param logger - Logger for warnings
+ * @returns Validated fulfillment or undefined
+ */
+export function validateFulfillment(
+  fulfillment: string | undefined,
+  logger: Logger
+): string | undefined {
+  if (!fulfillment) return undefined;
+
+  try {
+    const decoded = Buffer.from(fulfillment, 'base64');
+    if (decoded.toString('base64') !== fulfillment) {
+      logger.warn('Fulfillment is not valid base64, treating as withheld');
+      return undefined;
+    }
+    if (decoded.length !== 32) {
+      logger.warn(
+        { decodedLength: decoded.length },
+        'Fulfillment does not decode to exactly 32 bytes, treating as withheld'
+      );
+      return undefined;
+    }
+    return fulfillment;
+  } catch {
+    logger.warn('Fulfillment failed base64 decode, treating as withheld');
+    return undefined;
+  }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Adapter Factory
 // ────────────────────────────────────────────────────────────────────────────
@@ -187,6 +224,10 @@ export function createPaymentHandlerAdapter(
       expiresAt: packet.expiresAt,
       data: packet.data || undefined,
       isTransit: packet.isTransit,
+      // Sender-chosen execution condition (issue #309): present iff the
+      // terminating PREPARE carried a non-zero condition. The handler MUST
+      // answer an accept with the matching preimage in `fulfillment`.
+      executionCondition: packet.executionCondition,
     };
 
     // 3. Call user handler
@@ -211,6 +252,10 @@ export function createPaymentHandlerAdapter(
       return {
         fulfill: {
           data: validateResponseData(response.data, logger),
+          // App-supplied FULFILL preimage (issue #309) — required when the
+          // request carried executionCondition; the PacketHandler enforces
+          // sha256(fulfillment) == executionCondition (F99 on mismatch).
+          fulfillment: validateFulfillment(response.fulfillment, logger),
         },
       };
     } else {

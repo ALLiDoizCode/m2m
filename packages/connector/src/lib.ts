@@ -27,6 +27,7 @@ import {
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
+  validateFulfillment,
 } from './core/payment-handler';
 import { IlpSendHandler, validateIlpSendRequest } from './http/ilp-send-handler';
 
@@ -56,6 +57,7 @@ export {
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
+  validateFulfillment,
   // ILP send handler
   IlpSendHandler,
   validateIlpSendRequest,

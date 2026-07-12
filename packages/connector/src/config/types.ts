@@ -1711,6 +1711,23 @@ export interface LocalDeliveryRequest {
   sourcePeer: string;
   /** Whether this is a transit notification (fire-and-forget) at an intermediate hop */
   isTransit?: boolean;
+  /**
+   * Sender-chosen ILP execution condition (base64-encoded, 32 bytes) — issue #309.
+   *
+   * Present iff the terminating PREPARE carried a NON-ZERO `executionCondition`
+   * (a condition minted end-to-end by the original sender, e.g. a rolling-swap
+   * fill packet per toon-meta#145 §3). When present, the terminating
+   * application owns the fulfillment: it MUST return the matching 32-byte
+   * preimage in {@link LocalDeliveryResponse}'s `fulfill.fulfillment`, and the
+   * connector enforces `sha256(fulfillment) === executionCondition` before
+   * FULFILLing upstream — a missing or mismatching preimage converts the
+   * fulfill into an F99 REJECT and nothing is recorded as delivered. The
+   * connector never substitutes its NIP-59/HKDF-derived preimage on this path.
+   *
+   * Absent for legacy zero-condition traffic — those packets keep the pre-#309
+   * behavior (NIP-59 receiver-side preimage injection when available).
+   */
+  executionCondition?: string;
 }
 
 /**
@@ -1721,6 +1738,18 @@ export interface LocalDeliveryResponse {
   fulfill?: {
     /** Optional response data (base64) */
     data?: string;
+    /**
+     * FULFILL preimage (base64-encoded, exactly 32 bytes) — issue #309.
+     *
+     * REQUIRED when {@link LocalDeliveryRequest} carried `executionCondition`:
+     * the connector enforces `sha256(fulfillment) === executionCondition` and
+     * converts a missing/mismatching preimage into an F99 REJECT. When the
+     * request carried no `executionCondition`, an app-supplied preimage is
+     * still placed on the FULFILL, but the legacy NIP-59 receiver-side
+     * derivation (when active) takes precedence — preserving pre-#309
+     * behavior for zero-condition traffic.
+     */
+    fulfillment?: string;
   };
   /** Reject response (mutually exclusive with fulfill) */
   reject?: {
