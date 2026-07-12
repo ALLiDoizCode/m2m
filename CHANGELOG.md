@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.29.0](https://github.com/toon-protocol/connector/compare/v3.28.6...v3.29.0) (2026-07-12)
+
+### Features
+
+- **local-delivery:** end-to-end sender-chosen execution conditions through local delivery ([82dc623](https://github.com/toon-protocol/connector/commit/82dc623fe5b5c028ab5842eb0fbd5a7bc52e2082)), closes [#309](https://github.com/toon-protocol/connector/issues/309) [toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145) [pre-#309](https://github.com/toon-protocol/pre-/issues/309) [toon-client#350](https://github.com/toon-protocol/toon-client/issues/350)
+
+### Bug Fixes
+
+- **reject-map:** map swap-mill stale_rate reject to retryable T99 ([c5e0771](https://github.com/toon-protocol/connector/commit/c5e077108a9e86ccf08654ade32a1b99955d4922)), closes [toon-protocol/swap#53](https://github.com/toon-protocol/swap/issues/53) [toon-protocol/toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145)
+
 ## [3.28.6](https://github.com/toon-protocol/connector/compare/v3.28.5...v3.28.6) (2026-07-12)
 
 ### Bug Fixes
