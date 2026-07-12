@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.30.0](https://github.com/toon-protocol/connector/compare/v3.29.1...v3.30.0) (2026-07-12)
+
+### Features
+
+- **core:** sendPacket accepts sender-chosen executionCondition ([#314](https://github.com/toon-protocol/connector/issues/314)) ([dc90a1c](https://github.com/toon-protocol/connector/commit/dc90a1c71cb6f1d19a4047669fa0a912ff300ba8)), closes [#310](https://github.com/toon-protocol/connector/issues/310) [toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145) [#310](https://github.com/toon-protocol/connector/issues/310) [toon-protocol/swap#56](https://github.com/toon-protocol/swap/issues/56)
+
 ## [3.29.1](https://github.com/toon-protocol/connector/compare/v3.29.0...v3.29.1) (2026-07-12)
 
 ### Bug Fixes
