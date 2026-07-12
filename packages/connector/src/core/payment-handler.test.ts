@@ -72,6 +72,13 @@ describe('mapRejectCode', () => {
     expect(mapRejectCode('timeout')).toBe('T00');
   });
 
+  it("should map the swap mill's benign staleness reject to retryable T99 (swap#53)", () => {
+    // Contract (toon-protocol/swap#53): mill rejects a stale quoted rate with
+    // message 'stale_rate' / data.reason === 'stale_rate'. Must be T-class
+    // (temporary, retryable) on the wire — NOT fatal F99.
+    expect(mapRejectCode('stale_rate')).toBe('T99');
+  });
+
   it('should return F99 for unknown codes', () => {
     expect(mapRejectCode('unknown_code')).toBe('F99');
     expect(mapRejectCode('')).toBe('F99');
@@ -91,6 +98,7 @@ describe('REJECT_CODE_MAP', () => {
       'application_error',
       'internal_error',
       'timeout',
+      'stale_rate',
     ]);
   });
 });

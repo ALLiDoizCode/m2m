@@ -59,7 +59,8 @@ export type AcceptedSemanticCode =
   | 'unexpected_payment'
   | 'application_error'
   | 'internal_error'
-  | 'timeout';
+  | 'timeout'
+  | 'stale_rate';
 
 /**
  * Map business reject codes to ILP wire codes (RFC 0027).
@@ -78,6 +79,12 @@ export const REJECT_CODE_MAP: Record<string, string> = {
   application_error: 'F99',
   internal_error: 'T00',
   timeout: 'T00',
+  // Swap-mill benign staleness reject (toon-protocol/swap#53): the mill
+  // rejects with code/message 'stale_rate' (data.reason === 'stale_rate')
+  // when its quoted rate has expired. T99 — temporary, application-layer,
+  // retryable: the sender should re-quote and retry. Without this entry the
+  // code fell through to fatal F99.
+  stale_rate: 'T99',
 } satisfies Record<AcceptedSemanticCode, string>;
 
 // ────────────────────────────────────────────────────────────────────────────
