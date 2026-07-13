@@ -141,10 +141,10 @@ describe('buildSelfAnnouncementInfo — relay-connector apex', () => {
     const info = buildSelfAnnouncementInfo(relayConnectorConfig(), {
       ...baseSelfAnnounce,
       httpEndpoint: 'https://proxy.devnet.toonprotocol.dev/ilp',
-      relayUrl: 'wss://relay.devnet.toonprotocol.dev',
+      relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
     });
     expect(info.httpEndpoint).toBe('https://proxy.devnet.toonprotocol.dev/ilp');
-    expect(info.relayUrl).toBe('wss://relay.devnet.toonprotocol.dev');
+    expect(info.relayUrl).toBe('wss://relay-ws.devnet.toonprotocol.dev');
   });
 });
 
