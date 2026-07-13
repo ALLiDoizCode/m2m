@@ -351,6 +351,41 @@ describe('PerPacketClaimService', () => {
     });
   });
 
+  // Issue #316: per-packet claims are issued at FORWARD time and are NOT voided when the
+  // forwarded packet later REJECTs. These tests pin that deliberate behavior (see
+  // docs/local-delivery-fulfillment-contract.md § "Reject semantics"). If a future change
+  // introduces fulfill-gated / void-on-reject claim issuance, these expectations MUST be
+  // revisited together with the doc and the receiver-side monotonicity contract.
+  describe('reject semantics (issue #316)', () => {
+    it("keeps a rejected packet's δ in the settleable cumulative (no void-on-reject)", async () => {
+      // Two packets are forwarded; the SECOND is (conceptually) rejected downstream.
+      // The claim service has no notion of the reject — it advanced the cumulative at
+      // forward time — so getLatestClaim still folds in the rejected δ.
+      await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 100n); // fulfilled
+      const rejectedForward = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 200n); // later REJECTs
+
+      // The claim minted for the rejected forward still advanced nonce + cumulative...
+      expect((rejectedForward!.claimMessage as EVMClaimMessage).nonce).toBe(2);
+      expect((rejectedForward!.claimMessage as EVMClaimMessage).transferredAmount).toBe('300');
+
+      // ...and remains the latest settleable proof the auto-drive would redeem on-chain,
+      // i.e. it settles 300 (100 + the rejected 200), not 100.
+      const latest = service.getLatestClaim(TEST_CHANNEL_ID) as EVMClaimMessage;
+      expect(latest.transferredAmount).toBe('300');
+      expect(latest.nonce).toBe(2);
+    });
+
+    it('exposes no void/rollback API to un-issue a claim on reject', () => {
+      // The only state reset is resetChannel(), which is settlement-scoped (post
+      // cooperative settle), never per-reject. Pin that no per-reject undo hook exists.
+      const svc = service as unknown as Record<string, unknown>;
+      expect(typeof svc.rollbackClaim).toBe('undefined');
+      expect(typeof svc.voidClaim).toBe('undefined');
+      expect(typeof svc.revokeClaim).toBe('undefined');
+      expect(typeof service.resetChannel).toBe('function');
+    });
+  });
+
   describe('resetChannel', () => {
     it('should clear all tracking state for a channel', async () => {
       await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 1000n);

@@ -86,6 +86,66 @@ This is how a rolling-swap engine sends leg-B PREPAREs carrying leg A's `C_i`
 (toon-meta#145 §3 R4) without reaching into `handlePreparePacket`. When omitted,
 egress behavior is byte-for-byte the legacy class.
 
+## Reject semantics — chain-A per-packet claims are issued at FORWARD time (issue #316)
+
+This section is normative for the **per-packet settlement claim** the connector attaches
+to a value-bearing PREPARE it forwards to a non-`child` peer (issue #76), and pins the
+behavior on an ILP **REJECT**. It is distinct from the sender-chosen fulfillment above but
+interacts with it: a swap node's application-level rejects (`leg_b_failed`,
+`stale_rate`, liquidity, staleness — see toon-meta#145 §3 R8 and the swap benign-reject
+vocabulary) all reach a connector hop that has _already_ issued its chain-A claim.
+
+**Current behavior (connector 3.30.0), guaranteed:**
+
+1. The forwarding connector calls
+   `PerPacketClaimService.generateClaimForPacket()` **before** it forwards the PREPARE
+   (`packages/connector/src/core/packet-handler.ts`, claim-generation block, immediately
+   before `forwardToNextHop`). That call **unconditionally** advances the channel's
+   cumulative amount and nonce, signs the cumulative balance proof, sets it as the
+   channel's `latestClaim`, and persists it.
+2. The signed claim rides the forwarded PREPARE in BTP `protocolData`. The receiving peer
+   records it at **ingest** — `ClaimReceiver.ingestProtocolData()` runs off the inbound
+   BTP message (`registerWithBTPServer`), **not** off the eventual FULFILL — and emits
+   `CLAIM_RECEIVED`, which the SettlementMonitor/auto-drive uses to redeem the **highest
+   cumulative** proof on-chain (`SettlementExecutor.settleViaExistingChannel` →
+   `getLatestClaim`).
+3. If the forward **REJECTs** (any code, including the swap benign rejects), **the claim
+   stands.** There is no rollback: `PacketHandler` falls straight through to return the
+   REJECT, and `PerPacketClaimService` exposes **no** void/rollback method — only
+   `resetChannel()`, which is settlement-scoped (post cooperative settle), never per-reject.
+   The rejected packet's δ therefore remains folded into the cumulative the auto-drive
+   settles.
+
+**Net effect:** a payer pays for the forward **attempt**, not for delivery. On a chain of
+hops `sender → apex → maker`, a maker-side reject leaves the sender→apex and apex→maker
+per-packet claims in force even though no value was delivered end-to-end. For the rolling
+engine this is bounded to one δ per reject (R8 rolls the **maker's accepted watermark**
+back so the _maker_ does not double-count), but the **payer-side** cumulative still
+includes rejected packets.
+
+**Why this is not fixed by coupling claim issuance to FULFILL:** all three obvious
+"only pay on fulfill" shapes are unsound or out of scope at the connector level:
+
+- _Attach-on-fulfill_ (defer the claim past the PREPARE): the receiver's
+  `InboundClaimValidator` **rejects** any value-bearing, non-`parent` PREPARE that carries
+  no claim (`"No payment channel claim attached to packet"`). Deferring the claim would
+  get the PREPARE itself rejected. The design is deliberately pay-before-forward
+  (issues #76/#78) so the receiving connector is never exposed to an unpaid forward.
+- _Void-on-reject_ (roll the payer's cumulative/nonce back after a REJECT): the peer
+  **already holds** the signed cumulative proof and can redeem it on-chain, so a local
+  void changes nothing on-chain; and it would violate channel monotonicity — the receiver
+  requires strictly increasing nonce **and** amount, so the next claim would be rejected
+  and the channel wedged.
+- A genuine fix requires **receiver-side cooperation or a netting/refund protocol**
+  (signed refund acknowledgments that let the redeemable cumulative decrease for rejected
+  δ), or reversing issue #76 to fulfill-gated claims and accepting receiver in-flight
+  exposure. Either is a **cross-connector protocol change**, not a connector-local patch —
+  surfaced for maintainers in issue #316.
+
+Regression-pinned: `per-packet-claim-service.test.ts` § "reject semantics (issue #316)"
+(a rejected packet's δ stays in the settleable cumulative; no void/rollback API exists) and
+`packet-handler.test.ts` (claim is generated at forward time even when the forward REJECTs).
+
 ## Sequence (rolling-swap maker, leg A termination)
 
 ```

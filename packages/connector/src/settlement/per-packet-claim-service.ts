@@ -16,6 +16,27 @@
  * - Returns null if no channel exists for a peer (caller must handle as rejection)
  * - Delegates signing to chain-appropriate PaymentChannelProvider via ChainProviderRegistry
  *
+ * ## Reject semantics — claims are issued at FORWARD time, not FULFILL time (issue #316)
+ *
+ * {@link generateClaimForPacket} is called by the PacketHandler *before* it forwards
+ * the PREPARE to the next hop, and it unconditionally advances the channel's cumulative
+ * amount + nonce, signs the balance proof, sets it as `latestClaim`, and persists it.
+ * The signed claim then rides the forwarded PREPARE in BTP protocolData, so the
+ * counterparty holds it the instant the PREPARE arrives (its ClaimReceiver records the
+ * claim at ingest, independent of the eventual FULFILL/REJECT).
+ *
+ * There is therefore NO way to "un-issue" a claim if the forward later REJECTs: the
+ * counterparty already holds a valid signed cumulative proof and can redeem it on-chain,
+ * and this service's own `latestClaim` (read by SettlementExecutor's auto-drive) keeps
+ * the rejected packet's δ folded into the settleable cumulative. This is a *deliberate*
+ * property of the per-packet-claim model (issue #76): the payer pays for the forward
+ * ATTEMPT so the receiving connector is never exposed to an unpaid forward. The only
+ * state reset is {@link resetChannel}, and it is settlement-scoped (post cooperative
+ * settle), never per-reject. A payer-side "void on reject" is intentionally absent —
+ * it would be unsound (the peer already holds the proof) and would break channel
+ * monotonicity (the peer's ClaimReceiver requires strictly increasing nonce + amount).
+ * See docs/local-delivery-fulfillment-contract.md § "Reject semantics" and issue #316.
+ *
  * @module settlement/per-packet-claim-service
  */
 
@@ -149,7 +170,14 @@ export class PerPacketClaimService {
 
     const { channelId } = ctx;
 
-    // Increment cumulative transferred and nonce (synchronous — safe under Node.js single thread)
+    // Increment cumulative transferred and nonce (synchronous — safe under Node.js single thread).
+    //
+    // Issue #316: this advance is unconditional and happens at FORWARD time. If the
+    // packet this claim is minted for is later REJECTed downstream, this δ is NOT rolled
+    // back — the cumulative is monotonic, the peer already receives the signed proof on
+    // the forwarded PREPARE, and `latestClaim` (below) drives on-chain settlement of the
+    // rejected δ too. That is the intended per-packet-claim contract, not a leak to patch
+    // here. See the module-level "Reject semantics" note and issue #316.
     const prevCumulative = this.cumulativeTransferred.get(channelId) ?? 0n;
     const newCumulative = prevCumulative + amount;
     this.cumulativeTransferred.set(channelId, newCumulative);
