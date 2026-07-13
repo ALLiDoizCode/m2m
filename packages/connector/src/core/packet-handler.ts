@@ -1587,6 +1587,18 @@ export class PacketHandler {
 
     // Generate mandatory per-packet claim before forwarding to peer.
     //
+    // Issue #316 (reject semantics): the claim is minted, signed, persisted and set as
+    // the settleable `latestClaim` HERE — before `forwardToNextHop` below and therefore
+    // before we know whether the next hop FULFILLs or REJECTs. It rides the forwarded
+    // PREPARE, so the counterparty holds it regardless of outcome. If the forward REJECTs
+    // (including an app-level benign reject such as a swap node's staleness/liquidity/
+    // leg-B-failed reject), this δ is NOT voided: the payer pays for the forward ATTEMPT,
+    // the rejected δ stays in the cumulative the auto-drive settles. This is the
+    // deliberate per-packet-claim model (the receiving connector is never exposed to an
+    // unpaid forward), not a coupling bug to fix at this hop. Voiding on reject is
+    // unsound (the peer already holds the signed proof) and cannot be done unilaterally
+    // by the payer. See docs/local-delivery-fulfillment-contract.md § "Reject semantics".
+    //
     // The claim is relationship-aware (issue #76): it is required for every
     // value-bearing forward to a non-`local`, non-`child` next hop. A `'child'`
     // next hop is skipped — a parent settles DOWN to a child by letting the

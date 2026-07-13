@@ -568,6 +568,50 @@ describe('PacketHandler', () => {
     });
   });
 
+  // Issue #316: the per-packet claim is minted BEFORE the forward, so it is issued even
+  // when the forward then REJECTs (the payer pays for the forward attempt, and the claim
+  // rides the PREPARE to the peer regardless of outcome). Pin that behavior here; see
+  // docs/local-delivery-fulfillment-contract.md § "Reject semantics".
+  describe('handlePreparePacket() - claim issued at forward time on REJECT (issue #316)', () => {
+    it('generates the per-packet claim even when the downstream forward REJECTs', async () => {
+      const routingTable = new RoutingTable([{ prefix: 'g.alice', nextHop: 'peer-alice' }]);
+      const mockLogger = createMockLogger();
+      const btpClientManager = createMockBTPClientManager();
+      // Force the downstream forward to REJECT.
+      (btpClientManager.sendToPeer as jest.Mock).mockResolvedValue({
+        type: PacketType.REJECT,
+        code: 'F99',
+        triggeredBy: 'g.alice',
+        message: 'application error',
+        data: Buffer.alloc(0),
+      });
+      const handler = new PacketHandler(
+        routingTable,
+        btpClientManager,
+        'test.connector',
+        mockLogger
+      );
+      const claimService = createMockPerPacketClaimService();
+      handler.setPerPacketClaimService(claimService);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.alice.wallet',
+        amount: BigInt(2000),
+      });
+
+      const result = await handler.handlePreparePacket(packet);
+
+      // The forward rejected...
+      expect(result.type).toBe(PacketType.REJECT);
+      // ...but the claim was still generated at forward time, for the full δ.
+      expect(claimService.generateClaimForPacket).toHaveBeenCalledWith(
+        'peer-alice',
+        expect.any(String),
+        BigInt(2000)
+      );
+    });
+  });
+
   describe('handlePreparePacket() - No Route Found', () => {
     let handler: PacketHandler;
     let mockLogger: ReturnType<typeof createMockLogger>;
