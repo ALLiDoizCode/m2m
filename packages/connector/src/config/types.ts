@@ -608,13 +608,13 @@ export interface ConnectorConfig {
   btpAuthToken?: string;
 
   /**
-   * Optional local delivery configuration for forwarding packets to agent runtime
+   * Optional local delivery configuration for forwarding packets to the app
    * When enabled, packets destined for local addresses are forwarded via HTTP
-   * to an external agent runtime instead of using the built-in auto-fulfill stub
+   * to the app's HTTP handler instead of using the built-in auto-fulfill stub
    *
    * Environment variables:
    * - LOCAL_DELIVERY_ENABLED: Enable/disable local delivery (default: false)
-   * - LOCAL_DELIVERY_URL: URL to agent runtime (e.g., "http://connector:3100")
+   * - LOCAL_DELIVERY_URL: URL to the app's HTTP handler (e.g., "http://connector:3100")
    * - LOCAL_DELIVERY_TIMEOUT: Request timeout in ms (default: 30000)
    * - LOCAL_DELIVERY_AUTH_TOKEN: Bearer token for app authentication (no default)
    * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop app notification (default: false)
@@ -1587,9 +1587,9 @@ export interface SecurityConfig {
 /**
  * Local Delivery Configuration Interface
  *
- * Configures local delivery to an agent runtime for handling packets
+ * Configures local delivery to the app for handling packets
  * destined for local addresses. When enabled, packets routed to 'local'
- * or the connector's own nodeId are forwarded to an external agent runtime
+ * or the connector's own nodeId are forwarded to the app's HTTP handler
  * via HTTP instead of using the built-in auto-fulfill stub.
  *
  * @property enabled - Enable/disable local delivery forwarding (default: false)
