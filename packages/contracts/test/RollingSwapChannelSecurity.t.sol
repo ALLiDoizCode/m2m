@@ -19,8 +19,9 @@ import "./mocks/MockERC20WithFee.sol";
 ///           #9d cooperativeClose InsufficientDeposit branch
 ///           #9e cooperativeClose from the Closing state
 ///           #9f fee-on-transfer on the deposit() top-up path
-///           #1  cross-deployment replay — DOCUMENTED as a known limitation
-///               (NOT fixed here; digest lacks chainId/address separation)
+///           #1  cross-deployment / cross-chain replay — FIXED by the v2
+///               EIP-712 digest (domain binds chainId + address(this)); the
+///               replay now REVERTS BadSignature
 contract RollingSwapChannelSecurityTest is Test {
     // secp256k1 group order (for constructing a malleable high-s signature).
     uint256 internal constant SECP256K1_N =
@@ -62,10 +63,11 @@ contract RollingSwapChannelSecurityTest is Test {
 
     function _signClaim(uint256 pk, bytes32 channelId, uint256 cumulative, uint256 nonce, address to)
         internal
-        pure
+        view
         returns (bytes memory)
     {
-        bytes32 digest = keccak256(abi.encodePacked(channelId, cumulative, nonce, to));
+        // v2 EIP-712 digest (domain-separated by chainId + address(this)).
+        bytes32 digest = channel.claimDigest(channelId, cumulative, nonce, to);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -97,7 +99,7 @@ contract RollingSwapChannelSecurityTest is Test {
         _open();
         uint256 cumulative = 1_000_000;
         uint256 nonce = 1;
-        bytes32 digest = keccak256(abi.encodePacked(CHANNEL_ID, cumulative, nonce, recipient));
+        bytes32 digest = channel.claimDigest(CHANNEL_ID, cumulative, nonce, recipient);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
 
         // Flip to the malleable high-s form: s' = n - s, v' = 27<->28.
@@ -244,19 +246,23 @@ contract RollingSwapChannelSecurityTest is Test {
     }
 
     // =====================================================================
-    // #1 — cross-deployment replay. KNOWN LIMITATION, documented not fixed.
+    // #1 — cross-deployment / cross-chain replay is now BLOCKED (v2 fix).
     // =====================================================================
 
-    /// KNOWN LIMITATION (finding #1): digest lacks chainId/address domain
-    /// separation — see tracking issue. A single signer operating the SAME
-    /// channelId across two deployments lets ONE off-chain signature pay out on
-    /// BOTH contracts (same recipient). This test asserts the CURRENT vulnerable
-    /// behavior so the eventual fix (adding chainId/address to the preimage,
-    /// which is ABI-breaking and coordinated with the sdk/client/swap signer)
-    /// deliberately flips this assertion. Do NOT "fix" it here.
-    function testCrossDeploymentReplayIsCurrentlyPossible() public {
+    /// FIXED (finding #1): the v2 EIP-712 digest binds `chainId` +
+    /// `address(this)` via the domain separator, so a signature is valid on
+    /// EXACTLY one (chain, contract) pair. This is the inverse of the old
+    /// "KNOWN LIMITATION" test: a claim the signer issued for deployment A,
+    /// replayed against deployment B (same channelId, same signer, same
+    /// chainId), MUST now revert BadSignature — deployment B's domain separator
+    /// differs (different verifyingContract), so the recovered address is not
+    /// ch.signer. The recipient is paid on A only, never twice.
+    function testCrossDeploymentReplayIsBlocked() public {
         RollingSwapChannel chanA = new RollingSwapChannel(address(token), CHALLENGE);
         RollingSwapChannel chanB = new RollingSwapChannel(address(token), CHALLENGE);
+        assertTrue(address(chanA) != address(chanB), "distinct deployments");
+        // Same chainId, different verifyingContract -> different domain separator.
+        assertTrue(chanA.domainSeparator() != chanB.domainSeparator(), "domain separators must differ by address");
 
         token.transfer(funder, DEPOSIT * 2);
         vm.startPrank(funder);
@@ -267,14 +273,39 @@ contract RollingSwapChannelSecurityTest is Test {
         chanB.openChannel(CHANNEL_ID, signerAddr, DEPOSIT);
         vm.stopPrank();
 
-        // Signer issues ONE claim (intended for deployment A only).
+        // Signer issues ONE claim for deployment A (digest bound to chanA's domain).
         uint256 cum = 40_000e6;
-        bytes memory sig = _signClaim(signerPk, CHANNEL_ID, cum, 1, recipient);
+        bytes32 digestA = chanA.claimDigest(CHANNEL_ID, cum, 1, recipient);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digestA);
+        bytes memory sig = abi.encodePacked(r, s, v);
 
+        // Redeems on A.
         chanA.updateBalance(CHANNEL_ID, cum, 1, recipient, sig);
-        // Replaying the SAME signature on B currently SUCCEEDS (the bug).
+
+        // Replaying the SAME signature on B now REVERTS (the replay is blocked):
+        // chanB recovers a different address from its own domain-separated digest.
+        vm.expectRevert(RollingSwapChannel.BadSignature.selector);
         chanB.updateBalance(CHANNEL_ID, cum, 1, recipient, sig);
 
-        assertEq(token.balanceOf(recipient), cum * 2, "one signature paid out on TWO deployments (finding #1)");
+        // Paid exactly once, on A only.
+        assertEq(token.balanceOf(recipient), cum, "one signature pays out on exactly ONE deployment (finding #1 fixed)");
+    }
+
+    /// Cross-CHAIN replay is likewise blocked: the same deployment address on a
+    /// different chainId produces a different domain separator, so a signature
+    /// minted under chainId X cannot be redeemed under chainId Y.
+    function testCrossChainReplayIsBlocked() public {
+        _open();
+        uint256 cum = 40_000e6;
+
+        // Sign a claim as-if under the current chainId.
+        bytes memory sig = _signClaim(signerPk, CHANNEL_ID, cum, 1, recipient);
+
+        // Simulate the SAME contract observed on a different chain: the domain
+        // separator (and thus the digest the contract recovers against) changes,
+        // so the chainId-X signature no longer recovers to ch.signer.
+        vm.chainId(999999);
+        vm.expectRevert(RollingSwapChannel.BadSignature.selector);
+        channel.updateBalance(CHANNEL_ID, cum, 1, recipient, sig);
     }
 }

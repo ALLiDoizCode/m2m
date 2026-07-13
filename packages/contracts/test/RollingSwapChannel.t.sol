@@ -47,16 +47,17 @@ contract RollingSwapChannelTest is Test {
     }
 
     // ---------------------------------------------------------------------
-    // Signing helpers — reproduce the swap node's raw balance-proof signature
-    // (r||s||v, v=27+recovery, NO EIP-191/712 prefix).
+    // Signing helpers — reproduce the swap node's v2 balance-proof signature:
+    // an EIP-712 typed-data signature (domain RollingSwapChannel/2, bound to
+    // chainId + address(this)) returned as a raw r||s||v 65-byte blob.
     // ---------------------------------------------------------------------
 
     function _signClaim(uint256 pk, bytes32 channelId, uint256 cumulative, uint256 nonce, address to)
         internal
-        pure
+        view
         returns (bytes memory)
     {
-        bytes32 digest = keccak256(abi.encodePacked(channelId, cumulative, nonce, to));
+        bytes32 digest = channel.claimDigest(channelId, cumulative, nonce, to);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -93,29 +94,75 @@ contract RollingSwapChannelTest is Test {
         assertEq(SettlementSucceeded.selector, expected, "SettlementSucceeded topic drift");
     }
 
-    function testClaimDigestMatchesBalanceProofHashEvm() public view {
-        // Lock the digest preimage: channelId(32) || cumulative(32BE) ||
-        // nonce(32BE) || recipient(20) — byte-for-byte balanceProofHashEvm.
-        uint256 cumulative = 24_000_000;
-        uint256 nonce = 24;
-        bytes32 manual = keccak256(abi.encodePacked(CHANNEL_ID, cumulative, nonce, recipient));
-        assertEq(channel.claimDigest(CHANNEL_ID, cumulative, nonce, recipient), manual, "claim digest drift");
+    /// @notice V2 typehashes are pinned (finding #1). Any edit to the struct
+    ///         string breaks this — the other three repos hardcode these.
+    function testV2TypehashesPinned() public pure {
+        assertEq(
+            keccak256("ClaimBalanceProof(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce,address recipient)"),
+            0xa0c8262c1a8615f7674d3af796b14d19672d3634f89c6093502ab35c0afe2d91,
+            "ClaimBalanceProof typehash drift"
+        );
+        assertEq(
+            keccak256("CooperativeClose(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce)"),
+            0xa5753389755fea51cd5016d7b02b508ac03f2e822d9a7ee345ec45b36574ff9f,
+            "CooperativeClose typehash drift"
+        );
     }
 
-    /// @notice GOLDEN PIN (finding #5): the claim digest preimage is pinned to a
-    ///         hard-coded expected bytes32 for a fixed known input. Because both
-    ///         updateBalance and cooperativeClose now build the digest through
-    ///         the single internal _claimDigest (surfaced by claimDigest()), any
-    ///         future accidental change to the preimage bytes breaks this test —
-    ///         which is the whole point: the wire format is ABI-locked.
-    ///         Input: channelId=0x5b, cumulative=24_000_000, nonce=24,
-    ///         recipient=0x00000000000000000000000000000000DEADBEEF.
-    function testClaimDigestGoldenPin() public view {
-        bytes32 expected = 0xc5c584f6967bc3b48c9e738cbb64e7f039fc6f560b6f9a3a06c101ffcfc22287;
+    /// @notice Lock the v2 claim digest to an INDEPENDENT manual EIP-712
+    ///         recomputation: keccak256(0x1901 || domainSeparator || structHash)
+    ///         where structHash = keccak256(abi.encode(CLAIM_TYPEHASH, ...)).
+    ///         Proves the contract's `_hashTypedDataV4` path equals the raw
+    ///         EIP-712 algorithm the sdk/swap signer/client must reproduce.
+    function testClaimDigestMatchesV2Eip712() public view {
+        uint256 cumulative = 24_000_000;
+        uint256 nonce = 24;
+        bytes32 claimTypehash =
+            keccak256("ClaimBalanceProof(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce,address recipient)");
+        bytes32 structHash = keccak256(abi.encode(claimTypehash, CHANNEL_ID, cumulative, nonce, recipient));
+        bytes32 manual = keccak256(abi.encodePacked(hex"1901", channel.domainSeparator(), structHash));
+        assertEq(channel.claimDigest(CHANNEL_ID, cumulative, nonce, recipient), manual, "v2 claim digest drift");
+
+        bytes32 coopTypehash = keccak256("CooperativeClose(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce)");
+        bytes32 coopStruct = keccak256(abi.encode(coopTypehash, CHANNEL_ID, cumulative, nonce));
+        bytes32 coopManual = keccak256(abi.encodePacked(hex"1901", channel.domainSeparator(), coopStruct));
         assertEq(
-            channel.claimDigest(bytes32(uint256(0x5b)), 24_000_000, 24, address(0xDEADBEEF)),
-            expected,
-            "claim digest preimage changed - the ABI-locked wire format drifted"
+            channel.cooperativeCloseDigest(CHANNEL_ID, cumulative, nonce), coopManual, "v2 coop-close digest drift"
+        );
+    }
+
+    /// @notice GOLDEN VECTOR PIN (finding #1). Pins the v2 domain separator,
+    ///         claim digest, and cooperative-close digest to the hard-coded hex
+    ///         in `docs/rolling-swap-v2-digest-spec.md`. The other three repos
+    ///         (core/sdk, swap signer, client) conform to THESE literals, so a
+    ///         drift here (or in OZ's EIP712) breaks CI loudly.
+    ///
+    ///         Deployed at the fixed verifyingContract on the fixed chainId
+    ///         (Base, 8453) so the domain separator matches the golden vector.
+    ///         Inputs: channelId=0x5b, cumulative=24_000_000, nonce=24,
+    ///         recipient=0x00000000000000000000000000000000DEADBEEF.
+    function testV2GoldenVectorPin() public {
+        vm.chainId(8453);
+        address vc = 0x5FbDB2315678afecb367f032d93F642f64180aa3;
+        deployCodeTo("RollingSwapChannel.sol:RollingSwapChannel", abi.encode(address(token), CHALLENGE), vc);
+        RollingSwapChannel pinned = RollingSwapChannel(vc);
+
+        assertEq(
+            pinned.domainSeparator(),
+            0xb94d6e9c9c28083295de906f48c4db4110392800177aad52c3f99f2afbce594f,
+            "v2 domain separator golden drift"
+        );
+
+        bytes32 cid = bytes32(uint256(0x5b));
+        assertEq(
+            pinned.claimDigest(cid, 24_000_000, 24, address(0xDEADBEEF)),
+            0x8e0b1e0baf4cb5490d8d8ebcad0c51feec55adff992680c21cbf137a4434fede,
+            "v2 claim digest golden drift"
+        );
+        assertEq(
+            pinned.cooperativeCloseDigest(cid, 24_000_000, 24),
+            0x8b748bdfc330a591164551d4b536d64b963aff1059b594acc1dc5a24297e25c0,
+            "v2 coop-close digest golden drift"
         );
     }
 
