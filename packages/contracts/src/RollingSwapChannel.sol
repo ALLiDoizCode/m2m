@@ -60,15 +60,23 @@ contract RollingSwapChannel is ReentrancyGuard {
     ///         the funder reclaims the remaining deposit.
     uint256 public immutable challengePeriod;
 
-    /// @notice Minimum permitted challenge period.
-    uint256 public constant MIN_CHALLENGE_PERIOD = 1 hours;
+    /// @notice Minimum permitted challenge period. Floored at 1 day so a
+    ///         recipient always has a realistic window to observe a unilateral
+    ///         close and redeem their final signed watermark before the funder
+    ///         reclaims the remainder (1 hour was too short for safe operation).
+    uint256 public constant MIN_CHALLENGE_PERIOD = 1 days;
 
     // -----------------------------------------------------------------------
     // Domain-separation tag for the recipient's cooperative-close signature.
     // The claim digest is ABI-locked and NOT domain-separated (it must match
     // the swap signer). The close-acknowledgement digest is NEW surface under
-    // our control, so we tag it to guarantee it can never be confused with a
-    // claim, a claim of another contract, or a claim on another chain.
+    // our control, so we tag it to domain-separate a close-acknowledgement from
+    // a claim and to version the message (V1). NOTE: this tag does NOT bind
+    // chainId or address(this), so it does NOT by itself prevent cross-contract
+    // or cross-chain replay of a close-ack — it only guarantees a close-ack can
+    // never be misread as a balance-proof claim (or vice versa) and carries an
+    // explicit version. Cross-deployment domain separation is tracked
+    // separately (finding #1).
     // -----------------------------------------------------------------------
     bytes32 private constant COOP_CLOSE_TAG = keccak256("TOON_ROLLING_SWAP_COOP_CLOSE_V1");
 
@@ -139,7 +147,7 @@ contract RollingSwapChannel is ReentrancyGuard {
     // -----------------------------------------------------------------------
 
     /// @param _token The ERC20 token this contract settles.
-    /// @param _challengePeriod Unilateral-close challenge window (>= 1 hour).
+    /// @param _challengePeriod Unilateral-close challenge window (>= 1 day).
     constructor(address _token, uint256 _challengePeriod) {
         if (_token == address(0)) revert InvalidToken();
         if (_challengePeriod < MIN_CHALLENGE_PERIOD) revert InvalidChallengePeriod();
@@ -178,11 +186,17 @@ contract RollingSwapChannel is ReentrancyGuard {
         emit ChannelOpened(channelId, signer, msg.sender, received);
     }
 
-    /// @notice Top up an open channel's deposit. Anyone may add funds, but the
-    ///         remainder is always returned to the original funder on close.
+    /// @notice Top up an open channel's deposit. Restricted to the original
+    ///         funder: the remainder is always returned to `ch.funder` on close,
+    ///         so allowing a third party to top up would let them fund a channel
+    ///         whose unspent balance can only ever be reclaimed by the funder
+    ///         (a fund-donation / theft trap). The connector funds and tops up
+    ///         each channel from the same funder account, so this guard does not
+    ///         restrict any legitimate flow.
     function deposit(bytes32 channelId, uint256 amount) external nonReentrant {
         Channel storage ch = channels[channelId];
         if (ch.state != ChannelState.Open) revert InvalidChannelState();
+        if (msg.sender != ch.funder) revert NotFunder();
         if (amount == 0) revert ZeroDeposit();
 
         uint256 received = _pullToken(msg.sender, amount);
@@ -226,7 +240,9 @@ contract RollingSwapChannel is ReentrancyGuard {
 
         // Raw balance-proof digest — MUST match balanceProofHashEvm / the swap
         // node's EvmPaymentChannelSigner byte-for-byte. No EIP-191/712 prefix.
-        bytes32 digest = keccak256(abi.encodePacked(channelId, cumulativeAmount, nonce, recipient));
+        // Built via _claimDigest (single source of truth shared with
+        // cooperativeClose and the claimDigest view).
+        bytes32 digest = _claimDigest(channelId, cumulativeAmount, nonce, recipient);
         // OZ ECDSA.recover rejects malleable (high-s) signatures and invalid v,
         // and reverts on address(0) recovery — strictly safer than bare ecrecover.
         if (ECDSA.recover(digest, signature) != ch.signer) revert BadSignature();
@@ -281,7 +297,8 @@ contract RollingSwapChannel is ReentrancyGuard {
         if (nonce < ch.nonce) revert StaleNonce();
 
         // 1. Verify the swap signer's claim over the ABI-locked digest.
-        bytes32 claimHash = keccak256(abi.encodePacked(channelId, cumulativeAmount, nonce, recipient));
+        //    Same _claimDigest single source of truth as updateBalance.
+        bytes32 claimHash = _claimDigest(channelId, cumulativeAmount, nonce, recipient);
         if (ECDSA.recover(claimHash, signerSig) != ch.signer) revert BadSignature();
 
         // 2. Verify the recipient's cooperative-close acknowledgement over the
@@ -369,7 +386,7 @@ contract RollingSwapChannel is ReentrancyGuard {
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encodePacked(channelId, cumulativeAmount, nonce, recipient));
+        return _claimDigest(channelId, cumulativeAmount, nonce, recipient);
     }
 
     /// @notice The domain-tagged digest the recipient must sign to authorize a
@@ -385,6 +402,21 @@ contract RollingSwapChannel is ReentrancyGuard {
     // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------
+
+    /// @dev SINGLE SOURCE OF TRUTH for the ABI-locked claim (balance-proof)
+    ///      digest. Used by `updateBalance`, the claim leg of `cooperativeClose`,
+    ///      and the `claimDigest` view so the preimage exists in exactly one
+    ///      place and cannot drift between call sites. MUST remain byte-for-byte
+    ///      `keccak256(channelId(32) || cumulativeAmount(32BE) || nonce(32BE) ||
+    ///      recipient(20))` — matching balanceProofHashEvm / the swap node's
+    ///      EvmPaymentChannelSigner. No EIP-191/712 prefix.
+    function _claimDigest(bytes32 channelId, uint256 cumulativeAmount, uint256 nonce, address recipient)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked(channelId, cumulativeAmount, nonce, recipient));
+    }
 
     /// @dev Pull `amount` of `token` from `from`, returning the actual balance
     ///      delta (fee-on-transfer safe).

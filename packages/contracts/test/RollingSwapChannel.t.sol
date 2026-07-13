@@ -102,6 +102,23 @@ contract RollingSwapChannelTest is Test {
         assertEq(channel.claimDigest(CHANNEL_ID, cumulative, nonce, recipient), manual, "claim digest drift");
     }
 
+    /// @notice GOLDEN PIN (finding #5): the claim digest preimage is pinned to a
+    ///         hard-coded expected bytes32 for a fixed known input. Because both
+    ///         updateBalance and cooperativeClose now build the digest through
+    ///         the single internal _claimDigest (surfaced by claimDigest()), any
+    ///         future accidental change to the preimage bytes breaks this test —
+    ///         which is the whole point: the wire format is ABI-locked.
+    ///         Input: channelId=0x5b, cumulative=24_000_000, nonce=24,
+    ///         recipient=0x00000000000000000000000000000000DEADBEEF.
+    function testClaimDigestGoldenPin() public view {
+        bytes32 expected = 0xc5c584f6967bc3b48c9e738cbb64e7f039fc6f560b6f9a3a06c101ffcfc22287;
+        assertEq(
+            channel.claimDigest(bytes32(uint256(0x5b)), 24_000_000, 24, address(0xDEADBEEF)),
+            expected,
+            "claim digest preimage changed - the ABI-locked wire format drifted"
+        );
+    }
+
     // ---------------------------------------------------------------------
     // Constructor / open guards
     // ---------------------------------------------------------------------
@@ -112,8 +129,18 @@ contract RollingSwapChannelTest is Test {
     }
 
     function testConstructorRejectsShortChallenge() public {
+        // Floor is now 1 day (finding #7): anything below it must revert.
         vm.expectRevert(RollingSwapChannel.InvalidChallengePeriod.selector);
-        new RollingSwapChannel(address(token), 59 minutes);
+        new RollingSwapChannel(address(token), 1 hours);
+        vm.expectRevert(RollingSwapChannel.InvalidChallengePeriod.selector);
+        new RollingSwapChannel(address(token), 1 days - 1);
+    }
+
+    function testConstructorAcceptsChallengeAtFloor() public {
+        // Exactly the 1-day floor is accepted (deploy scripts default to 1 day).
+        RollingSwapChannel c = new RollingSwapChannel(address(token), 1 days);
+        assertEq(c.challengePeriod(), 1 days);
+        assertEq(c.MIN_CHALLENGE_PERIOD(), 1 days);
     }
 
     function testOpenChannelHappyPath() public {
