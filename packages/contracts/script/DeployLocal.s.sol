@@ -5,6 +5,7 @@ import "forge-std/Script.sol";
 import "../test/mocks/MockERC20.sol";
 import "../src/TokenNetwork.sol";
 import "../src/TokenNetworkRegistry.sol";
+import "../src/RollingSwapChannel.sol";
 
 /**
  * @title DeployLocalScript
@@ -38,15 +39,24 @@ contract DeployLocalScript is Script {
         address tokenNetworkAddress = registry.createTokenNetwork(address(usdcToken));
         console.log("TokenNetwork created at:", tokenNetworkAddress);
 
+        // Deploy the rolling-swap chain-B settlement contract (connector#315),
+        // bound to the same USDC token with a 1-day challenge window. This is
+        // the production surface the sdk/client `updateBalance` settlement tx
+        // redeems against on a swap's destination chain. Deploying it here keeps
+        // it in the anvil-state snapshot regenerated per connector#317, so
+        // rolling-swap integration tests can settle against a real deployment.
+        RollingSwapChannel rollingSwapChannel = new RollingSwapChannel(address(usdcToken), 1 days);
+        console.log("RollingSwapChannel deployed to:", address(rollingSwapChannel));
+
         // Transfer tokens to test peer wallets
         // Anvil test accounts: Account 2 (peer1), Account 3 (peer2)
         address[] memory peerAddresses = new address[](2);
         peerAddresses[0] = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC; // peer1 (Anvil account 2)
         peerAddresses[1] = 0x90F79bf6EB2c4f870365E785982E1f101E93b906; // peer2 (Anvil account 3)
 
-        uint256 tokensPerPeer = 10000 * 10**6; // 10k USDC each (6 decimals)
+        uint256 tokensPerPeer = 10000 * 10 ** 6; // 10k USDC each (6 decimals)
 
-        for (uint i = 0; i < peerAddresses.length; i++) {
+        for (uint256 i = 0; i < peerAddresses.length; i++) {
             usdcToken.transfer(peerAddresses[i], tokensPerPeer);
             console.log("Transferred 10k USDC to:", peerAddresses[i]);
         }
@@ -59,5 +69,6 @@ contract DeployLocalScript is Script {
         console.log("USDC_TOKEN_ADDRESS=%s", address(usdcToken));
         console.log("TOKEN_NETWORK_REGISTRY_ADDRESS=%s", address(registry));
         console.log("TOKEN_NETWORK_ADDRESS=%s", tokenNetworkAddress);
+        console.log("ROLLING_SWAP_CHANNEL_ADDRESS=%s", address(rollingSwapChannel));
     }
 }
