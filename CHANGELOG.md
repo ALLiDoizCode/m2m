@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.30.1](https://github.com/toon-protocol/connector/compare/v3.30.0...v3.30.1) (2026-07-13)
+
+### Bug Fixes
+
+- **connector:** correct stale devnet relay URL in self-announce docs ([#307](https://github.com/toon-protocol/connector/issues/307)) ([820c122](https://github.com/toon-protocol/connector/commit/820c1229e04f290d9c0900369ac7bccabb651442)), closes [#305](https://github.com/toon-protocol/connector/issues/305)
+- **test:** accept both NIP-01 JSON and TOON-string EVENT payloads in WS read-back probe ([#303](https://github.com/toon-protocol/connector/issues/303)) ([7e2c627](https://github.com/toon-protocol/connector/commit/7e2c62771d7660d2af2e1082087f98b09c167e45)), closes [relay#24](https://github.com/toon-protocol/relay/issues/24) [#301](https://github.com/toon-protocol/connector/issues/301)
+
 ## [3.30.0](https://github.com/toon-protocol/connector/compare/v3.29.1...v3.30.0) (2026-07-12)
 
 ### Features
