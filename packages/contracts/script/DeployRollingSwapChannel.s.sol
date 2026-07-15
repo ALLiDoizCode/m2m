@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.24;
 
 import "forge-std/Script.sol";
 import "../src/RollingSwapChannel.sol";
@@ -15,7 +15,7 @@ import "../src/RollingSwapChannel.sol";
  *
  *   TOKEN_ADDRESS    — the ERC20 the destination-chain recipient settles in
  *                      (e.g. USDC on Base).
- *   CHALLENGE_PERIOD — unilateral-close challenge window, seconds (>= 3600).
+ *   CHALLENGE_PERIOD — unilateral-close challenge window, seconds (>= 86400).
  *                      Defaults to 1 day if unset.
  */
 contract DeployRollingSwapChannelScript is Script {
