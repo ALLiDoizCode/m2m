@@ -41,8 +41,8 @@ the cutover **fail-closed**: a v1 raw-keccak signature can never validate as v2,
 and a v2 signature can never validate as v1.
 
 This is an **ABI-breaking wire migration**. The `updateBalance` selector/arity
-and the `SettlementSucceeded` event are **unchanged** — only the *signed digest
-preimage* moves. The 65-byte `r ‖ s ‖ v` signature envelope is unchanged
+and the `SettlementSucceeded` event are **unchanged** — only the _signed digest
+preimage_ moves. The 65-byte `r ‖ s ‖ v` signature envelope is unchanged
 (`v ∈ {27, 28}`, canonical low-`s` enforced by OZ `ECDSA.recover`).
 
 ---
@@ -58,7 +58,7 @@ structs share one domain.
 EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)
 ```
 
-- `name`    = `"RollingSwapChannel"`
+- `name` = `"RollingSwapChannel"`
 - `version` = `"2"`
 - `chainId` = the settlement chain id (e.g. `8453` for Base). On-chain this is
   `block.chainid`.
@@ -178,25 +178,25 @@ not upgrade) and retires v1 channels via cooperative/unilateral close.
 
 Fixed parameters:
 
-| Parameter | Value |
-|---|---|
-| `chainId` | `8453` (Base) |
-| `verifyingContract` | `0x5FbDB2315678afecb367f032d93F642f64180aa3` |
-| domain `name` | `"RollingSwapChannel"` |
-| domain `version` | `"2"` |
-| claim signer private key | `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80` |
-| claim signer address | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
+| Parameter                          | Value                                                                |
+| ---------------------------------- | -------------------------------------------------------------------- |
+| `chainId`                          | `8453` (Base)                                                        |
+| `verifyingContract`                | `0x5FbDB2315678afecb367f032d93F642f64180aa3`                         |
+| domain `name`                      | `"RollingSwapChannel"`                                               |
+| domain `version`                   | `"2"`                                                                |
+| claim signer private key           | `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80` |
+| claim signer address               | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`                         |
 | coop-close (recipient) private key | `0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d` |
-| coop-close (recipient) address | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` |
+| coop-close (recipient) address     | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8`                         |
 
 Message inputs (shared by both vectors):
 
-| Field | Value |
-|---|---|
-| `channelId` | `0x000000000000000000000000000000000000000000000000000000000000005b` |
-| `cumulativeAmount` | `24000000` (`0x016e3600`) |
-| `nonce` | `24` |
-| `recipient` | `0x00000000000000000000000000000000DEADBEEF` |
+| Field              | Value                                                                |
+| ------------------ | -------------------------------------------------------------------- |
+| `channelId`        | `0x000000000000000000000000000000000000000000000000000000000000005b` |
+| `cumulativeAmount` | `24000000` (`0x016e3600`)                                            |
+| `nonce`            | `24`                                                                 |
+| `recipient`        | `0x00000000000000000000000000000000DEADBEEF`                         |
 
 Derived domain (independent of the message):
 
