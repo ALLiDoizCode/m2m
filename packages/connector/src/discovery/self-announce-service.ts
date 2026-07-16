@@ -49,6 +49,15 @@ export interface PublishOutcome {
  */
 export type PublishFn = (event: NostrEvent) => Promise<PublishOutcome>;
 
+/**
+ * Resolves chain id → settlement-contract addresses that are only knowable at
+ * RUNTIME — the EVM TokenNetwork contract is an on-chain registry lookup, not
+ * a config field. Injected by `ConnectorNode` (which owns the chain providers)
+ * so the service stays provider-agnostic. May throw / reject; the service
+ * treats a failure as "not yet resolvable" and retries on the next refresh.
+ */
+export type ResolveTokenNetworksFn = () => Promise<Record<string, string>>;
+
 export interface SelfAnnounceServiceDeps {
   /** The full connector config (routes + chainProviders) the announcement derives from. */
   config: ConnectorConfig;
@@ -58,6 +67,13 @@ export interface SelfAnnounceServiceDeps {
   secretKey: Uint8Array;
   /** Routes the signed event through the connector's own pipe (free local / paid remote). */
   publish: PublishFn;
+  /**
+   * Optional runtime resolver for `tokenNetworks` entries (EVM TokenNetwork
+   * contracts). Invoked before each publish; a resolve failure logs, keeps the
+   * last successful result (contract addresses are stable), and the publish
+   * proceeds. Omit when the caller has no runtime-resolvable chains.
+   */
+  resolveTokenNetworks?: ResolveTokenNetworksFn;
   /** Pino logger. */
   logger: Logger;
 }
@@ -70,18 +86,22 @@ export class SelfAnnounceService {
   private readonly _selfAnnounce: SelfAnnounceConfig;
   private readonly _secretKey: Uint8Array;
   private readonly _publish: PublishFn;
+  private readonly _resolveTokenNetworks: ResolveTokenNetworksFn | undefined;
   private readonly _logger: Logger;
   private readonly _refreshIntervalSecs: number;
   private readonly _ttlSeconds: number;
 
   private _timer: ReturnType<typeof setInterval> | null = null;
   private _running = false;
+  /** Latest successfully resolved runtime tokenNetworks entries; null until the resolver first succeeds. */
+  private _runtimeTokenNetworks: Record<string, string> | null = null;
 
   constructor(deps: SelfAnnounceServiceDeps) {
     this._config = deps.config;
     this._selfAnnounce = deps.selfAnnounce;
     this._secretKey = deps.secretKey;
     this._publish = deps.publish;
+    this._resolveTokenNetworks = deps.resolveTokenNetworks;
     this._logger = deps.logger.child({ component: 'SelfAnnounceService' });
 
     const refresh =
@@ -106,13 +126,46 @@ export class SelfAnnounceService {
 
   /**
    * Build (but do not publish) the signed kind:10032 event. Exposed for tests
-   * and for callers that want to inspect the announcement.
+   * and for callers that want to inspect the announcement. Uses whatever
+   * runtime `tokenNetworks` entries have been resolved so far (see
+   * {@link _refreshRuntimeTokenNetworks}); the config-derived entries are
+   * always present.
    */
   buildEvent(): NostrEvent {
-    const info = buildSelfAnnouncementInfo(this._config, this._selfAnnounce, (context, message) =>
-      this._logger.warn(context, message)
+    const info = buildSelfAnnouncementInfo(
+      this._config,
+      this._selfAnnounce,
+      (context, message) => this._logger.warn(context, message),
+      this._runtimeTokenNetworks ?? undefined
     );
     return buildIlpPeerInfoEvent(info, this._secretKey, { ttlSeconds: this._ttlSeconds });
+  }
+
+  /**
+   * Refresh the runtime `tokenNetworks` entries via the injected resolver.
+   * Called before every publish (an RPC blip at boot must not blank the field
+   * forever): a success replaces the stored map — except that an EMPTY result
+   * never clobbers a previously non-empty one (a transient all-providers
+   * outage keeps announcing the last-known stable contract addresses) — and a
+   * failure logs and keeps the last successful result. Either way the
+   * announcement still goes out; clients without the entries fall back to
+   * explicit config / chain presets.
+   */
+  private async _refreshRuntimeTokenNetworks(): Promise<void> {
+    if (!this._resolveTokenNetworks) {
+      return;
+    }
+    try {
+      const resolved = await this._resolveTokenNetworks();
+      if (Object.keys(resolved).length > 0 || this._runtimeTokenNetworks === null) {
+        this._runtimeTokenNetworks = resolved;
+      }
+    } catch (err) {
+      this._logger.warn(
+        { event: 'self_announce_token_networks_unresolved', err: errMsg(err) },
+        'Failed to resolve runtime tokenNetworks; announcing with last-known values (will retry on next refresh)'
+      );
+    }
   }
 
   /**
@@ -173,6 +226,10 @@ export class SelfAnnounceService {
    * abort the refresh loop.
    */
   async publish(): Promise<void> {
+    // Best-effort: pick up the runtime tokenNetworks (EVM TokenNetwork
+    // contracts) before building; a failure logs inside and never blocks.
+    await this._refreshRuntimeTokenNetworks();
+
     let event: NostrEvent;
     try {
       event = this.buildEvent();

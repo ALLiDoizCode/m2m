@@ -16,6 +16,7 @@
  */
 
 import { ConnectorNode } from './connector-node';
+import { EVMPaymentChannelProvider } from '../settlement/provider/evm-payment-channel-provider';
 import { createLogger } from '../utils/logger';
 import type { ConnectorConfig, SelfAnnounceConfig } from '../config/types';
 import { PacketType, type ILPFulfillPacket, type ILPRejectPacket } from '@toon-protocol/shared';
@@ -203,6 +204,77 @@ describe('ConnectorNode._startSelfAnnounce', () => {
     expect(svc).not.toBeNull();
     expect(svc.running).toBe(true);
     svc.stop();
+  });
+});
+
+describe('ConnectorNode._resolveAnnounceTokenNetworks', () => {
+  const TOKEN_NETWORK = '0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0';
+  const TOKEN = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+
+  /**
+   * A REAL EVMPaymentChannelProvider over a hand-written in-memory SDK stub —
+   * only the three signing-context reads are implemented (no network).
+   */
+  function realEvmProvider(
+    chainId: string,
+    tokenNetworkAddress: string
+  ): EVMPaymentChannelProvider {
+    const sdk = {
+      getChainId: async () => 31337,
+      getTokenNetworkAddress: async () => tokenNetworkAddress,
+      getSignerAddress: async () => '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab',
+    };
+    return new EVMPaymentChannelProvider(sdk as any, chainId, TOKEN, logger as any);
+  }
+
+  it('returns an empty map when settlement is not bootstrapped (no chain registry)', async () => {
+    const node = makeNode({ keyId: HEX_KEY });
+    await expect((node as any)._resolveAnnounceTokenNetworks()).resolves.toEqual({});
+  });
+
+  it('maps each EVM provider chainId to its on-chain TokenNetwork address', async () => {
+    const node = makeNode({ keyId: HEX_KEY });
+    (node as any)._chainRegistry = {
+      getAllProviders: () => [realEvmProvider('evm:31337', TOKEN_NETWORK)],
+    };
+    await expect((node as any)._resolveAnnounceTokenNetworks()).resolves.toEqual({
+      'evm:31337': TOKEN_NETWORK,
+    });
+  });
+
+  it('skips non-EVM providers (Solana/Mina announce params are config-derived)', async () => {
+    const node = makeNode({ keyId: HEX_KEY });
+    (node as any)._chainRegistry = {
+      getAllProviders: () => [
+        { chainType: 'solana', chainId: 'solana:devnet' },
+        realEvmProvider('evm:31337', TOKEN_NETWORK),
+      ],
+    };
+    await expect((node as any)._resolveAnnounceTokenNetworks()).resolves.toEqual({
+      'evm:31337': TOKEN_NETWORK,
+    });
+  });
+
+  it('omits a provider whose lookup fails without dropping the others', async () => {
+    const node = makeNode({ keyId: HEX_KEY });
+    const failing = realEvmProvider('evm:84532', TOKEN_NETWORK);
+    failing.getSigningContext = async () => {
+      throw new Error('registry RPC down');
+    };
+    (node as any)._chainRegistry = {
+      getAllProviders: () => [failing, realEvmProvider('evm:31337', TOKEN_NETWORK)],
+    };
+    await expect((node as any)._resolveAnnounceTokenNetworks()).resolves.toEqual({
+      'evm:31337': TOKEN_NETWORK,
+    });
+  });
+
+  it('omits an empty tokenNetworkAddress (never announces empty strings)', async () => {
+    const node = makeNode({ keyId: HEX_KEY });
+    (node as any)._chainRegistry = {
+      getAllProviders: () => [realEvmProvider('evm:31337', '')],
+    };
+    await expect((node as any)._resolveAnnounceTokenNetworks()).resolves.toEqual({});
   });
 });
 

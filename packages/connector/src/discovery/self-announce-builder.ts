@@ -5,6 +5,9 @@
  * Everything advertised is DERIVED from the connector's `connector.yaml`:
  * - the locally-terminated routes' `ilpAddress` + `settlementAddresses`,
  * - the chain ids from `chainProviders`,
+ * - the per-chain channel parameters (`tokenNetworks` / `preferredTokens`)
+ *   from the `chainProviders` entries — plus runtime-resolved EVM TokenNetwork
+ *   contracts injected by the caller (see {@link deriveChainSettlementParams}),
  * - the public BTP/HTTP/relay endpoints (operator overrides, since the
  *   connector can't infer its public hostname behind TLS termination).
  *
@@ -21,7 +24,12 @@
  * @module discovery/self-announce-builder
  */
 
-import type { ConnectorConfig, RouteConfig, SelfAnnounceConfig } from '../config/types';
+import type {
+  ChainProviderConfigEntry,
+  ConnectorConfig,
+  RouteConfig,
+  SelfAnnounceConfig,
+} from '../config/types';
 import type { IlpPeerInfo } from './ilp-peer-info-event';
 
 /** Default asset advertised when not overridden. */
@@ -160,17 +168,91 @@ export function normalizeSettlementAddressKeys(
 }
 
 /**
+ * Per-chain settlement parameters derived from the `chainProviders` config —
+ * the maps a standalone client needs to open a payment channel from the
+ * announce alone (toon-client#378 consumes them).
+ */
+export interface ChainSettlementParams {
+  /**
+   * Chain id → settlement-contract address: the payment-channel PROGRAM id on
+   * Solana chains, the payment channel zkApp address on Mina chains. EVM
+   * TokenNetwork contracts are NOT config-derivable (the config carries only
+   * the TokenNetworkRegistry; the TokenNetwork itself is an on-chain lookup) —
+   * they arrive via the runtime `tokenNetworks` merge in
+   * {@link buildSelfAnnouncementInfo}.
+   */
+  tokenNetworks: Record<string, string>;
+  /**
+   * Chain id → preferred token contract: the ERC-20 token on EVM chains, the
+   * SPL token MINT on Solana chains, the token-owner zkApp on Mina chains.
+   */
+  preferredTokens: Record<string, string>;
+}
+
+/**
+ * Derive per-chain `tokenNetworks` / `preferredTokens` announce maps from the
+ * `chainProviders` config. Keys are the providers' `chainId`s — the exact
+ * same identifiers `supportedChains` advertises, so the maps stay consistent
+ * with the rest of the announcement. Entries the provider does not configure
+ * (e.g. a Solana provider without a `tokenMint`) are omitted, never emitted
+ * as empty strings.
+ *
+ * Per chain family:
+ * - `evm`: `preferredTokens` = `tokenAddress` (the ERC-20 channel token). No
+ *   config-derivable `tokenNetworks` entry — see {@link ChainSettlementParams}.
+ * - `solana`: `tokenNetworks` = `programId` (the payment-channel program),
+ *   `preferredTokens` = `tokenMint` (the SPL mint).
+ * - `mina`: `tokenNetworks` = `zkAppAddress` (the payment channel zkApp),
+ *   `preferredTokens` = `tokenAddress` (the token-owner zkApp), when set.
+ *
+ * @param chainProviders - The `chainProviders` config entries.
+ * @returns The derived (possibly empty) chain-keyed maps.
+ */
+export function deriveChainSettlementParams(
+  chainProviders: ChainProviderConfigEntry[] | undefined
+): ChainSettlementParams {
+  const tokenNetworks: Record<string, string> = {};
+  const preferredTokens: Record<string, string> = {};
+
+  for (const provider of chainProviders ?? []) {
+    const chainId = provider.chainId;
+    if (!chainId) continue;
+
+    switch (provider.chainType) {
+      case 'evm':
+        if (provider.tokenAddress) preferredTokens[chainId] = provider.tokenAddress;
+        break;
+      case 'solana':
+        if (provider.programId) tokenNetworks[chainId] = provider.programId;
+        if (provider.tokenMint) preferredTokens[chainId] = provider.tokenMint;
+        break;
+      case 'mina':
+        if (provider.zkAppAddress) tokenNetworks[chainId] = provider.zkAppAddress;
+        if (provider.tokenAddress) preferredTokens[chainId] = provider.tokenAddress;
+        break;
+    }
+  }
+
+  return { tokenNetworks, preferredTokens };
+}
+
+/**
  * Build the connector's own kind:10032 announcement payload from its config.
  *
  * @param config - The full connector config (routes + chainProviders).
  * @param selfAnnounce - The `selfAnnounce` block (endpoints + overrides).
  * @param warn - Optional warn sink for derivation anomalies (dropped keys).
+ * @param runtimeTokenNetworks - Chain id → settlement-contract addresses that
+ *   are only knowable at RUNTIME (the EVM TokenNetwork contract is resolved
+ *   on-chain from the configured registry). Merged over the config-derived
+ *   `tokenNetworks`; keys must use the same chain ids as `supportedChains`.
  * @returns An `IlpPeerInfo` augmented with out-of-band `routes` hints.
  */
 export function buildSelfAnnouncementInfo(
   config: ConnectorConfig,
   selfAnnounce: SelfAnnounceConfig,
-  warn?: AnnounceWarnFn
+  warn?: AnnounceWarnFn,
+  runtimeTokenNetworks?: Record<string, string>
 ): SelfAnnouncementInfo {
   const terminated = config.routes.filter(isTerminated);
 
@@ -206,6 +288,13 @@ export function buildSelfAnnouncementInfo(
     warn
   );
 
+  // Per-chain channel parameters (toon-client#378): config-derived Solana/Mina
+  // entries, with runtime-resolved entries (the EVM TokenNetwork contract)
+  // merged on top. Both are keyed by the same chain ids as `supportedChains`.
+  const derivedParams = deriveChainSettlementParams(config.chainProviders);
+  const tokenNetworks = { ...derivedParams.tokenNetworks, ...(runtimeTokenNetworks ?? {}) };
+  const preferredTokens = derivedParams.preferredTokens;
+
   const routes = resolveRouteHints(config.routes, selfAnnounce.routes);
 
   const info: SelfAnnouncementInfo = {
@@ -218,6 +307,8 @@ export function buildSelfAnnouncementInfo(
     ...(selfAnnounce.relayUrl ? { relayUrl: selfAnnounce.relayUrl } : {}),
     ...(supportedChains.length > 0 ? { supportedChains } : {}),
     ...(Object.keys(settlementAddresses).length > 0 ? { settlementAddresses } : {}),
+    ...(Object.keys(tokenNetworks).length > 0 ? { tokenNetworks } : {}),
+    ...(Object.keys(preferredTokens).length > 0 ? { preferredTokens } : {}),
     routes,
   };
 
