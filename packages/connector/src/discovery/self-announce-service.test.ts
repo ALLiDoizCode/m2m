@@ -196,6 +196,86 @@ describe('SelfAnnounceService — publish path', () => {
   });
 });
 
+describe('SelfAnnounceService — runtime tokenNetworks resolver (toon-client#378)', () => {
+  const TN = { 'evm:31337': '0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0' };
+
+  /** A recorder that also captures the parsed announce content. */
+  function contentRecorder(): { contents: Record<string, unknown>[]; publish: PublishFn } {
+    const contents: Record<string, unknown>[] = [];
+    const publish: PublishFn = async (event) => {
+      contents.push(JSON.parse(event.content) as Record<string, unknown>);
+      return { mode: 'local-free', ok: true };
+    };
+    return { contents, publish };
+  }
+
+  function makeResolverService(resolveTokenNetworks: () => Promise<Record<string, string>>): {
+    service: SelfAnnounceService;
+    contents: Record<string, unknown>[];
+  } {
+    const rec = contentRecorder();
+    const service = new SelfAnnounceService({
+      config: config(),
+      selfAnnounce,
+      secretKey: sk,
+      publish: rec.publish,
+      resolveTokenNetworks,
+      logger,
+    });
+    return { service, contents: rec.contents };
+  }
+
+  it('merges the resolved tokenNetworks into the published announce content', async () => {
+    const { service, contents } = makeResolverService(async () => TN);
+    await service.publish();
+    expect(contents).toHaveLength(1);
+    expect(contents[0]!.tokenNetworks).toEqual(TN);
+  });
+
+  it('omits tokenNetworks before any successful resolve (buildEvent stays sync)', () => {
+    const { service } = makeResolverService(async () => TN);
+    // No publish yet → nothing resolved → the fixture config (EVM without a
+    // config-derivable TokenNetwork) announces no tokenNetworks at all.
+    const content = JSON.parse(service.buildEvent().content) as Record<string, unknown>;
+    expect(content.tokenNetworks).toBeUndefined();
+  });
+
+  it('publishes WITHOUT tokenNetworks when the resolver rejects, and retries next publish', async () => {
+    let calls = 0;
+    const { service, contents } = makeResolverService(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('RPC down');
+      return TN;
+    });
+    await service.publish();
+    expect(contents[0]!.tokenNetworks).toBeUndefined();
+    // Next refresh retries the resolver and picks the entries up.
+    await service.publish();
+    expect(contents[1]!.tokenNetworks).toEqual(TN);
+    expect(calls).toBe(2);
+  });
+
+  it('keeps the last-known entries when a later resolve comes back empty', async () => {
+    let calls = 0;
+    const { service, contents } = makeResolverService(async () => {
+      calls += 1;
+      return calls === 1 ? TN : {};
+    });
+    await service.publish();
+    await service.publish();
+    // A transient all-providers outage (empty map) must not blank the field.
+    expect(contents[1]!.tokenNetworks).toEqual(TN);
+  });
+
+  it('does not throw when the resolver throws a non-Error value', async () => {
+    const { service, contents } = makeResolverService(async () => {
+      throw 'plain string failure'; // eslint-disable-line @typescript-eslint/no-throw-literal
+    });
+    await expect(service.publish()).resolves.toBeUndefined();
+    expect(contents).toHaveLength(1);
+  });
+});
+
 describe('SelfAnnounceService — lifecycle', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => {

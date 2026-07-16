@@ -128,6 +128,18 @@ function parseIlpPeerInfoReplica(event: { kind: number; content: string }): void
     }
   }
 
+  // preferredTokens / tokenNetworks: core (identical in 1.6.0, 2.0.1, and
+  // 3.0.0) only requires each to be an object when present — no key-format or
+  // supportedChains-membership check. The connector still keys them by the
+  // `supportedChains` chain ids for consistency (asserted separately below).
+  const { preferredTokens, tokenNetworks } = parsed;
+  if (preferredTokens !== undefined && !isObject(preferredTokens)) {
+    throw new Error('preferredTokens must be an object');
+  }
+  if (tokenNetworks !== undefined && !isObject(tokenNetworks)) {
+    throw new Error('tokenNetworks must be an object');
+  }
+
   const { ilpAddresses } = parsed;
   if (ilpAddresses !== undefined) {
     if (!Array.isArray(ilpAddresses)) {
@@ -159,6 +171,11 @@ function provider(chainType: string, chainId: string): ChainProvider {
   return { chainType, chainId, rpcUrl: 'http://localhost:1', keyId: 'k' } as ChainProvider;
 }
 
+const SOL_PROGRAM = 'ChanProg1111111111111111111111111111111111';
+const SOL_MINT = 'UsdcMint1111111111111111111111111111111111';
+const MINA_ZKAPP = 'B62qChannelZkApp111111111111111111111111111111111111111';
+const EVM_TOKEN = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+
 /** Relay-connector apex, three chains — the live `toon` box shape (#289). */
 function relayApexConfig(): ConnectorConfig {
   return {
@@ -167,9 +184,13 @@ function relayApexConfig(): ConnectorConfig {
     environment: 'development',
     peers: [],
     chainProviders: [
-      provider('evm', 'evm:31337'),
-      provider('solana', 'solana:devnet'),
-      provider('mina', 'mina:devnet'),
+      { ...provider('evm', 'evm:31337'), tokenAddress: EVM_TOKEN } as ChainProvider,
+      {
+        ...provider('solana', 'solana:devnet'),
+        programId: SOL_PROGRAM,
+        tokenMint: SOL_MINT,
+      } as ChainProvider,
+      { ...provider('mina', 'mina:devnet'), zkAppAddress: MINA_ZKAPP } as ChainProvider,
     ],
     routes: [
       {
@@ -225,7 +246,10 @@ const selfAnnounce: SelfAnnounceConfig = {
   relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
 };
 
-function buildSignedAnnounce(config: ConnectorConfig) {
+function buildSignedAnnounce(config: ConnectorConfig): {
+  info: ReturnType<typeof buildSelfAnnouncementInfo>;
+  event: ReturnType<typeof buildIlpPeerInfoEvent>;
+} {
   const info = buildSelfAnnouncementInfo(config, selfAnnounce);
   return { info, event: buildIlpPeerInfoEvent(info, generateSecretKey(), { ttlSeconds: 600 }) };
 }
@@ -254,6 +278,33 @@ describe('kind:10032 self-announce conforms to core parseIlpPeerInfo (#289)', ()
     const { info } = buildSignedAnnounce(relayApexConfig());
     const chains = new Set(info.supportedChains);
     for (const key of Object.keys(info.settlementAddresses ?? {})) {
+      expect(chains.has(key)).toBe(true);
+    }
+  });
+
+  it('carries per-chain tokenNetworks/preferredTokens and still parses (toon-client#378)', () => {
+    const { info, event } = buildSignedAnnounce(relayApexConfig());
+    expect(() => parseIlpPeerInfoReplica(event)).not.toThrow();
+    // Solana: payment-channel PROGRAM id + SPL mint; Mina: channel zkApp. The
+    // EVM TokenNetwork is runtime-resolved (registry lookup), not in this
+    // config-only build.
+    expect(info.tokenNetworks).toEqual({
+      'solana:devnet': SOL_PROGRAM,
+      'mina:devnet': MINA_ZKAPP,
+    });
+    expect(info.preferredTokens).toEqual({
+      'evm:31337': EVM_TOKEN,
+      'solana:devnet': SOL_MINT,
+    });
+  });
+
+  it('every tokenNetworks/preferredTokens key is a member of supportedChains (consistency)', () => {
+    const { info } = buildSignedAnnounce(relayApexConfig());
+    const chains = new Set(info.supportedChains);
+    for (const key of [
+      ...Object.keys(info.tokenNetworks ?? {}),
+      ...Object.keys(info.preferredTokens ?? {}),
+    ]) {
       expect(chains.has(key)).toBe(true);
     }
   });
