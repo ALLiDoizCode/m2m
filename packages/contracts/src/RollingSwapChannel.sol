@@ -5,29 +5,42 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 /// @title RollingSwapChannel
 /// @notice Production chain-B settlement contract for the TOON rolling-swap
 ///         receive side (rolling-swap epic — toon-protocol/toon-meta#145,
 ///         connector#315).
 ///
-/// @dev THE CLAIM WIRE FORMAT IS ABI-LOCKED. The `updateBalance(...)` entrypoint
-///      and the `SettlementSucceeded(...)` event are byte-for-byte what the
-///      shipped the toon-protocol/sdk `buildSettlementTx()` /
-///      the toon-protocol/client `submitEvmSettlement()` produce and expect
-///      (proven end-to-end by toon-protocol/swap#59). Redeeming a cumulative
-///      balance proof verifies the swap node's raw-secp256k1 signature over
+/// @dev V2 CLAIM DIGEST — EIP-712 DOMAIN-SEPARATED (refs connector#324,
+///      finding #1). Redeeming a cumulative balance proof verifies the swap
+///      node's secp256k1 signature over an EIP-712 typed digest:
 ///
-///          keccak256( channelId(32) || cumulativeAmount(32BE)
-///                      || nonce(32BE) || recipient(20) )
+///          digest = keccak256( 0x1901
+///                      || domainSeparator
+///                      || hashStruct(ClaimBalanceProof) )
 ///
-///      signed with NO EIP-191 / NO EIP-712 prefix as a 65-byte `r || s || v`
-///      blob (v = 27 + recovery). This is the exact digest emitted by
-///      the toon-protocol/core `balanceProofHashEvm` and the swap node's
-///      `EvmPaymentChannelSigner.signBalanceProof`. Changing any of the
-///      `updateBalance` arity/types, the digest preimage, or the event shape
-///      requires a coordinated change to the sdk, the client, and the swap
-///      signer — DO NOT drift it here.
+///      with domain `EIP712Domain(name="RollingSwapChannel", version="2",
+///      chainId=block.chainid, verifyingContract=address(this))` and struct
+///      `ClaimBalanceProof(bytes32 channelId, uint256 cumulativeAmount,
+///      uint256 nonce, address recipient)`. Because the digest now binds
+///      `block.chainid` and `address(this)`, a signature is valid on EXACTLY
+///      one (chain, contract) pair — cross-chain / cross-deployment replay
+///      (finding #1) is impossible. The `version="2"` string additionally
+///      guarantees a v1 raw-keccak signature can never validate as v2 and
+///      vice-versa (fail-closed version cutover).
+///
+///      THIS IS AN ABI-BREAKING WIRE MIGRATION vs the v1 raw digest
+///      `keccak256(channelId||cumulative(32BE)||nonce(32BE)||recipient(20))`
+///      that shipped in sdk `buildEvmSettlementTx` / client
+///      `submitEvmSettlement` / the swap node's `EvmPaymentChannelSigner` /
+///      core `balanceProofHashEvm`. All four MUST be migrated to the v2
+///      EIP-712 preimage in lock-step (the signer now REQUIRES `chainId` and
+///      `verifyingContract` as inputs — v1 signers took neither). The exact
+///      typehashes, domain-separator computation, and golden test vectors are
+///      pinned in `docs/rolling-swap-v2-digest-spec.md`; conform to that doc.
+///      The `updateBalance` selector/arity and the `SettlementSucceeded` event
+///      shape are UNCHANGED — only the signed digest preimage moved.
 ///
 ///      Differences vs the swap#59 test fixture (`RollingSwapChannel.sol` in
 ///      the swap repo's integration suite), all of which are INTERNAL to the
@@ -45,7 +58,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 ///      vector against a recipient's already-earned, already-signed balance.
 ///      The only privileged role is per-channel (`funder`), scoped to
 ///      reclaiming that channel's own unspent deposit.
-contract RollingSwapChannel is ReentrancyGuard {
+contract RollingSwapChannel is ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
 
     // -----------------------------------------------------------------------
@@ -67,18 +80,26 @@ contract RollingSwapChannel is ReentrancyGuard {
     uint256 public constant MIN_CHALLENGE_PERIOD = 1 days;
 
     // -----------------------------------------------------------------------
-    // Domain-separation tag for the recipient's cooperative-close signature.
-    // The claim digest is ABI-locked and NOT domain-separated (it must match
-    // the swap signer). The close-acknowledgement digest is NEW surface under
-    // our control, so we tag it to domain-separate a close-acknowledgement from
-    // a claim and to version the message (V1). NOTE: this tag does NOT bind
-    // chainId or address(this), so it does NOT by itself prevent cross-contract
-    // or cross-chain replay of a close-ack — it only guarantees a close-ack can
-    // never be misread as a balance-proof claim (or vice versa) and carries an
-    // explicit version. Cross-deployment domain separation is tracked
-    // separately (finding #1).
+    // EIP-712 v2 type hashes (refs connector#324, finding #1).
+    //
+    // Both the balance-proof claim and the cooperative-close acknowledgement are
+    // signed as EIP-712 typed data under the domain
+    //   EIP712Domain(name="RollingSwapChannel", version="2",
+    //                chainId=block.chainid, verifyingContract=address(this))
+    // (established in the constructor via the OZ EIP712 base). The domain binds
+    // chainId + contract address, so a signature is valid on exactly one
+    // (chain, deployment) pair — closing the cross-chain / cross-deployment
+    // replay class (finding #1). The version="2" string means a v1 raw-keccak
+    // signature can never be accepted here and vice-versa.
     // -----------------------------------------------------------------------
-    bytes32 private constant COOP_CLOSE_TAG = keccak256("TOON_ROLLING_SWAP_COOP_CLOSE_V1");
+
+    /// @dev keccak256("ClaimBalanceProof(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce,address recipient)")
+    bytes32 private constant CLAIM_TYPEHASH =
+        keccak256("ClaimBalanceProof(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce,address recipient)");
+
+    /// @dev keccak256("CooperativeClose(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce)")
+    bytes32 private constant COOP_CLOSE_TYPEHASH =
+        keccak256("CooperativeClose(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce)");
 
     // -----------------------------------------------------------------------
     // Channel state
@@ -148,7 +169,11 @@ contract RollingSwapChannel is ReentrancyGuard {
 
     /// @param _token The ERC20 token this contract settles.
     /// @param _challengePeriod Unilateral-close challenge window (>= 1 day).
-    constructor(address _token, uint256 _challengePeriod) {
+    /// @dev The EIP712("RollingSwapChannel", "2") base binds the v2 digest to
+    ///      this chain and this deployment address (finding #1). OZ caches the
+    ///      domain separator and recomputes it on a chainId change, so the digest
+    ///      stays correct across forks.
+    constructor(address _token, uint256 _challengePeriod) EIP712("RollingSwapChannel", "2") {
         if (_token == address(0)) revert InvalidToken();
         if (_challengePeriod < MIN_CHALLENGE_PERIOD) revert InvalidChallengePeriod();
         token = _token;
@@ -215,16 +240,17 @@ contract RollingSwapChannel is ReentrancyGuard {
     ///         recipient can always redeem the final watermark during a
     ///         unilateral-close challenge window).
     ///
-    /// @dev ABI-LOCKED: selector, arity, types, digest preimage, and the
-    ///      emitted event are the exact contract the sdk/client depend on.
-    ///      Highest-nonce-wins: N cumulative claims net to one payout no matter
-    ///      how many are submitted — only the delta over `cumulativePaid` moves.
+    /// @dev Selector, arity, types, and the emitted event are UNCHANGED from v1
+    ///      (the sdk/client depend on them); only the signed digest preimage
+    ///      moved to the v2 EIP-712 scheme (finding #1). Highest-nonce-wins: N
+    ///      cumulative claims net to one payout no matter how many are submitted
+    ///      — only the delta over `cumulativePaid` moves.
     ///
     /// @param channelId The channel id.
     /// @param cumulativeAmount Cumulative amount owed to `recipient` (monotone).
     /// @param nonce Monotone balance-proof nonce (strictly greater than stored).
     /// @param recipient Address to receive the delta (bound into the signature).
-    /// @param signature 65-byte `r || s || v` over the raw balance-proof digest.
+    /// @param signature 65-byte `r || s || v` over the v2 EIP-712 claim digest.
     function updateBalance(
         bytes32 channelId,
         uint256 cumulativeAmount,
@@ -238,10 +264,11 @@ contract RollingSwapChannel is ReentrancyGuard {
         if (cumulativeAmount <= ch.cumulativePaid) revert StaleCumulativeAmount();
         if (signature.length != 65) revert BadSignatureLength();
 
-        // Raw balance-proof digest — MUST match balanceProofHashEvm / the swap
-        // node's EvmPaymentChannelSigner byte-for-byte. No EIP-191/712 prefix.
-        // Built via _claimDigest (single source of truth shared with
-        // cooperativeClose and the claimDigest view).
+        // v2 EIP-712 balance-proof digest — domain-separated by chainId +
+        // address(this) (finding #1). MUST match the v2 balanceProofHashEvm /
+        // the swap node's EvmPaymentChannelSigner byte-for-byte. Built via
+        // _claimDigest (single source of truth shared with cooperativeClose and
+        // the claimDigest view).
         bytes32 digest = _claimDigest(channelId, cumulativeAmount, nonce, recipient);
         // OZ ECDSA.recover rejects malleable (high-s) signatures and invalid v,
         // and reverts on address(0) recovery — strictly safer than bare ecrecover.
@@ -273,12 +300,14 @@ contract RollingSwapChannel is ReentrancyGuard {
     /// @dev Two signatures are required, mirroring a Mina channel's dual-sign
     ///      redemption:
     ///        - `signerSig`: the swap signer's balance proof over the SAME
-    ///          ABI-locked digest as `updateBalance` (channelId, cumulative,
-    ///          nonce, recipient). Pays the recipient the delta.
+    ///          v2 EIP-712 ClaimBalanceProof digest as `updateBalance`
+    ///          (channelId, cumulative, nonce, recipient). Pays the recipient
+    ///          the delta.
     ///        - `recipientCloseSig`: the recipient's acknowledgement that this
-    ///          is the final state, over a domain-tagged digest
-    ///          `keccak256(COOP_CLOSE_TAG || channelId || cumulative || nonce)`.
-    ///          This authorizes early release of the remainder to the funder.
+    ///          is the final state, over the v2 EIP-712 CooperativeClose digest
+    ///          (channelId, cumulative, nonce) — domain-separated by chainId +
+    ///          address(this). This authorizes early release of the remainder
+    ///          to the funder.
     ///      Callable from Open or Closing. If `cumulativeAmount` merely equals
     ///      the already-settled cumulative (no new delta), only the funder's
     ///      remainder is released — a pure cooperative teardown.
@@ -302,8 +331,9 @@ contract RollingSwapChannel is ReentrancyGuard {
         if (ECDSA.recover(claimHash, signerSig) != ch.signer) revert BadSignature();
 
         // 2. Verify the recipient's cooperative-close acknowledgement over the
-        //    domain-tagged digest.
-        bytes32 closeDigest = keccak256(abi.encodePacked(COOP_CLOSE_TAG, channelId, cumulativeAmount, nonce));
+        //    v2 EIP-712 CooperativeClose digest (domain-separated by chainId +
+        //    address(this), single source of truth _cooperativeCloseDigest).
+        bytes32 closeDigest = _cooperativeCloseDigest(channelId, cumulativeAmount, nonce);
         if (ECDSA.recover(closeDigest, recipientCloseSig) != recipient) revert BadSignature();
 
         // 3. Pay the recipient any new delta.
@@ -378,44 +408,74 @@ contract RollingSwapChannel is ReentrancyGuard {
         return uint256(ch.closingAt) + challengePeriod;
     }
 
-    /// @notice The exact digest the swap signer must sign for `updateBalance` /
-    ///         the claim leg of `cooperativeClose`. Exposed for off-chain
-    ///         tooling and tests; equals `balanceProofHashEvm(...)`.
+    /// @notice The exact v2 EIP-712 digest the swap signer must sign for
+    ///         `updateBalance` / the claim leg of `cooperativeClose`. Exposed for
+    ///         off-chain tooling and tests; equals the v2 `balanceProofHashEvm(...)`
+    ///         once the sdk/swap signer migrate to the domain-separated preimage.
     function claimDigest(bytes32 channelId, uint256 cumulativeAmount, uint256 nonce, address recipient)
         external
-        pure
+        view
         returns (bytes32)
     {
         return _claimDigest(channelId, cumulativeAmount, nonce, recipient);
     }
 
-    /// @notice The domain-tagged digest the recipient must sign to authorize a
-    ///         cooperative close.
+    /// @notice The v2 EIP-712 digest the recipient must sign to authorize a
+    ///         cooperative close (domain-separated by chainId + address(this)).
     function cooperativeCloseDigest(bytes32 channelId, uint256 cumulativeAmount, uint256 nonce)
         external
-        pure
+        view
         returns (bytes32)
     {
-        return keccak256(abi.encodePacked(COOP_CLOSE_TAG, channelId, cumulativeAmount, nonce));
+        return _cooperativeCloseDigest(channelId, cumulativeAmount, nonce);
+    }
+
+    /// @notice The EIP-712 domain separator for this deployment (chainId +
+    ///         address(this) bound). Exposed so the sdk / swap signer / client
+    ///         can cross-check they are producing v2 digests against the right
+    ///         domain.
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
     }
 
     // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------
 
-    /// @dev SINGLE SOURCE OF TRUTH for the ABI-locked claim (balance-proof)
+    /// @dev SINGLE SOURCE OF TRUTH for the v2 EIP-712 claim (balance-proof)
     ///      digest. Used by `updateBalance`, the claim leg of `cooperativeClose`,
     ///      and the `claimDigest` view so the preimage exists in exactly one
-    ///      place and cannot drift between call sites. MUST remain byte-for-byte
-    ///      `keccak256(channelId(32) || cumulativeAmount(32BE) || nonce(32BE) ||
-    ///      recipient(20))` — matching balanceProofHashEvm / the swap node's
-    ///      EvmPaymentChannelSigner. No EIP-191/712 prefix.
+    ///      place and cannot drift between call sites.
+    ///
+    ///      digest = _hashTypedDataV4(keccak256(abi.encode(
+    ///          CLAIM_TYPEHASH, channelId, cumulativeAmount, nonce, recipient)))
+    ///
+    ///      i.e. keccak256(0x1901 || domainSeparator || structHash) with the
+    ///      domain bound to chainId + address(this) (finding #1). MUST match the
+    ///      v2 `balanceProofHashEvm` / swap `EvmPaymentChannelSigner` — see
+    ///      `docs/rolling-swap-v2-digest-spec.md` for the pinned vectors.
     function _claimDigest(bytes32 channelId, uint256 cumulativeAmount, uint256 nonce, address recipient)
         internal
-        pure
+        view
         returns (bytes32)
     {
-        return keccak256(abi.encodePacked(channelId, cumulativeAmount, nonce, recipient));
+        return _hashTypedDataV4(
+            keccak256(abi.encode(CLAIM_TYPEHASH, channelId, cumulativeAmount, nonce, recipient))
+        );
+    }
+
+    /// @dev SINGLE SOURCE OF TRUTH for the v2 EIP-712 cooperative-close
+    ///      acknowledgement digest. Same domain as the claim digest, so the
+    ///      close-ack is bound to chainId + address(this) and can never be
+    ///      confused with a balance-proof claim (distinct typehash).
+    function _cooperativeCloseDigest(bytes32 channelId, uint256 cumulativeAmount, uint256 nonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        return _hashTypedDataV4(
+            keccak256(abi.encode(COOP_CLOSE_TYPEHASH, channelId, cumulativeAmount, nonce))
+        );
     }
 
     /// @dev Pull `amount` of `token` from `from`, returning the actual balance
