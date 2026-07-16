@@ -886,9 +886,9 @@ export class ConnectorNode implements HealthStatusProvider {
         continue;
       }
       try {
-        const { tokenNetworkAddress } = await provider.getSigningContext();
-        if (tokenNetworkAddress) {
-          out[provider.chainId] = tokenNetworkAddress;
+        const { verifyingContract } = await provider.getSigningContext();
+        if (verifyingContract) {
+          out[provider.chainId] = verifyingContract;
         }
       } catch (err) {
         this._logger.warn(
