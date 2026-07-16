@@ -845,6 +845,11 @@ export class ConnectorNode implements HealthStatusProvider {
         // Route the write through THIS connector's own pipe: a locally-terminated
         // announceTo delivers free; a remote announceTo pays from our channel.
         publish: (event) => this._publishAnnouncement(event),
+        // Runtime-only announce fields: the EVM TokenNetwork contract is an
+        // on-chain registry lookup, so it comes from the live providers rather
+        // than config (Solana/Mina channel params are config-derived in the
+        // builder). Resolved lazily by the service and cached.
+        resolveTokenNetworks: () => this._resolveAnnounceTokenNetworks(),
         logger: this._logger,
       });
       this._selfAnnounceService.start();
@@ -858,6 +863,45 @@ export class ConnectorNode implements HealthStatusProvider {
         'Failed to start self-announce service; continuing without it'
       );
     }
+  }
+
+  /**
+   * Resolve the runtime-only `tokenNetworks` announce entries from the live
+   * chain providers: for each EVM provider, the TokenNetwork contract address
+   * looked up on-chain from the configured TokenNetworkRegistry (toon-client#378
+   * consumes it as `tokenNetworks[chainId]`). Solana/Mina entries are
+   * config-derived inside the announce builder and need no runtime resolution.
+   *
+   * Keyed by the providers' `chainId` — the exact identifiers the announcement
+   * lists in `supportedChains` (both derive from `config.chainProviders`).
+   * Per-provider failures are logged and skipped (a chain whose RPC is down
+   * must not blank the whole map); an empty result is fine — the announcement
+   * simply omits those entries.
+   */
+  private async _resolveAnnounceTokenNetworks(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    const providers = this._chainRegistry?.getAllProviders() ?? [];
+    for (const provider of providers) {
+      if (!(provider instanceof EVMPaymentChannelProvider)) {
+        continue;
+      }
+      try {
+        const { tokenNetworkAddress } = await provider.getSigningContext();
+        if (tokenNetworkAddress) {
+          out[provider.chainId] = tokenNetworkAddress;
+        }
+      } catch (err) {
+        this._logger.warn(
+          {
+            event: 'self_announce_token_network_lookup_failed',
+            chainId: provider.chainId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'Failed to resolve TokenNetwork contract for announce (entry omitted)'
+        );
+      }
+    }
+    return out;
   }
 
   /**

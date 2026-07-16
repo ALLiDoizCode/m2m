@@ -69,7 +69,20 @@ export interface IlpPeerInfo {
    * `parseIlpPeerInfo` rejects the whole event otherwise (#289).
    */
   settlementAddresses?: Record<string, string>;
-  /** Maps chain identifier → preferred token contract address. */
+  /**
+   * Maps chain identifier → the settlement-contract address a client needs to
+   * open a payment channel on that chain: the TokenNetwork contract on EVM
+   * chains, the payment-channel PROGRAM id on Solana chains, and the payment
+   * channel zkApp address on Mina chains. Keyed by the same fully-qualified
+   * chain ids as `supportedChains`. (Core's published parser only requires an
+   * object here; keys mirror `supportedChains` for consistency.)
+   */
+  tokenNetworks?: Record<string, string>;
+  /**
+   * Maps chain identifier → preferred token contract address: the ERC-20 token
+   * on EVM chains, the SPL token MINT on Solana chains, and the token-owner
+   * zkApp address on Mina chains.
+   */
   preferredTokens?: Record<string, string>;
   /** Allow out-of-band content fields (e.g. `routes`) to ride along in content. */
   [key: string]: unknown;

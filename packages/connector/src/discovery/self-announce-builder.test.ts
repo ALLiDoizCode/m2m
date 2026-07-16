@@ -14,6 +14,7 @@
 import type { ConnectorConfig, SelfAnnounceConfig } from '../config/types';
 import {
   buildSelfAnnouncementInfo,
+  deriveChainSettlementParams,
   normalizeSettlementAddressKeys,
   resolveRouteHints,
 } from './self-announce-builder';
@@ -288,6 +289,146 @@ describe('normalizeSettlementAddressKeys (#289)', () => {
     const info = buildSelfAnnouncementInfo(config, baseSelfAnnounce, warn);
     expect(info.settlementAddresses).toEqual({ 'evm:31337': APEX_EVM });
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('deriveChainSettlementParams (toon-client#378)', () => {
+  type ChainProvider = NonNullable<ConnectorConfig['chainProviders']>[number];
+
+  const EVM_TOKEN = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+  const SOL_PROGRAM = 'ChanProg1111111111111111111111111111111111';
+  const SOL_MINT = 'UsdcMint1111111111111111111111111111111111';
+  const MINA_ZKAPP = 'B62qChannelZkApp111111111111111111111111111111111111111';
+  const MINA_TOKEN_OWNER = 'B62qTokenOwner11111111111111111111111111111111111111111';
+
+  function evm(overrides: Record<string, unknown> = {}): ChainProvider {
+    return {
+      chainType: 'evm',
+      chainId: 'evm:31337',
+      rpcUrl: 'http://localhost:8545',
+      registryAddress: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+      keyId: 'k',
+      tokenAddress: EVM_TOKEN,
+      ...overrides,
+    } as ChainProvider;
+  }
+
+  function solana(overrides: Record<string, unknown> = {}): ChainProvider {
+    return {
+      chainType: 'solana',
+      chainId: 'solana:devnet',
+      rpcUrl: 'http://localhost:8899',
+      programId: SOL_PROGRAM,
+      keyId: 'k',
+      tokenMint: SOL_MINT,
+      ...overrides,
+    } as ChainProvider;
+  }
+
+  function mina(overrides: Record<string, unknown> = {}): ChainProvider {
+    return {
+      chainType: 'mina',
+      chainId: 'mina:devnet',
+      graphqlUrl: 'http://localhost:8080/graphql',
+      zkAppAddress: MINA_ZKAPP,
+      tokenAddress: MINA_TOKEN_OWNER,
+      ...overrides,
+    } as ChainProvider;
+  }
+
+  it('solana: programId → tokenNetworks, tokenMint → preferredTokens (keyed by chainId)', () => {
+    expect(deriveChainSettlementParams([solana()])).toEqual({
+      tokenNetworks: { 'solana:devnet': SOL_PROGRAM },
+      preferredTokens: { 'solana:devnet': SOL_MINT },
+    });
+  });
+
+  it('evm: tokenAddress → preferredTokens only (TokenNetwork is a runtime lookup, not config)', () => {
+    expect(deriveChainSettlementParams([evm()])).toEqual({
+      tokenNetworks: {},
+      preferredTokens: { 'evm:31337': EVM_TOKEN },
+    });
+  });
+
+  it('mina: zkAppAddress → tokenNetworks, token-owner tokenAddress → preferredTokens', () => {
+    expect(deriveChainSettlementParams([mina()])).toEqual({
+      tokenNetworks: { 'mina:devnet': MINA_ZKAPP },
+      preferredTokens: { 'mina:devnet': MINA_TOKEN_OWNER },
+    });
+  });
+
+  it('multi-chain: merges all families, keys matching the chainProviders chain ids', () => {
+    expect(deriveChainSettlementParams([evm(), solana(), mina()])).toEqual({
+      tokenNetworks: { 'solana:devnet': SOL_PROGRAM, 'mina:devnet': MINA_ZKAPP },
+      preferredTokens: {
+        'evm:31337': EVM_TOKEN,
+        'solana:devnet': SOL_MINT,
+        'mina:devnet': MINA_TOKEN_OWNER,
+      },
+    });
+  });
+
+  it('omits entries the provider does not configure (never emits empty strings)', () => {
+    expect(
+      deriveChainSettlementParams([
+        evm({ tokenAddress: '' }),
+        solana({ tokenMint: undefined }),
+        mina({ tokenAddress: undefined, zkAppAddress: '' }),
+      ])
+    ).toEqual({
+      tokenNetworks: { 'solana:devnet': SOL_PROGRAM },
+      preferredTokens: {},
+    });
+  });
+
+  it('returns empty maps for undefined / empty chainProviders and skips empty chainIds', () => {
+    expect(deriveChainSettlementParams(undefined)).toEqual({
+      tokenNetworks: {},
+      preferredTokens: {},
+    });
+    expect(deriveChainSettlementParams([])).toEqual({ tokenNetworks: {}, preferredTokens: {} });
+    expect(deriveChainSettlementParams([solana({ chainId: '' })])).toEqual({
+      tokenNetworks: {},
+      preferredTokens: {},
+    });
+  });
+
+  it('is wired into buildSelfAnnouncementInfo, alongside the runtime tokenNetworks merge', () => {
+    const config = relayConnectorConfig();
+    config.chainProviders = [evm(), solana(), mina()];
+    const RUNTIME_TN = '0xTokenNetworkResolvedAtRuntime';
+    const info = buildSelfAnnouncementInfo(config, baseSelfAnnounce, undefined, {
+      'evm:31337': RUNTIME_TN,
+    });
+    // Config-derived Solana/Mina entries + the runtime-resolved EVM entry.
+    expect(info.tokenNetworks).toEqual({
+      'evm:31337': RUNTIME_TN,
+      'solana:devnet': SOL_PROGRAM,
+      'mina:devnet': MINA_ZKAPP,
+    });
+    expect(info.preferredTokens).toEqual({
+      'evm:31337': EVM_TOKEN,
+      'solana:devnet': SOL_MINT,
+      'mina:devnet': MINA_TOKEN_OWNER,
+    });
+  });
+
+  it('runtime tokenNetworks win over a config-derived entry for the same chain', () => {
+    const config = relayConnectorConfig();
+    config.chainProviders = [solana()];
+    const info = buildSelfAnnouncementInfo(config, baseSelfAnnounce, undefined, {
+      'solana:devnet': 'RuntimeOverride1111111111111111111111111111',
+    });
+    expect(info.tokenNetworks).toEqual({
+      'solana:devnet': 'RuntimeOverride1111111111111111111111111111',
+    });
+  });
+
+  it('omits both maps entirely when nothing is derivable (no empty objects on the wire)', () => {
+    // The default relay fixture's EVM provider has no tokenAddress.
+    const info = buildSelfAnnouncementInfo(relayConnectorConfig(), baseSelfAnnounce);
+    expect(info.tokenNetworks).toBeUndefined();
+    expect(info.preferredTokens).toBeUndefined();
   });
 });
 
