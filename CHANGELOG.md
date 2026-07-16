@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.32.0](https://github.com/toon-protocol/connector/compare/v3.31.0...v3.32.0) (2026-07-16)
+
+### Features
+
+- **contracts:** v2 EIP-712 claim digest with chainId/address domain separation (refs [#324](https://github.com/toon-protocol/connector/issues/324)) ([#325](https://github.com/toon-protocol/connector/issues/325)) ([a67a039](https://github.com/toon-protocol/connector/commit/a67a039a5d2246aa12ecdb542a520b815d3d011b)), closes [finding-#1](https://github.com/toon-protocol/finding-/issues/1)
+
 ## [3.31.0](https://github.com/toon-protocol/connector/compare/v3.30.2...v3.31.0) (2026-07-13)
 
 ### Features
