@@ -95,6 +95,7 @@
     "@solana-program/token": "^0.6.0",
     "@solana/kit": "^3.0.3",
     "@toon-protocol/mina-zkapp": "^0.1.0",
+    "@toon-protocol/settlement-digest": "^1.0.0",
     "@toon-protocol/shared": "^1.3.0",
     "cors": "^2.8.6",
     "ethers": "^6.16.0",
