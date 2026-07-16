@@ -10,7 +10,7 @@
  * @module evm-payment-channel-provider
  */
 
-import type { BalanceProof, ChannelState } from '@toon-protocol/shared';
+import type { ChannelState } from '@toon-protocol/shared';
 import type { Logger } from '../../utils/logger';
 import type { BlockchainType } from '../../btp/btp-claim-types';
 import type {
@@ -160,14 +160,29 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
     balanceProof: BalanceProofParams,
     signature: string
   ): Promise<TxResult> {
-    this._logger.info('EVMPaymentChannelProvider: claiming from channel', {
+    this._logger.info('EVMPaymentChannelProvider: redeeming via updateBalance', {
       channelId,
       nonce: balanceProof.nonce,
       chainId: this.chainId,
     });
 
-    const sdkProof = this.toSdkBalanceProof(balanceProof);
-    await this._sdk.claimFromChannel(channelId, this._tokenAddress, sdkProof, signature);
+    // v2 redeem (connector#329 Phase 4b): submit the cumulative balance proof to
+    // RollingSwapChannel.updateBalance at the self-describing verifyingContract.
+    // recipient + verifyingContract are bound into the signed digest and REQUIRED.
+    if (!balanceProof.recipient || !balanceProof.verifyingContract) {
+      throw new Error(
+        'EVM v2 updateBalance requires recipient and verifyingContract on the balance proof'
+      );
+    }
+
+    await this._sdk.updateBalance(
+      balanceProof.verifyingContract,
+      channelId,
+      safeBigInt(balanceProof.transferredAmount, 'cumulativeAmount'),
+      balanceProof.nonce,
+      balanceProof.recipient,
+      signature
+    );
 
     // PaymentChannelSDK methods return void — transaction hash is not yet
     // propagated from the underlying ethers.js ContractTransactionResponse.
@@ -225,18 +240,30 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
    * @returns Hex-encoded EIP-712 signature string
    */
   async signBalanceProof(params: BalanceProofParams): Promise<string> {
-    this._logger.debug('EVMPaymentChannelProvider: signing balance proof', {
+    this._logger.debug('EVMPaymentChannelProvider: signing v2 balance proof', {
       channelId: params.channelId,
       nonce: params.nonce,
       chainId: this.chainId,
     });
 
+    // v2 (connector#329 Phase 4b): recipient + chainId + verifyingContract are
+    // REQUIRED digest inputs. `transferredAmount` carries the cumulative amount.
+    if (params.recipient === undefined || params.verifyingContract === undefined) {
+      throw new Error(
+        'EVM v2 signBalanceProof requires recipient and verifyingContract on the params'
+      );
+    }
+    if (params.chainId === undefined) {
+      throw new Error('EVM v2 signBalanceProof requires chainId on the params');
+    }
+
     return this._sdk.signBalanceProof(
       params.channelId,
       params.nonce,
-      safeBigInt(params.transferredAmount, 'transferredAmount'),
-      safeBigInt(params.lockedAmount, 'lockedAmount'),
-      params.locksRoot
+      safeBigInt(params.transferredAmount, 'cumulativeAmount'),
+      params.recipient,
+      params.chainId,
+      params.verifyingContract
     );
   }
 
@@ -249,15 +276,41 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
    * @returns `true` if the signature is valid, `false` otherwise
    */
   async verifyBalanceProof(params: VerifyBalanceProofParams): Promise<boolean> {
-    this._logger.debug('EVMPaymentChannelProvider: verifying balance proof', {
+    this._logger.debug('EVMPaymentChannelProvider: verifying v2 balance proof', {
       channelId: params.channelId,
       nonce: params.nonce,
       chainId: this.chainId,
     });
 
-    const sdkProof = this.toSdkBalanceProof(params);
+    // v2 verify (connector#329 Phase 4b): rebuild the v2 EIP-712 digest from the
+    // self-describing params and recover the signer. recipient/chainId/
+    // verifyingContract are REQUIRED — a missing one fails closed.
+    if (
+      params.recipient === undefined ||
+      params.chainId === undefined ||
+      params.verifyingContract === undefined
+    ) {
+      this._logger.warn('EVMPaymentChannelProvider: v2 verify missing required domain fields', {
+        channelId: params.channelId,
+        hasRecipient: params.recipient !== undefined,
+        hasChainId: params.chainId !== undefined,
+        hasVerifyingContract: params.verifyingContract !== undefined,
+      });
+      return false;
+    }
 
-    return this._sdk.verifyBalanceProof(sdkProof, params.signature, params.signerAddress);
+    return this._sdk.verifyBalanceProofV2(
+      {
+        channelId: params.channelId,
+        cumulativeAmount: params.transferredAmount,
+        nonce: params.nonce,
+        recipient: params.recipient,
+        chainId: params.chainId,
+        verifyingContract: params.verifyingContract,
+      },
+      params.signature,
+      params.signerAddress
+    );
   }
 
   /**
@@ -379,44 +432,35 @@ export class EVMPaymentChannelProvider implements PaymentChannelProvider {
 
   /**
    * Get the EVM-specific signing context needed for constructing self-describing
-   * claim messages (chainId, tokenNetworkAddress, signerAddress).
+   * v2 claim messages (chainId, verifyingContract, signerAddress).
+   *
+   * `verifyingContract` is the deployed RollingSwapChannel address bound into the
+   * v2 EIP-712 signing domain (connector#329 Phase 4b) — it replaces the v1
+   * `tokenNetworkAddress`. It is resolved from the SDK's configured settlement
+   * contract for this token.
    *
    * This method is NOT part of the `PaymentChannelProvider` interface — it is an
    * EVM-specific concrete method. Callers should use `instanceof EVMPaymentChannelProvider`
    * to narrow the type before calling.
    *
-   * @returns Signing context with chainId (number), tokenNetworkAddress (hex), and signerAddress (hex)
+   * @returns Signing context with chainId (number), verifyingContract (hex), and signerAddress (hex)
    */
   async getSigningContext(): Promise<{
     chainId: number;
-    tokenNetworkAddress: string;
+    verifyingContract: string;
     signerAddress: string;
   }> {
-    const [chainId, tokenNetworkAddress, signerAddress] = await Promise.all([
+    const [chainId, verifyingContract, signerAddress] = await Promise.all([
       this._sdk.getChainId(),
       this._sdk.getTokenNetworkAddress(this._tokenAddress),
       this._sdk.getSignerAddress(),
     ]);
-    return { chainId, tokenNetworkAddress, signerAddress };
+    return { chainId, verifyingContract, signerAddress };
   }
 
   // ---------------------------------------------------------------------------
   // Private Helpers
   // ---------------------------------------------------------------------------
-
-  /**
-   * Convert provider-level `BalanceProofParams` (string amounts) to SDK-level
-   * `BalanceProof` (bigint amounts).
-   */
-  private toSdkBalanceProof(params: BalanceProofParams): BalanceProof {
-    return {
-      channelId: params.channelId,
-      nonce: params.nonce,
-      transferredAmount: safeBigInt(params.transferredAmount, 'transferredAmount'),
-      lockedAmount: safeBigInt(params.lockedAmount, 'lockedAmount'),
-      locksRoot: params.locksRoot,
-    };
-  }
 
   /**
    * Translate EVM-specific `ChannelState` to chain-agnostic `ProviderChannelState`.

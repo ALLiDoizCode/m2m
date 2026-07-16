@@ -42,6 +42,11 @@ const TEST_PARTICIPANT_2 = '0x' + 'd'.repeat(40);
 const TEST_TOKEN_NETWORK_ADDRESS = '0x' + 'e'.repeat(40);
 const TEST_TOKEN_ADDRESS = '0x' + 'f'.repeat(40);
 const TEST_CHAIN_ID_STR = 'evm:31337';
+// v2 RollingSwapChannel fields (connector#329 Phase 4b)
+const TEST_RECIPIENT = '0x' + '7'.repeat(40);
+const TEST_VERIFYING_CONTRACT = '0x' + 'e'.repeat(40);
+// v2 buildVerifyParams always sends lockedAmount '0' and a zeroed locksRoot.
+const V2_ZERO_LOCKS_ROOT = '0x' + '0'.repeat(64);
 
 // ---------------------------------------------------------------------------
 // Mock Factories
@@ -85,18 +90,19 @@ function createMockRegistry(
 
 function createValidEVMClaim(overrides: Partial<EVMClaimMessage> = {}): EVMClaimMessage {
   return {
-    version: '1.0',
+    version: '2.0',
     blockchain: 'evm',
     messageId: 'evm-0xabc123-5-1706889600000',
     timestamp: '2026-03-25T12:00:00.000Z',
     senderId: 'peer-bob',
     channelId: TEST_CHANNEL_ID,
     nonce: 5,
-    transferredAmount: '1000000000000000000',
-    lockedAmount: '0',
-    locksRoot: '0x' + '0'.repeat(64),
+    cumulativeAmount: '1000000000000000000',
+    recipient: TEST_RECIPIENT,
     signature: '0x' + 'b'.repeat(130),
     signerAddress: TEST_SIGNER_ADDRESS,
+    chainId: 8453,
+    verifyingContract: TEST_VERIFYING_CONTRACT,
     ...overrides,
   };
 }
@@ -107,7 +113,7 @@ function createSelfDescribingClaim(overrides: Partial<EVMClaimMessage> = {}): EV
     senderId: 'peer-new',
     nonce: 1,
     chainId: 31337,
-    tokenNetworkAddress: TEST_TOKEN_NETWORK_ADDRESS,
+    verifyingContract: TEST_TOKEN_NETWORK_ADDRESS,
     tokenAddress: TEST_TOKEN_ADDRESS,
     ...overrides,
   });
@@ -256,11 +262,14 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       expect(mockProvider.verifyBalanceProof).toHaveBeenCalledWith({
         channelId: claim.channelId,
         nonce: claim.nonce,
-        transferredAmount: claim.transferredAmount, // string, not bigint
-        lockedAmount: claim.lockedAmount, // string, not bigint
-        locksRoot: claim.locksRoot,
+        transferredAmount: claim.cumulativeAmount, // string, carries v2 cumulative
+        lockedAmount: '0', // string, not bigint (legacy slot, always '0' for v2)
+        locksRoot: V2_ZERO_LOCKS_ROOT,
         signature: claim.signature,
         signerAddress: claim.signerAddress,
+        recipient: claim.recipient,
+        chainId: claim.chainId,
+        verifyingContract: claim.verifyingContract,
       } satisfies VerifyBalanceProofParams);
 
       // And: Claim is persisted with verified=true
@@ -299,7 +308,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       const emittedEvent: ClaimReceivedEvent = claimReceivedListener.mock.calls[0][0];
       expect(emittedEvent.peerId).toBe('peer-bob');
       expect(emittedEvent.channelId).toBe(claim.channelId);
-      expect(emittedEvent.cumulativeAmount).toBe(BigInt(claim.transferredAmount));
+      expect(emittedEvent.cumulativeAmount).toBe(BigInt(claim.cumulativeAmount));
     });
 
     it('[P0] should persist claim with verified=false when provider rejects signature', async () => {
@@ -358,8 +367,7 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
       mockStatement.get.mockReturnValue(undefined);
 
       const claim = createValidEVMClaim({
-        transferredAmount: '5000000000000000000',
-        lockedAmount: '1000000',
+        cumulativeAmount: '5000000000000000000',
       });
 
       // When: Claim is received
@@ -371,8 +379,9 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
         .calls[0]![0] as VerifyBalanceProofParams;
       expect(typeof calledParams.transferredAmount).toBe('string');
       expect(typeof calledParams.lockedAmount).toBe('string');
+      // v2: transferredAmount carries the cumulative; lockedAmount is a legacy '0' slot.
       expect(calledParams.transferredAmount).toBe('5000000000000000000');
-      expect(calledParams.lockedAmount).toBe('1000000');
+      expect(calledParams.lockedAmount).toBe('0');
     });
   });
 
@@ -595,11 +604,14 @@ describe('ClaimReceiver ATDD - Story 32.6: Multi-Chain Verification', () => {
         expect.objectContaining({
           channelId: claim.channelId,
           nonce: claim.nonce,
-          transferredAmount: claim.transferredAmount,
-          lockedAmount: claim.lockedAmount,
-          locksRoot: claim.locksRoot,
+          transferredAmount: claim.cumulativeAmount,
+          lockedAmount: '0',
+          locksRoot: V2_ZERO_LOCKS_ROOT,
           signature: claim.signature,
           signerAddress: claim.signerAddress,
+          recipient: claim.recipient,
+          chainId: claim.chainId,
+          verifyingContract: claim.verifyingContract,
         })
       );
     });

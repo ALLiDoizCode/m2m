@@ -80,10 +80,11 @@ describe('ClaimSender', () => {
       const channelId = '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
       const nonce = 42;
       const transferredAmount = '5000000000000000000';
-      const lockedAmount = '0';
-      const locksRoot = '0x' + '0'.repeat(64);
+      const recipient = '0x' + '2'.repeat(40);
       const signature = '0x' + 'a'.repeat(130);
       const signerAddress = '0x' + '1'.repeat(40);
+      const chainId = 8453;
+      const verifyingContract = '0x' + 'e'.repeat(40);
 
       const result = await claimSender.sendEVMClaim(
         peerId,
@@ -91,10 +92,11 @@ describe('ClaimSender', () => {
         channelId,
         nonce,
         transferredAmount,
-        lockedAmount,
-        locksRoot,
+        recipient,
         signature,
-        signerAddress
+        signerAddress,
+        chainId,
+        verifyingContract
       );
 
       // Assert success with nonce in message ID
@@ -105,14 +107,15 @@ describe('ClaimSender', () => {
       const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
       const claimData = JSON.parse(dataBuffer.toString('utf8'));
       expect(claimData).toMatchObject({
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         nonce,
-        transferredAmount,
-        lockedAmount,
-        locksRoot,
+        cumulativeAmount: transferredAmount,
+        recipient,
         signature,
         signerAddress,
+        chainId,
+        verifyingContract,
       });
 
       // Assert database insert with blockchain='evm'
@@ -152,10 +155,11 @@ describe('ClaimSender', () => {
         '0xchannelId123',
         1,
         '1000',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       // Fast-forward through retry delays (exponential backoff: 1s, 2s, 4s)
@@ -204,10 +208,11 @@ describe('ClaimSender', () => {
         '0xchannelId456',
         1,
         '2000',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       // Fast-forward through all retry delays
@@ -234,10 +239,11 @@ describe('ClaimSender', () => {
         '0xchannelId789',
         1,
         '3000',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       // Claim send should still succeed (idempotency)
@@ -265,10 +271,11 @@ describe('ClaimSender', () => {
         '0xchannelIdABC',
         1,
         '4000',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       // Claim send should still succeed (persistence is secondary)
@@ -297,10 +304,11 @@ describe('ClaimSender', () => {
         channelId,
         nonce,
         '1000',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       expect(result.messageId).toMatch(/^evm-0xEVM123-999-\d{13}$/);
@@ -313,10 +321,11 @@ describe('ClaimSender', () => {
         '0xchannel1',
         1,
         '100',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       // Wait to ensure different timestamp
@@ -328,10 +337,11 @@ describe('ClaimSender', () => {
         '0xchannel1',
         2,
         '200',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       // Extract timestamps from message IDs
@@ -350,10 +360,11 @@ describe('ClaimSender', () => {
         '0xchannelBTP',
         1,
         '7777',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       expect(mockBtpClient.sendProtocolData).toHaveBeenCalledWith(
@@ -373,20 +384,21 @@ describe('ClaimSender', () => {
         channelId,
         1,
         transferredAmount,
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
       const claimData = JSON.parse(dataBuffer.toString('utf8'));
 
       expect(claimData).toMatchObject({
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         channelId,
-        transferredAmount,
+        cumulativeAmount: transferredAmount,
       });
       expect(typeof claimData.messageId).toBe('string');
       expect(typeof claimData.timestamp).toBe('string');
@@ -407,10 +419,11 @@ describe('ClaimSender', () => {
         '0xchannelNoNodeId',
         1,
         '8888',
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       expect(result.success).toBe(true);
@@ -430,10 +443,11 @@ describe('ClaimSender', () => {
         '0xchannelLarge',
         1,
         largeAmount,
-        '0',
-        '0x00',
+        '0x' + '2'.repeat(40),
         '0xsig',
-        '0xaddr'
+        '0xaddr',
+        8453,
+        '0x' + 'e'.repeat(40)
       );
 
       expect(result.success).toBe(true);
@@ -441,7 +455,7 @@ describe('ClaimSender', () => {
       // Verify amount preserved as string (no precision loss)
       const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
       const claimData = JSON.parse(dataBuffer.toString('utf8'));
-      expect(claimData.transferredAmount).toBe(largeAmount);
+      expect(claimData.cumulativeAmount).toBe(largeAmount);
     }, 50);
   });
 
@@ -452,12 +466,11 @@ describe('ClaimSender', () => {
       const channelId = '0x' + 'a'.repeat(64);
       const nonce = 100;
       const transferredAmount = '10000000000000000000';
-      const lockedAmount = '0';
-      const locksRoot = '0x' + '0'.repeat(64);
+      const recipient = '0x' + '5'.repeat(40);
       const signature = '0x' + 'b'.repeat(130);
       const signerAddress = '0x' + '1'.repeat(40);
       const chainId = 8453;
-      const tokenNetworkAddress = '0x' + '2'.repeat(40);
+      const verifyingContract = '0x' + '2'.repeat(40);
       const tokenAddress = '0x' + '3'.repeat(40);
 
       // Act
@@ -467,12 +480,11 @@ describe('ClaimSender', () => {
         channelId,
         nonce,
         transferredAmount,
-        lockedAmount,
-        locksRoot,
+        recipient,
         signature,
         signerAddress,
         chainId,
-        tokenNetworkAddress,
+        verifyingContract,
         tokenAddress
       );
 
@@ -483,65 +495,69 @@ describe('ClaimSender', () => {
       const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
       const claimData = JSON.parse(dataBuffer.toString('utf8'));
       expect(claimData).toMatchObject({
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         nonce,
-        transferredAmount,
-        lockedAmount,
-        locksRoot,
+        cumulativeAmount: transferredAmount,
+        recipient,
         signature,
         signerAddress,
         chainId,
-        tokenNetworkAddress,
+        verifyingContract,
         tokenAddress,
       });
     }, 50);
 
-    it('should omit self-describing fields from serialized JSON when not provided (backward compatibility)', async () => {
+    it('should omit optional tokenAddress from serialized JSON when not provided (backward compatibility)', async () => {
       // Arrange
       const peerId = 'peer-epic31-without-fields';
       const channelId = '0x' + 'c'.repeat(64);
       const nonce = 200;
       const transferredAmount = '20000000000000000000';
-      const lockedAmount = '0';
-      const locksRoot = '0x' + '0'.repeat(64);
+      const recipient = '0x' + '6'.repeat(40);
       const signature = '0x' + 'd'.repeat(130);
       const signerAddress = '0x' + '4'.repeat(40);
+      const chainId = 8453;
+      const verifyingContract = '0x' + 'e'.repeat(40);
 
-      // Act - call without optional fields
+      // Act - call with required chainId/verifyingContract but without optional tokenAddress
       const result = await claimSender.sendEVMClaim(
         peerId,
         mockBtpClient as unknown as BTPClient,
         channelId,
         nonce,
         transferredAmount,
-        lockedAmount,
-        locksRoot,
+        recipient,
         signature,
-        signerAddress
-        // chainId, tokenNetworkAddress, tokenAddress omitted
+        signerAddress,
+        chainId,
+        verifyingContract
+        // tokenAddress omitted
       );
 
       // Assert
       expect(result.success).toBe(true);
 
-      // Verify JSON payload excludes optional fields (undefined values excluded by JSON.stringify)
+      // Verify JSON payload includes required fields (undefined values excluded by JSON.stringify)
       const [, , dataBuffer] = mockBtpClient.sendProtocolData.mock.calls[0];
       const claimData = JSON.parse(dataBuffer.toString('utf8'));
       expect(claimData).toMatchObject({
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         nonce,
-        transferredAmount,
-        lockedAmount,
-        locksRoot,
+        cumulativeAmount: transferredAmount,
+        recipient,
         signature,
         signerAddress,
+        chainId,
+        verifyingContract,
       });
 
-      // Verify optional fields are NOT present in the serialized JSON
-      expect(claimData).not.toHaveProperty('chainId');
-      expect(claimData).not.toHaveProperty('tokenNetworkAddress');
+      // Required self-describing fields ARE always present in v2
+      expect(claimData).toHaveProperty('chainId');
+      expect(claimData).toHaveProperty('verifyingContract');
+
+      // Verify optional tokenAddress is NOT present in the serialized JSON
       expect(claimData).not.toHaveProperty('tokenAddress');
     }, 50);
   });

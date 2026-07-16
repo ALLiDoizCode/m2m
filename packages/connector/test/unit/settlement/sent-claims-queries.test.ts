@@ -43,7 +43,7 @@ describe('SentClaimsQueries', () => {
             claim_data: JSON.stringify({
               channelId: 'ch1',
               tokenAddress: '0xToken',
-              transferredAmount: '1000',
+              cumulativeAmount: '1000',
               nonce: 5,
               blockchain: 'evm',
             }),
@@ -54,7 +54,7 @@ describe('SentClaimsQueries', () => {
             claim_data: JSON.stringify({
               channelId: 'ch2',
               tokenAddress: '0xToken',
-              transferredAmount: '2000',
+              cumulativeAmount: '2000',
               nonce: 3,
               blockchain: 'evm',
             }),
@@ -80,7 +80,7 @@ describe('SentClaimsQueries', () => {
             claim_data: JSON.stringify({
               channelId: 'ch1',
               tokenAddress: '0xToken',
-              transferredAmount: '1000',
+              cumulativeAmount: '1000',
               nonce: 1,
               blockchain: 'evm',
             }),
@@ -91,7 +91,7 @@ describe('SentClaimsQueries', () => {
             claim_data: JSON.stringify({
               channelId: 'ch1',
               tokenAddress: '0xToken',
-              transferredAmount: '5000',
+              cumulativeAmount: '5000',
               nonce: 5,
               blockchain: 'evm',
             }),
@@ -210,7 +210,7 @@ describe('SentClaimsQueries', () => {
             claim_data: JSON.stringify({
               channelId: 'ch1',
               tokenAddress: '0xToken',
-              transferredAmount: 'not-a-number',
+              cumulativeAmount: 'not-a-number',
               nonce: 1,
               blockchain: 'evm',
             }),

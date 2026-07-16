@@ -78,18 +78,19 @@ function createMockProvider(
 
 function createEVMClaimFixture(): EVMClaimMessage {
   return {
-    version: '1.0',
+    version: '2.0',
     blockchain: 'evm',
     messageId: 'claim-evm-001',
     timestamp: '2026-03-28T12:00:00.000Z',
     senderId: 'peer-evm',
     channelId: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
     nonce: 1,
-    transferredAmount: '5000',
-    lockedAmount: '0',
-    locksRoot: '0x' + '0'.repeat(64),
+    cumulativeAmount: '5000',
+    recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
     signature: '0x' + 'ab'.repeat(65),
     signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    chainId: 8453,
+    verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
   };
 }
 
@@ -317,7 +318,7 @@ describe('Mixed-Chain Three-Way Settlement (Story 34.8)', () => {
       expect(parsed.blockchain).toBe('evm');
       expect(parsed.channelId).toBe(evmClaim.channelId);
       expect(parsed.nonce).toBe(evmClaim.nonce);
-      expect(parsed.transferredAmount).toBe(evmClaim.transferredAmount);
+      expect(parsed.cumulativeAmount).toBe(evmClaim.cumulativeAmount);
       expect(parsed.signature).toBe(evmClaim.signature);
       expect(parsed.signerAddress).toBe(evmClaim.signerAddress);
 

@@ -110,33 +110,34 @@ export class ClaimSender {
     btpClient: BTPClient,
     channelId: string,
     nonce: number,
-    transferredAmount: string,
-    lockedAmount: string,
-    locksRoot: string,
+    cumulativeAmount: string,
+    recipient: string,
     signature: string,
     signerAddress: string,
-    chainId?: number,
-    tokenNetworkAddress?: string,
+    chainId: number,
+    verifyingContract: string,
     tokenAddress?: string
   ): Promise<ClaimSendResult> {
     const messageId = this._generateMessageId('evm', channelId, nonce);
     const timestamp = new Date().toISOString();
 
+    // v2 RollingSwapChannel claim (connector#329 Phase 4b). chainId +
+    // verifyingContract are REQUIRED domain inputs; recipient is bound into the
+    // signed digest.
     const claimMessage: EVMClaimMessage = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId,
       timestamp,
       senderId: this.nodeId ?? 'unknown',
       channelId,
       nonce,
-      transferredAmount,
-      lockedAmount,
-      locksRoot,
+      cumulativeAmount,
+      recipient,
       signature,
       signerAddress,
-      ...(chainId !== undefined && { chainId }),
-      ...(tokenNetworkAddress !== undefined && { tokenNetworkAddress }),
+      chainId,
+      verifyingContract,
       ...(tokenAddress !== undefined && { tokenAddress }),
     };
 

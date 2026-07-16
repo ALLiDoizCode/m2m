@@ -142,6 +142,25 @@ export interface BalanceProofParams {
    * key and fail preflight. Ignored by the EVM and Mina providers.
    */
   signerPublicKey?: string;
+  /**
+   * EVM v2-only (RollingSwapChannel, connector#329): recipient address bound into
+   * the v2 EIP-712 balance-proof digest and paid the delta on `updateBalance`.
+   * `transferredAmount` carries the cumulative amount for EVM too. Required for
+   * the EVM v2 sign/redeem path; ignored by the Solana and Mina providers.
+   */
+  recipient?: string;
+  /**
+   * EVM v2-only: the settlement chain id — part of the v2 EIP-712 signing domain
+   * (`EIP712Domain(...,chainId,...)`), so it is a REQUIRED digest input, not a
+   * hint. Ignored by the Solana and Mina providers.
+   */
+  chainId?: number;
+  /**
+   * EVM v2-only: the deployed RollingSwapChannel contract address — part of the
+   * v2 EIP-712 signing domain (`EIP712Domain(...,verifyingContract)`) and the
+   * on-chain `updateBalance` target. Ignored by the Solana and Mina providers.
+   */
+  verifyingContract?: string;
 }
 
 /** Parameters for verifying a balance proof off-chain. */
@@ -160,6 +179,22 @@ export interface VerifyBalanceProofParams {
   signature: string;
   /** Address of the expected signer */
   signerAddress: string;
+  /**
+   * EVM v2-only (RollingSwapChannel, connector#329): recipient address bound into
+   * the v2 EIP-712 balance-proof digest. Required to rebuild the digest for EVM
+   * verification; ignored by the Solana and Mina providers.
+   */
+  recipient?: string;
+  /**
+   * EVM v2-only: settlement chain id — part of the v2 EIP-712 signing domain.
+   * Ignored by the Solana and Mina providers.
+   */
+  chainId?: number;
+  /**
+   * EVM v2-only: deployed RollingSwapChannel address — part of the v2 EIP-712
+   * signing domain. Ignored by the Solana and Mina providers.
+   */
+  verifyingContract?: string;
 }
 
 // ---------------------------------------------------------------------------

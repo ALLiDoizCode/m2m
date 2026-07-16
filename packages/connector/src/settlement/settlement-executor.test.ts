@@ -43,6 +43,30 @@ const testChannelId = '0xaaaa111122223333444455556666777788889999aaaabbbbccccddd
 const testCurrentBalance = 1200n;
 const testThreshold = 1000n;
 const testChainId = 'evm:anvil:31337';
+const testRecipient = testPeerAddress;
+const testVerifyingContract = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+
+/**
+ * Build a v2 (RollingSwapChannel) EVM claim fixture (connector#329 Phase 4b).
+ * Emits the v2 self-describing fields (cumulativeAmount / recipient /
+ * verifyingContract / version '2.0') the settlement executor reads to build the
+ * EVM redeem balance proof. Solana/Mina claim fixtures are left untouched.
+ */
+function makeV2EvmClaimFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: '2.0',
+    blockchain: 'evm',
+    channelId: testChannelId,
+    nonce: 5,
+    cumulativeAmount: '5000',
+    recipient: testRecipient,
+    signature: '0xperpacketsignature',
+    signerAddress: testPeerAddress,
+    chainId: 31337,
+    verifyingContract: testVerifyingContract,
+    ...overrides,
+  };
+}
 
 /**
  * Create a mock PaymentChannelProvider
@@ -288,15 +312,7 @@ describe('SettlementExecutor', () => {
 
       // Create executor with per-packet claim service
       const mockPerPacketClaimService = {
-        getLatestClaim: jest.fn().mockReturnValue({
-          blockchain: 'evm',
-          channelId: testChannelId,
-          nonce: 5,
-          transferredAmount: '5000',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
-          signature: '0xperpacketsignature',
-        }),
+        getLatestClaim: jest.fn().mockReturnValue(makeV2EvmClaimFixture()),
         resetChannel: jest.fn(),
         start: jest.fn(),
         stop: jest.fn(),
@@ -325,16 +341,19 @@ describe('SettlementExecutor', () => {
       // Drain the settlement chain by stopping the executor
       await executor.stop();
 
-      // Verify: claimFromChannel called with BalanceProofParams (string amounts)
+      // Verify: claimFromChannel called with v2 BalanceProofParams. transferredAmount
+      // carries the cumulative amount; recipient/chainId/verifyingContract are the
+      // v2 RollingSwapChannel digest inputs (connector#329 Phase 4b).
       expect(mockProvider.claimFromChannel).toHaveBeenCalledWith(
         testChannelId,
         expect.objectContaining({
           channelId: testChannelId,
           nonce: 5,
           transferredAmount: '5000',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
-        } as BalanceProofParams),
+          recipient: testRecipient,
+          chainId: 31337,
+          verifyingContract: testVerifyingContract,
+        } as Partial<BalanceProofParams>),
         '0xperpacketsignature'
       );
 
@@ -373,15 +392,10 @@ describe('SettlementExecutor', () => {
       ]);
 
       // Verified inbound claim used to build the balance proof for claimFromChannel.
-      const verifiedClaim = {
-        blockchain: 'evm',
-        channelId: testChannelId,
+      const verifiedClaim = makeV2EvmClaimFixture({
         nonce: 7,
-        transferredAmount: '5000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
         signature: '0xverifiedclaimsignature',
-      };
+      });
       const mockClaimReceiver = {
         getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(verifiedClaim),
         getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(verifiedClaim),
@@ -470,15 +484,7 @@ describe('SettlementExecutor', () => {
 
       // Create executor with per-packet claim service
       const mockPerPacketClaimService = {
-        getLatestClaim: jest.fn().mockReturnValue({
-          blockchain: 'evm',
-          channelId: testChannelId,
-          nonce: 5,
-          transferredAmount: '5000',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
-          signature: '0xperpacketsignature',
-        }),
+        getLatestClaim: jest.fn().mockReturnValue(makeV2EvmClaimFixture()),
         resetChannel: jest.fn(),
         start: jest.fn(),
         stop: jest.fn(),
@@ -678,15 +684,7 @@ describe('SettlementExecutor', () => {
       } as ChannelMetadata);
 
       const mockPerPacketClaimService = {
-        getLatestClaim: jest.fn().mockReturnValue({
-          blockchain: 'evm',
-          channelId: testChannelId,
-          nonce: 5,
-          transferredAmount: '5000',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
-          signature: '0xsig',
-        }),
+        getLatestClaim: jest.fn().mockReturnValue(makeV2EvmClaimFixture({ signature: '0xsig' })),
         resetChannel: jest.fn(),
         start: jest.fn(),
         stop: jest.fn(),
@@ -831,15 +829,7 @@ describe('SettlementExecutor', () => {
       );
       // Intentionally NOT calling setChannelManager() — standalone node.
 
-      const evmClaim = {
-        blockchain: 'evm',
-        channelId: testChannelId,
-        nonce: 5,
-        transferredAmount: '5000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
-        signature: '0xperpacketsignature',
-      };
+      const evmClaim = makeV2EvmClaimFixture();
       const mockClaimReceiver = {
         getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(evmClaim),
         getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(evmClaim),
@@ -909,16 +899,11 @@ describe('SettlementExecutor', () => {
         status: 'open',
       } as ChannelMetadata);
 
-      const verifiedClaim = {
-        blockchain: 'evm',
-        channelId: testChannelId,
+      const verifiedClaim = makeV2EvmClaimFixture({
         chainId: 31337,
         nonce: 9,
-        transferredAmount: '5000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
         signature: '0xverifiedinboundsignature',
-      };
+      });
       const mockClaimReceiver = {
         getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(verifiedClaim),
         getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(verifiedClaim),
@@ -998,16 +983,11 @@ describe('SettlementExecutor', () => {
 
       // Claim names chainId 31337 → must resolve to testChainId provider, not
       // the first-listed otherProvider (evm:optimism:10).
-      const verifiedClaim = {
-        blockchain: 'evm',
-        channelId: testChannelId,
+      const verifiedClaim = makeV2EvmClaimFixture({
         chainId: 31337,
         nonce: 3,
-        transferredAmount: '5000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
         signature: '0xexactchainsignature',
-      };
+      });
       const mockClaimReceiver = {
         getLatestVerifiedClaimForPeer: jest.fn().mockResolvedValue(verifiedClaim),
         getLatestVerifiedClaimForChannel: jest.fn().mockResolvedValue(verifiedClaim),

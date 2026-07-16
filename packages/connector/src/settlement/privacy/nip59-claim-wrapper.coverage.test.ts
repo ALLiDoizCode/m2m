@@ -79,18 +79,19 @@ describe('Branch coverage: wrapClaim error handling (line 260)', () => {
   test('wrapClaim throws NIP59WrapError when secp256k1.getPublicKey fails', () => {
     const wrapper = createWrapper();
     const claim = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'test-1',
       timestamp: '2026-01-01T00:00:00.000Z',
       senderId: 'peer-a',
       channelId: '0x' + '00'.repeat(32),
       nonce: 1,
-      transferredAmount: '1000',
-      lockedAmount: '0',
-      locksRoot: '0x' + '00'.repeat(32),
+      cumulativeAmount: '1000',
+      recipient: '0x' + '11'.repeat(20),
       signature: '0x' + '00'.repeat(65),
       signerAddress: '0x' + '00'.repeat(20),
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     } as const;
 
     const senderPrivKey = randomBytes(32);
@@ -216,18 +217,19 @@ describe('Branch coverage: wrapClaimWithCondition catch block (line 476)', () =>
   test('wrapClaimWithCondition throws NIP59WrapError when crypto fails', () => {
     const wrapper = createWrapper();
     const claim = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'test-2',
       timestamp: '2026-01-01T00:00:00.000Z',
       senderId: 'peer-b',
       channelId: '0x' + '00'.repeat(32),
       nonce: 2,
-      transferredAmount: '2000',
-      lockedAmount: '0',
-      locksRoot: '0x' + '00'.repeat(32),
+      cumulativeAmount: '2000',
+      recipient: '0x' + '11'.repeat(20),
       signature: '0x' + '00'.repeat(65),
       signerAddress: '0x' + '00'.repeat(20),
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     } as const;
 
     const senderPrivKey = randomBytes(32);
@@ -452,18 +454,19 @@ describe('Branch coverage: ECDH key derivation edge cases', () => {
   test('wrapClaim throws NIP59WrapError when secp256k1.getSharedSecret fails', () => {
     const wrapper = createWrapper();
     const claim = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'test-3',
       timestamp: '2026-01-01T00:00:00.000Z',
       senderId: 'peer-c',
       channelId: '0x' + '00'.repeat(32),
       nonce: 3,
-      transferredAmount: '3000',
-      lockedAmount: '0',
-      locksRoot: '0x' + '00'.repeat(32),
+      cumulativeAmount: '3000',
+      recipient: '0x' + '11'.repeat(20),
       signature: '0x' + '00'.repeat(65),
       signerAddress: '0x' + '00'.repeat(20),
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     } as const;
 
     const senderPrivKey = randomBytes(32);
@@ -495,18 +498,19 @@ describe('Branch coverage: catch blocks with non-Error thrown values', () => {
   test('wrapClaim catch uses String(err) when thrown value is not an Error (line 261)', () => {
     const wrapper = createWrapper();
     const claim = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'test-string-throw',
       timestamp: '2026-01-01T00:00:00.000Z',
       senderId: 'peer-e',
       channelId: '0x' + '00'.repeat(32),
       nonce: 5,
-      transferredAmount: '5000',
-      lockedAmount: '0',
-      locksRoot: '0x' + '00'.repeat(32),
+      cumulativeAmount: '5000',
+      recipient: '0x' + '11'.repeat(20),
       signature: '0x' + '00'.repeat(65),
       signerAddress: '0x' + '00'.repeat(20),
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     } as const;
 
     jest.spyOn(secp256k1, 'getPublicKey').mockImplementation(() => {
@@ -521,18 +525,19 @@ describe('Branch coverage: catch blocks with non-Error thrown values', () => {
   test('wrapClaimWithCondition catch uses String(err) when thrown value is not an Error (line 477)', () => {
     const wrapper = createWrapper();
     const claim = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'test-string-throw-2',
       timestamp: '2026-01-01T00:00:00.000Z',
       senderId: 'peer-f',
       channelId: '0x' + '00'.repeat(32),
       nonce: 6,
-      transferredAmount: '6000',
-      lockedAmount: '0',
-      locksRoot: '0x' + '00'.repeat(32),
+      cumulativeAmount: '6000',
+      recipient: '0x' + '11'.repeat(20),
       signature: '0x' + '00'.repeat(65),
       signerAddress: '0x' + '00'.repeat(20),
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     } as const;
 
     jest.spyOn(secp256k1, 'getPublicKey').mockImplementation(() => {
@@ -779,18 +784,19 @@ describe('Branch coverage: NIP-59 disabled passthrough branches', () => {
   test('wrapClaimWithCondition returns null when NIP-59 is disabled', () => {
     const wrapper = createWrapper(false);
     const claim = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'test-4',
       timestamp: '2026-01-01T00:00:00.000Z',
       senderId: 'peer-d',
       channelId: '0x' + '00'.repeat(32),
       nonce: 4,
-      transferredAmount: '4000',
-      lockedAmount: '0',
-      locksRoot: '0x' + '00'.repeat(32),
+      cumulativeAmount: '4000',
+      recipient: '0x' + '11'.repeat(20),
       signature: '0x' + '00'.repeat(65),
       signerAddress: '0x' + '00'.repeat(20),
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     } as const;
 
     const senderPrivKey = randomBytes(32);

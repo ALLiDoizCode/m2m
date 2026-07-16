@@ -72,20 +72,19 @@ beforeEach(() => {
 
 function createEVMClaimFixture(): EVMClaimMessage {
   return {
-    version: '1.0',
+    version: '2.0',
     blockchain: 'evm',
     messageId: `claim-evm-${Date.now()}`,
     timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z'),
     senderId: 'peer-alice',
     channelId: '0x' + '1234567890abcdef'.repeat(4),
     nonce: 42,
-    transferredAmount: '1000000000000000000',
-    lockedAmount: '0',
-    locksRoot: '0x' + '0'.repeat(64),
+    cumulativeAmount: '1000000000000000000',
+    recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
     signature: '0x' + 'ab'.repeat(65),
     signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
     chainId: 8453,
-    tokenNetworkAddress: '0x' + 'cd'.repeat(20),
+    verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     tokenAddress: '0x' + 'ef'.repeat(20),
   };
 }
@@ -366,7 +365,7 @@ describe('T-34.6-07: Wrapped claim indistinguishable', () => {
     expect(serialized).not.toContain(claim.senderId);
     expect(serialized).not.toContain(claim.channelId);
     expect(serialized).not.toContain(claim.signerAddress);
-    expect(serialized).not.toContain(claim.transferredAmount);
+    expect(serialized).not.toContain(claim.cumulativeAmount);
   });
 
   test('wrapped claim only exposes ephemeralPublicKey, encryptedPayload, timestamp, version', () => {
@@ -712,8 +711,8 @@ describe('AC 6 gap: No balance or blockchain info exposed to intermediary', () =
 
     // The blockchain field value should not appear in the outer wrapper
     expect(serialized).not.toContain('"evm"');
-    // Balance information (transferredAmount is long enough to be a meaningful check)
-    expect(serialized).not.toContain(claim.transferredAmount);
+    // Balance information (cumulativeAmount is long enough to be a meaningful check)
+    expect(serialized).not.toContain(claim.cumulativeAmount);
     // Channel ID and signer address should not be visible
     expect(serialized).not.toContain(claim.channelId);
     expect(serialized).not.toContain(claim.signerAddress);

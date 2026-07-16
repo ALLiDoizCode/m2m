@@ -2595,7 +2595,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         if (blockchain === 'evm') {
           let cum = 0n;
           try {
-            cum = BigInt(c.transferredAmount ?? '0');
+            // v2 EVM claim (connector#329 Phase 4b): cumulative lives in cumulativeAmount.
+            cum = BigInt(c.cumulativeAmount ?? '0');
           } catch {
             cum = 0n;
           }

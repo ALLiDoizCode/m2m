@@ -46,7 +46,7 @@ describe('ClaimRedemptionService', () => {
 
     // Mock PaymentChannelSDK
     mockEVMChannelSDK = {
-      claimFromChannel: jest.fn().mockResolvedValue(undefined),
+      updateBalance: jest.fn().mockResolvedValue(undefined),
     } as unknown as jest.Mocked<PaymentChannelSDK>;
 
     // Mock ethers.Provider
@@ -189,7 +189,7 @@ describe('ClaimRedemptionService', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       expect(mockStmt.all).toHaveBeenCalledWith(5);
-      expect(mockEVMChannelSDK.claimFromChannel).not.toHaveBeenCalled();
+      expect(mockEVMChannelSDK.updateBalance).not.toHaveBeenCalled();
 
       service.stop();
     });
@@ -199,33 +199,32 @@ describe('ClaimRedemptionService', () => {
     it('should successfully redeem EVM claim', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_evm_123',
         senderId: 'peer-alice',
         channelId: '0xABC123',
         nonce: 1,
-        transferredAmount: '5000000',
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '5000000',
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm',
         signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
       };
 
       const { mockUpdateStmt } = setupDbMocks([makeDbRow(evmClaim)]);
-      mockEVMChannelSDK.claimFromChannel.mockResolvedValue(undefined);
+      mockEVMChannelSDK.updateBalance.mockResolvedValue(undefined);
 
       service.start();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      // claimFromChannel called with (channelId, tokenAddress, balanceProof, signature)
-      expect(mockEVMChannelSDK.claimFromChannel).toHaveBeenCalledWith(
+      // updateBalance called with (verifyingContract, channelId, cumulativeAmount, nonce, recipient, signature)
+      expect(mockEVMChannelSDK.updateBalance).toHaveBeenCalledWith(
+        '0x' + 'e'.repeat(40),
         '0xABC123',
-        '0x1234567890abcdef1234567890abcdef12345678',
-        expect.objectContaining({
-          channelId: '0xABC123',
-          nonce: 1,
-          transferredAmount: 5000000n,
-          lockedAmount: 0n,
-        }),
+        5000000n,
+        1,
+        '0x' + '2'.repeat(40),
         'sig_evm'
       );
       // DB update: stmt.run(Date.now(), txHash, messageId)
@@ -241,13 +240,15 @@ describe('ClaimRedemptionService', () => {
     it('should retry EVM claim redemption on failure', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_evm_retry',
         senderId: 'peer-bob',
         channelId: '0xDEF456',
         nonce: 2,
-        transferredAmount: '3000000',
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '3000000',
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm_retry',
         signerAddress: '0x8ba1f109551bD432803012645Ac136ddd64DBA72',
       };
@@ -255,7 +256,7 @@ describe('ClaimRedemptionService', () => {
       const { mockUpdateStmt } = setupDbMocks([makeDbRow(evmClaim)]);
 
       // First attempt fails, second succeeds
-      mockEVMChannelSDK.claimFromChannel
+      mockEVMChannelSDK.updateBalance
         .mockRejectedValueOnce(new Error('Network error'))
         .mockResolvedValueOnce(undefined);
 
@@ -264,7 +265,7 @@ describe('ClaimRedemptionService', () => {
       // Wait for retry (1s backoff + buffer)
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
-      expect(mockEVMChannelSDK.claimFromChannel).toHaveBeenCalledTimes(2);
+      expect(mockEVMChannelSDK.updateBalance).toHaveBeenCalledTimes(2);
       expect(mockUpdateStmt.run).toHaveBeenCalledWith(
         expect.any(Number),
         'msg_evm_retry',
@@ -277,13 +278,15 @@ describe('ClaimRedemptionService', () => {
     it('should fail after 3 retry attempts', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_evm_fail',
         senderId: 'peer-charlie',
         channelId: '0xGHI789',
         nonce: 3,
-        transferredAmount: '5000000',
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '5000000',
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm_fail',
         signerAddress: '0x9cA1f109551bD432803012645Ac136ddd64DBA73',
       };
@@ -291,14 +294,14 @@ describe('ClaimRedemptionService', () => {
       setupDbMocks([makeDbRow(evmClaim)]);
 
       // All attempts fail
-      mockEVMChannelSDK.claimFromChannel.mockRejectedValue(new Error('Persistent network error'));
+      mockEVMChannelSDK.updateBalance.mockRejectedValue(new Error('Persistent network error'));
 
       service.start();
 
       // Wait for all retries (1s + 2s + 4s backoff + buffer)
       await new Promise((resolve) => setTimeout(resolve, 8000));
 
-      expect(mockEVMChannelSDK.claimFromChannel).toHaveBeenCalledTimes(3);
+      expect(mockEVMChannelSDK.updateBalance).toHaveBeenCalledTimes(3);
 
       service.stop();
     }, 10000);
@@ -308,13 +311,15 @@ describe('ClaimRedemptionService', () => {
     it('should redeem profitable claims', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_profitable',
         senderId: 'peer-alice',
         channelId: '0xPROFIT',
         nonce: 1,
-        transferredAmount: '10000000', // High amount
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '10000000', // High amount
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm',
         signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
       };
@@ -325,12 +330,12 @@ describe('ClaimRedemptionService', () => {
         gasPrice: 1n, // 1 wei – gas cost = 150000 wei << 10M claim
       } as any);
 
-      mockEVMChannelSDK.claimFromChannel.mockResolvedValue(undefined);
+      mockEVMChannelSDK.updateBalance.mockResolvedValue(undefined);
 
       service.start();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      expect(mockEVMChannelSDK.claimFromChannel).toHaveBeenCalled();
+      expect(mockEVMChannelSDK.updateBalance).toHaveBeenCalled();
       expect(mockUpdateStmt.run).toHaveBeenCalledWith(
         expect.any(Number),
         'msg_profitable',
@@ -343,13 +348,15 @@ describe('ClaimRedemptionService', () => {
     it('should skip unprofitable claims', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_unprofitable',
         senderId: 'peer-bob',
         channelId: '0xUNPROFIT',
         nonce: 1,
-        transferredAmount: '500', // Very small amount
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '500', // Very small amount
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm',
         signerAddress: '0x8ba1f109551bD432803012645Ac136ddd64DBA72',
       };
@@ -364,7 +371,7 @@ describe('ClaimRedemptionService', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Should NOT attempt redemption
-      expect(mockEVMChannelSDK.claimFromChannel).not.toHaveBeenCalled();
+      expect(mockEVMChannelSDK.updateBalance).not.toHaveBeenCalled();
       expect(mockLogger.debug).toHaveBeenCalledWith(
         expect.objectContaining({
           messageId: 'msg_unprofitable',
@@ -378,13 +385,15 @@ describe('ClaimRedemptionService', () => {
     it('should skip high-gas EVM claims', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_high_gas',
         senderId: 'peer-charlie',
         channelId: '0xHIGHGAS',
         nonce: 1,
-        transferredAmount: '2000000', // Moderate amount
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '2000000', // Moderate amount
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm',
         signerAddress: '0x9cA1f109551bD432803012645Ac136ddd64DBA73',
       };
@@ -399,7 +408,7 @@ describe('ClaimRedemptionService', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Should NOT attempt redemption due to high gas
-      expect(mockEVMChannelSDK.claimFromChannel).not.toHaveBeenCalled();
+      expect(mockEVMChannelSDK.updateBalance).not.toHaveBeenCalled();
 
       service.stop();
     });
@@ -409,13 +418,15 @@ describe('ClaimRedemptionService', () => {
     it('should estimate EVM gas using provider.getFeeData()', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_gas_test',
         senderId: 'peer-alice',
         channelId: '0xGASEST',
         nonce: 1,
-        transferredAmount: '5000000',
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '5000000',
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm',
         signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
       };
@@ -426,7 +437,7 @@ describe('ClaimRedemptionService', () => {
         gasPrice: 2000000000n, // 2 gwei
       } as any);
 
-      mockEVMChannelSDK.claimFromChannel.mockResolvedValue(undefined);
+      mockEVMChannelSDK.updateBalance.mockResolvedValue(undefined);
 
       service.start();
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -439,13 +450,15 @@ describe('ClaimRedemptionService', () => {
     it('should return 0 when EVM gas estimation fails', async () => {
       const evmClaim = {
         blockchain: 'evm',
+        version: '2.0',
         messageId: 'msg_gas_fail',
         senderId: 'peer-bob',
         channelId: '0xGASFAIL',
         nonce: 1,
-        transferredAmount: '3000000',
-        lockedAmount: '0',
-        locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cumulativeAmount: '3000000',
+        recipient: '0x' + '2'.repeat(40),
+        verifyingContract: '0x' + 'e'.repeat(40),
+        chainId: 8453,
         signature: 'sig_evm',
         signerAddress: '0x8ba1f109551bD432803012645Ac136ddd64DBA72',
       };
@@ -453,7 +466,7 @@ describe('ClaimRedemptionService', () => {
       setupDbMocks([makeDbRow(evmClaim)]);
 
       mockEvmProvider.getFeeData.mockRejectedValue(new Error('RPC error'));
-      mockEVMChannelSDK.claimFromChannel.mockResolvedValue(undefined);
+      mockEVMChannelSDK.updateBalance.mockResolvedValue(undefined);
 
       service.start();
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -466,7 +479,7 @@ describe('ClaimRedemptionService', () => {
       );
 
       // Should still attempt redemption with gas cost = 0
-      expect(mockEVMChannelSDK.claimFromChannel).toHaveBeenCalled();
+      expect(mockEVMChannelSDK.updateBalance).toHaveBeenCalled();
 
       service.stop();
     });

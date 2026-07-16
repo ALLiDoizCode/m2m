@@ -796,12 +796,18 @@ export class SettlementExecutor extends EventEmitter {
 
     if (isEVMClaim(latestClaim)) {
       onChainChannelId = channelId;
+      // v2 redeem (connector#329 Phase 4b): carry the cumulative amount +
+      // recipient + verifyingContract so the provider can submit
+      // RollingSwapChannel.updateBalance. transferredAmount holds the cumulative.
       balanceProofParams = {
         channelId,
         nonce: latestClaim.nonce,
-        transferredAmount: latestClaim.transferredAmount,
-        lockedAmount: latestClaim.lockedAmount,
-        locksRoot: latestClaim.locksRoot,
+        transferredAmount: latestClaim.cumulativeAmount,
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
+        recipient: latestClaim.recipient,
+        chainId: latestClaim.chainId,
+        verifyingContract: latestClaim.verifyingContract,
       };
       claimSignature = latestClaim.signature;
     } else if (isSolanaClaim(latestClaim)) {

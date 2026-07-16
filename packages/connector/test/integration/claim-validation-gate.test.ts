@@ -41,7 +41,7 @@ import { BTPMessageType } from '../../src/btp/btp-types';
 import type { BTPMessage, BTPData } from '../../src/btp/btp-types';
 import { BTP_CLAIM_PROTOCOL } from '../../src/btp/btp-claim-types';
 import type { EVMClaimMessage } from '../../src/btp/btp-claim-types';
-import { getDomainSeparator, getBalanceProofTypes } from '../../src/settlement/eip712-helper';
+import { signV2EvmClaim } from '../../src/test-utils/v2-evm-claim';
 
 // Gate: Only run when EVM_INTEGRATION=true and Anvil is available
 const RUN_EVM_TESTS = process.env.EVM_INTEGRATION === 'true';
@@ -175,48 +175,51 @@ function createTestPrepare(destination: string, amount: bigint): { packet: ILPPr
 }
 
 /**
- * Build a signed EVM claim message for BTP protocol data.
+ * Build a signed v2 RollingSwapChannel EVM claim message for BTP protocol data
+ * (connector#329 Phase 4b). The signature is a genuine EIP-712 signature over the
+ * v2 `ClaimBalanceProof` typed data, so the inbound validator's real v2 verify
+ * (secp256k1 recovery over the self-describing chainId + verifyingContract domain)
+ * accepts it — unless `signerAddress` is deliberately mismatched from the signing
+ * key (the invalid-signature attack path).
  */
 async function buildSignedClaim(opts: {
   channelId: string;
   nonce: number;
-  transferredAmount: bigint;
+  cumulativeAmount: bigint;
+  recipient: string;
   signerPrivateKey: string;
   signerAddress: string;
   senderId: string;
   chainId: number;
-  tokenNetworkAddress: string;
+  verifyingContract: string;
   tokenAddress: string;
 }): Promise<{ protocolName: string; contentType: number; data: Buffer }> {
-  const balanceProof = {
-    channelId: opts.channelId,
-    nonce: opts.nonce,
-    transferredAmount: opts.transferredAmount,
-    lockedAmount: 0n,
-    locksRoot: '0x' + '0'.repeat(64),
-  };
-
-  // Sign with EIP-712
-  const domain = getDomainSeparator(BigInt(opts.chainId), opts.tokenNetworkAddress);
-  const types = getBalanceProofTypes();
-  const wallet = new ethers.Wallet(opts.signerPrivateKey);
-  const signature = await wallet.signTypedData(domain, types, balanceProof);
+  const { signature } = await signV2EvmClaim(
+    {
+      channelId: opts.channelId,
+      cumulativeAmount: opts.cumulativeAmount,
+      nonce: opts.nonce,
+      recipient: opts.recipient,
+      chainId: opts.chainId,
+      verifyingContract: opts.verifyingContract,
+    },
+    opts.signerPrivateKey
+  );
 
   const claim: EVMClaimMessage = {
-    version: '1.0',
+    version: '2.0',
     blockchain: 'evm',
     messageId: `claim-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     timestamp: new Date().toISOString(),
     senderId: opts.senderId,
     channelId: opts.channelId,
     nonce: opts.nonce,
-    transferredAmount: opts.transferredAmount.toString(),
-    lockedAmount: '0',
-    locksRoot: '0x' + '0'.repeat(64),
+    cumulativeAmount: opts.cumulativeAmount.toString(),
+    recipient: opts.recipient,
     signature,
     signerAddress: opts.signerAddress,
     chainId: opts.chainId,
-    tokenNetworkAddress: opts.tokenNetworkAddress,
+    verifyingContract: opts.verifyingContract,
     tokenAddress: opts.tokenAddress,
   };
 
@@ -312,12 +315,13 @@ describeEvm('Claim Validation Gate (BTP Transport Layer)', () => {
       const claimProtocolData = await buildSignedClaim({
         channelId: '0x' + randomBytes(32).toString('hex'),
         nonce: 1,
-        transferredAmount: 1000n,
+        cumulativeAmount: 1000n,
+        recipient: PEER_EVM_ADDRESSES[0]!,
         signerPrivateKey: wrongPrivateKey,
         signerAddress: fakeSignerAddress, // Mismatched: signed by wrongKey but claims fakeAddress
         senderId: 'attacker-bad-sig',
         chainId: ANVIL_CHAIN_ID,
-        tokenNetworkAddress,
+        verifyingContract: tokenNetworkAddress,
         tokenAddress: TOKEN_ADDRESS,
       });
 
@@ -379,12 +383,13 @@ describeEvm('Claim Validation Gate (BTP Transport Layer)', () => {
       const claimProtocolData = await buildSignedClaim({
         channelId,
         nonce: 1,
-        transferredAmount: 1000n,
+        cumulativeAmount: 1000n,
+        recipient: PEER_EVM_ADDRESSES[0]!,
         signerPrivateKey,
         signerAddress,
         senderId: 'peer2',
         chainId: ANVIL_CHAIN_ID,
-        tokenNetworkAddress,
+        verifyingContract: tokenNetworkAddress,
         tokenAddress: TOKEN_ADDRESS,
       });
 
@@ -430,37 +435,35 @@ describeEvm('Claim Validation Gate (BTP Transport Layer)', () => {
     try {
       const { packet } = createTestPrepare('test.peer1.receiver', 1000n);
 
-      // Build a claim WITHOUT chainId/tokenNetworkAddress (missing self-describing fields)
+      // Build a v2 claim WITHOUT chainId/verifyingContract (missing self-describing
+      // fields). In v2 (connector#329 Phase 4b) chainId + verifyingContract are
+      // REQUIRED digest inputs, so a claim that omits them cannot be verified and is
+      // rejected structurally by validateClaimMessage before signature recovery.
       const signerPrivateKey = '0x' + randomBytes(32).toString('hex');
-      const signerWallet = new ethers.Wallet(signerPrivateKey);
+      const channelId = '0x' + randomBytes(32).toString('hex');
+      const recipient = PEER_EVM_ADDRESSES[0]!;
 
-      const balanceProof = {
-        channelId: '0x' + randomBytes(32).toString('hex'),
-        nonce: 1,
-        transferredAmount: 1000n,
-        lockedAmount: 0n,
-        locksRoot: '0x' + '0'.repeat(64),
-      };
-
-      // Sign with some domain (doesn't matter — the point is the claim lacks self-describing fields)
-      const domain = getDomainSeparator(BigInt(ANVIL_CHAIN_ID), tokenNetworkAddress);
-      const types = getBalanceProofTypes();
-      const signature = await signerWallet.signTypedData(domain, types, balanceProof);
+      // Mint a genuine v2 signature (over the default domain) — the point is the
+      // claim on the wire lacks the self-describing chainId/verifyingContract, not
+      // that the signature is malformed.
+      const { signature, signerAddress } = await signV2EvmClaim(
+        { channelId, cumulativeAmount: '1000', nonce: 1, recipient },
+        signerPrivateKey
+      );
 
       const claim = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: `claim-test-${Date.now()}`,
         timestamp: new Date().toISOString(),
         senderId: 'attacker-no-self-describe',
-        channelId: balanceProof.channelId,
+        channelId,
         nonce: 1,
-        transferredAmount: '1000',
-        lockedAmount: '0',
-        locksRoot: balanceProof.locksRoot,
+        cumulativeAmount: '1000',
+        recipient,
         signature,
-        signerAddress: signerWallet.address,
-        // Intentionally NO chainId, tokenNetworkAddress, tokenAddress
+        signerAddress,
+        // Intentionally NO chainId, verifyingContract, tokenAddress
       };
 
       const claimData = {
@@ -474,7 +477,8 @@ describeEvm('Claim Validation Gate (BTP Transport Layer)', () => {
       expect(result.type).toBe(PacketType.REJECT);
       const reject = result as ILPRejectPacket;
       expect(reject.code).toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
-      expect(reject.message).toContain('Unknown channel');
+      // v2: missing self-describing fields fail structural validation.
+      expect(reject.message).toContain('Invalid claim structure');
     } finally {
       ws.close();
     }

@@ -157,6 +157,22 @@ export class ChannelManager extends EventEmitter {
   }
 
   /**
+   * Resolve a peer's on-chain settlement (recipient) address.
+   *
+   * Backed by the connector's `peerIdToAddressMap` — the connector-side view of a
+   * peer's kind:10032 `settlementAddresses[chain]`. This is the `recipient` bound
+   * into the v2 RollingSwapChannel balance-proof digest when WE sign an outbound
+   * per-packet claim to pay the peer (connector#329 Phase 4b): the peer redeems
+   * the claim and is paid at this address.
+   *
+   * @param peerId - Peer connector ID
+   * @returns The peer's 0x settlement address, or undefined if unknown
+   */
+  getPeerAddress(peerId: string): string | undefined {
+    return this.config.peerIdToAddressMap.get(peerId);
+  }
+
+  /**
    * Get all channels for a peer, regardless of the tokenId they are indexed under.
    *
    * The peer→channel index is keyed by tokenId, but a non-EVM external channel is

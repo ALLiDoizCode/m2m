@@ -101,7 +101,7 @@ export class SentClaimsQueries {
           channelId = claim.channelId;
           tokenAddress = claim.tokenAddress ?? '';
           try {
-            amount = BigInt(claim.transferredAmount ?? '0');
+            amount = BigInt(claim.cumulativeAmount ?? '0');
           } catch {
             amount = 0n;
           }

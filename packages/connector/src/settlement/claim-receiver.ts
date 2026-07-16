@@ -60,7 +60,7 @@ export interface ClaimReceivedEvent {
  */
 export const ERRORS = {
   MISSING_SELF_DESCRIBING_FIELDS:
-    'Missing self-describing fields for unknown channel (chainId, tokenNetworkAddress, tokenAddress required)',
+    'Missing self-describing fields for unknown channel (chainId, verifyingContract, tokenAddress required)',
   CHANNEL_NOT_FOUND: 'Channel does not exist on-chain',
   CHANNEL_NOT_OPENED: 'Channel not in opened state',
   SIGNER_NOT_PARTICIPANT: 'Signer is not a channel participant',
@@ -243,7 +243,7 @@ export class ClaimReceiver extends EventEmitter {
             const event: ClaimReceivedEvent = {
               peerId,
               channelId: claimMessage.channelId,
-              cumulativeAmount: BigInt(claimMessage.transferredAmount),
+              cumulativeAmount: BigInt(claimMessage.cumulativeAmount),
             };
             this.emit('CLAIM_RECEIVED', event);
             childLogger.debug(
@@ -455,7 +455,7 @@ export class ClaimReceiver extends EventEmitter {
       );
 
       // Require all self-describing fields
-      if (claim.chainId === undefined || !claim.tokenNetworkAddress || !claim.tokenAddress) {
+      if (claim.chainId === undefined || !claim.verifyingContract || !claim.tokenAddress) {
         this.logger.warn(
           { channelId: claim.channelId, signerAddress: claim.signerAddress },
           ERRORS.MISSING_SELF_DESCRIBING_FIELDS
@@ -543,7 +543,9 @@ export class ClaimReceiver extends EventEmitter {
         channelId: claim.channelId,
         peerId,
         tokenAddress: claim.tokenAddress,
-        tokenNetworkAddress: claim.tokenNetworkAddress,
+        // v2: the RollingSwapChannel address (self-describing verifyingContract),
+        // stored in the channel-registration's contract-address slot.
+        tokenNetworkAddress: claim.verifyingContract,
         chainId: claim.chainId,
         chain: provider.chainId,
         status: 'open',
@@ -607,11 +609,17 @@ export class ClaimReceiver extends EventEmitter {
     return {
       channelId: claim.channelId,
       nonce: claim.nonce,
-      transferredAmount: claim.transferredAmount,
-      lockedAmount: claim.lockedAmount,
-      locksRoot: claim.locksRoot,
+      // v2: transferredAmount carries the cumulative amount; recipient/chainId/
+      // verifyingContract are the required v2 EIP-712 digest inputs. lockedAmount/
+      // locksRoot are legacy interface slots the EVM v2 provider ignores.
+      transferredAmount: claim.cumulativeAmount,
+      lockedAmount: '0',
+      locksRoot: '0x' + '0'.repeat(64),
       signature: claim.signature,
       signerAddress: claim.signerAddress,
+      recipient: claim.recipient,
+      chainId: claim.chainId,
+      verifyingContract: claim.verifyingContract,
     };
   }
 
@@ -1253,7 +1261,7 @@ export class ClaimReceiver extends EventEmitter {
         if (isEVMClaim(claim)) {
           tokenAddress = claim.tokenAddress ?? '';
           try {
-            amount = BigInt(claim.transferredAmount ?? '0');
+            amount = BigInt(claim.cumulativeAmount ?? '0');
           } catch {
             amount = 0n;
           }

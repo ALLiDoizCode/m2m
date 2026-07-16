@@ -460,20 +460,22 @@ describe('UnifiedSettlementExecutor', () => {
         expect(mockBTPClientManager.getClientForPeer).toHaveBeenCalledWith('peer-alice');
         expect(mockBTPClientManager.isConnected).toHaveBeenCalledWith('peer-alice');
 
-        // Verify ClaimSender.sendEVMClaim called with correct parameters (Epic 31: includes self-describing fields)
+        // Verify ClaimSender.sendEVMClaim called with the v2 RollingSwapChannel
+        // arg list (connector#329 Phase 4b): cumulativeAmount + recipient replace
+        // the v1 transferredAmount/lockedAmount/locksRoot, and verifyingContract
+        // replaces tokenNetworkAddress. recipient is the peer's evmAddress.
         expect(mockClaimSender.sendEVMClaim).toHaveBeenCalledWith(
           'peer-alice',
           mockBTPClient,
           '0xabc123', // channelId from mockEVMChannelSDK
           1, // nonce
-          '1000000000', // transferredAmount
-          '0', // lockedAmount
-          '0x0000000000000000000000000000000000000000000000000000000000000000', // locksRoot
+          '1000000000', // cumulativeAmount
+          '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb', // recipient (peer evmAddress)
           '0xsignature', // signature from mockEVMChannelSDK
           '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb', // signerAddress
-          8453, // chainId (Epic 31)
-          '0x1234567890123456789012345678901234567890', // tokenNetworkAddress (Epic 31)
-          '0xUSDCAddress' // tokenAddress (Epic 31)
+          8453, // chainId (v2 domain)
+          '0x1234567890123456789012345678901234567890', // verifyingContract (v2 domain)
+          '0xUSDCAddress' // tokenAddress
         );
 
         // Verify success logged

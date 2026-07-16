@@ -30,7 +30,13 @@ export type BlockchainType = 'evm' | 'solana' | 'mina';
  * - `senderId`: Peer ID of the sender (for correlation with BTP connection)
  */
 export interface BaseClaimMessage {
-  version: '1.0';
+  /**
+   * Protocol version. EVM claims are `'2.0'` (RollingSwapChannel v2 EIP-712
+   * domain-separated digest, connector#329 Phase 4b); Solana/Mina claims remain
+   * `'1.0'`. A `'1.0'`-shaped EVM claim is rejected structurally before any
+   * cryptography runs (fail-closed cutover — no dual-scheme verification).
+   */
+  version: '1.0' | '2.0';
   blockchain: BlockchainType;
   messageId: string;
   timestamp: string;
@@ -38,56 +44,61 @@ export interface BaseClaimMessage {
 }
 
 /**
- * EVM-compatible blockchain claim message (Raiden-style balance proofs).
+ * EVM-compatible blockchain claim message — RollingSwapChannel v2 balance proof
+ * (connector#329 Phase 4b, BREAKING).
+ *
+ * v2 is EIP-712 domain-separated: the signed digest is
+ * `ClaimBalanceProof(bytes32 channelId,uint256 cumulativeAmount,uint256 nonce,address recipient)`
+ * under domain `EIP712Domain(name="RollingSwapChannel", version="2", chainId,
+ * verifyingContract)`. A signature is therefore valid on EXACTLY one
+ * `(chainId, verifyingContract)` pair — `chainId` and `verifyingContract` are no
+ * longer optional self-describing hints but REQUIRED inputs to the digest itself.
+ * The v1 Raiden fields (`transferredAmount`/`lockedAmount`/`locksRoot`) are gone.
  *
  * Fields:
  * - `channelId`: bytes32 hex string (0x-prefixed) identifying the payment channel
- * - `nonce`: Monotonically increasing balance proof nonce (prevents replay attacks)
- * - `transferredAmount`: Cumulative transferred amount (bigint precision)
- * - `lockedAmount`: Locked amount for pending transfers (0 for simple transfers)
- * - `locksRoot`: Merkle root of locked transfers (32-byte hex, zeros if no locks)
- * - `signature`: EIP-712 typed signature (hex string)
+ * - `nonce`: Monotonically increasing balance-proof nonce (prevents replay)
+ * - `cumulativeAmount`: Cumulative amount owed to `recipient` (string, bigint precision)
+ * - `recipient`: Address paid the delta on redemption (0x-prefixed, 40 hex chars);
+ *   cryptographically bound into the v2 digest
+ * - `signature`: 65-byte `r||s||v` secp256k1 signature over the v2 EIP-712 digest
  * - `signerAddress`: Ethereum address of the signer (0x-prefixed, 40 hex chars)
- * - `chainId`: (Optional) EVM chain ID (e.g., 8453 for Base, 84532 for Base Sepolia)
- * - `tokenNetworkAddress`: (Optional) TokenNetwork contract address (0x-prefixed, 40 hex chars)
+ * - `chainId`: EVM chain ID (REQUIRED — part of the v2 signing domain)
+ * - `verifyingContract`: RollingSwapChannel contract address (REQUIRED — part of
+ *   the v2 signing domain; repurposes the v1 `tokenNetworkAddress` slot)
  * - `tokenAddress`: (Optional) ERC20 token contract address (0x-prefixed, 40 hex chars)
- *
- * The optional self-describing fields enable dynamic on-chain verification of unknown channels
- * without pre-registration. These fields are cryptographically bound to the EIP-712 signature
- * via the domain separator (chainId and tokenNetworkAddress are part of the signing domain).
  *
  * Example:
  * ```typescript
  * const evmClaim: EVMClaimMessage = {
- *   version: '1.0',
+ *   version: '2.0',
  *   blockchain: 'evm',
  *   messageId: 'claim-002',
  *   timestamp: '2026-02-02T12:00:00.000Z',
  *   senderId: 'peer-bob',
  *   channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
  *   nonce: 5,
- *   transferredAmount: '1000000000000000000', // 1 ETH in wei
- *   lockedAmount: '0',
- *   locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
- *   signature: '0xabcdef...', // EIP-712 signature
+ *   cumulativeAmount: '1000000000000000000', // 1 token unit, cumulative
+ *   recipient: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+ *   signature: '0xabcdef...', // v2 EIP-712 signature
  *   signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
  *   chainId: 8453, // Base mainnet
- *   tokenNetworkAddress: '0x1234567890123456789012345678901234567890',
+ *   verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
  *   tokenAddress: '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
  * };
  * ```
  */
 export interface EVMClaimMessage extends BaseClaimMessage {
+  version: '2.0';
   blockchain: 'evm';
   channelId: string;
   nonce: number;
-  transferredAmount: string;
-  lockedAmount: string;
-  locksRoot: string;
+  cumulativeAmount: string;
+  recipient: string;
   signature: string;
   signerAddress: string;
-  chainId?: number;
-  tokenNetworkAddress?: string;
+  chainId: number;
+  verifyingContract: string;
   tokenAddress?: string;
 }
 
@@ -399,6 +410,16 @@ function validateMinaClaim(claim: Partial<MinaClaimMessage>): void {
  * @throws Error if claim is invalid
  */
 function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
+  // Fail-closed version guard (connector#329 Phase 4b): an EVM claim MUST be v2.
+  // A v1 ('1.0') Raiden-shaped claim is rejected here, structurally, before any
+  // cryptography runs — no dual-scheme fallback. The cryptographic guard (the
+  // EIP-712 version="2" folded into the signed preimage) is the second, independent
+  // line of defence in verifyEVMClaim.
+  if (claim.version !== '2.0') {
+    const sanitizedVersion = String(claim.version ?? '').slice(0, 20);
+    throw new Error(`Invalid EVM claim version (expected '2.0', got '${sanitizedVersion}')`);
+  }
+
   // Required fields
   if (!claim.channelId || typeof claim.channelId !== 'string') {
     throw new Error('Missing or invalid channelId (expected non-empty string)');
@@ -411,14 +432,11 @@ function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
   ) {
     throw new Error('Missing or invalid nonce (expected non-negative integer)');
   }
-  if (!claim.transferredAmount || typeof claim.transferredAmount !== 'string') {
-    throw new Error('Missing or invalid transferredAmount (expected non-empty string)');
+  if (!claim.cumulativeAmount || typeof claim.cumulativeAmount !== 'string') {
+    throw new Error('Missing or invalid cumulativeAmount (expected non-empty string)');
   }
-  if (!claim.lockedAmount || typeof claim.lockedAmount !== 'string') {
-    throw new Error('Missing or invalid lockedAmount (expected non-empty string)');
-  }
-  if (!claim.locksRoot || typeof claim.locksRoot !== 'string') {
-    throw new Error('Missing or invalid locksRoot (expected non-empty string)');
+  if (!claim.recipient || typeof claim.recipient !== 'string') {
+    throw new Error('Missing or invalid recipient (expected non-empty string)');
   }
   if (!claim.signature || typeof claim.signature !== 'string') {
     throw new Error('Missing or invalid signature (expected non-empty string)');
@@ -437,37 +455,33 @@ function validateEVMClaim(claim: Partial<EVMClaimMessage>): void {
     throw new Error('Invalid signerAddress format (expected 0x-prefixed 40-char hex)');
   }
 
-  // locksRoot format validation
-  if (!/^0x[0-9a-fA-F]{64}$/.test(claim.locksRoot)) {
-    throw new Error('Invalid locksRoot format (expected 0x-prefixed 64-char hex)');
+  // recipient format validation (bound into the v2 EIP-712 digest)
+  if (!/^0x[0-9a-fA-F]{40}$/.test(claim.recipient)) {
+    throw new Error('Invalid recipient format (expected 0x-prefixed 40-char hex)');
   }
 
-  // Amount validation (non-negative integers as strings)
-  if (!/^\d+$/.test(claim.transferredAmount)) {
-    throw new Error('Invalid transferredAmount (expected non-negative integer string)');
-  }
-  if (!/^\d+$/.test(claim.lockedAmount)) {
-    throw new Error('Invalid lockedAmount (expected non-negative integer string)');
+  // Amount validation (non-negative integer as string)
+  if (!/^\d+$/.test(claim.cumulativeAmount)) {
+    throw new Error('Invalid cumulativeAmount (expected non-negative integer string)');
   }
 
-  // Optional self-describing fields validation (Epic 31)
-  if (claim.chainId !== undefined) {
-    if (
-      typeof claim.chainId !== 'number' ||
-      !Number.isInteger(claim.chainId) ||
-      claim.chainId <= 0
-    ) {
-      throw new Error('Invalid chainId (expected positive integer)');
-    }
+  // chainId is REQUIRED in v2 — it is part of the signing domain, not a hint.
+  if (
+    claim.chainId === undefined ||
+    typeof claim.chainId !== 'number' ||
+    !Number.isInteger(claim.chainId) ||
+    claim.chainId <= 0
+  ) {
+    throw new Error('Missing or invalid chainId (expected positive integer)');
   }
 
-  if (claim.tokenNetworkAddress !== undefined) {
-    if (typeof claim.tokenNetworkAddress !== 'string') {
-      throw new Error('Invalid tokenNetworkAddress (expected string)');
-    }
-    if (!/^0x[0-9a-fA-F]{40}$/.test(claim.tokenNetworkAddress)) {
-      throw new Error('Invalid tokenNetworkAddress format (expected 0x-prefixed 40-char hex)');
-    }
+  // verifyingContract is REQUIRED in v2 — the RollingSwapChannel address bound
+  // into the signing domain (repurposes the v1 tokenNetworkAddress slot).
+  if (!claim.verifyingContract || typeof claim.verifyingContract !== 'string') {
+    throw new Error('Missing or invalid verifyingContract (expected non-empty string)');
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(claim.verifyingContract)) {
+    throw new Error('Invalid verifyingContract format (expected 0x-prefixed 40-char hex)');
   }
 
   if (claim.tokenAddress !== undefined) {
@@ -515,12 +529,15 @@ export function validateClaimMessage(msg: unknown): asserts msg is BTPClaimMessa
 
   const claim = msg as Partial<BTPClaimMessage>;
 
-  // Validate base fields
-  if (claim.version !== '1.0') {
+  // Validate base fields. EVM claims are v2 ('2.0'); Solana/Mina remain v1 ('1.0').
+  // The exact per-scheme version is enforced by the chain-specific validators
+  // below (validateEVMClaim requires '2.0', fail-closed); here we only bound the
+  // field to the known protocol versions.
+  if (claim.version !== '1.0' && claim.version !== '2.0') {
     // Sanitize: truncate and stringify version to prevent information disclosure
     // from untrusted input (OWASP A09:2021 - Security Logging and Monitoring Failures)
     const sanitizedVersion = String(claim.version ?? '').slice(0, 20);
-    throw new Error(`Invalid version (expected '1.0', got '${sanitizedVersion}')`);
+    throw new Error(`Invalid version (expected '1.0' or '2.0', got '${sanitizedVersion}')`);
   }
 
   if (!claim.blockchain || typeof claim.blockchain !== 'string') {

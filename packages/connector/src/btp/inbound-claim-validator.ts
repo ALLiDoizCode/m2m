@@ -33,7 +33,7 @@ import {
 } from '../settlement/privacy/nip59-claim-wrapper';
 import type { ILPPreparePacket, ILPRejectPacket } from '@toon-protocol/shared';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
-import type { BalanceProof } from '@toon-protocol/shared';
+import { verifyEVMClaimV2 } from '../settlement/eip712-v2-verifier';
 import type { PaymentChannelSDK } from '../settlement/payment-channel-sdk';
 import type { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
 import type {
@@ -75,7 +75,6 @@ export class InboundClaimValidator {
   private readonly logger: Logger;
   private readonly paymentChannelSDK?: PaymentChannelSDK;
   private readonly chainRegistry?: ChainProviderRegistry;
-  private readonly channelManager?: ChannelManager;
   private readonly nodeId: string;
 
   private readonly nip59Wrapper?: NIP59ClaimWrapper;
@@ -92,7 +91,10 @@ export class InboundClaimValidator {
     paymentChannelSDK: PaymentChannelSDK | undefined,
     nodeId: string,
     logger: Logger,
-    channelManager?: ChannelManager,
+    // Retained positionally for call-site compatibility. The v2 EVM verify path
+    // (connector#329 Phase 4b) is a pure signature recovery over the self-describing
+    // claim and no longer consults the ChannelManager, so this is unused.
+    _channelManager?: ChannelManager,
     nip59Wrapper?: NIP59ClaimWrapper,
     nip59PrivateKey?: Uint8Array,
     getPeerRelation?: PeerRelationResolver,
@@ -101,7 +103,6 @@ export class InboundClaimValidator {
     this.paymentChannelSDK = paymentChannelSDK;
     this.nodeId = nodeId;
     this.logger = logger.child({ component: 'InboundClaimValidator' });
-    this.channelManager = channelManager;
     this.nip59Wrapper = nip59Wrapper;
     this.nip59PrivateKey = nip59PrivateKey;
     this.getPeerRelation = getPeerRelation;
@@ -257,70 +258,36 @@ export class InboundClaimValidator {
     claim: EVMClaimMessage,
     peerId: string
   ): Promise<ILPRejectPacket | null> {
-    // Callers (validate) guard this; re-assert here so the local SDK reference
-    // is non-null for the verification calls below.
-    const paymentChannelSDK = this.paymentChannelSDK;
-    if (!paymentChannelSDK) {
+    // Callers (validate) guard that EVM settlement is configured; re-assert the
+    // SDK presence as the "EVM is configured" gate. The v2 signature check itself
+    // is pure (delegated to the dependency-light settlement-digest leaf) and needs
+    // neither the SDK nor an RPC round-trip — keeping the hot path RPC-free.
+    if (!this.paymentChannelSDK) {
       return this.createReject('EVM claim received but EVM settlement is not configured');
     }
 
-    // Verify EIP-712 signature
-    // BigInt() can throw on non-numeric strings; wrap in try/catch for defense-in-depth
-    // even though validateClaimMessage() already validates the format.
-    let balanceProof: BalanceProof;
-    try {
-      balanceProof = {
-        channelId: claim.channelId,
-        nonce: claim.nonce,
-        transferredAmount: BigInt(claim.transferredAmount),
-        lockedAmount: BigInt(claim.lockedAmount),
-        locksRoot: claim.locksRoot,
-      };
-    } catch {
-      this.logger.warn(
-        {
-          event: 'inbound_claim_invalid_amount',
-          peerId,
-          channelId: claim.channelId,
-        },
-        'Rejecting ILP PREPARE: invalid transferredAmount or lockedAmount for BigInt conversion'
-      );
-      return this.createReject('Invalid claim amounts');
-    }
-
+    // v2 RollingSwapChannel verify (connector#329 Phase 4b). The claim is
+    // self-describing: chainId + verifyingContract are REQUIRED digest inputs
+    // (validateClaimMessage already enforced their presence + format), so the v2
+    // EIP-712 digest is rebuilt from the wire fields and the secp256k1 signer is
+    // recovered and compared to the claim's signerAddress. A v1-signed / v1-shaped
+    // claim cannot recover to signerAddress under the version="2" domain — no
+    // dual-scheme fallback (fail-closed).
     let signatureValid: boolean;
     try {
-      // Prefer self-describing claims with explicit domain (Epic 31)
-      if (claim.chainId !== undefined && claim.tokenNetworkAddress) {
-        signatureValid = await paymentChannelSDK.verifyBalanceProofWithDomain(
-          balanceProof,
-          claim.signature,
-          claim.signerAddress,
-          claim.chainId,
-          claim.tokenNetworkAddress
-        );
-      } else {
-        // Fall back to known-channel verification
-        const knownChannel = this.channelManager?.getChannelById(claim.channelId);
-        if (!knownChannel) {
-          this.logger.warn(
-            {
-              event: 'inbound_claim_unknown_channel',
-              peerId,
-              channelId: claim.channelId,
-            },
-            'Rejecting ILP PREPARE: unknown channel and no self-describing fields'
-          );
-          return this.createReject(
-            'Unknown channel: claim must include chainId and tokenNetworkAddress'
-          );
-        }
-        signatureValid = await paymentChannelSDK.verifyBalanceProof(
-          balanceProof,
-          claim.signature,
-          claim.signerAddress
-        );
-      }
+      const result = verifyEVMClaimV2(
+        {
+          channelId: claim.channelId,
+          cumulativeAmount: claim.cumulativeAmount,
+          nonce: claim.nonce,
+          recipient: claim.recipient,
+          chainId: claim.chainId,
+          verifyingContract: claim.verifyingContract,
+        },
+        claim.signature,
+        claim.signerAddress
+      );
+      signatureValid = result.valid;
     } catch (error) {
       this.logger.warn(
         {
@@ -342,7 +309,7 @@ export class InboundClaimValidator {
           channelId: claim.channelId,
           signerAddress: claim.signerAddress,
         },
-        'Rejecting ILP PREPARE: invalid EIP-712 signature'
+        'Rejecting ILP PREPARE: invalid v2 EIP-712 signature'
       );
       return this.createReject('Invalid EIP-712 signature on claim');
     }
@@ -352,7 +319,7 @@ export class InboundClaimValidator {
         event: 'inbound_claim_validated',
         peerId,
         channelId: claim.channelId,
-        transferredAmount: claim.transferredAmount,
+        cumulativeAmount: claim.cumulativeAmount,
         nonce: claim.nonce,
       },
       'Inbound claim validated successfully'

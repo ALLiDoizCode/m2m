@@ -4,25 +4,31 @@
  * Branch coverage tests for InboundClaimValidator
  * Targets all branches in validate() and verifyEVMClaim()
  *
+ * connector#329 Phase 4b: verifyEVMClaim no longer calls the PaymentChannelSDK.
+ * It rebuilds the v2 RollingSwapChannel EIP-712 digest and recovers the signer
+ * via the pure `verifyEVMClaimV2` leaf. So the EVM accept/reject branches are
+ * driven with REAL v2-signed claims (via the shared `makeV2EvmClaim` helper)
+ * rather than by mocking an SDK verify method. The SDK argument survives only as
+ * the "EVM is configured" truthiness gate.
+ *
  * Branches covered:
  * 1. validate() returns null for zero-amount packets
- * 2. Missing claim data → reject
- * 3. Wrapped claim (NIP-59) when wrapper IS configured → unwrap and validate
- * 4. Wrapped claim when wrapper NOT configured → reject
- * 5. Plaintext claim → JSON.parse and validate
- * 6. Invalid claim structure (catch block) → reject with error message
- * 7. EVM claim → verifyEVMClaim()
- * 8. Non-EVM claim → reject with unsupported chain
- * 9. verifyEVMClaim(): BigInt conversion catch block
- * 10. verifyEVMClaim(): signature verification success and failure
- * 11. verifyEVMClaim(): channelManager not configured vs configured
- * 12. verifyEVMClaim(): channel lookup failure vs success
+ * 2. Relation-aware parent skip (issue #78)
+ * 3. Missing claim data → reject
+ * 4. Wrapped claim (NIP-59) when wrapper IS configured → unwrap and validate
+ * 5. Wrapped claim when wrapper NOT configured → reject
+ * 6. Plaintext claim → JSON.parse and validate
+ * 7. Invalid claim structure (catch block) → reject with error message
+ * 8. EVM claim → verifyEVMClaim()
+ * 9. Non-EVM claim → reject with unsupported chain
+ * 10. verifyEVMClaim(): EVM SDK not configured → reject
+ * 11. verifyEVMClaim(): real v2 signature verification success and failure
+ * 12. verifyEVMClaim(): verify leaf throws → reject
  */
 
 import { InboundClaimValidator } from './inbound-claim-validator';
 import type { Logger } from '../utils/logger';
 import type { PaymentChannelSDK } from '../settlement/payment-channel-sdk';
-import type { ChannelManager } from '../settlement/channel-manager';
 import type { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import {
   BTP_WRAPPED_CLAIM_PROTOCOL,
@@ -35,6 +41,7 @@ import {
   isSolanaClaim,
   isMinaClaim,
 } from './btp-claim-types';
+import { makeV2EvmClaim } from '../test-utils/v2-evm-claim';
 import { PacketType, ILPErrorCode } from '@toon-protocol/shared';
 import type { ILPPreparePacket } from '@toon-protocol/shared';
 
@@ -82,16 +89,12 @@ const createMockLogger = (): jest.Mocked<Logger> =>
     }),
   }) as unknown as jest.Mocked<Logger>;
 
+// The v2 verify path is a pure signature recovery — the SDK is never invoked by
+// verifyEVMClaim; a truthy stand-in only satisfies the "EVM configured" gate.
 const createMockPaymentChannelSDK = (): jest.Mocked<PaymentChannelSDK> =>
   ({
-    verifyBalanceProof: jest.fn(),
-    verifyBalanceProofWithDomain: jest.fn(),
+    verifyBalanceProofV2: jest.fn(),
   }) as unknown as jest.Mocked<PaymentChannelSDK>;
-
-const createMockChannelManager = (): jest.Mocked<ChannelManager> =>
-  ({
-    getChannelById: jest.fn(),
-  }) as unknown as jest.Mocked<ChannelManager>;
 
 const createPreparePacket = (amount: bigint = 1000n): ILPPreparePacket => {
   const futureExpiry = new Date(Date.now() + 10000);
@@ -108,25 +111,25 @@ interface ValidatorFixture {
   validator: InboundClaimValidator;
   mockLogger: jest.Mocked<Logger>;
   mockPaymentChannelSDK: jest.Mocked<PaymentChannelSDK>;
-  mockChannelManager?: jest.Mocked<ChannelManager>;
 }
 
 const createValidator = (
   options: {
-    channelManager?: jest.Mocked<ChannelManager>;
+    paymentChannelSDK?: jest.Mocked<PaymentChannelSDK> | undefined;
     nip59Wrapper?: NIP59ClaimWrapper;
     nip59PrivateKey?: Uint8Array;
     getPeerRelation?: (peerId: string) => 'parent' | 'peer' | 'child' | undefined;
+    withoutSDK?: boolean;
   } = {}
 ): ValidatorFixture => {
   const mockLogger = createMockLogger();
   const mockPaymentChannelSDK = createMockPaymentChannelSDK();
 
   const validator = new InboundClaimValidator(
-    mockPaymentChannelSDK,
+    options.withoutSDK ? undefined : mockPaymentChannelSDK,
     'test-node',
     mockLogger,
-    options.channelManager,
+    undefined,
     options.nip59Wrapper,
     options.nip59PrivateKey,
     options.getPeerRelation
@@ -136,24 +139,27 @@ const createValidator = (
     validator,
     mockLogger,
     mockPaymentChannelSDK,
-    mockChannelManager: options.channelManager,
   };
 };
 
+// A structurally-valid v2 EVM claim JSON with a dummy signature — used where the
+// signature path is NOT reached (validateClaimMessage is mocked to throw, or the
+// content is otherwise irrelevant to the branch under test).
 const createEVMClaimJSON = (overrides?: Record<string, unknown>): string => {
   const claim = {
-    version: '1.0',
+    version: '2.0',
     blockchain: 'evm',
     messageId: 'msg-1',
     timestamp: new Date().toISOString(),
     senderId: 'peer-a',
     channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
     nonce: 1,
-    transferredAmount: '100',
-    lockedAmount: '0',
-    locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    cumulativeAmount: '100',
+    recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
     signature: '0xabc',
-    signerAddress: '0xdef',
+    signerAddress: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+    chainId: 8453,
+    verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     ...overrides,
   };
   return JSON.stringify(claim);
@@ -289,22 +295,9 @@ describe('InboundClaimValidator branch coverage', () => {
     });
 
     it('should unwrap and validate wrapped claim when wrapper IS configured', async () => {
-      const unwrappedClaim = {
-        version: '1.0',
-        blockchain: 'evm',
-        messageId: 'msg-1',
-        timestamp: new Date().toISOString(),
-        senderId: 'peer-a',
-        channelId: '0x1234',
-        nonce: 1,
-        transferredAmount: '100',
-        lockedAmount: '0',
-        locksRoot: '0x0000',
-        signature: '0xabc',
-        signerAddress: '0xdef',
-        chainId: 1,
-        tokenNetworkAddress: '0xtoken',
-      };
+      // A REAL, leaf-verifiable v2 EVM claim is what the unwrapper yields, so the
+      // pure verifyEVMClaimV2 signature recovery accepts it.
+      const unwrappedClaim = await makeV2EvmClaim({ channelId: '0x' + '22'.repeat(32) });
 
       const mockNip59Wrapper = {
         unwrapClaim: jest.fn().mockReturnValue(unwrappedClaim),
@@ -319,11 +312,10 @@ describe('InboundClaimValidator branch coverage', () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
 
-      const { validator, mockPaymentChannelSDK } = createValidator({
+      const { validator } = createValidator({
         nip59Wrapper: mockNip59Wrapper,
         nip59PrivateKey: new Uint8Array(32),
       });
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockResolvedValue(true);
 
       const packet = createPreparePacket(1000n);
       const protocolData = [
@@ -342,13 +334,6 @@ describe('InboundClaimValidator branch coverage', () => {
         expect.objectContaining({ version: '1.0' }),
         new Uint8Array(32)
       );
-      expect(mockPaymentChannelSDK.verifyBalanceProofWithDomain).toHaveBeenCalledWith(
-        expect.objectContaining({ channelId: '0x1234', transferredAmount: 100n, lockedAmount: 0n }),
-        '0xabc',
-        '0xdef',
-        1,
-        '0xtoken'
-      );
     });
   });
 
@@ -360,16 +345,15 @@ describe('InboundClaimValidator branch coverage', () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
 
-      const { validator, mockPaymentChannelSDK } = createValidator();
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockResolvedValue(true);
+      const { validator } = createValidator();
 
-      const claimJson = createEVMClaimJSON({ chainId: 1, tokenNetworkAddress: '0xtoken' });
+      const claim = await makeV2EvmClaim();
       const packet = createPreparePacket(1000n);
       const protocolData = [
         {
           protocolName: BTP_CLAIM_PROTOCOL.NAME,
           contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
+          data: Buffer.from(JSON.stringify(claim), 'utf8'),
         },
       ];
 
@@ -546,16 +530,15 @@ describe('InboundClaimValidator branch coverage', () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
 
-      const { validator, mockPaymentChannelSDK } = createValidator();
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockResolvedValue(true);
+      const { validator } = createValidator();
 
-      const claimJson = createEVMClaimJSON({ chainId: 1, tokenNetworkAddress: '0xtoken' });
+      const claim = await makeV2EvmClaim();
       const packet = createPreparePacket(1000n);
       const protocolData = [
         {
           protocolName: BTP_CLAIM_PROTOCOL.NAME,
           contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
+          data: Buffer.from(JSON.stringify(claim), 'utf8'),
         },
       ];
 
@@ -610,25 +593,22 @@ describe('InboundClaimValidator branch coverage', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Branch 9: verifyEVMClaim — BigInt conversion catch block
+  // Branch 10: verifyEVMClaim — EVM SDK not configured
   // -------------------------------------------------------------------------
-  describe('Branch 9: BigInt conversion catch block', () => {
-    it('should reject when transferredAmount cannot be converted to BigInt', async () => {
+  describe('Branch 10: EVM settlement not configured', () => {
+    it('should reject an EVM claim when no EVM payment-channel SDK is configured', async () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
 
-      const { validator, mockLogger } = createValidator();
-      const claimJson = createEVMClaimJSON({
-        transferredAmount: 'not-a-number',
-        chainId: 1,
-        tokenNetworkAddress: '0xtoken',
-      });
+      const { validator, mockLogger } = createValidator({ withoutSDK: true });
+
+      const claim = await makeV2EvmClaim();
       const packet = createPreparePacket(1000n);
       const protocolData = [
         {
           protocolName: BTP_CLAIM_PROTOCOL.NAME,
           contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
+          data: Buffer.from(JSON.stringify(claim), 'utf8'),
         },
       ];
 
@@ -638,71 +618,61 @@ describe('InboundClaimValidator branch coverage', () => {
         type: PacketType.REJECT,
         code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
         triggeredBy: 'test-node',
-        message: 'Invalid claim amounts',
+        message: 'EVM claim received but EVM settlement is not configured',
         data: Buffer.alloc(0),
       });
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'inbound_claim_invalid_amount' }),
-        'Rejecting ILP PREPARE: invalid transferredAmount or lockedAmount for BigInt conversion'
+        expect.objectContaining({ event: 'inbound_claim_no_evm_sdk' }),
+        'Rejecting ILP PREPARE: EVM claim received but no EVM payment-channel SDK configured'
       );
     });
   });
 
   // -------------------------------------------------------------------------
-  // Branch 10: verifyEVMClaim — signature verification success / failure
+  // Branch 11: verifyEVMClaim — real v2 signature verification success / failure
   // -------------------------------------------------------------------------
-  describe('Branch 10: signature verification success and failure', () => {
-    it('should accept when self-describing signature verification succeeds', async () => {
+  describe('Branch 11: v2 signature verification success and failure', () => {
+    it('should accept when the real v2 EIP-712 signature verifies', async () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
 
-      const { validator, mockPaymentChannelSDK, mockLogger } = createValidator();
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockResolvedValue(true);
+      const { validator, mockLogger } = createValidator();
 
-      const claimJson = createEVMClaimJSON({ chainId: 1, tokenNetworkAddress: '0xtoken' });
+      const claim = await makeV2EvmClaim({ cumulativeAmount: '100', nonce: 1 });
       const packet = createPreparePacket(1000n);
       const protocolData = [
         {
           protocolName: BTP_CLAIM_PROTOCOL.NAME,
           contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
+          data: Buffer.from(JSON.stringify(claim), 'utf8'),
         },
       ];
 
       const result = await validator.validate(protocolData, packet, 'peer-a');
 
       expect(result).toBeNull();
-      expect(mockPaymentChannelSDK.verifyBalanceProofWithDomain).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
-          transferredAmount: 100n,
-          lockedAmount: 0n,
-        }),
-        '0xabc',
-        '0xdef',
-        1,
-        '0xtoken'
-      );
       expect(mockLogger.debug).toHaveBeenCalledWith(
         expect.objectContaining({ event: 'inbound_claim_validated' }),
         'Inbound claim validated successfully'
       );
     });
 
-    it('should reject when self-describing signature verification returns false', async () => {
+    it('should reject when the v2 signature does not match the signed fields', async () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
 
-      const { validator, mockPaymentChannelSDK, mockLogger } = createValidator();
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockResolvedValue(false);
+      const { validator, mockLogger } = createValidator();
 
-      const claimJson = createEVMClaimJSON({ chainId: 1, tokenNetworkAddress: '0xtoken' });
+      // Sign over nonce=1, then advertise nonce=2 — the recovered signer no longer
+      // matches signerAddress, so the pure leaf reports valid=false.
+      const claim = await makeV2EvmClaim({ nonce: 1 });
+      claim.nonce = 2;
       const packet = createPreparePacket(1000n);
       const protocolData = [
         {
           protocolName: BTP_CLAIM_PROTOCOL.NAME,
           contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
+          data: Buffer.from(JSON.stringify(claim), 'utf8'),
         },
       ];
 
@@ -717,256 +687,30 @@ describe('InboundClaimValidator branch coverage', () => {
       });
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ event: 'inbound_claim_invalid_signature' }),
-        'Rejecting ILP PREPARE: invalid EIP-712 signature'
-      );
-    });
-
-    it('should reject when self-describing signature verification throws', async () => {
-      (validateClaimMessage as jest.Mock).mockImplementation(() => {});
-      (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
-
-      const { validator, mockPaymentChannelSDK, mockLogger } = createValidator();
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockRejectedValue(
-        new Error('network error')
-      );
-
-      const claimJson = createEVMClaimJSON({ chainId: 1, tokenNetworkAddress: '0xtoken' });
-      const packet = createPreparePacket(1000n);
-      const protocolData = [
-        {
-          protocolName: BTP_CLAIM_PROTOCOL.NAME,
-          contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
-        },
-      ];
-
-      const result = await validator.validate(protocolData, packet, 'peer-a');
-
-      expect(result).toEqual({
-        type: PacketType.REJECT,
-        code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
-        triggeredBy: 'test-node',
-        message: 'Signature verification failed',
-        data: Buffer.alloc(0),
-      });
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'inbound_claim_signature_error' }),
-        'Rejecting ILP PREPARE: signature verification error'
-      );
-    });
-
-    it('should reject when self-describing signature verification throws a non-Error value', async () => {
-      (validateClaimMessage as jest.Mock).mockImplementation(() => {});
-      (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
-
-      const { validator, mockPaymentChannelSDK, mockLogger } = createValidator();
-      mockPaymentChannelSDK.verifyBalanceProofWithDomain.mockRejectedValue('network-down');
-
-      const claimJson = createEVMClaimJSON({ chainId: 1, tokenNetworkAddress: '0xtoken' });
-      const packet = createPreparePacket(1000n);
-      const protocolData = [
-        {
-          protocolName: BTP_CLAIM_PROTOCOL.NAME,
-          contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
-        },
-      ];
-
-      const result = await validator.validate(protocolData, packet, 'peer-a');
-
-      expect(result).toEqual({
-        type: PacketType.REJECT,
-        code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
-        triggeredBy: 'test-node',
-        message: 'Signature verification failed',
-        data: Buffer.alloc(0),
-      });
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'inbound_claim_signature_error', error: 'network-down' }),
-        'Rejecting ILP PREPARE: signature verification error'
+        'Rejecting ILP PREPARE: invalid v2 EIP-712 signature'
       );
     });
   });
 
   // -------------------------------------------------------------------------
-  // Branch 11 & 12: channelManager not configured vs configured / lookup failure vs success
+  // Branch 12: verifyEVMClaim — verify leaf throws
   // -------------------------------------------------------------------------
-  describe('Branch 11 & 12: channelManager configuration and lookup', () => {
-    it('should reject when channelManager is NOT configured and no self-describing fields', async () => {
+  describe('Branch 12: signature verification throws', () => {
+    it('should reject when the v2 verify leaf throws (malformed signature)', async () => {
       (validateClaimMessage as jest.Mock).mockImplementation(() => {});
       (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
 
-      const { validator, mockLogger } = createValidator(); // no channelManager
-      const claimJson = createEVMClaimJSON(); // no chainId, no tokenNetworkAddress
+      const { validator, mockLogger } = createValidator();
+
+      // A non-65-byte signature makes the leaf's normalizeSignature65 throw.
+      const claim = await makeV2EvmClaim();
+      claim.signature = '0xabc';
       const packet = createPreparePacket(1000n);
       const protocolData = [
         {
           protocolName: BTP_CLAIM_PROTOCOL.NAME,
           contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
-        },
-      ];
-
-      const result = await validator.validate(protocolData, packet, 'peer-a');
-
-      expect(result).toEqual({
-        type: PacketType.REJECT,
-        code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
-        triggeredBy: 'test-node',
-        message: 'Unknown channel: claim must include chainId and tokenNetworkAddress',
-        data: Buffer.alloc(0),
-      });
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'inbound_claim_unknown_channel' }),
-        'Rejecting ILP PREPARE: unknown channel and no self-describing fields'
-      );
-    });
-
-    it('should reject when channelManager IS configured but channel lookup fails', async () => {
-      (validateClaimMessage as jest.Mock).mockImplementation(() => {});
-      (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
-
-      const mockChannelManager = createMockChannelManager();
-      mockChannelManager.getChannelById.mockReturnValue(null);
-
-      const { validator, mockLogger } = createValidator({ channelManager: mockChannelManager });
-      const claimJson = createEVMClaimJSON(); // no chainId, no tokenNetworkAddress
-      const packet = createPreparePacket(1000n);
-      const protocolData = [
-        {
-          protocolName: BTP_CLAIM_PROTOCOL.NAME,
-          contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
-        },
-      ];
-
-      const result = await validator.validate(protocolData, packet, 'peer-a');
-
-      expect(result).toEqual({
-        type: PacketType.REJECT,
-        code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
-        triggeredBy: 'test-node',
-        message: 'Unknown channel: claim must include chainId and tokenNetworkAddress',
-        data: Buffer.alloc(0),
-      });
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'inbound_claim_unknown_channel' }),
-        'Rejecting ILP PREPARE: unknown channel and no self-describing fields'
-      );
-    });
-
-    it('should accept when channelManager finds channel and verifyBalanceProof succeeds', async () => {
-      (validateClaimMessage as jest.Mock).mockImplementation(() => {});
-      (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
-
-      const mockChannelManager = createMockChannelManager();
-      mockChannelManager.getChannelById.mockReturnValue({
-        channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
-        peerId: 'peer-a',
-        tokenId: 'USDC',
-        tokenAddress: '0xusdc',
-        chain: 'evm:base:8453',
-        createdAt: new Date(),
-        lastActivityAt: new Date(),
-        status: 'opened',
-      } as any);
-
-      const { validator, mockPaymentChannelSDK } = createValidator({
-        channelManager: mockChannelManager,
-      });
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(true);
-
-      const claimJson = createEVMClaimJSON(); // no self-describing fields
-      const packet = createPreparePacket(1000n);
-      const protocolData = [
-        {
-          protocolName: BTP_CLAIM_PROTOCOL.NAME,
-          contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
-        },
-      ];
-
-      const result = await validator.validate(protocolData, packet, 'peer-a');
-
-      expect(result).toBeNull();
-      expect(mockChannelManager.getChannelById).toHaveBeenCalledWith(
-        '0x1234567890123456789012345678901234567890123456789012345678901234'
-      );
-      expect(mockPaymentChannelSDK.verifyBalanceProof).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
-          transferredAmount: 100n,
-          lockedAmount: 0n,
-        }),
-        '0xabc',
-        '0xdef'
-      );
-    });
-
-    it('should reject when channelManager finds channel but verifyBalanceProof returns false', async () => {
-      (validateClaimMessage as jest.Mock).mockImplementation(() => {});
-      (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
-
-      const mockChannelManager = createMockChannelManager();
-      mockChannelManager.getChannelById.mockReturnValue({
-        channelId: '0x1234',
-        peerId: 'peer-a',
-        status: 'opened',
-      } as any);
-
-      const { validator, mockPaymentChannelSDK, mockLogger } = createValidator({
-        channelManager: mockChannelManager,
-      });
-      mockPaymentChannelSDK.verifyBalanceProof.mockResolvedValue(false);
-
-      const claimJson = createEVMClaimJSON();
-      const packet = createPreparePacket(1000n);
-      const protocolData = [
-        {
-          protocolName: BTP_CLAIM_PROTOCOL.NAME,
-          contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
-        },
-      ];
-
-      const result = await validator.validate(protocolData, packet, 'peer-a');
-
-      expect(result).toEqual({
-        type: PacketType.REJECT,
-        code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
-        triggeredBy: 'test-node',
-        message: 'Invalid EIP-712 signature on claim',
-        data: Buffer.alloc(0),
-      });
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'inbound_claim_invalid_signature' }),
-        'Rejecting ILP PREPARE: invalid EIP-712 signature'
-      );
-    });
-
-    it('should reject when channelManager finds channel but verifyBalanceProof throws', async () => {
-      (validateClaimMessage as jest.Mock).mockImplementation(() => {});
-      (isEVMClaim as unknown as jest.Mock).mockReturnValue(true);
-
-      const mockChannelManager = createMockChannelManager();
-      mockChannelManager.getChannelById.mockReturnValue({
-        channelId: '0x1234',
-        peerId: 'peer-a',
-        status: 'opened',
-      } as any);
-
-      const { validator, mockPaymentChannelSDK, mockLogger } = createValidator({
-        channelManager: mockChannelManager,
-      });
-      mockPaymentChannelSDK.verifyBalanceProof.mockRejectedValue(new Error('verify crash'));
-
-      const claimJson = createEVMClaimJSON();
-      const packet = createPreparePacket(1000n);
-      const protocolData = [
-        {
-          protocolName: BTP_CLAIM_PROTOCOL.NAME,
-          contentType: 1,
-          data: Buffer.from(claimJson, 'utf8'),
+          data: Buffer.from(JSON.stringify(claim), 'utf8'),
         },
       ];
 

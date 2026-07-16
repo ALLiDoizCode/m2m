@@ -289,14 +289,22 @@ export class UnifiedSettlementExecutor {
       depositAmount
     );
 
-    // Sign balance proof for settlement amount
+    // v2 self-describing domain fields (connector#329 Phase 4b) — required to
+    // sign the RollingSwapChannel balance proof. recipient is the peer's on-chain
+    // settlement address; verifyingContract is the RollingSwapChannel address.
+    const chainId = await this.evmChannelSDK.getChainId();
+    const verifyingContract = await this.evmChannelSDK.getTokenNetworkAddress(tokenAddress);
+    const recipient = config.evmAddress;
+
+    // Sign v2 balance proof for settlement amount
     const nonce = 1; // Initial nonce for new channel
     const signature = await this.evmChannelSDK.signBalanceProof(
       channelId,
       nonce,
       depositAmount,
-      0n,
-      '0x0000000000000000000000000000000000000000000000000000000000000000'
+      recipient,
+      chainId,
+      verifyingContract
     );
     const signerAddress = await this.evmChannelSDK.getSignerAddress();
 
@@ -304,22 +312,17 @@ export class UnifiedSettlementExecutor {
     try {
       const btpClient = this.getBTPClientForPeer(peerId);
 
-      // Obtain self-describing fields for Epic 31
-      const chainId = await this.evmChannelSDK.getChainId();
-      const tokenNetworkAddress = await this.evmChannelSDK.getTokenNetworkAddress(tokenAddress);
-
       const result = await this._claimSender.sendEVMClaim(
         peerId,
         btpClient,
         channelId,
         nonce,
         depositAmount.toString(),
-        '0',
-        '0x0000000000000000000000000000000000000000000000000000000000000000',
+        recipient,
         signature,
         signerAddress,
         chainId,
-        tokenNetworkAddress,
+        verifyingContract,
         tokenAddress
       );
 

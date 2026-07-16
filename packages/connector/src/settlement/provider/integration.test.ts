@@ -103,13 +103,13 @@ const createMockSDK = (): jest.Mocked<
   Pick<
     PaymentChannelSDK,
     | 'signBalanceProof'
-    | 'verifyBalanceProof'
+    | 'verifyBalanceProofV2'
     | 'getChainId'
     | 'getTokenNetworkAddress'
     | 'getSignerAddress'
     | 'openChannel'
     | 'deposit'
-    | 'claimFromChannel'
+    | 'updateBalance'
     | 'closeChannel'
     | 'settleChannel'
     | 'getChannelState'
@@ -121,13 +121,13 @@ const createMockSDK = (): jest.Mocked<
   >
 > => ({
   signBalanceProof: jest.fn().mockResolvedValue('0xmocksignature'),
-  verifyBalanceProof: jest.fn().mockResolvedValue(true),
+  verifyBalanceProofV2: jest.fn().mockReturnValue(true),
   getChainId: jest.fn().mockResolvedValue(TEST_CHAIN_ID_NUMERIC),
   getTokenNetworkAddress: jest.fn().mockResolvedValue(TEST_TOKEN_NETWORK_ADDRESS),
   getSignerAddress: jest.fn().mockResolvedValue(TEST_SIGNER_ADDRESS),
   openChannel: jest.fn().mockResolvedValue({ channelId: TEST_CHANNEL_ID, txHash: '0xOpenTxHash' }),
   deposit: jest.fn().mockResolvedValue(undefined),
-  claimFromChannel: jest.fn().mockResolvedValue(undefined),
+  updateBalance: jest.fn().mockResolvedValue(undefined),
   closeChannel: jest.fn().mockResolvedValue(undefined),
   settleChannel: jest.fn().mockResolvedValue(undefined),
   getChannelState: jest.fn().mockResolvedValue({
@@ -173,8 +173,14 @@ function createMockProvider(
 const createMockChannelManager = (
   channelMap?: Record<string, { channelId: string; tokenAddress: string }>
 ): jest.Mocked<
-  Pick<ChannelManager, 'getChannelForPeer' | 'ensureChannelExists' | 'getChannelById'>
+  Pick<
+    ChannelManager,
+    'getChannelForPeer' | 'ensureChannelExists' | 'getChannelById' | 'getPeerAddress'
+  >
 > => ({
+  // v2 EVM claims bind the peer's settlement address as `recipient`
+  // (connector#329 Phase 4b); PerPacketClaimService reads it via getPeerAddress.
+  getPeerAddress: jest.fn().mockReturnValue(TEST_PEER_ADDRESS),
   getChannelForPeer: jest.fn().mockImplementation((peerId: string, tokenId: string) => {
     const key = `${peerId}:${tokenId}`;
     const channel = channelMap?.[key];
@@ -291,7 +297,7 @@ describe('[T-32.8-01] AC 1: Full settlement flow through abstraction layer', () 
     // The claim was signed by the mock SDK, so verification should succeed
     const claimData = JSON.parse(claimResult!.protocolData.data.toString('utf8'));
     expect(claimData.signature).toBe('0xmocksignature');
-    expect(mockSDK.verifyBalanceProof).not.toHaveBeenCalled();
+    expect(mockSDK.verifyBalanceProofV2).not.toHaveBeenCalled();
 
     // Step 3: SettlementExecutor settles via existing channel
     /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -351,10 +357,10 @@ describe('[T-32.8-01] AC 1: Full settlement flow through abstraction layer', () 
     // The settlement chain is a promise chain inside SettlementExecutor; we poll
     // for the expected side-effect rather than sleeping a fixed duration so the
     // test is resilient to slow CI runners.
-    await waitForCondition(() => mockSDK.claimFromChannel.mock.calls.length > 0);
+    await waitForCondition(() => mockSDK.updateBalance.mock.calls.length > 0);
 
-    // Verify: claimFromChannel was called through the provider (not SDK directly)
-    expect(mockSDK.claimFromChannel).toHaveBeenCalled();
+    // Verify: the v2 redeem (updateBalance) was called through the provider (not SDK directly)
+    expect(mockSDK.updateBalance).toHaveBeenCalled();
 
     // Verify: TigerBeetle balance updated
     expect(mockAccountManager.recordSettlement).toHaveBeenCalledWith(
@@ -462,19 +468,18 @@ describe('[T-32.8-03] AC 3: Claim JSON structure matches expected EVM claim form
     // Parse serialized claim from protocolData
     const serialized = JSON.parse(result!.protocolData.data.toString('utf8'));
 
-    // Verify all required EVM claim fields
+    // Verify all required EVM v2 claim fields (connector#329 Phase 4b —
+    // RollingSwapChannel): cumulativeAmount + recipient + verifyingContract replace
+    // the v1 transferredAmount/lockedAmount/locksRoot/tokenNetworkAddress.
     expect(serialized.blockchain).toBe('evm');
-    expect(serialized.version).toBe('1.0');
+    expect(serialized.version).toBe('2.0');
     expect(serialized.channelId).toBe(TEST_CHANNEL_ID);
     expect(serialized.nonce).toBe(1);
-    expect(serialized.transferredAmount).toBe('1000');
-    expect(serialized.lockedAmount).toBe('0');
-    expect(serialized.locksRoot).toBe(
-      '0x0000000000000000000000000000000000000000000000000000000000000000'
-    );
+    expect(serialized.cumulativeAmount).toBe('1000');
+    expect(serialized.recipient).toBe(TEST_PEER_ADDRESS);
     expect(serialized.signature).toBe('0xmocksignature');
     expect(serialized.chainId).toBe(TEST_CHAIN_ID_NUMERIC);
-    expect(serialized.tokenNetworkAddress).toBe(TEST_TOKEN_NETWORK_ADDRESS);
+    expect(serialized.verifyingContract).toBe(TEST_TOKEN_NETWORK_ADDRESS);
     expect(serialized.tokenAddress).toBe(TEST_TOKEN_ADDRESS);
     expect(serialized.senderId).toBe(TEST_NODE_ID);
     expect(typeof serialized.messageId).toBe('string');
@@ -521,6 +526,10 @@ describe('[T-32.8-04] AC 3: EIP-712 signatures identical for same inputs through
       transferredAmount: '1000',
       lockedAmount: '0',
       locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      // v2 EVM digest inputs (connector#329 Phase 4b) — required by the provider.
+      recipient: TEST_PEER_ADDRESS,
+      chainId: TEST_CHAIN_ID_NUMERIC,
+      verifyingContract: TEST_TOKEN_NETWORK_ADDRESS,
     };
 
     // Sign twice through the abstraction layer (registry -> provider -> SDK)
@@ -742,18 +751,16 @@ describe('[T-32.8-07] AC 5: SettlementExecutor claims from existing channel thro
     handler(event);
 
     // Poll for the expected side-effect instead of a fixed sleep
-    await waitForCondition(() => mockSDK.claimFromChannel.mock.calls.length > 0);
+    await waitForCondition(() => mockSDK.updateBalance.mock.calls.length > 0);
 
-    // provider.claimFromChannel() called with the latest per-packet claim
-    expect(mockSDK.claimFromChannel).toHaveBeenCalledWith(
+    // provider.claimFromChannel() redeems via the SDK's v2 updateBalance
+    // (verifyingContract, channelId, cumulativeAmount, nonce, recipient, signature).
+    expect(mockSDK.updateBalance).toHaveBeenCalledWith(
+      TEST_TOKEN_NETWORK_ADDRESS,
       TEST_CHANNEL_ID,
-      TEST_TOKEN_ADDRESS,
-      expect.objectContaining({
-        channelId: TEST_CHANNEL_ID,
-        nonce: 1,
-        transferredAmount: 1000n,
-        lockedAmount: 0n,
-      }),
+      1000n,
+      1,
+      TEST_PEER_ADDRESS,
       '0xmocksignature'
     );
 
@@ -966,18 +973,19 @@ describe('[T-32.8-11] AC 8: Error propagation through settlement services', () =
       mockLogger
     );
 
-    // Build a realistic BTP claim message
+    // Build a realistic v2 BTP claim message (connector#329 Phase 4b). It passes
+    // structural validation so verification reaches provider.verifyBalanceProof
+    // (which is mocked to reject) — the path this test exercises.
     const claimMessage = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       channelId: TEST_CHANNEL_ID,
       nonce: 1,
-      transferredAmount: '1000',
-      lockedAmount: '0',
-      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      cumulativeAmount: '1000',
+      recipient: TEST_PEER_ADDRESS,
       signature: '0xmocksignature',
       chainId: TEST_CHAIN_ID_NUMERIC,
-      tokenNetworkAddress: TEST_TOKEN_NETWORK_ADDRESS,
+      verifyingContract: TEST_SIGNER_ADDRESS,
       tokenAddress: TEST_TOKEN_ADDRESS,
       senderId: TEST_PEER_ID,
       messageId: 'test-msg-1',

@@ -1583,18 +1583,19 @@ describe('Admin API Balance and Settlement State Endpoints (Story 21.3)', () => 
     };
 
     const evmClaim = {
-      version: '1.0' as const,
+      version: '2.0' as const,
       blockchain: 'evm' as const,
       messageId: 'claim-002',
       timestamp: '2026-02-08T12:00:00.000Z',
       senderId: 'peer-b',
       channelId: '0xevm123',
       nonce: 5,
-      transferredAmount: '1000000',
-      lockedAmount: '0',
-      locksRoot: '0x' + '0'.repeat(64),
+      cumulativeAmount: '1000000',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
       signature: '0xabcdef',
       signerAddress: '0x742d35Cc',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     it('should return 200 with EVM claim fields', async () => {
@@ -1607,7 +1608,7 @@ describe('Admin API Balance and Settlement State Endpoints (Story 21.3)', () => 
       expect(res.body.blockchain).toBe('evm');
       expect(res.body.channelId).toBe('0xevm123');
       expect(res.body.nonce).toBe(5);
-      expect(res.body.transferredAmount).toBe('1000000');
+      expect(res.body.cumulativeAmount).toBe('1000000');
       expect(res.body.signerAddress).toBe('0x742d35Cc');
     });
 

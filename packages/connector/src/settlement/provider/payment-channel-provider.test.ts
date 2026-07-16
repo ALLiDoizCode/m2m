@@ -212,18 +212,19 @@ describe('ProviderChannelState (T-32.1-02)', () => {
 
 describe('EVMClaimMessage backward compatibility (T-32.1-03)', () => {
   const evmClaim: EVMClaimMessage = {
-    version: '1.0',
+    version: '2.0',
     blockchain: 'evm',
     messageId: 'claim-evm-001',
     timestamp: '2026-02-02T12:00:00.000Z',
     senderId: 'peer-bob',
     channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
     nonce: 5,
-    transferredAmount: '1000000000000000000',
-    lockedAmount: '0',
-    locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    cumulativeAmount: '1000000000000000000',
+    recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
     signature: '0xabcdef1234567890',
     signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    chainId: 8453,
+    verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
   };
 
   it('should narrow EVMClaimMessage via isEVMClaim()', () => {
@@ -410,18 +411,19 @@ describe('ProviderConfig discriminated union (T-32.1-06)', () => {
 describe('BTPClaimMessage union (T-32.1-07)', () => {
   it('should accept EVMClaimMessage', () => {
     const msg: BTPClaimMessage = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'msg-1',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-1',
       channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
       nonce: 1,
-      transferredAmount: '100',
-      lockedAmount: '0',
-      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      cumulativeAmount: '100',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
       signature: '0xsig',
       signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
     expect(msg.blockchain).toBe('evm');
   });
@@ -468,18 +470,19 @@ describe('BTPClaimMessage union (T-32.1-07)', () => {
 describe('validateClaimMessage() (T-32.1-08)', () => {
   it('should accept valid EVM claims (unchanged behavior)', () => {
     const validEVMClaim = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'claim-evm-001',
       timestamp: '2026-02-02T12:00:00.000Z',
       senderId: 'peer-bob',
       channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
       nonce: 5,
-      transferredAmount: '1000000000000000000',
-      lockedAmount: '0',
-      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      cumulativeAmount: '1000000000000000000',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
       signature: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
       signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     expect(() => validateClaimMessage(validEVMClaim)).not.toThrow();
@@ -561,18 +564,19 @@ describe('isSolanaClaim() type guard', () => {
 
   it('should return false for EVM claims', () => {
     const msg: BTPClaimMessage = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'msg-evm-1',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-1',
       channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
       nonce: 1,
-      transferredAmount: '100',
-      lockedAmount: '0',
-      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      cumulativeAmount: '100',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
       signature: '0xsig',
       signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
     expect(isSolanaClaim(msg)).toBe(false);
   });
@@ -636,18 +640,19 @@ describe('isMinaClaim() type guard', () => {
 
   it('should return false for EVM claims', () => {
     const msg: BTPClaimMessage = {
-      version: '1.0',
+      version: '2.0',
       blockchain: 'evm',
       messageId: 'msg-evm-2',
       timestamp: '2026-03-24T12:00:00.000Z',
       senderId: 'peer-1',
       channelId: '0x1234567890123456789012345678901234567890123456789012345678901234',
       nonce: 1,
-      transferredAmount: '100',
-      lockedAmount: '0',
-      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      cumulativeAmount: '100',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
       signature: '0xsig',
       signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
     expect(isMinaClaim(msg)).toBe(false);
   });

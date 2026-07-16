@@ -50,10 +50,8 @@ const createMockSDK = (): jest.Mocked<
     | 'getSignerAddress'
     | 'openChannel'
     | 'deposit'
-    | 'claimFromChannel'
     | 'closeChannel'
     | 'settleChannel'
-    | 'verifyBalanceProof'
     | 'getChannelState'
     | 'onChannelOpened'
     | 'onChannelClosed'
@@ -68,10 +66,8 @@ const createMockSDK = (): jest.Mocked<
   getSignerAddress: jest.fn().mockResolvedValue('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1'),
   openChannel: jest.fn(),
   deposit: jest.fn(),
-  claimFromChannel: jest.fn(),
   closeChannel: jest.fn(),
   settleChannel: jest.fn(),
-  verifyBalanceProof: jest.fn(),
   getChannelState: jest.fn(),
   onChannelOpened: jest.fn(),
   onChannelClosed: jest.fn(),
@@ -105,10 +101,16 @@ const createMockRegistry = (
     }),
 });
 
+// v2 EVM recipient — the peer's settlement address bound into the signed digest.
+// Valid 0x-prefixed 40-hex address.
+const TEST_RECIPIENT = '0x' + 'bb'.repeat(20);
+
 // Mock ChannelManager
 const createMockChannelManager = (
   channelMap?: Record<string, { channelId: string; tokenAddress: string }>
-): jest.Mocked<Pick<ChannelManager, 'getChannelForPeer' | 'ensureChannelExists'>> => ({
+): jest.Mocked<
+  Pick<ChannelManager, 'getChannelForPeer' | 'ensureChannelExists' | 'getPeerAddress'>
+> => ({
   getChannelForPeer: jest.fn().mockImplementation((peerId: string, tokenId: string) => {
     const key = `${peerId}:${tokenId}`;
     const channel = channelMap?.[key];
@@ -125,6 +127,7 @@ const createMockChannelManager = (
     };
   }),
   ensureChannelExists: jest.fn().mockResolvedValue(undefined),
+  getPeerAddress: jest.fn().mockReturnValue(TEST_RECIPIENT),
 });
 
 // Mock SQLite Database
@@ -188,12 +191,12 @@ describe('PerPacketClaimService', () => {
       const claim = result!.claimMessage;
       expect(isEVMClaim(claim)).toBe(true);
       const evmClaim = claim as EVMClaimMessage;
-      expect(evmClaim.version).toBe('1.0');
+      expect(evmClaim.version).toBe('2.0');
       expect(evmClaim.blockchain).toBe('evm');
       expect(evmClaim.channelId).toBe(TEST_CHANNEL_ID);
       expect(evmClaim.nonce).toBe(1);
-      expect(evmClaim.transferredAmount).toBe('1000');
-      expect(evmClaim.lockedAmount).toBe('0');
+      expect(evmClaim.cumulativeAmount).toBe('1000');
+      expect(evmClaim.recipient).toBe(TEST_RECIPIENT);
       expect(evmClaim.signature).toBe('0xmocksignature');
       expect(evmClaim.senderId).toBe(TEST_NODE_ID);
       expect(evmClaim.chainId).toBe(31337);
@@ -215,9 +218,9 @@ describe('PerPacketClaimService', () => {
       const result2 = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 200n);
       const result3 = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 300n);
 
-      expect((result1!.claimMessage as EVMClaimMessage).transferredAmount).toBe('100');
-      expect((result2!.claimMessage as EVMClaimMessage).transferredAmount).toBe('300'); // 100 + 200
-      expect((result3!.claimMessage as EVMClaimMessage).transferredAmount).toBe('600'); // 100 + 200 + 300
+      expect((result1!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('100');
+      expect((result2!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('300'); // 100 + 200
+      expect((result3!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('600'); // 100 + 200 + 300
     });
 
     it('should return null when no channel exists for peer', async () => {
@@ -244,6 +247,9 @@ describe('PerPacketClaimService', () => {
         transferredAmount: '500',
         lockedAmount: '0',
         locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        recipient: TEST_RECIPIENT,
+        chainId: 31337,
+        verifyingContract: '0xTokenNetworkAddress1234567890abcdef',
       });
     });
 
@@ -260,7 +266,7 @@ describe('PerPacketClaimService', () => {
       const parsed = JSON.parse(result!.protocolData.data.toString('utf8'));
       expect(parsed.channelId).toBe(TEST_CHANNEL_ID);
       expect(parsed.nonce).toBe(1);
-      expect(parsed.transferredAmount).toBe('1000');
+      expect(parsed.cumulativeAmount).toBe('1000');
     });
 
     it('should return null when no provider found for peer (T-32.4-04)', async () => {
@@ -314,7 +320,7 @@ describe('PerPacketClaimService', () => {
 
       expect(result).not.toBeNull();
       const evmClaim = result!.claimMessage as EVMClaimMessage;
-      expect(evmClaim.tokenNetworkAddress).toBe('0xTokenNetworkAddress1234567890abcdef');
+      expect(evmClaim.verifyingContract).toBe('0xTokenNetworkAddress1234567890abcdef');
       expect(evmClaim.signerAddress).toBe('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1');
       expect(evmClaim.chainId).toBe(31337);
       expect(evmClaim.tokenAddress).toBe(TEST_TOKEN_ADDRESS);
@@ -327,7 +333,7 @@ describe('PerPacketClaimService', () => {
       const parsed = JSON.parse(result!.protocolData.data.toString('utf8'));
       expect(parsed.blockchain).toBe('evm');
       expect(parsed.chainId).toBe(31337);
-      expect(parsed.tokenNetworkAddress).toBe('0xTokenNetworkAddress1234567890abcdef');
+      expect(parsed.verifyingContract).toBe('0xTokenNetworkAddress1234567890abcdef');
       expect(parsed.tokenAddress).toBe(TEST_TOKEN_ADDRESS);
       expect(parsed.signerAddress).toBe('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1');
     });
@@ -347,7 +353,7 @@ describe('PerPacketClaimService', () => {
       expect(isEVMClaim(latest!)).toBe(true);
       const evmLatest = latest as EVMClaimMessage;
       expect(evmLatest.nonce).toBe(2);
-      expect(evmLatest.transferredAmount).toBe('300');
+      expect(evmLatest.cumulativeAmount).toBe('300');
     });
   });
 
@@ -366,12 +372,12 @@ describe('PerPacketClaimService', () => {
 
       // The claim minted for the rejected forward still advanced nonce + cumulative...
       expect((rejectedForward!.claimMessage as EVMClaimMessage).nonce).toBe(2);
-      expect((rejectedForward!.claimMessage as EVMClaimMessage).transferredAmount).toBe('300');
+      expect((rejectedForward!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('300');
 
       // ...and remains the latest settleable proof the auto-drive would redeem on-chain,
       // i.e. it settles 300 (100 + the rejected 200), not 100.
       const latest = service.getLatestClaim(TEST_CHANNEL_ID) as EVMClaimMessage;
-      expect(latest.transferredAmount).toBe('300');
+      expect(latest.cumulativeAmount).toBe('300');
       expect(latest.nonce).toBe(2);
     });
 
@@ -405,7 +411,7 @@ describe('PerPacketClaimService', () => {
       // Need to clear cache so context is re-fetched
       const result = await service.generateClaimForPacket(TEST_PEER_ID, 'M2M', 50n);
       expect((result!.claimMessage as EVMClaimMessage).nonce).toBe(1);
-      expect((result!.claimMessage as EVMClaimMessage).transferredAmount).toBe('50');
+      expect((result!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('50');
     });
   });
 
@@ -416,7 +422,7 @@ describe('PerPacketClaimService', () => {
           claim_data: JSON.stringify({
             channelId: TEST_CHANNEL_ID,
             nonce: 5,
-            transferredAmount: '5000',
+            cumulativeAmount: '5000',
             blockchain: 'evm',
           }),
         },
@@ -444,7 +450,7 @@ describe('PerPacketClaimService', () => {
           claim_data: JSON.stringify({
             channelId: TEST_CHANNEL_ID,
             nonce: 10,
-            transferredAmount: '10000',
+            cumulativeAmount: '10000',
             blockchain: 'evm',
           }),
         },
@@ -462,7 +468,7 @@ describe('PerPacketClaimService', () => {
 
       const result = await recoveredService.generateClaimForPacket(TEST_PEER_ID, 'M2M', 500n);
       expect((result!.claimMessage as EVMClaimMessage).nonce).toBe(11); // continues from 10
-      expect((result!.claimMessage as EVMClaimMessage).transferredAmount).toBe('10500'); // 10000 + 500
+      expect((result!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('10500'); // 10000 + 500
     });
 
     it('should handle malformed DB data gracefully', () => {
@@ -511,7 +517,7 @@ describe('PerPacketClaimService', () => {
           claim_data: JSON.stringify({
             channelId: TEST_CHANNEL_ID,
             nonce: 3,
-            transferredAmount: '3000',
+            cumulativeAmount: '3000',
             blockchain: 'evm',
           }),
         },
@@ -656,13 +662,13 @@ describe('PerPacketClaimService', () => {
 
       // Peer A: nonce 1 (100), nonce 2 (300 cumulative)
       expect((resultA1!.claimMessage as EVMClaimMessage).nonce).toBe(1);
-      expect((resultA1!.claimMessage as EVMClaimMessage).transferredAmount).toBe('100');
+      expect((resultA1!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('100');
       expect((resultA2!.claimMessage as EVMClaimMessage).nonce).toBe(2);
-      expect((resultA2!.claimMessage as EVMClaimMessage).transferredAmount).toBe('300');
+      expect((resultA2!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('300');
 
       // Peer B: nonce 1 (500) — independent from Peer A
       expect((resultB1!.claimMessage as EVMClaimMessage).nonce).toBe(1);
-      expect((resultB1!.claimMessage as EVMClaimMessage).transferredAmount).toBe('500');
+      expect((resultB1!.claimMessage as EVMClaimMessage).cumulativeAmount).toBe('500');
     });
   });
 
@@ -976,7 +982,7 @@ describe('PerPacketClaimService', () => {
       expect(evmClaim.blockchain).toBe('evm');
       expect(evmClaim.channelId).toBe(TEST_CHANNEL_ID);
       expect(evmClaim.nonce).toBe(1);
-      expect(evmClaim.transferredAmount).toBe('1000');
+      expect(evmClaim.cumulativeAmount).toBe('1000');
     });
   });
 

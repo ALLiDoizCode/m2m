@@ -85,8 +85,13 @@ interface ChannelClaimContext {
   tokenAddress: string;
   // EVM-specific fields (populated only when blockchain === 'evm')
   chainId?: number;
-  tokenNetworkAddress?: string;
+  // v2 RollingSwapChannel address bound into the EIP-712 signing domain
+  // (connector#329 Phase 4b; repurposes the v1 tokenNetworkAddress slot).
+  verifyingContract?: string;
   signerAddress?: string;
+  // v2 recipient — the peer's settlement address; who is paid the delta on
+  // redemption and who is bound into the signed balance-proof digest.
+  recipient?: string;
   // Solana-specific fields (populated only when blockchain === 'solana')
   programId?: string;
   channelAccount?: string; // PDA address (same as channelId for Solana)
@@ -199,8 +204,11 @@ export class PerPacketClaimService {
     this.currentNonce.set(channelId, newNonce);
 
     // Sign balance proof via the chain-appropriate provider.
-    // lockedAmount and locksRoot are EVM-specific concepts; Solana providers ignore them
-    // but the chain-agnostic SignBalanceProofParams interface requires them.
+    // lockedAmount and locksRoot are legacy EVM/Solana interface slots (unused by
+    // the v2 EVM digest, which signs cumulativeAmount + recipient + chainId +
+    // verifyingContract). transferredAmount carries the cumulative amount for all
+    // chains. For EVM v2 (connector#329 Phase 4b) recipient/chainId/verifyingContract
+    // are the REQUIRED digest inputs; non-EVM providers ignore them.
     const locksRoot = '0x0000000000000000000000000000000000000000000000000000000000000000';
     const signature = await ctx.provider.signBalanceProof({
       channelId,
@@ -208,6 +216,11 @@ export class PerPacketClaimService {
       transferredAmount: newCumulative.toString(),
       lockedAmount: '0',
       locksRoot,
+      ...(ctx.blockchain === 'evm' && {
+        recipient: ctx.recipient,
+        chainId: ctx.chainId,
+        verifyingContract: ctx.verifyingContract,
+      }),
     });
 
     // Construct self-describing claim message
@@ -217,27 +230,32 @@ export class PerPacketClaimService {
     let claimMessage: BTPClaimMessage;
 
     if (ctx.blockchain === 'evm') {
-      // EVM claim construction (backward compatible)
+      // EVM v2 claim construction (connector#329 Phase 4b — RollingSwapChannel).
       if (!ctx.signerAddress) {
         throw new Error(
           `EVM claim construction requires signerAddress but it was not populated for channel ${channelId}`
         );
       }
+      if (!ctx.recipient || ctx.chainId === undefined || !ctx.verifyingContract) {
+        throw new Error(
+          `EVM v2 claim construction requires recipient, chainId, and verifyingContract ` +
+            `but they were not populated for channel ${channelId}`
+        );
+      }
       const evmClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId,
         timestamp,
         senderId: this.nodeId,
         channelId,
         nonce: newNonce,
-        transferredAmount: newCumulative.toString(),
-        lockedAmount: '0',
-        locksRoot,
+        cumulativeAmount: newCumulative.toString(),
+        recipient: ctx.recipient,
         signature,
         signerAddress: ctx.signerAddress,
         chainId: ctx.chainId,
-        tokenNetworkAddress: ctx.tokenNetworkAddress,
+        verifyingContract: ctx.verifyingContract,
         tokenAddress: ctx.tokenAddress,
       };
       claimMessage = evmClaim;
@@ -449,10 +467,23 @@ export class PerPacketClaimService {
     try {
       // For EVM providers: get signing context for self-describing claim fields
       let evmContext:
-        | { chainId: number; tokenNetworkAddress: string; signerAddress: string }
+        | { chainId: number; verifyingContract: string; signerAddress: string }
         | undefined;
+      let evmRecipient: string | undefined;
       if (provider instanceof EVMPaymentChannelProvider) {
         evmContext = await provider.getSigningContext();
+        // v2 recipient (connector#329 Phase 4b): the peer's on-chain settlement
+        // address (its kind:10032 settlementAddresses[chain], surfaced by the
+        // connector's peerIdToAddressMap). Bound into the signed digest and paid
+        // the delta when the peer redeems. Required to build an EVM v2 claim.
+        evmRecipient = this.channelManager.getPeerAddress(peerId);
+        if (!evmRecipient) {
+          this.logger.warn(
+            { peerId, tokenId, chain: metadata.chain },
+            'No settlement (recipient) address known for peer — cannot build EVM v2 claim'
+          );
+          return null;
+        }
       }
 
       // For Solana providers: get Solana-specific context (Story 33.6)
@@ -478,8 +509,9 @@ export class PerPacketClaimService {
         tokenAddress: metadata.tokenAddress,
         ...(evmContext && {
           chainId: evmContext.chainId,
-          tokenNetworkAddress: evmContext.tokenNetworkAddress,
+          verifyingContract: evmContext.verifyingContract,
           signerAddress: evmContext.signerAddress,
+          recipient: evmRecipient,
         }),
         ...(solanaContext && {
           programId: solanaContext.programId,
@@ -539,7 +571,7 @@ export class PerPacketClaimService {
             if (
               typeof claim.channelId !== 'string' ||
               typeof claim.nonce !== 'number' ||
-              typeof claim.transferredAmount !== 'string'
+              typeof claim.cumulativeAmount !== 'string'
             ) {
               continue; // Skip structurally invalid claims
             }
@@ -547,7 +579,7 @@ export class PerPacketClaimService {
             if (!recoveredChannels.has(claim.channelId)) {
               recoveredChannels.add(claim.channelId);
               this.currentNonce.set(claim.channelId, claim.nonce);
-              this.cumulativeTransferred.set(claim.channelId, BigInt(claim.transferredAmount));
+              this.cumulativeTransferred.set(claim.channelId, BigInt(claim.cumulativeAmount));
               this.latestClaim.set(claim.channelId, claim);
             }
           }

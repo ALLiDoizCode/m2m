@@ -110,9 +110,11 @@ function createMockEVMProvider(): jest.Mocked<PaymentChannelProvider> & {
   const evmProvider = provider as jest.Mocked<PaymentChannelProvider> & {
     getSigningContext: jest.Mock;
   };
+  // v2 (connector#329 Phase 4b): getSigningContext returns verifyingContract
+  // (the RollingSwapChannel address) in place of the v1 tokenNetworkAddress.
   evmProvider.getSigningContext = jest.fn().mockResolvedValue({
     chainId: 31337,
-    tokenNetworkAddress: EVM_TOKEN_NETWORK,
+    verifyingContract: EVM_TOKEN_NETWORK,
     signerAddress: EVM_SIGNER_ADDRESS,
   });
   // Make instanceof EVMPaymentChannelProvider work
@@ -167,10 +169,17 @@ function createMockChannelManager(
 ): jest.Mocked<
   Pick<
     ChannelManager,
-    'getChannelForPeer' | 'ensureChannelExists' | 'getChannelById' | 'registerExternalChannel'
+    | 'getChannelForPeer'
+    | 'ensureChannelExists'
+    | 'getChannelById'
+    | 'registerExternalChannel'
+    | 'getPeerAddress'
   >
 > {
   return {
+    // v2 EVM claims bind the peer's settlement address as `recipient`
+    // (connector#329 Phase 4b); PerPacketClaimService reads it via getPeerAddress.
+    getPeerAddress: jest.fn().mockReturnValue(EVM_SIGNER_ADDRESS),
     getChannelForPeer: jest.fn().mockImplementation((peerId: string, tokenId: string) => {
       const key = `${peerId}:${tokenId}`;
       const channel = channelMap[key];
@@ -266,7 +275,7 @@ describe('[T-33.7-04] Mixed-chain: EVM and Solana peers — correct claims for e
       expect(evmResult!.claimMessage.channelId).toBe(EVM_CHANNEL_ID);
       expect(evmResult!.claimMessage.signerAddress).toBe(EVM_SIGNER_ADDRESS);
       expect(evmResult!.claimMessage.nonce).toBe(1);
-      expect(evmResult!.claimMessage.transferredAmount).toBe('1000');
+      expect(evmResult!.claimMessage.cumulativeAmount).toBe('1000');
     }
 
     // And: Solana claim has correct blockchain type and fields
@@ -329,8 +338,8 @@ describe('[T-33.7-04] Mixed-chain: EVM and Solana peers — correct claims for e
     if (isEVMClaim(evm1!.claimMessage) && isEVMClaim(evm2!.claimMessage)) {
       expect(evm1!.claimMessage.nonce).toBe(1);
       expect(evm2!.claimMessage.nonce).toBe(2);
-      expect(evm1!.claimMessage.transferredAmount).toBe('500');
-      expect(evm2!.claimMessage.transferredAmount).toBe('800'); // 500 + 300
+      expect(evm1!.claimMessage.cumulativeAmount).toBe('500');
+      expect(evm2!.claimMessage.cumulativeAmount).toBe('800'); // 500 + 300
     }
 
     // And: Solana claims accumulate independently
@@ -413,20 +422,20 @@ describe('[T-33.7-12] EVM regression: EVM settlement works identically alongside
     expect(result).not.toBeNull();
     const claim = result!.claimMessage;
     expect(claim.blockchain).toBe('evm');
-    expect(claim.version).toBe('1.0');
+    expect(claim.version).toBe('2.0');
     expect(claim.senderId).toBe(NODE_ID);
 
     if (isEVMClaim(claim)) {
+      // v2 EVM claim (connector#329 Phase 4b — RollingSwapChannel): cumulativeAmount
+      // + recipient + verifyingContract replace transferredAmount/lockedAmount/
+      // locksRoot/tokenNetworkAddress.
       expect(claim.channelId).toBe(EVM_CHANNEL_ID);
       expect(claim.nonce).toBe(1);
-      expect(claim.transferredAmount).toBe('5000');
-      expect(claim.lockedAmount).toBe('0');
-      expect(claim.locksRoot).toBe(
-        '0x0000000000000000000000000000000000000000000000000000000000000000'
-      );
+      expect(claim.cumulativeAmount).toBe('5000');
+      expect(claim.recipient).toBe(EVM_SIGNER_ADDRESS);
       expect(claim.signerAddress).toBe(EVM_SIGNER_ADDRESS);
       expect(claim.chainId).toBe(31337);
-      expect(claim.tokenNetworkAddress).toBe(EVM_TOKEN_NETWORK);
+      expect(claim.verifyingContract).toBe(EVM_TOKEN_NETWORK);
       expect(claim.tokenAddress).toBe(EVM_TOKEN_ADDRESS);
     }
 
@@ -458,6 +467,10 @@ describe('[T-33.7-12] EVM regression: EVM settlement works identically alongside
       locksRoot: '0x' + '0'.repeat(64),
       signature: '0xmocksig',
       signerAddress: EVM_SIGNER_ADDRESS,
+      // v2 EVM digest inputs (connector#329 Phase 4b).
+      recipient: EVM_SIGNER_ADDRESS,
+      chainId: 31337,
+      verifyingContract: EVM_TOKEN_NETWORK,
     });
     expect(verifyResult).toBe(true);
     expect(evmProvider.verifyBalanceProof).toHaveBeenCalledTimes(1);
@@ -648,8 +661,8 @@ describe('[AC-34.7-07] Three-chain routing: EVM, Solana, and Mina peers — corr
     if (isEVMClaim(evm1!.claimMessage) && isEVMClaim(evm2!.claimMessage)) {
       expect(evm1!.claimMessage.nonce).toBe(1);
       expect(evm2!.claimMessage.nonce).toBe(2);
-      expect(evm1!.claimMessage.transferredAmount).toBe('500');
-      expect(evm2!.claimMessage.transferredAmount).toBe('800'); // 500 + 300
+      expect(evm1!.claimMessage.cumulativeAmount).toBe('500');
+      expect(evm2!.claimMessage.cumulativeAmount).toBe('800'); // 500 + 300
     }
 
     // And: Solana claims accumulate independently

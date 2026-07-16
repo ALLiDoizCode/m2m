@@ -390,12 +390,14 @@ describe('SettlementExecutor branch coverage', () => {
 
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          version: '2.0',
           blockchain: 'evm',
           channelId: TEST_CHANNEL_ID,
           nonce: 1,
-          transferredAmount: '100',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
+          cumulativeAmount: '100',
+          recipient: TEST_PEER_ADDRESS,
+          chainId: 31337,
+          verifyingContract: TEST_TOKEN_ADDRESS,
           signature: '0xsignature',
         }),
         resetChannel: jest.fn(),
@@ -471,12 +473,14 @@ describe('SettlementExecutor branch coverage', () => {
 
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          version: '2.0',
           blockchain: 'evm',
           channelId: TEST_CHANNEL_ID,
           nonce: 1,
-          transferredAmount: '100',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
+          cumulativeAmount: '100',
+          recipient: TEST_PEER_ADDRESS,
+          chainId: 31337,
+          verifyingContract: TEST_TOKEN_ADDRESS,
           signature: '0xsignature',
         }),
         resetChannel: jest.fn(),
@@ -568,12 +572,14 @@ describe('SettlementExecutor branch coverage', () => {
       executor.setChannelManager(mockChannelManager);
 
       const evmClaim = {
+        version: '2.0' as const,
         blockchain: 'evm' as const,
         channelId: TEST_CHANNEL_ID,
         nonce: 7,
-        transferredAmount: '700',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '700',
+        recipient: TEST_PEER_ADDRESS,
+        chainId: 31337,
+        verifyingContract: TEST_TOKEN_ADDRESS,
         signature: '0xclaimSig',
       };
 
@@ -586,12 +592,14 @@ describe('SettlementExecutor branch coverage', () => {
       // Also set per-packet service with a different claim to prove ClaimReceiver wins
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          version: '2.0',
           blockchain: 'evm',
           channelId: TEST_CHANNEL_ID,
           nonce: 99,
-          transferredAmount: '9900',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
+          cumulativeAmount: '9900',
+          recipient: TEST_PEER_ADDRESS,
+          chainId: 31337,
+          verifyingContract: TEST_TOKEN_ADDRESS,
           signature: '0xotherSig',
         }),
         resetChannel: jest.fn(),
@@ -608,7 +616,12 @@ describe('SettlementExecutor branch coverage', () => {
       );
       expect(mockProvider.claimFromChannel).toHaveBeenCalledWith(
         TEST_CHANNEL_ID,
-        expect.objectContaining({ nonce: 7, transferredAmount: '700' }),
+        expect.objectContaining({
+          nonce: 7,
+          transferredAmount: '700',
+          recipient: TEST_PEER_ADDRESS,
+          verifyingContract: TEST_TOKEN_ADDRESS,
+        }),
         '0xclaimSig'
       );
     });
@@ -625,12 +638,14 @@ describe('SettlementExecutor branch coverage', () => {
 
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          version: '2.0',
           blockchain: 'evm',
           channelId: TEST_CHANNEL_ID,
           nonce: 3,
-          transferredAmount: '300',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
+          cumulativeAmount: '300',
+          recipient: TEST_PEER_ADDRESS,
+          chainId: 31337,
+          verifyingContract: TEST_TOKEN_ADDRESS,
           signature: '0xfallbackSig',
         }),
         resetChannel: jest.fn(),
@@ -643,7 +658,12 @@ describe('SettlementExecutor branch coverage', () => {
 
       expect(mockProvider.claimFromChannel).toHaveBeenCalledWith(
         TEST_CHANNEL_ID,
-        expect.objectContaining({ nonce: 3, transferredAmount: '300' }),
+        expect.objectContaining({
+          nonce: 3,
+          transferredAmount: '300',
+          recipient: TEST_PEER_ADDRESS,
+          verifyingContract: TEST_TOKEN_ADDRESS,
+        }),
         '0xfallbackSig'
       );
     });
@@ -669,12 +689,14 @@ describe('SettlementExecutor branch coverage', () => {
 
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          version: '2.0',
           blockchain: 'evm',
           channelId: TEST_CHANNEL_ID,
           nonce: 4,
-          transferredAmount: '400',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
+          cumulativeAmount: '400',
+          recipient: TEST_PEER_ADDRESS,
+          chainId: 31337,
+          verifyingContract: TEST_TOKEN_ADDRESS,
           signature: '0xsentSig',
         }),
         resetChannel: jest.fn(),
@@ -687,7 +709,12 @@ describe('SettlementExecutor branch coverage', () => {
 
       expect(mockProvider.claimFromChannel).toHaveBeenCalledWith(
         TEST_CHANNEL_ID,
-        expect.objectContaining({ nonce: 4, transferredAmount: '400' }),
+        expect.objectContaining({
+          nonce: 4,
+          transferredAmount: '400',
+          recipient: TEST_PEER_ADDRESS,
+          verifyingContract: TEST_TOKEN_ADDRESS,
+        }),
         '0xsentSig'
       );
     });
@@ -834,12 +861,14 @@ describe('SettlementExecutor branch coverage', () => {
 
       const mockPerPacketClaimService = {
         getLatestClaim: jest.fn().mockReturnValue({
+          version: '2.0',
           blockchain: 'evm',
           channelId: TEST_CHANNEL_ID,
           nonce: 5,
-          transferredAmount: '500',
-          lockedAmount: '0',
-          locksRoot: '0x' + '0'.repeat(64),
+          cumulativeAmount: '500',
+          recipient: TEST_PEER_ADDRESS,
+          chainId: 31337,
+          verifyingContract: TEST_TOKEN_ADDRESS,
           signature: '0xevmSig',
         }),
         resetChannel: jest.fn(),

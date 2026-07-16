@@ -59,16 +59,16 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     nonce?: number;
   }): void {
     const claimData = {
+      version: '2.0',
       messageId: opts.messageId,
       blockchain: 'evm',
       channelId: opts.channelId,
       tokenAddress: opts.tokenAddress,
-      tokenNetworkAddress: '0x1111111111111111111111111111111111111111',
+      verifyingContract: '0x1111111111111111111111111111111111111111',
       chainId: 8453,
       nonce: opts.nonce ?? 1,
-      transferredAmount: opts.transferredAmount,
-      lockedAmount: '0',
-      locksRoot: '0x' + '0'.repeat(64),
+      cumulativeAmount: opts.transferredAmount,
+      recipient: '0xcccccccccccccccccccccccccccccccccccccccc',
       signature: '0x' + '0'.repeat(130),
       signerAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     };
@@ -99,16 +99,16 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     nonce?: number;
   }): void {
     const claimData = {
+      version: '2.0',
       messageId: opts.messageId,
       blockchain: 'evm',
       channelId: opts.channelId,
       tokenAddress: opts.tokenAddress,
-      tokenNetworkAddress: '0x2222222222222222222222222222222222222222',
+      verifyingContract: '0x2222222222222222222222222222222222222222',
       chainId: 8453,
       nonce: opts.nonce ?? 1,
-      transferredAmount: opts.transferredAmount,
-      lockedAmount: '0',
-      locksRoot: '0x' + '0'.repeat(64),
+      cumulativeAmount: opts.transferredAmount,
+      recipient: '0xdddddddddddddddddddddddddddddddddddddddd',
       signature: '0x' + '0'.repeat(130),
       signerAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     };

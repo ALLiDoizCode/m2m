@@ -21,13 +21,28 @@
 
 import { ethers } from 'ethers';
 import { PaymentChannelSDK, ChallengeNotExpiredError } from './payment-channel-sdk';
-import type { BalanceProof } from '@toon-protocol/shared';
 import type { Logger } from '../utils/logger';
 import type { KeyManager } from '../security/key-manager';
 import type { EVMRPCConnectionPool } from '../utils/evm-rpc-connection-pool';
 
 jest.mock('ethers');
 jest.mock('../security/key-manager-signer');
+
+// Pinned golden v2 vector (mirrors eip712-v2-verifier.test.ts / the leaf). The v2
+// verify path is backed by the dependency-light @toon-protocol/settlement-digest
+// leaf, so it works even with ethers mocked.
+const GOLDEN_V2_PARAMS = {
+  channelId: '0x' + '00'.repeat(31) + '5b',
+  cumulativeAmount: '24000000',
+  nonce: 24,
+  recipient: '0x' + '00'.repeat(16) + 'deadbeef',
+  chainId: 8453,
+  verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+};
+const GOLDEN_V2_SIGNATURE =
+  '0xfa66a50c60bdd47c11b4b6a76f44255095d77cead2910b619d3b8e838237982b' +
+  '196b22bc46254ff3e85923d0604bf7de9136d0ba79cfe85a3f38d636b262c9bb1b';
+const GOLDEN_V2_SIGNER = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 
 describe('PaymentChannelSDK - Comprehensive Branch Coverage', () => {
   let sdk: PaymentChannelSDK;
@@ -121,6 +136,9 @@ describe('PaymentChannelSDK - Comprehensive Branch Coverage', () => {
       }),
       claimFromChannel: jest.fn().mockResolvedValue({
         wait: jest.fn().mockResolvedValue({ hash: '0xclaimhash' }),
+      }),
+      updateBalance: jest.fn().mockResolvedValue({
+        wait: jest.fn().mockResolvedValue({ hash: '0xupdatehash' }),
       }),
       channels: jest.fn().mockResolvedValue({
         settlementTimeout: 3600n,
@@ -620,76 +638,33 @@ describe('PaymentChannelSDK - Comprehensive Branch Coverage', () => {
       jest.clearAllMocks();
     });
 
-    it('should sign with default locksRoot (ZeroHash)', async () => {
-      const sig = await sdk.signBalanceProof(mockChannelId, 1, 100n, 0n);
-      expect(sig).toMatch(/^0x[a-f0-9]+$/);
-    });
-
-    it('should sign with custom locksRoot', async () => {
-      const customLocksRoot = '0x' + 'c'.repeat(64);
-      const sig = await sdk.signBalanceProof(mockChannelId, 1, 100n, 0n, customLocksRoot);
-      expect(sig).toMatch(/^0x[a-f0-9]+$/);
-    });
-
-    it('should find TokenNetwork from cache where state !== 0', async () => {
-      // Already cached from openChannel
-      const sig = await sdk.signBalanceProof(mockChannelId, 1, 100n);
-      expect(sig).toBeDefined();
-    });
-
-    it('should skip TokenNetwork from cache where state === 0', async () => {
-      // Create a second token network in cache with state 0
-      const otherTokenAddress = '0x' + 'd'.repeat(40);
-      const otherTokenNetworkAddress = '0x' + 'e'.repeat(40);
-
-      // Mock registry to return other address for other token
-      mockRegistryContract.getTokenNetwork?.mockResolvedValueOnce(otherTokenNetworkAddress);
-
-      // Create a separate mock contract for the other network
-      const otherContract = {
-        getAddress: jest.fn().mockResolvedValue(otherTokenNetworkAddress),
-        channels: jest.fn().mockResolvedValue({ state: 0 }), // NonExistent
-      } as unknown as ethers.Contract;
-
-      (ethers.Contract as unknown as jest.Mock).mockImplementation((address: string) => {
-        if (address === mockRegistryAddress) return mockRegistryContract;
-        if (address === otherTokenNetworkAddress) return otherContract;
-        if (address === mockTokenNetworkAddress) return mockTokenNetworkContract;
-        if (address === mockTokenAddress) return mockERC20Contract;
-        return mockTokenNetworkContract;
-      });
-
-      // Populate cache with other contract by querying it
-      await (sdk as any).getTokenNetworkContract(otherTokenAddress);
-
-      // Now signBalanceProof should iterate both, skip the state===0 one, and use the state!==0 one
-      const sig = await sdk.signBalanceProof(mockChannelId, 1, 100n);
-      expect(sig).toBeDefined();
-    });
-
-    it('should throw if no TokenNetwork found for channel', async () => {
-      // Empty the tokenNetworkCache so iteration finds nothing
-      (sdk as any).tokenNetworkCache.clear();
-
-      await expect(sdk.signBalanceProof(mockChannelId, 1, 100n)).rejects.toThrow(
-        `Cannot determine TokenNetwork for channel ${mockChannelId}`
+    it('should build the v2 leaf digest and sign it via KeyManager', async () => {
+      const sig = await sdk.signBalanceProof(
+        mockChannelId,
+        1,
+        100n,
+        mockPeerAddress,
+        8453,
+        mockTokenNetworkAddress
       );
+      // 0x-prefixed 65-byte (130 hex char) signature straight from keyManager.sign
+      expect(sig).toMatch(/^0x[a-f0-9]{130}$/);
+      expect(mockKeyManager.sign).toHaveBeenCalledWith(expect.any(Buffer), mockEvmKeyId);
     });
 
-    it('should continue iteration if channels() throws for a cached contract', async () => {
-      const throwingContract = {
-        getAddress: jest.fn().mockResolvedValue('0xthrow'),
-        channels: jest.fn().mockRejectedValue(new Error('network error')),
-      } as unknown as ethers.Contract;
-
-      // Clear cache and set throwing contract first, then working contract
-      (sdk as any).tokenNetworkCache.clear();
-      (sdk as any).tokenNetworkCache.set('throwing', throwingContract);
-      (sdk as any).tokenNetworkCache.set('working', mockTokenNetworkContract);
-
-      // signBalanceProof should catch the error, continue (line 540), then find the working contract
-      const sig = await sdk.signBalanceProof(mockChannelId, 1, 100n);
-      expect(sig).toBeDefined();
+    it('should sign different cumulative amounts / nonces without touching ethers', async () => {
+      const sig = await sdk.signBalanceProof(
+        mockChannelId,
+        7,
+        5000n,
+        mockPeerAddress,
+        8453,
+        mockTokenNetworkAddress
+      );
+      expect(sig).toMatch(/^0x[a-f0-9]{130}$/);
+      // v2 no longer builds an ethers TypedDataEncoder hash for signing.
+      expect(ethers.TypedDataEncoder.hash).not.toHaveBeenCalled();
+      expect(mockLogger.debug).toHaveBeenCalledWith('v2 balance proof signed', expect.any(Object));
     });
   });
 
@@ -697,99 +672,54 @@ describe('PaymentChannelSDK - Comprehensive Branch Coverage', () => {
   // 7. verifyBalanceProof
   // ==========================================================================
 
-  describe('verifyBalanceProof', () => {
-    beforeEach(async () => {
-      await sdk.openChannel(mockPeerAddress, mockTokenAddress, 3600, 0n);
-      jest.clearAllMocks();
-    });
-
-    it('should return true for valid signature', async () => {
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
-      const isValid = await sdk.verifyBalanceProof(bp, '0xgoodsig', mockPeerAddress);
+  describe('verifyBalanceProofV2', () => {
+    it('should return true for a valid v2 signature (golden vector)', () => {
+      const isValid = sdk.verifyBalanceProofV2(
+        GOLDEN_V2_PARAMS,
+        GOLDEN_V2_SIGNATURE,
+        GOLDEN_V2_SIGNER
+      );
       expect(isValid).toBe(true);
     });
 
-    it('should return false for invalid signature (wrong signer)', async () => {
-      (ethers.verifyTypedData as jest.Mock).mockReturnValueOnce('0xbadaddress');
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
-      const isValid = await sdk.verifyBalanceProof(bp, '0xbadsig', mockPeerAddress);
+    it('should fail closed for a wrong expected signer', () => {
+      const isValid = sdk.verifyBalanceProofV2(
+        GOLDEN_V2_PARAMS,
+        GOLDEN_V2_SIGNATURE,
+        mockPeerAddress
+      );
       expect(isValid).toBe(false);
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        'Balance proof verification failed',
+        'v2 balance proof verification failed',
         expect.any(Object)
       );
     });
 
-    it('should return false when TokenNetwork cannot be determined', async () => {
-      (sdk as any).tokenNetworkCache.clear();
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
-      const isValid = await sdk.verifyBalanceProof(bp, '0xgoodsig', mockPeerAddress);
+    it('should fail closed when a signed field is tampered', () => {
+      const isValid = sdk.verifyBalanceProofV2(
+        { ...GOLDEN_V2_PARAMS, chainId: 1 },
+        GOLDEN_V2_SIGNATURE,
+        GOLDEN_V2_SIGNER
+      );
+      expect(isValid).toBe(false);
+    });
+
+    it('should return false for a bad-length signature', () => {
+      const isValid = sdk.verifyBalanceProofV2(GOLDEN_V2_PARAMS, '0x1234', GOLDEN_V2_SIGNER);
       expect(isValid).toBe(false);
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        'Cannot determine TokenNetwork for balance proof verification',
+        'v2 balance proof verification: bad signature length',
         expect.any(Object)
       );
     });
 
-    it('should return false on verification error', async () => {
-      (ethers.verifyTypedData as jest.Mock).mockImplementationOnce(() => {
-        throw new Error('bad sig');
-      });
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
-      const isValid = await sdk.verifyBalanceProof(bp, '0xbad', mockPeerAddress);
+    it('should return false and log on a malformed (non-hex) signature', () => {
+      const isValid = sdk.verifyBalanceProofV2(GOLDEN_V2_PARAMS, '0xzz', GOLDEN_V2_SIGNER);
       expect(isValid).toBe(false);
       expect(mockLogger.error).toHaveBeenCalledWith(
-        'Balance proof verification error',
+        'v2 balance proof verification error',
         expect.any(Object)
       );
-    });
-
-    it('should continue iteration if channels() throws for a cached contract', async () => {
-      const throwingContract = {
-        getAddress: jest.fn().mockResolvedValue('0xthrow'),
-        channels: jest.fn().mockRejectedValue(new Error('network error')),
-      } as unknown as ethers.Contract;
-
-      // Clear cache and set throwing contract first, then working contract
-      (sdk as any).tokenNetworkCache.clear();
-      (sdk as any).tokenNetworkCache.set('throwing', throwingContract);
-      (sdk as any).tokenNetworkCache.set('working', mockTokenNetworkContract);
-
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
-
-      // Should catch error, continue (line 612), then verify with working contract
-      const isValid = await sdk.verifyBalanceProof(bp, '0xgoodsig', mockPeerAddress);
-      expect(isValid).toBe(true);
     });
   });
 
@@ -850,100 +780,59 @@ describe('PaymentChannelSDK - Comprehensive Branch Coverage', () => {
   // 9. claimFromChannel
   // ==========================================================================
 
-  describe('claimFromChannel', () => {
+  describe('updateBalance', () => {
     beforeEach(async () => {
       await sdk.openChannel(mockPeerAddress, mockTokenAddress, 3600, 0n);
       jest.clearAllMocks();
     });
 
-    it('should claim from opened channel', async () => {
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
-
-      await sdk.claimFromChannel(mockChannelId, mockTokenAddress, bp, '0xsig');
-      expect(mockTokenNetworkContract.claimFromChannel).toHaveBeenCalledWith(
+    it('should submit the v2 balance proof to RollingSwapChannel.updateBalance', async () => {
+      await sdk.updateBalance(
+        mockTokenNetworkAddress, // verifyingContract
         mockChannelId,
-        bp,
+        100n, // cumulativeAmount
+        1, // nonce
+        mockPeerAddress, // recipient
         '0xsig'
       );
-      // Cache should be deleted
+
+      expect(mockTokenNetworkContract.updateBalance).toHaveBeenCalledWith(
+        mockChannelId,
+        100n,
+        1,
+        mockPeerAddress,
+        '0xsig'
+      );
+      // Cache is invalidated (cumulativePaid changed on-chain)
       expect((sdk as any).channelStateCache.has(mockChannelId)).toBe(false);
     });
 
-    it('should claim from closed channel', async () => {
-      // Close the channel first
-      (mockProvider.getBlock as jest.Mock).mockResolvedValueOnce({
-        timestamp: Math.floor(Date.now() / 1000),
-      });
-      await sdk.closeChannel(mockChannelId, mockTokenAddress);
-      jest.clearAllMocks();
-
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
-
-      // Mock channels for getChannelState to return closed
-      mockTokenNetworkContract.channels?.mockResolvedValueOnce({
-        settlementTimeout: 3600n,
-        state: 2,
-        closedAt: BigInt(Math.floor(Date.now() / 1000)),
-        openedAt: BigInt(Math.floor(Date.now() / 1000) - 3600),
-        participant1: mockMyAddress,
-        participant2: mockPeerAddress,
-      });
-      mockTokenNetworkContract.participants?.mockResolvedValueOnce({
-        deposit: 1000000n,
-        nonce: 0n,
-        transferredAmount: 0n,
-      });
-      mockTokenNetworkContract.participants?.mockResolvedValueOnce({
-        deposit: 1000000n,
-        nonce: 0n,
-        transferredAmount: 0n,
-      });
-
-      await sdk.claimFromChannel(mockChannelId, mockTokenAddress, bp, '0xsig');
-      expect(mockTokenNetworkContract.claimFromChannel).toHaveBeenCalled();
-    });
-
-    it('should throw if channel is settled', async () => {
-      const freshSDK = new PaymentChannelSDK(
-        mockProvider,
-        mockKeyManager,
-        mockEvmKeyId,
-        mockRegistryAddress,
-        mockLogger
+    it('should redeem at the self-describing verifyingContract regardless of cache', async () => {
+      await sdk.updateBalance(
+        mockTokenNetworkAddress,
+        mockChannelId,
+        5000n,
+        7,
+        mockPeerAddress,
+        '0xsig2'
       );
 
-      mockTokenNetworkContract.channels?.mockResolvedValueOnce({
-        settlementTimeout: 3600n,
-        state: 3,
-        closedAt: 0n,
-        openedAt: BigInt(Math.floor(Date.now() / 1000) - 7200),
-        participant1: mockMyAddress,
-        participant2: mockPeerAddress,
-      });
+      expect(mockTokenNetworkContract.updateBalance).toHaveBeenCalledWith(
+        mockChannelId,
+        5000n,
+        7,
+        mockPeerAddress,
+        '0xsig2'
+      );
+      expect(mockLogger.info).toHaveBeenCalledWith('updateBalance completed', expect.any(Object));
+    });
 
-      const bp: BalanceProof = {
-        channelId: mockChannelId,
-        nonce: 1,
-        transferredAmount: 100n,
-        lockedAmount: 0n,
-        locksRoot: ethers.ZeroHash,
-      };
+    it('should propagate contract errors from updateBalance', async () => {
+      mockTokenNetworkContract.updateBalance?.mockRejectedValueOnce(new Error('reverted'));
 
       await expect(
-        freshSDK.claimFromChannel(mockChannelId, mockTokenAddress, bp, '0xsig')
-      ).rejects.toThrow('Cannot claim from channel in status: settled');
+        sdk.updateBalance(mockTokenNetworkAddress, mockChannelId, 100n, 1, mockPeerAddress, '0xsig')
+      ).rejects.toThrow('reverted');
     });
   });
 
@@ -1389,56 +1278,34 @@ describe('PaymentChannelSDK - Comprehensive Branch Coverage', () => {
   // 14. verifyBalanceProofWithDomain
   // ==========================================================================
 
-  describe('verifyBalanceProofWithDomain', () => {
-    const bp: BalanceProof = {
-      channelId: mockChannelId,
-      nonce: 1,
-      transferredAmount: 100n,
-      lockedAmount: 0n,
-      locksRoot: ethers.ZeroHash,
-    };
-
-    it('should return true for valid domain and signature', async () => {
-      const result = await sdk.verifyBalanceProofWithDomain(
-        bp,
-        '0xgoodsig',
-        mockPeerAddress,
-        8453,
-        mockTokenNetworkAddress
-      );
-      expect(result).toBe(true);
+  describe('getChannelStateByContract', () => {
+    it('should return v2 RollingSwapChannel state (Open → opened)', async () => {
+      const result = await sdk.getChannelStateByContract(mockChannelId, mockTokenNetworkAddress);
+      expect(result.exists).toBe(true);
+      expect(result.status).toBe('opened');
     });
 
-    it('should return false for invalid signer', async () => {
-      (ethers.verifyTypedData as jest.Mock).mockReturnValueOnce('0xbadaddr');
-      const result = await sdk.verifyBalanceProofWithDomain(
-        bp,
-        '0xbadsig',
-        mockPeerAddress,
-        8453,
-        mockTokenNetworkAddress
-      );
-      expect(result).toBe(false);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        'Balance proof verification with explicit domain failed',
-        expect.any(Object)
-      );
+    it('should map Closing (state 2) to closed (redeemable during challenge window)', async () => {
+      mockTokenNetworkContract.channels?.mockResolvedValueOnce({ state: 2 });
+      const result = await sdk.getChannelStateByContract(mockChannelId, mockTokenNetworkAddress);
+      expect(result.exists).toBe(true);
+      expect(result.status).toBe('closed');
     });
 
-    it('should return false on verification error', async () => {
-      (ethers.verifyTypedData as jest.Mock).mockImplementationOnce(() => {
-        throw new Error('bad format');
-      });
-      const result = await sdk.verifyBalanceProofWithDomain(
-        bp,
-        '0xbad',
-        mockPeerAddress,
-        8453,
-        mockTokenNetworkAddress
-      );
-      expect(result).toBe(false);
+    it('should map NonExistent (state 0) to non-existent / settled', async () => {
+      mockTokenNetworkContract.channels?.mockResolvedValueOnce({ state: 0 });
+      const result = await sdk.getChannelStateByContract(mockChannelId, mockTokenNetworkAddress);
+      expect(result.exists).toBe(false);
+      expect(result.status).toBe('settled');
+    });
+
+    it('should throw and log on contract/RPC error', async () => {
+      mockTokenNetworkContract.channels?.mockRejectedValueOnce(new Error('bad format'));
+      await expect(
+        sdk.getChannelStateByContract(mockChannelId, mockTokenNetworkAddress)
+      ).rejects.toThrow('bad format');
       expect(mockLogger.error).toHaveBeenCalledWith(
-        'Balance proof verification with explicit domain error',
+        'Failed to query RollingSwapChannel state by contract',
         expect.any(Object)
       );
     });

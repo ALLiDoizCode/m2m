@@ -137,18 +137,19 @@ describe('ClaimReceiver', () => {
 
     beforeEach(() => {
       validEVMClaim = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-0xabc123-5-1706889600000',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 5,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       protocolData = {
@@ -182,11 +183,14 @@ describe('ClaimReceiver', () => {
       expect(mockProvider.verifyBalanceProof).toHaveBeenCalledWith({
         channelId: validEVMClaim.channelId,
         nonce: validEVMClaim.nonce,
-        transferredAmount: validEVMClaim.transferredAmount,
-        lockedAmount: validEVMClaim.lockedAmount,
-        locksRoot: validEVMClaim.locksRoot,
+        transferredAmount: validEVMClaim.cumulativeAmount,
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
         signature: validEVMClaim.signature,
         signerAddress: validEVMClaim.signerAddress,
+        recipient: validEVMClaim.recipient,
+        chainId: validEVMClaim.chainId,
+        verifyingContract: validEVMClaim.verifyingContract,
       });
 
       // Verify database insert with verified=true
@@ -219,7 +223,7 @@ describe('ClaimReceiver', () => {
       const emittedEvent: ClaimReceivedEvent = claimReceivedListener.mock.calls[0][0];
       expect(emittedEvent.peerId).toBe('peer-bob');
       expect(emittedEvent.channelId).toBe(validEVMClaim.channelId);
-      expect(emittedEvent.cumulativeAmount).toBe(BigInt(validEVMClaim.transferredAmount));
+      expect(emittedEvent.cumulativeAmount).toBe(BigInt(validEVMClaim.cumulativeAmount));
     });
 
     it('should NOT emit CLAIM_RECEIVED event when verification fails', async () => {
@@ -418,18 +422,19 @@ describe('ClaimReceiver', () => {
 
     it('should handle database persistence failure gracefully', async () => {
       const validEVMClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-test-123',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 1,
-        transferredAmount: '1000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       const protocolData: BTPProtocolData = {
@@ -469,18 +474,19 @@ describe('ClaimReceiver', () => {
 
     it('should handle duplicate message IDs gracefully (idempotency)', async () => {
       const validEVMClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-test-123',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 1,
-        transferredAmount: '1000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       const protocolData: BTPProtocolData = {
@@ -537,20 +543,19 @@ describe('ClaimReceiver', () => {
       overrides: Partial<EVMClaimMessage> = {}
     ): EVMClaimMessage {
       return {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-dynamic-test-1',
         timestamp: '2026-03-07T12:00:00.000Z',
         senderId: 'peer-new',
         channelId: mockChannelId,
         nonce: 1,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: mockSignerAddress,
         chainId: 31337,
-        tokenNetworkAddress: mockTokenNetworkAddress,
+        verifyingContract: mockTokenNetworkAddress,
         tokenAddress: mockTokenAddress,
         ...overrides,
       };
@@ -632,11 +637,14 @@ describe('ClaimReceiver', () => {
       expect(mockProvider.verifyBalanceProof).toHaveBeenCalledWith({
         channelId: mockChannelId,
         nonce: claim.nonce,
-        transferredAmount: claim.transferredAmount,
-        lockedAmount: claim.lockedAmount,
-        locksRoot: claim.locksRoot,
+        transferredAmount: claim.cumulativeAmount,
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
         signature: claim.signature,
         signerAddress: claim.signerAddress,
+        recipient: claim.recipient,
+        chainId: claim.chainId,
+        verifyingContract: claim.verifyingContract,
       });
 
       // Verify channel registered with the resolved provider's canonical
@@ -761,19 +769,20 @@ describe('ClaimReceiver', () => {
     });
 
     it('should reject unknown channel missing self-describing fields', async () => {
-      // Missing chainId
+      // Missing chainId — in v2 chainId is a REQUIRED digest input, so the claim
+      // is rejected STRUCTURALLY by validateEVMClaim (fail-closed) before the
+      // unknown-channel self-describing branch is ever reached.
       const claim1 = makeClaimWithSelfDescribing({ chainId: undefined });
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim1));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channelId: mockChannelId,
-        }),
-        ERRORS.MISSING_SELF_DESCRIBING_FIELDS
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        { error: expect.any(Error) },
+        'Failed to parse claim message'
       );
 
-      // Missing tokenNetworkAddress
+      // Missing verifyingContract — also a REQUIRED v2 digest input, so likewise
+      // rejected structurally at parse time.
       jest.clearAllMocks();
       mockChannelManager.getChannelById.mockReturnValue(null);
       // Reset provider mocks after clearAllMocks
@@ -789,18 +798,18 @@ describe('ClaimReceiver', () => {
         return undefined;
       });
       mockRegistry.getAllProviders.mockReturnValue([mockProvider]);
-      const claim2 = makeClaimWithSelfDescribing({ tokenNetworkAddress: undefined });
+      const claim2 = makeClaimWithSelfDescribing({ verifyingContract: undefined });
       await dynamicBtpHandler!('peer-new', makeBTPMessage(claim2));
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channelId: mockChannelId,
-        }),
-        ERRORS.MISSING_SELF_DESCRIBING_FIELDS
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        { error: expect.any(Error) },
+        'Failed to parse claim message'
       );
 
-      // Missing tokenAddress
+      // Missing tokenAddress — tokenAddress is OPTIONAL in v2 structural validation,
+      // so the claim parses and reaches the unknown-channel self-describing branch,
+      // which requires it and rejects with MISSING_SELF_DESCRIBING_FIELDS.
       jest.clearAllMocks();
       mockChannelManager.getChannelById.mockReturnValue(null);
       // Reset provider mocks after clearAllMocks
@@ -976,10 +985,10 @@ describe('ClaimReceiver', () => {
       mockProvider.verifyBalanceProof.mockResolvedValue(true);
       mockStatement.get.mockReturnValue(undefined);
 
-      // Claim WITHOUT self-describing fields
+      // Claim WITHOUT the optional tokenAddress (chainId + verifyingContract are
+      // mandatory v2 digest inputs and always present). A pre-registered channel
+      // still verifies via the known-channel path without any on-chain lookup.
       const claim = makeClaimWithSelfDescribing({
-        chainId: undefined,
-        tokenNetworkAddress: undefined,
         tokenAddress: undefined,
       });
 
@@ -1036,18 +1045,19 @@ describe('ClaimReceiver', () => {
 
     it('should reject EVM claim with NO_PROVIDER_REGISTERED error when registry has no provider', async () => {
       const evmClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-no-provider-1',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 1,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       const protocolData: BTPProtocolData = {
@@ -1096,18 +1106,19 @@ describe('ClaimReceiver', () => {
 
     it('should not emit CLAIM_RECEIVED event when no provider is registered', async () => {
       const evmClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-no-provider-2',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 1,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       const protocolData: BTPProtocolData = {
@@ -1201,20 +1212,19 @@ describe('ClaimReceiver', () => {
       });
 
       const claim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-settled-test-1',
         timestamp: '2026-03-07T12:00:00.000Z',
         senderId: 'peer-new',
         channelId: mockChannelId,
         nonce: 1,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: mockSignerAddress,
         chainId: 31337,
-        tokenNetworkAddress: mockTokenNetworkAddress,
+        verifyingContract: mockTokenNetworkAddress,
         tokenAddress: mockTokenAddress,
       };
 
@@ -1307,18 +1317,19 @@ describe('ClaimReceiver', () => {
       mockStatement.get.mockReturnValue(undefined);
 
       const claim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-known-chain-1',
         timestamp: '2026-03-07T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: mockChannelId,
         nonce: 1,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       const btpMessage: BTPMessage = {
@@ -1349,11 +1360,14 @@ describe('ClaimReceiver', () => {
       expect(mockProvider.verifyBalanceProof).toHaveBeenCalledWith({
         channelId: mockChannelId,
         nonce: claim.nonce,
-        transferredAmount: claim.transferredAmount,
-        lockedAmount: claim.lockedAmount,
-        locksRoot: claim.locksRoot,
+        transferredAmount: claim.cumulativeAmount,
+        lockedAmount: '0',
+        locksRoot: '0x' + '0'.repeat(64),
         signature: claim.signature,
         signerAddress: claim.signerAddress,
+        recipient: claim.recipient,
+        chainId: claim.chainId,
+        verifyingContract: claim.verifyingContract,
       });
 
       // Verify getChannelState was NOT called (known channel skips on-chain check)
@@ -1387,20 +1401,19 @@ describe('ClaimReceiver', () => {
 
     function makeClaim(overrides: Partial<EVMClaimMessage> = {}): EVMClaimMessage {
       return {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-issue-56-1',
         timestamp: '2026-03-07T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: mockChannelId,
         nonce: 1,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: mockSignerAddress,
         chainId: 31337,
-        tokenNetworkAddress: mockTokenNetworkAddress,
+        verifyingContract: mockTokenNetworkAddress,
         tokenAddress: mockTokenAddress,
         ...overrides,
       };
@@ -1584,18 +1597,19 @@ describe('ClaimReceiver', () => {
   describe('getLatestVerifiedClaim', () => {
     it('should return latest verified claim for peer and channel', async () => {
       const storedClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-test-123',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 1,
-        transferredAmount: '1000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       mockStatement.get.mockReturnValue({
@@ -2228,18 +2242,19 @@ describe('ClaimReceiver', () => {
     it('[P0] should NOT break EVM claim verification path (T-33.6-16 regression)', async () => {
       // Verify EVM claims still work when Solana verification is wired in
       const evmClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-0xabc123-5-1706889600000',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 5,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       const evmProtocolData: BTPProtocolData = {
@@ -2828,18 +2843,19 @@ describe('ClaimReceiver', () => {
 
     it('[P0] should NOT break EVM claim verification path (T-34.7-12 regression)', async () => {
       const evmClaim: EVMClaimMessage = {
-        version: '1.0',
+        version: '2.0',
         blockchain: 'evm',
         messageId: 'evm-0xabc123-5-1706889600000',
         timestamp: '2026-02-02T12:00:00.000Z',
         senderId: 'peer-bob',
         channelId: '0x' + 'a'.repeat(64),
         nonce: 5,
-        transferredAmount: '1000000000000000000',
-        lockedAmount: '0',
-        locksRoot: '0x' + '0'.repeat(64),
+        cumulativeAmount: '1000000000000000000',
+        recipient: '0x' + '7'.repeat(40),
         signature: '0x' + 'b'.repeat(130),
         signerAddress: '0x' + 'c'.repeat(40),
+        chainId: 8453,
+        verifyingContract: '0x' + 'e'.repeat(40),
       };
 
       const evmProtocolData: BTPProtocolData = {

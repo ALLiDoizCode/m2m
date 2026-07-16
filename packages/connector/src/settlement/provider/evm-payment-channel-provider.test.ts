@@ -22,7 +22,6 @@
 
 import type {
   ChannelState,
-  BalanceProof,
   ChannelOpenedEvent,
   ChannelClosedEvent,
   ChannelSettledEvent,
@@ -75,11 +74,11 @@ function createMockSDK(): jest.Mocked<
     PaymentChannelSDK,
     | 'openChannel'
     | 'deposit'
-    | 'claimFromChannel'
+    | 'updateBalance'
     | 'closeChannel'
     | 'settleChannel'
     | 'signBalanceProof'
-    | 'verifyBalanceProof'
+    | 'verifyBalanceProofV2'
     | 'getChannelState'
     | 'onChannelOpened'
     | 'onChannelClosed'
@@ -94,11 +93,11 @@ function createMockSDK(): jest.Mocked<
   return {
     openChannel: jest.fn(),
     deposit: jest.fn(),
-    claimFromChannel: jest.fn(),
+    updateBalance: jest.fn(),
     closeChannel: jest.fn(),
     settleChannel: jest.fn(),
     signBalanceProof: jest.fn(),
-    verifyBalanceProof: jest.fn(),
+    verifyBalanceProofV2: jest.fn(),
     getChannelState: jest.fn(),
     onChannelOpened: jest.fn(),
     onChannelClosed: jest.fn(),
@@ -216,16 +215,21 @@ describe('signBalanceProof delegation (T-32.3-04)', () => {
       transferredAmount: '1000000000000000000',
       lockedAmount: '500000000000000000',
       locksRoot: '0xLocksRoot000000000000000000000000000000000000000000000000000001',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     const result = await provider.signBalanceProof(params);
 
+    // v2: (channelId, nonce, cumulativeAmount, recipient, chainId, verifyingContract)
     expect(sdk.signBalanceProof).toHaveBeenCalledWith(
       CHANNEL_ID,
       5,
       BigInt('1000000000000000000'),
-      BigInt('500000000000000000'),
-      '0xLocksRoot000000000000000000000000000000000000000000000000000001'
+      '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      8453,
+      '0x5FbDB2315678afecb367f032d93F642f64180aa3'
     );
     expect(result).toBe('0xSignature123abc');
   });
@@ -236,11 +240,11 @@ describe('signBalanceProof delegation (T-32.3-04)', () => {
 // ---------------------------------------------------------------------------
 
 describe('verifyBalanceProof delegation (T-32.3-05)', () => {
-  it('should construct BalanceProof from params and delegate to sdk.verifyBalanceProof', async () => {
+  it('should construct v2 params and delegate to sdk.verifyBalanceProofV2', async () => {
     const sdk = createMockSDK();
     const provider = createProvider(sdk);
 
-    sdk.verifyBalanceProof.mockResolvedValue(true);
+    sdk.verifyBalanceProofV2.mockReturnValue(true);
 
     const params: VerifyBalanceProofParams = {
       channelId: CHANNEL_ID,
@@ -250,19 +254,24 @@ describe('verifyBalanceProof delegation (T-32.3-05)', () => {
       locksRoot: '0xLocksRoot000000000000000000000000000000000000000000000000000002',
       signature: '0xSignatureToVerify',
       signerAddress: '0xSignerAddress123',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     const result = await provider.verifyBalanceProof(params);
 
-    const expectedBalanceProof: BalanceProof = {
-      channelId: CHANNEL_ID,
-      nonce: 3,
-      transferredAmount: BigInt('2000000000000000000'),
-      lockedAmount: BigInt('0'),
-      locksRoot: '0xLocksRoot000000000000000000000000000000000000000000000000000002',
-    };
-    expect(sdk.verifyBalanceProof).toHaveBeenCalledWith(
-      expectedBalanceProof,
+    // v2: cumulativeAmount carried by transferredAmount; recipient/chainId/
+    // verifyingContract rebuild the v2 EIP-712 digest.
+    expect(sdk.verifyBalanceProofV2).toHaveBeenCalledWith(
+      {
+        channelId: CHANNEL_ID,
+        cumulativeAmount: '2000000000000000000',
+        nonce: 3,
+        recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+        chainId: 8453,
+        verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+      },
       '0xSignatureToVerify',
       '0xSignerAddress123'
     );
@@ -273,7 +282,7 @@ describe('verifyBalanceProof delegation (T-32.3-05)', () => {
     const sdk = createMockSDK();
     const provider = createProvider(sdk);
 
-    sdk.verifyBalanceProof.mockResolvedValue(false);
+    sdk.verifyBalanceProofV2.mockReturnValue(false);
 
     const params: VerifyBalanceProofParams = {
       channelId: CHANNEL_ID,
@@ -283,11 +292,35 @@ describe('verifyBalanceProof delegation (T-32.3-05)', () => {
       locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
       signature: '0xInvalidSignature',
       signerAddress: '0xWrongSigner',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     const result = await provider.verifyBalanceProof(params);
 
     expect(result).toBe(false);
+  });
+
+  it('should return false (fail closed) when v2 domain fields are missing', async () => {
+    const sdk = createMockSDK();
+    const provider = createProvider(sdk);
+
+    const params: VerifyBalanceProofParams = {
+      channelId: CHANNEL_ID,
+      nonce: 1,
+      transferredAmount: '100',
+      lockedAmount: '0',
+      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      signature: '0xSig',
+      signerAddress: '0xSigner',
+      // recipient / chainId / verifyingContract intentionally omitted
+    };
+
+    const result = await provider.verifyBalanceProof(params);
+
+    expect(result).toBe(false);
+    expect(sdk.verifyBalanceProofV2).not.toHaveBeenCalled();
   });
 });
 
@@ -705,11 +738,11 @@ describe('getChannelState translation (T-32.3-08)', () => {
 // ---------------------------------------------------------------------------
 
 describe('claimFromChannel delegation (T-32.3-09)', () => {
-  it('should convert BalanceProofParams to BalanceProof and delegate to SDK', async () => {
+  it('should convert BalanceProofParams to v2 args and delegate to sdk.updateBalance', async () => {
     const sdk = createMockSDK();
     const provider = createProvider(sdk);
 
-    sdk.claimFromChannel.mockResolvedValue(undefined);
+    sdk.updateBalance.mockResolvedValue(undefined);
 
     const balanceProofParams: BalanceProofParams = {
       channelId: CHANNEL_ID,
@@ -717,6 +750,8 @@ describe('claimFromChannel delegation (T-32.3-09)', () => {
       transferredAmount: '5000000000000000000',
       lockedAmount: '0',
       locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
     const signature = '0xClaimSignature';
 
@@ -726,22 +761,37 @@ describe('claimFromChannel delegation (T-32.3-09)', () => {
       signature
     );
 
-    const expectedBalanceProof: BalanceProof = {
-      channelId: CHANNEL_ID,
-      nonce: 7,
-      transferredAmount: BigInt('5000000000000000000'),
-      lockedAmount: 0n,
-      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
-    };
-    expect(sdk.claimFromChannel).toHaveBeenCalledWith(
+    // v2 redeem: (verifyingContract, channelId, cumulativeAmount, nonce, recipient, signature)
+    expect(sdk.updateBalance).toHaveBeenCalledWith(
+      '0x5FbDB2315678afecb367f032d93F642f64180aa3',
       CHANNEL_ID,
-      TOKEN_ADDRESS,
-      expectedBalanceProof,
+      BigInt('5000000000000000000'),
+      7,
+      '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
       signature
     );
 
     expect(result).toHaveProperty('txHash');
     expect(typeof result.txHash).toBe('string');
+  });
+
+  it('should throw when recipient or verifyingContract is missing on the balance proof', async () => {
+    const sdk = createMockSDK();
+    const provider = createProvider(sdk);
+
+    const balanceProofParams: BalanceProofParams = {
+      channelId: CHANNEL_ID,
+      nonce: 7,
+      transferredAmount: '5000000000000000000',
+      lockedAmount: '0',
+      locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      // recipient / verifyingContract intentionally omitted
+    };
+
+    await expect(
+      provider.claimFromChannel(CHANNEL_ID, balanceProofParams, '0xSig')
+    ).rejects.toThrow(/requires recipient and verifyingContract/i);
+    expect(sdk.updateBalance).not.toHaveBeenCalled();
   });
 });
 
@@ -805,7 +855,7 @@ describe('deposit delegation (T-32.3-11)', () => {
 // ---------------------------------------------------------------------------
 
 describe('getSigningContext (T-32.4-11)', () => {
-  it('should return SDK values for chainId, tokenNetworkAddress, and signerAddress', async () => {
+  it('should return SDK values for chainId, verifyingContract, and signerAddress', async () => {
     const sdk = createMockSDK();
     sdk.getChainId = jest.fn().mockResolvedValue(31337);
     sdk.getTokenNetworkAddress = jest
@@ -820,7 +870,7 @@ describe('getSigningContext (T-32.4-11)', () => {
 
     expect(ctx).toEqual({
       chainId: 31337,
-      tokenNetworkAddress: '0xTokenNetworkAddress1234567890abcdef',
+      verifyingContract: '0xTokenNetworkAddress1234567890abcdef',
       signerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
     });
 
@@ -952,6 +1002,9 @@ describe('error propagation from SDK', () => {
       transferredAmount: '100',
       lockedAmount: '0',
       locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     await expect(provider.signBalanceProof(params)).rejects.toThrow('SDK: signing failed');
@@ -970,7 +1023,7 @@ describe('error propagation from SDK', () => {
     const sdk = createMockSDK();
     const provider = createProvider(sdk);
 
-    sdk.claimFromChannel.mockRejectedValue(new Error('SDK: claim failed'));
+    sdk.updateBalance.mockRejectedValue(new Error('SDK: claim failed'));
 
     const balanceProofParams: BalanceProofParams = {
       channelId: CHANNEL_ID,
@@ -978,6 +1031,8 @@ describe('error propagation from SDK', () => {
       transferredAmount: '100',
       lockedAmount: '0',
       locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     await expect(
@@ -1042,7 +1097,7 @@ describe('input validation', () => {
     );
   });
 
-  it('should throw a descriptive error for non-numeric transferredAmount in signBalanceProof', async () => {
+  it('should throw a descriptive error for non-numeric cumulativeAmount in signBalanceProof', async () => {
     const sdk = createMockSDK();
     const provider = createProvider(sdk);
 
@@ -1052,28 +1107,33 @@ describe('input validation', () => {
       transferredAmount: 'invalid',
       lockedAmount: '0',
       locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      chainId: 8453,
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     await expect(provider.signBalanceProof(params)).rejects.toThrow(
-      /Invalid transferredAmount.*invalid/
+      /Invalid cumulativeAmount.*invalid/
     );
   });
 
-  it('should throw a descriptive error for non-numeric lockedAmount in claimFromChannel', async () => {
+  it('should throw a descriptive error for non-numeric cumulativeAmount in claimFromChannel', async () => {
     const sdk = createMockSDK();
     const provider = createProvider(sdk);
 
     const balanceProofParams: BalanceProofParams = {
       channelId: CHANNEL_ID,
       nonce: 1,
-      transferredAmount: '100',
-      lockedAmount: 'bad',
+      transferredAmount: 'bad',
+      lockedAmount: '0',
       locksRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      recipient: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
     };
 
     await expect(
       provider.claimFromChannel(CHANNEL_ID, balanceProofParams, '0xSig')
-    ).rejects.toThrow(/Invalid lockedAmount.*bad/);
+    ).rejects.toThrow(/Invalid cumulativeAmount.*bad/);
   });
 
   it('should truncate long invalid values in error messages to prevent info disclosure', async () => {

@@ -10,13 +10,16 @@
 import type { Provider, Signer, Contract, Listener, Log, LogDescription, EventLog } from 'ethers';
 import type {
   ChannelState,
-  BalanceProof,
   ChannelOpenedEvent,
   ChannelClosedEvent,
   ChannelSettledEvent,
   ChannelCooperativeSettledEvent,
 } from '@toon-protocol/shared';
-import { getDomainSeparator, getBalanceProofTypes } from './eip712-helper';
+import {
+  balanceProofHashEvm,
+  verifyEvmClaimSignature,
+  hexToBytes,
+} from '@toon-protocol/settlement-digest';
 import type { Logger } from '../utils/logger';
 import type { KeyManager } from '../security/key-manager';
 import { createKeyManagerSigner } from '../security/key-manager-signer';
@@ -44,6 +47,18 @@ const TOKEN_NETWORK_ABI = [
   'event ChannelClosed(bytes32 indexed channelId, address indexed closingParticipant)',
   'event ChannelSettled(bytes32 indexed channelId, uint256 participant1Amount, uint256 participant2Amount)',
   'event ChannelClaimed(bytes32 indexed channelId, address indexed claimant, uint256 claimedAmount, uint256 totalClaimed)',
+];
+
+// RollingSwapChannel ABI (connector#329 Phase 4b) — the v2 redeem entrypoint.
+// The connector redeems inbound peer claims by submitting the cumulative v2
+// balance proof to `updateBalance`; the contract recomputes the v2 EIP-712 digest
+// and pays the recipient the delta above `cumulativePaid`. Only the methods the
+// connector's redeem/state paths need. `channels(bytes32)` returns the v2 Channel
+// struct (signer, funder, nonce, cumulativePaid, deposit, closingAt, state).
+const ROLLING_SWAP_CHANNEL_ABI = [
+  'function updateBalance(bytes32 channelId, uint256 cumulativeAmount, uint256 nonce, address recipient, bytes signature) external',
+  'function channels(bytes32) external view returns (address signer, address funder, uint256 nonce, uint256 cumulativePaid, uint256 deposit, uint64 closingAt, uint8 state)',
+  'event SettlementSucceeded(bytes32 indexed channelId, uint256 cumulativeAmount, uint256 nonce, address indexed recipient)',
 ];
 
 // Standard ERC20 ABI for approvals, allowance checks, and symbol queries
@@ -506,145 +521,130 @@ export class PaymentChannelSDK {
   }
 
   /**
-   * Sign a balance proof using EIP-712
+   * Sign a v2 RollingSwapChannel balance proof (connector#329 Phase 4b).
    *
-   * @param channelId - Channel identifier
-   * @param nonce - Monotonically increasing nonce
-   * @param transferredAmount - Cumulative amount transferred to counterparty
-   * @param lockedAmount - Amount in pending HTLCs (0 for now)
-   * @param locksRoot - Merkle root of locked transfers (bytes32(0) for now)
-   * @returns EIP-712 signature
+   * Builds the v2 EIP-712 claim digest via the shared, dependency-light
+   * `@toon-protocol/settlement-digest` leaf — domain
+   * `EIP712Domain(name="RollingSwapChannel", version="2", chainId,
+   * verifyingContract)`, struct `ClaimBalanceProof(bytes32 channelId,uint256
+   * cumulativeAmount,uint256 nonce,address recipient)` — and signs the 32-byte
+   * digest with the existing secp256k1 key via the KeyManager. Only the digest
+   * preimage moved vs v1; the signing primitive is unchanged. `chainId` and
+   * `verifyingContract` are REQUIRED inputs (v1 took neither): a signature is
+   * valid on exactly one `(chain, contract)` pair.
+   *
+   * @param channelId - Channel identifier (0x + 64 hex, bytes32)
+   * @param nonce - Monotonically increasing balance-proof nonce
+   * @param cumulativeAmount - Cumulative amount owed to `recipient`
+   * @param recipient - Address paid the delta on redemption (0x + 40 hex)
+   * @param chainId - Settlement chain id (part of the v2 signing domain)
+   * @param verifyingContract - RollingSwapChannel address (part of the v2 domain)
+   * @returns 0x-prefixed 65-byte r||s||v signature over the v2 digest
    */
   async signBalanceProof(
     channelId: string,
     nonce: number,
-    transferredAmount: bigint,
-    lockedAmount: bigint = 0n,
-    locksRoot?: string
+    cumulativeAmount: bigint,
+    recipient: string,
+    chainId: number,
+    verifyingContract: string
   ): Promise<string> {
-    const { ethers } = await this._ensureInitialized();
-    const resolvedLocksRoot = locksRoot ?? ethers.ZeroHash;
-
-    // Determine which TokenNetwork this channel belongs to by querying all cached networks
-    let tokenNetworkAddress: string | undefined;
-    for (const [, contract] of this.tokenNetworkCache) {
-      try {
-        const channelData = await contract.channels!(channelId);
-        if (channelData.state !== 0) {
-          // NonExistent = 0
-          tokenNetworkAddress = await contract.getAddress();
-          break;
-        }
-      } catch {
-        // Channel doesn't exist in this network, continue
-        continue;
-      }
-    }
-
-    if (!tokenNetworkAddress) {
-      throw new Error(`Cannot determine TokenNetwork for channel ${channelId}`);
-    }
-
-    // Get chain ID
-    const network = await this.provider.getNetwork();
-    const chainId = network.chainId;
-
-    // Build EIP-712 domain and types
-    const domain = getDomainSeparator(chainId, tokenNetworkAddress);
-    const types = getBalanceProofTypes();
-
-    // Build balance proof object
-    const balanceProof: BalanceProof = {
-      channelId,
-      nonce,
-      transferredAmount,
-      lockedAmount,
-      locksRoot: resolvedLocksRoot,
-    };
-
-    // Create EIP-712 hash
-    const hash = ethers.TypedDataEncoder.hash(domain, types, balanceProof);
-
-    // Sign the hash with KeyManager
-    const signatureBuffer = await this.keyManager.sign(
-      Buffer.from(hash.slice(2), 'hex'),
-      this.evmKeyId
+    // v2 EIP-712 digest (single source of truth = the published leaf). No chain
+    // query / TokenNetwork registry lookup needed: chainId + verifyingContract are
+    // supplied by the caller (self-describing on the wire).
+    const digest = balanceProofHashEvm(
+      hexToBytes(channelId),
+      cumulativeAmount,
+      BigInt(nonce),
+      hexToBytes(recipient),
+      BigInt(chainId),
+      hexToBytes(verifyingContract)
     );
+
+    // Sign the 32-byte digest with KeyManager (same secp256k1 key as v1).
+    const signatureBuffer = await this.keyManager.sign(Buffer.from(digest), this.evmKeyId);
 
     // Convert signature Buffer to hex string for blockchain submission
     const signature = '0x' + signatureBuffer.toString('hex');
 
-    this.logger.debug('Balance proof signed', {
+    this.logger.debug('v2 balance proof signed', {
       channelId,
       nonce,
-      transferredAmount: transferredAmount.toString(),
+      cumulativeAmount: cumulativeAmount.toString(),
+      recipient,
+      chainId,
+      verifyingContract,
     });
 
     return signature;
   }
 
   /**
-   * Verify a balance proof signature
+   * Verify a v2 RollingSwapChannel balance-proof signature (connector#329 Phase 4b).
    *
-   * @param balanceProof - Balance proof to verify
-   * @param signature - EIP-712 signature
-   * @param expectedSigner - Expected signer address
-   * @returns True if signature is valid
+   * Rebuilds the v2 EIP-712 claim digest from the self-describing params and
+   * recovers the secp256k1 signer via the shared leaf, comparing (case-insensitively)
+   * to `expectedSigner`. Fail-closed: any malformed field or recovery error returns
+   * `false`. There is no v1 fallback — a v1 raw-keccak signature cannot recover to
+   * the expected signer under the v2 `version="2"` domain.
+   *
+   * @param params - v2 claim params (channelId, cumulativeAmount, nonce, recipient,
+   *   chainId, verifyingContract) — all REQUIRED
+   * @param signature - 0x-prefixed 65-byte r||s||v signature
+   * @param expectedSigner - the address the claim must be signed by
+   * @returns True if the recovered signer matches `expectedSigner`
    */
-  async verifyBalanceProof(
-    balanceProof: BalanceProof,
+  verifyBalanceProofV2(
+    params: {
+      channelId: string;
+      cumulativeAmount: bigint | string;
+      nonce: number;
+      recipient: string;
+      chainId: number;
+      verifyingContract: string;
+    },
     signature: string,
     expectedSigner: string
-  ): Promise<boolean> {
+  ): boolean {
     try {
-      const { ethers } = await this._ensureInitialized();
-
-      // Determine TokenNetwork address for this channel
-      let tokenNetworkAddress: string | undefined;
-      for (const [, contract] of this.tokenNetworkCache) {
-        try {
-          const channelData = await contract.channels!(balanceProof.channelId);
-          if (channelData.state !== 0) {
-            tokenNetworkAddress = await contract.getAddress();
-            break;
-          }
-        } catch {
-          continue;
-        }
-      }
-
-      if (!tokenNetworkAddress) {
-        this.logger.warn('Cannot determine TokenNetwork for balance proof verification', {
-          channelId: balanceProof.channelId,
+      const sig = signature.startsWith('0x') ? signature.slice(2) : signature;
+      const sigBytes = hexToBytes(sig);
+      if (sigBytes.length !== 65) {
+        this.logger.warn('v2 balance proof verification: bad signature length', {
+          channelId: params.channelId,
+          length: sigBytes.length,
         });
         return false;
       }
+      const { valid, recovered } = verifyEvmClaimSignature(
+        {
+          channelId: params.channelId,
+          cumulativeAmount: params.cumulativeAmount,
+          nonce: params.nonce,
+          recipient: params.recipient,
+          chainId: params.chainId,
+          verifyingContract: params.verifyingContract,
+        },
+        sigBytes,
+        expectedSigner
+      );
 
-      // Get chain ID
-      const network = await this.provider.getNetwork();
-      const chainId = network.chainId;
-
-      // Build EIP-712 domain and types
-      const domain = getDomainSeparator(chainId, tokenNetworkAddress);
-      const types = getBalanceProofTypes();
-
-      // Recover signer from signature
-      const recoveredSigner = ethers.verifyTypedData(domain, types, balanceProof, signature);
-
-      // Compare addresses (case-insensitive)
-      const isValid = recoveredSigner.toLowerCase() === expectedSigner.toLowerCase();
-
-      if (!isValid) {
-        this.logger.warn('Balance proof verification failed', {
-          balanceProof,
+      if (!valid) {
+        this.logger.warn('v2 balance proof verification failed', {
+          channelId: params.channelId,
           expectedSigner,
-          recoveredSigner,
+          recovered,
+          chainId: params.chainId,
+          verifyingContract: params.verifyingContract,
         });
       }
 
-      return isValid;
+      return valid;
     } catch (error) {
-      this.logger.error('Balance proof verification error', { balanceProof, error });
+      this.logger.error('v2 balance proof verification error', {
+        channelId: params.channelId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return false;
     }
   }
@@ -685,43 +685,61 @@ export class PaymentChannelSDK {
   }
 
   /**
-   * Claim transferred funds from a channel using counterparty's signed balance proof.
-   * Works on both opened and closed channels (claims allowed during grace period).
-   * Only the delta since last claim is transferred (prevents double-pay).
+   * Redeem an inbound peer claim by submitting a v2 cumulative balance proof to
+   * `RollingSwapChannel.updateBalance` (connector#329 Phase 4b — the redeem
+   * migration off Raiden `TokenNetwork.claimFromChannel`).
    *
-   * @param channelId - Channel identifier
-   * @param tokenAddress - ERC20 token address
-   * @param balanceProof - Balance proof signed by the counterparty (sender)
-   * @param signature - EIP-712 signature of the balance proof
+   * The contract recomputes the v2 EIP-712 digest from `(channelId,
+   * cumulativeAmount, nonce, recipient)`, recovers the signer, requires it to be
+   * the channel's `signer`, and transfers the recipient the delta above
+   * `cumulativePaid` (highest-nonce-wins; N claims net to one payout). We carry
+   * only the self-describing fields + the unchanged 65-byte signature — no
+   * client-side digest is recomputed here (the contract is the source of truth).
+   * Callable while the channel is Open or Closing (redeem during the challenge
+   * window).
+   *
+   * @param verifyingContract - Deployed RollingSwapChannel address (from the
+   *   self-describing claim; the `updateBalance` target and v2 domain contract)
+   * @param channelId - Channel identifier (bytes32)
+   * @param cumulativeAmount - Cumulative amount owed to `recipient`
+   * @param nonce - Monotone balance-proof nonce
+   * @param recipient - Address paid the delta (bound into the signature)
+   * @param signature - 65-byte r||s||v signature over the v2 digest
    */
-  async claimFromChannel(
+  async updateBalance(
+    verifyingContract: string,
     channelId: string,
-    tokenAddress: string,
-    balanceProof: BalanceProof,
+    cumulativeAmount: bigint,
+    nonce: number,
+    recipient: string,
     signature: string
   ): Promise<void> {
-    const tokenNetwork = await this.getTokenNetworkContract(tokenAddress);
-    const state = await this.getChannelState(channelId, tokenAddress);
+    const { signer, ethers } = await this._ensureInitialized();
+    const channel = new ethers.Contract(verifyingContract, ROLLING_SWAP_CHANNEL_ABI, signer);
 
-    // Validate channel is opened or closed (claims allowed during grace period)
-    if (state.status !== 'opened' && state.status !== 'closed') {
-      throw new Error(`Cannot claim from channel in status: ${state.status}`);
-    }
-
-    this.logger.info('Claiming from channel', {
+    this.logger.info('Redeeming claim via RollingSwapChannel.updateBalance', {
       channelId,
-      nonce: balanceProof.nonce,
-      transferredAmount: balanceProof.transferredAmount.toString(),
+      nonce,
+      cumulativeAmount: cumulativeAmount.toString(),
+      recipient,
+      verifyingContract,
     });
 
-    // Call claimFromChannel on contract
-    const tx = await tokenNetwork.claimFromChannel!(channelId, balanceProof, signature);
+    // Submit the v2 balance proof. The contract verifies the signature against
+    // the channel's registered signer and pays the recipient the delta.
+    const tx = await channel.updateBalance!(
+      channelId,
+      cumulativeAmount,
+      nonce,
+      recipient,
+      signature
+    );
     const receipt = await tx.wait();
 
-    // Invalidate cached state (deposit/balance changed on-chain)
+    // Invalidate cached state (cumulativePaid/deposit changed on-chain)
     this.channelStateCache.delete(channelId);
 
-    this.logger.info('Claim from channel completed', { channelId, txHash: receipt.hash });
+    this.logger.info('updateBalance completed', { channelId, txHash: receipt.hash });
   }
 
   /**
@@ -902,53 +920,65 @@ export class PaymentChannelSDK {
   }
 
   /**
-   * Verify a balance proof signature using an explicit EIP-712 domain
-   * Used for verifying claims from unknown channels where the TokenNetwork
-   * is not in the registry cache. Read-only -- no signer needed.
+   * Read a v2 RollingSwapChannel's on-chain state directly from its contract
+   * address (connector#329 Phase 4b), mapping the v2 Channel lifecycle to the
+   * connector's chain-agnostic status. Used for verifying unknown channels from
+   * self-describing v2 claims (the `verifyingContract` is the channel contract).
+   * Read-only — no signer needed.
    *
-   * @param balanceProof - Balance proof to verify
-   * @param signature - EIP-712 signature
-   * @param expectedSigner - Expected signer address
-   * @param chainId - EVM chain ID for domain construction
-   * @param tokenNetworkAddress - TokenNetwork contract address for domain construction
-   * @returns True if signature is valid
+   * v2 `ChannelState` enum → status mapping:
+   *   NonExistent(0) → 'settled' (treated as non-redeemable / not open)
+   *   Open(1)        → 'opened'  (redeemable)
+   *   Closing(2)     → 'closed'  (redeemable during the challenge window)
+   *   Closed(3)      → 'settled' (terminal)
+   *
+   * `participants` are `[signer, funder]` — the claim's `signerAddress` must equal
+   * the channel `signer` for the balance proof to redeem on-chain.
+   *
+   * @param channelId - Channel identifier (bytes32)
+   * @param verifyingContract - Deployed RollingSwapChannel contract address
    */
-  async verifyBalanceProofWithDomain(
-    balanceProof: BalanceProof,
-    signature: string,
-    expectedSigner: string,
-    chainId: number,
-    tokenNetworkAddress: string
-  ): Promise<boolean> {
+  async getChannelStateByContract(
+    channelId: string,
+    verifyingContract: string
+  ): Promise<{
+    exists: boolean;
+    status: 'opened' | 'closed' | 'settled';
+    signer: string;
+    funder: string;
+    deposit: bigint;
+    cumulativePaid: bigint;
+    nonce: number;
+  }> {
+    const { ethers } = await requireOptional<typeof import('ethers')>('ethers', 'EVM settlement');
+
+    const channel = new ethers.Contract(verifyingContract, ROLLING_SWAP_CHANNEL_ABI, this.provider);
+
     try {
-      const { ethers } = await requireOptional<typeof import('ethers')>('ethers', 'EVM settlement');
-
-      const domain = getDomainSeparator(chainId, tokenNetworkAddress);
-      const types = getBalanceProofTypes();
-
-      const recoveredSigner = ethers.verifyTypedData(domain, types, balanceProof, signature);
-
-      const isValid = recoveredSigner.toLowerCase() === expectedSigner.toLowerCase();
-
-      if (!isValid) {
-        this.logger.warn('Balance proof verification with explicit domain failed', {
-          channelId: balanceProof.channelId,
-          expectedSigner,
-          recoveredSigner,
-          chainId,
-          tokenNetworkAddress,
-        });
-      }
-
-      return isValid;
+      const data = await channel.channels!(channelId);
+      const stateEnum = Number(data.state);
+      const statusMap: Record<number, 'opened' | 'closed' | 'settled'> = {
+        0: 'settled', // NonExistent
+        1: 'opened', // Open
+        2: 'closed', // Closing (challenge window — claims still redeemable)
+        3: 'settled', // Closed (terminal)
+      };
+      return {
+        exists: stateEnum !== 0,
+        status: statusMap[stateEnum] ?? 'settled',
+        signer: data.signer as string,
+        funder: data.funder as string,
+        deposit: data.deposit as bigint,
+        cumulativePaid: data.cumulativePaid as bigint,
+        nonce: Number(data.nonce),
+      };
     } catch (error) {
-      this.logger.error('Balance proof verification with explicit domain error', {
-        channelId: balanceProof.channelId,
-        chainId,
-        tokenNetworkAddress,
+      this.logger.error('Failed to query RollingSwapChannel state by contract', {
+        channelId,
+        verifyingContract,
         error,
       });
-      return false;
+      throw error;
     }
   }
 

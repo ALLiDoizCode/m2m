@@ -46,7 +46,6 @@ import type { Logger } from 'pino';
 import type { ethers } from 'ethers';
 import type { PaymentChannelSDK } from './payment-channel-sdk';
 import type { BTPClaimMessage, EVMClaimMessage, BlockchainType } from '../btp/btp-claim-types';
-import type { BalanceProof } from '@toon-protocol/shared';
 
 /**
  * Configuration for ClaimRedemptionService
@@ -312,31 +311,24 @@ export class ClaimRedemptionService {
       {
         channelId: claim.channelId,
         nonce: claim.nonce,
-        amount: claim.transferredAmount,
+        amount: claim.cumulativeAmount,
       },
-      'Redeeming EVM balance proof on-chain'
+      'Redeeming v2 EVM balance proof on-chain'
     );
-
-    // Create BalanceProof object with bigint conversion
-    const balanceProof: BalanceProof = {
-      channelId: claim.channelId,
-      nonce: claim.nonce,
-      transferredAmount: BigInt(claim.transferredAmount),
-      lockedAmount: BigInt(claim.lockedAmount),
-      locksRoot: claim.locksRoot,
-    };
-
-    // Get tokenAddress from config
-    const tokenAddress = this.config.evmTokenAddress;
 
     // Retry logic (3 attempts, exponential backoff 1s, 2s, 4s)
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        // claimFromChannel: submit counterparty's signed proof to collect owed tokens
-        await this.evmChannelSDK.claimFromChannel(
+        // v2 redeem (connector#329 Phase 4b): submit the counterparty's signed
+        // cumulative balance proof to RollingSwapChannel.updateBalance at the
+        // self-describing verifyingContract. The contract verifies the signature
+        // and pays the recipient the delta above cumulativePaid.
+        await this.evmChannelSDK.updateBalance(
+          claim.verifyingContract,
           claim.channelId,
-          tokenAddress,
-          balanceProof,
+          BigInt(claim.cumulativeAmount),
+          claim.nonce,
+          claim.recipient,
           claim.signature
         );
 
@@ -404,7 +396,7 @@ export class ClaimRedemptionService {
    * @returns Claim amount as bigint
    */
   private _getClaimAmount(claim: BTPClaimMessage): bigint {
-    return BigInt((claim as EVMClaimMessage).transferredAmount);
+    return BigInt((claim as EVMClaimMessage).cumulativeAmount);
   }
 
   /**
