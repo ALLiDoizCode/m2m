@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.33.0](https://github.com/toon-protocol/connector/compare/v3.32.0...v3.33.0) (2026-07-16)
+
+### Features
+
+- **discovery:** announce per-chain tokenNetworks + preferredTokens in kind:10032 ([#331](https://github.com/toon-protocol/connector/issues/331)) ([e0fec99](https://github.com/toon-protocol/connector/commit/e0fec991cbe43895f36be47cb989a64d9a4465ff)), closes [toon-client#378](https://github.com/toon-protocol/toon-client/issues/378) [toon-client#378](https://github.com/toon-protocol/toon-client/issues/378)
+- **settlement:** add settlement-digest leaf + v2 verify helper, unwired ([#330](https://github.com/toon-protocol/connector/issues/330)) [skip release] ([982965d](https://github.com/toon-protocol/connector/commit/982965da6561f0d52d9e9a7af1d100f162ec3ad3))
+
 ## [3.32.0](https://github.com/toon-protocol/connector/compare/v3.31.0...v3.32.0) (2026-07-16)
 
 ### Features
