@@ -36,8 +36,8 @@ describe('RegistryStore', () => {
 
   it('round-trips a peer with all fields', () => {
     store.savePeer({
-      id: 'town',
-      url: 'wss://town:3000',
+      id: 'relay',
+      url: 'wss://relay:3000',
       authToken: 'secret',
       relation: 'child',
       transport: 'direct',
@@ -48,8 +48,8 @@ describe('RegistryStore', () => {
     const { peers } = store.loadAll();
     expect(peers).toHaveLength(1);
     expect(peers[0]).toEqual({
-      id: 'town',
-      url: 'wss://town:3000',
+      id: 'relay',
+      url: 'wss://relay:3000',
       authToken: 'secret',
       relation: 'child',
       transport: 'direct',
@@ -60,15 +60,15 @@ describe('RegistryStore', () => {
 
   it('round-trips a route', () => {
     store.saveRoute({
-      prefix: 'g.connector.town',
-      nextHop: 'town',
+      prefix: 'g.connector.relay',
+      nextHop: 'relay',
       priority: 5,
       source: 'runtime',
     });
 
     const { routes } = store.loadAll();
     expect(routes).toEqual([
-      { prefix: 'g.connector.town', nextHop: 'town', priority: 5, source: 'runtime' },
+      { prefix: 'g.connector.relay', nextHop: 'relay', priority: 5, source: 'runtime' },
     ]);
   });
 

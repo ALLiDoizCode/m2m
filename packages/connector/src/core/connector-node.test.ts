@@ -17,8 +17,13 @@ import {
   ILPFulfillPacket,
   ILPRejectPacket,
 } from '@toon-protocol/shared';
-import { ConfigLoader, ConnectorNotStartedError } from '../config/config-loader';
+import {
+  ConfigLoader,
+  ConnectorNotStartedError,
+  InvalidExecutionConditionError,
+} from '../config/config-loader';
 import { HealthServer } from '../http/health-server';
+import { sha256 } from '@noble/hashes/sha2';
 
 // Mock all dependencies
 jest.mock('../routing/routing-table');
@@ -1157,6 +1162,95 @@ describe('ConnectorNode', () => {
       expect(packet.data).toEqual(Buffer.from('test-payload'));
     });
 
+    describe('executionCondition (issue #309/PR #310 egress symmetry)', () => {
+      // Sender-minted preimage/condition pair (spec R1: C = sha256(P)).
+      const preimage = new Uint8Array(32).fill(0x42);
+      const condition = new Uint8Array(sha256(preimage));
+
+      beforeEach(async () => {
+        await connectorNode.start();
+        jest.clearAllMocks();
+        mockPacketHandler.handlePreparePacket.mockResolvedValue(createMockFulfill());
+      });
+
+      it('should ride the PREPARE verbatim when supplied as Uint8Array', async () => {
+        await connectorNode.sendPacket({ ...validParams, executionCondition: condition });
+
+        const packet = mockPacketHandler.handlePreparePacket.mock.calls[0]![0];
+        expect(packet.executionCondition).toBeInstanceOf(Uint8Array);
+        expect(Buffer.from(packet.executionCondition!)).toEqual(Buffer.from(condition));
+      });
+
+      it('should decode a base64 string condition to the same 32 bytes', async () => {
+        await connectorNode.sendPacket({
+          ...validParams,
+          executionCondition: Buffer.from(condition).toString('base64'),
+        });
+
+        const packet = mockPacketHandler.handlePreparePacket.mock.calls[0]![0];
+        expect(Buffer.from(packet.executionCondition!)).toEqual(Buffer.from(condition));
+      });
+
+      it('should omit executionCondition from the packet when absent (legacy path unchanged)', async () => {
+        await connectorNode.sendPacket(validParams);
+
+        const packet = mockPacketHandler.handlePreparePacket.mock.calls[0]![0];
+        expect('executionCondition' in packet).toBe(false);
+      });
+
+      it('should surface the FULFILL fulfillment preimage to the caller', async () => {
+        mockPacketHandler.handlePreparePacket.mockResolvedValue({
+          type: PacketType.FULFILL as const,
+          fulfillment: preimage,
+          data: Buffer.alloc(0),
+        });
+
+        const result = await connectorNode.sendPacket({
+          ...validParams,
+          executionCondition: condition,
+        });
+
+        expect(result.type).toBe(PacketType.FULFILL);
+        const fulfillment = (result as ILPFulfillPacket).fulfillment!;
+        expect(Buffer.from(fulfillment)).toEqual(Buffer.from(preimage));
+        // Caller-side verification contract: sha256(fulfillment) === condition.
+        expect(Buffer.from(sha256(new Uint8Array(fulfillment)))).toEqual(Buffer.from(condition));
+      });
+
+      it.each([
+        ['a 31-byte Uint8Array', new Uint8Array(31).fill(1), /exactly 32 bytes, got 31/],
+        ['a 33-byte Uint8Array', new Uint8Array(33).fill(1), /exactly 32 bytes, got 33/],
+        ['an invalid base64 string', 'not-valid-base64!!!', /must be valid base64/],
+        [
+          'a base64 string decoding to 16 bytes',
+          Buffer.alloc(16, 7).toString('base64'),
+          /exactly 32 bytes, got 16/,
+        ],
+        ['an all-zero Uint8Array', new Uint8Array(32), /must not be all-zero/],
+        ['an all-zero base64 string', Buffer.alloc(32).toString('base64'), /must not be all-zero/],
+      ] as Array<[string, Uint8Array | string, RegExp]>)(
+        'should throw InvalidExecutionConditionError for %s without sending',
+        async (_label, badCondition, messagePattern) => {
+          await expect(
+            connectorNode.sendPacket({ ...validParams, executionCondition: badCondition })
+          ).rejects.toThrow(InvalidExecutionConditionError);
+          await expect(
+            connectorNode.sendPacket({ ...validParams, executionCondition: badCondition })
+          ).rejects.toThrow(messagePattern);
+          expect(mockPacketHandler.handlePreparePacket).not.toHaveBeenCalled();
+        }
+      );
+
+      it('should log hasExecutionCondition on send', async () => {
+        await connectorNode.sendPacket({ ...validParams, executionCondition: condition });
+
+        expect(mockLogger.info).toHaveBeenCalledWith(
+          expect.objectContaining({ event: 'send_packet', hasExecutionCondition: true }),
+          'Sending packet via public API'
+        );
+      });
+    });
+
     it('should return T00 Reject on unexpected handlePreparePacket error', async () => {
       // Arrange
       await connectorNode.start();
@@ -1305,15 +1399,15 @@ describe('ConnectorNode', () => {
 
       // Act
       const result = await connectorNode.registerPeer({
-        id: 'mill',
+        id: 'swap',
         // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
-        url: 'ws://mill:3000',
-        authToken: 'token-mill',
+        url: 'ws://swap:3000',
+        authToken: 'token-swap',
         relation: 'child',
       });
 
       // Assert
-      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('mill', 'child');
+      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('swap', 'child');
       expect(result.relation).toBe('child');
     });
 
@@ -1999,7 +2093,7 @@ describe('ConnectorNode', () => {
       it('should infer standalone when localDelivery.enabled=true and adminApi.enabled=true', () => {
         // Arrange
         const config = createTestConfig({
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: true, port: 8081 },
         });
         const node = new ConnectorNode(config, mockLogger);
@@ -2056,7 +2150,7 @@ describe('ConnectorNode', () => {
       it('should default to embedded for hybrid config (adminApi.enabled=false, localDelivery.enabled=true)', () => {
         // Arrange
         const config = createTestConfig({
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: false },
         });
         const node = new ConnectorNode(config, mockLogger);
@@ -2072,7 +2166,7 @@ describe('ConnectorNode', () => {
         // Arrange - explicit embedded but flags suggest standalone
         const config = createTestConfig({
           deploymentMode: 'embedded',
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: true, port: 8081 },
         });
         const node = new ConnectorNode(config, mockLogger);
@@ -2133,7 +2227,7 @@ describe('ConnectorNode', () => {
       it('should return true when mode is inferred as standalone', () => {
         // Arrange
         const config = createTestConfig({
-          localDelivery: { enabled: true, handlerUrl: 'http://bls:8080' },
+          localDelivery: { enabled: true, handlerUrl: 'http://app:8080' },
           adminApi: { enabled: true, port: 8081 },
         });
         const node = new ConnectorNode(config, mockLogger);

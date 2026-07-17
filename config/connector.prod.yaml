@@ -1,11 +1,11 @@
 # =============================================================================
-# Connector — Production Config Template (standalone + BLS)
+# Connector — Production Config Template (standalone + app)
 # =============================================================================
 # Bind-mounted into the `connector` service at /app/config/connector.yaml.
 # Edit freely — the connector reads the file on startup.
 #
 # This template matches the Tier-3 security posture:
-#   - Connector and BLS run in separate containers on one compose network
+#   - Connector and app run in separate containers on one compose network
 #   - Admin API binds inside the container but is NOT published to the host
 #   - `allowedIPs` gates the admin API to docker bridge subnets
 #   - No API key required (loopback-equivalent via network isolation)
@@ -35,12 +35,12 @@ adminApi:
   # apiKey: ${ADMIN_API_KEY}  # TODO: uncomment + set via secret manager
                               # when exposing the admin API off-host.
 
-# ── Local delivery (connector → BLS) ────────────────────────────────────────
-# BLS service runs as a sibling container on the same compose network.
-# The compose `bls` hostname resolves to that container's bridge IP.
+# ── Local delivery (connector → app) ────────────────────────────────────────
+# The app service runs as a sibling container on the same compose network.
+# The compose `app` hostname resolves to that container's bridge IP.
 localDelivery:
   enabled: true
-  handlerUrl: http://bls:3100
+  handlerUrl: http://app:3100
   timeout: 30000
 
 # ── ATOR overlay transport (OPTIONAL) ───────────────────────────────────────

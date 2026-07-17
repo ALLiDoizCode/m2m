@@ -55,6 +55,24 @@ const DEFAULT_NETWORK = 'https://api.minascan.io/node/devnet/v1/graphql';
 const DEFAULT_AMOUNT_USDC = 1000n;
 
 /**
+ * Fee (in nanomina) for the mint zkApp command. A zkApp command on the public
+ * Mina devnet is rejected with "Insufficient fee" at the default (~0.001 MINA)
+ * fee floor that `Mina.transaction` would otherwise pick — proof commands cost
+ * more than plain payments. 0.1 MINA is the well-worn devnet zkApp fee and is
+ * what the manual mint used. Override with MINA_TX_FEE (whole MINA) if the
+ * mempool fee floor rises. 1 MINA = 1e9 nanomina.
+ */
+const MINT_FEE_NANOMINA = (() => {
+  const whole = process.env['MINA_TX_FEE'];
+  if (whole && Number.isFinite(Number(whole))) {
+    // Parse "0.1" → 100_000_000 nanomina without floating point drift.
+    const [w, f = ''] = String(whole).split('.');
+    return BigInt(w || '0') * 1_000_000_000n + BigInt((f + '000000000').slice(0, 9) || '0');
+  }
+  return 100_000_000n; // 0.1 MINA
+})();
+
+/**
  * Admin-mint `wholeUsdc` USDC (whole tokens, scaled to 6-dp base units) to
  * `recipient`. The admin authority signs; the fee payer (default: the admin
  * authority) pays fees + the recipient token-account creation fee.
@@ -70,12 +88,17 @@ export async function mintUsdc(opts: {
   signers: PrivateKey[];
   /** Whether the recipient's token account must be funded (true on first mint). */
   fundRecipient: boolean;
+  /** zkApp tx fee in nanomina; defaults to MINT_FEE_NANOMINA (0.1 MINA). */
+  feeNanomina?: bigint;
 }): Promise<string> {
   const amount = UInt64.from(opts.wholeUsdc * ONE_USDC);
-  const tx = await Mina.transaction(opts.feePayer, async () => {
-    if (opts.fundRecipient) AccountUpdate.fundNewAccount(opts.feePayer, 1);
-    await opts.token.mint(opts.recipient, amount);
-  });
+  const tx = await Mina.transaction(
+    { sender: opts.feePayer, fee: UInt64.from(opts.feeNanomina ?? MINT_FEE_NANOMINA) },
+    async () => {
+      if (opts.fundRecipient) AccountUpdate.fundNewAccount(opts.feePayer, 1);
+      await opts.token.mint(opts.recipient, amount);
+    }
+  );
   await tx.prove();
   await tx.sign(opts.signers).send();
   return (await opts.token.getBalanceOf(opts.recipient)).toString();

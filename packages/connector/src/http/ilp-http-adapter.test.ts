@@ -45,7 +45,7 @@ const createMockLogger = (): jest.Mocked<Logger> =>
 const createPrepare = (): ILPPreparePacket => ({
   type: PacketType.PREPARE,
   amount: BigInt(1000),
-  destination: 'g.connector.town',
+  destination: 'g.connector.relay',
   expiresAt: new Date(Date.now() + 10000),
   data: Buffer.from('hello'),
 });
@@ -133,7 +133,7 @@ describe('IlpHttpAdapter', () => {
     expect(claimEntry).toBeDefined();
     expect(claimEntry!.contentType).toBe(BTP_CLAIM_PROTOCOL.CONTENT_TYPE);
     expect(claimEntry!.data.toString('utf8')).toBe(claimJson);
-    expect(ilpPacket.destination).toBe('g.connector.town');
+    expect(ilpPacket.destination).toBe('g.connector.relay');
     expect(peerId).toBe('connector-b'); // authenticated via header (no-auth secret)
 
     // Response is 200 + the serialized FULFILL in the body (RFC-0035).
@@ -280,7 +280,7 @@ describe('IlpHttpAdapter', () => {
       upstream: 'http://127.0.0.1:8080',
       price: '1000', // atomic nano-USDC; must be advertised byte-identical
       chains: ['evm', 'solana', 'mina'],
-      ilpAddress: 'g.connector.town',
+      ilpAddress: 'g.connector.relay',
       settlementAddresses: {
         evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28',
         solana: '7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2',
@@ -340,7 +340,7 @@ describe('IlpHttpAdapter', () => {
       const body = parseGreeting(res);
 
       expect(body.x402Version).toBe(2);
-      expect(body.resource).toEqual({ url: 'g.connector.town' });
+      expect(body.resource).toEqual({ url: 'g.connector.relay' });
       expect(body.error).toBe(`${X402_PAYMENT_SIGNATURE_HEADER} header is required`);
       for (const entry of body.accepts) {
         expect(entry).toHaveProperty('scheme');
@@ -538,7 +538,7 @@ describe('IlpHttpAdapter', () => {
       upstream: 'http://127.0.0.1:8080',
       price: BIND_PRICE,
       chains: ['evm'],
-      ilpAddress: 'g.connector.town',
+      ilpAddress: 'g.connector.relay',
       settlementAddresses: { evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28' },
       ...overrides,
     });
@@ -575,7 +575,7 @@ describe('IlpHttpAdapter', () => {
       const prepare: ILPPreparePacket = {
         type: PacketType.PREPARE,
         amount: BigInt(1000),
-        destination: 'g.connector.town',
+        destination: 'g.connector.relay',
         expiresAt: new Date(Date.now() + 10000),
         data: encodeHttpRequest(envelope),
       };

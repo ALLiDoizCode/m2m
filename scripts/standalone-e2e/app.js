@@ -1,7 +1,7 @@
-// Minimal Business Logic Server used by the container-based standalone E2E
-// test. Accepts POST /handle-packet, auto-fulfills, and tracks received
-// requests in memory. GET /received returns the captured list so the test can
-// assert what was forwarded.
+// Minimal app used by the container-based standalone E2E test. Accepts
+// POST /handle-packet, auto-fulfills, and tracks received requests in
+// memory. GET /received returns the captured list so the test can assert
+// what was forwarded.
 //
 // Stdlib-only — runs on any `node:22-alpine` container without `npm install`.
 
@@ -60,9 +60,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Tier-3 proof endpoint: the BLS forwards an admin-API call to the connector
+  // Tier-3 proof endpoint: the app forwards an admin-API call to the connector
   // over the docker-compose bridge network. The connector's IP allowlist must
-  // accept the BLS's bridge IP; its admin port is NOT published on the host.
+  // accept the app's bridge IP; its admin port is NOT published on the host.
   // Set CONNECTOR_ADMIN_URL at container start to point at the connector.
   if (req.method === 'POST' && req.url === '/trigger-admin-send') {
     try {
@@ -102,5 +102,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   // eslint-disable-next-line no-console
-  console.log(`BLS listening on 0.0.0.0:${PORT}`);
+  console.log(`App listening on 0.0.0.0:${PORT}`);
 });

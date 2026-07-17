@@ -20,11 +20,22 @@
 # those raw ports are not reachable from the internet — nginx (80/443) is the
 # only public surface. Run firewall.sh on the host before exposing the box.
 
+# Bound the overlay services' Docker json logs too (nginx access logs go to
+# stdout in nginx:alpine, so they otherwise grow unbounded on /var/lib/docker).
+# Mirrors the x-logging anchor in the base docker-compose.yml — kept local since
+# YAML anchors don't span files. See that file for the disk-full incident note.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
 services:
   nginx:
     image: nginx:alpine
     profiles: [evm, solana, mina]
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       anvil:
         condition: service_started
@@ -45,6 +56,7 @@ services:
     image: certbot/certbot
     profiles: [evm, solana, mina]
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - linode_certbot_conf:/etc/letsencrypt
       - linode_certbot_www:/var/www/certbot

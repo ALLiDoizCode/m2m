@@ -1,15 +1,26 @@
 # Multi-stage Dockerfile for Connector
 #
-# Stage 1 (builder): Compiles TypeScript to JavaScript with all dependencies
-# Stage 2 (runtime): Runs compiled connector with production dependencies only
+# Stage 1 (builder):  Compiles TypeScript to JavaScript with all dependencies
+# Stage 2 (proddeps): Installs production node_modules for the TARGET platform
+# Stage 3 (runtime):  Runs compiled connector with production dependencies only
+#
+# Cross-platform note: stages 1 and 2 are pinned to $BUILDPLATFORM so that
+# node/npm ALWAYS execute natively on the build host — node running under
+# QEMU emulation (multi-arch buildx of the linux/arm64 leg) intermittently
+# dies with SIGILL ("qemu: uncaught target signal 4", exit 132), which broke
+# the v3.28.6 release image build. The runtime stage is the only
+# target-platform stage and never executes node at build time (only apk /
+# busybox, which are safe under emulation). Target-arch native binaries
+# (libsql, sharp) are installed in the proddeps stage as explicit pinned
+# packages instead of by running npm under emulation.
 #
 # Build: docker build -t connector .
 # Run:   docker run -e NODE_ID=connector-a -e BTP_SERVER_PORT=3000 -p 3000:3000 connector
 
 # ============================================
-# Stage 1: Builder
+# Stage 1: Builder (build platform — native)
 # ============================================
-FROM node:22-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 
 # Set working directory
 WORKDIR /app
@@ -47,9 +58,22 @@ RUN cd packages/shared && npm run build && \
     cd ../connector && npm run build
 
 # ============================================
-# Stage 2: Runtime
+# Stage 2: Production deps (build platform — native)
 # ============================================
-FROM node:22-alpine AS runtime
+# Installs the runtime node_modules tree FOR the target platform while
+# running natively on the build platform (no node under QEMU — see header).
+# The target platform's prebuilt native modules are installed explicitly:
+# package-lock.json was generated on macOS and omits linux platform-optional
+# packages (npm/cli#4828), so a locked `npm install` never materializes them
+# regardless of host platform. Explicit pinned installs with --force bypass
+# npm's EBADPLATFORM check (we install arm64 binaries on the x64 build host;
+# they are never executed at build time):
+# - @libsql/linux-{x64,arm64}-musl (issue #79 — libsql ships N-API prebuilds,
+#   replacing native better-sqlite3 which needed a python3/make/g++ build)
+# - @img/sharp-linuxmusl-{x64,arm64} + matching sharp-libvips package
+FROM --platform=$BUILDPLATFORM node:22-alpine AS proddeps
+
+ARG TARGETARCH
 
 # Set production environment
 ENV NODE_ENV=production
@@ -64,22 +88,56 @@ COPY packages/shared/package.json ./packages/shared/
 COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
 
 # Install production dependencies only (excludes devDependencies like TypeScript)
-# This significantly reduces image size
-# Remove the 'prepare' script before install (it runs husky which is a devDependency)
-# Then explicitly install the platform-specific libsql prebuilt binary for
-# Alpine ARM64/x64. libsql ships N-API prebuilds, so no C toolchain is needed
-# (issue #79 — this replaced native better-sqlite3, which required a
-# python3/make/g++ build step and had no Node 24 prebuild).
-RUN apk add --no-cache jq && \
-    jq 'del(.scripts.prepare)' package.json > package.json.tmp && \
-    mv package.json.tmp package.json && \
+# - Remove the 'prepare' script first (it runs husky, a devDependency).
+# - Map Docker's $TARGETARCH (amd64|arm64) to npm/node arch (x64|arm64).
+# - Supplemental install: pin the target-arch native prebuilds to the exact
+#   versions resolved in the installed tree (libsql's own version; sharp's
+#   optionalDependencies pins), --no-save so manifests stay untouched.
+# - The trailing `test -d` lines make the build FAIL LOUDLY if the target
+#   platform's native prebuilds are missing (the old code swallowed that
+#   failure with `|| true` and would ship a broken image).
+RUN NPM_ARCH=$(case "$TARGETARCH" in \
+      amd64) echo x64 ;; \
+      arm64) echo arm64 ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac) && \
+    node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));delete p.scripts.prepare;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n");' && \
     npm install --omit=dev --ignore-scripts && \
-    cd packages/connector && \
-    LIBSQL_VERSION=$(npm ls libsql --json 2>/dev/null | jq -r '.dependencies.libsql.version // .dependencies["@libsql/client"].dependencies.libsql.version // "0.4.7"') && \
-    (npm install "@libsql/linux-arm64-musl@${LIBSQL_VERSION}" --no-save 2>/dev/null || \
-     npm install "@libsql/linux-x64-musl@${LIBSQL_VERSION}" --no-save 2>/dev/null || true) && \
-    cd ../.. && \
-    apk del jq
+    SPECS=$(node -e ' \
+      const arch = process.argv[1]; \
+      const out = []; \
+      const libsql = require("/app/node_modules/libsql/package.json"); \
+      out.push(`@libsql/linux-${arch}-musl@${libsql.version}`); \
+      const sharp = require("/app/node_modules/sharp/package.json"); \
+      for (const name of [`@img/sharp-linuxmusl-${arch}`, `@img/sharp-libvips-linuxmusl-${arch}`]) { \
+        const v = (sharp.optionalDependencies || {})[name]; \
+        if (!v) { console.error(`sharp has no optionalDependency ${name}`); process.exit(1); } \
+        out.push(`${name}@${v}`); \
+      } \
+      console.log(out.join(" ")); \
+    ' "$NPM_ARCH") && \
+    npm install $SPECS --no-save --ignore-scripts --force && \
+    test -d "node_modules/@libsql/linux-${NPM_ARCH}-musl" && \
+    test -d "node_modules/@img/sharp-linuxmusl-${NPM_ARCH}" && \
+    test -d "node_modules/@img/sharp-libvips-linuxmusl-${NPM_ARCH}"
+
+# ============================================
+# Stage 3: Runtime (target platform)
+# ============================================
+# No node/npm execution happens in this stage at build time — only apk and
+# busybox commands, which run fine under QEMU emulation.
+FROM node:22-alpine AS runtime
+
+# Set production environment
+ENV NODE_ENV=production
+
+# Set working directory
+WORKDIR /app
+
+# Copy package manifests + the fully-resolved production node_modules
+# (including workspace symlinks and target-arch native prebuilds) from the
+# proddeps stage.
+COPY --from=proddeps /app ./
 
 # Copy compiled JavaScript from builder stage
 # Only copy dist directories, not source code

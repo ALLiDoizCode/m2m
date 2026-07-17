@@ -34,6 +34,18 @@ export const PaymentRequestSchema = z.object({
    * ignored (fire-and-forget); when false/omitted the response decides accept/reject.
    */
   isTransit: z.boolean().optional(),
+  /**
+   * Sender-chosen ILP execution condition (base64-encoded, 32 bytes) — issue #309.
+   *
+   * Present iff the terminating PREPARE carried a NON-ZERO `executionCondition`.
+   * When present, an accepting node MUST return the matching 32-byte preimage in
+   * {@link PaymentResponseSchema}'s `fulfillment` such that
+   * `sha256(fulfillment) === executionCondition`; otherwise the connector
+   * converts the accept into an F99 REJECT and nothing is recorded as delivered.
+   * Absent for legacy zero-condition traffic, which keeps pre-#309 behavior
+   * end to end.
+   */
+  executionCondition: z.string().optional(),
 });
 export type PaymentRequest = z.infer<typeof PaymentRequestSchema>;
 
@@ -43,6 +55,18 @@ export const PaymentResponseSchema = z.object({
   accept: z.boolean(),
   /** Optional response data (base64) for the fulfill or reject packet */
   data: z.string().optional(),
+  /**
+   * FULFILL preimage (base64-encoded, exactly 32 bytes) — issue #309.
+   *
+   * REQUIRED when the {@link PaymentRequestSchema} carried `executionCondition`
+   * and `accept` is true: the connector enforces
+   * `sha256(fulfillment) === executionCondition` on the local-delivery leg and
+   * converts a missing/mismatching preimage into an F99 REJECT (no value is
+   * recorded as delivered). Ignored when the request carried no
+   * `executionCondition` (legacy path keeps its existing fulfillment
+   * derivation) and when `accept` is false.
+   */
+  fulfillment: z.string().optional(),
   /** Rejection reason (only when accept is false) */
   rejectReason: z
     .object({

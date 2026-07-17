@@ -781,7 +781,7 @@ describe('PacketHandler branch coverage', () => {
           type: PacketType.REJECT,
           code: ILPErrorCode.F99_APPLICATION_ERROR,
           triggeredBy: 'test.connector',
-          message: 'BLS said no',
+          message: 'app said no',
           data: Buffer.alloc(0),
         }),
       };
@@ -792,7 +792,7 @@ describe('PacketHandler branch coverage', () => {
 
       expect(result.type).toBe(PacketType.REJECT);
       const reject = result as ILPRejectPacket;
-      expect(reject.message).toBe('BLS said no');
+      expect(reject.message).toBe('app said no');
     });
 
     it('injects preimage into HTTP FULFILL response when NIP-59 claim present', async () => {

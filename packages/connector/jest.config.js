@@ -65,6 +65,17 @@ module.exports = {
     // `npm run build -w @toon-protocol/mina-zkapp` (or root `npm run build`)
     // before these suites locally.
     '^@toon-protocol/mina-zkapp$': '<rootDir>/../mina-zkapp/dist/index.js',
+    // The published `@toon-protocol/settlement-digest` leaf (Phase 4a of
+    // connector#329) ships ESM-only with an `exports` map that offers no
+    // `require` condition, so Jest's CJS resolver cannot find it. Map the bare
+    // specifier straight to its built entry; `transformIgnorePatterns` below then
+    // lets babel-jest transpile that ESM (and the leaf's own NESTED `@noble/* ^2`)
+    // down to CJS for the test runtime. The connector's OWN top-level
+    // `@noble/* ^1` is untouched — it still resolves via its dual-package
+    // `require` condition to its CJS entry (it is only additionally babel-processed,
+    // which is a no-op for already-CJS output).
+    '^@toon-protocol/settlement-digest$':
+      '<rootDir>/../../node_modules/@toon-protocol/settlement-digest/dist/index.js',
   },
   transform: {
     '^.+\\.ts$': [
@@ -79,5 +90,13 @@ module.exports = {
   // ESM (`"type": "module"`, `export …`); the in-proof lightnet test imports the
   // mina-zkapp `dist`, which requires it, so it must be transpiled rather than
   // ignored (matches the mina-zkapp package's own jest config).
-  transformIgnorePatterns: ['node_modules/(?!(@toon-format|@libsql|mina-fungible-token)/)'],
+  // `@toon-protocol/settlement-digest` (+ `@noble` for the leaf's nested `@noble/* ^2`)
+  // are ESM-only and must be transpiled by babel-jest for the CJS test runtime
+  // (see moduleNameMapper note above). Allow-listing `@noble` also touches the
+  // connector's own `@noble/* ^1`, but that only babel-processes their already-CJS
+  // `require`-condition entry — no behavior change (verified against the rfc9421
+  // HTTP-signature and NIP-59 gift-wrap crypto suites).
+  transformIgnorePatterns: [
+    'node_modules/(?!(@toon-format|@libsql|mina-fungible-token|@toon-protocol/settlement-digest|@noble)/)',
+  ],
 };

@@ -57,6 +57,7 @@ import {
   ConfigLoader,
   ConfigurationError,
   ConnectorNotStartedError,
+  InvalidExecutionConditionError,
 } from '../config/config-loader';
 import { HealthServer } from '../http/health-server';
 import { IlpHttpAdapter, type InboundClaimValidateFn } from '../http/ilp-http-adapter';
@@ -97,7 +98,13 @@ import {
 import { InboundClaimValidator } from '../btp/inbound-claim-validator';
 import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
+import { SelfAnnounceService, type PublishOutcome } from '../discovery/self-announce-service';
+import { planAnnouncePublish } from '../discovery/self-announce-publish';
+import type { NostrEvent } from 'nostr-tools';
 import { hexToBytes } from '@noble/hashes/utils';
+
+/** Round-trip timeout (ms) for a self-announce write PREPARE. */
+const SELF_ANNOUNCE_PREPARE_TIMEOUT_MS = 30_000;
 import { promises as dns } from 'dns';
 // Import package.json for version information
 import packageJson from '../../package.json';
@@ -147,7 +154,7 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _settlementPeers: Map<string, SettlementPeerConfig> = new Map();
   // Persistent peer/route registry (Epic: persistent registry). Mirrors every
   // runtime peer/route mutation to SQLite so they survive a restart instead of
-  // being dropped (the "re-POST the town route" RUNBOOK workaround). Stays null
+  // being dropped (the "re-POST the relay route" RUNBOOK workaround). Stays null
   // when `libsql` is unavailable — registration then degrades to in-memory only.
   private _registryStore: RegistryStore | null = null;
   private _healthStatus: 'healthy' | 'unhealthy' | 'starting' = 'starting';
@@ -178,6 +185,10 @@ export class ConnectorNode implements HealthStatusProvider {
   // derive distinct settlement keys without mutating global env. NEVER logged.
   private readonly _mnemonicOverride?: string;
   private readonly _mnemonicAccountIndex?: number;
+  // Self-announce service (relay#37 / store#22). When `selfAnnounce.enabled` is
+  // set, publishes + refreshes this node's own kind:10032 IlpPeerInfo. Null when
+  // disabled or no signing identity is available.
+  private _selfAnnounceService: SelfAnnounceService | null = null;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -313,7 +324,7 @@ export class ConnectorNode implements HealthStatusProvider {
     // Link BTPServer to PacketHandler for bidirectional forwarding (resolves circular dependency)
     this._packetHandler.setBTPServer(this._btpServer);
 
-    // Configure local delivery if enabled (forwards local packets to agent runtime)
+    // Configure local delivery if enabled (forwards local packets to app handler)
     const localDeliveryEnabled =
       resolvedConfig.localDelivery?.enabled || process.env.LOCAL_DELIVERY_ENABLED === 'true';
     if (localDeliveryEnabled) {
@@ -474,13 +485,13 @@ export class ConnectorNode implements HealthStatusProvider {
    *    - Other combinations → defaults to 'embedded'
    *
    * **Deployment Modes:**
-   * - **embedded**: Connector runs in same process as business logic
+   * - **embedded**: Connector runs in same process as the app
    *   - Use `setPacketHandler()` or `setLocalDeliveryHandler()` for incoming packets
    *   - Use `node.sendPacket()` for outgoing packets
    *   - Admin API typically disabled
    *
    * - **standalone**: Connector runs as separate process/container
-   *   - Incoming packets forwarded via HTTP to `/handle-packet` on external BLS
+   *   - Incoming packets forwarded via HTTP to `/handle-packet` on external app
    *   - Outgoing packets sent via HTTP to `/admin/ilp/send` on connector admin API
    *   - Admin API enabled for external control
    *
@@ -526,7 +537,7 @@ export class ConnectorNode implements HealthStatusProvider {
   /**
    * Check if the connector is running in embedded mode.
    *
-   * Embedded mode means the connector runs in the same process as business logic:
+   * Embedded mode means the connector runs in the same process as the app:
    * - Incoming packets handled via `setPacketHandler()` or `setLocalDeliveryHandler()`
    * - Outgoing packets sent via `node.sendPacket()` library calls
    * - Admin API typically disabled (not needed for in-process communication)
@@ -552,10 +563,10 @@ export class ConnectorNode implements HealthStatusProvider {
    * Check if the connector is running in standalone mode.
    *
    * Standalone mode means the connector runs as a separate process/container:
-   * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external BLS
+   * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external app
    * - Outgoing packets sent via HTTP POST to `/admin/ilp/send` on connector admin API
    * - Admin API enabled for external control
-   * - Local delivery enabled with `handlerUrl` pointing to external BLS
+   * - Local delivery enabled with `handlerUrl` pointing to external app
    *
    * @returns true if deployment mode is 'standalone', false otherwise
    *
@@ -564,7 +575,7 @@ export class ConnectorNode implements HealthStatusProvider {
    * if (node.isStandalone()) {
    *   console.log('Connector running in standalone mode');
    *   console.log('Admin API:', node._config.adminApi?.port);
-   *   console.log('BLS URL:', node._config.localDelivery?.handlerUrl);
+   *   console.log('App URL:', node._config.localDelivery?.handlerUrl);
    * }
    * ```
    */
@@ -576,14 +587,25 @@ export class ConnectorNode implements HealthStatusProvider {
    * Send an ILP Prepare packet through the connector's routing logic.
    * Routes through PacketHandler using RoutingTable longest-prefix matching.
    *
+   * When `params.executionCondition` is provided (sender-chosen condition,
+   * issue #309/PR #310 egress symmetry; toon-meta#145 §3 R4), it rides the
+   * outgoing PREPARE verbatim — the claim/NIP-59 path never overwrites an
+   * existing condition — and the resolved FULFILL carries the terminating
+   * application's `fulfillment` preimage so the caller can verify
+   * `sha256(fulfillment) === executionCondition`.
+   *
    * @param params - Packet parameters (destination, amount, condition, expiry, data)
    * @returns ILP Fulfill or Reject packet
    * @throws ConnectorNotStartedError if connector has not been started
+   * @throws InvalidExecutionConditionError if `executionCondition` is malformed
+   *   (not base64 / not exactly 32 bytes / all-zero)
    */
   async sendPacket(params: SendPacketParams): Promise<ILPFulfillPacket | ILPRejectPacket> {
     if (!this._btpServerStarted) {
       throw new ConnectorNotStartedError();
     }
+
+    const executionCondition = this._decodeExecutionCondition(params.executionCondition);
 
     const packet: ILPPreparePacket = {
       type: PacketType.PREPARE,
@@ -591,6 +613,7 @@ export class ConnectorNode implements HealthStatusProvider {
       amount: params.amount,
       expiresAt: params.expiresAt,
       data: params.data ?? Buffer.alloc(0),
+      ...(executionCondition ? { executionCondition } : {}),
     };
 
     this._logger.info(
@@ -599,6 +622,7 @@ export class ConnectorNode implements HealthStatusProvider {
         destination: params.destination,
         amount: params.amount.toString(),
         expiresAt: params.expiresAt.toISOString(),
+        hasExecutionCondition: !!executionCondition,
       },
       'Sending packet via public API'
     );
@@ -622,6 +646,54 @@ export class ConnectorNode implements HealthStatusProvider {
         data: Buffer.alloc(0),
       } as ILPRejectPacket;
     }
+  }
+
+  /**
+   * Decode and validate a caller-supplied execution condition for
+   * {@link sendPacket} (issue #309/PR #310 egress symmetry).
+   *
+   * Accepts raw bytes or a base64 string; returns `undefined` when absent.
+   * Enforces exactly 32 bytes after decode and rejects an all-zero condition:
+   * all-zero is the wire encoding for "no condition" (the OER codec drops it
+   * on decode and the claim path would replace it with a derived condition),
+   * so it can never ride verbatim — callers wanting legacy behavior must omit
+   * the field instead.
+   *
+   * @throws InvalidExecutionConditionError on malformed input
+   */
+  private _decodeExecutionCondition(
+    condition: Uint8Array | string | undefined
+  ): Uint8Array | undefined {
+    if (condition === undefined) {
+      return undefined;
+    }
+
+    let bytes: Uint8Array;
+    if (typeof condition === 'string') {
+      const decoded = Buffer.from(condition, 'base64');
+      // Round-trip check: Buffer.from(..., 'base64') silently tolerates
+      // invalid input; mirror the admin API's strict base64 validation.
+      if (decoded.toString('base64') !== condition) {
+        throw new InvalidExecutionConditionError('executionCondition must be valid base64');
+      }
+      bytes = new Uint8Array(decoded);
+    } else {
+      bytes = new Uint8Array(condition);
+    }
+
+    if (bytes.length !== 32) {
+      throw new InvalidExecutionConditionError(
+        `executionCondition must be exactly 32 bytes, got ${bytes.length}`
+      );
+    }
+    if (bytes.every((b) => b === 0)) {
+      throw new InvalidExecutionConditionError(
+        'executionCondition must not be all-zero (all-zero means "no condition" on the wire); ' +
+          'omit the field for unconditional packets'
+      );
+    }
+
+    return bytes;
   }
 
   /**
@@ -694,6 +766,187 @@ export class ConnectorNode implements HealthStatusProvider {
       },
       'Mnemonic signing mode active: derived per-chain settlement keys from TOON_MNEMONIC'
     );
+  }
+
+  /**
+   * Resolve the connector's Nostr secret key (NIP-06) for self-announce signing.
+   *
+   * The NIP-06 Nostr key IS the connector's secp256k1 EVM settlement key
+   * (`m/44'/1237'/0'/0/0`), so the self-announcement is signed under the SAME
+   * identity the node settles with — matching how the devnet store apex pubkey
+   * (`f9308a019258…036f9`) is derived. Resolution order:
+   *
+   * 1. The EVM `chainProviders[].keyId` (a raw 0x-hex private key). After
+   *    `_applyMnemonicSigningMode()`, this already holds the mnemonic-derived
+   *    key, so this branch covers both raw-key and mnemonic deploys.
+   * 2. Otherwise derive directly from the mnemonic (env `TOON_MNEMONIC` or the
+   *    test override).
+   *
+   * Returns null (with a warning) when no signing identity is available.
+   *
+   * SECURITY: never logs the key bytes or the mnemonic.
+   */
+  private _resolveNostrSecretKey(): Uint8Array | null {
+    const evmProvider = this._config.chainProviders?.find((p) => p.chainType === 'evm');
+    const keyId = (evmProvider as { keyId?: string } | undefined)?.keyId;
+    if (keyId && /^(0x)?[0-9a-fA-F]{64}$/.test(keyId)) {
+      return hexToBytes(keyId.replace(/^0x/, ''));
+    }
+
+    const mnemonic = this._mnemonicOverride ?? process.env.TOON_MNEMONIC;
+    if (mnemonic) {
+      try {
+        const keys = deriveChainKeysFromMnemonic(mnemonic, this._mnemonicAccountIndex ?? 0);
+        return hexToBytes(keys.evm.privateKey.replace(/^0x/, ''));
+      } catch (err) {
+        this._logger.warn(
+          {
+            event: 'self_announce_key_derive_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'Failed to derive Nostr key for self-announce'
+        );
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Start the self-announce service (relay#37 / store#22) when configured.
+   *
+   * Opt-in via `selfAnnounce.enabled`. Builds the kind:10032 IlpPeerInfo from
+   * this node's own routes/chainProviders/endpoints, signs with the NIP-06 key,
+   * and publishes + refreshes it THROUGH this connector's own routing via
+   * {@link _publishAnnouncement}. Best-effort: any failure logs and skips so
+   * startup is never blocked.
+   */
+  private _startSelfAnnounce(): void {
+    const selfAnnounce = this._config.selfAnnounce;
+    if (!selfAnnounce?.enabled) {
+      return;
+    }
+
+    const secretKey = this._resolveNostrSecretKey();
+    if (!secretKey) {
+      this._logger.warn(
+        { event: 'self_announce_no_identity' },
+        'selfAnnounce.enabled but no Nostr signing identity (set TOON_MNEMONIC or an EVM keyId); not announcing'
+      );
+      return;
+    }
+
+    try {
+      this._selfAnnounceService = new SelfAnnounceService({
+        config: this._config,
+        selfAnnounce,
+        secretKey,
+        // Route the write through THIS connector's own pipe: a locally-terminated
+        // announceTo delivers free; a remote announceTo pays from our channel.
+        publish: (event) => this._publishAnnouncement(event),
+        // Runtime-only announce fields: the EVM TokenNetwork contract is an
+        // on-chain registry lookup, so it comes from the live providers rather
+        // than config (Solana/Mina channel params are config-derived in the
+        // builder). Resolved lazily by the service and cached.
+        resolveTokenNetworks: () => this._resolveAnnounceTokenNetworks(),
+        logger: this._logger,
+      });
+      this._selfAnnounceService.start();
+    } catch (err) {
+      this._selfAnnounceService = null;
+      this._logger.warn(
+        {
+          event: 'self_announce_start_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start self-announce service; continuing without it'
+      );
+    }
+  }
+
+  /**
+   * Resolve the runtime-only `tokenNetworks` announce entries from the live
+   * chain providers: for each EVM provider, the TokenNetwork contract address
+   * looked up on-chain from the configured TokenNetworkRegistry (toon-client#378
+   * consumes it as `tokenNetworks[chainId]`). Solana/Mina entries are
+   * config-derived inside the announce builder and need no runtime resolution.
+   *
+   * Keyed by the providers' `chainId` — the exact identifiers the announcement
+   * lists in `supportedChains` (both derive from `config.chainProviders`).
+   * Per-provider failures are logged and skipped (a chain whose RPC is down
+   * must not blank the whole map); an empty result is fine — the announcement
+   * simply omits those entries.
+   */
+  private async _resolveAnnounceTokenNetworks(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    const providers = this._chainRegistry?.getAllProviders() ?? [];
+    for (const provider of providers) {
+      if (!(provider instanceof EVMPaymentChannelProvider)) {
+        continue;
+      }
+      try {
+        const { tokenNetworkAddress } = await provider.getSigningContext();
+        if (tokenNetworkAddress) {
+          out[provider.chainId] = tokenNetworkAddress;
+        }
+      } catch (err) {
+        this._logger.warn(
+          {
+            event: 'self_announce_token_network_lookup_failed',
+            chainId: provider.chainId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'Failed to resolve TokenNetwork contract for announce (entry omitted)'
+        );
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Publish a signed kind:10032 announcement THROUGH this connector's own
+   * routing (relay#37 / store#22). The same write path any client uses:
+   *
+   * - `announceTo` resolves to a LOCAL terminated route (this connector fronts
+   *   the relay) → `sendPacket` with amount `0` → routed to this node's local
+   *   delivery handler (the route's `HttpProxyHandler`), which reverse-proxies
+   *   the inner `POST /write` to the route's resolved upstream. Local delivery
+   *   returns before the forward/claim path, so it is **free**.
+   * - `announceTo` is REMOTE (forwarded) → `sendPacket` with amount =
+   *   `announcePrice` (> 0) → forwarded to the next-hop peer, where the forward
+   *   path attaches a per-packet settlement claim funded from THIS connector's
+   *   own channel. The connector **pays for its own write**.
+   *
+   * `routeTerminationRegistry.match(announceTo)` is the local-vs-remote signal;
+   * `planAnnouncePublish` turns it into the `sendPacket` amount + envelope. The
+   * write is delivered through `sendPacket`, never a raw POST to a private port.
+   */
+  private async _publishAnnouncement(event: NostrEvent): Promise<PublishOutcome> {
+    const selfAnnounce = this._config.selfAnnounce!;
+    const announceTo = selfAnnounce.announceTo;
+    const isLocallyTerminated = this._routeTerminationRegistry.match(announceTo) !== undefined;
+
+    const plan = planAnnouncePublish({
+      announceTo,
+      event,
+      isLocallyTerminated,
+      ...(selfAnnounce.announcePrice ? { remotePriceAtomic: selfAnnounce.announcePrice } : {}),
+    });
+
+    const expiresAt = new Date(Date.now() + SELF_ANNOUNCE_PREPARE_TIMEOUT_MS);
+    const response = await this.sendPacket({
+      destination: plan.destination,
+      amount: plan.amount,
+      expiresAt,
+      data: plan.data,
+    });
+
+    if (response.type === PacketType.FULFILL) {
+      return { mode: plan.mode, ok: true };
+    }
+    const reject = response as ILPRejectPacket;
+    return { mode: plan.mode, ok: false, detail: `${reject.code}: ${reject.message ?? ''}`.trim() };
   }
 
   /**
@@ -1771,7 +2024,7 @@ export class ConnectorNode implements HealthStatusProvider {
       }
 
       // Replay any runtime-added peers/routes from a previous run so they
-      // survive this restart (instead of the "re-POST the town route" RUNBOOK
+      // survive this restart (instead of the "re-POST the relay route" RUNBOOK
       // recovery). The store itself was opened earlier (before the admin server)
       // so the admin HTTP surface shares it. Best-effort.
       await this._reconcileRegistry();
@@ -1827,6 +2080,13 @@ export class ConnectorNode implements HealthStatusProvider {
           'Payment channel creation completed'
         );
       }
+
+      // Self-announce (relay#37 / store#22): publish + refresh this node's own
+      // kind:10032 IlpPeerInfo so its apex routes are discoverable out of band.
+      // Started last (after the BTP/HTTP/admin surfaces are up) so the
+      // announcement reflects a fully-running node. Best-effort: a build/key
+      // failure logs and skips rather than aborting startup.
+      this._startSelfAnnounce();
 
       // Update health status to healthy after all components started
       this._updateHealthStatus();
@@ -1905,6 +2165,12 @@ export class ConnectorNode implements HealthStatusProvider {
     );
 
     try {
+      // Stop the self-announce refresh loop first (clears its unref'd timer).
+      if (this._selfAnnounceService) {
+        this._selfAnnounceService.stop();
+        this._selfAnnounceService = null;
+      }
+
       // Stop settlement monitor FIRST to stop polling the ledger during drain.
       // The executor already unsubscribes in its own stop(), so no new events fire.
       if (this._settlementMonitor) {
@@ -2882,7 +3148,7 @@ export class ConnectorNode implements HealthStatusProvider {
    *     refresh of the mirror — it never re-applies them.
    *  2. Replay every `source='runtime'` peer/route that isn't already present.
    *     These are the admin-API additions from a previous run; without this they
-   *     would be lost on restart (the "re-POST the town route" RUNBOOK step).
+   *     would be lost on restart (the "re-POST the relay route" RUNBOOK step).
    *
    * Best-effort: if `libsql` is unavailable the store stays null and the
    * connector keeps today's in-memory-only behavior.

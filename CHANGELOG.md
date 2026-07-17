@@ -5,6 +5,121 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.33.0](https://github.com/toon-protocol/connector/compare/v3.32.0...v3.33.0) (2026-07-16)
+
+### Features
+
+- **discovery:** announce per-chain tokenNetworks + preferredTokens in kind:10032 ([#331](https://github.com/toon-protocol/connector/issues/331)) ([e0fec99](https://github.com/toon-protocol/connector/commit/e0fec991cbe43895f36be47cb989a64d9a4465ff)), closes [toon-client#378](https://github.com/toon-protocol/toon-client/issues/378) [toon-client#378](https://github.com/toon-protocol/toon-client/issues/378)
+- **settlement:** add settlement-digest leaf + v2 verify helper, unwired ([#330](https://github.com/toon-protocol/connector/issues/330)) [skip release] ([982965d](https://github.com/toon-protocol/connector/commit/982965da6561f0d52d9e9a7af1d100f162ec3ad3))
+
+## [3.32.0](https://github.com/toon-protocol/connector/compare/v3.31.0...v3.32.0) (2026-07-16)
+
+### Features
+
+- **contracts:** v2 EIP-712 claim digest with chainId/address domain separation (refs [#324](https://github.com/toon-protocol/connector/issues/324)) ([#325](https://github.com/toon-protocol/connector/issues/325)) ([a67a039](https://github.com/toon-protocol/connector/commit/a67a039a5d2246aa12ecdb542a520b815d3d011b)), closes [finding-#1](https://github.com/toon-protocol/finding-/issues/1)
+
+## [3.31.0](https://github.com/toon-protocol/connector/compare/v3.30.2...v3.31.0) (2026-07-13)
+
+### Features
+
+- **contracts:** production chain-B rolling-swap settlement contract ([#320](https://github.com/toon-protocol/connector/issues/320)) ([6f4f435](https://github.com/toon-protocol/connector/commit/6f4f4352835aecef26dce98a96312dea8dbd717a)), closes [swap#59](https://github.com/toon-protocol/swap/issues/59) [swap#59](https://github.com/toon-protocol/swap/issues/59) [connector#317](https://github.com/toon-protocol/connector/issues/317)
+
+## [3.30.2](https://github.com/toon-protocol/connector/compare/v3.30.1...v3.30.2) (2026-07-13)
+
+### Bug Fixes
+
+- **contracts:** regenerate anvil-state.json for anvil 1.7.1 ([#318](https://github.com/toon-protocol/connector/issues/318)) ([3263053](https://github.com/toon-protocol/connector/commit/32630535b3a8d140c5861379b198ebb7d0682b19))
+
+## [3.30.1](https://github.com/toon-protocol/connector/compare/v3.30.0...v3.30.1) (2026-07-13)
+
+### Bug Fixes
+
+- **connector:** correct stale devnet relay URL in self-announce docs ([#307](https://github.com/toon-protocol/connector/issues/307)) ([820c122](https://github.com/toon-protocol/connector/commit/820c1229e04f290d9c0900369ac7bccabb651442)), closes [#305](https://github.com/toon-protocol/connector/issues/305)
+- **test:** accept both NIP-01 JSON and TOON-string EVENT payloads in WS read-back probe ([#303](https://github.com/toon-protocol/connector/issues/303)) ([7e2c627](https://github.com/toon-protocol/connector/commit/7e2c62771d7660d2af2e1082087f98b09c167e45)), closes [relay#24](https://github.com/toon-protocol/relay/issues/24) [#301](https://github.com/toon-protocol/connector/issues/301)
+
+## [3.30.0](https://github.com/toon-protocol/connector/compare/v3.29.1...v3.30.0) (2026-07-12)
+
+### Features
+
+- **core:** sendPacket accepts sender-chosen executionCondition ([#314](https://github.com/toon-protocol/connector/issues/314)) ([dc90a1c](https://github.com/toon-protocol/connector/commit/dc90a1c71cb6f1d19a4047669fa0a912ff300ba8)), closes [#310](https://github.com/toon-protocol/connector/issues/310) [toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145) [#310](https://github.com/toon-protocol/connector/issues/310) [toon-protocol/swap#56](https://github.com/toon-protocol/swap/issues/56)
+
+## [3.29.1](https://github.com/toon-protocol/connector/compare/v3.29.0...v3.29.1) (2026-07-12)
+
+### Bug Fixes
+
+- **docker:** stop running node under QEMU in multi-arch builds (arm64 SIGILL) ([d99dc6f](https://github.com/toon-protocol/connector/commit/d99dc6f18193b7cc7bad88ec4890c62c22d07f1c)), closes [npm/cli#4828](https://github.com/npm/cli/issues/4828)
+
+## [3.29.0](https://github.com/toon-protocol/connector/compare/v3.28.6...v3.29.0) (2026-07-12)
+
+### Features
+
+- **local-delivery:** end-to-end sender-chosen execution conditions through local delivery ([82dc623](https://github.com/toon-protocol/connector/commit/82dc623fe5b5c028ab5842eb0fbd5a7bc52e2082)), closes [#309](https://github.com/toon-protocol/connector/issues/309) [toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145) [pre-#309](https://github.com/toon-protocol/pre-/issues/309) [toon-client#350](https://github.com/toon-protocol/toon-client/issues/350)
+
+### Bug Fixes
+
+- **reject-map:** map swap-mill stale_rate reject to retryable T99 ([c5e0771](https://github.com/toon-protocol/connector/commit/c5e077108a9e86ccf08654ade32a1b99955d4922)), closes [toon-protocol/swap#53](https://github.com/toon-protocol/swap/issues/53) [toon-protocol/toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145)
+
+## [3.28.6](https://github.com/toon-protocol/connector/compare/v3.28.5...v3.28.6) (2026-07-12)
+
+### Bug Fixes
+
+- **cli:** unbreak npm publish — pin inquirer to CJS v8 (ERR_REQUIRE_ESM in publish gate) ([8d3c3f9](https://github.com/toon-protocol/connector/commit/8d3c3f944f471204e8a311cd0e7209787f1e54d0)), closes [toon-protocol/toon-meta#145](https://github.com/toon-protocol/toon-meta/issues/145) [#310](https://github.com/toon-protocol/connector/issues/310)
+
+## [3.28.5](https://github.com/toon-protocol/connector/compare/v3.28.4...v3.28.5) (2026-07-02)
+
+### Bug Fixes
+
+- **discovery:** emit schema-compliant settlementAddresses keys in kind:10032 announces ([#290](https://github.com/toon-protocol/connector/issues/290)) ([d1ade55](https://github.com/toon-protocol/connector/commit/d1ade557f22fc4c077b0ac6de7dca47aa2892ff8)), closes [#289](https://github.com/toon-protocol/connector/issues/289) [toon-protocol/toon#56](https://github.com/toon-protocol/toon/issues/56)
+
+## [3.28.4](https://github.com/toon-protocol/connector/compare/v3.28.3...v3.28.4) (2026-07-01)
+
+### Bug Fixes
+
+- **devnet:** cap solana ledger size + rotate validator logs to prevent disk-full halts ([#276](https://github.com/toon-protocol/connector/issues/276)) ([3d8ae72](https://github.com/toon-protocol/connector/commit/3d8ae722dad544c52670bd64a1371d6a7d553dc9)), closes [#255](https://github.com/toon-protocol/connector/issues/255)
+
+## [3.28.3](https://github.com/toon-protocol/connector/compare/v3.28.2...v3.28.3) (2026-06-26)
+
+### Code Refactoring
+
+- rename legacy `town` node-type vocab to `relay` ([#273](https://github.com/toon-protocol/connector/issues/273)) ([1a751a7](https://github.com/toon-protocol/connector/commit/1a751a7cfda44d5eff50dc02d17f0076adce2886)), closes [#267](https://github.com/toon-protocol/connector/issues/267) [#264](https://github.com/toon-protocol/connector/issues/264)
+
+## [3.28.2](https://github.com/toon-protocol/connector/compare/v3.28.1...v3.28.2) (2026-06-26)
+
+### Code Refactoring
+
+- rename legacy `mill` node-type vocabulary to `swap` ([#272](https://github.com/toon-protocol/connector/issues/272)) ([c08f57d](https://github.com/toon-protocol/connector/commit/c08f57ded0c8123208815ac42d4a9e58d6b3c1db)), closes [#268](https://github.com/toon-protocol/connector/issues/268)
+
+## [3.28.1](https://github.com/toon-protocol/connector/compare/v3.28.0...v3.28.1) (2026-06-26)
+
+### Bug Fixes
+
+- **probe:** recover content.ilpAddress from TOON-text payloads ([#274](https://github.com/toon-protocol/connector/issues/274)) ([01bb397](https://github.com/toon-protocol/connector/commit/01bb397f2e27d61ef78552b85b3626cbc75061e6))
+
+## [3.28.0](https://github.com/toon-protocol/connector/compare/v3.27.0...v3.28.0) (2026-06-26)
+
+### Features
+
+- **discovery:** connector self-announce (kind:10032 IlpPeerInfo) ([#265](https://github.com/toon-protocol/connector/issues/265)) ([4436178](https://github.com/toon-protocol/connector/commit/44361783b7457675ac8ca7a1958c120022d76b5e)), closes [toon-protocol/relay#37](https://github.com/toon-protocol/relay/issues/37) [toon-protocol/store#22](https://github.com/toon-protocol/store/issues/22) [#259](https://github.com/toon-protocol/connector/issues/259)
+- **probe:** kind:10032 self-announce discovery acceptance probe ([#266](https://github.com/toon-protocol/connector/issues/266)) ([6910f04](https://github.com/toon-protocol/connector/commit/6910f040a999f114ff3c3ac595770e3b11bc2beb)), closes [relay#37](https://github.com/toon-protocol/relay/issues/37) [store#22](https://github.com/toon-protocol/store/issues/22) [toon-meta#69](https://github.com/toon-protocol/toon-meta/issues/69) [store#22](https://github.com/toon-protocol/store/issues/22)
+
+## [3.27.0](https://github.com/toon-protocol/connector/compare/v3.26.1...v3.27.0) (2026-06-24)
+
+### Features
+
+- **probe:** add store paid round-trip acceptance probe ([#258](https://github.com/toon-protocol/connector/issues/258)) ([ab5df02](https://github.com/toon-protocol/connector/commit/ab5df02ba87742a4f7fcb5bcd1776e179dd15ad8))
+
+## [3.26.1](https://github.com/toon-protocol/connector/compare/v3.26.0...v3.26.1) (2026-06-24)
+
+### Bug Fixes
+
+- **devnet:** bound Solana test-validator ledger to stop it filling the box disk ([#255](https://github.com/toon-protocol/connector/issues/255)) ([9d3b3e8](https://github.com/toon-protocol/connector/commit/9d3b3e8642de85319f2e0dbedb0e709e8726d6db))
+
+## [3.26.0](https://github.com/toon-protocol/connector/compare/v3.25.1...v3.26.0) (2026-06-24)
+
+### Features
+
+- multi-node Mina-lightnet provisioning + faucet native-MINA & USDC drip ([#254](https://github.com/toon-protocol/connector/issues/254)) ([0d93a41](https://github.com/toon-protocol/connector/commit/0d93a4112c43607671521bb4ee5ce21d2388ff9e)), closes [#235](https://github.com/toon-protocol/connector/issues/235) [#236](https://github.com/toon-protocol/connector/issues/236) [#240](https://github.com/toon-protocol/connector/issues/240)
+
 ## [3.25.1](https://github.com/toon-protocol/connector/compare/v3.25.0...v3.25.1) (2026-06-23)
 
 ### Bug Fixes

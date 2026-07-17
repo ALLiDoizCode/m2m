@@ -23,6 +23,7 @@ import {
   LocalDeliveryConfig,
   ChainProviderConfigEntry,
   TransportConfig,
+  SelfAnnounceConfig,
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
@@ -58,6 +59,19 @@ export class ConnectorNotStartedError extends Error {
   constructor(message: string = 'Connector is not started. Call start() before sendPacket().') {
     super(message);
     this.name = 'ConnectorNotStartedError';
+  }
+}
+
+/**
+ * Error thrown when `SendPacketParams.executionCondition` is malformed:
+ * not valid base64, not exactly 32 bytes after decode, or all-zero
+ * (all-zero is the wire encoding for "no condition" — omit the field instead).
+ * Thrown synchronously by `ConnectorNode.sendPacket()` before any packet is sent.
+ */
+export class InvalidExecutionConditionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidExecutionConditionError';
   }
 }
 
@@ -211,6 +225,9 @@ export class ConfigLoader {
       chainProviders: rawConfig.chainProviders as ChainProviderConfigEntry[] | undefined,
       deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
       nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
+      // relay#37 / store#22: opt-in kind:10032 self-announce. Passed through
+      // unchanged; the SelfAnnounceService validates required fields at start.
+      selfAnnounce: rawConfig.selfAnnounce as SelfAnnounceConfig | undefined,
       transport,
     };
 

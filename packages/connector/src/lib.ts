@@ -5,7 +5,12 @@
  */
 
 import { ConnectorNode } from './core/connector-node';
-import { ConfigLoader, ConfigurationError, ConnectorNotStartedError } from './config/config-loader';
+import {
+  ConfigLoader,
+  ConfigurationError,
+  ConnectorNotStartedError,
+  InvalidExecutionConditionError,
+} from './config/config-loader';
 import { createLogger } from './utils/logger';
 import { RoutingTable } from './routing/routing-table';
 import { PacketHandler } from './core/packet-handler';
@@ -27,6 +32,7 @@ import {
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
+  validateFulfillment,
 } from './core/payment-handler';
 import { IlpSendHandler, validateIlpSendRequest } from './http/ilp-send-handler';
 
@@ -36,6 +42,7 @@ export {
   ConfigLoader,
   ConfigurationError,
   ConnectorNotStartedError,
+  InvalidExecutionConditionError,
   RoutingTable,
   PacketHandler,
   BTPServer,
@@ -56,6 +63,7 @@ export {
   generatePaymentId,
   mapRejectCode,
   validateResponseData,
+  validateFulfillment,
   // ILP send handler
   IlpSendHandler,
   validateIlpSendRequest,

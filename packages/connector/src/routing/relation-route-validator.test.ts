@@ -13,13 +13,13 @@ describe('deriveLocalPrefixes', () => {
     const routes = [
       { prefix: 'g.connector', nextHop: 'g.connector' },
       { prefix: 'g.local', nextHop: 'local' },
-      { prefix: 'g.connector.town', nextHop: 'town' },
+      { prefix: 'g.connector.relay', nextHop: 'relay' },
     ];
     expect(deriveLocalPrefixes(routes, 'g.connector')).toEqual(['g.connector', 'g.local']);
   });
 
   it('returns empty when nothing terminates locally', () => {
-    const routes = [{ prefix: 'g.connector.town', nextHop: 'town' }];
+    const routes = [{ prefix: 'g.connector.relay', nextHop: 'relay' }];
     expect(deriveLocalPrefixes(routes, 'g.connector')).toEqual([]);
   });
 });
@@ -28,15 +28,15 @@ describe('validateRelationRoute', () => {
   const self = ['g.connector'];
 
   it('accepts a child route under the connector address', () => {
-    expect(validateRelationRoute('child', self, ['g.connector.town'])).toEqual({ ok: true });
+    expect(validateRelationRoute('child', self, ['g.connector.relay'])).toEqual({ ok: true });
   });
 
   it('rejects a child route not under the connector address', () => {
-    const result = validateRelationRoute('child', self, ['g.other.town']);
+    const result = validateRelationRoute('child', self, ['g.other.relay']);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toContain(
-        "prefix 'g.other.town' must be under the connector's own address"
+        "prefix 'g.other.relay' must be under the connector's own address"
       );
     }
   });
@@ -67,25 +67,25 @@ describe('validateRelationRoute', () => {
   });
 
   it('validates every route prefix, not just the first', () => {
-    const result = validateRelationRoute('child', self, ['g.connector.town', 'g.other.mill']);
+    const result = validateRelationRoute('child', self, ['g.connector.relay', 'g.other.swap']);
     expect(result.ok).toBe(false);
   });
 });
 
 describe('deriveDefaultChildRoute', () => {
   it('derives <self>.<peerId> for a child with no explicit route', () => {
-    expect(deriveDefaultChildRoute('child', ['g.connector'], 'town')).toEqual({
-      prefix: 'g.connector.town',
+    expect(deriveDefaultChildRoute('child', ['g.connector'], 'relay')).toEqual({
+      prefix: 'g.connector.relay',
       priority: 0,
     });
   });
 
   it('returns null for non-child relations', () => {
-    expect(deriveDefaultChildRoute('peer', ['g.connector'], 'town')).toBeNull();
-    expect(deriveDefaultChildRoute('parent', ['g.connector'], 'town')).toBeNull();
+    expect(deriveDefaultChildRoute('peer', ['g.connector'], 'relay')).toBeNull();
+    expect(deriveDefaultChildRoute('parent', ['g.connector'], 'relay')).toBeNull();
   });
 
   it('returns null when no self-prefix is known', () => {
-    expect(deriveDefaultChildRoute('child', [], 'town')).toBeNull();
+    expect(deriveDefaultChildRoute('child', [], 'relay')).toBeNull();
   });
 });

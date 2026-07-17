@@ -120,7 +120,7 @@ describe('Environment Validator — Deployment Mode Validation', () => {
         deploymentMode: 'embedded',
         localDelivery: {
           enabled: true,
-          handlerUrl: 'http://bls:8080',
+          handlerUrl: 'http://app:8080',
         },
       };
 
@@ -207,7 +207,7 @@ describe('Environment Validator — Deployment Mode Validation', () => {
         deploymentMode: 'standalone',
         localDelivery: {
           enabled: true,
-          handlerUrl: 'http://bls:8080',
+          handlerUrl: 'http://app:8080',
         },
         adminApi: {
           enabled: true,
@@ -225,7 +225,7 @@ describe('Environment Validator — Deployment Mode Validation', () => {
         deploymentMode: 'standalone',
         localDelivery: {
           enabled: true,
-          handlerUrl: 'http://bls:8080',
+          handlerUrl: 'http://app:8080',
         },
         adminApi: {
           enabled: false,
@@ -300,7 +300,7 @@ describe('Environment Validator — Deployment Mode Validation', () => {
         deploymentMode: 'embedded',
         localDelivery: {
           enabled: true,
-          handlerUrl: 'http://bls:8080',
+          handlerUrl: 'http://app:8080',
         },
       };
 
@@ -316,7 +316,7 @@ describe('Environment Validator — Deployment Mode Validation', () => {
         deploymentMode: 'embedded',
         localDelivery: {
           enabled: true,
-          handlerUrl: 'http://bls:8080',
+          handlerUrl: 'http://app:8080',
         },
       };
 
@@ -332,7 +332,7 @@ describe('Environment Validator — Deployment Mode Validation', () => {
         deploymentMode: 'embedded',
         localDelivery: {
           enabled: true,
-          handlerUrl: 'http://bls:8080',
+          handlerUrl: 'http://app:8080',
         },
       };
 

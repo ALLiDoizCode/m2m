@@ -14,6 +14,23 @@
 #   make infra-up      Start all chains (EVM + Solana + Mina)
 #   make infra-down    Stop all chains (EVM + Solana + Mina; preserves volumes)
 
+# ── Shared json-file log rotation for the long-running dev-chain services ──
+# Incident 2026-06-26: on the self-hosted devnet box the solana-validator wrote
+# a 121 MB UNROTATED Docker json log (it prints a status line ~30x/sec) on top
+# of an oversized rocksdb ledger, which helped fill the box disk to 100%. A full
+# disk silently FREEZES Solana block production (slot stops advancing) while
+# /health still returns "ok", so faucet/settlement writes hang then 500
+# ("Transaction was not confirmed in 30s") with no obvious cause. anvil, faucet
+# and mina-lightnet are similarly chatty. Cap every such service's container log
+# at 30 MB total (10 MB x 3 rotated files) so logs can never fill /var/lib/docker.
+# (The solana ledger itself is bounded separately by --limit-ledger-size in
+# infra/solana/entrypoint.sh — the two together are the durable disk-full fix.)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
 services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Anvil - Local Ethereum Node with Auto-Deployed Contracts
@@ -69,6 +86,7 @@ services:
     ports:
       - '8545:8545'
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test:
         [
@@ -84,6 +102,9 @@ services:
   # Token Faucet - Provides ETH and USDC tokens for testing
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   faucet:
+    # Build context is the repo ROOT (not packages/faucet): the image builds the
+    # mina-zkapp ESM bundle for the Mina USDC admin-mint path, so the Dockerfile
+    # COPYs packages/mina-zkapp + packages/faucet. See packages/faucet/Dockerfile.
     build:
       # Build context is the repo ROOT (not packages/faucet): the multi-stage
       # Dockerfile compiles the mina-zkapp ESM bundle from packages/mina-zkapp/
@@ -135,6 +156,19 @@ services:
       MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
       MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
 
+      # ── Mina USDC admin-mint (o1js zk-proving) ──
+      # When MINA_USDC_ADMIN_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT are
+      # all set, the /api/mina/request route ALSO admin-mints USDC (compiling the
+      # UsdcChannelToken + FungibleTokenAdmin circuits once, ~6s, on the first
+      # mint). MINA_USDC_ADMIN_KEY is the FUNDED mint-authority base58 PRIVATE key
+      # (a SECRET — pass through from the host env, never hardcoded). When unset,
+      # the route keeps dripping native MINA only. Reuses MINA_GRAPHQL_URL above.
+      MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-}
+      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
+      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
+      MINA_USDC_AMOUNT: ${MINA_USDC_AMOUNT:-1000}
+      MINA_TX_FEE: ${MINA_TX_FEE:-}
+
     volumes:
       # Committed throwaway devnet treasury authority (mint authority + USDC
       # source). Read-only; only present/used under the solana profile.
@@ -149,6 +183,7 @@ services:
         condition: service_healthy
         required: false
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test:
         ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://localhost:3500/health || exit 1']
@@ -188,6 +223,16 @@ services:
     security_opt:
       - seccomp=unconfined
     restart: unless-stopped
+    # Bounded json-file logs (10m x 3 = 30 MB) so a chatty or crash-looping
+    # validator can't fill the box disk via /var/lib/docker. The validator was
+    # observed writing a 121 MB UNROTATED log; the prior 50m x 3 cap (~150 MB)
+    # still allowed that, so this tightens it to a true 30 MB. The ledger itself
+    # is bounded separately by --limit-ledger-size in entrypoint.sh. See the
+    # x-logging anchor at the top of this file for the full incident note.
+    logging: *default-logging
+    # NB: /health returning "ok" only proves RPC is up — it does NOT prove the
+    # validator is still producing blocks. A disk-full validator freezes its slot
+    # yet stays "healthy" here; monitor getSlot advancing (and disk) out-of-band.
     healthcheck:
       test: ['CMD-SHELL', 'curl -sf http://localhost:8899/health | grep -q ok']
       interval: 10s
@@ -214,6 +259,7 @@ services:
         limits:
           memory: 8g
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ['CMD-SHELL', 'curl -sf http://localhost:8181/list-acquired-accounts || exit 1']
       interval: 15s
@@ -222,21 +268,21 @@ services:
       start_period: 120s
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # Standalone Mode E2E — 2 connector containers + 2 BLS containers
+  # Standalone Mode E2E — 2 connector containers + 2 app containers
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Proves the connector Docker image boots with deploymentMode: standalone,
   # peers over BTP across the compose network, forwards packets via
-  # /admin/ilp/send, and delivers to a BLS over HTTP /handle-packet.
+  # /admin/ilp/send, and delivers to an app over HTTP /handle-packet.
   # Only the admin API ports are published to the host so the test harness
   # can drive assertions.
-  standalone-bls1:
+  standalone-app1:
     image: node:22-alpine
     profiles: [standalone-e2e]
-    command: ['node', '/app/bls.js']
+    command: ['node', '/app/app.js']
     environment:
       PORT: '3100'
     volumes:
-      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+      - ./scripts/standalone-e2e/app.js:/app/app.js:ro
     ports:
       - '127.0.0.1:13101:3100'
     networks:
@@ -249,14 +295,14 @@ services:
       retries: 5
       start_period: 5s
 
-  standalone-bls2:
+  standalone-app2:
     image: node:22-alpine
     profiles: [standalone-e2e]
-    command: ['node', '/app/bls.js']
+    command: ['node', '/app/app.js']
     environment:
       PORT: '3100'
     volumes:
-      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+      - ./scripts/standalone-e2e/app.js:/app/app.js:ro
     ports:
       - '127.0.0.1:13102:3100'
     networks:
@@ -284,7 +330,7 @@ services:
       - '127.0.0.1:18081:8081' # admin API
       - '127.0.0.1:18080:8080' # health
     depends_on:
-      standalone-bls1:
+      standalone-app1:
         condition: service_healthy
     networks:
       - standalone_net
@@ -304,29 +350,29 @@ services:
       - '127.0.0.1:28081:8081' # admin API
       - '127.0.0.1:28080:8080' # health
     depends_on:
-      standalone-bls2:
+      standalone-app2:
         condition: service_healthy
     networks:
       - standalone_net
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # Tier-3 admin-API allowlist demo — BLS + connector in separate
+  # Tier-3 admin-API allowlist demo — app + connector in separate
   # containers on one compose network. Admin port is NOT published to
-  # the host. BLS reaches admin API via compose DNS; the connector
-  # accepts the call because the BLS's source IP falls in the docker
+  # the host. The app reaches admin API via compose DNS; the connector
+  # accepts the call because the app's source IP falls in the docker
   # bridge CIDR allowlist.
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  standalone-allowlist-bls:
+  standalone-allowlist-app:
     image: node:22-alpine
     profiles: [standalone-allowlist]
-    command: ['node', '/app/bls.js']
+    command: ['node', '/app/app.js']
     environment:
       PORT: '3100'
       CONNECTOR_ADMIN_URL: http://standalone-allowlist-connector:8081
     volumes:
-      - ./scripts/standalone-e2e/bls.js:/app/bls.js:ro
+      - ./scripts/standalone-e2e/app.js:/app/app.js:ro
     ports:
-      # Only the BLS is reachable from the host (test harness drives it).
+      # Only the app is reachable from the host (test harness drives it).
       # The connector's admin port is intentionally NOT published.
       - '127.0.0.1:13401:3100'
     networks:
@@ -353,88 +399,10 @@ services:
     # Admin API port (8081) is intentionally NOT in `ports:` — the allowlist
     # is a defense-in-depth layer on TOP of not publishing, not a replacement.
     depends_on:
-      standalone-allowlist-bls:
+      standalone-allowlist-app:
         condition: service_healthy
     networks:
       - standalone_allowlist_net
-
-  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # App behind the connector (issue #221) — the "hello-world" of deploying an
-  # app behind the connector locally. One `make app-up` brings up a standalone
-  # connector (paid reverse proxy) + an oblivious relay (app) + anvil + faucet.
-  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # AC1: this profile runs connector + app + anvil + faucet.
-  # AC2: the app is reachable ONLY through the connector for paid writes
-  #      (its write port is NOT published); free reads stay on the app's
-  #      Nostr WS read port (published to 127.0.0.1).
-  #
-  # All four services live on the compose DEFAULT network (no `networks:` key),
-  # exactly like anvil + faucet above, so the connector can dial `anvil:8545`,
-  # `faucet:3500`, and `app:3100` by service name. Only `connector` (POST
-  # /ilp) and the app's WS read port are published to the host.
-  #
-  # NOTE: the oblivious relay image does NOT live in this repo (it is built from
-  # the separate relay repo, published as ghcr.io/toon-protocol/relay:latest).
-  # Override the tag via `RELAY_IMAGE` (e.g. pin a `sha-…` tag). The full AC3 paid
-  # round-trip runs by default against the published image under
-  # APP_E2E=1.
-  connector:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: connector:standalone-e2e
-    profiles: [app]
-    environment:
-      CONFIG_FILE: /app/config/connector.yaml
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-    volumes:
-      - ./scripts/app/connector.yaml:/app/config/connector.yaml:ro
-    ports:
-      # ONLY the ILP-over-HTTP edge (POST /ilp, RFC-0035) is published, and
-      # only to loopback. The admin API (8081) is intentionally NOT published —
-      # it binds inside the container and is gated by `allowedIPs` in the config.
-      - '127.0.0.1:3000:3000' # POST /ilp edge (paid writes enter here)
-      - '127.0.0.1:8080:8080' # health
-    depends_on:
-      anvil:
-        condition: service_healthy
-      faucet:
-        condition: service_healthy
-
-  # The oblivious app — relay#26 "oblivious mode" published image. Contract pinned
-  # from relay#24 (store/read) and verified against the real image. Its entrypoint
-  # is the `relay` CLI (dist/cli.js), which runs as a standalone oblivious
-  # read/write relay out of the box. Its paid-write HTTP store port (3100,
-  # `POST /write`) is NOT published — only the connector dials it over the compose
-  # network (`app:3100`), which enforces AC2. Its Nostr WS read port (7100) IS
-  # published so FREE reads bypass the connector entirely.
-  #
-  # RELAY_IMAGE may be overridden to pin a specific tag (e.g. `sha-b8ec120`).
-  app:
-    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:latest}
-    profiles: [app]
-    environment:
-      # The published image already sets TOON_BLS_PORT=3100 / TOON_RELAY_PORT=7100
-      # and runs oblivious by default. We keep the explicit env to document intent.
-      TOON_OBLIVIOUS_MODE: 'true'
-      TOON_BLS_PORT: '3100' # paid-write HTTP store (POST /write) — NOT published
-      TOON_RELAY_PORT: '7100' # free-read Nostr WS — published below
-      TOON_CHAIN: 'none' # oblivious forces relay-only; explicit for safety
-      # The relay CLI REQUIRES an identity key to boot (NOSTR_SECRET_KEY /
-      # TOON_SECRET_KEY / TOON_MNEMONIC). Provide a deterministic local-only
-      # default so `compose up` succeeds unattended; override for real keys.
-      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000001}
-      TOON_DEV_MODE: ${RELAY_DEV_MODE:-true} # skip sig verify for local smoke fixtures
-    ports:
-      # Free reads: clients hit the relay's Nostr WS directly (no connector).
-      # The paid-write port 3100 is deliberately ABSENT from this list (enforces AC2).
-      - '127.0.0.1:7100:7100'
-    healthcheck:
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
 
 networks:
   standalone_net:

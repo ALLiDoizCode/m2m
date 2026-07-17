@@ -163,6 +163,43 @@ describe('validateIlpSendRequest', () => {
       expect(validateIlpSendRequest(body)).toBe('timeoutMs must be a positive integer');
     });
   });
+
+  describe('condition validation (issue #309/PR #310 egress symmetry)', () => {
+    const validCondition = Buffer.alloc(32, 0x42).toString('base64');
+
+    it('should accept a valid 32-byte base64 condition', () => {
+      const body = { ...validRequestBody(), condition: validCondition };
+      expect(validateIlpSendRequest(body)).toBeNull();
+    });
+
+    it('should accept a request without condition (legacy path)', () => {
+      expect(validateIlpSendRequest(validRequestBody())).toBeNull();
+    });
+
+    it('should reject a non-string condition', () => {
+      const body = { ...validRequestBody(), condition: 42 };
+      expect(validateIlpSendRequest(body)).toBe('condition must be a base64 string');
+    });
+
+    it('should reject invalid base64', () => {
+      const body = { ...validRequestBody(), condition: 'not-valid-base64!!!' };
+      expect(validateIlpSendRequest(body)).toBe('condition must be valid base64');
+    });
+
+    it('should reject a condition that does not decode to 32 bytes', () => {
+      const body = { ...validRequestBody(), condition: Buffer.alloc(16, 7).toString('base64') };
+      expect(validateIlpSendRequest(body)).toBe(
+        'condition must decode to exactly 32 bytes, got 16'
+      );
+    });
+
+    it('should reject an all-zero condition', () => {
+      const body = { ...validRequestBody(), condition: Buffer.alloc(32).toString('base64') };
+      expect(validateIlpSendRequest(body)).toBe(
+        'condition must not be all-zero (omit it for unconditional packets)'
+      );
+    });
+  });
 });
 
 describe('IlpSendHandler', () => {
@@ -367,6 +404,43 @@ describe('IlpSendHandler', () => {
       expect(paramsArg.destination).toBe('g.connector.peer1');
       expect(paramsArg.amount).toBe(BigInt('1500000'));
       expect(paramsArg.data!.equals(Buffer.from('Hello World'))).toBe(true);
+    }, 60_000);
+
+    it('should pass a sender-chosen condition through as executionCondition (issue #309/PR #310)', async () => {
+      const condition = Buffer.alloc(32, 0x42).toString('base64');
+      const preimage = Buffer.alloc(32, 0x24);
+      const fulfillPacket: ILPFulfillPacket = {
+        type: PacketType.FULFILL,
+        fulfillment: new Uint8Array(preimage),
+        data: Buffer.alloc(0),
+      };
+      mockSendPacket.mockResolvedValue(fulfillPacket);
+
+      const res = await request(app)
+        .post('/ilp/send')
+        .send({ ...validRequestBody(), condition });
+
+      expect(mockSendPacket).toHaveBeenCalledTimes(1);
+      const paramsArg = mockSendPacket.mock.calls[0]![0] as SendPacketParams;
+      expect(paramsArg.executionCondition).toBe(condition);
+
+      // The resolved preimage is surfaced so the caller can verify sha256(P) === C.
+      expect(res.status).toBe(200);
+      expect(res.body.accepted).toBe(true);
+      expect(res.body.fulfillment).toBe(preimage.toString('base64'));
+    }, 60_000);
+
+    it('should omit executionCondition when the request carries no condition', async () => {
+      const fulfillPacket: ILPFulfillPacket = {
+        type: PacketType.FULFILL,
+        data: Buffer.alloc(0),
+      };
+      mockSendPacket.mockResolvedValue(fulfillPacket);
+
+      await request(app).post('/ilp/send').send(validRequestBody());
+
+      const paramsArg = mockSendPacket.mock.calls[0]![0] as SendPacketParams;
+      expect('executionCondition' in paramsArg).toBe(false);
     }, 60_000);
   });
 

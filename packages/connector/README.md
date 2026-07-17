@@ -35,7 +35,7 @@ The connector supports two deployment modes via `deploymentMode` in config:
 | Mode           | Value          | How packets arrive            | How packets are sent           |
 | -------------- | -------------- | ----------------------------- | ------------------------------ |
 | **Embedded**   | `'embedded'`   | `setPacketHandler()` callback | `node.sendPacket()`            |
-| **Standalone** | `'standalone'` | HTTP POST to BLS `handlerUrl` | HTTP POST to `/admin/ilp/send` |
+| **Standalone** | `'standalone'` | HTTP POST to app `handlerUrl` | HTTP POST to `/admin/ilp/send` |
 
 When `deploymentMode` is omitted, it is inferred from `localDelivery` and `adminApi` flags.
 
@@ -107,7 +107,7 @@ environment: production
 
 localDelivery:
   enabled: true
-  handlerUrl: http://my-bls:3100
+  handlerUrl: http://my-app:3100
   timeout: 5000
 
 adminApi:
@@ -147,7 +147,7 @@ const node = new ConnectorNode(config: ConnectorConfig | string, logger: Logger)
 | `healthCheckPort` | `number`                     | `8080`        | HTTP health endpoint port                            |
 | `logLevel`        | `string`                     | `'info'`      | `'debug'` \| `'info'` \| `'warn'` \| `'error'`       |
 | `adminApi`        | `AdminApiConfig`             | disabled      | Admin REST API settings                              |
-| `localDelivery`   | `LocalDeliveryConfig`        | disabled      | HTTP forwarding to BLS                               |
+| `localDelivery`   | `LocalDeliveryConfig`        | disabled      | HTTP forwarding to app                               |
 | `settlement`      | `SettlementConfig`           | —             | TigerBeetle accounting config                        |
 | `chainProviders`  | `ChainProviderConfigEntry[]` | —             | Multi-chain settlement providers (EVM, Solana, Mina) |
 | `transport`       | `TransportConfig`            | direct        | Network transport: `direct` or `socks5` (ATOR)       |
@@ -257,19 +257,19 @@ peers:
 
 ## Per-Hop Notification
 
-Intermediate connectors can fire non-blocking notifications to a BLS for transit packets:
+Intermediate connectors can fire non-blocking notifications to an app for transit packets:
 
 ```yaml
 localDelivery:
   enabled: true
-  handlerUrl: http://my-bls:3100
+  handlerUrl: http://my-app:3100
   perHopNotification: true
 ```
 
 |                  | Transit (`isTransit: true`) | Final-Hop (`isTransit` omitted)    |
 | ---------------- | --------------------------- | ---------------------------------- |
 | **When**         | Packet passing through      | Packet addressed to this connector |
-| **BLS response** | Ignored (fire-and-forget)   | Drives ILP fulfill/reject          |
+| **App response** | Ignored (fire-and-forget)   | Drives ILP fulfill/reject          |
 | **Blocking**     | No                          | Yes                                |
 | **Use case**     | Logging, analytics          | Payment acceptance, business logic |
 

@@ -18,6 +18,8 @@
     "src/**/*",
     "test/integration/paid-roundtrip-client.ts",
     "test/integration/multi-hop-helpers.ts",
-    "../../scripts/app/ci-acceptance-probe.ts"
+    "../../scripts/app/ci-acceptance-probe.ts",
+    "../../scripts/app/ci-acceptance-probe-store.ts",
+    "../../scripts/app/ci-discovery-probe.ts"
   ]
 }

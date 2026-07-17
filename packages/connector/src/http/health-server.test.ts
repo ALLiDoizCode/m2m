@@ -169,7 +169,7 @@ describe('HealthServer', () => {
       expect(response.body.totalPeers).toBe(2);
     });
 
-    it.skip('should return 503 Service Unavailable when status is starting', async () => {
+    it('should return 503 Service Unavailable when status is starting', async () => {
       // Arrange
       const startingStatus: HealthStatus = {
         status: 'starting',

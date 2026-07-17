@@ -493,7 +493,7 @@ export interface ConnectorConfig {
    *
    * - **standalone**: Connector runs as separate process/container
    *   → Validates that `localDelivery.handlerUrl` is set (required for HTTP forwarding)
-   *   → Warns if `adminApi.enabled` is false (external BLS typically needs admin API)
+   *   → Warns if `adminApi.enabled` is false (external app typically needs admin API)
    *   → Use with HTTP endpoints: `/handle-packet` (incoming) and `/admin/ilp/send` (outgoing)
    *
    * When omitted, mode is **inferred** from configuration flags (backward compatible):
@@ -608,18 +608,148 @@ export interface ConnectorConfig {
   btpAuthToken?: string;
 
   /**
-   * Optional local delivery configuration for forwarding packets to agent runtime
+   * Optional local delivery configuration for forwarding packets to the app
    * When enabled, packets destined for local addresses are forwarded via HTTP
-   * to an external agent runtime instead of using the built-in auto-fulfill stub
+   * to the app's HTTP handler instead of using the built-in auto-fulfill stub
    *
    * Environment variables:
    * - LOCAL_DELIVERY_ENABLED: Enable/disable local delivery (default: false)
-   * - LOCAL_DELIVERY_URL: URL to agent runtime (e.g., "http://connector:3100")
+   * - LOCAL_DELIVERY_URL: URL to the app's HTTP handler (e.g., "http://connector:3100")
    * - LOCAL_DELIVERY_TIMEOUT: Request timeout in ms (default: 30000)
-   * - LOCAL_DELIVERY_AUTH_TOKEN: Bearer token for BLS authentication (no default)
-   * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop BLS notification (default: false)
+   * - LOCAL_DELIVERY_AUTH_TOKEN: Bearer token for app authentication (no default)
+   * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop app notification (default: false)
    */
   localDelivery?: LocalDeliveryConfig;
+
+  /**
+   * Optional self-announce configuration (relay#37 / store#22).
+   *
+   * When enabled, the connector builds, signs, and continuously republishes a
+   * `kind:10032` `IlpPeerInfo` announcement describing its OWN apex routes to a
+   * relay's event store, so a client holding only the genesis seed can discover
+   * the publish/store routes + settlement info out of band (instead of falling
+   * back to hardcoded `publishDestination`/`storeDestination`). Disabled by
+   * default — absent this block the connector announces nothing.
+   *
+   * @see SelfAnnounceConfig
+   */
+  selfAnnounce?: SelfAnnounceConfig;
+}
+
+/**
+ * Self-Announce Configuration Interface (relay#37 / store#22)
+ *
+ * Drives the connector's `kind:10032` `IlpPeerInfo` self-announcement. The
+ * advertised peer info is DERIVED from the connector's own config (its
+ * locally-terminated routes' `ilpAddress` + `settlementAddresses`, the
+ * `chainProviders` chain ids, and the BTP endpoint) — the operator does not
+ * re-type it. The optional overrides below cover only the values the connector
+ * cannot infer (its public BTP/HTTP/relay hostnames, terminated behind TLS) or
+ * wishes to pin explicitly.
+ *
+ * The publish TRANSPORT is the connector's own routing: `announceTo` names the
+ * ILP address to write the announcement THROUGH, and the connector resolves it
+ * against its own routing table — a locally-terminated route delivers the write
+ * FREE through its `RouteTermination` upstream, while a remote route originates
+ * a PAID write over ILP funded from the connector's own settlement channel
+ * (exactly how it would pay for any write). There is no raw private-port URL in
+ * config.
+ *
+ * @example
+ * ```yaml
+ * selfAnnounce:
+ *   enabled: true
+ *   announceTo: g.proxy.relay           # ILP route to publish the write THROUGH
+ *   refreshIntervalSecs: 300            # republish every 5m; TTL = 2x = 10m
+ *   btpEndpoint: wss://proxy.devnet.toonprotocol.dev:443
+ *   relayUrl: wss://relay-ws.devnet.toonprotocol.dev
+ * ```
+ */
+export interface SelfAnnounceConfig {
+  /**
+   * Whether self-announce is enabled. When false (default), the connector
+   * publishes no `kind:10032` announcement.
+   */
+  enabled: boolean;
+
+  /**
+   * The ILP address (relay/publish route) to publish the kind:10032 write
+   * THROUGH. The connector resolves it against its OWN routing table and writes
+   * the SAME way it handles any write:
+   * - **Locally terminated** (this connector fronts the relay — e.g. an apex
+   *   whose `g.proxy.relay` route has a `RouteTermination` `upstream`) → the
+   *   write is delivered through that termination = **FREE** (no payment; the
+   *   upstream comes from the resolved route, not config).
+   * - **Forwarded** (a remote relay — e.g. the store box writing through
+   *   `g.proxy.relay`, which forwards to the apex) → a **PAID** write is
+   *   originated over ILP, funded from the connector's own settlement channel to
+   *   its next hop (`announcePrice` below).
+   *
+   * Distinct from the announcement CONTENT's own `ilpAddress` (derived from this
+   * node's terminated routes): e.g. the store box sets `announceTo: g.proxy.relay`
+   * (where to write) while announcing its own `g.proxy.store` peer info.
+   */
+  announceTo: string;
+
+  /**
+   * Price to pay (atomic units, e.g. nano-USDC, decimal-string) when `announceTo`
+   * resolves to a REMOTE (forwarded) route — the connector pays this for its own
+   * write, like any client. Must be ≥ the remote relay route's price. IGNORED
+   * when `announceTo` is locally terminated (that path is free). Default `'1000'`.
+   */
+  announcePrice?: string;
+
+  /**
+   * Seconds between republishes. The announcement carries a NIP-40 `expiration`
+   * tag of `2 × refreshIntervalSecs`, so each refresh lands a fresh, unexpired
+   * event at half the TTL and the announcement never goes stale while the node
+   * is up. Default: 300 (5 minutes → 10-minute TTL).
+   */
+  refreshIntervalSecs?: number;
+
+  /**
+   * Public BTP WebSocket endpoint to advertise (e.g.
+   * `wss://proxy.devnet.toonprotocol.dev:443`). The connector cannot infer its
+   * own public hostname behind TLS termination, so set this for clients/peers to
+   * dial. When omitted, `btpEndpoint` is left out of the announcement.
+   */
+  btpEndpoint?: string;
+
+  /**
+   * Public ILP-over-HTTP ingress endpoint to advertise (RFC-0035 `POST /ilp`),
+   * for stateless one-shot writes. Optional.
+   */
+  httpEndpoint?: string;
+
+  /**
+   * Public Nostr relay read WS URL to advertise for FREE reads (e.g.
+   * `wss://relay-ws.devnet.toonprotocol.dev`). Lets a client discover where to
+   * subscribe without out-of-band config. Optional.
+   */
+  relayUrl?: string;
+
+  /**
+   * Asset code advertised in the announcement. Default: `USDC`.
+   */
+  assetCode?: string;
+
+  /**
+   * Asset scale (decimal places) advertised. Default: 6 (USDC).
+   */
+  assetScale?: number;
+
+  /**
+   * Optional explicit route-hint overrides. When omitted, the publish/store
+   * route addresses are DERIVED from the connector's configured routes (the
+   * `.relay` route is the publish address; the direct `.store` route is the
+   * store address). Override only for non-standard topologies.
+   */
+  routes?: {
+    /** ILP address a client should PUBLISH (Nostr writes) to, e.g. `g.proxy.relay`. */
+    publish?: string;
+    /** ILP address a client should STORE (blob uploads) to, e.g. `g.proxy.store`. */
+    store?: string;
+  };
 }
 
 /**
@@ -892,12 +1022,12 @@ export type Environment = 'development' | 'staging' | 'production';
  *
  * **Standalone Mode** (`'standalone'`):
  * - Connector runs as a separate process/container from business logic
- * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external BLS
+ * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external app
  * - Outgoing packets sent via HTTP POST to `/admin/ilp/send` on connector's admin API
  * - Admin API enabled for external control
- * - Local delivery enabled with `handlerUrl` pointing to BLS
+ * - Local delivery enabled with `handlerUrl` pointing to the app
  * - **Use cases**: Microservices, multi-language integrations, process isolation
- * - **Example**: Connector container + separate Python/Go/Rust business logic server
+ * - **Example**: Connector container + separate Python/Go/Rust app
  *
  * **Configuration Behavior**:
  * - When `deploymentMode` is **specified**: Configuration is validated against mode expectations
@@ -1457,9 +1587,9 @@ export interface SecurityConfig {
 /**
  * Local Delivery Configuration Interface
  *
- * Configures local delivery to an agent runtime for handling packets
+ * Configures local delivery to the app for handling packets
  * destined for local addresses. When enabled, packets routed to 'local'
- * or the connector's own nodeId are forwarded to an external agent runtime
+ * or the connector's own nodeId are forwarded to the app's HTTP handler
  * via HTTP instead of using the built-in auto-fulfill stub.
  *
  * @property enabled - Enable/disable local delivery forwarding (default: false)
@@ -1494,7 +1624,7 @@ export interface LocalDeliveryConfig {
   enabled?: boolean;
 
   /**
-   * URL to the business logic server's base endpoint
+   * URL to the app's base endpoint
    * The connector will POST to {handlerUrl}/handle-packet
    * Environment variable: LOCAL_DELIVERY_URL
    * Example: 'http://localhost:8080'
@@ -1510,18 +1640,18 @@ export interface LocalDeliveryConfig {
   timeout?: number;
 
   /**
-   * Optional bearer token for authenticating outbound requests to the BLS
+   * Optional bearer token for authenticating outbound requests to the app
    * When set, the connector sends `Authorization: Bearer {authToken}` on
-   * all outbound HTTP requests to the business logic server
+   * all outbound HTTP requests to the app
    * Environment variable: LOCAL_DELIVERY_AUTH_TOKEN (no default)
    */
   authToken?: string;
 
   /**
-   * Enable per-hop BLS notification for transit packets
-   * When enabled, intermediate connectors fire a non-blocking POST to the BLS
+   * Enable per-hop app notification for transit packets
+   * When enabled, intermediate connectors fire a non-blocking POST to the app
    * for packets transiting through, in addition to forwarding via BTP.
-   * The BLS notification is fire-and-forget — failures do not affect forwarding.
+   * The app notification is fire-and-forget — failures do not affect forwarding.
    * Environment variable: LOCAL_DELIVERY_PER_HOP_NOTIFICATION (default: 'false')
    * Default: false
    */
@@ -1566,7 +1696,7 @@ export interface LocalDeliveryConfig {
  * ```
  */
 /**
- * Request sent to BLS for local delivery.
+ * Request sent to the app for local delivery.
  */
 export interface LocalDeliveryRequest {
   /** Full ILP destination address */
@@ -1581,16 +1711,45 @@ export interface LocalDeliveryRequest {
   sourcePeer: string;
   /** Whether this is a transit notification (fire-and-forget) at an intermediate hop */
   isTransit?: boolean;
+  /**
+   * Sender-chosen ILP execution condition (base64-encoded, 32 bytes) — issue #309.
+   *
+   * Present iff the terminating PREPARE carried a NON-ZERO `executionCondition`
+   * (a condition minted end-to-end by the original sender, e.g. a rolling-swap
+   * fill packet per toon-meta#145 §3). When present, the terminating
+   * application owns the fulfillment: it MUST return the matching 32-byte
+   * preimage in {@link LocalDeliveryResponse}'s `fulfill.fulfillment`, and the
+   * connector enforces `sha256(fulfillment) === executionCondition` before
+   * FULFILLing upstream — a missing or mismatching preimage converts the
+   * fulfill into an F99 REJECT and nothing is recorded as delivered. The
+   * connector never substitutes its NIP-59/HKDF-derived preimage on this path.
+   *
+   * Absent for legacy zero-condition traffic — those packets keep the pre-#309
+   * behavior (NIP-59 receiver-side preimage injection when available).
+   */
+  executionCondition?: string;
 }
 
 /**
- * Response from BLS.
+ * Response from the app.
  */
 export interface LocalDeliveryResponse {
   /** Fulfill response (mutually exclusive with reject) */
   fulfill?: {
     /** Optional response data (base64) */
     data?: string;
+    /**
+     * FULFILL preimage (base64-encoded, exactly 32 bytes) — issue #309.
+     *
+     * REQUIRED when {@link LocalDeliveryRequest} carried `executionCondition`:
+     * the connector enforces `sha256(fulfillment) === executionCondition` and
+     * converts a missing/mismatching preimage into an F99 REJECT. When the
+     * request carried no `executionCondition`, an app-supplied preimage is
+     * still placed on the FULFILL, but the legacy NIP-59 receiver-side
+     * derivation (when active) takes precedence — preserving pre-#309
+     * behavior for zero-condition traffic.
+     */
+    fulfillment?: string;
   };
   /** Reject response (mutually exclusive with fulfill) */
   reject?: {
@@ -1627,6 +1786,24 @@ export interface SendPacketParams {
   expiresAt: Date;
   /** Optional application data payload */
   data?: Buffer;
+  /**
+   * Optional sender-chosen SHA-256 execution condition (egress symmetry for
+   * issue #309/PR #310; toon-meta#145 §3 R4 — e.g. a rolling-swap leg-B
+   * PREPARE carrying leg A's condition). Accepts raw bytes (`Uint8Array`) or
+   * a base64-encoded string; MUST decode to exactly 32 bytes and MUST NOT be
+   * all-zero (all-zero is the wire encoding for "no condition" and would be
+   * replaced by the connector-derived condition — omit the field instead).
+   * Invalid values throw `InvalidExecutionConditionError` before any packet
+   * is sent.
+   *
+   * When present, the condition rides the outgoing PREPARE verbatim — the
+   * claim/NIP-59 derivation path only sets its own condition when none exists
+   * (PR #310's rule) — and the resolved FULFILL's `fulfillment` preimage is
+   * returned on the ILPFulfillPacket result so the caller can verify
+   * `sha256(fulfillment) === executionCondition`. When absent, behavior is
+   * unchanged (zero/derived condition per existing semantics).
+   */
+  executionCondition?: Uint8Array | string;
 }
 
 /** Re-export AdminSettlementConfig for use in PeerRegistrationRequest */
@@ -1722,7 +1899,7 @@ export interface RemovePeerResult {
 
 /**
  * Request body for `POST /admin/ilp/send`.
- * Used by the BLS to initiate outbound ILP packets through the connector.
+ * Used by the app to initiate outbound ILP packets through the connector.
  *
  * @property destination - Valid ILP address (RFC-0015 format)
  * @property amount - Non-negative integer string (smallest currency unit)
