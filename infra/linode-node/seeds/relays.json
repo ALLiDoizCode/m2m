@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "updatedAt": "2026-07-17T20:49:19.091Z",
+  "entries": [
+    {
+      "relayUrl": "wss://relay-ws.devnet.toonprotocol.dev"
+    }
+  ],
+  "curatorPubkey": "0342e0b25c7b41cbc36ec3b350bcecf378a386fec7a3c2d49e1dd0de1b1d735a",
+  "sig": "adf4638539164f421a39f1d01e117234263bde1b68a20b408718ec81b57e9c23f706d85c681c259b8cc3e3d81e16e5ebbdbd27259b27c8e14116bb8120ad5bdc"
+}
