@@ -2,16 +2,21 @@
  * Tests for the curated signed seed-registry manifest (toon-meta#153).
  *
  * Covers: canonical JSON determinism, sign→verify round trip, tamper and
- * wrong-key rejection, structural parsing of untrusted documents, and the
- * "unknown extra fields are stripped before hashing" normalization contract.
+ * wrong-key rejection, structural parsing of untrusted documents, the
+ * "unknown extra fields are stripped before hashing" normalization contract,
+ * and that the COMMITTED devnet registry manifest verifies against the
+ * shipped pinned fallback curator key (connector#343).
  *
  * Real schnorr signatures via `@noble/curves` (no crypto mocks).
  *
  * @module discovery/bootstrap-manifest.test
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { schnorr } from '@noble/curves/secp256k1';
 import { bytesToHex } from '@noble/hashes/utils';
+import { FALLBACK_CURATOR_PUBKEY, FALLBACK_RELAY_SEEDS } from './bootstrap-seeds';
 import {
   canonicalJson,
   manifestDigest,
@@ -156,5 +161,40 @@ describe('parseSeedManifest (toon-meta#153)', () => {
       version: base.version,
     } as SeedManifestPayload;
     expect(bytesToHex(manifestDigest(base))).toBe(bytesToHex(manifestDigest(reordered)));
+  });
+});
+
+describe('committed devnet registry manifest (connector#343)', () => {
+  const manifestPath = join(__dirname, '../../../../infra/linode-node/seeds/relays.json');
+
+  it('the committed relays.json parses and verifies against FALLBACK_CURATOR_PUBKEY', () => {
+    const raw: unknown = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const parsed = parseSeedManifest(raw);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) {
+      return;
+    }
+    // The committed artifact must be genuinely signed by the shipped pinned
+    // key — the exact check `BootstrapService` performs with default config.
+    expect(verifySeedManifest(parsed.manifest, FALLBACK_CURATOR_PUBKEY)).toBe(true);
+    expect(parsed.manifest.version).toBe(1);
+    expect(parsed.manifest.entries.length).toBeGreaterThan(0);
+    // The registry and the hardcoded fallback tier agree on the devnet seed.
+    expect(parsed.manifest.entries.map((entry) => entry.relayUrl)).toEqual(
+      FALLBACK_RELAY_SEEDS.map((seed) => seed.relayUrl)
+    );
+  });
+
+  it('tampering with the committed manifest breaks verification', () => {
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    const tampered = {
+      ...raw,
+      entries: [{ relayUrl: 'wss://evil.example.org' }],
+    };
+    const parsed = parseSeedManifest(tampered);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(verifySeedManifest(parsed.manifest, FALLBACK_CURATOR_PUBKEY)).toBe(false);
+    }
   });
 });

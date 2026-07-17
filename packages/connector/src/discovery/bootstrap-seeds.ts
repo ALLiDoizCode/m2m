@@ -37,22 +37,28 @@ export interface RelaySeed {
 /**
  * FALLBACK OF LAST RESORT — well-known TOON relay seeds, tried only when the
  * signed registry, the learned-peer cache, and `bootstrap.seeds` all produced
- * nothing usable. Placeholder devnet/mainnet endpoints; every entry is
+ * nothing usable. Real, operated devnet endpoint(s); every entry is
  * probe-verified before being trusted (see `BootstrapService`).
+ *
+ * Deliberately a single devnet relay for now: a short honest list beats a
+ * plausible-looking fake one (connector#289). Production/mainnet relay seeds
+ * are future work, tracked alongside the production registry (issue #343
+ * scoped this to devnet-real v0).
  */
 export const FALLBACK_RELAY_SEEDS: readonly RelaySeed[] = [
   { relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev' },
-  { relayUrl: 'wss://relay-ws-2.devnet.toonprotocol.dev' },
-  { relayUrl: 'wss://relay-ws.toonprotocol.dev' },
 ];
 
 /**
- * PLACEHOLDER curator pubkey (BIP-340 x-only, 64-char lowercase hex) used to
+ * Devnet curator pubkey (BIP-340 x-only, 64-char lowercase hex) used to
  * verify the curated seed-registry manifest when `bootstrap.curatorPubkey` is
- * not pinned in config. This value is NOT a real key: no genuine manifest will
- * verify against it, so operators consuming a real registry MUST pin the real
- * curator key via `bootstrap.curatorPubkey`. Replace before shipping a real
- * curated registry for v0 devnet.
+ * not pinned in config. This is the REAL v0 devnet curator key: the committed
+ * manifest at `infra/linode-node/seeds/relays.json` is signed by it (see
+ * `scripts/sign-seed-manifest.mjs` for the rotation tooling; the secret lives
+ * outside the repo under `~/.toon-curator/`). Operators should still pin
+ * `bootstrap.curatorPubkey` explicitly in config — config always wins over
+ * this fallback. A production/mainnet curator key (with hardened custody) is
+ * future work and will land with the production registry.
  */
 export const FALLBACK_CURATOR_PUBKEY =
-  'c07a4e778ad24f0c8b48cd8ee63c2d7d1ab6a6f6f52c2f5f7a90d5f0ffb0000f';
+  '0342e0b25c7b41cbc36ec3b350bcecf378a386fec7a3c2d49e1dd0de1b1d735a';

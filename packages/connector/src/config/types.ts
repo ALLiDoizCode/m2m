@@ -918,8 +918,9 @@ export interface BootstrapConfig {
   /**
    * Pinned curator pubkey (BIP-340 x-only, 64-char lowercase hex) the
    * registry manifest signature is verified against. Falls back to the
-   * hardcoded placeholder `FALLBACK_CURATOR_PUBKEY` when omitted — which no
-   * real manifest verifies against, so pin this when using `registryUrl`.
+   * hardcoded `FALLBACK_CURATOR_PUBKEY` (the real v0 devnet curator key) when
+   * omitted. Operators should still pin this explicitly when using
+   * `registryUrl` — config always wins over the hardcoded fallback.
    */
   curatorPubkey?: string;
 
