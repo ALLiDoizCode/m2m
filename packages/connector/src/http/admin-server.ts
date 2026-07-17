@@ -85,6 +85,8 @@ export class AdminServer {
     routeTerminationRegistry?: import('./admin-api').RouteTerminationSink;
     getDiscoveredNodes?: () => import('../discovery/discovered-node-registry').DiscoveredNode[];
     checkFundedChannelCap?: (peerId: string) => string | null;
+    recordRuntimePeerUrl?: (peerId: string, url: string) => void;
+    forgetRuntimePeerUrl?: (peerId: string) => void;
   };
 
   /**
@@ -155,6 +157,16 @@ export class AdminServer {
      * `ConnectorNode.registerPeer`.
      */
     checkFundedChannelCap?: (peerId: string) => string | null;
+    /**
+     * Runtime peer-URL bookkeeping hooks (issue #345). Forwarded to the admin
+     * router so `POST /admin/peers` records (and `DELETE /admin/peers/:peerId`
+     * forgets) the peer's BTP url in the same map `ConnectorNode.registerPeer`
+     * / `removePeer` maintain — keeping the discovered-node registry's
+     * endpoint-fallback funded matching correct for peers promoted via the
+     * admin HTTP surface.
+     */
+    recordRuntimePeerUrl?: (peerId: string, url: string) => void;
+    forgetRuntimePeerUrl?: (peerId: string) => void;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -197,6 +209,8 @@ export class AdminServer {
       routeTerminationRegistry,
       getDiscoveredNodes,
       checkFundedChannelCap,
+      recordRuntimePeerUrl,
+      forgetRuntimePeerUrl,
     } = this._options;
 
     this._app = express();
@@ -231,6 +245,8 @@ export class AdminServer {
       routeTerminationRegistry,
       getDiscoveredNodes,
       checkFundedChannelCap,
+      recordRuntimePeerUrl,
+      forgetRuntimePeerUrl,
     });
 
     this._app.use('/admin', adminRouter);

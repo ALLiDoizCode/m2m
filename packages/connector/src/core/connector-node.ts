@@ -2109,6 +2109,14 @@ export class ConnectorNode implements HealthStatusProvider {
           // parity).
           getDiscoveredNodes: () => this.getDiscoveredNodes(),
           checkFundedChannelCap: (peerId) => this._checkFundedChannelCap(peerId),
+          // Issue #345: POST/DELETE /admin/peers mutate the client managers
+          // directly (they do not call registerPeer/removePeer), so they must
+          // maintain the same runtime-url map the discovered registry's
+          // endpoint-fallback funded matching reads — otherwise a peer
+          // promoted via the admin surface shows `funded: false` until a
+          // restart replays the registration.
+          recordRuntimePeerUrl: (peerId, url) => this._runtimePeerUrls.set(peerId, url),
+          forgetRuntimePeerUrl: (peerId) => this._runtimePeerUrls.delete(peerId),
         });
 
         await this._adminServer.start();
