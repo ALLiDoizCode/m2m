@@ -558,3 +558,181 @@ describe('buildRoutingInfo', () => {
     expect('routing' in info).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// toon-meta#153 — apex aggregation + first-class child route hints
+// ---------------------------------------------------------------------------
+
+/** A post-expansion apex config: apex + children with expanded routes. */
+function apexAggregationConfig(): ConnectorConfig {
+  return {
+    nodeId: 'connector',
+    btpServerPort: 3000,
+    environment: 'development',
+    apex: 'g.proxy',
+    children: [
+      { name: 'relay', upstream: 'http://relay:3100', price: '1000' },
+      { name: 'store', peerId: 'store-box' },
+    ],
+    peers: [{ id: 'store-box', url: 'ws://store-box:3000', authToken: 's', relation: 'child' }],
+    routes: [
+      // Expanded `upstream` child (locally terminated).
+      {
+        prefix: 'g.proxy.relay',
+        nextHop: 'connector',
+        upstream: 'http://relay:3100',
+        price: '1000',
+        chains: ['evm'],
+        ilpAddress: 'g.proxy.relay',
+        settlementAddresses: { evm: APEX_EVM },
+      },
+      // Expanded `peerId` child (forwarding to the child peer).
+      { prefix: 'g.proxy.store', nextHop: 'store-box' },
+      // Standalone terminated route NOT under the apex.
+      {
+        prefix: 'g.standalone.greet',
+        nextHop: 'connector',
+        upstream: 'http://greet:9000',
+        price: '10',
+        chains: ['evm'],
+        ilpAddress: 'g.standalone.greet',
+        settlementAddresses: { evm: STORE_EVM },
+      },
+    ],
+  };
+}
+
+describe('buildSelfAnnouncementInfo — apex aggregation (toon-meta#153)', () => {
+  it('collapses child routes to the apex and keeps uncovered standalone routes', () => {
+    const info = buildSelfAnnouncementInfo(apexAggregationConfig(), baseSelfAnnounce);
+    expect(info.ilpAddress).toBe('g.proxy');
+    expect(info.ilpAddresses).toEqual(['g.proxy', 'g.standalone.greet']);
+  });
+
+  it('advertises only the apex when every terminated route is covered', () => {
+    const config = apexAggregationConfig();
+    config.routes = config.routes.filter((r) => r.prefix !== 'g.standalone.greet');
+    const info = buildSelfAnnouncementInfo(config, baseSelfAnnounce);
+    expect(info.ilpAddress).toBe('g.proxy');
+    // A single advertised address → no ilpAddresses array (legacy shape).
+    expect(info.ilpAddresses).toBeUndefined();
+  });
+
+  it('still merges settlementAddresses across ALL terminated routes when aggregating', () => {
+    const info = buildSelfAnnouncementInfo(apexAggregationConfig(), baseSelfAnnounce);
+    // Later terminated routes win the shallow merge — identity info is not
+    // dropped by address aggregation. (No chainProviders here → keys pass
+    // through normalizeSettlementAddressKeys unqualified-dropped, so assert
+    // via a config WITH a provider.)
+    const config = apexAggregationConfig();
+    config.chainProviders = relayConnectorConfig().chainProviders;
+    const withChains = buildSelfAnnouncementInfo(config, baseSelfAnnounce);
+    expect(withChains.settlementAddresses).toEqual({ 'evm:31337': STORE_EVM });
+    expect(info.ilpAddress).toBe('g.proxy');
+  });
+
+  it('honors the aggregate:false opt-out even when children/apex are configured', () => {
+    const info = buildSelfAnnouncementInfo(apexAggregationConfig(), {
+      ...baseSelfAnnounce,
+      aggregate: false,
+    });
+    // Legacy enumeration: every terminated route advertised individually.
+    expect(info.ilpAddress).toBe('g.proxy.relay');
+    expect(info.ilpAddresses).toEqual(['g.proxy.relay', 'g.standalone.greet']);
+  });
+
+  it('supports aggregate:true opt-in on a legacy config (apex derived from the first self route)', () => {
+    const legacy: ConnectorConfig = {
+      nodeId: 'connector',
+      btpServerPort: 3000,
+      environment: 'development',
+      peers: [],
+      routes: [
+        {
+          prefix: 'g.proxy',
+          nextHop: 'connector',
+          upstream: 'http://apex:8080',
+          price: '0',
+          chains: ['evm'],
+          ilpAddress: 'g.proxy',
+          settlementAddresses: {},
+        },
+        {
+          prefix: 'g.proxy.relay',
+          nextHop: 'connector',
+          upstream: 'http://relay:3100',
+          price: '1000',
+          chains: ['evm'],
+          ilpAddress: 'g.proxy.relay',
+          settlementAddresses: {},
+        },
+      ],
+    };
+    const info = buildSelfAnnouncementInfo(legacy, { ...baseSelfAnnounce, aggregate: true });
+    expect(info.ilpAddress).toBe('g.proxy');
+    expect(info.ilpAddresses).toBeUndefined();
+
+    // Without the opt-in the same legacy config keeps enumerating (default off).
+    const legacyInfo = buildSelfAnnouncementInfo(legacy, baseSelfAnnounce);
+    expect(legacyInfo.ilpAddresses).toEqual(['g.proxy', 'g.proxy.relay']);
+  });
+
+  it('leaves legacy configs (no apex/children/aggregate) byte-identical to before', () => {
+    const info = buildSelfAnnouncementInfo(relayConnectorConfig(), baseSelfAnnounce);
+    expect(info.ilpAddress).toBe('g.proxy.relay');
+    expect(info.ilpAddresses).toBeUndefined();
+  });
+});
+
+describe('resolveRouteHints — children precedence (toon-meta#153)', () => {
+  const children: ConnectorConfig['children'] = [
+    { name: 'relay', upstream: 'http://relay:3100' },
+    { name: 'store', peerId: 'store-box' },
+  ];
+
+  it('resolves publish/store from children named relay/store before suffix heuristics', () => {
+    // Decoy routes ending in .relay/.store at a DIFFERENT address would win
+    // under the legacy heuristics — the first-class children take precedence.
+    const routes = [
+      { prefix: 'g.decoy.relay', nextHop: 'x' },
+      { prefix: 'g.decoy.store', nextHop: 'x' },
+    ] as ConnectorConfig['routes'];
+    expect(resolveRouteHints(routes, undefined, children, 'g.proxy')).toEqual({
+      publish: 'g.proxy.relay',
+      store: 'g.proxy.store',
+    });
+  });
+
+  it('explicit overrides still beat child-derived hints', () => {
+    expect(resolveRouteHints([], { publish: 'g.override.pub' }, children, 'g.proxy')).toEqual({
+      publish: 'g.override.pub',
+      store: 'g.proxy.store',
+    });
+  });
+
+  it('falls back to suffix heuristics when no child is named relay/store', () => {
+    const apiOnly: ConnectorConfig['children'] = [{ name: 'api', upstream: 'http://api:1' }];
+    const routes = [
+      { prefix: 'g.legacy.relay', nextHop: 'connector', ilpAddress: 'g.legacy.relay' },
+    ] as ConnectorConfig['routes'];
+    expect(resolveRouteHints(routes, undefined, apiOnly, 'g.proxy')).toEqual({
+      publish: 'g.legacy.relay',
+      store: 'g.legacy.store',
+    });
+  });
+
+  it('ignores children when no apex is known (cannot join the address)', () => {
+    const routes = [
+      { prefix: 'g.legacy.relay', nextHop: 'connector', ilpAddress: 'g.legacy.relay' },
+    ] as ConnectorConfig['routes'];
+    expect(resolveRouteHints(routes, undefined, children, undefined)).toEqual({
+      publish: 'g.legacy.relay',
+      store: 'g.legacy.store',
+    });
+  });
+
+  it('is wired through buildSelfAnnouncementInfo (hints from children, not suffixes)', () => {
+    const info = buildSelfAnnouncementInfo(apexAggregationConfig(), baseSelfAnnounce);
+    expect(info.routes).toEqual({ publish: 'g.proxy.relay', store: 'g.proxy.store' });
+  });
+});

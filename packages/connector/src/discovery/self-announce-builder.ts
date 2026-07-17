@@ -26,11 +26,13 @@
 
 import type {
   ChainProviderConfigEntry,
+  ChildConfig,
   ConnectorConfig,
   PeerConfig,
   RouteConfig,
   SelfAnnounceConfig,
 } from '../config/types';
+import { deriveApex } from '../config/child-expander';
 import type { IlpPeerInfo, IlpRoutingInfo } from './ilp-peer-info-event';
 
 /** Default asset advertised when not overridden. */
@@ -67,24 +69,42 @@ function routeAddress(route: RouteConfig): string {
 /**
  * Resolve the publish/store route hints from the connector's routes.
  *
- * - publish: an explicit override, else the route ending in `.relay`, else the
- *   store address with its trailing `.store` swapped for `.relay`.
- * - store: an explicit override, else the DIRECT `.store` route (one not on the
- *   `.relay.` hop path), else any `.store` route, else the publish address with
- *   its trailing `.relay` swapped for `.store`.
+ * Resolution precedence per side (toon-meta#153 generalization):
+ * 1. an explicit `selfAnnounce.routes` override;
+ * 2. a `children` entry named `relay` (publish) / `store` (store), resolved to
+ *    its expanded address `<apex>.<name>` — the first-class child-prefix
+ *    binding replaces the label heuristics when present;
+ * 3. the legacy suffix heuristics (backward compatible):
+ *    - publish: the route ending in `.relay`, else the store address with its
+ *      trailing `.store` swapped for `.relay`;
+ *    - store: the DIRECT `.store` route (one not on the `.relay.` hop path),
+ *      else any `.store` route, else the publish address with its trailing
+ *      `.relay` swapped for `.store`.
  *
  * Mirrors the store entrypoint's `resolveAnnouncementRoutes`, generalized to
  * work from EITHER a relay-connector apex (terminates `.relay`) or a
  * store-connector apex (terminates `.store`).
+ *
+ * @param routes - The connector's configured routes.
+ * @param override - Optional explicit `selfAnnounce.routes` overrides.
+ * @param children - Optional `children` bindings (toon-meta#153).
+ * @param apex - The node's apex (required to resolve child hints).
  */
 export function resolveRouteHints(
   routes: RouteConfig[],
-  override?: SelfAnnounceConfig['routes']
+  override?: SelfAnnounceConfig['routes'],
+  children?: ChildConfig[],
+  apex?: string
 ): IlpRouteHints {
   const addresses = routes.map(routeAddress);
 
-  const relayRoute = addresses.find((a) => a.endsWith('.relay'));
+  // First-class children named 'relay'/'store' resolve to `<apex>.<name>`.
+  const childHint = (name: string): string | undefined =>
+    apex && children?.some((c) => c.name === name) ? `${apex}.${name}` : undefined;
+
+  const relayRoute = childHint('relay') ?? addresses.find((a) => a.endsWith('.relay'));
   const directStoreRoute =
+    childHint('store') ??
     addresses.find((a) => a.endsWith('.store') && !a.includes('.relay.')) ??
     addresses.find((a) => a.endsWith('.store'));
 
@@ -310,7 +330,33 @@ export function buildSelfAnnouncementInfo(
   // node IS). Fall back to all routes if nothing is terminated (forwarding-only
   // node still advertises where it routes).
   const sourceRoutes = terminated.length > 0 ? terminated : config.routes;
-  const ilpAddresses = Array.from(new Set(sourceRoutes.map(routeAddress))).filter(Boolean);
+  let ilpAddresses = Array.from(new Set(sourceRoutes.map(routeAddress))).filter(Boolean);
+
+  // Apex aggregation (toon-meta#153): advertise only the apex upward. Every
+  // address covered by the apex (equal to it or a strict descendant) collapses
+  // to the apex; terminated routes NOT under the apex are still advertised
+  // individually (uncovered standalone routes). Defaults on only when the
+  // `children`/`apex` config surface is in use, so legacy configs keep
+  // enumerating every terminated route unchanged.
+  const apex = deriveApex(config);
+  const aggregate =
+    selfAnnounce.aggregate ??
+    (config.apex !== undefined || (config.children !== undefined && config.children.length > 0));
+  if (aggregate && apex) {
+    const collapsed: string[] = [];
+    for (const address of ilpAddresses) {
+      const covered = address === apex || address.startsWith(`${apex}.`);
+      const advertised = covered ? apex : address;
+      if (!collapsed.includes(advertised)) {
+        collapsed.push(advertised);
+      }
+    }
+    // Apex first: it is the node's primary advertised identity.
+    ilpAddresses = collapsed.includes(apex)
+      ? [apex, ...collapsed.filter((a) => a !== apex)]
+      : collapsed;
+  }
+
   const ilpAddress = ilpAddresses[0] ?? '';
 
   // Supported chains from the chain providers (e.g. `evm:31337`).
@@ -345,7 +391,7 @@ export function buildSelfAnnouncementInfo(
   const tokenNetworks = { ...derivedParams.tokenNetworks, ...(runtimeTokenNetworks ?? {}) };
   const preferredTokens = derivedParams.preferredTokens;
 
-  const routes = resolveRouteHints(config.routes, selfAnnounce.routes);
+  const routes = resolveRouteHints(config.routes, selfAnnounce.routes, config.children, apex);
 
   // Link-state block (toon-meta#153): own locally-delivered prefixes (cost 0)
   // + the Nostr pubkeys of configured peers, when known. Content ride-along.
