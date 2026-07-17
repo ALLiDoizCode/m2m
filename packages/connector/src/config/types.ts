@@ -749,6 +749,68 @@ export interface ConnectorConfig {
    * @see BootstrapConfig
    */
   bootstrap?: BootstrapConfig;
+
+  /**
+   * Optional funded-peering policy (toon-meta#153, discovered-vs-peered).
+   *
+   * Discovery (kind:10032 ingest → the discovered-node registry + learned
+   * multi-hop routes) is free and unbounded; FUNDING a settlement channel to
+   * an upstream is a deliberate, bounded operator choice. This block bounds
+   * that choice. Absent → unlimited funded channels, no auto-registration
+   * (identical to pre-existing behavior).
+   *
+   * @see PeeringPolicyConfig
+   */
+  peeringPolicy?: PeeringPolicyConfig;
+}
+
+/**
+ * Funded-Peering Policy (toon-meta#153, discovered-vs-peered split).
+ *
+ * The epic's thesis is "sparse channels, dense reachability": a node funds
+ * settlement channels to a FEW upstreams and reaches everything else through
+ * them via learned multi-hop routes. This block makes the sparsity an
+ * enforced policy instead of an operator convention.
+ *
+ * @example
+ * ```yaml
+ * peeringPolicy:
+ *   maxFundedChannels: 3
+ *   autoRegister: false   # v0: false is the only supported value
+ * ```
+ */
+export interface PeeringPolicyConfig {
+  /**
+   * Maximum number of FUNDED peer channels this node may hold at once.
+   * Enforced in `ConnectorNode.registerPeer` (and the mirrored
+   * `POST /admin/peers` surface): registering a peer WITH a settlement block
+   * that would open a new funded channel beyond the cap fails with a clear
+   * error.
+   *
+   * What is counted: currently-registered peers (live in the BTP / ILP-HTTP
+   * client managers) that carry runtime settlement config — i.e. entries in
+   * the connector's settlement-peer map, created by
+   * `registerPeer`/`POST /admin/peers` settlement blocks (including those
+   * replayed from the persistent registry at boot). Peers registered WITHOUT
+   * a settlement block (route-only links) do not count, and re-registering an
+   * already-funded peer never consumes a new slot. Static YAML `peers[]`
+   * settlement fields (`evmAddress` etc.) predate this policy and are not
+   * counted — the cap governs the runtime funding admission path.
+   *
+   * Omitted → unlimited (backward compatible). Must be a positive integer.
+   */
+  maxFundedChannels?: number;
+
+  /**
+   * Whether the connector may AUTOMATICALLY register (fund) discovered nodes.
+   *
+   * v0: `false` is the ONLY supported value — funding stays a deliberate
+   * operator action (inspect `GET /admin/discovered-nodes`, promote via the
+   * existing `POST /admin/peers`). Setting `true` is rejected at config load
+   * with "not yet supported"; auto-funding policy is future work. Defaults to
+   * `false`.
+   */
+  autoRegister?: boolean;
 }
 
 /**

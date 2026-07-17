@@ -28,6 +28,7 @@ import {
   ChildConfig,
   BootstrapConfig,
   BootstrapSeedEntry,
+  PeeringPolicyConfig,
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
@@ -273,6 +274,8 @@ export class ConfigLoader {
       // toon-meta#153: opt-in cold-start bootstrap. Validated above (URL
       // schemes, hex pubkeys, positive integers); absent → disabled.
       bootstrap,
+      // toon-meta#153 (discovered-vs-peered): bounded funded-peering policy.
+      peeringPolicy: this.validatePeeringPolicy(rawConfig.peeringPolicy),
       transport,
     };
 
@@ -280,6 +283,60 @@ export class ConfigLoader {
     validateEnvironment(connectorConfig);
 
     return connectorConfig;
+  }
+
+  /**
+   * Validate the optional `peeringPolicy` block (toon-meta#153,
+   * discovered-vs-peered split).
+   *
+   * `maxFundedChannels` must be a positive integer when present.
+   * `autoRegister` must be a boolean, and `true` is REJECTED for v0: funding
+   * a settlement channel stays a deliberate operator action; auto-funding
+   * policy is future work.
+   *
+   * @param raw - The untrusted `peeringPolicy` value from the config input.
+   * @returns The validated block, or `undefined` when absent.
+   * @throws ConfigurationError on any malformed field or `autoRegister: true`.
+   * @private
+   */
+  private static validatePeeringPolicy(raw: unknown): PeeringPolicyConfig | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ConfigurationError('peeringPolicy must be an object');
+    }
+    const block = raw as Record<string, unknown>;
+
+    if (block.maxFundedChannels !== undefined) {
+      if (
+        typeof block.maxFundedChannels !== 'number' ||
+        !Number.isInteger(block.maxFundedChannels) ||
+        block.maxFundedChannels <= 0
+      ) {
+        throw new ConfigurationError('peeringPolicy.maxFundedChannels must be a positive integer');
+      }
+    }
+
+    if (block.autoRegister !== undefined) {
+      if (typeof block.autoRegister !== 'boolean') {
+        throw new ConfigurationError('peeringPolicy.autoRegister must be a boolean');
+      }
+      if (block.autoRegister === true) {
+        throw new ConfigurationError(
+          'peeringPolicy.autoRegister: true is not yet supported — funding a settlement ' +
+            'channel is a deliberate operator action (review GET /admin/discovered-nodes ' +
+            'and promote via POST /admin/peers)'
+        );
+      }
+    }
+
+    return {
+      ...(block.maxFundedChannels !== undefined
+        ? { maxFundedChannels: block.maxFundedChannels as number }
+        : {}),
+      ...(block.autoRegister !== undefined ? { autoRegister: block.autoRegister as boolean } : {}),
+    };
   }
 
   /**

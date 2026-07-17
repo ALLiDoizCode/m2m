@@ -58,6 +58,7 @@ import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 import type { PeerRelation, RouteTermination, TerminationChain } from '../config/types';
 import { validateRouteTermination, toRouteTermination } from '../config/types';
+import type { DiscoveredNode } from '../discovery/discovered-node-registry';
 
 /**
  * Admin API Configuration
@@ -215,6 +216,27 @@ export interface AdminAPIConfig {
    * not applied (the registry seam is simply absent).
    */
   routeTerminationRegistry?: RouteTerminationSink;
+
+  /**
+   * Optional discovered-node reader (toon-meta#153, discovered-vs-peered).
+   * When provided, `GET /admin/discovered-nodes` lists every node known from
+   * kind:10032 relay ingest with its `funded` flag, so an operator can see
+   * discovered-but-unfunded nodes and choose which to promote via the
+   * EXISTING `POST /admin/peers` (the entry's `btpEndpoint` is the `url`;
+   * its `settlementAddresses`/`supportedChains` seed the settlement block).
+   * When omitted (route learning disabled / test fixtures), the endpoint
+   * returns an empty list.
+   */
+  getDiscoveredNodes?: () => DiscoveredNode[];
+
+  /**
+   * Optional funded-channel cap gate (toon-meta#153). When provided,
+   * `POST /admin/peers` with a `settlement` block calls this with the peer id
+   * before any mutation; a non-null return is the rejection message (HTTP
+   * 409), byte-identical to the error `ConnectorNode.registerPeer` throws
+   * (cross-surface parity). When omitted, no cap is enforced on this surface.
+   */
+  checkFundedChannelCap?: (peerId: string) => string | null;
 }
 
 /**
@@ -622,6 +644,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     httpPeerEgress,
     setPeerProtocol,
     routeTerminationRegistry,
+    getDiscoveredNodes,
+    checkFundedChannelCap,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -890,6 +914,18 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         const settlementError = validateSettlementConfig(body.settlement);
         if (settlementError) {
           res.status(400).json({ error: 'Bad request', message: settlementError });
+          return;
+        }
+      }
+
+      // Funded-peering admission (toon-meta#153, discovered-vs-peered): a
+      // settlement block is the intent to FUND a channel; the cap gate mirrors
+      // ConnectorNode.registerPeer with a byte-identical message. Checked
+      // BEFORE any mutation so a rejected request leaves no partial state.
+      if (body.settlement && checkFundedChannelCap) {
+        const capError = checkFundedChannelCap(body.id);
+        if (capError) {
+          res.status(409).json({ error: 'Conflict', message: capError });
           return;
         }
       }
@@ -1311,6 +1347,41 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.error({ event: 'admin_api_error', error: errorMessage }, 'Failed to update peer');
+      res.status(500).json({ error: 'Internal server error', message: errorMessage });
+    }
+  });
+
+  /**
+   * GET /admin/discovered-nodes (toon-meta#153, discovered-vs-peered)
+   *
+   * List every node known from kind:10032 relay ingest — the free, unbounded
+   * DISCOVERED set — each entry flagged `funded` when a live registered peer
+   * currently maps to it (matched by configured `nip59PublicKey` pubkey, or
+   * `btpEndpoint === peer.url` as fallback).
+   *
+   * Response schema note: there is deliberately NO promote endpoint. To fund
+   * a discovered-but-unfunded node, use the EXISTING `POST /admin/peers`:
+   * the entry supplies `btpEndpoint` (the peer `url`) plus settlement hints
+   * (`supportedChains`, `settlementAddresses`, `assetCode`/`assetScale`).
+   * Admission is bounded by `peeringPolicy.maxFundedChannels`.
+   */
+  router.get('/discovered-nodes', (_req: Request, res: Response) => {
+    try {
+      const nodes = getDiscoveredNodes ? getDiscoveredNodes() : [];
+      res.json({
+        nodeId,
+        discoveredCount: nodes.length,
+        fundedCount: nodes.filter((n) => n.funded).length,
+        // Promote a node with POST /admin/peers (url = node.btpEndpoint);
+        // no dedicated promote endpoint exists by design.
+        nodes,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(
+        { event: 'admin_api_error', error: errorMessage },
+        'Failed to list discovered nodes'
+      );
       res.status(500).json({ error: 'Internal server error', message: errorMessage });
     }
   });

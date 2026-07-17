@@ -66,8 +66,20 @@ export {
   DEFAULT_MAX_LEARNED_ROUTES,
   LEARNED_ROUTE_PRIORITY,
 } from './route-learning-service';
-export type { RouteLearningServiceDeps } from './route-learning-service';
+export type { RouteLearningServiceDeps, DiscoveredNodeSink } from './route-learning-service';
 export { createNostrRelayClient } from './nostr-relay-client';
+
+// Discovered-vs-peered split (toon-meta#153): the free, unbounded DISCOVERED
+// set (known from kind:10032 ingest, routable-through via learned routes)
+// surfaced as a first-class registry, distinct from the few deliberately
+// FUNDED peers (bounded by peeringPolicy.maxFundedChannels).
+export { DiscoveredNodeRegistry } from './discovered-node-registry';
+export type {
+  DiscoveredNode,
+  DiscoveredNodeIngestResult,
+  DiscoveredNodeRegistryDeps,
+  FundedPeerRef,
+} from './discovered-node-registry';
 export type {
   RouteLearningRelayClient,
   RelaySubscriptionHandle,
