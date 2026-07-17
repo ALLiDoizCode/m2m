@@ -234,7 +234,11 @@ export interface AdminAPIConfig {
    * `POST /admin/peers` with a `settlement` block calls this with the peer id
    * before any mutation; a non-null return is the rejection message (HTTP
    * 409), byte-identical to the error `ConnectorNode.registerPeer` throws
-   * (cross-surface parity). When omitted, no cap is enforced on this surface.
+   * (cross-surface parity). `PUT /admin/peers/:peerId` runs the same gate,
+   * but only for a FIRST-TIME settlement add (no existing `settlementPeers`
+   * entry) — the unfunded → funded transition that consumes a slot (issue
+   * #344); settlement updates to an already-funded peer stay exempt. When
+   * omitted, no cap is enforced on this surface.
    */
   checkFundedChannelCap?: (peerId: string) => string | null;
 
@@ -1314,6 +1318,28 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
             });
             return;
           }
+        }
+      }
+
+      // Funded-peering admission (toon-meta#153, issue #344): a FIRST-TIME
+      // settlement add on an existing route-only peer is the unfunded → funded
+      // transition that consumes a peeringPolicy.maxFundedChannels slot, so it
+      // runs the same injected cap gate as POST /admin/peers with the same 409
+      // shape (cross-surface parity). Updating an already-funded peer's
+      // settlement merges config without consuming a new slot (mirroring
+      // ConnectorNode._checkFundedChannelCap's already-funded early return),
+      // and routes-only updates never consult the gate. Checked BEFORE any
+      // mutation so a rejected request leaves no partial state.
+      if (
+        body.settlement &&
+        settlementPeers &&
+        !settlementPeers.has(peerId) &&
+        checkFundedChannelCap
+      ) {
+        const capError = checkFundedChannelCap(peerId);
+        if (capError) {
+          res.status(409).json({ error: 'Conflict', message: capError });
+          return;
         }
       }
 

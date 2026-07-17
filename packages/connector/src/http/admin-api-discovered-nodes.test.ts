@@ -1,7 +1,8 @@
 /**
  * Unit tests for the discovered-vs-peered admin surface (toon-meta#153):
  * GET /admin/discovered-nodes and the funded-channel cap gate on
- * POST /admin/peers. Follows the admin-api-peers.test.ts fixture pattern
+ * POST /admin/peers and PUT /admin/peers/:peerId first-time settlement adds
+ * (issue #344). Follows the admin-api-peers.test.ts fixture pattern
  * (supertest against a router built with hand-wired deps).
  *
  * @module http/admin-api-discovered-nodes.test
@@ -16,6 +17,7 @@ import {
   type FundedPeerRef,
 } from '../discovery/discovered-node-registry';
 import { ILP_PEER_INFO_KIND } from '../discovery/ilp-peer-info-event';
+import type { PeerConfig as SettlementPeerConfig } from '../settlement/types';
 import type { Logger } from 'pino';
 import type { RoutingTable } from '../routing/routing-table';
 import type { BTPClientManager } from '../btp/btp-client-manager';
@@ -196,6 +198,130 @@ describe('Admin API — discovered-vs-peered surface (toon-meta#153)', () => {
 
       expect(res.status).toBe(201);
       expect(checkFundedChannelCap).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('PUT /admin/peers/:peerId — funded-channel cap gate (issue #344)', () => {
+    // The unfunded → funded transition this surface can perform: a FIRST-TIME
+    // settlement add on an existing route-only peer consumes a
+    // maxFundedChannels slot, so it must run the same injected gate as
+    // POST /admin/peers with the same 409 shape. Settlement updates to an
+    // already-funded peer and routes-only PUTs stay exempt.
+    const capMessage =
+      "Funded-channel cap reached: 2/2 funded channels in use (peeringPolicy.maxFundedChannels). Registering 'peer-c' with settlement config would open another funded channel — remove a funded peer first (DELETE /admin/peers/:peerId) or raise the cap. Discovered nodes stay reachable through learned multi-hop routes without a funded channel.";
+
+    const settlementBody = {
+      settlement: {
+        preference: 'evm' as const,
+        evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28',
+        chainId: 8453,
+      },
+    };
+
+    function fundedEntry(peerId: string): SettlementPeerConfig {
+      return {
+        peerId,
+        address: '',
+        settlementPreference: 'evm',
+        settlementTokens: ['EVM'],
+        evmAddress: '0x' + '2'.repeat(40),
+      };
+    }
+
+    it('rejects a first-time settlement add with 409 when the cap gate refuses, leaving the peer unchanged', async () => {
+      // peer-c is live but route-only: no settlementPeers entry.
+      mockBTPClientManager.getPeerIds.mockReturnValue(['peer-a', 'peer-b', 'peer-c']);
+      const settlementPeers = new Map<string, SettlementPeerConfig>([
+        ['peer-a', fundedEntry('peer-a')],
+        ['peer-b', fundedEntry('peer-b')],
+      ]);
+      const checkFundedChannelCap = jest.fn().mockReturnValue(capMessage);
+      const app = await makeApp({ checkFundedChannelCap, settlementPeers });
+
+      const res = await request(app)
+        .put('/admin/peers/peer-c')
+        .send({ ...settlementBody, routes: [{ prefix: 'g.peer-c' }] });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'Conflict', message: capMessage });
+      expect(checkFundedChannelCap).toHaveBeenCalledWith('peer-c');
+      // Atomic rejection: no partial state — settlement untouched, routes not added.
+      expect(settlementPeers.has('peer-c')).toBe(false);
+      expect(settlementPeers.size).toBe(2);
+      expect(mockRoutingTable.addRoute).not.toHaveBeenCalled();
+    });
+
+    it('never consults the cap gate when updating an already-funded peer settlement (no new slot)', async () => {
+      mockBTPClientManager.getPeerIds.mockReturnValue(['peer-a', 'peer-b']);
+      const settlementPeers = new Map<string, SettlementPeerConfig>([
+        ['peer-a', fundedEntry('peer-a')],
+        ['peer-b', fundedEntry('peer-b')],
+      ]);
+      const checkFundedChannelCap = jest.fn().mockReturnValue(capMessage);
+      const app = await makeApp({ checkFundedChannelCap, settlementPeers });
+
+      const res = await request(app).put('/admin/peers/peer-a').send(settlementBody);
+
+      expect(res.status).toBe(200);
+      expect(checkFundedChannelCap).not.toHaveBeenCalled();
+      // Merge applied: the update landed on the existing entry.
+      expect(settlementPeers.get('peer-a')?.evmAddress).toBe(
+        '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28'
+      );
+    });
+
+    it('never consults the cap gate for a routes-only PUT', async () => {
+      mockBTPClientManager.getPeerIds.mockReturnValue(['peer-c']);
+      const checkFundedChannelCap = jest.fn().mockReturnValue(capMessage);
+      const app = await makeApp({ checkFundedChannelCap, settlementPeers: new Map() });
+
+      const res = await request(app)
+        .put('/admin/peers/peer-c')
+        .send({ routes: [{ prefix: 'g.peer-c' }] });
+
+      expect(res.status).toBe(200);
+      expect(checkFundedChannelCap).not.toHaveBeenCalled();
+      expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.peer-c', 'peer-c', 0);
+    });
+
+    it('admits the same first-time settlement add after DELETE of a funded peer frees a slot', async () => {
+      // Stateful fixture wired like production: the gate counts settlement
+      // entries among live client-manager peers against cap = 2, and the
+      // DELETE handler removes both the live peer and its settlement entry.
+      const livePeerIds = new Set(['peer-a', 'peer-b', 'peer-c']);
+      const settlementPeers = new Map<string, SettlementPeerConfig>([
+        ['peer-a', fundedEntry('peer-a')],
+        ['peer-b', fundedEntry('peer-b')],
+      ]);
+      mockBTPClientManager.getPeerIds.mockImplementation(() => Array.from(livePeerIds));
+      mockBTPClientManager.removePeer.mockImplementation(async (peerId: string) => {
+        livePeerIds.delete(peerId);
+      });
+      const maxFundedChannels = 2;
+      const checkFundedChannelCap = jest.fn((peerId: string): string | null => {
+        if (settlementPeers.has(peerId)) return null;
+        let funded = 0;
+        for (const id of settlementPeers.keys()) {
+          if (livePeerIds.has(id)) funded++;
+        }
+        if (funded < maxFundedChannels) return null;
+        return capMessage;
+      });
+      const app = await makeApp({ checkFundedChannelCap, settlementPeers });
+
+      // At cap: first-time add on route-only peer-c is refused.
+      const blocked = await request(app).put('/admin/peers/peer-c').send(settlementBody);
+      expect(blocked.status).toBe(409);
+      expect(settlementPeers.has('peer-c')).toBe(false);
+
+      // Free a slot, then the identical PUT succeeds.
+      const del = await request(app).delete('/admin/peers/peer-b');
+      expect(del.status).toBe(200);
+      expect(settlementPeers.has('peer-b')).toBe(false);
+
+      const admitted = await request(app).put('/admin/peers/peer-c').send(settlementBody);
+      expect(admitted.status).toBe(200);
+      expect(settlementPeers.get('peer-c')?.settlementPreference).toBe('evm');
     });
   });
 
