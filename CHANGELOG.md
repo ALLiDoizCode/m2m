@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.34.0](https://github.com/toon-protocol/connector/compare/v3.33.1...v3.34.0) (2026-07-17)
+
+### Features
+
+- **config:** general child-prefix registration + apex aggregation (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([0448414](https://github.com/toon-protocol/connector/commit/04484141bc20d0fd9e569b4f3b38370890bd6401))
+- **discovery:** capability directory in kind:10032 announcements (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([c7bcd67](https://github.com/toon-protocol/connector/commit/c7bcd67707754065e66cb2abe044f7e8bebb19e9))
+- **discovery:** cold-start bootstrap — curated signed seeds, peer cache, sample-and-verify (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([900fb0e](https://github.com/toon-protocol/connector/commit/900fb0ecdc9a320dc3195b6c5f331e588cef28cc)), closes [connector#289](https://github.com/toon-protocol/connector/issues/289)
+- **discovery:** discovered-vs-peered split + bounded funding policy (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([bed8dbd](https://github.com/toon-protocol/connector/commit/bed8dbd94c709d04d1b72cccd3914b89196905d4))
+- **routing:** multi-hop route learning via link-state over kind:10032 (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([937cfcb](https://github.com/toon-protocol/connector/commit/937cfcbb5862c8c7854f2616ec474fdb6f1b7594))
+
+### Bug Fixes
+
+- **ci:** inventory the discovered-nodes route and restore function coverage on feat/153-control-plane ([471cea0](https://github.com/toon-protocol/connector/commit/471cea03bddd27766ef971e416ccf67d6033f599)), closes [#333](https://github.com/toon-protocol/connector/issues/333) [toon-meta#153](https://github.com/toon-protocol/toon-meta/issues/153)
+- **core:** restore stop() block brace lost in three-way merge ([3386fee](https://github.com/toon-protocol/connector/commit/3386fee251ae99bb046e70ec4150bb2da22b616d))
+
 ## [3.33.1](https://github.com/toon-protocol/connector/compare/v3.33.0...v3.33.1) (2026-07-17)
 
 ### Bug Fixes
