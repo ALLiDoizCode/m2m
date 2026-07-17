@@ -78,6 +78,20 @@ let minaUsdcInfoFn = () => ({ usdcMint: false });
   }
 }
 
+// Warm the o1js circuit cache in the BACKGROUND at boot (issue #348): compiling
+// FungibleTokenAdmin + UsdcChannelToken takes ~3 minutes on the 2 GB devnet box
+// (178.6s observed), and before this warm-up the compile ran lazily inside the
+// FIRST /api/mina/request — pushing that request to ~4min15s total (compile +
+// ~76s prove) while clients time out at ~2min. Failures here are non-fatal:
+// compileOnce resets its cache so the next mint retries.
+if (minaUsdcMinter) {
+  minaUsdcMinter
+    .compile()
+    .catch((err) =>
+      console.error('⚠️  Mina USDC circuit warm-up failed (will retry on first mint):', err.message)
+    );
+}
+
 // Serialize Solana drips the same way EVM ones are, so concurrent requests
 // don't race the treasury's transaction signing / blockhash reuse.
 let solanaQueue = Promise.resolve();
@@ -318,6 +332,16 @@ app.post('/api/solana/request', (req, res) => {
     .catch((error) => {
       console.error('❌ Solana faucet request failed:', error);
       if (!res.headersSent) {
+        // A wedged validator (block production halted while the RPC + /health
+        // stay up — issues #277/#348) is an UPSTREAM outage, not a faucet bug:
+        // answer 503 with the honest diagnosis instead of a misleading 500.
+        if (error.code === 'VALIDATOR_STALLED') {
+          res.status(503).json({
+            error: 'Solana validator not producing blocks',
+            message: error.message,
+          });
+          return;
+        }
         res.status(500).json({
           error: 'Solana faucet request failed',
           message: error.message,
@@ -367,16 +391,44 @@ app.post('/api/mina/request', (req, res) => {
       //    the minter is unconfigured — we just note it was skipped. A USDC mint
       //    FAILURE (when configured) is surfaced in the response (usdc.error) but
       //    still returns 200 because the native drip already succeeded.
+      //
+      //    While the circuit cache is still WARMING (~3min after boot on the
+      //    2 GB devnet box — see the boot-time warm-up above), we do NOT hold
+      //    the response for compile+prove (~4min total, past client timeouts):
+      //    we answer with the native payment + usdc.pending and finish the mint
+      //    in the background ON THIS SAME QUEUE, so a later drip's mint can
+      //    never race the admin account's nonce (issue #348).
       let usdc;
+      let pendingMint = null;
       if (minaUsdcMinter) {
-        try {
-          usdc = await minaUsdcMinter.mint(address);
-        } catch (mintErr) {
-          console.error(
-            '  ⚠️  Mina USDC mint failed (native drip still succeeded):',
-            mintErr.message
-          );
-          usdc = { error: 'USDC mint failed', message: mintErr.message };
+        if (minaUsdcMinter.isWarm()) {
+          try {
+            usdc = await minaUsdcMinter.mint(address);
+          } catch (mintErr) {
+            console.error(
+              '  ⚠️  Mina USDC mint failed (native drip still succeeded):',
+              mintErr.message
+            );
+            usdc = { error: 'USDC mint failed', message: mintErr.message };
+          }
+        } else {
+          usdc = {
+            pending: true,
+            note:
+              'USDC mint queued: the zk circuits are still compiling on this host ' +
+              '(first ~3min after a faucet restart). The mint will land shortly after; ' +
+              'native MINA was dripped now.',
+          };
+          pendingMint = () =>
+            minaUsdcMinter
+              .mint(address)
+              .then(() => console.log(`  ✅ Background Mina USDC mint completed for ${address}`))
+              .catch((mintErr) =>
+                console.error(
+                  `  ⚠️  Background Mina USDC mint failed for ${address}:`,
+                  mintErr.message
+                )
+              );
         }
       } else {
         usdc = {
@@ -389,6 +441,10 @@ app.post('/api/mina/request', (req, res) => {
 
       console.log(`  ✅ Mina faucet request completed for ${address}`);
       res.json({ success: true, chain: 'mina', address, payment: result, usdc });
+
+      // Keep the queue serialized through the background mint (nonce safety);
+      // its errors are already handled above so it can never poison the queue.
+      if (pendingMint) await pendingMint();
     })
     .catch((error) => {
       console.error('❌ Mina faucet request failed:', error.message);

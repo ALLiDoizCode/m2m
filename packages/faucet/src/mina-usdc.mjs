@@ -38,14 +38,7 @@
 // the route keeps dripping native MINA only (mirrors createSolanaFaucet /
 // createMinaFaucet). Fail-loud ONLY on a structurally invalid admin key.
 
-import {
-  AccountUpdate,
-  Mina,
-  PrivateKey,
-  PublicKey,
-  TokenId,
-  UInt64,
-} from 'o1js';
+import { AccountUpdate, Mina, PrivateKey, PublicKey, TokenId, UInt64, fetchAccount } from 'o1js';
 
 // Compiled ESM build of the repo's mina-zkapp token classes (see header). The
 // Dockerfile builds `packages/mina-zkapp/dist-esm/` and the image lays it out so
@@ -129,10 +122,11 @@ async function tokenAccountExists(recipientB58, tokenIdField) {
  *
  * Returns the recipient's post-mint balance (base units) as a string.
  */
-async function mintUsdc({ token, feePayer, recipient, wholeUsdc, signers, fundRecipient }) {
+async function mintUsdc({ token, feePayer, recipient, wholeUsdc, signers, fundRecipient, nonce }) {
   const amount = UInt64.from(wholeUsdc * ONE_USDC);
   const tx = await Mina.transaction(
-    { sender: feePayer, fee: UInt64.from(MINT_FEE_NANOMINA) },
+    // `nonce` (when known) is the POOL-AWARE inferredNonce — see mint() below.
+    { sender: feePayer, fee: UInt64.from(MINT_FEE_NANOMINA), ...(nonce != null ? { nonce } : {}) },
     async () => {
       if (fundRecipient) AccountUpdate.fundNewAccount(feePayer, 1);
       await token.mint(recipient, amount);
@@ -176,11 +170,14 @@ export function createMinaUsdcMinter() {
 
   // Validate token / admin-contract addresses (fail-loud on a bad address).
   let tokenPubKey;
+  let adminContractPubKey;
   try {
     tokenPubKey = PublicKey.fromBase58(tokenAddr);
-    PublicKey.fromBase58(adminContractAddr); // validate; address is informational here
+    adminContractPubKey = PublicKey.fromBase58(adminContractAddr);
   } catch {
-    throw new Error('MINA_USDC_TOKEN / MINA_USDC_ADMIN_CONTRACT is not a valid base58 Mina address.');
+    throw new Error(
+      'MINA_USDC_TOKEN / MINA_USDC_ADMIN_CONTRACT is not a valid base58 Mina address.'
+    );
   }
 
   const wholeUsdc = BigInt(MINA_USDC_AMOUNT);
@@ -208,20 +205,32 @@ export function createMinaUsdcMinter() {
   console.log(`   Per drip:       ${MINA_USDC_AMOUNT} USDC`);
   console.log(`   GraphQL:        ${MINA_GRAPHQL_URL}`);
 
-  // Compile FungibleTokenAdmin + UsdcChannelToken EXACTLY ONCE (~6s). Done
-  // lazily on first mint so the faucet still boots instantly; cached via this
+  // Compile FungibleTokenAdmin + UsdcChannelToken EXACTLY ONCE. Cached via this
   // promise so concurrent/repeat mints never recompile. We compile the SUBCLASS
   // (its `compile()` override also mirrors provers onto the base FungibleToken so
   // inherited `mint` proves — see usdc-channel-token.ts).
+  //
+  // TIMING (issue #348): compilation takes ~6s on a dev machine but ~3 MINUTES
+  // (178.6s observed) on the 2 GB devnet box — far longer than faucet clients
+  // wait. So index.js WARMS this cache in the background at boot via `compile()`
+  // below, and the /api/mina route checks `isWarm()` to avoid holding a drip
+  // response hostage to an in-flight compile.
   let compilePromise = null;
+  let warm = false;
   function compileOnce() {
     if (!compilePromise) {
       compilePromise = (async () => {
-        console.log('  ⏳ Compiling FungibleTokenAdmin + UsdcChannelToken circuits (first mint, ~6s)...');
+        console.log(
+          '  ⏳ Compiling FungibleTokenAdmin + UsdcChannelToken circuits ' +
+            '(~6s on a dev machine, ~3min on the 2 GB devnet box)...'
+        );
         const t0 = Date.now();
         await FungibleTokenAdmin.compile();
         await UsdcChannelToken.compile();
-        console.log(`  ✅ Mina USDC circuits compiled in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+        warm = true;
+        console.log(
+          `  ✅ Mina USDC circuits compiled in ${((Date.now() - t0) / 1000).toFixed(1)}s`
+        );
       })().catch((err) => {
         // Reset so a transient compile failure can be retried on the next mint.
         compilePromise = null;
@@ -241,8 +250,14 @@ export function createMinaUsdcMinter() {
 
     isValidAddress: isValidMinaAddress,
 
-    // Eagerly warm the circuit cache (optional; the route uses lazy compile).
+    // Eagerly warm the circuit cache — index.js calls this in the background at
+    // boot so the first drip does not pay the ~3min on-box compile (issue #348).
     compile: compileOnce,
+
+    // True once the circuits are compiled: a mint will run at "prove speed"
+    // (~75s on the devnet box) instead of compile+prove (~4min). The route uses
+    // this to decide whether to await the mint or answer with usdc.pending.
+    isWarm: () => warm,
 
     /**
      * Admin-mint `whole` USDC (default the configured per-drip amount) to
@@ -255,6 +270,41 @@ export function createMinaUsdcMinter() {
     async mint(recipientB58, whole) {
       const amountWhole = whole == null ? wholeUsdc : BigInt(whole);
       await compileOnce();
+
+      // Refresh the o1js account cache before EVERY mint (issue #348): the
+      // Mina.Network instance caches fetched accounts, so without this the
+      // SECOND mint in a process built its tx with the fee payer's STALE nonce
+      // from the first mint's fetch and the node rejected it "Invalid_nonce"
+      // (observed live on the devnet box). Also refresh the token + admin
+      // zkApp accounts so the proof runs against current on-chain state.
+      await fetchAccount({ publicKey: adminPubKey });
+      await fetchAccount({ publicKey: tokenPubKey });
+      await fetchAccount({ publicKey: adminContractPubKey });
+
+      // Fee-payer nonce: the ON-CHAIN nonce fetchAccount returns is not enough
+      // — proving takes ~70s while blocks land slower, so a back-to-back drip's
+      // previous mint command is often still in the POOL when this one builds,
+      // and reusing its nonce is rejected "Invalid_nonce" (observed live). The
+      // GraphQL `inferredNonce` counts pooled commands, so consecutive mints
+      // queue gaplessly behind each other. Best-effort: if the probe fails we
+      // fall back to o1js's cached on-chain nonce (correct when the pool is
+      // empty, e.g. the first mint after boot).
+      let nonce;
+      try {
+        const nonceData = await minaGraphql(
+          `query AdminNonce($pk: PublicKey!) {
+            account(publicKey: $pk) { inferredNonce }
+          }`,
+          { pk: adminPubKey.toBase58() }
+        );
+        const inferred = nonceData?.account?.inferredNonce;
+        if (inferred != null) nonce = Number(inferred);
+      } catch (nonceErr) {
+        console.log(
+          `  ⚠️  Could not probe admin inferredNonce (${nonceErr.message}); ` +
+            'using the fetched on-chain nonce.'
+        );
+      }
 
       // Decide fundRecipient by detecting the recipient's token account. If the
       // GraphQL probe itself fails we DEFAULT to funding (true) and rely on the
@@ -278,6 +328,7 @@ export function createMinaUsdcMinter() {
           wholeUsdc: amountWhole,
           signers: [adminAuthority],
           fundRecipient: fund,
+          nonce,
         });
 
       let balance;
@@ -293,7 +344,9 @@ export function createMinaUsdcMinter() {
         }
       }
 
-      console.log(`  📤 Minted ${amountWhole} USDC to ${recipientB58} (balance ${balance} base units)`);
+      console.log(
+        `  📤 Minted ${amountWhole} USDC to ${recipientB58} (balance ${balance} base units)`
+      );
       return { amount: String(amountWhole), balance, token: tokenAddr, tokenId: tokenIdField };
     },
   };

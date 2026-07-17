@@ -37,7 +37,10 @@ const NANO = 1_000_000_000n;
 // Leave unset to accept any valid funded key (e.g. lightnet genesis accounts,
 // which the provisioning acquires fresh on each reset — their address is not
 // known ahead of time, so a hardcoded treasury would break the lightnet drip).
-const EXPECTED_TREASURY = process.env.MINA_TREASURY_ADDRESS || null;
+// Read LAZILY (inside createMinaFaucet) rather than at module load, so the
+// guard actually sees the env the factory is called under — and so the tests
+// can exercise it.
+const expectedTreasury = () => process.env.MINA_TREASURY_ADDRESS || null;
 
 const MINA_NETWORK = process.env.MINA_NETWORK || 'devnet';
 const MINA_GRAPHQL_URL =
@@ -104,9 +107,10 @@ export function createMinaFaucet() {
     // Don't echo the key or the raw error (which may embed it).
     throw new Error('MINA_FAUCET_KEY is not a valid base58 Mina private key.');
   }
-  if (EXPECTED_TREASURY && derived !== EXPECTED_TREASURY) {
+  const expected = expectedTreasury();
+  if (expected && derived !== expected) {
     throw new Error(
-      `MINA_FAUCET_KEY derives ${derived} but MINA_TREASURY_ADDRESS is set to ${EXPECTED_TREASURY}. ` +
+      `MINA_FAUCET_KEY derives ${derived} but MINA_TREASURY_ADDRESS is set to ${expected}. ` +
         'Set MINA_FAUCET_KEY to the correct treasury private key, or unset MINA_TREASURY_ADDRESS.'
     );
   }
