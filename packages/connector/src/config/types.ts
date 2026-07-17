@@ -734,6 +734,21 @@ export interface ConnectorConfig {
    * @see RouteLearningConfig
    */
   routeLearning?: RouteLearningConfig;
+
+  /**
+   * Optional cold-start bootstrap configuration (toon-meta#153).
+   *
+   * Everything in the TOON network is discovered THROUGH a relay, but a cold
+   * node needs an out-of-band seed to reach its FIRST relay. When enabled, the
+   * connector resolves relay seeds (curated signed registry → learned-peer
+   * cache → config seeds → hardcoded fallback), probes candidates
+   * (sample-and-verify) before trusting them, and persists verified relays so
+   * seeds stay refreshable data instead of frozen config (connector#289).
+   * Disabled by default — absent this block, no bootstrap runs.
+   *
+   * @see BootstrapConfig
+   */
+  bootstrap?: BootstrapConfig;
 }
 
 /**
@@ -781,6 +796,77 @@ export interface RouteLearningConfig {
    * Default: 1000.
    */
   maxRoutes?: number;
+}
+
+/**
+ * A single operator-configured relay seed for cold-start bootstrap.
+ * Structurally identical to the discovery layer's `RelaySeed`.
+ */
+export interface BootstrapSeedEntry {
+  /** Nostr relay WebSocket URL (`wss://…`; `ws://…` allowed for local dev). */
+  relayUrl: string;
+  /** Optional relay operator Nostr pubkey (64-char lowercase hex). */
+  pubkey?: string;
+}
+
+/**
+ * Cold-Start Bootstrap Configuration (toon-meta#153).
+ *
+ * Governs how a cold connector finds its first relay(s). Resolution order:
+ * fresh signed registry (`registryUrl`) → persisted learned-peer cache
+ * (`cachePath`) → `seeds` below → hardcoded fallback list. Candidates are
+ * merged, deduped by relay URL, and sample-and-verified (probe: connect +
+ * fetch at least one valid kind:10032 event or an EOSE) before being trusted.
+ *
+ * @example
+ * ```yaml
+ * bootstrap:
+ *   enabled: true
+ *   registryUrl: https://seeds.toonprotocol.dev/relays.json
+ *   curatorPubkey: 3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d
+ *   seeds:
+ *     - relayUrl: wss://relay-ws.devnet.toonprotocol.dev
+ *   sampleSize: 3
+ *   refreshIntervalSecs: 3600
+ * ```
+ */
+export interface BootstrapConfig {
+  /** Whether cold-start bootstrap is enabled. Default (absent block): disabled. */
+  enabled: boolean;
+
+  /**
+   * HTTPS URL of the curated signed seed registry (a JSON `SeedManifest`,
+   * whole-manifest schnorr signature). When omitted, resolution starts at the
+   * learned-peer cache. Must be `https://`.
+   */
+  registryUrl?: string;
+
+  /**
+   * Pinned curator pubkey (BIP-340 x-only, 64-char lowercase hex) the
+   * registry manifest signature is verified against. Falls back to the
+   * hardcoded placeholder `FALLBACK_CURATOR_PUBKEY` when omitted — which no
+   * real manifest verifies against, so pin this when using `registryUrl`.
+   */
+  curatorPubkey?: string;
+
+  /** Operator-provided seed relays, tried after the registry and cache tiers. */
+  seeds?: BootstrapSeedEntry[];
+
+  /**
+   * Path of the learned-peer JSON cache file. Default:
+   * `./data/bootstrap-cache-<nodeId>.json` (the connector's data dir).
+   */
+  cachePath?: string;
+
+  /**
+   * Sample-and-verify width: how many candidate relays are probed
+   * concurrently per wave, and the maximum number of verified relays kept.
+   * Default: 3.
+   */
+  sampleSize?: number;
+
+  /** Seconds between seed re-resolutions. Default: 3600 (1 hour). */
+  refreshIntervalSecs?: number;
 }
 
 /**
