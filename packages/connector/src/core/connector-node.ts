@@ -2299,6 +2299,8 @@ export class ConnectorNode implements HealthStatusProvider {
       if (this._routeLearningService) {
         this._routeLearningService.stop();
         this._routeLearningService = null;
+      }
+
       // Stop the cold-start bootstrap refresh loop (clears its unref'd timer).
       if (this._bootstrapService) {
         this._bootstrapService.stop();
