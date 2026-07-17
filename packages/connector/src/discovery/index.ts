@@ -25,10 +25,15 @@ export type {
   ResolveTokenNetworksFn,
 } from './self-announce-service';
 export {
+  buildCapabilityDirectory,
   buildSelfAnnouncementInfo,
+  buildRoutingInfo,
   deriveChainSettlementParams,
+  nip59KeyToNostrPubkey,
   normalizeSettlementAddressKeys,
   resolveRouteHints,
+  PUBLISH_HINT_CAPABILITY,
+  STORE_HINT_CAPABILITY,
 } from './self-announce-builder';
 export type {
   AnnounceWarnFn,
@@ -42,5 +47,85 @@ export {
   DEFAULT_ANNOUNCE_PRICE,
 } from './self-announce-publish';
 export type { AnnouncePublishPlan, AnnouncePublishMode } from './self-announce-publish';
-export { buildIlpPeerInfoEvent, ILP_PEER_INFO_KIND, EXPIRATION_TAG } from './ilp-peer-info-event';
-export type { IlpPeerInfo, BuildIlpPeerInfoOptions } from './ilp-peer-info-event';
+export {
+  buildIlpPeerInfoEvent,
+  parseRoutingInfo,
+  parseCapabilityDirectory,
+  normalizeCapabilityName,
+  ILP_PEER_INFO_KIND,
+  EXPIRATION_TAG,
+  CAPABILITY_NAME_PATTERN,
+} from './ilp-peer-info-event';
+export type {
+  IlpPeerInfo,
+  IlpRoutingInfo,
+  IlpRoutingPrefix,
+  IlpCapabilityEntry,
+  BuildIlpPeerInfoOptions,
+} from './ilp-peer-info-event';
+
+// Route learning (toon-meta#153): the connector CONSUMES peers' kind:10032
+// announcements (link-state `routing` blocks) from the relay's free read
+// endpoint and installs learned multi-hop routes below config precedence.
+export {
+  RouteLearningService,
+  DEFAULT_ROUTE_LEARNING_REFRESH_SECS,
+  DEFAULT_MAX_LEARNED_ROUTES,
+  LEARNED_ROUTE_PRIORITY,
+} from './route-learning-service';
+export type { RouteLearningServiceDeps, DiscoveredNodeSink } from './route-learning-service';
+export { createNostrRelayClient } from './nostr-relay-client';
+
+// Discovered-vs-peered split (toon-meta#153): the free, unbounded DISCOVERED
+// set (known from kind:10032 ingest, routable-through via learned routes)
+// surfaced as a first-class registry, distinct from the few deliberately
+// FUNDED peers (bounded by peeringPolicy.maxFundedChannels).
+export { DiscoveredNodeRegistry } from './discovered-node-registry';
+export type {
+  DiscoveredNode,
+  DiscoveredNodeIngestResult,
+  DiscoveredNodeRegistryDeps,
+  FundedPeerRef,
+} from './discovered-node-registry';
+export type {
+  RouteLearningRelayClient,
+  RelaySubscriptionHandle,
+  RelayEventFilter,
+} from './nostr-relay-client';
+
+// Cold-start bootstrap (toon-meta#153): resolve relay seeds (curated signed
+// registry → learned-peer cache → config seeds → hardcoded fallback),
+// sample-and-verify candidates before trusting them, persist survivors.
+export {
+  BootstrapService,
+  DEFAULT_SAMPLE_SIZE,
+  DEFAULT_BOOTSTRAP_REFRESH_INTERVAL_SECS,
+  DEFAULT_PROBE_TIMEOUT_MS,
+  DEFAULT_CACHE_MAX_AGE_MS,
+} from './bootstrap-service';
+export type {
+  BootstrapServiceDeps,
+  ResolvedRelaySeed,
+  RelayProbeFn,
+  RelayProbeResult,
+  FetchFn,
+  FetchResponseLike,
+  RelaysResolvedListener,
+} from './bootstrap-service';
+export { FALLBACK_RELAY_SEEDS, FALLBACK_CURATOR_PUBKEY } from './bootstrap-seeds';
+export type { RelaySeed } from './bootstrap-seeds';
+export {
+  canonicalJson,
+  manifestDigest,
+  signSeedManifest,
+  parseSeedManifest,
+  verifySeedManifest,
+} from './bootstrap-manifest';
+export type {
+  SeedManifest,
+  SeedManifestPayload,
+  SeedManifestParseResult,
+} from './bootstrap-manifest';
+export { FileBootstrapCacheStore } from './bootstrap-cache';
+export type { BootstrapCacheStore, CachedRelaySeed, RelaySeedSource } from './bootstrap-cache';
+export { createKind10032RelayProbe, BOOTSTRAP_PROBE_SUB_ID } from './relay-probe';

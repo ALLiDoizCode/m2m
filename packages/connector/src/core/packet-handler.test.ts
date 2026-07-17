@@ -1869,7 +1869,7 @@ describe('PacketHandler', () => {
       },
     ];
 
-    const createMockNip59Wrapper = () =>
+    const createMockNip59Wrapper = (): never =>
       ({
         isEnabled: jest.fn().mockReturnValue(true),
         unwrapClaimWithPreimage: jest.fn().mockReturnValue({
@@ -1878,7 +1878,7 @@ describe('PacketHandler', () => {
         }),
       }) as never;
 
-    const createMockIlpMetrics = () =>
+    const createMockIlpMetrics = (): never =>
       ({
         recordInbound: jest.fn(),
         recordLocalDeliver: jest.fn(),

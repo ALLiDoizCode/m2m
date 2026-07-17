@@ -39,6 +39,7 @@
  */
 
 import type { ProviderConfig } from '../settlement/provider/payment-channel-provider';
+import type { IlpCapabilityEntry } from '../discovery/ilp-peer-info-event';
 
 /**
  * Configuration entry for a chain provider.
@@ -293,6 +294,78 @@ export interface RouteTermination {
 }
 
 /**
+ * Child-prefix binding under the connector's apex (toon-meta#153).
+ *
+ * A general, first-class way to bind `<apex>.<name>` to either an INTERNAL
+ * handler (`upstream`) or an EXTERNAL child peer link (`peerId`) — replacing
+ * the old hardcoded `.relay`/`.store` label conventions. Exactly one of
+ * `upstream` | `peerId` must be set.
+ *
+ * Each child expands (at config load, before the routing table and route
+ * termination registry are built) into an ordinary {@link RouteConfig} under
+ * the node's apex, so the packet path is identical either way:
+ * - `upstream` → a locally-terminated route (`nextHop` = this node, reverse
+ *   proxied to `upstream` by the HttpProxyHandler);
+ * - `peerId`  → a forwarding route (`nextHop` = the peer), which must exist in
+ *   `peers` with `relation: 'child'`.
+ *
+ * @example
+ * ```yaml
+ * apex: g.proxy
+ * children:
+ *   - name: relay            # internal handler → g.proxy.relay terminates here
+ *     upstream: http://relay:3100
+ *     price: '1000'
+ *   - name: store            # external child peer → g.proxy.store forwards
+ *     peerId: store-box      # peers[store-box].relation must be 'child'
+ * ```
+ */
+export interface ChildConfig {
+  /**
+   * Single ILP label appended to the apex (lowercase alphanumeric, `-`, `_`).
+   * The joined address `<apex>.<name>` must be a valid ILP address.
+   */
+  name: string;
+
+  /**
+   * Internal binding: HTTP(S) base URL of the handler the connector reverse
+   * proxies `<apex>.<name>` traffic to. Mutually exclusive with {@link peerId}.
+   */
+  upstream?: string;
+
+  /**
+   * External binding: id of a configured peer (must have `relation: 'child'`)
+   * that `<apex>.<name>` traffic forwards to. Mutually exclusive with
+   * {@link upstream}.
+   */
+  peerId?: string;
+
+  /**
+   * Price to terminate at this child (atomic units, decimal string). Only
+   * meaningful for `upstream` children; defaults to `'0'` (free).
+   */
+  price?: string;
+
+  /**
+   * Optional advisory capability tag (e.g. `'nostr-relay'`, `'blob-store'`,
+   * or a namespaced `'os.put'`). Carried on the config for discovery layers
+   * (a child with a capability is advertised in the kind:10032 `capabilities`
+   * directory at `<apex>.<name>` — toon-meta#153); not consulted by the
+   * packet path. Must satisfy the capability name grammar (alphanumeric
+   * start, then alphanumerics / `.` / `_` / `-`).
+   */
+  capability?: string;
+
+  /**
+   * Optional content address / URI of the capability's interface descriptor
+   * (e.g. `sha256:ab01…`), advertised as `capabilities[].schema` in the
+   * kind:10032 directory (toon-meta#153). Names are for humans; hashes are
+   * for binding. Only meaningful together with {@link capability}.
+   */
+  schema?: string;
+}
+
+/**
  * Route Configuration Interface
  *
  * Defines a routing table entry mapping ILP address prefixes
@@ -438,6 +511,28 @@ export interface ConnectorConfig {
    * Route nextHop values must reference peer IDs from the peers list
    */
   routes: RouteConfig[];
+
+  /**
+   * Optional explicit ILP apex address for this node (toon-meta#153).
+   *
+   * The apex is the address subtree this node owns: `children` expand to
+   * `<apex>.<name>` routes, and self-announce aggregation collapses covered
+   * routes to the apex. When omitted, the apex is derived from the node's
+   * first self route (a route whose `nextHop` is this node's `nodeId` or
+   * `'local'`), using its `ilpAddress` (else `prefix`). Prefer setting it
+   * explicitly when using `children`.
+   */
+  apex?: string;
+
+  /**
+   * Optional child-prefix bindings under the apex (toon-meta#153).
+   *
+   * Each entry binds `<apex>.<name>` to an internal handler (`upstream`) or an
+   * external child peer link (`peerId`), expanding into ordinary routes at
+   * config load — see {@link ChildConfig}. Replaces the legacy hardcoded
+   * `.relay`/`.store` label conventions with a general mechanism.
+   */
+  children?: ChildConfig[];
 
   /**
    * Optional settlement configuration for TigerBeetle integration
@@ -634,6 +729,218 @@ export interface ConnectorConfig {
    * @see SelfAnnounceConfig
    */
   selfAnnounce?: SelfAnnounceConfig;
+
+  /**
+   * Optional multi-hop route learning configuration (toon-meta#153).
+   *
+   * When enabled, the connector subscribes to kind:10032 `IlpPeerInfo`
+   * announcements on the configured relay read endpoints (free reads),
+   * maintains a link-state database from each announcement's `routing` block
+   * (reachable prefixes + neighbor adjacency), computes shortest paths, and
+   * installs LEARNED routes whose first hop is a directly-connected peer.
+   * Learned routes sit BELOW static config routes (negative priority, never
+   * overwrite an existing prefix) and are withdrawn when the sourcing
+   * announcement expires or the destination becomes unreachable. Disabled by
+   * default — absent this block the connector consumes no announcements.
+   *
+   * @see RouteLearningConfig
+   */
+  routeLearning?: RouteLearningConfig;
+
+  /**
+   * Optional cold-start bootstrap configuration (toon-meta#153).
+   *
+   * Everything in the TOON network is discovered THROUGH a relay, but a cold
+   * node needs an out-of-band seed to reach its FIRST relay. When enabled, the
+   * connector resolves relay seeds (curated signed registry → learned-peer
+   * cache → config seeds → hardcoded fallback), probes candidates
+   * (sample-and-verify) before trusting them, and persists verified relays so
+   * seeds stay refreshable data instead of frozen config (connector#289).
+   * Disabled by default — absent this block, no bootstrap runs.
+   *
+   * @see BootstrapConfig
+   */
+  bootstrap?: BootstrapConfig;
+
+  /**
+   * Optional funded-peering policy (toon-meta#153, discovered-vs-peered).
+   *
+   * Discovery (kind:10032 ingest → the discovered-node registry + learned
+   * multi-hop routes) is free and unbounded; FUNDING a settlement channel to
+   * an upstream is a deliberate, bounded operator choice. This block bounds
+   * that choice. Absent → unlimited funded channels, no auto-registration
+   * (identical to pre-existing behavior).
+   *
+   * @see PeeringPolicyConfig
+   */
+  peeringPolicy?: PeeringPolicyConfig;
+}
+
+/**
+ * Funded-Peering Policy (toon-meta#153, discovered-vs-peered split).
+ *
+ * The epic's thesis is "sparse channels, dense reachability": a node funds
+ * settlement channels to a FEW upstreams and reaches everything else through
+ * them via learned multi-hop routes. This block makes the sparsity an
+ * enforced policy instead of an operator convention.
+ *
+ * @example
+ * ```yaml
+ * peeringPolicy:
+ *   maxFundedChannels: 3
+ *   autoRegister: false   # v0: false is the only supported value
+ * ```
+ */
+export interface PeeringPolicyConfig {
+  /**
+   * Maximum number of FUNDED peer channels this node may hold at once.
+   * Enforced in `ConnectorNode.registerPeer` (and the mirrored
+   * `POST /admin/peers` surface): registering a peer WITH a settlement block
+   * that would open a new funded channel beyond the cap fails with a clear
+   * error.
+   *
+   * What is counted: currently-registered peers (live in the BTP / ILP-HTTP
+   * client managers) that carry runtime settlement config — i.e. entries in
+   * the connector's settlement-peer map, created by
+   * `registerPeer`/`POST /admin/peers` settlement blocks (including those
+   * replayed from the persistent registry at boot). Peers registered WITHOUT
+   * a settlement block (route-only links) do not count, and re-registering an
+   * already-funded peer never consumes a new slot. Static YAML `peers[]`
+   * settlement fields (`evmAddress` etc.) predate this policy and are not
+   * counted — the cap governs the runtime funding admission path.
+   *
+   * Omitted → unlimited (backward compatible). Must be a positive integer.
+   */
+  maxFundedChannels?: number;
+
+  /**
+   * Whether the connector may AUTOMATICALLY register (fund) discovered nodes.
+   *
+   * v0: `false` is the ONLY supported value — funding stays a deliberate
+   * operator action (inspect `GET /admin/discovered-nodes`, promote via the
+   * existing `POST /admin/peers`). Setting `true` is rejected at config load
+   * with "not yet supported"; auto-funding policy is future work. Defaults to
+   * `false`.
+   */
+  autoRegister?: boolean;
+}
+
+/**
+ * Route Learning Configuration Interface (toon-meta#153)
+ *
+ * Drives the connector's consumption of OTHER nodes' kind:10032 announcements
+ * for multi-hop route learning — the read-side complement of
+ * {@link SelfAnnounceConfig}. Reads are FREE (a relay's public WS endpoint),
+ * so no payment config is involved.
+ *
+ * @example
+ * ```yaml
+ * routeLearning:
+ *   enabled: true
+ *   relayUrls:
+ *     - wss://relay-ws.devnet.toonprotocol.dev
+ *   refreshIntervalSecs: 60
+ *   maxRoutes: 1000
+ * ```
+ */
+export interface RouteLearningConfig {
+  /**
+   * Whether route learning is enabled. When false (default), the connector
+   * subscribes to nothing and installs no learned routes.
+   */
+  enabled: boolean;
+
+  /**
+   * Public Nostr relay WS URLs to subscribe to for kind:10032 announcements.
+   * When omitted, falls back to `selfAnnounce.relayUrl` when that is set
+   * (the relay a node announces TO is usually also worth learning FROM).
+   */
+  relayUrls?: string[];
+
+  /**
+   * Seconds between periodic expiry sweeps / recomputes (route withdrawal for
+   * lapsed NIP-40 expirations also happens on this cadence, in addition to
+   * the recompute-on-ingest path). Default: 60.
+   */
+  refreshIntervalSecs?: number;
+
+  /**
+   * Maximum number of learned routes to install (a safety valve against a
+   * flooded relay). The best (lowest-cost) routes win, deterministically.
+   * Default: 1000.
+   */
+  maxRoutes?: number;
+}
+
+/**
+ * A single operator-configured relay seed for cold-start bootstrap.
+ * Structurally identical to the discovery layer's `RelaySeed`.
+ */
+export interface BootstrapSeedEntry {
+  /** Nostr relay WebSocket URL (`wss://…`; `ws://…` allowed for local dev). */
+  relayUrl: string;
+  /** Optional relay operator Nostr pubkey (64-char lowercase hex). */
+  pubkey?: string;
+}
+
+/**
+ * Cold-Start Bootstrap Configuration (toon-meta#153).
+ *
+ * Governs how a cold connector finds its first relay(s). Resolution order:
+ * fresh signed registry (`registryUrl`) → persisted learned-peer cache
+ * (`cachePath`) → `seeds` below → hardcoded fallback list. Candidates are
+ * merged, deduped by relay URL, and sample-and-verified (probe: connect +
+ * fetch at least one valid kind:10032 event or an EOSE) before being trusted.
+ *
+ * @example
+ * ```yaml
+ * bootstrap:
+ *   enabled: true
+ *   registryUrl: https://seeds.toonprotocol.dev/relays.json
+ *   curatorPubkey: 3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d
+ *   seeds:
+ *     - relayUrl: wss://relay-ws.devnet.toonprotocol.dev
+ *   sampleSize: 3
+ *   refreshIntervalSecs: 3600
+ * ```
+ */
+export interface BootstrapConfig {
+  /** Whether cold-start bootstrap is enabled. Default (absent block): disabled. */
+  enabled: boolean;
+
+  /**
+   * HTTPS URL of the curated signed seed registry (a JSON `SeedManifest`,
+   * whole-manifest schnorr signature). When omitted, resolution starts at the
+   * learned-peer cache. Must be `https://`.
+   */
+  registryUrl?: string;
+
+  /**
+   * Pinned curator pubkey (BIP-340 x-only, 64-char lowercase hex) the
+   * registry manifest signature is verified against. Falls back to the
+   * hardcoded placeholder `FALLBACK_CURATOR_PUBKEY` when omitted — which no
+   * real manifest verifies against, so pin this when using `registryUrl`.
+   */
+  curatorPubkey?: string;
+
+  /** Operator-provided seed relays, tried after the registry and cache tiers. */
+  seeds?: BootstrapSeedEntry[];
+
+  /**
+   * Path of the learned-peer JSON cache file. Default:
+   * `./data/bootstrap-cache-<nodeId>.json` (the connector's data dir).
+   */
+  cachePath?: string;
+
+  /**
+   * Sample-and-verify width: how many candidate relays are probed
+   * concurrently per wave, and the maximum number of verified relays kept.
+   * Default: 3.
+   */
+  sampleSize?: number;
+
+  /** Seconds between seed re-resolutions. Default: 3600 (1 hour). */
+  refreshIntervalSecs?: number;
 }
 
 /**
@@ -739,8 +1046,22 @@ export interface SelfAnnounceConfig {
   assetScale?: number;
 
   /**
+   * Apex aggregation opt-out (toon-meta#153).
+   *
+   * When true, the announcement advertises only the node's apex upward:
+   * `ilpAddress`/`ilpAddresses` collapse every route covered by the apex
+   * (equal to it or a strict descendant) to the apex itself. Terminated routes
+   * NOT under the apex are still advertised individually (uncovered standalone
+   * routes). Defaults to `true` when `children` or `apex` config is present,
+   * `false` otherwise — so legacy configs keep enumerating every terminated
+   * route exactly as before.
+   */
+  aggregate?: boolean;
+
+  /**
    * Optional explicit route-hint overrides. When omitted, the publish/store
-   * route addresses are DERIVED from the connector's configured routes (the
+   * route addresses are DERIVED from `children` named `relay`/`store` first
+   * (toon-meta#153), then from the connector's configured routes (the
    * `.relay` route is the publish address; the direct `.store` route is the
    * store address). Override only for non-standard topologies.
    */
@@ -750,6 +1071,16 @@ export interface SelfAnnounceConfig {
     /** ILP address a client should STORE (blob uploads) to, e.g. `g.proxy.store`. */
     store?: string;
   };
+
+  /**
+   * Optional explicit capability directory entries (toon-meta#153), appended
+   * AFTER the entries derived from `children` capabilities and the legacy
+   * publish/store hints — an override/extension list for capabilities the
+   * derivation cannot express. Validated at config load (capability name
+   * grammar, ILP address, non-negative decimal price, non-empty schema); the
+   * merged directory is deduped by (capability, address).
+   */
+  capabilities?: IlpCapabilityEntry[];
 }
 
 /**

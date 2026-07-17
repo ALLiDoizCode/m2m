@@ -1443,6 +1443,84 @@ describe('ConnectorNode', () => {
       ).rejects.toThrow(/Invalid relation: must be 'parent', 'peer', or 'child' \(got 'sibling'\)/);
     });
 
+    // ── toon-meta#153: config child bindings + apex self-prefix ──
+
+    it('registerPeer() rejects a relation contradicting a config child binding (toon-meta#153)', async () => {
+      // Arrange: config binds 'store-box' as the child 'store' under the apex.
+      const childCfg = createTestConfig({
+        apex: 'g.self',
+        children: [{ name: 'store', peerId: 'store-box' }],
+      });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(childCfg);
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      mockBTPClientManager.getPeerIds.mockReturnValue([]);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+
+      // Act & Assert: a non-child relation contradicts the config binding.
+      await expect(
+        node.registerPeer({
+          id: 'store-box',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://store-box:3000',
+          authToken: 't',
+          relation: 'peer',
+        })
+      ).rejects.toThrow(/bound as child 'store' in config; relation must be 'child'/);
+    });
+
+    it('registerPeer() skips the auto child route for a config-bound child peer (toon-meta#153)', async () => {
+      // Arrange: the expanded route `g.self.store` already binds this peer at
+      // config load — no `<self>.<peerId>` auto-route should be re-derived.
+      const childCfg = createTestConfig({
+        apex: 'g.self',
+        children: [{ name: 'store', peerId: 'store-box' }],
+      });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(childCfg);
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      mockBTPClientManager.getPeerIds.mockReturnValue([]);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+      mockRoutingTable.addRoute.mockClear();
+
+      // Act
+      await node.registerPeer({
+        id: 'store-box',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+        url: 'ws://store-box:3000',
+        authToken: 't',
+        relation: 'child',
+      });
+
+      // Assert
+      expect(mockRoutingTable.addRoute).not.toHaveBeenCalled();
+      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('store-box', 'child');
+    });
+
+    it('registerPeer() counts the config apex as a self-prefix for child admission (toon-meta#153)', async () => {
+      // Arrange: NO local routes at all — the explicit apex alone anchors the
+      // child subtree, so the auto route `<apex>.<peerId>` can be derived.
+      const apexCfg = createTestConfig({ apex: 'g.self' });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(apexCfg);
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      mockBTPClientManager.getPeerIds.mockReturnValue([]);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+      mockRoutingTable.addRoute.mockClear();
+
+      // Act
+      await node.registerPeer({
+        id: 'kid',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+        url: 'ws://kid:3000',
+        authToken: 't',
+        relation: 'child',
+      });
+
+      // Assert
+      expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.self.kid', 'kid', 0);
+    });
+
     it('registerPeer() throws ConnectorNotStartedError before start()', async () => {
       // Arrange - create fresh connector, do NOT start
       const freshConnector = new ConnectorNode(testConfigPath, mockLogger);
@@ -1507,6 +1585,148 @@ describe('ConnectorNode', () => {
           routes: [{ prefix: 'INVALID PREFIX!!!' }],
         })
       ).rejects.toThrow('Invalid ILP address prefix: INVALID PREFIX!!!');
+    });
+
+    // ── toon-meta#153: peeringPolicy.maxFundedChannels (discovered-vs-peered) ──
+
+    describe('peeringPolicy.maxFundedChannels', () => {
+      const settlement = {
+        preference: 'evm' as const,
+        evmAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28',
+        chainId: 8453,
+      };
+
+      /** A started node whose config caps funded channels at `max`. */
+      async function makeCappedNode(max: number): Promise<ConnectorNode> {
+        const cappedConfig = createTestConfig({
+          peers: [],
+          routes: [],
+          peeringPolicy: { maxFundedChannels: max },
+        });
+        (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(cappedConfig);
+        const node = new ConnectorNode(testConfigPath, mockLogger);
+        await node.start();
+        mockBTPClientManager.getPeerIds.mockReturnValue([]);
+        mockRoutingTable.getAllRoutes.mockReturnValue([]);
+        return node;
+      }
+
+      it('rejects a settlement-bearing registration beyond the cap, before any mutation', async () => {
+        const node = await makeCappedNode(1);
+
+        // First funded channel fits (0/1 in use).
+        await node.registerPeer({
+          id: 'funded-1',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://funded-1:3000',
+          authToken: 't1',
+          settlement,
+        });
+
+        // funded-1 is now live; a second funded channel would exceed the cap.
+        mockBTPClientManager.getPeerIds.mockReturnValue(['funded-1']);
+        mockBTPClientManager.addPeer.mockClear();
+        await expect(
+          node.registerPeer({
+            id: 'funded-2',
+            // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+            url: 'ws://funded-2:3000',
+            authToken: 't2',
+            settlement,
+          })
+        ).rejects.toThrow(/Funded-channel cap reached: 1\/1 funded channels in use/);
+        expect(mockBTPClientManager.addPeer).not.toHaveBeenCalled();
+      });
+
+      it('never caps a route-only (no settlement) registration — discovery/routing stays free', async () => {
+        const node = await makeCappedNode(1);
+        await node.registerPeer({
+          id: 'funded-1',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://funded-1:3000',
+          authToken: 't1',
+          settlement,
+        });
+        mockBTPClientManager.getPeerIds.mockReturnValue(['funded-1']);
+
+        // At the cap, an UNFUNDED link is still admitted.
+        const result = await node.registerPeer({
+          id: 'route-only',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://route-only:3000',
+          authToken: 't3',
+        });
+        expect(result.id).toBe('route-only');
+      });
+
+      it('re-registering an already-funded peer at the cap does not consume a new slot', async () => {
+        const node = await makeCappedNode(1);
+        await node.registerPeer({
+          id: 'funded-1',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://funded-1:3000',
+          authToken: 't1',
+          settlement,
+        });
+        mockBTPClientManager.getPeerIds.mockReturnValue(['funded-1']);
+
+        // Settlement-config merge on the SAME peer is admitted at the cap.
+        const result = await node.registerPeer({
+          id: 'funded-1',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://funded-1:3000',
+          authToken: 't1',
+          settlement: { ...settlement, chainId: 42161 },
+        });
+        expect(result.id).toBe('funded-1');
+      });
+
+      it('removePeer() frees a funded slot', async () => {
+        const node = await makeCappedNode(1);
+        await node.registerPeer({
+          id: 'funded-1',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://funded-1:3000',
+          authToken: 't1',
+          settlement,
+        });
+        mockBTPClientManager.getPeerIds.mockReturnValue(['funded-1']);
+
+        await node.removePeer('funded-1');
+
+        // Slot freed — the next funded registration is admitted.
+        mockBTPClientManager.getPeerIds.mockReturnValue([]);
+        const result = await node.registerPeer({
+          id: 'funded-2',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://funded-2:3000',
+          authToken: 't2',
+          settlement,
+        });
+        expect(result.id).toBe('funded-2');
+      });
+
+      it('leaves settlement-bearing registrations unlimited when no peeringPolicy is configured', async () => {
+        // Default createTestConfig carries no peeringPolicy block.
+        mockBTPClientManager.getPeerIds.mockReturnValue([]);
+        mockRoutingTable.getAllRoutes.mockReturnValue([]);
+        for (const id of ['f1', 'f2', 'f3']) {
+          const result = await connectorNode.registerPeer({
+            id,
+            // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+            url: `ws://${id}:3000`,
+            authToken: 't',
+            settlement,
+          });
+          expect(result.id).toBe(id);
+        }
+      });
+    });
+
+    // ── toon-meta#153: getDiscoveredNodes() (discovered-vs-peered) ──
+
+    it('getDiscoveredNodes() returns an empty list when route learning is disabled (no ingest feed)', () => {
+      expect(connectorNode.getDiscoveredNodes()).toEqual([]);
     });
 
     // ── removePeer() ──
