@@ -24,10 +24,13 @@ import {
   ChainProviderConfigEntry,
   TransportConfig,
   SelfAnnounceConfig,
+  ChildConfig,
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
 import { isValidNonNegativeIntegerString } from '../settlement/types';
+import { ChildConfigError, expandChildren } from './child-expander';
+import { deriveLocalPrefixes, validateRelationRoute } from '../routing/relation-route-validator';
 
 /**
  * Custom Error Class for Configuration Errors
@@ -198,6 +201,37 @@ export class ConfigLoader {
     this.validateRoutes(rawConfig.routes as RouteConfig[], rawConfig.peers as PeerConfig[]);
     this.validatePorts(rawConfig);
 
+    // Expand `children` bindings into routes under the apex (toon-meta#153).
+    // Runs BEFORE the ConnectorNode builds its RoutingTable and
+    // RouteTerminationRegistry from `routes`, so the packet path is identical
+    // for internal (`upstream`) and external (`peerId`) children.
+    const apex = this.validateApex(rawConfig.apex);
+    const children = this.validateChildrenShape(rawConfig.children);
+    const nodeId = rawConfig.nodeId as string;
+    const peers = rawConfig.peers as PeerConfig[];
+    let routes = rawConfig.routes as RouteConfig[];
+    if (children && children.length > 0) {
+      let expandedRoutes: RouteConfig[];
+      try {
+        expandedRoutes = expandChildren(children, apex, routes, peers, nodeId);
+      } catch (error) {
+        if (error instanceof ChildConfigError) {
+          throw new ConfigurationError(`Invalid children config: ${error.message}`);
+        }
+        throw error;
+      }
+      // Expanded routes go through the same route validation as hand-written
+      // ones (prefix format + termination shape).
+      this.validateRoutes(expandedRoutes, peers);
+      routes = [...routes, ...expandedRoutes];
+    }
+
+    // Relation ↔ route enforcement at config load (toon-meta#153): every route
+    // whose nextHop is a peer with a declared relation must be consistent with
+    // that relation's topology (child ⇒ strict descendant of a self-prefix or
+    // the apex; parent ⇒ not under the self subtree).
+    this.enforceRelationRoutes(routes, peers, nodeId, apex);
+
     // Load blockchain configuration from environment variables
     const blockchain = this.loadBlockchainConfig(environment);
 
@@ -206,12 +240,14 @@ export class ConfigLoader {
 
     // Apply default values for optional fields and pass through all optional config
     const connectorConfig: ConnectorConfig = {
-      nodeId: rawConfig.nodeId as string,
+      nodeId,
       btpServerPort,
       healthCheckPort,
       logLevel: (rawConfig.logLevel as 'debug' | 'info' | 'warn' | 'error' | undefined) ?? 'info',
-      peers: rawConfig.peers as PeerConfig[],
-      routes: rawConfig.routes as RouteConfig[],
+      peers,
+      routes,
+      ...(apex !== undefined ? { apex } : {}),
+      ...(children !== undefined ? { children } : {}),
       environment,
       blockchain,
       // Pass through optional fields from input object
@@ -686,6 +722,102 @@ export class ConfigLoader {
       if (healthPort < MIN_PORT || healthPort > MAX_PORT) {
         throw new ConfigurationError(
           `Health check port must be between ${MIN_PORT}-${MAX_PORT}, got: ${healthPort}`
+        );
+      }
+    }
+  }
+
+  /**
+   * Validate the optional top-level `apex` field (toon-meta#153).
+   *
+   * @param raw - Unvalidated `apex` value from the YAML input
+   * @returns The apex string, or undefined when absent
+   * @throws ConfigurationError when present but not a non-empty string
+   * @private
+   */
+  private static validateApex(raw: unknown): string | undefined {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      throw new ConfigurationError(
+        `Invalid type for apex: expected non-empty string, got ${typeof raw}`
+      );
+    }
+    return raw;
+  }
+
+  /**
+   * Shape-validate the optional `children` section (toon-meta#153): must be an
+   * array of objects when present. Per-entry semantic validation (name label,
+   * exactly-one-of upstream|peerId, peer admission, …) is performed by
+   * `expandChildren`.
+   *
+   * @param raw - Unvalidated `children` value from the YAML input
+   * @returns The children entries, or undefined when absent
+   * @throws ConfigurationError when present but not an array of objects
+   * @private
+   */
+  private static validateChildrenShape(raw: unknown): ChildConfig[] | undefined {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(raw)) {
+      throw new ConfigurationError(`Invalid type for children: expected array, got ${typeof raw}`);
+    }
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ConfigurationError('Invalid children entry: expected an object');
+      }
+    }
+    return raw as ChildConfig[];
+  }
+
+  /**
+   * Enforce relation ↔ route consistency at config load (toon-meta#153).
+   *
+   * For every route whose `nextHop` is a peer with a declared `relation`, the
+   * route prefix must be consistent with that relation's topology:
+   * - `child`  ⇒ a strict descendant of one of the node's self-prefixes (a
+   *   route with nextHop === nodeId or 'local') or the apex;
+   * - `parent` ⇒ NOT under the node's own subtree.
+   *
+   * Mirrors the runtime admission checks in `ConnectorNode.registerPeer` /
+   * the admin API, turning the latent F06/T00 mis-tagged-child trap into an
+   * immediate boot-time `ConfigurationError` naming the offending route.
+   *
+   * @param routes - All routes (including expanded children)
+   * @param peers - Configured peers (relation source)
+   * @param nodeId - This node's id (self-prefix derivation)
+   * @param apex - Optional explicit apex, counted as a self-prefix
+   * @throws ConfigurationError listing the offending route on violation
+   * @private
+   */
+  private static enforceRelationRoutes(
+    routes: RouteConfig[],
+    peers: PeerConfig[],
+    nodeId: string,
+    apex?: string
+  ): void {
+    const peersWithRelation = peers.filter((p) => p.relation !== undefined);
+    if (peersWithRelation.length === 0) {
+      return;
+    }
+
+    const localPrefixes = deriveLocalPrefixes(routes, nodeId);
+    if (apex !== undefined && !localPrefixes.includes(apex)) {
+      localPrefixes.push(apex);
+    }
+
+    for (const peer of peersWithRelation) {
+      const routePrefixes = routes.filter((r) => r.nextHop === peer.id).map((r) => r.prefix);
+      if (routePrefixes.length === 0) {
+        continue;
+      }
+      const result = validateRelationRoute(peer.relation, localPrefixes, routePrefixes);
+      if (!result.ok) {
+        throw new ConfigurationError(
+          `Relation/route mismatch for peer '${peer.id}' (relation '${peer.relation}'): ${result.error}`
         );
       }
     }

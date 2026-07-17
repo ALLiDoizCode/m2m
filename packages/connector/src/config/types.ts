@@ -293,6 +293,67 @@ export interface RouteTermination {
 }
 
 /**
+ * Child-prefix binding under the connector's apex (toon-meta#153).
+ *
+ * A general, first-class way to bind `<apex>.<name>` to either an INTERNAL
+ * handler (`upstream`) or an EXTERNAL child peer link (`peerId`) — replacing
+ * the old hardcoded `.relay`/`.store` label conventions. Exactly one of
+ * `upstream` | `peerId` must be set.
+ *
+ * Each child expands (at config load, before the routing table and route
+ * termination registry are built) into an ordinary {@link RouteConfig} under
+ * the node's apex, so the packet path is identical either way:
+ * - `upstream` → a locally-terminated route (`nextHop` = this node, reverse
+ *   proxied to `upstream` by the HttpProxyHandler);
+ * - `peerId`  → a forwarding route (`nextHop` = the peer), which must exist in
+ *   `peers` with `relation: 'child'`.
+ *
+ * @example
+ * ```yaml
+ * apex: g.proxy
+ * children:
+ *   - name: relay            # internal handler → g.proxy.relay terminates here
+ *     upstream: http://relay:3100
+ *     price: '1000'
+ *   - name: store            # external child peer → g.proxy.store forwards
+ *     peerId: store-box      # peers[store-box].relation must be 'child'
+ * ```
+ */
+export interface ChildConfig {
+  /**
+   * Single ILP label appended to the apex (lowercase alphanumeric, `-`, `_`).
+   * The joined address `<apex>.<name>` must be a valid ILP address.
+   */
+  name: string;
+
+  /**
+   * Internal binding: HTTP(S) base URL of the handler the connector reverse
+   * proxies `<apex>.<name>` traffic to. Mutually exclusive with {@link peerId}.
+   */
+  upstream?: string;
+
+  /**
+   * External binding: id of a configured peer (must have `relation: 'child'`)
+   * that `<apex>.<name>` traffic forwards to. Mutually exclusive with
+   * {@link upstream}.
+   */
+  peerId?: string;
+
+  /**
+   * Price to terminate at this child (atomic units, decimal string). Only
+   * meaningful for `upstream` children; defaults to `'0'` (free).
+   */
+  price?: string;
+
+  /**
+   * Optional advisory capability tag (e.g. `'nostr-relay'`, `'blob-store'`).
+   * Carried on the config for discovery layers; not consulted by the packet
+   * path.
+   */
+  capability?: string;
+}
+
+/**
  * Route Configuration Interface
  *
  * Defines a routing table entry mapping ILP address prefixes
@@ -438,6 +499,28 @@ export interface ConnectorConfig {
    * Route nextHop values must reference peer IDs from the peers list
    */
   routes: RouteConfig[];
+
+  /**
+   * Optional explicit ILP apex address for this node (toon-meta#153).
+   *
+   * The apex is the address subtree this node owns: `children` expand to
+   * `<apex>.<name>` routes, and self-announce aggregation collapses covered
+   * routes to the apex. When omitted, the apex is derived from the node's
+   * first self route (a route whose `nextHop` is this node's `nodeId` or
+   * `'local'`), using its `ilpAddress` (else `prefix`). Prefer setting it
+   * explicitly when using `children`.
+   */
+  apex?: string;
+
+  /**
+   * Optional child-prefix bindings under the apex (toon-meta#153).
+   *
+   * Each entry binds `<apex>.<name>` to an internal handler (`upstream`) or an
+   * external child peer link (`peerId`), expanding into ordinary routes at
+   * config load — see {@link ChildConfig}. Replaces the legacy hardcoded
+   * `.relay`/`.store` label conventions with a general mechanism.
+   */
+  children?: ChildConfig[];
 
   /**
    * Optional settlement configuration for TigerBeetle integration
@@ -739,8 +822,22 @@ export interface SelfAnnounceConfig {
   assetScale?: number;
 
   /**
+   * Apex aggregation opt-out (toon-meta#153).
+   *
+   * When true, the announcement advertises only the node's apex upward:
+   * `ilpAddress`/`ilpAddresses` collapse every route covered by the apex
+   * (equal to it or a strict descendant) to the apex itself. Terminated routes
+   * NOT under the apex are still advertised individually (uncovered standalone
+   * routes). Defaults to `true` when `children` or `apex` config is present,
+   * `false` otherwise — so legacy configs keep enumerating every terminated
+   * route exactly as before.
+   */
+  aggregate?: boolean;
+
+  /**
    * Optional explicit route-hint overrides. When omitted, the publish/store
-   * route addresses are DERIVED from the connector's configured routes (the
+   * route addresses are DERIVED from `children` named `relay`/`store` first
+   * (toon-meta#153), then from the connector's configured routes (the
    * `.relay` route is the publish address; the direct `.store` route is the
    * store address). Override only for non-standard topologies.
    */

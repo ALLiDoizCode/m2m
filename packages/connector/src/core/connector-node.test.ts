@@ -1443,6 +1443,84 @@ describe('ConnectorNode', () => {
       ).rejects.toThrow(/Invalid relation: must be 'parent', 'peer', or 'child' \(got 'sibling'\)/);
     });
 
+    // ── toon-meta#153: config child bindings + apex self-prefix ──
+
+    it('registerPeer() rejects a relation contradicting a config child binding (toon-meta#153)', async () => {
+      // Arrange: config binds 'store-box' as the child 'store' under the apex.
+      const childCfg = createTestConfig({
+        apex: 'g.self',
+        children: [{ name: 'store', peerId: 'store-box' }],
+      });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(childCfg);
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      mockBTPClientManager.getPeerIds.mockReturnValue([]);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+
+      // Act & Assert: a non-child relation contradicts the config binding.
+      await expect(
+        node.registerPeer({
+          id: 'store-box',
+          // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+          url: 'ws://store-box:3000',
+          authToken: 't',
+          relation: 'peer',
+        })
+      ).rejects.toThrow(/bound as child 'store' in config; relation must be 'child'/);
+    });
+
+    it('registerPeer() skips the auto child route for a config-bound child peer (toon-meta#153)', async () => {
+      // Arrange: the expanded route `g.self.store` already binds this peer at
+      // config load — no `<self>.<peerId>` auto-route should be re-derived.
+      const childCfg = createTestConfig({
+        apex: 'g.self',
+        children: [{ name: 'store', peerId: 'store-box' }],
+      });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(childCfg);
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      mockBTPClientManager.getPeerIds.mockReturnValue([]);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+      mockRoutingTable.addRoute.mockClear();
+
+      // Act
+      await node.registerPeer({
+        id: 'store-box',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+        url: 'ws://store-box:3000',
+        authToken: 't',
+        relation: 'child',
+      });
+
+      // Assert
+      expect(mockRoutingTable.addRoute).not.toHaveBeenCalled();
+      expect(mockPacketHandler.setPeerRelation).toHaveBeenCalledWith('store-box', 'child');
+    });
+
+    it('registerPeer() counts the config apex as a self-prefix for child admission (toon-meta#153)', async () => {
+      // Arrange: NO local routes at all — the explicit apex alone anchors the
+      // child subtree, so the auto route `<apex>.<peerId>` can be derived.
+      const apexCfg = createTestConfig({ apex: 'g.self' });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(apexCfg);
+      const node = new ConnectorNode(testConfigPath, mockLogger);
+      await node.start();
+      mockBTPClientManager.getPeerIds.mockReturnValue([]);
+      mockRoutingTable.getAllRoutes.mockReturnValue([]);
+      mockRoutingTable.addRoute.mockClear();
+
+      // Act
+      await node.registerPeer({
+        id: 'kid',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+        url: 'ws://kid:3000',
+        authToken: 't',
+        relation: 'child',
+      });
+
+      // Assert
+      expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.self.kid', 'kid', 0);
+    });
+
     it('registerPeer() throws ConnectorNotStartedError before start()', async () => {
       // Arrange - create fresh connector, do NOT start
       const freshConnector = new ConnectorNode(testConfigPath, mockLogger);

@@ -2741,18 +2741,29 @@ export class ConnectorNode implements HealthStatusProvider {
       }
     }
 
+    // Config-declared child binding (toon-meta#153): when this peer id is
+    // bound as a `children[].peerId`, its route `<apex>.<name>` was already
+    // expanded at config load with an admission contract of relation 'child'.
+    // Reject a contradictory relation at runtime registration, and skip the
+    // auto-derived `<self>.<peerId>` route (the expanded binding already
+    // routes to this peer).
+    const childBinding = this._config.children?.find((c) => c.peerId === config.id);
+    if (childBinding && config.relation !== undefined && config.relation !== 'child') {
+      throw new Error(
+        `Peer '${config.id}' is bound as child '${childBinding.name}' in config; relation must be 'child' (got '${config.relation}')`
+      );
+    }
+
     // Relation ↔ route admission validation + child auto-route (Phase 2).
-    // The connector's self-prefixes are the routes that terminate locally; when
-    // none exist the validator no-ops, so this never breaks routing-only nodes.
+    // The connector's self-prefixes are the routes that terminate locally
+    // (plus the explicit apex, toon-meta#153); when none exist the validator
+    // no-ops, so this never breaks routing-only nodes.
     // A `child` registered without an explicit route gets `<self>.<peerId>`
     // derived, collapsing the old two-step (register peer, then add route) and
     // closing the mis-tagged-child F06/T00 trap before any packet flows.
-    const localPrefixes = deriveLocalPrefixes(
-      this._routingTable.getAllRoutes(),
-      this._config.nodeId
-    );
+    const localPrefixes = this._selfPrefixesWithApex();
     let effectiveRoutes = config.routes;
-    if (!effectiveRoutes || effectiveRoutes.length === 0) {
+    if ((!effectiveRoutes || effectiveRoutes.length === 0) && !childBinding) {
       const autoRoute = deriveDefaultChildRoute(config.relation, localPrefixes, config.id);
       if (autoRoute) {
         effectiveRoutes = [autoRoute];
@@ -3065,6 +3076,24 @@ export class ConnectorNode implements HealthStatusProvider {
   }
 
   /**
+   * The connector's self-prefixes for relation ↔ route admission checks: the
+   * locally-terminating routes' prefixes plus the explicit config `apex`
+   * (toon-meta#153) when set — so child admission works even when the apex has
+   * no local route of its own.
+   */
+  private _selfPrefixesWithApex(): string[] {
+    const localPrefixes = deriveLocalPrefixes(
+      this._routingTable.getAllRoutes(),
+      this._config.nodeId
+    );
+    const apex = this._config.apex;
+    if (apex !== undefined && !localPrefixes.includes(apex)) {
+      localPrefixes.push(apex);
+    }
+    return localPrefixes;
+  }
+
+  /**
    * Add a static route to the routing table.
    * Equivalent to POST /admin/routes — same validation.
    *
@@ -3097,10 +3126,7 @@ export class ConnectorNode implements HealthStatusProvider {
     // (no constraint), so this only rejects an unambiguously child/parent-shaped
     // mismatch and never blocks routing-only or local routes.
     const nextHopRelation = this._packetHandler.getPeerRelation(route.nextHop);
-    const localPrefixes = deriveLocalPrefixes(
-      this._routingTable.getAllRoutes(),
-      this._config.nodeId
-    );
+    const localPrefixes = this._selfPrefixesWithApex();
     const relationValidation = validateRelationRoute(nextHopRelation, localPrefixes, [
       route.prefix,
     ]);

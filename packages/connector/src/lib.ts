@@ -99,7 +99,11 @@ export type {
   IlpSendRequest,
   IlpSendResponse,
   TransportConfig,
+  ChildConfig,
 } from './config/types';
+
+// Child-prefix registration + apex derivation (toon-meta#153)
+export { ChildConfigError, deriveApex, expandChildren } from './config/child-expander';
 
 // Re-export settlement types for library consumers
 export type { AdminSettlementConfig } from './settlement/types';
