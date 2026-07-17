@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.34.2](https://github.com/toon-protocol/connector/compare/v3.34.1...v3.34.2) (2026-07-17)
+
+### Bug Fixes
+
+- **http:** enforce funded-channel cap on first-time settlement add via PUT /admin/peers (closes [#344](https://github.com/toon-protocol/connector/issues/344)) ([#347](https://github.com/toon-protocol/connector/issues/347)) ([ea2e5cf](https://github.com/toon-protocol/connector/commit/ea2e5cff3cc7dfd17f91965b7a7728c9682cbb85))
+
 ## [3.34.1](https://github.com/toon-protocol/connector/compare/v3.34.0...v3.34.1) (2026-07-17)
 
 ### Bug Fixes
