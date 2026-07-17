@@ -237,6 +237,26 @@ export interface AdminAPIConfig {
    * (cross-surface parity). When omitted, no cap is enforced on this surface.
    */
   checkFundedChannelCap?: (peerId: string) => string | null;
+
+  /**
+   * Optional runtime peer-URL recorder (issue #345, toon-meta#153). When
+   * provided, `POST /admin/peers` calls this after a fresh BTP peer
+   * registration with the peer's id and `url` — the same bookkeeping
+   * `ConnectorNode.registerPeer` performs — so the discovered-node registry's
+   * `btpEndpoint === url` funded-matching fallback also covers peers promoted
+   * via this surface (otherwise the discovered entry stays `funded: false`
+   * until a restart replays the registration). When omitted, no URL is
+   * recorded on this surface.
+   */
+  recordRuntimePeerUrl?: (peerId: string, url: string) => void;
+
+  /**
+   * Symmetric un-record hook for {@link recordRuntimePeerUrl}. When provided,
+   * `DELETE /admin/peers/:peerId` calls this after removing the peer — the
+   * same cleanup `ConnectorNode.removePeer` performs — so a removed peer's
+   * URL no longer funded-matches its discovered entry.
+   */
+  forgetRuntimePeerUrl?: (peerId: string) => void;
 }
 
 /**
@@ -646,6 +666,8 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     routeTerminationRegistry,
     getDiscoveredNodes,
     checkFundedChannelCap,
+    recordRuntimePeerUrl,
+    forgetRuntimePeerUrl,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -983,6 +1005,12 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
 
           await btpClientManager.addPeer(peer);
 
+          // Discovered-vs-peered (issue #345): record the runtime peer's BTP
+          // url — the same bookkeeping ConnectorNode.registerPeer performs —
+          // so the discovered registry's endpoint-fallback funded matching
+          // covers peers promoted via this surface without a restart.
+          recordRuntimePeerUrl?.(body.id, body.url);
+
           log.info(
             {
               event: 'admin_peer_added',
@@ -1185,6 +1213,10 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
 
       // Remove peer
       await btpClientManager.removePeer(peerId);
+      // Discovered-vs-peered (issue #345): drop the runtime-url record — the
+      // same cleanup ConnectorNode.removePeer performs — so the removed peer
+      // immediately stops funded-matching its discovered entry.
+      forgetRuntimePeerUrl?.(peerId);
       log.info({ event: 'admin_peer_removed', peerId }, `Removed peer: ${peerId}`);
 
       // Remove settlement config if exists
