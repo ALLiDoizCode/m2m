@@ -122,10 +122,11 @@ async function tokenAccountExists(recipientB58, tokenIdField) {
  *
  * Returns the recipient's post-mint balance (base units) as a string.
  */
-async function mintUsdc({ token, feePayer, recipient, wholeUsdc, signers, fundRecipient }) {
+async function mintUsdc({ token, feePayer, recipient, wholeUsdc, signers, fundRecipient, nonce }) {
   const amount = UInt64.from(wholeUsdc * ONE_USDC);
   const tx = await Mina.transaction(
-    { sender: feePayer, fee: UInt64.from(MINT_FEE_NANOMINA) },
+    // `nonce` (when known) is the POOL-AWARE inferredNonce — see mint() below.
+    { sender: feePayer, fee: UInt64.from(MINT_FEE_NANOMINA), ...(nonce != null ? { nonce } : {}) },
     async () => {
       if (fundRecipient) AccountUpdate.fundNewAccount(feePayer, 1);
       await token.mint(recipient, amount);
@@ -280,6 +281,31 @@ export function createMinaUsdcMinter() {
       await fetchAccount({ publicKey: tokenPubKey });
       await fetchAccount({ publicKey: adminContractPubKey });
 
+      // Fee-payer nonce: the ON-CHAIN nonce fetchAccount returns is not enough
+      // — proving takes ~70s while blocks land slower, so a back-to-back drip's
+      // previous mint command is often still in the POOL when this one builds,
+      // and reusing its nonce is rejected "Invalid_nonce" (observed live). The
+      // GraphQL `inferredNonce` counts pooled commands, so consecutive mints
+      // queue gaplessly behind each other. Best-effort: if the probe fails we
+      // fall back to o1js's cached on-chain nonce (correct when the pool is
+      // empty, e.g. the first mint after boot).
+      let nonce;
+      try {
+        const nonceData = await minaGraphql(
+          `query AdminNonce($pk: PublicKey!) {
+            account(publicKey: $pk) { inferredNonce }
+          }`,
+          { pk: adminPubKey.toBase58() }
+        );
+        const inferred = nonceData?.account?.inferredNonce;
+        if (inferred != null) nonce = Number(inferred);
+      } catch (nonceErr) {
+        console.log(
+          `  ⚠️  Could not probe admin inferredNonce (${nonceErr.message}); ` +
+            'using the fetched on-chain nonce.'
+        );
+      }
+
       // Decide fundRecipient by detecting the recipient's token account. If the
       // GraphQL probe itself fails we DEFAULT to funding (true) and rely on the
       // "already exists" retry below.
@@ -302,6 +328,7 @@ export function createMinaUsdcMinter() {
           wholeUsdc: amountWhole,
           signers: [adminAuthority],
           fundRecipient: fund,
+          nonce,
         });
 
       let balance;
