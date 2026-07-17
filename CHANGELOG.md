@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.34.1](https://github.com/toon-protocol/connector/compare/v3.34.0...v3.34.1) (2026-07-17)
+
+### Bug Fixes
+
+- **http:** record runtime peer URLs on the admin POST/DELETE peer surface (closes [#345](https://github.com/toon-protocol/connector/issues/345)) ([#346](https://github.com/toon-protocol/connector/issues/346)) ([16af9ee](https://github.com/toon-protocol/connector/commit/16af9ee9bbf4b5aef861cf75f5bd77b569c41319))
+
 ## [3.34.0](https://github.com/toon-protocol/connector/compare/v3.33.1...v3.34.0) (2026-07-17)
 
 ### Features
