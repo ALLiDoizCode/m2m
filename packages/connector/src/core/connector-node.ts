@@ -101,6 +101,12 @@ import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
 import { SelfAnnounceService, type PublishOutcome } from '../discovery/self-announce-service';
 import { planAnnouncePublish } from '../discovery/self-announce-publish';
 import { RouteLearningService } from '../discovery/route-learning-service';
+import {
+  DiscoveredNodeRegistry,
+  type DiscoveredNode,
+  type FundedPeerRef,
+} from '../discovery/discovered-node-registry';
+import { nip59KeyToNostrPubkey } from '../discovery/self-announce-builder';
 import { createNostrRelayClient } from '../discovery/nostr-relay-client';
 import { getPublicKey, type NostrEvent } from 'nostr-tools';
 import { BootstrapService } from '../discovery/bootstrap-service';
@@ -198,6 +204,16 @@ export class ConnectorNode implements HealthStatusProvider {
   // set, consumes peers' kind:10032 announcements from the relay and installs
   // learned multi-hop routes. Null when disabled.
   private _routeLearningService: RouteLearningService | null = null;
+  // Discovered-node registry (toon-meta#153, discovered-vs-peered). Fed by the
+  // route-learning ingest seam; surfaces the free, unbounded "discovered" set
+  // (getDiscoveredNodes / GET /admin/discovered-nodes) as distinct from the
+  // few deliberately FUNDED peers. Null when route learning is disabled (no
+  // ingest feed → nothing discovered).
+  private _discoveredNodeRegistry: DiscoveredNodeRegistry | null = null;
+  // BTP `url` of peers registered at RUNTIME via registerPeer (static config
+  // peers carry their url in `_config.peers`). Feeds the discovered registry's
+  // funded-matching endpoint fallback. Maintained by registerPeer/removePeer.
+  private readonly _runtimePeerUrls = new Map<string, string>();
   // Cold-start bootstrap service (toon-meta#153). When `bootstrap.enabled` is
   // set, resolves relay seeds (signed registry → cache → config → fallback),
   // sample-and-verifies them, and refreshes on an interval. Null when disabled.
@@ -953,6 +969,18 @@ export class ConnectorNode implements HealthStatusProvider {
     const ownPubkey = secretKey ? getPublicKey(secretKey) : undefined;
 
     try {
+      // Discovered-vs-peered (toon-meta#153): the registry rides the SAME
+      // relay subscription via the route-learning ingest seam — discovery
+      // stays free and opens no links; funding stays a bounded operator
+      // choice (registerPeer + peeringPolicy.maxFundedChannels).
+      this._discoveredNodeRegistry = new DiscoveredNodeRegistry({
+        getFundedPeers: () => this._getFundedPeerRefs(),
+        ...(ownPubkey ? { ownPubkey } : {}),
+        logger: this._logger,
+      });
+      this._ilpMetrics.setDiscoveredNodeCountsProvider(
+        () => this._discoveredNodeRegistry?.counts() ?? { discovered: 0, funded: 0 }
+      );
       this._routeLearningService = new RouteLearningService({
         config: this._config,
         routeLearning,
@@ -962,11 +990,13 @@ export class ConnectorNode implements HealthStatusProvider {
         // can actually egress on).
         getDirectPeerIds: () => this._btpClientManager.getPeerIds(),
         ...(ownPubkey ? { ownPubkey } : {}),
+        discoveredNodes: this._discoveredNodeRegistry,
         logger: this._logger,
       });
       this._routeLearningService.start();
     } catch (err) {
       this._routeLearningService = null;
+      this._discoveredNodeRegistry = null;
       this._logger.warn(
         {
           event: 'route_learning_start_failed',
@@ -2073,6 +2103,12 @@ export class ConnectorNode implements HealthStatusProvider {
           // local-termination config (upstream/price/chains/…) into the same
           // in-memory registry #216's proxy handler resolves against.
           routeTerminationRegistry: this._routeTerminationRegistry,
+          // toon-meta#153 (discovered-vs-peered): surface the discovered set
+          // read-only, and mirror the funded-channel cap on POST /admin/peers
+          // with the exact error string registerPeer throws (cross-surface
+          // parity).
+          getDiscoveredNodes: () => this.getDiscoveredNodes(),
+          checkFundedChannelCap: (peerId) => this._checkFundedChannelCap(peerId),
         });
 
         await this._adminServer.start();
@@ -2295,11 +2331,14 @@ export class ConnectorNode implements HealthStatusProvider {
       }
 
       // Stop route learning (closes the relay subscription, withdraws all
-      // learned soft-state routes, clears its unref'd sweep timer).
+      // learned soft-state routes, clears its unref'd sweep timer, and clears
+      // the discovered-node registry it feeds — soft state, re-learned after
+      // boot).
       if (this._routeLearningService) {
         this._routeLearningService.stop();
         this._routeLearningService = null;
       }
+      this._discoveredNodeRegistry = null;
 
       // Stop the cold-start bootstrap refresh loop (clears its unref'd timer).
       if (this._bootstrapService) {
@@ -2891,6 +2930,19 @@ export class ConnectorNode implements HealthStatusProvider {
       }
     }
 
+    // Funded-peering admission (toon-meta#153, discovered-vs-peered): a
+    // settlement block on a registration is the intent to FUND a channel to
+    // this peer. peeringPolicy.maxFundedChannels bounds how many such funded
+    // channels may exist at once — discovery/routing-through stays free and
+    // unbounded. Checked BEFORE any mutation so a rejected registration
+    // leaves no partial state.
+    if (config.settlement) {
+      const capError = this._checkFundedChannelCap(config.id);
+      if (capError) {
+        throw new Error(capError);
+      }
+    }
+
     // Config-declared child binding (toon-meta#153): when this peer id is
     // bound as a `children[].peerId`, its route `<apex>.<name>` was already
     // expanded at config load with an admission contract of relation 'child'.
@@ -2964,6 +3016,10 @@ export class ConnectorNode implements HealthStatusProvider {
           transport: config.transport,
         };
         await this._btpClientManager.addPeer(peer);
+        // Discovered-vs-peered (toon-meta#153): remember the runtime peer's
+        // BTP url so the discovered registry's endpoint-fallback funded
+        // matching also covers peers registered after boot.
+        this._runtimePeerUrls.set(config.id, config.url);
         // Story 37.2/37.3: prime metrics labels so runtime-added peers appear in both
         // the Prometheus scrape (with zero counters) and /admin/metrics.json before
         // their first packet.
@@ -3101,6 +3157,10 @@ export class ConnectorNode implements HealthStatusProvider {
 
     // Remove BTP peer
     await this._btpClientManager.removePeer(peerId);
+    // Discovered-vs-peered (toon-meta#153): removing a peer frees its funded
+    // slot (the settlement config is deleted below) and drops its runtime-url
+    // record from the discovered registry's funded-matching set.
+    this._runtimePeerUrls.delete(peerId);
     // Story 37.2/37.3: drop peer from the metrics "known peers" set so it stops
     // being surfaced as idle in Prometheus scrapes. Historical counter totals
     // are preserved internally but no longer exposed via /admin/metrics.json
@@ -3177,6 +3237,98 @@ export class ConnectorNode implements HealthStatusProvider {
 
       return peerInfo;
     });
+  }
+
+  /**
+   * List the DISCOVERED node set (toon-meta#153, discovered-vs-peered):
+   * every node known from kind:10032 relay ingest, each flagged `funded`
+   * when a live registered peer currently maps to it. Equivalent to
+   * GET /admin/discovered-nodes.
+   *
+   * Discovered-but-unfunded nodes are reachable through learned multi-hop
+   * routes at zero capital cost; an operator promotes one to a FUNDED peer
+   * via the existing {@link registerPeer} / POST /admin/peers (the entry
+   * supplies `btpEndpoint` for `url` plus settlement hints), subject to
+   * `peeringPolicy.maxFundedChannels`.
+   *
+   * @returns The discovered nodes (empty when route learning is disabled —
+   *   there is no ingest feed without it).
+   */
+  getDiscoveredNodes(): DiscoveredNode[] {
+    return this._discoveredNodeRegistry ? this._discoveredNodeRegistry.list() : [];
+  }
+
+  /**
+   * Funded-matching source for the discovered-node registry: the LIVE
+   * registered peers (BTP + ILP-HTTP), each carrying the identifiers a
+   * discovered entry can be matched on — the x-only Nostr pubkey derived from
+   * the configured `nip59PublicKey`, and the BTP `url` (from static config,
+   * or the runtime-registration record for peers added after boot).
+   */
+  private _getFundedPeerRefs(): FundedPeerRef[] {
+    const refsById = new Map<string, FundedPeerRef>();
+    for (const peerId of this._btpClientManager.getPeerIds()) {
+      refsById.set(peerId, { peerId });
+    }
+    for (const peerId of this._httpPeerClientManager.getPeerIds()) {
+      if (!refsById.has(peerId)) refsById.set(peerId, { peerId });
+    }
+    for (const peer of this._config.peers) {
+      const ref = refsById.get(peer.id);
+      if (!ref) continue;
+      const nostrPubkey = nip59KeyToNostrPubkey(peer.nip59PublicKey);
+      if (nostrPubkey) ref.nostrPubkey = nostrPubkey;
+      if (peer.url) ref.btpUrl = peer.url;
+    }
+    for (const [peerId, url] of this._runtimePeerUrls) {
+      const ref = refsById.get(peerId);
+      if (ref && ref.btpUrl === undefined) ref.btpUrl = url;
+    }
+    return Array.from(refsById.values());
+  }
+
+  /**
+   * Count the FUNDED channels currently held (toon-meta#153): registered
+   * peers (live in the BTP / ILP-HTTP client managers) that carry runtime
+   * settlement config — i.e. an entry in `_settlementPeers`, created by
+   * `registerPeer`/POST /admin/peers settlement blocks (including those
+   * replayed from the persistent registry at boot). Route-only peers do not
+   * count. See {@link PeeringPolicyConfig.maxFundedChannels} for the exact
+   * counting contract.
+   */
+  private _countFundedChannels(): number {
+    const liveIds = new Set([
+      ...this._btpClientManager.getPeerIds(),
+      ...this._httpPeerClientManager.getPeerIds(),
+    ]);
+    let count = 0;
+    for (const peerId of this._settlementPeers.keys()) {
+      if (liveIds.has(peerId)) count++;
+    }
+    return count;
+  }
+
+  /**
+   * Enforce `peeringPolicy.maxFundedChannels` for a registration that carries
+   * a settlement block. Returns the rejection message, or `null` when
+   * admission is allowed: no cap configured, the peer is ALREADY funded
+   * (re-registration merges config without consuming a new slot), or the cap
+   * has headroom. Shared verbatim by `registerPeer` and the mirrored
+   * POST /admin/peers handler for cross-surface error parity.
+   */
+  private _checkFundedChannelCap(peerId: string): string | null {
+    const maxFundedChannels = this._config.peeringPolicy?.maxFundedChannels;
+    if (maxFundedChannels === undefined) return null;
+    if (this._settlementPeers.has(peerId)) return null;
+    const funded = this._countFundedChannels();
+    if (funded < maxFundedChannels) return null;
+    return (
+      `Funded-channel cap reached: ${funded}/${maxFundedChannels} funded channels in use ` +
+      `(peeringPolicy.maxFundedChannels). Registering '${peerId}' with settlement config would ` +
+      `open another funded channel — remove a funded peer first (DELETE /admin/peers/:peerId) ` +
+      `or raise the cap. Discovered nodes stay reachable through learned multi-hop routes ` +
+      `without a funded channel.`
+    );
   }
 
   /**

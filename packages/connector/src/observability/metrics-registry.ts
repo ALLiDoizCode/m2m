@@ -73,6 +73,16 @@ export class IlpMetricsRegistry {
   public readonly lastPacketTimestampSeconds: Gauge<'peer'>;
   public readonly packetsRejectedPreRoutingTotal: Counter<'reason'>;
   public readonly packetsLocallyDeliveredTotal: Counter<'peer'>;
+  public readonly discoveredNodesGauge: Gauge;
+  public readonly discoveredNodesFundedGauge: Gauge;
+
+  /**
+   * Read-time source for the discovered-vs-funded gauges (toon-meta#153).
+   * Sampled by the gauges' `collect()` on every scrape; when unset (route
+   * learning disabled, or before wiring) both gauges report 0.
+   */
+  private _discoveredNodeCountsProvider: (() => { discovered: number; funded: number }) | null =
+    null;
 
   /**
    * Tracks peers that have been explicitly registered via `registerPeer()`. Used so that
@@ -134,9 +144,42 @@ export class IlpMetricsRegistry {
       registers: [this.register],
     });
 
+    // Discovered-vs-peered gauges (toon-meta#153): the free, unbounded
+    // "discovered" set vs its funded subset. Sampled at scrape time from the
+    // provider so the gauges never hold a stale copy of registry state.
+    this.discoveredNodesGauge = new Gauge({
+      name: 'toon_discovered_nodes',
+      help: 'Nodes currently known from kind:10032 relay ingest (the discovered set, funded or not). 0 when route learning is disabled.',
+      registers: [this.register],
+      collect: () => {
+        const counts = this._discoveredNodeCountsProvider?.();
+        this.discoveredNodesGauge.set(counts?.discovered ?? 0);
+      },
+    });
+
+    this.discoveredNodesFundedGauge = new Gauge({
+      name: 'toon_discovered_nodes_funded',
+      help: 'Discovered nodes to which a live registered peer currently maps (the funded subset of toon_discovered_nodes).',
+      registers: [this.register],
+      collect: () => {
+        const counts = this._discoveredNodeCountsProvider?.();
+        this.discoveredNodesFundedGauge.set(counts?.funded ?? 0);
+      },
+    });
+
     if (options.collectDefaults !== false) {
       collectDefaultMetrics({ register: this.register });
     }
+  }
+
+  /**
+   * Wire the discovered-node registry's counts into the
+   * `toon_discovered_nodes` / `toon_discovered_nodes_funded` gauges
+   * (toon-meta#153). Called by the connector when route learning starts;
+   * safe to call again (last provider wins).
+   */
+  setDiscoveredNodeCountsProvider(provider: () => { discovered: number; funded: number }): void {
+    this._discoveredNodeCountsProvider = provider;
   }
 
   /**

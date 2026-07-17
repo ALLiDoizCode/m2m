@@ -44,6 +44,25 @@ import {
 import { ILP_PEER_INFO_KIND } from './ilp-peer-info-event';
 import { nip59KeyToNostrPubkey } from './self-announce-builder';
 import type { RelaySubscriptionHandle, RouteLearningRelayClient } from './nostr-relay-client';
+import type { LinkStateEventInput } from '../routing/link-state-db';
+
+/**
+ * Narrow structural sink for the discovered-node seam (toon-meta#153,
+ * discovered-vs-peered split). Satisfied by
+ * {@link ./discovered-node-registry.DiscoveredNodeRegistry}; kept structural so
+ * the service has no hard class dependency and tests can hand in fakes.
+ *
+ * The service feeds it every SIGNATURE-VERIFIED kind:10032 event — including
+ * announcements without a link-state `routing` block, which the link-state
+ * database rejects but which still identify a discoverable node — plus the
+ * periodic expiry sweep, and clears it on stop (soft state). No second relay
+ * subscription is ever opened for discovery.
+ */
+export interface DiscoveredNodeSink {
+  ingest(event: LinkStateEventInput, nowSecs?: number): unknown;
+  sweepExpired(nowSecs?: number): unknown;
+  clear(): void;
+}
 
 /** Default seconds between periodic expiry sweeps / recomputes. */
 export const DEFAULT_ROUTE_LEARNING_REFRESH_SECS = 60;
@@ -85,6 +104,12 @@ export interface RouteLearningServiceDeps {
    * injectable only for tests that need to exercise the rejection path.
    */
   verifyEvent?: (event: NostrEvent) => boolean;
+  /**
+   * Optional discovered-node registry seam (toon-meta#153). When provided,
+   * every verified announcement is mirrored into it and the periodic sweep
+   * expires its entries — see {@link DiscoveredNodeSink}.
+   */
+  discoveredNodes?: DiscoveredNodeSink;
   /** Pino logger. */
   logger: Logger;
 }
@@ -100,6 +125,7 @@ export class RouteLearningService {
   private readonly _getDirectPeerIds: () => string[];
   private readonly _ownPubkey: string | undefined;
   private readonly _verifyEvent: (event: NostrEvent) => boolean;
+  private readonly _discoveredNodes: DiscoveredNodeSink | undefined;
   private readonly _logger: Logger;
   private readonly _refreshIntervalSecs: number;
   private readonly _maxRoutes: number;
@@ -120,6 +146,7 @@ export class RouteLearningService {
     this._getDirectPeerIds = deps.getDirectPeerIds;
     this._ownPubkey = deps.ownPubkey;
     this._verifyEvent = deps.verifyEvent ?? nostrVerifyEvent;
+    this._discoveredNodes = deps.discoveredNodes;
     this._logger = deps.logger.child({ component: 'RouteLearningService' });
 
     const refresh = deps.routeLearning.refreshIntervalSecs;
@@ -230,6 +257,9 @@ export class RouteLearningService {
     }
     this._installed.clear();
     this._db.clear();
+    // Discovered set is soft state fed exclusively by this subscription —
+    // once the feed stops, the snapshot goes stale, so drop it too.
+    this._discoveredNodes?.clear();
     if (this._running) {
       this._logger.info({ event: 'route_learning_stopped' }, 'Route learning service stopped');
     }
@@ -256,6 +286,12 @@ export class RouteLearningService {
       return;
     }
 
+    // Discovered-vs-peered seam (toon-meta#153): every verified announcement
+    // marks a DISCOVERED node, whether or not it carries a routing block the
+    // link-state database can use. The registry does its own defensive
+    // parsing and never throws.
+    this._discoveredNodes?.ingest(event);
+
     const result = this._db.ingest(event);
     if (result === 'ingested') {
       this._logger.debug(
@@ -281,6 +317,7 @@ export class RouteLearningService {
    * which also picks up direct-peer connectivity changes between ingests.
    */
   sweep(nowSecs: number = Math.floor(Date.now() / 1000)): void {
+    this._discoveredNodes?.sweepExpired(nowSecs);
     const removed = this._db.sweepExpired(nowSecs);
     if (removed.length > 0) {
       this._logger.info(

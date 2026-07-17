@@ -87,7 +87,19 @@ export {
   DEFAULT_MAX_LEARNED_ROUTES,
   LEARNED_ROUTE_PRIORITY,
 } from './discovery/route-learning-service';
-export type { RouteLearningServiceDeps } from './discovery/route-learning-service';
+export type {
+  RouteLearningServiceDeps,
+  DiscoveredNodeSink,
+} from './discovery/route-learning-service';
+// Discovered-vs-peered split (toon-meta#153): the discovered set as a
+// first-class registry, distinct from the few deliberately funded peers.
+export { DiscoveredNodeRegistry } from './discovery/discovered-node-registry';
+export type {
+  DiscoveredNode,
+  DiscoveredNodeIngestResult,
+  DiscoveredNodeRegistryDeps,
+  FundedPeerRef,
+} from './discovery/discovered-node-registry';
 export { createNostrRelayClient } from './discovery/nostr-relay-client';
 export type {
   RouteLearningRelayClient,
@@ -141,6 +153,7 @@ export type {
   IlpSendResponse,
   TransportConfig,
   RouteLearningConfig,
+  PeeringPolicyConfig,
   ChildConfig,
 } from './config/types';
 

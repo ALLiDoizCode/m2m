@@ -26,7 +26,12 @@ import type {
   RelaySubscriptionHandle,
   RouteLearningRelayClient,
 } from './nostr-relay-client';
-import { LEARNED_ROUTE_PRIORITY, RouteLearningService } from './route-learning-service';
+import {
+  LEARNED_ROUTE_PRIORITY,
+  RouteLearningService,
+  type DiscoveredNodeSink,
+} from './route-learning-service';
+import type { LinkStateEventInput } from '../routing/link-state-db';
 
 const logger = createLogger('route-learning-test', 'silent');
 
@@ -131,6 +136,7 @@ function makeHarness(
     config?: ConnectorConfig;
     routingTable?: RoutingTable;
     directPeerIds?: string[];
+    discoveredNodes?: DiscoveredNodeSink;
   } = {}
 ): Harness {
   const relay = new FakeRelayClient();
@@ -142,9 +148,31 @@ function makeHarness(
     relayClient: relay,
     getDirectPeerIds: () => opts.directPeerIds ?? ['peer-b'],
     ownPubkey: pkSelf,
+    ...(opts.discoveredNodes ? { discoveredNodes: opts.discoveredNodes } : {}),
     logger,
   });
   return { service, relay, routingTable };
+}
+
+/** Honest in-memory DiscoveredNodeSink — records the seam's calls. */
+class FakeDiscoveredNodeSink implements DiscoveredNodeSink {
+  ingested: LinkStateEventInput[] = [];
+  sweeps: Array<number | undefined> = [];
+  clearCount = 0;
+
+  ingest(event: LinkStateEventInput): unknown {
+    this.ingested.push(event);
+    return 'discovered';
+  }
+
+  sweepExpired(nowSecs?: number): unknown {
+    this.sweeps.push(nowSecs);
+    return [];
+  }
+
+  clear(): void {
+    this.clearCount++;
+  }
 }
 
 describe('RouteLearningService', () => {
@@ -485,6 +513,54 @@ describe('RouteLearningService', () => {
       expect(() => relay.deliver(note)).not.toThrow();
       expect(service.linkStateSize).toBe(0);
       service.stop();
+    });
+  });
+
+  // ── discovered-node seam (toon-meta#153, discovered-vs-peered) ──
+  describe('discovered-node seam', () => {
+    it('feeds every signature-verified announcement to the sink — including ones without a routing block', () => {
+      const sink = new FakeDiscoveredNodeSink();
+      const { service, relay } = makeHarness({ discoveredNodes: sink });
+      service.start();
+
+      // With a routing block (also enters the link-state db)…
+      relay.deliver(announcement(skB, { prefixes: [{ prefix: 'g.b' }], adjacency: [] }));
+      // …and without one (link-state db rejects it; still a DISCOVERED node).
+      relay.deliver(announcement(skC, undefined, { btpEndpoint: 'wss://c.example:443' }));
+
+      expect(sink.ingested).toHaveLength(2);
+      expect(sink.ingested.map((e) => e.pubkey)).toEqual([pkB, pkC]);
+      expect(service.linkStateSize).toBe(1);
+      service.stop();
+    });
+
+    it('does NOT feed the sink an event with a forged signature', () => {
+      const sink = new FakeDiscoveredNodeSink();
+      const { service, relay } = makeHarness({ discoveredNodes: sink });
+      service.start();
+
+      const genuine = announcement(skB, { prefixes: [{ prefix: 'g.b' }], adjacency: [] });
+      // JSON round-trip strips nostr-tools' verified-cache symbol so the
+      // signature is actually re-checked against the tampered pubkey.
+      const forged = JSON.parse(JSON.stringify(genuine)) as NostrEvent;
+      forged.pubkey = pkC;
+      expect(() => relay.deliver(forged)).not.toThrow();
+
+      expect(sink.ingested).toHaveLength(0);
+      service.stop();
+    });
+
+    it('sweeps the sink on the periodic sweep and clears it on stop', () => {
+      const sink = new FakeDiscoveredNodeSink();
+      const { service } = makeHarness({ discoveredNodes: sink });
+      service.start();
+
+      const nowSecs = Math.floor(Date.now() / 1000) + 1000;
+      service.sweep(nowSecs);
+      expect(sink.sweeps).toEqual([nowSecs]);
+
+      service.stop();
+      expect(sink.clearCount).toBe(1);
     });
   });
 });
