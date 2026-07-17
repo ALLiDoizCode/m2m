@@ -32,8 +32,10 @@ import type {
   RouteConfig,
   SelfAnnounceConfig,
 } from '../config/types';
+import { isValidILPAddress } from '@toon-protocol/shared';
 import { deriveApex } from '../config/child-expander';
-import type { IlpPeerInfo, IlpRoutingInfo } from './ilp-peer-info-event';
+import type { IlpCapabilityEntry, IlpPeerInfo, IlpRoutingInfo } from './ilp-peer-info-event';
+import { normalizeCapabilityName } from './ilp-peer-info-event';
 
 /** Default asset advertised when not overridden. */
 const DEFAULT_ASSET_CODE = 'USDC';
@@ -307,6 +309,159 @@ export function buildRoutingInfo(config: ConnectorConfig): IlpRoutingInfo | null
 }
 
 /**
+ * Capability advertised for the legacy `routes.publish` (relay write) hint.
+ *
+ * Naming: connector-control-plane.md §4.1 standardizes the closed core
+ * (`os.put`/`os.get`/`os.send`/`os.transfer`/`os.swap`/`os.run`) but nowhere
+ * assigns a core name to the relay-write hint, so per the open-namespace rule
+ * we advertise it as `os.publish` — the hint's own established name — rather
+ * than inventing core semantics for it.
+ */
+export const PUBLISH_HINT_CAPABILITY = 'os.publish';
+
+/**
+ * Capability advertised for the legacy `routes.store` (blob store) hint.
+ *
+ * Naming precedent: connector-control-plane.md §4.3's directory example maps
+ * exactly this hint to `"capability": "os.store"` at the store address (and
+ * §1 line 43 speaks of "capability `os.store`"), so we follow the doc rather
+ * than remapping onto core `os.put`/`os.get`.
+ */
+export const STORE_HINT_CAPABILITY = 'os.store';
+
+/**
+ * Derive the announcement's `capabilities` directory (toon-meta#153,
+ * connector-control-plane.md §4.3) from the connector's config:
+ *
+ * 1. **Explicit child capabilities** — every `children` entry carrying a
+ *    `capability` field advertises `{ capability, address: <apex>.<name>,
+ *    price?, schema? }`. These are the operator's explicit word and always
+ *    win: a derived hint entry (2) is suppressed when an explicit entry
+ *    already covers the same capability name OR the same address.
+ * 2. **Derived legacy-hint mappings** — the resolved `routes` hints map
+ *    publish → {@link PUBLISH_HINT_CAPABILITY} and store →
+ *    {@link STORE_HINT_CAPABILITY} (see those constants for the naming
+ *    rationale), carrying the matching child/route price when configured.
+ *    The legacy `routes: { publish, store }` block itself is still emitted
+ *    unchanged alongside — deployed consumers parse it.
+ * 3. **Explicit `selfAnnounce.capabilities`** — operator-provided entries
+ *    (validated at config load) appended after the derived ones.
+ *
+ * Entries whose capability name or address is invalid are skipped with a
+ * warning (the builder stays pure — warn-sink pattern); capability names are
+ * normalized to lowercase; the result is deduped by (capability, address),
+ * first occurrence wins.
+ *
+ * @param config - The full connector config (children + routes).
+ * @param selfAnnounce - The `selfAnnounce` block (hint overrides + explicit entries).
+ * @param warn - Optional warn sink for skipped entries.
+ * @returns The derived directory (possibly empty), in the order above.
+ */
+export function buildCapabilityDirectory(
+  config: ConnectorConfig,
+  selfAnnounce?: SelfAnnounceConfig,
+  warn?: AnnounceWarnFn
+): IlpCapabilityEntry[] {
+  const apex = deriveApex(config);
+
+  const makeEntry = (
+    rawCapability: string,
+    address: string,
+    price: string | undefined,
+    schema: string | undefined,
+    source: string
+  ): IlpCapabilityEntry | null => {
+    const capability = normalizeCapabilityName(rawCapability);
+    if (capability === null) {
+      warn?.(
+        { event: 'self_announce_capability_skipped', capability: rawCapability, source },
+        'Skipping capability entry with a malformed capability name'
+      );
+      return null;
+    }
+    if (!isValidILPAddress(address)) {
+      warn?.(
+        { event: 'self_announce_capability_skipped', capability, address, source },
+        'Skipping capability entry with an invalid ILP address'
+      );
+      return null;
+    }
+    return {
+      capability,
+      address,
+      ...(price !== undefined ? { price } : {}),
+      ...(schema !== undefined ? { schema } : {}),
+    };
+  };
+
+  // 1. Explicit child capabilities: `<apex>.<name>` termination advertised
+  //    under the operator-declared capability name.
+  const childEntries: IlpCapabilityEntry[] = [];
+  for (const child of config.children ?? []) {
+    if (child.capability === undefined) continue;
+    if (!apex) {
+      warn?.(
+        { event: 'self_announce_capability_skipped', capability: child.capability },
+        'Skipping child capability: no apex is derivable to resolve its address'
+      );
+      continue;
+    }
+    const entry = makeEntry(
+      child.capability,
+      `${apex}.${child.name}`,
+      child.price,
+      child.schema,
+      `child '${child.name}'`
+    );
+    if (entry) childEntries.push(entry);
+  }
+
+  // 3 (collected early so explicit entries can suppress derived ones).
+  const explicitEntries: IlpCapabilityEntry[] = [];
+  for (const raw of selfAnnounce?.capabilities ?? []) {
+    const entry = makeEntry(raw.capability, raw.address, raw.price, raw.schema, 'selfAnnounce');
+    if (entry) explicitEntries.push(entry);
+  }
+
+  // 2. Derived legacy-hint mappings — suppressed wherever an explicit entry
+  //    already covers the capability name or the address (explicit wins).
+  const explicit = [...childEntries, ...explicitEntries];
+  const explicitCapabilities = new Set(explicit.map((e) => e.capability));
+  const explicitAddresses = new Set(explicit.map((e) => e.address));
+
+  const priceForAddress = (address: string): string | undefined => {
+    if (apex) {
+      const child = (config.children ?? []).find((c) => `${apex}.${c.name}` === address);
+      if (child?.price !== undefined) return child.price;
+    }
+    return config.routes.find((r) => routeAddress(r) === address)?.price;
+  };
+
+  const hints = resolveRouteHints(config.routes, selfAnnounce?.routes, config.children, apex);
+  const derivedEntries: IlpCapabilityEntry[] = [];
+  for (const [capability, address] of [
+    [PUBLISH_HINT_CAPABILITY, hints.publish],
+    [STORE_HINT_CAPABILITY, hints.store],
+  ] as const) {
+    if (!isValidILPAddress(address)) continue; // e.g. the '' no-routes fallback
+    if (explicitCapabilities.has(capability) || explicitAddresses.has(address)) continue;
+    const price = priceForAddress(address);
+    derivedEntries.push({ capability, address, ...(price !== undefined ? { price } : {}) });
+  }
+
+  // Dedupe by (capability, address), first occurrence wins.
+  const seen = new Set<string>();
+  const directory: IlpCapabilityEntry[] = [];
+  for (const entry of [...childEntries, ...derivedEntries, ...explicitEntries]) {
+    const key = `${entry.capability} ${entry.address}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    directory.push(entry);
+  }
+  return directory;
+}
+
+/**
  * Build the connector's own kind:10032 announcement payload from its config.
  *
  * @param config - The full connector config (routes + chainProviders).
@@ -397,6 +552,11 @@ export function buildSelfAnnouncementInfo(
   // + the Nostr pubkeys of configured peers, when known. Content ride-along.
   const routing = buildRoutingInfo(config);
 
+  // Capability directory (toon-meta#153): the general form of the legacy
+  // `routes` hints. Emitted ALONGSIDE them — deployed consumers still parse
+  // the hints, new consumers read the directory. Content ride-along.
+  const capabilities = buildCapabilityDirectory(config, selfAnnounce, warn);
+
   const info: SelfAnnouncementInfo = {
     ilpAddress,
     ...(ilpAddresses.length > 1 ? { ilpAddresses } : {}),
@@ -410,6 +570,7 @@ export function buildSelfAnnouncementInfo(
     ...(Object.keys(tokenNetworks).length > 0 ? { tokenNetworks } : {}),
     ...(Object.keys(preferredTokens).length > 0 ? { preferredTokens } : {}),
     ...(routing ? { routing } : {}),
+    ...(capabilities.length > 0 ? { capabilities } : {}),
     routes,
   };
 

@@ -25,12 +25,15 @@ export type {
   ResolveTokenNetworksFn,
 } from './self-announce-service';
 export {
+  buildCapabilityDirectory,
   buildSelfAnnouncementInfo,
   buildRoutingInfo,
   deriveChainSettlementParams,
   nip59KeyToNostrPubkey,
   normalizeSettlementAddressKeys,
   resolveRouteHints,
+  PUBLISH_HINT_CAPABILITY,
+  STORE_HINT_CAPABILITY,
 } from './self-announce-builder';
 export type {
   AnnounceWarnFn,
@@ -47,13 +50,17 @@ export type { AnnouncePublishPlan, AnnouncePublishMode } from './self-announce-p
 export {
   buildIlpPeerInfoEvent,
   parseRoutingInfo,
+  parseCapabilityDirectory,
+  normalizeCapabilityName,
   ILP_PEER_INFO_KIND,
   EXPIRATION_TAG,
+  CAPABILITY_NAME_PATTERN,
 } from './ilp-peer-info-event';
 export type {
   IlpPeerInfo,
   IlpRoutingInfo,
   IlpRoutingPrefix,
+  IlpCapabilityEntry,
   BuildIlpPeerInfoOptions,
 } from './ilp-peer-info-event';
 

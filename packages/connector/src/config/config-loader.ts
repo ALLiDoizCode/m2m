@@ -31,7 +31,9 @@ import {
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
+import { isValidILPAddress } from '@toon-protocol/shared';
 import { isValidNonNegativeIntegerString } from '../settlement/types';
+import { normalizeCapabilityName } from '../discovery/ilp-peer-info-event';
 import { ChildConfigError, expandChildren } from './child-expander';
 import { deriveLocalPrefixes, validateRelationRoute } from '../routing/relation-route-validator';
 
@@ -266,8 +268,10 @@ export class ConfigLoader {
       deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
       nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
       // relay#37 / store#22: opt-in kind:10032 self-announce. Passed through
-      // unchanged; the SelfAnnounceService validates required fields at start.
-      selfAnnounce: rawConfig.selfAnnounce as SelfAnnounceConfig | undefined,
+      // unchanged apart from the explicit `capabilities` list, which is
+      // validated here (toon-meta#153); the SelfAnnounceService validates the
+      // remaining required fields at start.
+      selfAnnounce: this.validateSelfAnnounce(rawConfig.selfAnnounce),
       // toon-meta#153: opt-in multi-hop route learning (validated shape).
       routeLearning: this.validateRouteLearning(rawConfig.routeLearning),
       // toon-meta#153: opt-in cold-start bootstrap. Validated above (URL
@@ -280,6 +284,75 @@ export class ConfigLoader {
     validateEnvironment(connectorConfig);
 
     return connectorConfig;
+  }
+
+  /**
+   * Validate the optional `selfAnnounce` block's explicit `capabilities`
+   * directory entries (toon-meta#153). The rest of the block is passed
+   * through unchanged — the SelfAnnounceService validates its required
+   * fields at start (relay#37 / store#22 behavior, unchanged).
+   *
+   * Each entry must be an object with:
+   * - `capability`: a string satisfying the capability name grammar
+   *   (alphanumeric start, then alphanumerics / `.` / `_` / `-`);
+   * - `address`: a valid ILP address;
+   * - `price` (optional): a non-negative decimal string (atomic units);
+   * - `schema` (optional): a non-empty string.
+   *
+   * @param raw - The untrusted `selfAnnounce` value from the config input.
+   * @returns The block (capabilities validated), or `undefined` when absent.
+   * @throws ConfigurationError on any malformed capabilities entry.
+   * @private
+   */
+  private static validateSelfAnnounce(raw: unknown): SelfAnnounceConfig | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ConfigurationError('selfAnnounce must be an object');
+    }
+    const block = raw as Record<string, unknown>;
+
+    if (block.capabilities !== undefined) {
+      if (!Array.isArray(block.capabilities)) {
+        throw new ConfigurationError('selfAnnounce.capabilities must be an array');
+      }
+      for (const entry of block.capabilities) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          throw new ConfigurationError('selfAnnounce.capabilities entries must be objects');
+        }
+        const { capability, address, price, schema } = entry as Record<string, unknown>;
+        if (typeof capability !== 'string' || normalizeCapabilityName(capability) === null) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities: capability must be a name like 'os.put' ` +
+              `(alphanumeric start, then alphanumerics/'.'/'_'/'-'), got ${String(capability)}`
+          );
+        }
+        if (typeof address !== 'string' || !isValidILPAddress(address)) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities['${capability}']: address must be a valid ILP address, ` +
+              `got ${String(address)}`
+          );
+        }
+        if (
+          price !== undefined &&
+          (typeof price !== 'string' || !isValidNonNegativeIntegerString(price))
+        ) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities['${capability}']: price must be a non-negative decimal ` +
+              `string (atomic units), got ${String(price)}`
+          );
+        }
+        if (schema !== undefined && (typeof schema !== 'string' || schema.length === 0)) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities['${capability}']: schema must be a non-empty string, ` +
+              `got ${String(schema)}`
+          );
+        }
+      }
+    }
+
+    return raw as SelfAnnounceConfig;
   }
 
   /**

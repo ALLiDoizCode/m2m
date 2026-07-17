@@ -13,12 +13,15 @@
 
 import type { ConnectorConfig, SelfAnnounceConfig } from '../config/types';
 import {
+  buildCapabilityDirectory,
   buildRoutingInfo,
   buildSelfAnnouncementInfo,
   deriveChainSettlementParams,
   nip59KeyToNostrPubkey,
   normalizeSettlementAddressKeys,
   resolveRouteHints,
+  PUBLISH_HINT_CAPABILITY,
+  STORE_HINT_CAPABILITY,
 } from './self-announce-builder';
 
 const APEX_EVM = '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab';
@@ -734,5 +737,135 @@ describe('resolveRouteHints — children precedence (toon-meta#153)', () => {
   it('is wired through buildSelfAnnouncementInfo (hints from children, not suffixes)', () => {
     const info = buildSelfAnnouncementInfo(apexAggregationConfig(), baseSelfAnnounce);
     expect(info.routes).toEqual({ publish: 'g.proxy.relay', store: 'g.proxy.store' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toon-meta#153 — capability directory in kind:10032
+// ---------------------------------------------------------------------------
+
+describe('buildCapabilityDirectory (toon-meta#153)', () => {
+  it('derives the legacy publish/store hints as os.publish/os.store entries with route prices', () => {
+    // The hardcoded routes:{publish,store} block is the degenerate two-entry
+    // case of the directory (connector-control-plane.md §4.3, which maps the
+    // store hint to `os.store`).
+    const directory = buildCapabilityDirectory(relayConnectorConfig(), baseSelfAnnounce);
+    expect(directory).toEqual([
+      { capability: PUBLISH_HINT_CAPABILITY, address: 'g.proxy.relay', price: '1000' },
+      { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store', price: '1000' },
+    ]);
+  });
+
+  it('derives entries from children carrying a capability (address, price, schema)', () => {
+    const config = apexAggregationConfig();
+    config.children = [
+      {
+        name: 'relay',
+        upstream: 'http://relay:3100',
+        price: '1000',
+        capability: 'os.put',
+        schema: 'sha256:ab01',
+      },
+      { name: 'store', peerId: 'store-box' },
+    ];
+    const directory = buildCapabilityDirectory(config, baseSelfAnnounce);
+    // Explicit child entry first; derived os.publish for the SAME address is
+    // suppressed (explicit wins); the store hint is still derived (that child
+    // declares no capability). The forwarding store route carries no price.
+    expect(directory).toEqual([
+      { capability: 'os.put', address: 'g.proxy.relay', price: '1000', schema: 'sha256:ab01' },
+      { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store' },
+    ]);
+  });
+
+  it('suppresses a derived entry when an explicit one claims the same capability name', () => {
+    const config = relayConnectorConfig();
+    const selfAnnounce: SelfAnnounceConfig = {
+      ...baseSelfAnnounce,
+      capabilities: [{ capability: 'os.publish', address: 'g.elsewhere.relay', price: '5' }],
+    };
+    const directory = buildCapabilityDirectory(config, selfAnnounce);
+    expect(directory).toEqual([
+      // Derived os.publish gone (explicit wins); derived os.store intact.
+      { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store', price: '1000' },
+      { capability: 'os.publish', address: 'g.elsewhere.relay', price: '5' },
+    ]);
+  });
+
+  it('appends selfAnnounce.capabilities after derived entries and dedupes by (capability, address)', () => {
+    const config = apexAggregationConfig();
+    config.children = [
+      { name: 'relay', upstream: 'http://relay:3100', price: '1000', capability: 'os.publish' },
+      { name: 'store', peerId: 'store-box' },
+    ];
+    const selfAnnounce: SelfAnnounceConfig = {
+      ...baseSelfAnnounce,
+      capabilities: [
+        // Same (capability, address) as the child entry after normalization —
+        // deduped, first occurrence (the child's, with its price) wins.
+        { capability: 'OS.PUBLISH', address: 'g.proxy.relay' },
+        { capability: 'os.run', address: 'g.proxy.run', price: '5', schema: 'sha256:ff02' },
+      ],
+    };
+    const directory = buildCapabilityDirectory(config, selfAnnounce);
+    expect(directory).toEqual([
+      { capability: 'os.publish', address: 'g.proxy.relay', price: '1000' },
+      { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store' },
+      { capability: 'os.run', address: 'g.proxy.run', price: '5', schema: 'sha256:ff02' },
+    ]);
+  });
+
+  it('skips (and warns about) entries with malformed names or invalid addresses', () => {
+    const config = apexAggregationConfig();
+    config.children = [
+      { name: 'relay', upstream: 'http://relay:3100', capability: '.bad-name' },
+      { name: 'store', peerId: 'store-box' },
+    ];
+    const selfAnnounce: SelfAnnounceConfig = {
+      ...baseSelfAnnounce,
+      capabilities: [{ capability: 'os.run', address: 'not an ilp address!' }],
+    };
+    const warnings: object[] = [];
+    const directory = buildCapabilityDirectory(config, selfAnnounce, (ctx) => warnings.push(ctx));
+    // Both explicit sources were skipped; the derived hints remain.
+    expect(directory).toEqual([
+      { capability: PUBLISH_HINT_CAPABILITY, address: 'g.proxy.relay', price: '1000' },
+      { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store' },
+    ]);
+    expect(warnings).toHaveLength(2);
+    expect(warnings.every((w) => 'event' in w)).toBe(true);
+  });
+
+  it('returns [] when there is nothing to advertise (no routes, children, or explicit entries)', () => {
+    const empty: ConnectorConfig = {
+      nodeId: 'connector',
+      btpServerPort: 3000,
+      environment: 'development',
+      peers: [],
+      routes: [],
+    };
+    expect(buildCapabilityDirectory(empty, baseSelfAnnounce)).toEqual([]);
+  });
+
+  it('is wired into buildSelfAnnouncementInfo ALONGSIDE the unchanged legacy hints', () => {
+    const info = buildSelfAnnouncementInfo(relayConnectorConfig(), baseSelfAnnounce);
+    expect(info.capabilities).toEqual([
+      { capability: PUBLISH_HINT_CAPABILITY, address: 'g.proxy.relay', price: '1000' },
+      { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store', price: '1000' },
+    ]);
+    // Deployed consumers parse the legacy block — it must not change shape.
+    expect(info.routes).toEqual({ publish: 'g.proxy.relay', store: 'g.proxy.store' });
+  });
+
+  it('omits the capabilities field entirely when the directory is empty', () => {
+    const empty: ConnectorConfig = {
+      nodeId: 'connector',
+      btpServerPort: 3000,
+      environment: 'development',
+      peers: [],
+      routes: [],
+    };
+    const info = buildSelfAnnouncementInfo(empty, { enabled: true, announceTo: 'g.x' });
+    expect('capabilities' in info).toBe(false);
   });
 });

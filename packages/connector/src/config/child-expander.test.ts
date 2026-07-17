@@ -164,6 +164,39 @@ describe('expandChildren (toon-meta#153)', () => {
     );
   });
 
+  it('accepts a valid capability + schema (toon-meta#153 capability directory)', () => {
+    const children: ChildConfig[] = [
+      { name: 'relay', upstream: 'http://a:1', capability: 'os.publish', schema: 'sha256:ab01' },
+      { name: 'blob', upstream: 'http://b:2', capability: 'blob-store' },
+    ];
+    expect(() => expandChildren(children, APEX, [], [], NODE_ID)).not.toThrow();
+  });
+
+  it.each(['.bad', 'has space', '', 'bad/slash'])(
+    "throws on a malformed child capability ('%s')",
+    (capability) => {
+      const children: ChildConfig[] = [{ name: 'relay', upstream: 'http://a:1', capability }];
+      expect(() => expandChildren(children, APEX, [], [], NODE_ID)).toThrow(
+        /capability must be a name/
+      );
+    }
+  );
+
+  it('throws on an empty or non-string child schema', () => {
+    const children: ChildConfig[] = [
+      { name: 'relay', upstream: 'http://a:1', capability: 'os.publish', schema: '' },
+    ];
+    expect(() => expandChildren(children, APEX, [], [], NODE_ID)).toThrow(
+      /schema must be a non-empty string/
+    );
+    const nonString = [
+      { name: 'relay', upstream: 'http://a:1', schema: 42 },
+    ] as unknown as ChildConfig[];
+    expect(() => expandChildren(nonString, APEX, [], [], NODE_ID)).toThrow(
+      /schema must be a non-empty string/
+    );
+  });
+
   it('throws when children are configured but no apex is derivable', () => {
     const children: ChildConfig[] = [{ name: 'relay', upstream: 'http://a:1' }];
     expect(() => expandChildren(children, undefined, [], [], NODE_ID)).toThrow(

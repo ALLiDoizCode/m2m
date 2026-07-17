@@ -24,6 +24,7 @@
 
 import { isValidILPAddress } from '@toon-protocol/shared';
 import { isValidNonNegativeIntegerString } from '../settlement/types';
+import { normalizeCapabilityName } from '../discovery/ilp-peer-info-event';
 import type { ChildConfig, PeerConfig, RouteConfig, TerminationChain } from './types';
 
 /**
@@ -85,6 +86,9 @@ export function deriveApex(config: {
  * - exactly one of `upstream` | `peerId` is set;
  * - names are unique across `children`;
  * - `price` (when present) is a non-negative integer string;
+ * - `capability` (when present) satisfies the capability name grammar and
+ *   `schema` (when present) is a non-empty string (toon-meta#153 — both feed
+ *   the kind:10032 `capabilities` directory);
  * - a `peerId` child's peer exists in `peers` with `relation: 'child'`;
  * - the expanded prefix does not collide with an existing route bound
  *   elsewhere (an identical existing binding is skipped — idempotent).
@@ -178,8 +182,24 @@ export function expandChildren(
         );
       }
     }
-    if (child.capability !== undefined && typeof child.capability !== 'string') {
-      throw new ChildConfigError(`${where}: capability must be a string`);
+    if (child.capability !== undefined) {
+      if (
+        typeof child.capability !== 'string' ||
+        normalizeCapabilityName(child.capability) === null
+      ) {
+        throw new ChildConfigError(
+          `${where}: capability must be a name like 'os.put' or 'nostr-relay' ` +
+            `(alphanumeric start, then alphanumerics/'.'/'_'/'-'), got ${String(child.capability)}`
+        );
+      }
+    }
+    if (child.schema !== undefined) {
+      if (typeof child.schema !== 'string' || child.schema.length === 0) {
+        throw new ChildConfigError(
+          `${where}: schema must be a non-empty string (content address / URI of the ` +
+            `capability's interface descriptor), got ${String(child.schema)}`
+        );
+      }
     }
 
     const prefix = `${apex}.${child.name}`;

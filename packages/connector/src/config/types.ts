@@ -39,6 +39,7 @@
  */
 
 import type { ProviderConfig } from '../settlement/provider/payment-channel-provider';
+import type { IlpCapabilityEntry } from '../discovery/ilp-peer-info-event';
 
 /**
  * Configuration entry for a chain provider.
@@ -346,11 +347,22 @@ export interface ChildConfig {
   price?: string;
 
   /**
-   * Optional advisory capability tag (e.g. `'nostr-relay'`, `'blob-store'`).
-   * Carried on the config for discovery layers; not consulted by the packet
-   * path.
+   * Optional advisory capability tag (e.g. `'nostr-relay'`, `'blob-store'`,
+   * or a namespaced `'os.put'`). Carried on the config for discovery layers
+   * (a child with a capability is advertised in the kind:10032 `capabilities`
+   * directory at `<apex>.<name>` — toon-meta#153); not consulted by the
+   * packet path. Must satisfy the capability name grammar (alphanumeric
+   * start, then alphanumerics / `.` / `_` / `-`).
    */
   capability?: string;
+
+  /**
+   * Optional content address / URI of the capability's interface descriptor
+   * (e.g. `sha256:ab01…`), advertised as `capabilities[].schema` in the
+   * kind:10032 directory (toon-meta#153). Names are for humans; hashes are
+   * for binding. Only meaningful together with {@link capability}.
+   */
+  schema?: string;
 }
 
 /**
@@ -997,6 +1009,16 @@ export interface SelfAnnounceConfig {
     /** ILP address a client should STORE (blob uploads) to, e.g. `g.proxy.store`. */
     store?: string;
   };
+
+  /**
+   * Optional explicit capability directory entries (toon-meta#153), appended
+   * AFTER the entries derived from `children` capabilities and the legacy
+   * publish/store hints — an override/extension list for capabilities the
+   * derivation cannot express. Validated at config load (capability name
+   * grammar, ILP address, non-negative decimal price, non-empty schema); the
+   * merged directory is deduped by (capability, address).
+   */
+  capabilities?: IlpCapabilityEntry[];
 }
 
 /**

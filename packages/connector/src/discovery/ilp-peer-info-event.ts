@@ -28,6 +28,7 @@
  */
 
 import { finalizeEvent, type NostrEvent } from 'nostr-tools';
+import { isValidILPAddress } from '@toon-protocol/shared';
 
 /** kind:10032 — replaceable (10000-19999) ILP peer info announcement. */
 export const ILP_PEER_INFO_KIND = 10032;
@@ -114,6 +115,114 @@ export function parseRoutingInfo(content: unknown): IlpRoutingInfo | null {
 }
 
 /**
+ * A single capability advertisement inside the kind:10032 `capabilities`
+ * directory (toon-meta#153, connector-control-plane.md §4).
+ *
+ * Capabilities live in an open `os.<capability>` namespace with a closed
+ * standardized core (`os.put`, `os.get`, `os.send`, `os.transfer`, `os.swap`,
+ * `os.run`). The relay is the control plane mapping capability → address; the
+ * resolved `address` is an ordinary routable ILP prefix, so from the data
+ * plane's perspective a capability lookup never happened — ILP stays
+ * address-only.
+ */
+export interface IlpCapabilityEntry {
+  /**
+   * Namespaced capability name — a human handle like `os.put` or any
+   * `os.<name>` (the namespace is open; pay-to-write is the Sybil brake).
+   * Bare names (no `os.` prefix, e.g. `nostr-relay`) are allowed for
+   * forward-compat but the `os.*` namespace is the documented convention.
+   * Names are case-insensitive handles and are normalized to lowercase both
+   * when announced and when parsed (see {@link normalizeCapabilityName}).
+   */
+  capability: string;
+  /** Flat, routable ILP address where the capability is served (the plane bridge). */
+  address: string;
+  /** Optional price to invoke (atomic units, non-negative decimal string). */
+  price?: string;
+  /**
+   * Optional content address / URI of the capability's interface descriptor
+   * (e.g. `sha256:ab01…`). Names are for humans; hashes are for binding — two
+   * providers advertising the same descriptor hash are interchangeable.
+   */
+  schema?: string;
+}
+
+/**
+ * Capability name grammar: a dot-namespaced handle (`os.put`, `os.my-thing`)
+ * or a bare label (`nostr-relay`) — alphanumeric start, then alphanumerics,
+ * `.`, `_`, `-`. Case-insensitive; names normalize to lowercase.
+ */
+export const CAPABILITY_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
+
+/** Non-negative decimal price string (atomic units) — mirrors route `price`. */
+const CAPABILITY_PRICE_RE = /^\d+$/;
+
+/**
+ * Normalize a capability name: trim + lowercase. Returns `null` when the
+ * result does not satisfy {@link CAPABILITY_NAME_PATTERN} (names are
+ * case-insensitive human handles; the canonical wire form is lowercase).
+ *
+ * @param name - The raw capability name.
+ * @returns The normalized (lowercase) name, or `null` when malformed.
+ */
+export function normalizeCapabilityName(name: string): string | null {
+  const normalized = name.trim().toLowerCase();
+  return CAPABILITY_NAME_PATTERN.test(normalized) ? normalized : null;
+}
+
+/**
+ * Defensively parse the optional `capabilities` directory out of a kind:10032
+ * content object produced by SOMEONE ELSE (toon-meta#153).
+ *
+ * Never throws, mirroring {@link parseRoutingInfo}: an absent or structurally
+ * unusable block returns `[]`; malformed individual entries are dropped while
+ * the well-formed remainder is kept (one bad entry never discards the whole
+ * directory). Per entry:
+ * - `capability` must be a string satisfying {@link CAPABILITY_NAME_PATTERN}
+ *   (normalized to lowercase in the result);
+ * - `address` must be a valid ILP address (`isValidILPAddress`);
+ * - `price`, when present, must be a non-negative decimal string;
+ * - `schema`, when present, must be a non-empty string.
+ * A present-but-invalid optional field drops the entry (its terms cannot be
+ * trusted), exactly like `parseRoutingInfo` treats an invalid `cost`.
+ *
+ * @param content - The parsed (JSON) content of a kind:10032 event.
+ * @returns The sanitized capability entries (possibly empty), announcer order.
+ */
+export function parseCapabilityDirectory(content: unknown): IlpCapabilityEntry[] {
+  if (!content || typeof content !== 'object') return [];
+  const capabilities = (content as Record<string, unknown>).capabilities;
+  if (!Array.isArray(capabilities)) return [];
+
+  const entries: IlpCapabilityEntry[] = [];
+  for (const entry of capabilities) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const { capability, address, price, schema } = entry as Record<string, unknown>;
+
+    if (typeof capability !== 'string') continue;
+    const name = normalizeCapabilityName(capability);
+    if (name === null) continue;
+
+    if (typeof address !== 'string' || !isValidILPAddress(address)) continue;
+
+    if (price !== undefined && (typeof price !== 'string' || !CAPABILITY_PRICE_RE.test(price))) {
+      continue;
+    }
+    if (schema !== undefined && (typeof schema !== 'string' || schema.length === 0)) {
+      continue;
+    }
+
+    entries.push({
+      capability: name,
+      address,
+      ...(price !== undefined ? { price } : {}),
+      ...(schema !== undefined ? { schema } : {}),
+    });
+  }
+  return entries;
+}
+
+/**
  * ILP Peer Info — the kind:10032 content payload.
  *
  * Mirror of `@toon-protocol/core`'s `IlpPeerInfo` (subset used by the
@@ -169,6 +278,15 @@ export interface IlpPeerInfo {
    * content ride-along, never a wire-type change.
    */
   routing?: IlpRoutingInfo;
+  /**
+   * Optional capability directory (toon-meta#153, connector-control-plane.md
+   * §4.3): how this node advertises capabilities in the open `os.<capability>`
+   * namespace. The legacy `routes: { publish, store }` hints are the
+   * degenerate two-entry case and are still emitted alongside for deployed
+   * consumers. Backward-compatible content ride-along, never a wire-type
+   * change; absent block = no capabilities.
+   */
+  capabilities?: IlpCapabilityEntry[];
   /** Allow out-of-band content fields (e.g. `routes`) to ride along in content. */
   [key: string]: unknown;
 }

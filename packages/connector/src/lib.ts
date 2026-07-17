@@ -102,9 +102,24 @@ export type {
 } from './routing/link-state-db';
 export { computeRoutes } from './routing/path-computation';
 export type { ComputedRoute, DirectNeighbor } from './routing/path-computation';
-export { parseRoutingInfo } from './discovery/ilp-peer-info-event';
-export type { IlpRoutingInfo, IlpRoutingPrefix } from './discovery/ilp-peer-info-event';
-export { buildRoutingInfo, nip59KeyToNostrPubkey } from './discovery/self-announce-builder';
+export {
+  parseRoutingInfo,
+  parseCapabilityDirectory,
+  normalizeCapabilityName,
+  CAPABILITY_NAME_PATTERN,
+} from './discovery/ilp-peer-info-event';
+export type {
+  IlpRoutingInfo,
+  IlpRoutingPrefix,
+  IlpCapabilityEntry,
+} from './discovery/ilp-peer-info-event';
+export {
+  buildCapabilityDirectory,
+  buildRoutingInfo,
+  nip59KeyToNostrPubkey,
+  PUBLISH_HINT_CAPABILITY,
+  STORE_HINT_CAPABILITY,
+} from './discovery/self-announce-builder';
 
 // Export configuration types
 export type {
