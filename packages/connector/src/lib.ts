@@ -101,6 +101,33 @@ export type {
   TransportConfig,
 } from './config/types';
 
+// Cold-start bootstrap (toon-meta#153): relay-seed resolution, signed seed
+// registry verification, learned-peer cache, and sample-and-verify probing.
+export {
+  BootstrapService,
+  DEFAULT_SAMPLE_SIZE,
+  DEFAULT_BOOTSTRAP_REFRESH_INTERVAL_SECS,
+} from './discovery/bootstrap-service';
+export type {
+  BootstrapServiceDeps,
+  ResolvedRelaySeed,
+  RelayProbeFn,
+  RelayProbeResult,
+  RelaysResolvedListener,
+} from './discovery/bootstrap-service';
+export { FALLBACK_RELAY_SEEDS, FALLBACK_CURATOR_PUBKEY } from './discovery/bootstrap-seeds';
+export type { RelaySeed } from './discovery/bootstrap-seeds';
+export {
+  signSeedManifest,
+  parseSeedManifest,
+  verifySeedManifest,
+} from './discovery/bootstrap-manifest';
+export type { SeedManifest, SeedManifestPayload } from './discovery/bootstrap-manifest';
+export { FileBootstrapCacheStore } from './discovery/bootstrap-cache';
+export type { BootstrapCacheStore, CachedRelaySeed } from './discovery/bootstrap-cache';
+export { createKind10032RelayProbe } from './discovery/relay-probe';
+export type { BootstrapConfig, BootstrapSeedEntry } from './config/types';
+
 // Re-export settlement types for library consumers
 export type { AdminSettlementConfig } from './settlement/types';
 

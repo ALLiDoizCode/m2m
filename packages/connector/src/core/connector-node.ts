@@ -100,6 +100,9 @@ import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
 import { SelfAnnounceService, type PublishOutcome } from '../discovery/self-announce-service';
 import { planAnnouncePublish } from '../discovery/self-announce-publish';
+import { BootstrapService } from '../discovery/bootstrap-service';
+import { FileBootstrapCacheStore } from '../discovery/bootstrap-cache';
+import { createKind10032RelayProbe } from '../discovery/relay-probe';
 import type { NostrEvent } from 'nostr-tools';
 import { hexToBytes } from '@noble/hashes/utils';
 
@@ -189,6 +192,10 @@ export class ConnectorNode implements HealthStatusProvider {
   // set, publishes + refreshes this node's own kind:10032 IlpPeerInfo. Null when
   // disabled or no signing identity is available.
   private _selfAnnounceService: SelfAnnounceService | null = null;
+  // Cold-start bootstrap service (toon-meta#153). When `bootstrap.enabled` is
+  // set, resolves relay seeds (signed registry → cache → config → fallback),
+  // sample-and-verifies them, and refreshes on an interval. Null when disabled.
+  private _bootstrapService: BootstrapService | null = null;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -811,6 +818,59 @@ export class ConnectorNode implements HealthStatusProvider {
     }
 
     return null;
+  }
+
+  /**
+   * Start the cold-start bootstrap service (toon-meta#153) when configured.
+   *
+   * Opt-in via `bootstrap.enabled`. Resolves relay seeds through the curated
+   * signed registry → learned-peer cache → config seeds → hardcoded fallback
+   * chain, sample-and-verifies candidates with a minimal kind:10032 probe, and
+   * persists the survivors. Consumers stay loosely coupled: the discovered
+   * relays are exposed via the public {@link bootstrapService} getter and the
+   * service's `onRelaysResolved` callback — deep integration (self-announce
+   * targets, kind:10032 route learning) belongs to the route-learning branch.
+   * Best-effort: any failure logs and skips so startup is never blocked.
+   */
+  private _startBootstrap(): void {
+    const bootstrap = this._config.bootstrap;
+    if (!bootstrap?.enabled) {
+      return;
+    }
+
+    try {
+      const cachePath = bootstrap.cachePath ?? `./data/bootstrap-cache-${this._config.nodeId}.json`;
+      const service = new BootstrapService({
+        config: bootstrap,
+        relayProbe: createKind10032RelayProbe(this._logger),
+        cacheStore: new FileBootstrapCacheStore(cachePath, this._logger),
+        logger: this._logger,
+      });
+      service.onRelaysResolved((relayUrls) => {
+        // The route-learning branch will consume these; for now surface them.
+        // Flag when self-announce carries no relay hint of its own — the
+        // bootstrap result is then the node's only view of the relay set.
+        this._logger.info(
+          {
+            event: 'bootstrap_relays_available',
+            relayUrls,
+            selfAnnounceHasRelayHint: Boolean(this._config.selfAnnounce?.relayUrl),
+          },
+          'Bootstrap discovered verified relays'
+        );
+      });
+      service.start();
+      this._bootstrapService = service;
+    } catch (err) {
+      this._bootstrapService = null;
+      this._logger.warn(
+        {
+          event: 'bootstrap_start_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start cold-start bootstrap service; continuing without it'
+      );
+    }
   }
 
   /**
@@ -2081,6 +2141,12 @@ export class ConnectorNode implements HealthStatusProvider {
         );
       }
 
+      // Cold-start bootstrap (toon-meta#153): resolve + verify relay seeds so
+      // a cold node can find its first relay. Started alongside self-announce
+      // (below) once the node is otherwise up. Best-effort: a failure logs and
+      // skips rather than aborting startup.
+      this._startBootstrap();
+
       // Self-announce (relay#37 / store#22): publish + refresh this node's own
       // kind:10032 IlpPeerInfo so its apex routes are discoverable out of band.
       // Started last (after the BTP/HTTP/admin surfaces are up) so the
@@ -2169,6 +2235,12 @@ export class ConnectorNode implements HealthStatusProvider {
       if (this._selfAnnounceService) {
         this._selfAnnounceService.stop();
         this._selfAnnounceService = null;
+      }
+
+      // Stop the cold-start bootstrap refresh loop (clears its unref'd timer).
+      if (this._bootstrapService) {
+        this._bootstrapService.stop();
+        this._bootstrapService = null;
       }
 
       // Stop settlement monitor FIRST to stop polling the ledger during drain.
@@ -2401,6 +2473,20 @@ export class ConnectorNode implements HealthStatusProvider {
     // torn down. During the in-flight `provider.start()` await and during any
     // part of stop()/rollback, this getter returns `null`.
     return this._transportProviderReady ? this._transportProvider : null;
+  }
+
+  /**
+   * Get the cold-start bootstrap service (toon-meta#153), or `null` when
+   * `bootstrap.enabled` is false or the node is stopped.
+   *
+   * The deliberate coupling surface for consumers of discovered relays
+   * (self-announce targets, the future kind:10032 route-learning client):
+   * read `getRelayUrls()` for the current verified list, or subscribe with
+   * `onRelaysResolved()`. Callers MUST NOT invoke `start()`/`stop()` on the
+   * returned service — lifecycle is managed exclusively by ConnectorNode.
+   */
+  get bootstrapService(): BootstrapService | null {
+    return this._bootstrapService;
   }
 
   /**

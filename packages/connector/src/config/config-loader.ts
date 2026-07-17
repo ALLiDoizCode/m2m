@@ -24,6 +24,8 @@ import {
   ChainProviderConfigEntry,
   TransportConfig,
   SelfAnnounceConfig,
+  BootstrapConfig,
+  BootstrapSeedEntry,
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
@@ -194,6 +196,7 @@ export class ConfigLoader {
     // Validate required fields and structure.
     this.validateRequiredFields(rawConfig);
     const transport = this.validateTransport(rawConfig.transport);
+    const bootstrap = this.validateBootstrap(rawConfig.bootstrap);
     this.validatePeers(rawConfig.peers as PeerConfig[]);
     this.validateRoutes(rawConfig.routes as RouteConfig[], rawConfig.peers as PeerConfig[]);
     this.validatePorts(rawConfig);
@@ -228,6 +231,9 @@ export class ConfigLoader {
       // relay#37 / store#22: opt-in kind:10032 self-announce. Passed through
       // unchanged; the SelfAnnounceService validates required fields at start.
       selfAnnounce: rawConfig.selfAnnounce as SelfAnnounceConfig | undefined,
+      // toon-meta#153: opt-in cold-start bootstrap. Validated above (URL
+      // schemes, hex pubkeys, positive integers); absent → disabled.
+      bootstrap,
       transport,
     };
 
@@ -731,5 +737,160 @@ export class ConfigLoader {
 
     // direct discards any extra fields unconditionally.
     return { type: 'direct' };
+  }
+
+  /**
+   * Validate and Normalize the `bootstrap` Block (toon-meta#153).
+   *
+   * Opt-in: absent (or explicit undefined) returns undefined and no bootstrap
+   * runs. When present: `enabled` is a required boolean; `registryUrl` must be
+   * https:// (the curated registry is signed AND transported over TLS);
+   * `curatorPubkey` and per-seed `pubkey` are 64-char lowercase hex (BIP-340
+   * x-only / Nostr keys); seed `relayUrl`s are ws:// or wss:// WebSocket URLs
+   * (ws:// permitted for local dev, mirroring peer URL validation);
+   * `sampleSize` and `refreshIntervalSecs` are positive integers.
+   *
+   * @param raw - Unvalidated `bootstrap` field value from the YAML input
+   * @returns Normalized `BootstrapConfig`, or undefined when absent
+   * @throws ConfigurationError on any schema violation
+   * @private
+   */
+  private static validateBootstrap(raw: unknown): BootstrapConfig | undefined {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      const actualType = raw === null ? 'null' : Array.isArray(raw) ? 'array' : typeof raw;
+      throw new ConfigurationError(
+        `Invalid type for bootstrap: expected object, got ${actualType}`
+      );
+    }
+
+    const rawBootstrap = raw as Record<string, unknown>;
+    const hex64 = /^[0-9a-f]{64}$/;
+    const wsUrl = /^wss?:\/\/.+/;
+
+    if (typeof rawBootstrap.enabled !== 'boolean') {
+      throw new ConfigurationError(
+        `Invalid type for bootstrap.enabled: expected boolean, got ${typeof rawBootstrap.enabled}`
+      );
+    }
+
+    if (rawBootstrap.registryUrl !== undefined) {
+      if (
+        typeof rawBootstrap.registryUrl !== 'string' ||
+        !/^https:\/\/.+/.test(rawBootstrap.registryUrl)
+      ) {
+        throw new ConfigurationError(
+          `Invalid bootstrap.registryUrl: must be an https:// URL, got ${String(
+            rawBootstrap.registryUrl
+          )}`
+        );
+      }
+    }
+
+    if (rawBootstrap.curatorPubkey !== undefined) {
+      if (
+        typeof rawBootstrap.curatorPubkey !== 'string' ||
+        !hex64.test(rawBootstrap.curatorPubkey)
+      ) {
+        throw new ConfigurationError(
+          'Invalid bootstrap.curatorPubkey: must be 64-char lowercase hex (BIP-340 x-only pubkey)'
+        );
+      }
+    }
+
+    let seeds: BootstrapSeedEntry[] | undefined;
+    if (rawBootstrap.seeds !== undefined) {
+      if (!Array.isArray(rawBootstrap.seeds)) {
+        throw new ConfigurationError(
+          `Invalid type for bootstrap.seeds: expected array, got ${typeof rawBootstrap.seeds}`
+        );
+      }
+      seeds = [];
+      for (const [index, rawSeed] of rawBootstrap.seeds.entries()) {
+        if (rawSeed === null || typeof rawSeed !== 'object' || Array.isArray(rawSeed)) {
+          throw new ConfigurationError(`Invalid bootstrap.seeds[${index}]: expected object`);
+        }
+        const seed = rawSeed as Record<string, unknown>;
+        if (typeof seed.relayUrl !== 'string' || !wsUrl.test(seed.relayUrl)) {
+          throw new ConfigurationError(
+            `Invalid bootstrap.seeds[${index}].relayUrl: must be a ws:// or wss:// URL, got ${String(
+              seed.relayUrl
+            )}`
+          );
+        }
+        if (
+          seed.pubkey !== undefined &&
+          (typeof seed.pubkey !== 'string' || !hex64.test(seed.pubkey))
+        ) {
+          throw new ConfigurationError(
+            `Invalid bootstrap.seeds[${index}].pubkey: must be 64-char lowercase hex`
+          );
+        }
+        seeds.push(
+          seed.pubkey !== undefined
+            ? { relayUrl: seed.relayUrl, pubkey: seed.pubkey as string }
+            : { relayUrl: seed.relayUrl }
+        );
+      }
+    }
+
+    if (rawBootstrap.cachePath !== undefined) {
+      if (typeof rawBootstrap.cachePath !== 'string' || rawBootstrap.cachePath.trim() === '') {
+        throw new ConfigurationError(
+          'Invalid bootstrap.cachePath: must be a non-empty file path string'
+        );
+      }
+    }
+
+    if (rawBootstrap.sampleSize !== undefined) {
+      if (
+        typeof rawBootstrap.sampleSize !== 'number' ||
+        !Number.isInteger(rawBootstrap.sampleSize) ||
+        rawBootstrap.sampleSize < 1
+      ) {
+        throw new ConfigurationError(
+          `Invalid bootstrap.sampleSize: must be a positive integer, got ${String(
+            rawBootstrap.sampleSize
+          )}`
+        );
+      }
+    }
+
+    if (rawBootstrap.refreshIntervalSecs !== undefined) {
+      if (
+        typeof rawBootstrap.refreshIntervalSecs !== 'number' ||
+        !Number.isInteger(rawBootstrap.refreshIntervalSecs) ||
+        rawBootstrap.refreshIntervalSecs < 1
+      ) {
+        throw new ConfigurationError(
+          `Invalid bootstrap.refreshIntervalSecs: must be a positive integer, got ${String(
+            rawBootstrap.refreshIntervalSecs
+          )}`
+        );
+      }
+    }
+
+    const bootstrap: BootstrapConfig = { enabled: rawBootstrap.enabled };
+    if (rawBootstrap.registryUrl !== undefined) {
+      bootstrap.registryUrl = rawBootstrap.registryUrl as string;
+    }
+    if (rawBootstrap.curatorPubkey !== undefined) {
+      bootstrap.curatorPubkey = rawBootstrap.curatorPubkey as string;
+    }
+    if (seeds !== undefined) {
+      bootstrap.seeds = seeds;
+    }
+    if (rawBootstrap.cachePath !== undefined) {
+      bootstrap.cachePath = rawBootstrap.cachePath as string;
+    }
+    if (rawBootstrap.sampleSize !== undefined) {
+      bootstrap.sampleSize = rawBootstrap.sampleSize as number;
+    }
+    if (rawBootstrap.refreshIntervalSecs !== undefined) {
+      bootstrap.refreshIntervalSecs = rawBootstrap.refreshIntervalSecs as number;
+    }
+    return bootstrap;
   }
 }
