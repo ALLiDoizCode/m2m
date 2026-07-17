@@ -38,7 +38,7 @@
 // the route keeps dripping native MINA only (mirrors createSolanaFaucet /
 // createMinaFaucet). Fail-loud ONLY on a structurally invalid admin key.
 
-import { AccountUpdate, Mina, PrivateKey, PublicKey, TokenId, UInt64 } from 'o1js';
+import { AccountUpdate, Mina, PrivateKey, PublicKey, TokenId, UInt64, fetchAccount } from 'o1js';
 
 // Compiled ESM build of the repo's mina-zkapp token classes (see header). The
 // Dockerfile builds `packages/mina-zkapp/dist-esm/` and the image lays it out so
@@ -169,9 +169,10 @@ export function createMinaUsdcMinter() {
 
   // Validate token / admin-contract addresses (fail-loud on a bad address).
   let tokenPubKey;
+  let adminContractPubKey;
   try {
     tokenPubKey = PublicKey.fromBase58(tokenAddr);
-    PublicKey.fromBase58(adminContractAddr); // validate; address is informational here
+    adminContractPubKey = PublicKey.fromBase58(adminContractAddr);
   } catch {
     throw new Error(
       'MINA_USDC_TOKEN / MINA_USDC_ADMIN_CONTRACT is not a valid base58 Mina address.'
@@ -268,6 +269,16 @@ export function createMinaUsdcMinter() {
     async mint(recipientB58, whole) {
       const amountWhole = whole == null ? wholeUsdc : BigInt(whole);
       await compileOnce();
+
+      // Refresh the o1js account cache before EVERY mint (issue #348): the
+      // Mina.Network instance caches fetched accounts, so without this the
+      // SECOND mint in a process built its tx with the fee payer's STALE nonce
+      // from the first mint's fetch and the node rejected it "Invalid_nonce"
+      // (observed live on the devnet box). Also refresh the token + admin
+      // zkApp accounts so the proof runs against current on-chain state.
+      await fetchAccount({ publicKey: adminPubKey });
+      await fetchAccount({ publicKey: tokenPubKey });
+      await fetchAccount({ publicKey: adminContractPubKey });
 
       // Decide fundRecipient by detecting the recipient's token account. If the
       // GraphQL probe itself fails we DEFAULT to funding (true) and rely on the
