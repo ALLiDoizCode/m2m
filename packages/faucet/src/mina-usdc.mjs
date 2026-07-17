@@ -38,14 +38,7 @@
 // the route keeps dripping native MINA only (mirrors createSolanaFaucet /
 // createMinaFaucet). Fail-loud ONLY on a structurally invalid admin key.
 
-import {
-  AccountUpdate,
-  Mina,
-  PrivateKey,
-  PublicKey,
-  TokenId,
-  UInt64,
-} from 'o1js';
+import { AccountUpdate, Mina, PrivateKey, PublicKey, TokenId, UInt64 } from 'o1js';
 
 // Compiled ESM build of the repo's mina-zkapp token classes (see header). The
 // Dockerfile builds `packages/mina-zkapp/dist-esm/` and the image lays it out so
@@ -180,7 +173,9 @@ export function createMinaUsdcMinter() {
     tokenPubKey = PublicKey.fromBase58(tokenAddr);
     PublicKey.fromBase58(adminContractAddr); // validate; address is informational here
   } catch {
-    throw new Error('MINA_USDC_TOKEN / MINA_USDC_ADMIN_CONTRACT is not a valid base58 Mina address.');
+    throw new Error(
+      'MINA_USDC_TOKEN / MINA_USDC_ADMIN_CONTRACT is not a valid base58 Mina address.'
+    );
   }
 
   const wholeUsdc = BigInt(MINA_USDC_AMOUNT);
@@ -208,20 +203,32 @@ export function createMinaUsdcMinter() {
   console.log(`   Per drip:       ${MINA_USDC_AMOUNT} USDC`);
   console.log(`   GraphQL:        ${MINA_GRAPHQL_URL}`);
 
-  // Compile FungibleTokenAdmin + UsdcChannelToken EXACTLY ONCE (~6s). Done
-  // lazily on first mint so the faucet still boots instantly; cached via this
+  // Compile FungibleTokenAdmin + UsdcChannelToken EXACTLY ONCE. Cached via this
   // promise so concurrent/repeat mints never recompile. We compile the SUBCLASS
   // (its `compile()` override also mirrors provers onto the base FungibleToken so
   // inherited `mint` proves — see usdc-channel-token.ts).
+  //
+  // TIMING (issue #348): compilation takes ~6s on a dev machine but ~3 MINUTES
+  // (178.6s observed) on the 2 GB devnet box — far longer than faucet clients
+  // wait. So index.js WARMS this cache in the background at boot via `compile()`
+  // below, and the /api/mina route checks `isWarm()` to avoid holding a drip
+  // response hostage to an in-flight compile.
   let compilePromise = null;
+  let warm = false;
   function compileOnce() {
     if (!compilePromise) {
       compilePromise = (async () => {
-        console.log('  ⏳ Compiling FungibleTokenAdmin + UsdcChannelToken circuits (first mint, ~6s)...');
+        console.log(
+          '  ⏳ Compiling FungibleTokenAdmin + UsdcChannelToken circuits ' +
+            '(~6s on a dev machine, ~3min on the 2 GB devnet box)...'
+        );
         const t0 = Date.now();
         await FungibleTokenAdmin.compile();
         await UsdcChannelToken.compile();
-        console.log(`  ✅ Mina USDC circuits compiled in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+        warm = true;
+        console.log(
+          `  ✅ Mina USDC circuits compiled in ${((Date.now() - t0) / 1000).toFixed(1)}s`
+        );
       })().catch((err) => {
         // Reset so a transient compile failure can be retried on the next mint.
         compilePromise = null;
@@ -241,8 +248,14 @@ export function createMinaUsdcMinter() {
 
     isValidAddress: isValidMinaAddress,
 
-    // Eagerly warm the circuit cache (optional; the route uses lazy compile).
+    // Eagerly warm the circuit cache — index.js calls this in the background at
+    // boot so the first drip does not pay the ~3min on-box compile (issue #348).
     compile: compileOnce,
+
+    // True once the circuits are compiled: a mint will run at "prove speed"
+    // (~75s on the devnet box) instead of compile+prove (~4min). The route uses
+    // this to decide whether to await the mint or answer with usdc.pending.
+    isWarm: () => warm,
 
     /**
      * Admin-mint `whole` USDC (default the configured per-drip amount) to
@@ -293,7 +306,9 @@ export function createMinaUsdcMinter() {
         }
       }
 
-      console.log(`  📤 Minted ${amountWhole} USDC to ${recipientB58} (balance ${balance} base units)`);
+      console.log(
+        `  📤 Minted ${amountWhole} USDC to ${recipientB58} (balance ${balance} base units)`
+      );
       return { amount: String(amountWhole), balance, token: tokenAddr, tokenId: tokenIdField };
     },
   };

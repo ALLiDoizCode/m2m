@@ -58,7 +58,11 @@ test('createMinaFaucet() throws when the key derives the WRONG treasury (guard f
   assert.notEqual(client.derivePublicKey(kp.privateKey), TREASURY);
 
   const saved = process.env.MINA_FAUCET_KEY;
+  const savedTreasury = process.env.MINA_TREASURY_ADDRESS;
   process.env.MINA_FAUCET_KEY = kp.privateKey;
+  // The guard is opt-in: it only fires when MINA_TREASURY_ADDRESS pins the
+  // expected treasury (unset deploys accept any valid funded key).
+  process.env.MINA_TREASURY_ADDRESS = TREASURY;
   try {
     assert.throws(
       () => createMinaFaucet(),
@@ -72,6 +76,8 @@ test('createMinaFaucet() throws when the key derives the WRONG treasury (guard f
   } finally {
     if (saved === undefined) delete process.env.MINA_FAUCET_KEY;
     else process.env.MINA_FAUCET_KEY = saved;
+    if (savedTreasury === undefined) delete process.env.MINA_TREASURY_ADDRESS;
+    else process.env.MINA_TREASURY_ADDRESS = savedTreasury;
   }
 });
 
