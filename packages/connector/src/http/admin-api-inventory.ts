@@ -240,6 +240,35 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
   },
 
   /**
+   * GET /admin/discovered-nodes
+   * List every node known from kind:10032 relay ingest (discovered-vs-peered)
+   */
+  {
+    path: '/discovered-nodes',
+    method: 'GET',
+    server: 'AdminServer',
+    mountPrefix: '/admin',
+    authModel: 'X-Api-Key',
+    successStatus: 200,
+    failureModes: [
+      { status: 401, description: 'Missing or invalid X-Api-Key' },
+      { status: 403, description: 'IP not in allowlist' },
+    ],
+    requestContract: 'none',
+    responseContract:
+      '{ nodeId: string; discoveredCount: number; fundedCount: number; ' +
+      'nodes: DiscoveredNode[] (discovery/discovered-node-registry.ts) }',
+    owningModule: 'http/admin-api.ts',
+    relatedStories: ['toon-meta#153'],
+    operationalNotes:
+      'Free, unbounded DISCOVERED set from kind:10032 announcements; each entry flagged ' +
+      '`funded` when a live registered peer maps to it. Returns an empty list when the ' +
+      'discovered-node registry is not wired (route learning disabled). Deliberately NO ' +
+      'promote endpoint: fund a node via the existing POST /admin/peers ' +
+      '(url = node.btpEndpoint), bounded by peeringPolicy.maxFundedChannels.',
+  },
+
+  /**
    * GET /admin/routes
    * List all routing table entries
    */
