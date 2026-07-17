@@ -13,6 +13,7 @@
 import { generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools';
 import {
   buildIlpPeerInfoEvent,
+  parseRoutingInfo,
   ILP_PEER_INFO_KIND,
   EXPIRATION_TAG,
   type IlpPeerInfo,
@@ -72,5 +73,66 @@ describe('buildIlpPeerInfoEvent', () => {
     expect(buildIlpPeerInfoEvent(info, sk).tags).toEqual([]);
     expect(buildIlpPeerInfoEvent(info, sk, { ttlSeconds: 0 }).tags).toEqual([]);
     expect(buildIlpPeerInfoEvent(info, sk, { ttlSeconds: -5 }).tags).toEqual([]);
+  });
+});
+
+/**
+ * parseRoutingInfo (toon-meta#153): defensive extraction of the optional
+ * link-state block from OTHER nodes' kind:10032 content.
+ */
+describe('parseRoutingInfo', () => {
+  const PK = 'ab'.repeat(32);
+
+  it('parses a well-formed routing block', () => {
+    const routing = parseRoutingInfo({
+      ilpAddress: 'g.a',
+      routing: { prefixes: [{ prefix: 'g.a', cost: 0 }, { prefix: 'g.b' }], adjacency: [PK] },
+    });
+    expect(routing).toEqual({
+      prefixes: [{ prefix: 'g.a', cost: 0 }, { prefix: 'g.b' }],
+      adjacency: [PK],
+    });
+  });
+
+  it('returns null when the block is absent or malformed', () => {
+    expect(parseRoutingInfo(null)).toBeNull();
+    expect(parseRoutingInfo('str')).toBeNull();
+    expect(parseRoutingInfo({})).toBeNull();
+    expect(parseRoutingInfo({ routing: 'x' })).toBeNull();
+    expect(parseRoutingInfo({ routing: [] })).toBeNull();
+    expect(parseRoutingInfo({ routing: { prefixes: 'x', adjacency: [] } })).toBeNull();
+    expect(parseRoutingInfo({ routing: { prefixes: [], adjacency: {} } })).toBeNull();
+  });
+
+  it('drops malformed entries but keeps the valid remainder, never throwing', () => {
+    const routing = parseRoutingInfo({
+      routing: {
+        prefixes: [
+          { prefix: 'g.good' },
+          { prefix: '' },
+          { prefix: 42 },
+          { prefix: 'g.neg', cost: -1 },
+          { prefix: 'g.inf', cost: Number.POSITIVE_INFINITY },
+          null,
+          'string',
+        ],
+        adjacency: [PK, PK.toUpperCase(), 'short', 7, null],
+      },
+    });
+    expect(routing).toEqual({ prefixes: [{ prefix: 'g.good' }], adjacency: [PK] });
+  });
+
+  it('round-trips through a signed kind:10032 event content', () => {
+    const withRouting: IlpPeerInfo = {
+      ilpAddress: 'g.proxy.relay',
+      btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
+      assetCode: 'USDC',
+      assetScale: 6,
+      routing: { prefixes: [{ prefix: 'g.proxy.relay', cost: 0 }], adjacency: [PK] },
+    };
+    const event = buildIlpPeerInfoEvent(withRouting, generateSecretKey());
+    expect(verifyEvent(event)).toBe(true);
+    const parsed = parseRoutingInfo(JSON.parse(event.content));
+    expect(parsed).toEqual(withRouting.routing);
   });
 });

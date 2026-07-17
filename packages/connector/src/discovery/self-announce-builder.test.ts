@@ -13,8 +13,10 @@
 
 import type { ConnectorConfig, SelfAnnounceConfig } from '../config/types';
 import {
+  buildRoutingInfo,
   buildSelfAnnouncementInfo,
   deriveChainSettlementParams,
+  nip59KeyToNostrPubkey,
   normalizeSettlementAddressKeys,
   resolveRouteHints,
 } from './self-announce-builder';
@@ -466,5 +468,93 @@ describe('buildSelfAnnouncementInfo — minimal / optional-omitted config', () =
     };
     const info = buildSelfAnnouncementInfo(noRoutes, { enabled: true, announceTo: 'g.x' });
     expect(info.ilpAddress).toBe(''); // ilpAddresses[0] ?? ''
+  });
+});
+
+/**
+ * Link-state announce derivation (toon-meta#153): the `routing` block carries
+ * this node's own locally-delivered prefixes (cost 0) and the Nostr pubkeys
+ * of configured peers.
+ */
+describe('nip59KeyToNostrPubkey', () => {
+  const X_COORD = 'AB'.repeat(32);
+
+  it('strips the parity byte and lowercases', () => {
+    expect(nip59KeyToNostrPubkey(`02${X_COORD}`)).toBe(X_COORD.toLowerCase());
+    expect(nip59KeyToNostrPubkey(`03${X_COORD}`)).toBe(X_COORD.toLowerCase());
+  });
+
+  it('rejects anything that is not a compressed secp256k1 key', () => {
+    expect(nip59KeyToNostrPubkey(undefined)).toBeNull();
+    expect(nip59KeyToNostrPubkey('')).toBeNull();
+    expect(nip59KeyToNostrPubkey(X_COORD)).toBeNull(); // x-only (no parity byte)
+    expect(nip59KeyToNostrPubkey(`04${X_COORD}`)).toBeNull(); // uncompressed marker
+    expect(nip59KeyToNostrPubkey(`02${X_COORD.slice(0, 62)}`)).toBeNull(); // short
+  });
+});
+
+describe('buildRoutingInfo', () => {
+  const PEER_X = `02${'aa'.repeat(32)}`;
+  const PEER_Y = `03${'bb'.repeat(32)}`;
+
+  it('announces terminated + self-nextHop prefixes at cost 0 and peer pubkeys', () => {
+    const config = relayConnectorConfig();
+    config.peers = [
+      { id: 'peer-x', url: 'ws://x:3000', authToken: 's', nip59PublicKey: PEER_X },
+      { id: 'peer-y', url: 'ws://y:3000', authToken: 's', nip59PublicKey: PEER_Y },
+      { id: 'peer-anon', url: 'ws://anon:3000', authToken: 's' }, // no pubkey → omitted
+    ];
+
+    const routing = buildRoutingInfo(config);
+    expect(routing).toEqual({
+      // g.proxy.relay is terminated (upstream); the forwarding routes to
+      // store-box are NOT re-announced.
+      prefixes: [{ prefix: 'g.proxy.relay', cost: 0 }],
+      adjacency: ['aa'.repeat(32), 'bb'.repeat(32)],
+    });
+  });
+
+  it('includes routes whose nextHop is this node itself', () => {
+    const config = relayConnectorConfig();
+    config.routes = [
+      { prefix: 'g.self.route', nextHop: 'connector' },
+      { prefix: 'g.local.route', nextHop: 'local' },
+      { prefix: 'g.forwarded', nextHop: 'peer-x' },
+    ];
+    const routing = buildRoutingInfo(config);
+    expect(routing?.prefixes).toEqual([
+      { prefix: 'g.self.route', cost: 0 },
+      { prefix: 'g.local.route', cost: 0 },
+    ]);
+  });
+
+  it('returns null when there is nothing to announce', () => {
+    const config = relayConnectorConfig();
+    config.routes = [{ prefix: 'g.forwarded', nextHop: 'peer-x' }];
+    config.peers = [];
+    expect(buildRoutingInfo(config)).toBeNull();
+  });
+
+  it('rides along in buildSelfAnnouncementInfo content', () => {
+    const config = relayConnectorConfig();
+    config.peers = [{ id: 'peer-x', url: 'ws://x:3000', authToken: 's', nip59PublicKey: PEER_X }];
+    const info = buildSelfAnnouncementInfo(config, { enabled: true, announceTo: 'g.proxy.relay' });
+    expect(info.routing).toEqual({
+      prefixes: [{ prefix: 'g.proxy.relay', cost: 0 }],
+      adjacency: ['aa'.repeat(32)],
+    });
+  });
+
+  it('omits the routing block entirely when empty', () => {
+    const noRoutes: ConnectorConfig = {
+      nodeId: 'connector',
+      btpServerPort: 3000,
+      environment: 'development',
+      peers: [],
+      routes: [],
+    };
+    const info = buildSelfAnnouncementInfo(noRoutes, { enabled: true, announceTo: 'g.x' });
+    expect(info.routing).toBeUndefined();
+    expect('routing' in info).toBe(false);
   });
 });

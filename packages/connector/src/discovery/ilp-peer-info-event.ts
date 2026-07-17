@@ -36,6 +36,84 @@ export const ILP_PEER_INFO_KIND = 10032;
 export const EXPIRATION_TAG = 'expiration';
 
 /**
+ * A single reachable-prefix advertisement inside {@link IlpRoutingInfo}.
+ */
+export interface IlpRoutingPrefix {
+  /** ILP address prefix this announcer can deliver locally (e.g. `g.proxy.relay`). */
+  prefix: string;
+  /**
+   * Non-negative delivery cost for this prefix at the announcing node. Omitted
+   * means `0` (a locally-terminated apex route). Consumers add per-hop costs on
+   * top when computing multi-hop paths.
+   */
+  cost?: number;
+}
+
+/**
+ * Link-state block carried inside the kind:10032 content (toon-meta#153).
+ *
+ * Rides along in the JSON-stringified content exactly like the `routes` hints —
+ * NOT a wire-type change, fully optional and backward-compatible (parsers that
+ * don't know the field ignore it; `parseRoutingInfo` never throws on garbage).
+ */
+export interface IlpRoutingInfo {
+  /** Prefixes this node can deliver, with optional non-negative cost (default 0). */
+  prefixes: IlpRoutingPrefix[];
+  /**
+   * Nostr pubkeys (64-char lowercase hex, x-only secp256k1) of this node's
+   * direct ILP neighbors. Only neighbors whose pubkey is KNOWN are listed.
+   */
+  adjacency: string[];
+}
+
+/** 64-char lowercase-hex x-only pubkey (a Nostr pubkey). */
+const NOSTR_PUBKEY_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Defensively parse the optional `routing` link-state block out of a
+ * kind:10032 content object produced by SOMEONE ELSE.
+ *
+ * Never throws: any malformed shape returns `null`; malformed individual
+ * entries (a non-string prefix, a negative cost, a non-hex adjacency entry)
+ * are dropped while the well-formed remainder is kept. Prefix values are only
+ * shape-checked here (non-empty string) — ILP-address validity is enforced at
+ * route-install time by the routing table.
+ *
+ * @param content - The parsed (JSON) content of a kind:10032 event.
+ * @returns The sanitized routing block, or `null` when absent/unusable.
+ */
+export function parseRoutingInfo(content: unknown): IlpRoutingInfo | null {
+  if (!content || typeof content !== 'object') return null;
+  const routing = (content as Record<string, unknown>).routing;
+  if (!routing || typeof routing !== 'object' || Array.isArray(routing)) return null;
+
+  const raw = routing as Record<string, unknown>;
+  if (!Array.isArray(raw.prefixes) || !Array.isArray(raw.adjacency)) return null;
+
+  const prefixes: IlpRoutingPrefix[] = [];
+  for (const entry of raw.prefixes) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const { prefix, cost } = entry as Record<string, unknown>;
+    if (typeof prefix !== 'string' || prefix.length === 0) continue;
+    if (cost === undefined) {
+      prefixes.push({ prefix });
+    } else if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) {
+      prefixes.push({ prefix, cost });
+    }
+    // A present-but-invalid cost drops the entry (cannot trust its metric).
+  }
+
+  const adjacency: string[] = [];
+  for (const entry of raw.adjacency) {
+    if (typeof entry === 'string' && NOSTR_PUBKEY_RE.test(entry)) {
+      adjacency.push(entry);
+    }
+  }
+
+  return { prefixes, adjacency };
+}
+
+/**
  * ILP Peer Info — the kind:10032 content payload.
  *
  * Mirror of `@toon-protocol/core`'s `IlpPeerInfo` (subset used by the
@@ -84,6 +162,13 @@ export interface IlpPeerInfo {
    * zkApp address on Mina chains.
    */
   preferredTokens?: Record<string, string>;
+  /**
+   * Optional link-state block (toon-meta#153): the prefixes this node can
+   * deliver plus the Nostr pubkeys of its direct neighbors, consumed by peers'
+   * route-learning services to compute multi-hop routes. Backward-compatible
+   * content ride-along, never a wire-type change.
+   */
+  routing?: IlpRoutingInfo;
   /** Allow out-of-band content fields (e.g. `routes`) to ride along in content. */
   [key: string]: unknown;
 }

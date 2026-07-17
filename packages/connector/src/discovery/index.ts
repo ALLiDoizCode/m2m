@@ -26,7 +26,9 @@ export type {
 } from './self-announce-service';
 export {
   buildSelfAnnouncementInfo,
+  buildRoutingInfo,
   deriveChainSettlementParams,
+  nip59KeyToNostrPubkey,
   normalizeSettlementAddressKeys,
   resolveRouteHints,
 } from './self-announce-builder';
@@ -42,5 +44,32 @@ export {
   DEFAULT_ANNOUNCE_PRICE,
 } from './self-announce-publish';
 export type { AnnouncePublishPlan, AnnouncePublishMode } from './self-announce-publish';
-export { buildIlpPeerInfoEvent, ILP_PEER_INFO_KIND, EXPIRATION_TAG } from './ilp-peer-info-event';
-export type { IlpPeerInfo, BuildIlpPeerInfoOptions } from './ilp-peer-info-event';
+export {
+  buildIlpPeerInfoEvent,
+  parseRoutingInfo,
+  ILP_PEER_INFO_KIND,
+  EXPIRATION_TAG,
+} from './ilp-peer-info-event';
+export type {
+  IlpPeerInfo,
+  IlpRoutingInfo,
+  IlpRoutingPrefix,
+  BuildIlpPeerInfoOptions,
+} from './ilp-peer-info-event';
+
+// Route learning (toon-meta#153): the connector CONSUMES peers' kind:10032
+// announcements (link-state `routing` blocks) from the relay's free read
+// endpoint and installs learned multi-hop routes below config precedence.
+export {
+  RouteLearningService,
+  DEFAULT_ROUTE_LEARNING_REFRESH_SECS,
+  DEFAULT_MAX_LEARNED_ROUTES,
+  LEARNED_ROUTE_PRIORITY,
+} from './route-learning-service';
+export type { RouteLearningServiceDeps } from './route-learning-service';
+export { createNostrRelayClient } from './nostr-relay-client';
+export type {
+  RouteLearningRelayClient,
+  RelaySubscriptionHandle,
+  RelayEventFilter,
+} from './nostr-relay-client';

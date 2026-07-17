@@ -100,7 +100,9 @@ import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
 import { SelfAnnounceService, type PublishOutcome } from '../discovery/self-announce-service';
 import { planAnnouncePublish } from '../discovery/self-announce-publish';
-import type { NostrEvent } from 'nostr-tools';
+import { RouteLearningService } from '../discovery/route-learning-service';
+import { createNostrRelayClient } from '../discovery/nostr-relay-client';
+import { getPublicKey, type NostrEvent } from 'nostr-tools';
 import { hexToBytes } from '@noble/hashes/utils';
 
 /** Round-trip timeout (ms) for a self-announce write PREPARE. */
@@ -189,6 +191,10 @@ export class ConnectorNode implements HealthStatusProvider {
   // set, publishes + refreshes this node's own kind:10032 IlpPeerInfo. Null when
   // disabled or no signing identity is available.
   private _selfAnnounceService: SelfAnnounceService | null = null;
+  // Route learning service (toon-meta#153). When `routeLearning.enabled` is
+  // set, consumes peers' kind:10032 announcements from the relay and installs
+  // learned multi-hop routes. Null when disabled.
+  private _routeLearningService: RouteLearningService | null = null;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -861,6 +867,52 @@ export class ConnectorNode implements HealthStatusProvider {
           err: err instanceof Error ? err.message : String(err),
         },
         'Failed to start self-announce service; continuing without it'
+      );
+    }
+  }
+
+  /**
+   * Start the route-learning service (toon-meta#153) when configured.
+   *
+   * Opt-in via `routeLearning.enabled`. Subscribes to kind:10032 announcements
+   * on the relay's FREE public read endpoint (SimplePool over WS), maintains a
+   * link-state database, and installs/withdraws LEARNED routes in the routing
+   * table below config precedence. Best-effort: any failure logs and skips so
+   * startup is never blocked.
+   */
+  private _startRouteLearning(): void {
+    const routeLearning = this._config.routeLearning;
+    if (!routeLearning?.enabled) {
+      return;
+    }
+
+    // Own pubkey (to ignore our own announcement in the relay stream). Derived
+    // from the same NIP-06 key self-announce signs with; optional — without a
+    // signing identity the node still learns, it just can't self-filter.
+    const secretKey = this._resolveNostrSecretKey();
+    const ownPubkey = secretKey ? getPublicKey(secretKey) : undefined;
+
+    try {
+      this._routeLearningService = new RouteLearningService({
+        config: this._config,
+        routeLearning,
+        routingTable: this._routingTable,
+        relayClient: createNostrRelayClient(),
+        // Legal first hops are the BTP client peer set (the ids PacketHandler
+        // can actually egress on).
+        getDirectPeerIds: () => this._btpClientManager.getPeerIds(),
+        ...(ownPubkey ? { ownPubkey } : {}),
+        logger: this._logger,
+      });
+      this._routeLearningService.start();
+    } catch (err) {
+      this._routeLearningService = null;
+      this._logger.warn(
+        {
+          event: 'route_learning_start_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start route-learning service; continuing without it'
       );
     }
   }
@@ -2088,6 +2140,11 @@ export class ConnectorNode implements HealthStatusProvider {
       // failure logs and skips rather than aborting startup.
       this._startSelfAnnounce();
 
+      // Route learning (toon-meta#153): consume peers' kind:10032
+      // announcements and install learned multi-hop routes. Started alongside
+      // self-announce (after the BTP peer set exists). Best-effort.
+      this._startRouteLearning();
+
       // Update health status to healthy after all components started
       this._updateHealthStatus();
 
@@ -2169,6 +2226,13 @@ export class ConnectorNode implements HealthStatusProvider {
       if (this._selfAnnounceService) {
         this._selfAnnounceService.stop();
         this._selfAnnounceService = null;
+      }
+
+      // Stop route learning (closes the relay subscription, withdraws all
+      // learned soft-state routes, clears its unref'd sweep timer).
+      if (this._routeLearningService) {
+        this._routeLearningService.stop();
+        this._routeLearningService = null;
       }
 
       // Stop settlement monitor FIRST to stop polling the ledger during drain.

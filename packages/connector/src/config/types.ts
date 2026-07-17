@@ -634,6 +634,70 @@ export interface ConnectorConfig {
    * @see SelfAnnounceConfig
    */
   selfAnnounce?: SelfAnnounceConfig;
+
+  /**
+   * Optional multi-hop route learning configuration (toon-meta#153).
+   *
+   * When enabled, the connector subscribes to kind:10032 `IlpPeerInfo`
+   * announcements on the configured relay read endpoints (free reads),
+   * maintains a link-state database from each announcement's `routing` block
+   * (reachable prefixes + neighbor adjacency), computes shortest paths, and
+   * installs LEARNED routes whose first hop is a directly-connected peer.
+   * Learned routes sit BELOW static config routes (negative priority, never
+   * overwrite an existing prefix) and are withdrawn when the sourcing
+   * announcement expires or the destination becomes unreachable. Disabled by
+   * default — absent this block the connector consumes no announcements.
+   *
+   * @see RouteLearningConfig
+   */
+  routeLearning?: RouteLearningConfig;
+}
+
+/**
+ * Route Learning Configuration Interface (toon-meta#153)
+ *
+ * Drives the connector's consumption of OTHER nodes' kind:10032 announcements
+ * for multi-hop route learning — the read-side complement of
+ * {@link SelfAnnounceConfig}. Reads are FREE (a relay's public WS endpoint),
+ * so no payment config is involved.
+ *
+ * @example
+ * ```yaml
+ * routeLearning:
+ *   enabled: true
+ *   relayUrls:
+ *     - wss://relay-ws.devnet.toonprotocol.dev
+ *   refreshIntervalSecs: 60
+ *   maxRoutes: 1000
+ * ```
+ */
+export interface RouteLearningConfig {
+  /**
+   * Whether route learning is enabled. When false (default), the connector
+   * subscribes to nothing and installs no learned routes.
+   */
+  enabled: boolean;
+
+  /**
+   * Public Nostr relay WS URLs to subscribe to for kind:10032 announcements.
+   * When omitted, falls back to `selfAnnounce.relayUrl` when that is set
+   * (the relay a node announces TO is usually also worth learning FROM).
+   */
+  relayUrls?: string[];
+
+  /**
+   * Seconds between periodic expiry sweeps / recomputes (route withdrawal for
+   * lapsed NIP-40 expirations also happens on this cadence, in addition to
+   * the recompute-on-ingest path). Default: 60.
+   */
+  refreshIntervalSecs?: number;
+
+  /**
+   * Maximum number of learned routes to install (a safety valve against a
+   * flooded relay). The best (lowest-cost) routes win, deterministically.
+   * Default: 1000.
+   */
+  maxRoutes?: number;
 }
 
 /**

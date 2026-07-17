@@ -27,10 +27,11 @@
 import type {
   ChainProviderConfigEntry,
   ConnectorConfig,
+  PeerConfig,
   RouteConfig,
   SelfAnnounceConfig,
 } from '../config/types';
-import type { IlpPeerInfo } from './ilp-peer-info-event';
+import type { IlpPeerInfo, IlpRoutingInfo } from './ilp-peer-info-event';
 
 /** Default asset advertised when not overridden. */
 const DEFAULT_ASSET_CODE = 'USDC';
@@ -236,6 +237,55 @@ export function deriveChainSettlementParams(
   return { tokenNetworks, preferredTokens };
 }
 
+/** Compressed secp256k1 pubkey: 02/03 parity byte + 32-byte x coordinate, hex. */
+const COMPRESSED_PUBKEY_RE = /^0[23][0-9a-fA-F]{64}$/;
+
+/**
+ * Convert a peer's configured `nip59PublicKey` (compressed secp256k1, 66-char
+ * hex with an 02/03 parity prefix) to its Nostr pubkey (the x-only 64-char
+ * lowercase-hex coordinate — exactly the compressed key minus the parity
+ * byte). Returns `null` for anything that isn't a valid compressed key.
+ */
+export function nip59KeyToNostrPubkey(nip59PublicKey: string | undefined): string | null {
+  if (!nip59PublicKey || !COMPRESSED_PUBKEY_RE.test(nip59PublicKey)) return null;
+  return nip59PublicKey.slice(2).toLowerCase();
+}
+
+/**
+ * Derive the announcement's link-state `routing` block (toon-meta#153) from
+ * the connector's config:
+ *
+ * - `prefixes`: the addresses of this node's OWN locally-delivered routes —
+ *   terminated routes (`upstream` set) plus routes whose `nextHop` is this
+ *   node itself (`nodeId` / `local`) — all at cost 0. Forwarding-only routes
+ *   are deliberately NOT advertised: reachability THROUGH this node emerges
+ *   from the adjacency graph, not from re-announcing someone else's prefixes.
+ * - `adjacency`: the Nostr pubkeys of configured peers, for peers that declare
+ *   a `nip59PublicKey`. Peers without a known pubkey are silently omitted
+ *   (they simply don't contribute an edge).
+ *
+ * Returns `null` when the block would be empty (nothing to announce).
+ */
+export function buildRoutingInfo(config: ConnectorConfig): IlpRoutingInfo | null {
+  const isLocallyDelivered = (route: RouteConfig): boolean =>
+    isTerminated(route) || route.nextHop === config.nodeId || route.nextHop === 'local';
+
+  const prefixes = Array.from(
+    new Set(config.routes.filter(isLocallyDelivered).map(routeAddress))
+  ).map((prefix) => ({ prefix, cost: 0 }));
+
+  const adjacency = Array.from(
+    new Set(
+      (config.peers ?? [])
+        .map((peer: PeerConfig) => nip59KeyToNostrPubkey(peer.nip59PublicKey))
+        .filter((pubkey): pubkey is string => pubkey !== null)
+    )
+  );
+
+  if (prefixes.length === 0 && adjacency.length === 0) return null;
+  return { prefixes, adjacency };
+}
+
 /**
  * Build the connector's own kind:10032 announcement payload from its config.
  *
@@ -297,6 +347,10 @@ export function buildSelfAnnouncementInfo(
 
   const routes = resolveRouteHints(config.routes, selfAnnounce.routes);
 
+  // Link-state block (toon-meta#153): own locally-delivered prefixes (cost 0)
+  // + the Nostr pubkeys of configured peers, when known. Content ride-along.
+  const routing = buildRoutingInfo(config);
+
   const info: SelfAnnouncementInfo = {
     ilpAddress,
     ...(ilpAddresses.length > 1 ? { ilpAddresses } : {}),
@@ -309,6 +363,7 @@ export function buildSelfAnnouncementInfo(
     ...(Object.keys(settlementAddresses).length > 0 ? { settlementAddresses } : {}),
     ...(Object.keys(tokenNetworks).length > 0 ? { tokenNetworks } : {}),
     ...(Object.keys(preferredTokens).length > 0 ? { preferredTokens } : {}),
+    ...(routing ? { routing } : {}),
     routes,
   };
 

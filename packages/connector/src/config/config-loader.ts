@@ -24,6 +24,7 @@ import {
   ChainProviderConfigEntry,
   TransportConfig,
   SelfAnnounceConfig,
+  RouteLearningConfig,
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
@@ -228,6 +229,8 @@ export class ConfigLoader {
       // relay#37 / store#22: opt-in kind:10032 self-announce. Passed through
       // unchanged; the SelfAnnounceService validates required fields at start.
       selfAnnounce: rawConfig.selfAnnounce as SelfAnnounceConfig | undefined,
+      // toon-meta#153: opt-in multi-hop route learning (validated shape).
+      routeLearning: this.validateRouteLearning(rawConfig.routeLearning),
       transport,
     };
 
@@ -235,6 +238,72 @@ export class ConfigLoader {
     validateEnvironment(connectorConfig);
 
     return connectorConfig;
+  }
+
+  /**
+   * Validate the optional `routeLearning` block (toon-meta#153).
+   *
+   * @param raw - The untrusted `routeLearning` value from the config input.
+   * @returns The validated block, or `undefined` when absent.
+   * @throws ConfigurationError on any malformed field.
+   * @private
+   */
+  private static validateRouteLearning(raw: unknown): RouteLearningConfig | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ConfigurationError('routeLearning must be an object');
+    }
+    const block = raw as Record<string, unknown>;
+
+    if (typeof block.enabled !== 'boolean') {
+      throw new ConfigurationError('routeLearning.enabled must be a boolean');
+    }
+
+    if (block.relayUrls !== undefined) {
+      if (!Array.isArray(block.relayUrls)) {
+        throw new ConfigurationError(
+          'routeLearning.relayUrls must be an array of ws:// or wss:// URLs'
+        );
+      }
+      for (const url of block.relayUrls) {
+        if (typeof url !== 'string' || !/^wss?:\/\/.+/.test(url)) {
+          throw new ConfigurationError(
+            `routeLearning.relayUrls entries must be ws:// or wss:// URLs, got: ${String(url)}`
+          );
+        }
+      }
+    }
+
+    if (block.refreshIntervalSecs !== undefined) {
+      if (
+        typeof block.refreshIntervalSecs !== 'number' ||
+        !Number.isFinite(block.refreshIntervalSecs) ||
+        block.refreshIntervalSecs <= 0
+      ) {
+        throw new ConfigurationError('routeLearning.refreshIntervalSecs must be a positive number');
+      }
+    }
+
+    if (block.maxRoutes !== undefined) {
+      if (
+        typeof block.maxRoutes !== 'number' ||
+        !Number.isInteger(block.maxRoutes) ||
+        block.maxRoutes <= 0
+      ) {
+        throw new ConfigurationError('routeLearning.maxRoutes must be a positive integer');
+      }
+    }
+
+    return {
+      enabled: block.enabled,
+      ...(block.relayUrls !== undefined ? { relayUrls: block.relayUrls as string[] } : {}),
+      ...(block.refreshIntervalSecs !== undefined
+        ? { refreshIntervalSecs: block.refreshIntervalSecs as number }
+        : {}),
+      ...(block.maxRoutes !== undefined ? { maxRoutes: block.maxRoutes as number } : {}),
+    };
   }
 
   /**

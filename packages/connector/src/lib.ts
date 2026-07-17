@@ -80,6 +80,32 @@ export type {
   FetchLike,
 } from './client/connector-admin-client';
 
+// Multi-hop route learning via link-state over kind:10032 (toon-meta#153)
+export {
+  RouteLearningService,
+  DEFAULT_ROUTE_LEARNING_REFRESH_SECS,
+  DEFAULT_MAX_LEARNED_ROUTES,
+  LEARNED_ROUTE_PRIORITY,
+} from './discovery/route-learning-service';
+export type { RouteLearningServiceDeps } from './discovery/route-learning-service';
+export { createNostrRelayClient } from './discovery/nostr-relay-client';
+export type {
+  RouteLearningRelayClient,
+  RelaySubscriptionHandle,
+  RelayEventFilter,
+} from './discovery/nostr-relay-client';
+export { LinkStateDatabase, parseExpirationTag } from './routing/link-state-db';
+export type {
+  LinkStateEntry,
+  LinkStateEventInput,
+  LinkStateIngestResult,
+} from './routing/link-state-db';
+export { computeRoutes } from './routing/path-computation';
+export type { ComputedRoute, DirectNeighbor } from './routing/path-computation';
+export { parseRoutingInfo } from './discovery/ilp-peer-info-event';
+export type { IlpRoutingInfo, IlpRoutingPrefix } from './discovery/ilp-peer-info-event';
+export { buildRoutingInfo, nip59KeyToNostrPubkey } from './discovery/self-announce-builder';
+
 // Export configuration types
 export type {
   ConnectorConfig,
@@ -99,6 +125,7 @@ export type {
   IlpSendRequest,
   IlpSendResponse,
   TransportConfig,
+  RouteLearningConfig,
 } from './config/types';
 
 // Re-export settlement types for library consumers
