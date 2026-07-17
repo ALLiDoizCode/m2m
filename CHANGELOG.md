@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.33.1](https://github.com/toon-protocol/connector/compare/v3.33.0...v3.33.1) (2026-07-17)
+
+### Bug Fixes
+
+- **test:** send unconditional packets in packet-flow counter invariants suite ([#321](https://github.com/toon-protocol/connector/issues/321)) ([#340](https://github.com/toon-protocol/connector/issues/340)) ([2821cf5](https://github.com/toon-protocol/connector/commit/2821cf51338e9b46f983c6615f3ddcf8d28d2d7b)), closes [#314](https://github.com/toon-protocol/connector/issues/314) [#309](https://github.com/toon-protocol/connector/issues/309) [#309](https://github.com/toon-protocol/connector/issues/309) [pre-#314-equivalent](https://github.com/toon-protocol/pre-/issues/314-equivalent) [#314](https://github.com/toon-protocol/connector/issues/314)
+
 ## [3.33.0](https://github.com/toon-protocol/connector/compare/v3.32.0...v3.33.0) (2026-07-16)
 
 ### Features
