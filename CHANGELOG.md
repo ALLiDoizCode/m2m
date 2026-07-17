@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.34.4](https://github.com/toon-protocol/connector/compare/v3.34.3...v3.34.4) (2026-07-17)
+
+### Bug Fixes
+
+- **faucet:** fail fast on wedged Solana validator; fix Mina drip timeout + Invalid_nonce (closes [#348](https://github.com/toon-protocol/connector/issues/348)) ([#350](https://github.com/toon-protocol/connector/issues/350)) ([67f3c5a](https://github.com/toon-protocol/connector/commit/67f3c5a8a102138e545e6968ce487a92d3c01735)), closes [#277](https://github.com/toon-protocol/connector/issues/277)
+
 ## [3.34.3](https://github.com/toon-protocol/connector/compare/v3.34.2...v3.34.3) (2026-07-17)
 
 ### Bug Fixes
