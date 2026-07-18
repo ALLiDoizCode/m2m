@@ -1872,7 +1872,19 @@ export class ConnectorNode implements HealthStatusProvider {
             (peerId) => this._packetHandler.getPeerRelation(peerId),
             // Issue #86: pass the registry so non-EVM inbound claims (Solana/Mina)
             // are accepted when a provider is registered for the claim's chain.
-            chainRegistry
+            chainRegistry,
+            // Issue #353: freshness gate. The validator consults the
+            // ClaimReceiver's received-claim nonce watermark (a LOCAL DB read,
+            // no chain RPC) so a replayed stale-nonce claim is F06-rejected
+            // BEFORE the packet ever reaches the local delivery handler /
+            // backend. Lazy closure: the ClaimReceiver is constructed a few
+            // steps below this validator; by the time packets flow it is
+            // wired. When it is absent (routing-only mode, or init failure)
+            // the gate falls back to crypto-only, the pre-#353 behavior.
+            async (peerId, blockchain, channelId) =>
+              this._claimReceiver
+                ? this._claimReceiver.getReceivedClaimWatermark(peerId, blockchain, channelId)
+                : null
           );
           this._inboundClaimValidate = (protocolData, ilpPacket, peerId) =>
             inboundClaimValidator.validate(protocolData, ilpPacket, peerId);

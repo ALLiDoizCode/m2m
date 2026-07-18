@@ -1644,6 +1644,79 @@ describe('ClaimReceiver', () => {
     });
   });
 
+  describe('getReceivedClaimWatermark (#353)', () => {
+    const storedClaim: EVMClaimMessage = {
+      version: '1.0',
+      blockchain: 'evm',
+      messageId: 'evm-watermark-1',
+      timestamp: '2026-07-17T12:00:00.000Z',
+      senderId: 'peer-bob',
+      channelId: '0x' + 'a'.repeat(64),
+      nonce: 6,
+      transferredAmount: '6000',
+      lockedAmount: '0',
+      locksRoot: '0x' + '0'.repeat(64),
+      signature: '0x' + 'b'.repeat(130),
+      signerAddress: '0x' + 'c'.repeat(40),
+    };
+
+    it('returns the latest verified claim for (peer, blockchain, channel)', async () => {
+      mockStatement.get.mockReturnValue({ claim_data: JSON.stringify(storedClaim) });
+
+      const result = await claimReceiver.getReceivedClaimWatermark(
+        'peer-bob',
+        'evm',
+        '0x' + 'a'.repeat(64)
+      );
+
+      expect(result).toEqual(storedClaim);
+      expect(mockStatement.get).toHaveBeenCalledWith('peer-bob', 'evm', '0x' + 'a'.repeat(64));
+    });
+
+    it('does NOT exclude redeemed claims — the watermark must never regress after redemption', async () => {
+      mockStatement.get.mockReturnValue(undefined);
+      await claimReceiver.getReceivedClaimWatermark('peer-bob', 'evm', '0x' + 'a'.repeat(64));
+
+      const sql = (mockDb.prepare.mock.calls[0] as unknown as [string])[0];
+      expect(sql).toContain('verified = 1');
+      // Unlike getLatestVerifiedClaim (the redemption path), the freshness
+      // watermark includes already-redeemed claims: a channel's nonce sequence
+      // keeps advancing across redemptions, so a stale pre-redemption claim
+      // must still compare against the all-time high-water nonce.
+      expect(sql).not.toContain('redeemed_at IS NULL');
+    });
+
+    it('returns null when no verified claim exists (first-claim case)', async () => {
+      mockStatement.get.mockReturnValue(undefined);
+
+      const result = await claimReceiver.getReceivedClaimWatermark(
+        'peer-bob',
+        'evm',
+        '0x' + 'a'.repeat(64)
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('returns null and logs on database failure (fail-open to the crypto gate)', async () => {
+      mockStatement.get.mockImplementation(() => {
+        throw new Error('Database error');
+      });
+
+      const result = await claimReceiver.getReceivedClaimWatermark(
+        'peer-bob',
+        'evm',
+        '0x' + 'a'.repeat(64)
+      );
+
+      expect(result).toBeNull();
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        { error: expect.any(Error) },
+        'Failed to query received-claim watermark'
+      );
+    });
+  });
+
   /**
    * Acceptance Tests for Story 33.6: Solana Claim Verification in ClaimReceiver
    *
