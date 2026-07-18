@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.34.6](https://github.com/toon-protocol/connector/compare/v3.34.5...v3.34.6) (2026-07-18)
+
+### Bug Fixes
+
+- **connector:** gate paid packets on the received-claim nonce watermark ([#353](https://github.com/toon-protocol/connector/issues/353)) ([#358](https://github.com/toon-protocol/connector/issues/358)) ([dd650c8](https://github.com/toon-protocol/connector/commit/dd650c86a54bc254a0e0091bf9ef3cb838dd890c)), closes [#220](https://github.com/toon-protocol/connector/issues/220)
+
 ## [3.34.5](https://github.com/toon-protocol/connector/compare/v3.34.4...v3.34.5) (2026-07-18)
 
 ### Bug Fixes
