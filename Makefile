@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs standalone-test standalone-test-docker standalone-test-allowlist infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-mint-usdc solana-build solana-test solana-deploy-devnet mina-up mina-down mina-logs standalone-test standalone-test-docker standalone-test-allowlist infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Default target - show help
 help:
@@ -28,6 +28,7 @@ help:
 	@echo "  make solana-up            Start Solana test validator (docker compose --profile solana)"
 	@echo "  make solana-down          Stop Solana validator"
 	@echo "  make solana-logs          Follow Solana docker compose logs"
+	@echo "  make solana-mint-usdc     Re-seed the mock-USDC mint (auto-run by solana-up/infra-up)"
 	@echo ""
 	@echo "Local Blockchain (Mina):"
 	@echo "  make mina-up              Start Mina lightnet (docker compose --profile mina)"
@@ -119,12 +120,31 @@ anvil-logs:
 # Local Blockchain — Solana (Test Validator + Program Deploy)
 solana-up:
 	docker compose --profile solana up -d
+	$(MAKE) solana-mint-usdc
 
 solana-down:
 	docker compose --profile solana down
 
 solana-logs:
 	docker compose --profile solana logs -f
+
+# Re-seed the deterministic mock-USDC mint after a validator (re)create. The
+# validator entrypoint runs `solana-test-validator --reset` on every start
+# (see infra/solana/entrypoint.sh), which wipes the mint along with the rest
+# of the chain state — previously this required manually re-running
+# infra/solana/create-usdc-mint.sh on the host, so every faucet USDC drip
+# failed with TokenAccountNotFoundError until someone noticed (issue #351).
+# The script is idempotent (skips creation if the mint exists, always tops up
+# the treasury) and non-fatal here if spl-token/solana aren't on PATH yet,
+# matching infra/linode/devnet.sh's mint_usdc() for the hosted devnet.
+solana-mint-usdc:
+	@echo "Waiting for Solana validator to be ready..."
+	@for i in $$(seq 1 60); do \
+		docker compose --profile solana exec -T solana-validator curl -sf http://localhost:8899/health 2>/dev/null | grep -q ok && break; \
+		sleep 2; \
+	done
+	@./infra/solana/create-usdc-mint.sh http://localhost:8899 \
+		|| echo "WARNING: USDC mint bootstrap failed (need spl-token + solana CLIs on PATH and a healthy validator)."
 
 # Local Blockchain — Mina (Lightnet)
 mina-up:
@@ -140,6 +160,7 @@ mina-logs:
 # infra-down intentionally does NOT pass -v (preserves existing per-profile volumes).
 infra-up: solana-build
 	docker compose --profile evm --profile solana --profile mina up -d
+	$(MAKE) solana-mint-usdc
 
 infra-down:
 	docker compose --profile evm --profile solana --profile mina down
