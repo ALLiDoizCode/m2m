@@ -37,9 +37,13 @@ import {
 // `enableChannelEscrow` / `depositToChannel` / `settleFromChannel` methods so the
 // PROOF (not the SDK) binds escrow payouts to the channel commitment.
 import { UsdcChannelToken } from './usdc-channel-token';
-// Rate-limited (permissionless, per-address-per-day capped) admin flavor — the
-// canonical public-devnet mint authority since the rate-limited redeploy.
+// Rate-limited (per-address-per-day capped) admin flavors:
+//  - RateLimitedUsdcAdmin              — recipient-SIGNED receipt (legacy).
+//  - PermissionlessRateLimitedUsdcAdmin — NO recipient signature; any fee payer
+//    mints to any address. The canonical public-devnet mint authority since the
+//    permissionless-mint redeploy.
 import { RateLimitedUsdcAdmin } from './usdc-rate-limited-admin';
+import { PermissionlessRateLimitedUsdcAdmin } from './usdc-permissionless-admin';
 
 /** Result of a USDC token deploy — the values to pin into endpoints.json. */
 export interface UsdcDeployResult {
@@ -290,6 +294,140 @@ export async function buildSelfMintTx(
  */
 export async function selfMintUsdc(opts: SelfMintTxOptions): Promise<string> {
   const tx = await buildSelfMintTx(opts);
+  await tx.send();
+  return (await opts.token.getBalanceOf(opts.recipient)).toString();
+}
+
+// ─── Permissionless flavor (PermissionlessRateLimitedUsdcAdmin) ──────────────
+// Same rate-limit policy, but the RECIPIENT never signs: any fee payer mints to
+// any address. The receipt AU is authorized by the admin's `canMint` proof
+// alone (increase-only packed-balance receipt; see usdc-permissionless-admin.ts).
+
+/**
+ * Deploy the USDC token gated by the FULLY PERMISSIONLESS rate-limited admin
+ * (`PermissionlessRateLimitedUsdcAdmin`): any fee payer can mint to ANY address
+ * up to the per-recipient daily cap, enforced in-proof + in-ledger, with NO
+ * recipient signature. `adminAuthority` keeps only pause/upgrade rights (never
+ * mints, need not be funded).
+ *
+ * Identical atomic deploy sequence to {@link deployUsdcToken} (admin + token +
+ * initialize, 3 funded new accounts); only the admin contract class differs.
+ * Also points `FungibleToken.AdminContract` at the permissionless admin so any
+ * later `token.mint(...)` in this process proves against the DEPLOYED admin
+ * circuit.
+ */
+export async function deployPermissionlessUsdcToken(opts: {
+  feePayer: PublicKey;
+  /** Public key of the PAUSE/UPGRADE authority (never needed for minting). */
+  adminAuthority: PublicKey;
+  /** Account for the PermissionlessRateLimitedUsdcAdmin contract. */
+  adminContractKey: PrivateKey;
+  /** Account for the FungibleToken contract. */
+  tokenKey: PrivateKey;
+  /** Signing keys (fee payer + the two contract account keys). */
+  signers: PrivateKey[];
+  network: string;
+  /** zkApp tx fee in nanomina; defaults to MINT_FEE_NANOMINA (0.1 MINA). */
+  feeNanomina?: bigint;
+}): Promise<{
+  result: UsdcDeployResult;
+  token: UsdcChannelToken;
+  admin: PermissionlessRateLimitedUsdcAdmin;
+  /** Hash of the submitted deploy transaction (for the deploy record). */
+  txHash: string;
+}> {
+  FungibleToken.AdminContract = PermissionlessRateLimitedUsdcAdmin;
+  const admin = new PermissionlessRateLimitedUsdcAdmin(opts.adminContractKey.toPublicKey());
+  const token = new UsdcChannelToken(opts.tokenKey.toPublicKey());
+
+  const tx = await Mina.transaction(
+    { sender: opts.feePayer, fee: UInt64.from(opts.feeNanomina ?? MINT_FEE_NANOMINA) },
+    async () => {
+      // Three new accounts pay the account-creation fee: admin, token, circulation.
+      AccountUpdate.fundNewAccount(opts.feePayer, 3);
+      await admin.deploy({ adminPublicKey: opts.adminAuthority });
+      await token.deploy(usdcDeployProps);
+      await token.initialize(
+        opts.adminContractKey.toPublicKey(),
+        USDC_DECIMALS_U8,
+        USDC_START_UNPAUSED // start unpaused
+      );
+    }
+  );
+  await tx.prove();
+  const pending = await tx.sign(opts.signers).send();
+
+  const result: UsdcDeployResult = {
+    tokenAddress: opts.tokenKey.toPublicKey().toBase58(),
+    tokenId: token.deriveTokenId().toString(),
+    adminContractAddress: opts.adminContractKey.toPublicKey().toBase58(),
+    adminAuthority: opts.adminAuthority.toBase58(),
+    decimals: USDC_DECIMALS,
+    network: opts.network,
+  };
+
+  return { result, token, admin, txHash: pending.hash };
+}
+
+/** Options for building a permissionless mint-to-arbitrary-recipient transaction. */
+export interface MintTxOptions {
+  /** Token deployed with the PERMISSIONLESS admin contract. */
+  token: FungibleToken;
+  feePayer: PublicKey;
+  /** Mint recipient — does NOT sign (any address). */
+  recipient: PublicKey;
+  /** Whole USDC to mint (scaled to 6-dp base units). */
+  wholeUsdc: bigint;
+  /** Signing keys — the FEE PAYER only (no recipient, no admin key). */
+  signers: PrivateKey[];
+  /**
+   * New accounts this tx must fund: 2 on a recipient's FIRST mint (token
+   * account + mint-receipt account), 0 afterwards. Paid by the fee payer.
+   */
+  fundNewAccounts?: number;
+  /** zkApp tx fee in nanomina; defaults to MINT_FEE_NANOMINA (0.1 MINA). */
+  feeNanomina?: bigint;
+  /** Explicit fee-payer nonce override (for queueing txs before inclusion). */
+  nonce?: number;
+}
+
+/**
+ * Build + prove + sign (but do NOT send) a permissionless mint transaction to an
+ * ARBITRARY recipient. Signed by the FEE PAYER only — the recipient never signs.
+ *
+ * Exposed separately from {@link mintUsdcPermissionless} so callers can control
+ * send ordering (e.g. the on-chain rejection smoke proves a second mint against
+ * the pre-first-mint receipt balance, sends the first, then submits the stale
+ * one and captures the ledger's balance-precondition failure).
+ */
+export async function buildMintTx(opts: MintTxOptions): Promise<Mina.Transaction<true, true>> {
+  // Route `token.mint`'s admin call through the permissionless circuit (the
+  // deployed admin account carries the PermissionlessRateLimitedUsdcAdmin vk).
+  FungibleToken.AdminContract = PermissionlessRateLimitedUsdcAdmin;
+  const amount = UInt64.from(opts.wholeUsdc * ONE_USDC);
+  const fundNewAccounts = opts.fundNewAccounts ?? 0;
+  const tx = await Mina.transaction(
+    {
+      sender: opts.feePayer,
+      fee: UInt64.from(opts.feeNanomina ?? MINT_FEE_NANOMINA),
+      ...(opts.nonce !== undefined ? { nonce: opts.nonce } : {}),
+    },
+    async () => {
+      if (fundNewAccounts > 0) AccountUpdate.fundNewAccount(opts.feePayer, fundNewAccounts);
+      await opts.token.mint(opts.recipient, amount);
+    }
+  );
+  const proven = await tx.prove();
+  return proven.sign(opts.signers);
+}
+
+/**
+ * Permissionless mint to an arbitrary recipient: build, send, and return the
+ * recipient's post-mint balance (base units) as a string. The FEE PAYER signs;
+ * NO recipient or admin signature is involved.
+ */
+export async function mintUsdcPermissionless(opts: MintTxOptions): Promise<string> {
+  const tx = await buildMintTx(opts);
   await tx.send();
   return (await opts.token.getBalanceOf(opts.recipient)).toString();
 }
