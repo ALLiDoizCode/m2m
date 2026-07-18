@@ -72,6 +72,8 @@ export async function deployUsdcToken(opts: {
   /** Signing keys (fee payer + the two contract account keys). */
   signers: PrivateKey[];
   network: string;
+  /** zkApp tx fee in nanomina; defaults to MINT_FEE_NANOMINA (0.1 MINA). */
+  feeNanomina?: bigint;
 }): Promise<{
   result: UsdcDeployResult;
   token: UsdcChannelToken;
@@ -80,17 +82,20 @@ export async function deployUsdcToken(opts: {
   const admin = new FungibleTokenAdmin(opts.adminContractKey.toPublicKey());
   const token = new UsdcChannelToken(opts.tokenKey.toPublicKey());
 
-  const tx = await Mina.transaction(opts.feePayer, async () => {
-    // Three new accounts pay the account-creation fee: admin, token, circulation.
-    AccountUpdate.fundNewAccount(opts.feePayer, 3);
-    await admin.deploy({ adminPublicKey: opts.adminAuthority });
-    await token.deploy(usdcDeployProps);
-    await token.initialize(
-      opts.adminContractKey.toPublicKey(),
-      USDC_DECIMALS_U8,
-      USDC_START_UNPAUSED // start unpaused
-    );
-  });
+  const tx = await Mina.transaction(
+    { sender: opts.feePayer, fee: UInt64.from(opts.feeNanomina ?? MINT_FEE_NANOMINA) },
+    async () => {
+      // Three new accounts pay the account-creation fee: admin, token, circulation.
+      AccountUpdate.fundNewAccount(opts.feePayer, 3);
+      await admin.deploy({ adminPublicKey: opts.adminAuthority });
+      await token.deploy(usdcDeployProps);
+      await token.initialize(
+        opts.adminContractKey.toPublicKey(),
+        USDC_DECIMALS_U8,
+        USDC_START_UNPAUSED // start unpaused
+      );
+    }
+  );
   await tx.prove();
   await tx.sign(opts.signers).send();
 
@@ -107,7 +112,7 @@ export async function deployUsdcToken(opts: {
 }
 
 /**
- * Fee (in nanomina) for the mint zkApp command. A zkApp command on the public
+ * Fee (in nanomina) for the deploy and mint zkApp commands. A zkApp command on the public
  * Mina devnet is rejected with "Insufficient fee" at the default (~0.001 MINA)
  * fee floor that `Mina.transaction` would otherwise pick — proof commands cost
  * more than plain payments. 0.1 MINA is the well-worn devnet zkApp fee and is
