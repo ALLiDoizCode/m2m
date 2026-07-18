@@ -42,6 +42,7 @@ import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 
 import { PaymentChannel } from './PaymentChannel';
+import { RateLimitedUsdcAdmin } from './usdc-rate-limited-admin';
 
 // Real compilation is slow; give each layer ample room (CI machines vary).
 const COMPILE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -61,6 +62,17 @@ const COMPILE_TIMEOUT_MS = 15 * 60 * 1000;
 const DEPLOYED_PAYMENT_CHANNEL_VK_HASH =
   '10198644144187455994960502319403624595373157040521352299817898965424059011097';
 
+/**
+ * The RateLimitedUsdcAdmin verification-key hash deployed with the
+ * rate-limited public-devnet USDC token (o1js 2.14.0 resolution). Every
+ * permissionless mint proves `canMint` against this key on-chain — if it
+ * drifts, mints on the deployed token stop verifying. As with the
+ * PaymentChannel pin above: do not update this constant to make CI green;
+ * that is a deliberate redeploy decision.
+ */
+const DEPLOYED_RATE_LIMITED_ADMIN_VK_HASH =
+  '15646924668446182536665832553975716875665619363054690992558188740688863581713';
+
 const PKG_ROOT = path.resolve(__dirname, '..');
 
 describe('circuit compile guard (#352)', () => {
@@ -75,6 +87,21 @@ describe('circuit compile guard (#352)', () => {
           ` — vk hash ${verificationKey.hash.toString()}`
       );
       expect(verificationKey.hash.toString()).toBe(DEPLOYED_PAYMENT_CHANNEL_VK_HASH);
+    },
+    COMPILE_TIMEOUT_MS
+  );
+
+  it(
+    'RateLimitedUsdcAdmin compiles in-process and keeps the deployed verification key',
+    async () => {
+      const start = Date.now();
+      const { verificationKey } = await RateLimitedUsdcAdmin.compile();
+      // eslint-disable-next-line no-console
+      console.log(
+        `RateLimitedUsdcAdmin.compile() ok in ${((Date.now() - start) / 1000).toFixed(1)}s` +
+          ` — vk hash ${verificationKey.hash.toString()}`
+      );
+      expect(verificationKey.hash.toString()).toBe(DEPLOYED_RATE_LIMITED_ADMIN_VK_HASH);
     },
     COMPILE_TIMEOUT_MS
   );
@@ -106,11 +133,13 @@ describe('circuit compile guard (#352)', () => {
       expect([...vkHashes.keys()].sort()).toEqual([
         'FungibleTokenAdmin',
         'PaymentChannel',
+        'RateLimitedUsdcAdmin',
         'UsdcChannelToken',
       ]);
       // Deterministic across module systems: the ESM build must produce the
-      // SAME PaymentChannel vk as the in-process CJS compile above.
+      // SAME vks as the in-process CJS compiles above.
       expect(vkHashes.get('PaymentChannel')).toBe(DEPLOYED_PAYMENT_CHANNEL_VK_HASH);
+      expect(vkHashes.get('RateLimitedUsdcAdmin')).toBe(DEPLOYED_RATE_LIMITED_ADMIN_VK_HASH);
     },
     COMPILE_TIMEOUT_MS
   );

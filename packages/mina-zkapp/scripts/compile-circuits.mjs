@@ -18,11 +18,13 @@
 import { PaymentChannel } from '../dist-esm/PaymentChannel.js';
 import { FungibleTokenAdmin } from '../dist-esm/usdc-token.js';
 import { UsdcChannelToken } from '../dist-esm/usdc-channel-token.js';
+import { RateLimitedUsdcAdmin } from '../dist-esm/usdc-rate-limited-admin.js';
 
 const circuits = [
   ['PaymentChannel', PaymentChannel],
   ['FungibleTokenAdmin', FungibleTokenAdmin],
   ['UsdcChannelToken', UsdcChannelToken],
+  ['RateLimitedUsdcAdmin', RateLimitedUsdcAdmin],
 ];
 
 for (const [name, contract] of circuits) {
