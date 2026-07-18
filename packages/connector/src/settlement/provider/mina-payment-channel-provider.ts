@@ -24,6 +24,8 @@ import type {
   TxResult,
   BalanceProofParams,
   VerifyBalanceProofParams,
+  OpenBalanceCommitmentParams,
+  CommitmentOpenResult,
   ProviderConfig,
 } from './payment-channel-provider';
 import type { ChainProviderFactory } from './chain-provider-registry';
@@ -593,6 +595,41 @@ export class MinaPaymentChannelProvider implements PaymentChannelProvider {
       );
       return false;
     }
+  }
+
+  /**
+   * Open a claim's plaintext balance preimage against its signature-bound
+   * commitment (issue #359 / toon-meta#168) — the Mina implementation of the
+   * value-binding seam. Delegates to
+   * {@link MinaPaymentChannelSDK.openBalanceCommitment}, which recomputes
+   * `Poseidon([balanceA, balanceB, salt])` and compares it to the commitment
+   * embedded in the proof. RPC-free (no chain read), signature-free (the crypto
+   * gate still runs {@link verifyBalanceProof}).
+   *
+   * A plaintext with a non-numeric balance/salt cannot be the preimage of any
+   * legitimately-signed commitment, so a `safeBigInt` parse failure resolves to
+   * `'mismatch'` (reject), NOT a fail-open.
+   */
+  async openBalanceCommitment(params: OpenBalanceCommitmentParams): Promise<CommitmentOpenResult> {
+    let balanceA: bigint;
+    let balanceB: bigint;
+    let salt: bigint;
+    try {
+      balanceA = safeBigInt(params.balanceA, 'balanceA');
+      balanceB = safeBigInt(params.balanceB, 'balanceB');
+      salt = safeBigInt(params.salt, 'salt');
+    } catch (err: unknown) {
+      this._logger.warn(
+        {
+          event: 'open_balance_commitment_bad_preimage',
+          chainId: this.chainId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'Mina claim preimage is not numeric; cannot open the commitment (treating as mismatch)'
+      );
+      return 'mismatch';
+    }
+    return this._sdk.openBalanceCommitment(params.proof, balanceA, balanceB, salt);
   }
 
   // -------------------------------------------------------------------------

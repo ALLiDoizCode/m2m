@@ -162,6 +162,30 @@ export interface VerifyBalanceProofParams {
   signerAddress: string;
 }
 
+/**
+ * Parameters for opening a claim's plaintext balance preimage against its
+ * signed commitment (Mina value binding, issue #359 / toon-meta#168).
+ */
+export interface OpenBalanceCommitmentParams {
+  /** Serialized proof carrying the signature-bound `commitment` field. */
+  proof: string;
+  /** Plaintext participant-A cumulative balance (the claim's `transferredAmount`). */
+  balanceA: string;
+  /** Plaintext participant-B balance (`'0'` for the unidirectional per-packet case). */
+  balanceB: string;
+  /** Plaintext commitment salt (the claim's `salt`). */
+  salt: string;
+}
+
+/**
+ * Verdict of {@link PaymentChannelProvider.openBalanceCommitment}:
+ * - `'match'`      the plaintext opens the signature-bound commitment → trust it;
+ * - `'mismatch'`   the plaintext does NOT open it (tampered/malformed) → reject;
+ * - `'unopenable'` no parseable commitment / crypto lib unavailable → the
+ *                  caller's migration policy decides.
+ */
+export type CommitmentOpenResult = 'match' | 'mismatch' | 'unopenable';
+
 // ---------------------------------------------------------------------------
 // Provider Interface
 // ---------------------------------------------------------------------------
@@ -249,6 +273,23 @@ export interface PaymentChannelProvider {
    * @returns `true` if the signature is valid, `false` otherwise
    */
   verifyBalanceProof(params: VerifyBalanceProofParams): Promise<boolean>;
+
+  /**
+   * Open a claim's plaintext balance preimage against its signature-bound
+   * commitment (issue #359 / toon-meta#168), letting the inbound gate treat the
+   * plaintext cumulative as trusted and bind claim VALUE to route PRICE.
+   *
+   * RPC-free: recomputes one commitment hash from the supplied plaintext and
+   * compares it to the commitment embedded in `proof`. Does NOT verify the
+   * signature (that stays {@link verifyBalanceProof}). OPTIONAL: only chains
+   * whose claim hides the cumulative behind a commitment implement it (Mina).
+   * EVM/Solana carry a plaintext `transferredAmount` the gate reads directly, so
+   * they leave this undefined.
+   *
+   * @param params - Proof + plaintext preimage (balanceA, balanceB, salt).
+   * @returns `'match'` | `'mismatch'` | `'unopenable'`.
+   */
+  openBalanceCommitment?(params: OpenBalanceCommitmentParams): Promise<CommitmentOpenResult>;
 
   /**
    * Query the current on-chain state of a channel.

@@ -1927,6 +1927,98 @@ export class MinaPaymentChannelSDK {
   }
 
   /**
+   * Open a claim's plaintext balance preimage against the commitment embedded
+   * in its signed proof — the connector-gate half of Option B for issue #359
+   * (design toon-meta#168).
+   *
+   * Recomputes `Poseidon.hash([balanceA, balanceB, salt])` — the SAME hash
+   * {@link signBalanceProof} (see the `commitment` computed above) and the
+   * on-chain `PaymentChannel.claimFromChannel` use — and compares it to the
+   * `commitment` field carried inside the proof. That `commitment` is the exact
+   * value the Pallas-Schnorr signature is verified over in
+   * {@link verifyBalanceProof} (`signature.verify(key, [commitment, nonce,
+   * channelHash])`). So a `'match'` means the plaintext balances are the true
+   * preimage of the *signature-bound* commitment: because Poseidon is
+   * collision-resistant, a payer cannot present plaintext balances that open to
+   * a commitment other than the one they signed. This lets the inbound gate
+   * treat `balanceA` (the claim's `transferredAmount`) as trusted plaintext and
+   * bind the claim's VALUE to the route PRICE, exactly as #360 does for the
+   * EVM/Solana plaintext `transferredAmount`.
+   *
+   * RPC-FREE and proof-free: this parses only the supplied `proof` string and
+   * runs one Poseidon hash. It does NOT verify the signature (that remains
+   * {@link verifyBalanceProof}'s job, run by the gate's crypto step) and reads
+   * no chain state — so it is safe on the per-packet hot path.
+   *
+   * @param proof - Serialized proof string (base64(JSON) or raw JSON) carrying
+   *   `{ commitment, ... }`, as produced by {@link signBalanceProof}.
+   * @param balanceA - Plaintext participant-A cumulative balance (the claim's
+   *   `transferredAmount`).
+   * @param balanceB - Plaintext participant-B balance (`0` for the
+   *   unidirectional per-packet case).
+   * @param salt - Plaintext commitment salt (the claim's `salt`).
+   * @returns
+   *   - `'match'`      the plaintext opens the signed commitment → trust it;
+   *   - `'mismatch'`   the plaintext does NOT open it (tampered/malformed
+   *                    preimage) → the caller MUST reject;
+   *   - `'unopenable'` the proof carries no parseable `commitment` (or o1js is
+   *                    unavailable) → the caller's migration policy decides.
+   */
+  async openBalanceCommitment(
+    proof: string,
+    balanceA: bigint,
+    balanceB: bigint,
+    salt: bigint
+  ): Promise<'match' | 'mismatch' | 'unopenable'> {
+    // Parse the proof first (no o1js needed): extract the commitment the
+    // signature is bound over. A proof we cannot parse — or one carrying no
+    // commitment — is a structural gap (old/garbled wire), not a value tamper.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let proofData: any;
+    try {
+      proofData = JSON.parse(this._normalizeSerializedProof(proof));
+    } catch {
+      return 'unopenable';
+    }
+    if (
+      typeof proofData !== 'object' ||
+      proofData === null ||
+      typeof proofData.commitment !== 'string' ||
+      proofData.commitment.length === 0
+    ) {
+      return 'unopenable';
+    }
+
+    let o1js: Awaited<ReturnType<typeof getO1js>>;
+    try {
+      o1js = await getO1js();
+    } catch (err: unknown) {
+      // o1js failed to load: an infrastructure fault, not a bad claim. Signal
+      // 'unopenable' so the gate can fall back per its migration policy rather
+      // than mis-rejecting a possibly-honest claim.
+      this._logger.warn(
+        {
+          event: 'open_balance_commitment_o1js_unavailable',
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'Cannot open balance commitment: o1js unavailable'
+      );
+      return 'unopenable';
+    }
+
+    try {
+      const { Field, Poseidon } = o1js;
+      const recomputed = Poseidon.hash([Field(balanceA), Field(balanceB), Field(salt)]).toString();
+      return recomputed === proofData.commitment ? 'match' : 'mismatch';
+    } catch {
+      // A plaintext value that is not a valid field element (e.g. ≥ the field
+      // modulus) can never be the preimage of a legitimately-signed commitment
+      // → treat as a mismatch (reject), NOT a fail-open.
+      return 'mismatch';
+    }
+  }
+
+  /**
    * Subscribe to channel state changes via polling.
    *
    * Polls `getChannelState()` at a configurable interval (default 30s).

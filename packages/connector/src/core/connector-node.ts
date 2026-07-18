@@ -1893,7 +1893,14 @@ export class ConnectorNode implements HealthStatusProvider {
             // returns undefined for a forwarded / non-terminated destination →
             // coalesce to null (this connector is not the pricing authority there;
             // the gate falls back to freshness-only for such packets).
-            (destination) => this._routeTerminationRegistry.match(destination)?.price ?? null
+            (destination) => this._routeTerminationRegistry.match(destination)?.price ?? null,
+            // Issue #359 / toon-meta#168: Mina value-binding migration switch.
+            // Default fail-open-and-log for an ABSENT/unopenable Mina preimage
+            // during the client-rollout window; the operator flips it to strict
+            // (reject) once the fleet emits the openable `[transferredAmount,
+            // balanceB, salt]` preimage everywhere. A PRESENT-but-mismatched
+            // preimage is always rejected regardless of this flag.
+            this._config.settlement?.minaValueBindingStrict ?? false
           );
           this._inboundClaimValidate = (protocolData, ilpPacket, peerId) =>
             inboundClaimValidator.validate(protocolData, ilpPacket, peerId);

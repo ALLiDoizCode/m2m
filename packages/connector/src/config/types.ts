@@ -1322,6 +1322,24 @@ export interface SettlementConfig {
    * Defaults to threshold monitoring disabled if not specified
    */
   thresholds?: SettlementThresholdConfig;
+
+  /**
+   * Mina claim value-binding migration switch (issue #359 / toon-meta#168).
+   *
+   * The inbound gate binds a Mina claim's VALUE to the route PRICE by opening
+   * the claim's plaintext balance preimage against its signature-bound Poseidon
+   * commitment (Option B). A claim that PRESENTS a preimage which does not open
+   * the commitment is always F06-rejected (tamper). This flag governs only the
+   * migration-sensitive ABSENT-preimage case (a client predating the `balanceB`
+   * emit, or a proof with no parseable commitment):
+   * - `false` / omitted (default) → fail-open-and-log during the client-rollout
+   *   window (freshness-only for such packets), so a wire/version gap never
+   *   blackholes paid Mina traffic.
+   * - `true` (flip post-rollout, once the client fleet emits the openable
+   *   preimage everywhere) → F06-reject Mina claims on priced routes that carry
+   *   no openable preimage.
+   */
+  minaValueBindingStrict?: boolean;
 }
 
 /**

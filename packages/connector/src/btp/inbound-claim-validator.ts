@@ -145,6 +145,23 @@ export class InboundClaimValidator {
    */
   private readonly resolveRoutePrice?: RoutePriceResolver;
 
+  /**
+   * Mina value-binding migration switch (issue #359 / toon-meta#168).
+   *
+   * Mina claim VALUE is bound to route PRICE by opening the claim's plaintext
+   * balance preimage against its signature-bound Poseidon commitment (Option B).
+   * A claim that PRESENTS a preimage (carries `balanceB`) which does NOT open
+   * the commitment is ALWAYS rejected — that is a tamper signal, regardless of
+   * this flag. This flag governs only the migration-sensitive cases where the
+   * preimage is ABSENT (an old client that predates the `balanceB` emit, or a
+   * proof carrying no parseable commitment):
+   * - `false` (default) → fail-open-and-log (`inbound_claim_value_unenforceable`,
+   *   freshness-only), preserving #360's Mina posture during the client-rollout
+   *   window so a wire/version gap never blackholes paid Mina traffic.
+   * - `true` (post-rollout) → reject such claims (`inbound_claim_value_unopenable`).
+   */
+  private readonly minaValueBindingStrict: boolean;
+
   constructor(
     paymentChannelSDK: PaymentChannelSDK | undefined,
     nodeId: string,
@@ -155,7 +172,8 @@ export class InboundClaimValidator {
     getPeerRelation?: PeerRelationResolver,
     chainRegistry?: ChainProviderRegistry,
     getReceivedClaimWatermark?: ReceivedClaimWatermarkLookup,
-    resolveRoutePrice?: RoutePriceResolver
+    resolveRoutePrice?: RoutePriceResolver,
+    minaValueBindingStrict = false
   ) {
     this.paymentChannelSDK = paymentChannelSDK;
     this.nodeId = nodeId;
@@ -167,6 +185,7 @@ export class InboundClaimValidator {
     this.chainRegistry = chainRegistry;
     this.getReceivedClaimWatermark = getReceivedClaimWatermark;
     this.resolveRoutePrice = resolveRoutePrice;
+    this.minaValueBindingStrict = minaValueBindingStrict;
   }
 
   /**
@@ -441,36 +460,39 @@ export class InboundClaimValidator {
    *   claimDelta = cumulative(claim) − cumulative(watermark ?? 0)
    *   reject (F06) iff claimDelta < resolvedRoutePrice
    *
-   * Scope & fail-open posture (all deliberate, all documented in #359):
+   * Scope & fail-open posture (all deliberate, all documented in #359/#168):
    * - **Not wired / no price resolver** → freshness-only (pre-#359 behavior).
    * - **Destination is not a locally-terminated priced route** (`resolveRoutePrice`
    *   returns `null`: a forwarded packet, or no termination registered) → this
    *   connector is not the pricing authority; the terminating node enforces its
    *   own price. Freshness still applied above. Enumerated uncovered path.
    * - **Free route** (price ≤ 0) → nothing to enforce.
-   * - **Mina claim** → `balanceCommitment` is an opaque zk commitment, NOT a
-   *   plaintext cumulative amount, so the delta is not computable at the gate.
-   *   This is structural (called out in #358) — logged `warn` and enumerated as
-   *   the remaining per-chain follow-up, NOT silently dropped.
+   * - **EVM / Solana claim** → carries a plaintext cumulative `transferredAmount`
+   *   the signature already binds; read it directly.
+   * - **Mina claim** → the cumulative hides behind a Poseidon `balanceCommitment`.
+   *   Option B (toon-meta#168): OPEN that commitment at the gate by recomputing
+   *   `Poseidon([transferredAmount, balanceB, salt])` from the plaintext wire
+   *   fields and requiring it to equal the signature-bound commitment. A present
+   *   preimage that does NOT open → REJECT (tamper). An absent preimage (old
+   *   client / pre-rollout) → migration policy (see {@link minaValueBindingStrict}).
    *
-   * Local data only (in-memory route registry + the already-read watermark) —
-   * no chain RPC, no extra DB read.
+   * Local data + one Poseidon hash for Mina — no chain RPC, no extra DB read.
    *
    * @param claim - Structurally validated, freshness-passed claim
    * @param ilpPacket - The PREPARE (its `destination` keys the route price)
    * @param watermark - The prior verified claim (or null on the first claim)
    * @param channelId - Chain-appropriate channel identifier (for logs)
    * @param peerId - Authenticated peer ID (for logs)
-   * @returns null to proceed, or an F06 reject on underpayment
+   * @returns null to proceed, or an F06 reject on underpayment / tamper
    * @private
    */
-  private checkClaimValue(
+  private async checkClaimValue(
     claim: BTPClaimMessage,
     ilpPacket: ILPPreparePacket,
     watermark: BTPClaimMessage | null,
     channelId: string,
     peerId: string
-  ): ILPRejectPacket | null {
+  ): Promise<ILPRejectPacket | null> {
     if (!this.resolveRoutePrice) {
       return null; // Value binding not wired → freshness-only (pre-#359).
     }
@@ -504,23 +526,31 @@ export class InboundClaimValidator {
       return null; // Free route → no value to bind.
     }
 
-    const cumulative = this.extractCumulativeAmount(claim);
-    if (cumulative === null) {
-      // Mina opaque balanceCommitment: value binding is structurally
-      // impossible at the gate. Enumerated deferred path (#359) — freshness
-      // (applied above) is the only guard here, exactly as in #358.
-      this.logger.warn(
-        {
-          event: 'inbound_claim_value_unenforceable',
-          peerId,
-          blockchain: claim.blockchain,
-          channelId,
-          destination: ilpPacket.destination,
-          routePrice: priceUnits.toString(),
-        },
-        'Claim value not bindable to price for this chain (opaque cumulative); freshness-only for this packet'
+    // Resolve the claim's TRUSTED cumulative channel amount.
+    let cumulative: bigint;
+    if (isMinaClaim(claim)) {
+      // Mina: open the signature-bound commitment (Option B, #359/#168).
+      const opened = await this.openMinaClaimCumulative(
+        claim,
+        ilpPacket,
+        channelId,
+        peerId,
+        priceUnits
       );
-      return null;
+      if (opened.reject) {
+        return opened.reject; // tamper (mismatch) or strict-mode unopenable → F06
+      }
+      if (opened.cumulative === undefined) {
+        return null; // unenforceable (fail-open cutover) → freshness-only
+      }
+      cumulative = opened.cumulative;
+    } else {
+      // EVM / Solana: plaintext `transferredAmount` the signature already binds.
+      const plain = this.extractCumulativeAmount(claim);
+      if (plain === null) {
+        return null; // Defensive: validateClaimMessage guarantees a numeric amount.
+      }
+      cumulative = plain;
     }
 
     const prior = watermark ? (this.extractCumulativeAmount(watermark) ?? 0n) : 0n;
@@ -548,13 +578,194 @@ export class InboundClaimValidator {
   }
 
   /**
+   * Open a Mina claim's plaintext cumulative amount against its signature-bound
+   * Poseidon commitment (Option B for issue #359, design toon-meta#168).
+   *
+   * The Mina claim carries the commitment preimage in plaintext on the wire
+   * (`transferredAmount` = balanceA, `balanceB`, `salt`), and the Pallas-Schnorr
+   * signature the crypto gate verifies is over `Poseidon([balanceA, balanceB,
+   * salt])`. Recomputing that hash and requiring it to equal the proof's
+   * signature-bound `commitment` makes `transferredAmount` TRUSTED plaintext: a
+   * payer cannot present balances opening to a commitment other than the one
+   * they signed (Poseidon is collision-resistant). RPC-free — one hash over
+   * fields already in hand; the signature itself is still verified downstream by
+   * the crypto gate, so VALUE (here) and AUTHENTICITY (crypto) both gate the
+   * packet before it reaches the backend.
+   *
+   * Outcomes:
+   * - **match** → returns `{ cumulative }` (trusted); caller enforces the delta.
+   * - **mismatch** (present preimage that does NOT open) → returns `{ reject }`
+   *   ALWAYS — a tamper/attack signal, independent of migration phase.
+   * - **absent preimage / unopenable** → migration policy
+   *   ({@link minaValueBindingStrict}): fail-open-and-log (default) or reject.
+   *
+   * `balanceB`'s presence is the rollout marker: the upgraded per-packet client
+   * emits it (`'0'` for the unidirectional case) precisely so the gate can
+   * reconstruct the preimage; a claim lacking it predates the value-binding
+   * emit and is treated as an absent preimage, not a tamper.
+   *
+   * @private
+   */
+  private async openMinaClaimCumulative(
+    claim: MinaClaimMessage,
+    ilpPacket: ILPPreparePacket,
+    channelId: string,
+    peerId: string,
+    routePrice: bigint
+  ): Promise<{ cumulative?: bigint; reject?: ILPRejectPacket }> {
+    // Absent preimage (old client, pre-`balanceB` emit): a migration artifact,
+    // not a tamper. `transferredAmount` and `salt` are required to open, and
+    // `balanceB` is the rollout marker.
+    if (
+      claim.transferredAmount === undefined ||
+      claim.balanceB === undefined ||
+      claim.salt === undefined
+    ) {
+      return this.minaValueUnenforceable(claim, ilpPacket, channelId, peerId, routePrice, 'absent');
+    }
+
+    const chainId = `mina:${claim.network ?? 'devnet'}`;
+    const provider = this.chainRegistry?.getProvider('mina', chainId);
+    if (!provider?.openBalanceCommitment) {
+      // No provider (or a provider that cannot open commitments): cannot bind
+      // value → migration policy, same as an absent preimage.
+      return this.minaValueUnenforceable(
+        claim,
+        ilpPacket,
+        channelId,
+        peerId,
+        routePrice,
+        'no_provider'
+      );
+    }
+
+    let result: 'match' | 'mismatch' | 'unopenable';
+    try {
+      result = await provider.openBalanceCommitment({
+        proof: claim.proof,
+        balanceA: claim.transferredAmount,
+        balanceB: claim.balanceB,
+        salt: claim.salt,
+      });
+    } catch (error) {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_value_open_error',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Opening Mina balance commitment threw; falling back to migration policy'
+      );
+      return this.minaValueUnenforceable(claim, ilpPacket, channelId, peerId, routePrice, 'error');
+    }
+
+    if (result === 'mismatch') {
+      // PRESENT preimage that does NOT open the signed commitment → tampered or
+      // malformed claim. Reject ALWAYS (the security crux), independent of the
+      // migration flag — this is an attack signal, not a rollout artifact.
+      this.logger.warn(
+        {
+          event: 'inbound_claim_value_binding_mismatch',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId,
+          destination: ilpPacket.destination,
+        },
+        'Rejecting ILP PREPARE: Mina claim balance preimage does not open its signed commitment (tampered claim)'
+      );
+      return {
+        reject: this.createReject(
+          'Invalid Mina claim: the plaintext balance preimage does not open the signed balance commitment'
+        ),
+      };
+    }
+
+    if (result === 'unopenable') {
+      // Proof carries no parseable commitment (or o1js unavailable): structural,
+      // not a tamper → migration policy.
+      return this.minaValueUnenforceable(
+        claim,
+        ilpPacket,
+        channelId,
+        peerId,
+        routePrice,
+        'unopenable'
+      );
+    }
+
+    // match → trusted plaintext.
+    try {
+      return { cumulative: BigInt(claim.transferredAmount) };
+    } catch {
+      return this.minaValueUnenforceable(claim, ilpPacket, channelId, peerId, routePrice, 'error');
+    }
+  }
+
+  /**
+   * Handle a Mina claim whose value cannot be bound because the openable
+   * preimage is ABSENT or structurally unavailable (NOT a tamper). Applies the
+   * {@link minaValueBindingStrict} migration switch: fail-open-and-log by
+   * default (freshness-only, matching #360's Mina posture during rollout), or
+   * F06-reject once the operator has flipped to strict post-client-rollout.
+   *
+   * @private
+   */
+  private minaValueUnenforceable(
+    claim: MinaClaimMessage,
+    ilpPacket: ILPPreparePacket,
+    channelId: string,
+    peerId: string,
+    routePrice: bigint,
+    reason: 'absent' | 'no_provider' | 'unopenable' | 'error'
+  ): { cumulative?: bigint; reject?: ILPRejectPacket } {
+    if (this.minaValueBindingStrict) {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_value_unopenable',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId,
+          destination: ilpPacket.destination,
+          routePrice: routePrice.toString(),
+          reason,
+        },
+        'Rejecting ILP PREPARE: Mina claim has no openable balance preimage and strict value binding is enabled'
+      );
+      return {
+        reject: this.createReject(
+          'Mina claim value not bindable to route price: no openable balance preimage (strict mode)'
+        ),
+      };
+    }
+
+    this.logger.warn(
+      {
+        event: 'inbound_claim_value_unenforceable',
+        peerId,
+        blockchain: claim.blockchain,
+        channelId,
+        destination: ilpPacket.destination,
+        routePrice: routePrice.toString(),
+        reason,
+      },
+      'Mina claim value not bindable to price (no openable preimage); freshness-only for this packet (migration cutover)'
+    );
+    return {};
+  }
+
+  /**
    * Extract a claim's PLAINTEXT cumulative channel amount as a bigint, or null
-   * when the chain's claim carries no plaintext cumulative (issue #359).
+   * when unavailable (issue #359).
    *
    * EVM and Solana claims carry `transferredAmount` — the cumulative amount
-   * transferred over the channel's lifetime — as a decimal string. Mina claims
-   * carry only `balanceCommitment`, an opaque zk commitment, so no cumulative
-   * value is derivable at the gate (returns null → value binding deferred).
+   * transferred over the channel's lifetime, bound by the signature — as a
+   * decimal string. Mina claims carry it too (plaintext), but for a Mina claim
+   * this is trustworthy ONLY once the commitment is opened
+   * ({@link openMinaClaimCumulative}); this helper reads it directly and is used
+   * for EVM/Solana current claims and for the trusted local WATERMARK baseline
+   * of any chain (the prior verified claim, not attacker-controlled input).
    *
    * @private
    */
@@ -563,7 +774,11 @@ export class InboundClaimValidator {
       if (isEVMClaim(claim) || isSolanaClaim(claim)) {
         return BigInt(claim.transferredAmount);
       }
-      return null; // Mina: opaque balanceCommitment.
+      // Mina: plaintext cumulative when present (watermark baseline).
+      if (claim.transferredAmount !== undefined) {
+        return BigInt(claim.transferredAmount);
+      }
+      return null;
     } catch {
       return null;
     }
