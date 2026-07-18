@@ -5,5 +5,15 @@
   "adminContractAddress": "B62qixs21jV5vZ3WyJAZiAv1mfwjBKhaxgvtYUZrpARsZZUQebPcK3e",
   "adminAuthority": "B62qkCNTX2nrXjW4eR2dgwxc5d25JKSWXwJvRdfjDYoZr5HAaLkpyi7",
   "decimals": 6,
-  "network": "https://mina.devnet.toonprotocol.dev/graphql"
+  "network": "https://mina.devnet.toonprotocol.dev/graphql",
+  "_permissionlessDevnetRedeployPending": {
+    "status": "PENDING FUNDING. When the deployer is funded, `npx tsx tools/mina/deploy-usdc-token.mts --permissionless --network https://api.minascan.io/node/devnet/v1/graphql --out infra/mina/usdc-token.json` OVERWRITES this file with the PUBLIC-DEVNET permissionless token record (PermissionlessRateLimitedUsdcAdmin: any fee payer mints to any address, 1,000 USDC/recipient/~24h, NO recipient signature).",
+    "deployerToFund": "B62qodjF3DByZfmT68bkTdLXV6Yqt9WJ8waG6CXpBbmaupP2vkYKTAd",
+    "newAdminAuthorityPublicKey": "B62qre1cKoN6KBRz16y98fFdR9hHi6AgWncgVYNYtEVQ9iU95QbT1CM",
+    "permissionlessAdminVkHash": "24054879512104605220650652318050994093349025874736442573804562558001657468018",
+    "usdcChannelTokenVkHash": "9692307225143487166733467413506207145324336685411164992097971188215422741850",
+    "decimals": 6,
+    "dailyCapUsdc": 1000,
+    "windowSlots": 480
+  }
 }

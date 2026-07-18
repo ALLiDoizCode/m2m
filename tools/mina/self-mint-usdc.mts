@@ -1,6 +1,15 @@
 /**
- * Permissionless SELF-MINT of rate-limited USDC on a Mina network — and the
- * live rejection smoke for the per-address daily mint cap.
+ * LEGACY (recipient-signed) self-mint of rate-limited USDC on a Mina network —
+ * and the live rejection smoke for the per-address daily mint cap.
+ *
+ * NOTE: this targets the recipient-signed `RateLimitedUsdcAdmin` token (the
+ * recipient's key must sign its mint-receipt AU). The canonical shared-devnet
+ * token is now the FULLY PERMISSIONLESS `PermissionlessRateLimitedUsdcAdmin`
+ * one, for which minting to ANY address — including your own — needs only the
+ * fee payer: use `tools/mina/mint-usdc.mts <recipient-b58> [amount]` (a self-mint
+ * is just mint-to-your-own-address, with no recipient key required). Kept for the
+ * legacy token + as the recipient-signed rate-limit reference.
+ *
  *
  * The public-devnet USDC token is gated by `RateLimitedUsdcAdmin`
  * (packages/mina-zkapp/src/usdc-rate-limited-admin.ts): ANY address can mint
