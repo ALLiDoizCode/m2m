@@ -103,8 +103,9 @@ services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   faucet:
     # Build context is the repo ROOT (not packages/faucet): the image builds the
-    # mina-zkapp ESM bundle for the Mina USDC admin-mint path, so the Dockerfile
-    # COPYs packages/mina-zkapp + packages/faucet. See packages/faucet/Dockerfile.
+    # mina-zkapp ESM bundle for the Mina USDC drip path (treasury self-mint +
+    # transfer), so the Dockerfile COPYs packages/mina-zkapp + packages/faucet.
+    # See packages/faucet/Dockerfile.
     build:
       context: .
       dockerfile: packages/faucet/Dockerfile
@@ -152,17 +153,25 @@ services:
       MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
       MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
 
-      # ── Mina USDC admin-mint (o1js zk-proving) ──
-      # When MINA_USDC_ADMIN_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT are
-      # all set, the /api/mina/request route ALSO admin-mints USDC (compiling the
-      # UsdcChannelToken + FungibleTokenAdmin circuits once, ~6s, on the first
-      # mint). MINA_USDC_ADMIN_KEY is the FUNDED mint-authority base58 PRIVATE key
-      # (a SECRET — pass through from the host env, never hardcoded). When unset,
+      # ── Mina USDC drip: treasury self-mint + transfer (o1js zk-proving) ──
+      # The public-devnet USDC token is gated by RateLimitedUsdcAdmin: mints are
+      # permissionless but capped (1,000 USDC/address/~24h) and require the
+      # RECIPIENT's signature — so the faucet cannot mint to users. Instead, when
+      # MINA_USDC_TREASURY_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT are
+      # all set, /api/mina/request and /api/mina/usdc-request drip USDC by plain
+      # TRANSFER from the treasury, which lazily SELF-MINTS its own daily
+      # allowance when below MINA_USDC_LOW_WATER (≤1,000 USDC/day ceiling).
+      # MINA_USDC_TREASURY_KEY is the FUNDED treasury base58 PRIVATE key (a
+      # SECRET — pass through from the host env, never hardcoded; the legacy
+      # MINA_USDC_ADMIN_KEY name is still accepted as a fallback). When unset,
       # the route keeps dripping native MINA only. Reuses MINA_GRAPHQL_URL above.
-      MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-}
+      MINA_USDC_TREASURY_KEY: ${MINA_USDC_TREASURY_KEY:-}
+      MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-} # legacy name (treasury fallback)
       MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
       MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
-      MINA_USDC_AMOUNT: ${MINA_USDC_AMOUNT:-1000}
+      MINA_USDC_DRIP_AMOUNT: ${MINA_USDC_DRIP_AMOUNT:-50}
+      MINA_USDC_LOW_WATER: ${MINA_USDC_LOW_WATER:-500}
+      MINA_USDC_COOLDOWN_HOURS: ${MINA_USDC_COOLDOWN_HOURS:-24}
       MINA_TX_FEE: ${MINA_TX_FEE:-}
 
     volumes:
