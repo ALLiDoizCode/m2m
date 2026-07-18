@@ -108,6 +108,9 @@ const solanaClaim = (nonce: number): SolanaClaimMessage => ({
 
 const MINA_ZKAPP_ADDRESS = 'B62qre3erTHfzQckNuibViWQGyyKwZseztqrjPZBv6SQF384Rg6ESAy';
 
+// Legacy Mina fixture: no `balanceB` on the wire (an "absent preimage" claim,
+// i.e. a client predating the #359/#168 value-binding emit). Used for the
+// migration (fail-open / strict) cases and the pre-existing #353 freshness tests.
 const minaClaim = (nonce: number): MinaClaimMessage => ({
   version: '1.0',
   blockchain: 'mina',
@@ -123,6 +126,17 @@ const minaClaim = (nonce: number): MinaClaimMessage => ({
   network: 'devnet',
 });
 
+// Upgraded Mina fixture: carries the full openable preimage (`transferredAmount`
+// = balanceA advancing 1000/nonce, explicit `balanceB`, `salt`) that the #359/#168
+// gate opens against the signed commitment. `transferredAmount` mirrors the
+// EVM/Solana fixtures so the value delta is identical across chains.
+const minaOpenableClaim = (nonce: number): MinaClaimMessage => ({
+  ...minaClaim(nonce),
+  transferredAmount: String(1000 * nonce),
+  balanceB: '0',
+  salt: '99',
+});
+
 // ─── Harness ───
 
 interface Harness {
@@ -134,13 +148,23 @@ interface Harness {
   watermarkLookup: jest.Mock;
   /** Route-price resolver (#359); undefined when the binding is not wired. */
   routePriceLookup?: jest.Mock;
+  /** Mina commitment-opening mock (#359/#168 Option B). */
+  openBalanceCommitment: jest.Mock;
 }
 
 const makeHarness = (
   watermarkByChannel: Record<string, BTPClaimMessage | null>,
-  opts: { wired?: boolean; routePrice?: (destination: string) => string | null } = {}
+  opts: {
+    wired?: boolean;
+    routePrice?: (destination: string) => string | null;
+    /** Mina commitment-open verdict (#359/#168); defaults to 'match'. */
+    openResult?: 'match' | 'mismatch' | 'unopenable';
+    /** Flip Mina value binding to strict (reject absent/unopenable preimages). */
+    minaStrict?: boolean;
+  } = {}
 ): Harness => {
   const verifyBalanceProof = jest.fn(async () => true);
+  const openBalanceCommitment = jest.fn(async () => opts.openResult ?? 'match');
   const registry = new ChainProviderRegistry();
   registry.register({
     chainType: 'solana',
@@ -151,6 +175,7 @@ const makeHarness = (
     chainType: 'mina',
     chainId: 'mina:devnet',
     verifyBalanceProof,
+    openBalanceCommitment,
   } as unknown as PaymentChannelProvider);
 
   const verifyBalanceProofWithDomain = jest.fn(async () => true);
@@ -178,7 +203,8 @@ const makeHarness = (
     undefined,
     registry,
     opts.wired === false ? undefined : (watermarkLookup as ReceivedClaimWatermarkLookup),
-    routePriceLookup as RoutePriceResolver | undefined
+    routePriceLookup as RoutePriceResolver | undefined,
+    opts.minaStrict ?? false
   );
 
   return {
@@ -187,6 +213,7 @@ const makeHarness = (
     verifyBalanceProofWithDomain,
     watermarkLookup,
     routePriceLookup,
+    openBalanceCommitment,
   };
 };
 
@@ -488,23 +515,230 @@ describe('InboundClaimValidator — claim-value ↔ price binding (#359)', () =>
     expect(h.routePriceLookup).toBeUndefined();
     expect(h.verifyBalanceProofWithDomain).toHaveBeenCalledTimes(1);
   });
+});
 
-  it('DEFERRED: a Mina claim on a priced route is not value-bound (opaque commitment) — freshness-only', async () => {
-    // Mina carries only balanceCommitment (opaque), so claimDelta is not
-    // computable at the gate. The claim must still pass the value dimension
-    // (freshness applies), and this is the enumerated per-chain follow-up.
+/**
+ * Mina claim value ↔ price binding via commitment opening (Option B, #359/#168)
+ *
+ * #360 left Mina fail-open (`inbound_claim_value_unenforceable`) because the
+ * cumulative hid behind an opaque `balanceCommitment`. Option B OPENS that
+ * commitment at the gate: it recomputes `Poseidon([transferredAmount, balanceB,
+ * salt])` from the plaintext wire fields (via the provider's
+ * `openBalanceCommitment`) and requires it to equal the signature-bound
+ * commitment. On a 'match', `transferredAmount` becomes trusted plaintext and
+ * feeds the SAME `claimDelta >= routePrice` check as EVM/Solana.
+ *
+ * The provider's opening is mocked here (a deterministic 'match'/'mismatch'/
+ * 'unopenable' verdict) so these tests isolate the GATE's reaction; the REAL
+ * Poseidon binding — a tampered amount provably failing the hash — is proven in
+ * mina-payment-channel-sdk.open-commitment.test.ts. The `minaOpenableClaim`
+ * fixture advances the cumulative by 1000/nonce, identical to EVM/Solana.
+ */
+describe('InboundClaimValidator — Mina claim-value ↔ price binding (Option B, #359/#168)', () => {
+  it('admits an openable claim whose delta covers the price (open→match, crypto runs)', async () => {
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '1000', openResult: 'match' } // delta 1000 == price
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    expect(result).toBeNull();
+    expect(h.openBalanceCommitment).toHaveBeenCalledTimes(1);
+    // The opened preimage was passed straight through from the wire fields.
+    expect(h.openBalanceCommitment).toHaveBeenCalledWith({
+      proof: 'emtQcm9vZg==',
+      balanceA: '7000',
+      balanceB: '0',
+      salt: '99',
+    });
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1); // proceeded to crypto
+  });
+
+  it('F06-rejects an underpaying openable claim (delta < price) before any crypto/backend', async () => {
+    // watermark cumulative 6000 → claim cumulative 7000: delta 1000, price 2000.
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '2000', openResult: 'match' }
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    const reject = expectF06(result);
+    expect(reject.message).toContain('Insufficient claim value');
+    expect(reject.message).toContain('1000'); // delta
+    expect(reject.message).toContain('2000'); // price
+    // Value decided on local data + one hash — crypto never runs, backend unreached.
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('REJECTS a tampered claim whose preimage does NOT open the signed commitment (security crux)', async () => {
+    // open→mismatch: the plaintext balances do not hash to the signed commitment.
+    // This is rejected ALWAYS (independent of the migration flag) and before crypto.
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '1000', openResult: 'mismatch' }
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(7)), // delta would cover the price…
+      createPrepare(),
+      'peer-a'
+    );
+
+    const reject = expectF06(result);
+    expect(reject.message).toContain('does not open the signed balance commitment');
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled(); // rejected before crypto
+  });
+
+  it('rejects a tampered preimage even when strict mode is OFF (mismatch is not a migration case)', async () => {
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '1000', openResult: 'mismatch', minaStrict: false }
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    expectF06(result);
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('binds value on the FIRST openable claim too (no watermark → baseline 0)', async () => {
+    // No watermark: claim nonce 1 → cumulative 1000; price 2000 → underpaid.
+    const h = makeHarness({}, { routePrice: () => '2000', openResult: 'match' });
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(1)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    expectF06(result);
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('MIGRATION (default fail-open): an ABSENT-preimage claim (no balanceB) is freshness-only', async () => {
+    // Legacy client: `minaClaim` carries no balanceB, so the gate cannot open the
+    // commitment. Default (non-strict) posture preserves #360 — log
+    // inbound_claim_value_unenforceable and proceed to crypto (freshness applies).
     const h = makeHarness(
       { [MINA_ZKAPP_ADDRESS]: minaClaim(6) },
       { routePrice: () => '999999999' } // would underpay IF it were enforceable
     );
 
     const result = await h.validator.validate(
-      asProtocolData(minaClaim(7)), // fresh (nonce advances)
+      asProtocolData(minaClaim(7)), // fresh, but no openable preimage
       createPrepare(),
       'peer-a'
     );
 
-    expect(result).toBeNull(); // not rejected: value binding is deferred for Mina
+    expect(result).toBeNull();
+    expect(h.openBalanceCommitment).not.toHaveBeenCalled(); // absent → never opened
     expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1); // proceeded to crypto
+  });
+
+  it('MIGRATION (strict): an ABSENT-preimage claim on a priced route is F06-rejected', async () => {
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaClaim(6) },
+      { routePrice: () => '2000', minaStrict: true }
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    const reject = expectF06(result);
+    expect(reject.message).toContain('no openable balance preimage');
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('MIGRATION: an UNOPENABLE proof (open→unopenable) fails open by default, rejects when strict', async () => {
+    const lenient = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '2000', openResult: 'unopenable' }
+    );
+    const lenientResult = await lenient.validator.validate(
+      asProtocolData(minaOpenableClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+    expect(lenientResult).toBeNull(); // fail-open cutover
+    expect(lenient.verifyBalanceProof).toHaveBeenCalledTimes(1);
+
+    const strict = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '2000', openResult: 'unopenable', minaStrict: true }
+    );
+    const strictResult = await strict.validator.validate(
+      asProtocolData(minaOpenableClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+    expectF06(strictResult);
+    expect(strict.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('does not enforce value on a free Mina route (price 0) — no opening attempted', async () => {
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '0', openResult: 'match' }
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    expect(result).toBeNull();
+    expect(h.openBalanceCommitment).not.toHaveBeenCalled();
+  });
+
+  it('does not enforce value on a forwarded Mina destination (price resolver → null)', async () => {
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => null, openResult: 'match' }
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    expect(result).toBeNull();
+    expect(h.openBalanceCommitment).not.toHaveBeenCalled();
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves freshness precedence: a STALE openable+underpaying claim is rejected as stale', async () => {
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaOpenableClaim(6) },
+      { routePrice: () => '2000', openResult: 'match' }
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaOpenableClaim(4)), // stale nonce
+      createPrepare(),
+      'peer-a'
+    );
+
+    const reject = expectF06(result);
+    expect(reject.message).toContain('Stale payment claim');
+    expect(h.openBalanceCommitment).not.toHaveBeenCalled(); // freshness ran first
   });
 });

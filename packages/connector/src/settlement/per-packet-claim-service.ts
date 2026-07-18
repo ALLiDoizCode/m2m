@@ -202,12 +202,36 @@ export class PerPacketClaimService {
     // lockedAmount and locksRoot are EVM-specific concepts; Solana providers ignore them
     // but the chain-agnostic SignBalanceProofParams interface requires them.
     const locksRoot = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+    // Mina value binding (issue #359 / toon-meta#168): the signed commitment is
+    // `Poseidon([balanceA, balanceB, salt])`, and the inbound gate OPENS that
+    // commitment by recomputing the same hash from the wire `transferredAmount`
+    // (=balanceA), `balanceB`, and `salt`. For that to verify, the salt and
+    // balanceB we SIGN over must be exactly what we put on the wire. So generate
+    // the per-session salt BEFORE signing (as a decimal, Field-parseable string —
+    // the old hex form threw in `safeBigInt` and left the salt effectively 0),
+    // and sign with `balanceB = 0` for the unidirectional per-packet case.
+    let minaBalanceB: string | undefined;
+    let minaSalt: string | undefined;
+    if (ctx.blockchain === 'mina') {
+      if (!ctx.minaSalt) {
+        // 128-bit random rendered as a DECIMAL string (well within the Pallas
+        // field), so signer, wire, gate, and on-chain settlement all parse it
+        // identically via BigInt/Field.
+        ctx.minaSalt = BigInt('0x' + randomBytes(16).toString('hex')).toString();
+      }
+      minaSalt = ctx.minaSalt;
+      minaBalanceB = '0';
+    }
+
     const signature = await ctx.provider.signBalanceProof({
       channelId,
       nonce: newNonce,
       transferredAmount: newCumulative.toString(),
       lockedAmount: '0',
       locksRoot,
+      ...(minaBalanceB !== undefined && { balanceB: minaBalanceB }),
+      ...(minaSalt !== undefined && { salt: minaSalt }),
     });
 
     // Construct self-describing claim message
@@ -272,9 +296,11 @@ export class PerPacketClaimService {
             `but they were not populated for channel ${channelId}`
         );
       }
-      // Generate per-session salt on first claim and cache it
-      if (!ctx.minaSalt) {
-        ctx.minaSalt = randomBytes(16).toString('hex');
+      // Per-session salt was generated (as a decimal string) and signed over
+      // above, before signBalanceProof — see the Mina value-binding note there.
+      // Assert it for the type system (unreachable: set in the mina branch above).
+      if (minaSalt === undefined) {
+        throw new Error('Mina salt was not generated before claim construction (unreachable)');
       }
       const minaClaim: MinaClaimMessage = {
         version: '1.0',
@@ -290,10 +316,14 @@ export class PerPacketClaimService {
         balanceCommitment: newCumulative.toString(),
         // transferredAmount carries participant A's plaintext cumulative balance
         // (the same value that feeds balanceCommitment). It drives the on-chain
-        // claimFromChannel in SettlementExecutor. balanceB/signatureB are left
-        // undefined here: the per-packet path is unidirectional; dual-party
-        // fields only apply to true bidirectional channels.
+        // claimFromChannel in SettlementExecutor.
         transferredAmount: newCumulative.toString(),
+        // balanceB = 0 for the unidirectional per-packet case, emitted EXPLICITLY
+        // (issue #359 / toon-meta#168) so the inbound gate can reconstruct the
+        // Poseidon commitment preimage `[transferredAmount, balanceB, salt]` and
+        // bind claim value to route price. Its presence is also the value-binding
+        // rollout marker the gate keys on.
+        balanceB: '0',
         nonce: newNonce,
         // signBalanceProof returns the serialized (raw-JSON) zk-SNARK proof.
         // The canonical wire encoding for a Mina claim `proof` is base64-encoded
@@ -301,7 +331,7 @@ export class PerPacketClaimService {
         // and the settlement-side verifier base64-decodes before JSON.parse.
         // Encoding here keeps our own produced claims valid against that gate.
         proof: Buffer.from(signature, 'utf8').toString('base64'),
-        salt: ctx.minaSalt,
+        salt: minaSalt,
         // Self-describing signer pubkey (Issue #114): lets the receiver verify the
         // signature against the correct key and resolve participant identity for
         // the on-chain claimFromChannel of an externally-opened channel.
