@@ -43,6 +43,7 @@ import * as path from 'node:path';
 
 import { PaymentChannel } from './PaymentChannel';
 import { RateLimitedUsdcAdmin } from './usdc-rate-limited-admin';
+import { PermissionlessRateLimitedUsdcAdmin } from './usdc-permissionless-admin';
 
 // Real compilation is slow; give each layer ample room (CI machines vary).
 const COMPILE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -72,6 +73,18 @@ const DEPLOYED_PAYMENT_CHANNEL_VK_HASH =
  */
 const DEPLOYED_RATE_LIMITED_ADMIN_VK_HASH =
   '15646924668446182536665832553975716875665619363054690992558188740688863581713';
+
+/**
+ * The PermissionlessRateLimitedUsdcAdmin verification-key hash deployed with the
+ * PERMISSIONLESS public-devnet USDC token (o1js 2.14.0 resolution) — the
+ * permissionless-mint redeploy that supersedes the recipient-signed
+ * RateLimitedUsdcAdmin token. Every permissionless mint proves `canMint` against
+ * this key on-chain — if it drifts, mints on the deployed token stop verifying.
+ * As with the pins above: do not update this constant to make CI green; that is
+ * a deliberate redeploy decision.
+ */
+const DEPLOYED_PERMISSIONLESS_ADMIN_VK_HASH =
+  '24054879512104605220650652318050994093349025874736442573804562558001657468018';
 
 const PKG_ROOT = path.resolve(__dirname, '..');
 
@@ -107,6 +120,21 @@ describe('circuit compile guard (#352)', () => {
   );
 
   it(
+    'PermissionlessRateLimitedUsdcAdmin compiles in-process and keeps the deployed verification key',
+    async () => {
+      const start = Date.now();
+      const { verificationKey } = await PermissionlessRateLimitedUsdcAdmin.compile();
+      // eslint-disable-next-line no-console
+      console.log(
+        `PermissionlessRateLimitedUsdcAdmin.compile() ok in ${((Date.now() - start) / 1000).toFixed(1)}s` +
+          ` — vk hash ${verificationKey.hash.toString()}`
+      );
+      expect(verificationKey.hash.toString()).toBe(DEPLOYED_PERMISSIONLESS_ADMIN_VK_HASH);
+    },
+    COMPILE_TIMEOUT_MS
+  );
+
+  it(
     'every shipped circuit compiles in one pure-ESM process (the deploy-tool modality)',
     () => {
       // Build the pure-ESM lib the deploy CLIs import (idempotent, ~seconds).
@@ -133,6 +161,7 @@ describe('circuit compile guard (#352)', () => {
       expect([...vkHashes.keys()].sort()).toEqual([
         'FungibleTokenAdmin',
         'PaymentChannel',
+        'PermissionlessRateLimitedUsdcAdmin',
         'RateLimitedUsdcAdmin',
         'UsdcChannelToken',
       ]);
@@ -140,6 +169,9 @@ describe('circuit compile guard (#352)', () => {
       // SAME vks as the in-process CJS compiles above.
       expect(vkHashes.get('PaymentChannel')).toBe(DEPLOYED_PAYMENT_CHANNEL_VK_HASH);
       expect(vkHashes.get('RateLimitedUsdcAdmin')).toBe(DEPLOYED_RATE_LIMITED_ADMIN_VK_HASH);
+      expect(vkHashes.get('PermissionlessRateLimitedUsdcAdmin')).toBe(
+        DEPLOYED_PERMISSIONLESS_ADMIN_VK_HASH
+      );
     },
     COMPILE_TIMEOUT_MS
   );
