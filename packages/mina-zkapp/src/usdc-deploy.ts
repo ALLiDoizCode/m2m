@@ -37,6 +37,9 @@ import {
 // `enableChannelEscrow` / `depositToChannel` / `settleFromChannel` methods so the
 // PROOF (not the SDK) binds escrow payouts to the channel commitment.
 import { UsdcChannelToken } from './usdc-channel-token';
+// Rate-limited (permissionless, per-address-per-day capped) admin flavor — the
+// canonical public-devnet mint authority since the rate-limited redeploy.
+import { RateLimitedUsdcAdmin } from './usdc-rate-limited-admin';
 
 /** Result of a USDC token deploy — the values to pin into endpoints.json. */
 export interface UsdcDeployResult {
@@ -158,5 +161,135 @@ export async function mintUsdc(opts: {
   );
   await tx.prove();
   await tx.sign(opts.signers).send();
+  return (await opts.token.getBalanceOf(opts.recipient)).toString();
+}
+
+/**
+ * Deploy the USDC token gated by the RATE-LIMITED admin contract
+ * (`RateLimitedUsdcAdmin`) — the canonical shared-devnet flavor: anyone can
+ * mint to themselves up to the per-address daily cap, enforced in-proof +
+ * in-ledger; `adminAuthority` keeps only pause/upgrade rights (NOT a mint
+ * monopoly), so it does not need to be funded for the token to be usable.
+ *
+ * Identical atomic deploy sequence to {@link deployUsdcToken} (admin + token +
+ * initialize, 3 funded new accounts); only the admin contract class differs.
+ * Also points `FungibleToken.AdminContract` at `RateLimitedUsdcAdmin` so any
+ * later `token.mint(...)` in this process proves against the DEPLOYED admin
+ * circuit (o1js resolves the admin prover through that static).
+ */
+export async function deployRateLimitedUsdcToken(opts: {
+  feePayer: PublicKey;
+  /** Public key of the PAUSE/UPGRADE authority (never needed for minting). */
+  adminAuthority: PublicKey;
+  /** Account for the RateLimitedUsdcAdmin contract. */
+  adminContractKey: PrivateKey;
+  /** Account for the FungibleToken contract. */
+  tokenKey: PrivateKey;
+  /** Signing keys (fee payer + the two contract account keys). */
+  signers: PrivateKey[];
+  network: string;
+  /** zkApp tx fee in nanomina; defaults to MINT_FEE_NANOMINA (0.1 MINA). */
+  feeNanomina?: bigint;
+}): Promise<{
+  result: UsdcDeployResult;
+  token: UsdcChannelToken;
+  admin: RateLimitedUsdcAdmin;
+  /** Hash of the submitted deploy transaction (for the deploy record). */
+  txHash: string;
+}> {
+  FungibleToken.AdminContract = RateLimitedUsdcAdmin;
+  const admin = new RateLimitedUsdcAdmin(opts.adminContractKey.toPublicKey());
+  const token = new UsdcChannelToken(opts.tokenKey.toPublicKey());
+
+  const tx = await Mina.transaction(
+    { sender: opts.feePayer, fee: UInt64.from(opts.feeNanomina ?? MINT_FEE_NANOMINA) },
+    async () => {
+      // Three new accounts pay the account-creation fee: admin, token, circulation.
+      AccountUpdate.fundNewAccount(opts.feePayer, 3);
+      await admin.deploy({ adminPublicKey: opts.adminAuthority });
+      await token.deploy(usdcDeployProps);
+      await token.initialize(
+        opts.adminContractKey.toPublicKey(),
+        USDC_DECIMALS_U8,
+        USDC_START_UNPAUSED // start unpaused
+      );
+    }
+  );
+  await tx.prove();
+  const pending = await tx.sign(opts.signers).send();
+
+  const result: UsdcDeployResult = {
+    tokenAddress: opts.tokenKey.toPublicKey().toBase58(),
+    tokenId: token.deriveTokenId().toString(),
+    adminContractAddress: opts.adminContractKey.toPublicKey().toBase58(),
+    adminAuthority: opts.adminAuthority.toBase58(),
+    decimals: USDC_DECIMALS,
+    network: opts.network,
+  };
+
+  return { result, token, admin, txHash: pending.hash };
+}
+
+/** Options for building a permissionless (rate-limited) self-mint transaction. */
+export interface SelfMintTxOptions {
+  /** Token deployed with the RATE-LIMITED admin contract. */
+  token: FungibleToken;
+  feePayer: PublicKey;
+  /** Mint recipient — must also SIGN (the mint-receipt AU requires it). */
+  recipient: PublicKey;
+  /** Whole USDC to mint (scaled to 6-dp base units). */
+  wholeUsdc: bigint;
+  /** Fee payer + RECIPIENT signing keys (no admin key involved). */
+  signers: PrivateKey[];
+  /**
+   * New accounts this tx must fund: 2 on a recipient's FIRST mint (token
+   * account + mint-receipt account), 0 afterwards.
+   */
+  fundNewAccounts?: number;
+  /** zkApp tx fee in nanomina; defaults to MINT_FEE_NANOMINA (0.1 MINA). */
+  feeNanomina?: bigint;
+  /** Explicit fee-payer nonce override (for queueing txs before inclusion). */
+  nonce?: number;
+}
+
+/**
+ * Build + prove + sign (but do NOT send) a rate-limited self-mint transaction.
+ *
+ * Exposed separately from {@link selfMintUsdc} so callers can control send
+ * ordering — e.g. the on-chain rejection smoke proves a second mint against
+ * the PRE-first-mint receipt state, sends the first, then submits the stale
+ * one and captures the ledger's app-state precondition failure.
+ */
+export async function buildSelfMintTx(
+  opts: SelfMintTxOptions
+): Promise<Mina.Transaction<true, true>> {
+  // Route `token.mint`'s admin call through the rate-limited circuit (the
+  // deployed admin account carries the RateLimitedUsdcAdmin verification key).
+  FungibleToken.AdminContract = RateLimitedUsdcAdmin;
+  const amount = UInt64.from(opts.wholeUsdc * ONE_USDC);
+  const fundNewAccounts = opts.fundNewAccounts ?? 0;
+  const tx = await Mina.transaction(
+    {
+      sender: opts.feePayer,
+      fee: UInt64.from(opts.feeNanomina ?? MINT_FEE_NANOMINA),
+      ...(opts.nonce !== undefined ? { nonce: opts.nonce } : {}),
+    },
+    async () => {
+      if (fundNewAccounts > 0) AccountUpdate.fundNewAccount(opts.feePayer, fundNewAccounts);
+      await opts.token.mint(opts.recipient, amount);
+    }
+  );
+  const proven = await tx.prove();
+  return proven.sign(opts.signers);
+}
+
+/**
+ * Permissionless (rate-limited) self-mint: build, send, and return the
+ * recipient's post-mint balance (base units) as a string. The recipient's key
+ * signs the mint receipt; NO admin signature is involved.
+ */
+export async function selfMintUsdc(opts: SelfMintTxOptions): Promise<string> {
+  const tx = await buildSelfMintTx(opts);
+  await tx.send();
   return (await opts.token.getBalanceOf(opts.recipient)).toString();
 }

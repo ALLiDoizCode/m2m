@@ -5,6 +5,14 @@
 # Mina analog of infra/solana/fund-solana.sh. There is no Mina token CLI, so the
 # mint goes through o1js via tools/mina/fund-usdc.mts (pure-ESM, run via tsx).
 #
+# NOTE (rate-limited mint redeploy, #352 follow-up): the CURRENT public-devnet
+# USDC token (infra/linode/endpoints.json "mina") is gated by RateLimitedUsdcAdmin
+# — mints are PERMISSIONLESS but require the RECIPIENT's signature and are capped
+# per address per ~24h, so this admin-mint script does NOT work against it. Use:
+#   npx tsx tools/mina/self-mint-usdc.mts --token <addr> --admin-contract <addr> \
+#     [--first-mint]   # MINA_FEE_PAYER_KEY + MINA_RECIPIENT_KEY in env
+# This script still works against stock-admin deploys (e.g. the lightnet box).
+#
 # The USDC token-owner zkApp is deployed ONCE to the public devnet by
 # tools/mina/deploy-usdc-token.mts (which writes infra/mina/usdc-token.json with
 # tokenAddress / adminContractAddress). This script reads that file (or env
