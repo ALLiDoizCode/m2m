@@ -19,23 +19,15 @@
   "mina": {
     "graphqlUrl": "https://mina.<DOMAIN>/graphql",
     "upstream": "https://api.minascan.io/node/devnet/v1/graphql",
-    "tokenAddress": "B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d",
-    "tokenId": "9497120696276615621907376728658022802954262638363646162765282600447713419198",
-    "adminContractAddress": "B62qpeGPgEhz6Vbd9E11PoTzz2EZZCJjqhwALxJ2BnkdozFm2rZtmRB",
-    "adminAuthority": "B62qqss8MphndS1nGNdtwaE936AaojqLu4wPFfw9yjA5Ga66XdVBoiE",
+    "tokenAddress": "B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa",
+    "tokenId": "13195431355853976025555236213553162231466702378883981110250774386432112635553",
+    "adminContractAddress": "B62qk3RsLgL38Vk7nDzGT3XHBjtzN9W9zz4A6WS2a6DhBMac9N8NKDs",
+    "adminAuthority": "B62qre1cKoN6KBRz16y98fFdR9hHi6AgWncgVYNYtEVQ9iU95QbT1CM",
     "demoChannelZkApp": "B62qigQwEwBAsSZad4GhSun8CAwkh3GUbx2YN2TbUHU8tzVFcFTE95x",
     "tokenDecimals": 6,
     "_fund": "PERMISSIONLESS MINT (no recipient key, no admin key): npx tsx tools/mina/mint-usdc.mts <recipient-b58> [amount] --token <tokenAddress> --admin-contract <adminContractAddress> — ANY funded fee payer mints up to 1,000 USDC per recipient per ~24h window (480 slots), enforced in-proof + in-ledger (PermissionlessRateLimitedUsdcAdmin). The recipient does NOT sign, so a webpage/connected wallet can mint to a typed-in address and any third-party/on-chain caller can mint to an address. First mint to a fresh recipient funds 2 new accounts (its token account + mint-receipt account), paid by the fee payer (~2 MINA); auto-detected by the CLI. Accepted devnet trade-off: a griefer can burn an address's daily quota by minting junk at it (harmless — mock token, self-heals each window). No admin key mints — admin = pause/upgrade only.",
     "_connectorNote": "On the live box the connector reads via the minascan upstream directly (the mina.<DOMAIN> proxy 504s on send). Set chainProviders[mina].graphqlUrl to the upstream, tokenAddress/tokenId to these live values. The connector verify path follows the per-claim channelAccount, so client-opened channels work; demoChannelZkApp is a pre-OPEN USDC channel for quick checks (predates this token — settles in the superseded 2026-06 token).",
-    "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). USDC FungibleToken (UsdcChannelToken, 6dp) gated by the PERMISSIONLESS rate-limited admin (PermissionlessRateLimitedUsdcAdmin: any fee payer mints to ANY address, 1,000 USDC/recipient/~24h enforced in-proof + in-ledger, NO recipient signature; admin key = pause/upgrade ONLY). Receipt counter is an increase-only packed balance (windowStart*2^32 + mintedInWindow) under the admin token id — the only owner-proof-writable field on a fresh recipient-keyed account. Supersedes the recipient-signed RateLimitedUsdcAdmin token B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d (2026-07-18) and earlier tokens.",
-    "_pendingPermissionlessRedeploy": {
-      "status": "PENDING FUNDING — the address/tokenId/adminContractAddress fields above still point to the recipient-signed RateLimitedUsdcAdmin token; they are replaced by the funded permissionless redeploy (tools/mina/deploy-usdc-token.mts --permissionless --out infra/mina/usdc-token.json).",
-      "deployerToFund": "B62qodjF3DByZfmT68bkTdLXV6Yqt9WJ8waG6CXpBbmaupP2vkYKTAd",
-      "deployerNeedsMina": "~4.3 (to ~6 MINA: 3-account deploy + live smoke + headroom)",
-      "newAdminAuthorityPublicKey": "B62qre1cKoN6KBRz16y98fFdR9hHi6AgWncgVYNYtEVQ9iU95QbT1CM",
-      "permissionlessAdminVkHash": "24054879512104605220650652318050994093349025874736442573804562558001657468018",
-      "usdcChannelTokenVkHash": "9692307225143487166733467413506207145324336685411164992097971188215422741850"
-    }
+    "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). USDC FungibleToken (UsdcChannelToken, 6dp) gated by the PERMISSIONLESS rate-limited admin (PermissionlessRateLimitedUsdcAdmin: any fee payer mints to ANY address, 1,000 USDC/recipient/~24h enforced in-proof + in-ledger, NO recipient signature; admin key = pause/upgrade ONLY). Receipt counter is an increase-only packed balance (windowStart*2^32 + mintedInWindow) under the admin token id — the only owner-proof-writable field on a fresh recipient-keyed account. Deployed to public devnet 2026-07-18 (deploy tx 5JuEsg9srJYB84e663Z62es8dK8xBfyQzL1tmiWvAthubBHy4WUn; PermissionlessRateLimitedUsdcAdmin vk 24054879512104605220650652318050994093349025874736442573804562558001657468018, UsdcChannelToken vk 9692307225143487166733467413506207145324336685411164992097971188215422741850). SUPERSEDES the recipient-signed RateLimitedUsdcAdmin token B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d (2026-07-18) and earlier tokens."
   },
   "_decimalsNote": "USDC is 6-decimal on every chain (EVM + Solana), so claim base units are uniform — no cross-chain normalization needed."
 }
