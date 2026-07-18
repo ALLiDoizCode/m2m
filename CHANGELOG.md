@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.35.0](https://github.com/toon-protocol/connector/compare/v3.34.8...v3.35.0) (2026-07-18)
+
+### Features
+
+- **mina:** permissionless USDC mint (mint to any address, recipient does not sign) ([#362](https://github.com/toon-protocol/connector/issues/362)) ([55ef944](https://github.com/toon-protocol/connector/commit/55ef9440846ff1fe702e99d610b3b214ec5f3035))
+
 ## [3.34.8](https://github.com/toon-protocol/connector/compare/v3.34.7...v3.34.8) (2026-07-18)
 
 ### Bug Fixes
