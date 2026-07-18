@@ -41,19 +41,21 @@ let compiled = false;
 type ProveResult = { txJson: string; fundNewAccounts: number };
 const pending = new Map<
   number,
-  {
-    resolve: (r: ProveResult) => void;
-    reject: (e: Error) => void;
-    onProgress?: (stage: ProveStage, message: string) => void;
-  }
+  { resolve: (r: ProveResult) => void; reject: (e: Error) => void }
 >();
+
+// The worker emits `progress` decoupled from any single request id (id 0), so we
+// route progress to whichever operation is currently in flight.
+let currentProgress: ((stage: ProveStage, message: string) => void) | null = null;
 
 worker.onmessage = (ev: MessageEvent<WorkerResponse>) => {
   const msg = ev.data;
-  const p = pending.get(msg.id);
   if (msg.kind === 'progress') {
-    p?.onProgress?.(msg.stage, msg.message);
-  } else if (msg.kind === 'compiled') {
+    currentProgress?.(msg.stage, msg.message);
+    return;
+  }
+  const p = pending.get(msg.id);
+  if (msg.kind === 'compiled') {
     compiled = true;
     p?.resolve({ txJson: '', fundNewAccounts: 0 });
     pending.delete(msg.id);
@@ -77,19 +79,34 @@ function ask(
   onProgress?: (stage: ProveStage, message: string) => void
 ): Promise<ProveResult> {
   const id = reqSeq++;
+  if (onProgress) currentProgress = onProgress;
   return new Promise<ProveResult>((resolve, reject) => {
-    pending.set(id, { resolve, reject, onProgress });
+    pending.set(id, {
+      resolve: (r) => {
+        if (onProgress && currentProgress === onProgress) currentProgress = null;
+        resolve(r);
+      },
+      reject: (e) => {
+        if (onProgress && currentProgress === onProgress) currentProgress = null;
+        reject(e);
+      },
+    });
     worker.postMessage({ ...req, id } as WorkerRequest);
   });
 }
 
 function startCompile() {
-  if (compileStarted) return;
+  if (compileStarted || compiled) return;
   compileStarted = true;
+  state.compileError = false;
+  render();
   ask({ kind: 'compile' }).catch((e) => {
+    // Reset so the user can retry a fresh compile (the worker also resets its
+    // memoized compile promise on failure, so a retry recompiles cleanly).
     compileStarted = false;
+    state.compileError = true;
     console.error('compile failed', e);
-    setBanner('err', `Circuit compile failed: ${e.message}`);
+    setBanner('err', 'Could not prepare the proving circuits. Please retry.');
   });
 }
 
@@ -106,6 +123,7 @@ interface State {
   proveStage: ProveStage | null;
   proveMessage: string;
   txHash: string | null;
+  compileError: boolean;
 }
 
 const state: State = {
@@ -120,6 +138,7 @@ const state: State = {
   proveStage: null,
   proveMessage: '',
   txHash: null,
+  compileError: false,
 };
 
 function setBanner(kind: State['banner'] extends null ? never : 'ok' | 'err' | 'warn' | 'info', html: string) {
@@ -215,9 +234,14 @@ async function doMint() {
     void refreshAllowance();
   } catch (e) {
     state.proving = false;
+    state.proveStage = null;
     const msg = (e as Error).message || String(e);
     if (/reject|denied|cancel/i.test(msg)) {
-      setBanner('warn', 'Transaction was rejected in Auro.');
+      setBanner('warn', 'Transaction was rejected in Auro. You can try again.');
+    } else if (/global context|inconsistent state|parallel|concurrently/i.test(msg)) {
+      // Should not happen (o1js work is serialized in the worker), but surface a
+      // clean retry instead of a raw o1js stack if it ever does.
+      setBanner('err', 'The prover hit a transient error. Please click the button to try again.');
     } else {
       setBanner('err', `Mint failed: ${msg}`);
     }
@@ -290,15 +314,21 @@ function view(): string {
       ? `<div class="status warn" style="margin-bottom:16px">Auro is on <b>${state.networkRaw || 'an unknown network'}</b>. Switch Auro to <b>Devnet</b> or the mint will fail.</div>`
       : '';
 
+  // Gate the button until circuits are compiled: this both prevents a click
+  // that would race an in-flight compile AND sets honest expectations. (The
+  // worker also serializes all o1js work, so this is defense-in-depth.)
   const mintDisabled =
     state.proving ||
     !connected ||
+    !compiled ||
     !isValidAddr(state.recipient) ||
     state.allowance?.exhausted === true;
 
   const mintLabel = state.proving
     ? state.proveMessage || 'Working…'
-    : `Get ${FAUCET_MINT_WHOLE_USDC} test USDC`;
+    : connected && !compiled
+      ? 'Compiling circuits… (~30s, one time)'
+      : `Get ${FAUCET_MINT_WHOLE_USDC} test USDC`;
 
   return `
     <div class="brand">
@@ -328,7 +358,13 @@ function view(): string {
         ? `<div class="card">
              <div class="row wrap" style="justify-content:space-between">
                <span class="chip"><span class="dot ${state.networkOk === false ? 'warn' : ''}"></span>${shorten(state.account!)}</span>
-               <span class="hint">${compiled ? 'circuits ready' : 'compiling circuits…'}</span>
+               <span class="hint">${
+                 compiled
+                   ? 'circuits ready'
+                   : state.compileError
+                     ? '<button class="ghost" id="retry-compile" style="width:auto;padding:4px 10px;font-size:0.8rem">Retry compile</button>'
+                     : 'compiling circuits…'
+               }</span>
              </div>
            </div>`
         : `<div class="card">
@@ -366,6 +402,9 @@ function wire() {
 
   const mintBtn = document.getElementById('mint');
   if (mintBtn) mintBtn.addEventListener('click', () => void doMint());
+
+  const retryBtn = document.getElementById('retry-compile');
+  if (retryBtn) retryBtn.addEventListener('click', () => startCompile());
 
   const input = document.getElementById('recipient') as HTMLInputElement | null;
   if (input) {
