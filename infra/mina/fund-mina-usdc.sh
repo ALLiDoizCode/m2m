@@ -3,10 +3,10 @@
 # Fund a Mina address on the (public) devnet with mock USDC (admin-mint).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Mina analog of infra/solana/fund-solana.sh. There is no Mina token CLI, so the
-# mint goes through o1js via tools/mina/fund-usdc.ts.
+# mint goes through o1js via tools/mina/fund-usdc.mts (pure-ESM, run via tsx).
 #
 # The USDC token-owner zkApp is deployed ONCE to the public devnet by
-# tools/mina/deploy-usdc-token.ts (which writes infra/mina/usdc-token.json with
+# tools/mina/deploy-usdc-token.mts (which writes infra/mina/usdc-token.json with
 # tokenAddress / adminContractAddress). This script reads that file (or env
 # overrides) and admin-mints USDC to the recipient. The recipient's token account
 # is auto-created on first mint (fee paid by the admin authority).
@@ -38,7 +38,7 @@ if [ -z "${MINA_USDC_ADMIN_KEY:-}" ]; then
 fi
 
 # Resolve the deployed token + admin-contract addresses: env overrides, else the
-# committed deploy-result JSON written by deploy-usdc-token.ts.
+# committed deploy-result JSON written by deploy-usdc-token.mts.
 TOKEN_ADDR="${MINA_USDC_TOKEN:-}"
 ADMIN_CONTRACT="${MINA_USDC_ADMIN_CONTRACT:-}"
 if { [ -z "$TOKEN_ADDR" ] || [ -z "$ADMIN_CONTRACT" ]; } && [ -f "$DEPLOY_JSON" ]; then
@@ -51,7 +51,7 @@ if { [ -z "$TOKEN_ADDR" ] || [ -z "$ADMIN_CONTRACT" ]; } && [ -f "$DEPLOY_JSON" 
 fi
 
 if [ -z "$TOKEN_ADDR" ] || [ -z "$ADMIN_CONTRACT" ]; then
-  echo "ERROR: token/admin-contract address unknown. Deploy first (deploy-usdc-token.ts" >&2
+  echo "ERROR: token/admin-contract address unknown. Deploy first (deploy-usdc-token.mts" >&2
   echo "       --out infra/mina/usdc-token.json) or set MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT." >&2
   exit 1
 fi
@@ -60,7 +60,10 @@ echo "==> Admin-minting $USDC_AMOUNT USDC to $RECIPIENT on $NETWORK"
 echo "    token=$TOKEN_ADDR admin-contract=$ADMIN_CONTRACT"
 
 cd "$ROOT"
-npx ts-node tools/mina/fund-usdc.ts \
+# fund-usdc is a PURE-ESM CLI (single-o1js-instance requirement, issue #352) run
+# via tsx; it imports the packages/mina-zkapp dist-esm build, so build it first.
+npm run build:esm --workspace=packages/mina-zkapp
+npx tsx tools/mina/fund-usdc.mts \
   --network "$NETWORK" \
   --token "$TOKEN_ADDR" \
   --admin-contract "$ADMIN_CONTRACT" \

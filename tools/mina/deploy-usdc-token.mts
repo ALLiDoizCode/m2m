@@ -14,7 +14,20 @@
  * in `infra/linode/endpoints.json` (`mina.tokenAddress`, `mina.tokenId`). Minting
  * to peers is done by the admin authority via `infra/mina/fund-mina-usdc.sh`.
  *
- * The deploy sequence mirrors `packages/mina-zkapp/src/usdc-token.test.ts`:
+ * ── Why this CLI is a PURE-ESM `.mts` (issue #352) ───────────────────────────
+ * o1js is a DUAL package: `require('o1js')` loads `dist/node/index.cjs` while
+ * `import 'o1js'` loads `dist/node/index.js` — two separate module instances
+ * whose `Snarky` bindings are per-instance state. `mina-fungible-token` is
+ * ESM-ONLY, so any CJS-transpiled run of this tool (the old `npx ts-node`
+ * invocation) loads BOTH o1js builds and `UsdcChannelToken.compile()` dies with
+ * `TypeError: Cannot read properties of undefined (reading 'run')` at the first
+ * gadget executed in the never-initialized copy. Running the whole graph as ESM
+ * — this `.mts` via `tsx`, the zkApp classes from `packages/mina-zkapp/dist-esm/`
+ * (the pure-ESM build the lightnet deployer + faucet already use) — keeps o1js
+ * single-instance. `PaymentChannel` (tools/mina/deploy-zkapp.ts) never hit this
+ * because it does not import `mina-fungible-token`.
+ *
+ * The deploy sequence mirrors `packages/mina-zkapp/src/usdc-deploy.test.ts`:
  *   1. deploy a `FungibleTokenAdmin` with `{ adminPublicKey }` (the mint authority)
  *   2. deploy a `FungibleToken` with `usdcDeployProps`
  *   3. `token.initialize(adminContract.address, UInt8.from(6), Bool(false))`
@@ -26,8 +39,8 @@
  * from the Mina devnet faucet (https://faucet.minaprotocol.com) first.
  *
  * ── Live deploy (public devnet) ──────────────────────────────────────────────
- *   Build the zkApp lib first so `mina-fungible-token` + o1js resolve:
- *     npm run build --workspace=packages/mina-zkapp   # (optional; we import src)
+ *   Build the pure-ESM zkApp lib first (required — this CLI imports dist-esm/):
+ *     npm run build:esm --workspace=packages/mina-zkapp
  *
  *   export MINA_DEPLOYER_KEY=<base58 private key, FUNDED on devnet>
  *   export MINA_USDC_ADMIN_KEY=<base58 private key, FUNDED on devnet>   # mint authority
@@ -35,7 +48,7 @@
  *   #   export MINA_USDC_TOKEN_KEY=<base58 private key>
  *   #   export MINA_USDC_ADMIN_CONTRACT_KEY=<base58 private key>
  *
- *   npx ts-node tools/mina/deploy-usdc-token.ts \
+ *   npx tsx tools/mina/deploy-usdc-token.mts \
  *     --network https://api.minascan.io/node/devnet/v1/graphql \
  *     --out infra/mina/usdc-token.json
  *
@@ -43,124 +56,58 @@
  *     and (to stderr) the generated contract private keys. Pin tokenAddress/tokenId
  *     into infra/linode/endpoints.json.
  *
+ * ── Compile-only dry run (no network, no keys, no funds) ─────────────────────
+ *   Compiles FungibleTokenAdmin + UsdcChannelToken exactly as the live path does,
+ *   prints timings + verification-key hashes, and exits. This is the CI/regression
+ *   surface for the #352 duplicate-instance failure:
+ *     npx tsx tools/mina/deploy-usdc-token.mts --compile-only
+ *
  * ── Local smoke test (no network, no funded key) ─────────────────────────────
- *   The authoritative smoke test is the jest suite (it compiles the ESM
- *   `mina-fungible-token` to CJS so it shares ONE o1js instance — required, else
- *   o1js throws "Must call Mina.setActiveInstance first" from a duplicate copy):
- *     npx jest --config tools/mina/jest.config.js
- *   It exercises the exported `deployUsdcToken` (6-dp deploy + tokenId) and
- *   `mintUsdc` (admin-mint) used by this script and fund-usdc.ts.
+ *   Deploys + mints on Mina.LocalBlockchain (proofsEnabled: false):
+ *     npx tsx tools/mina/deploy-usdc-token.mts --local
+ *   The same flow is jest-tested in packages/mina-zkapp/src/usdc-deploy.test.ts
+ *   (runs in CI).
  *
- *   The `--local` flag below runs the same flow standalone, but ONLY works when
- *   o1js is loaded as a single module instance (e.g. a bundled build); under bare
- *   `ts-node` the ESM/CJS split breaks it. Prefer the jest suite.
- *     npx ts-node tools/mina/deploy-usdc-token.ts --local
- *
- * Epic: USDC settlement across all chains (connector#188), ticket #193.
+ * Epic: USDC settlement across all chains (connector#188), ticket #193; the
+ * pure-ESM runner is the fix for the o1js UsdcChannelToken compile skew issue
+ * (#352).
  *
  * @module deploy-usdc-token
  */
 
 /* eslint-disable no-console */
 
-import { promises as fs } from 'fs';
-import * as path from 'path';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 
-import { AccountUpdate, Bool, Mina, PrivateKey, PublicKey, UInt64 } from 'o1js';
+import { AccountUpdate, Mina, PrivateKey, UInt64 } from 'o1js';
 
+// Pure-ESM build of the zkApp lib (npm run build:esm --workspace=packages/mina-zkapp).
+// Importing src/ (or the CJS dist/) here would re-introduce the dual-o1js seam.
 import {
   FungibleTokenAdmin,
   USDC_DECIMALS,
-  USDC_DECIMALS_U8,
   ONE_USDC,
-  usdcDeployProps,
-} from '../../packages/mina-zkapp/src/usdc-token';
-// In-proof-enforcing USDC token owner (Phase A). Deploys EXACTLY like the stock
-// `FungibleToken` (same usdcDeployProps / initialize), but ADDS the channel-bound
-// `enableChannelEscrow` / `depositToChannel` / `settleFromChannel` methods so the
-// PROOF (not the SDK) binds escrow payouts to the channel commitment.
-import { UsdcChannelToken } from '../../packages/mina-zkapp/src/usdc-channel-token';
+} from '../../packages/mina-zkapp/dist-esm/usdc-token.js';
+import { UsdcChannelToken } from '../../packages/mina-zkapp/dist-esm/usdc-channel-token.js';
+import { deployUsdcToken, mintUsdc } from '../../packages/mina-zkapp/dist-esm/usdc-deploy.js';
+// Type-only import (erased at runtime — loads NO module, so no dual-o1js risk).
+import type { UsdcDeployResult } from '../../packages/mina-zkapp/src/usdc-deploy';
 
 const DEFAULT_NETWORK = 'https://api.minascan.io/node/devnet/v1/graphql';
-
-/** Result of a USDC token deploy — the values to pin into endpoints.json. */
-export interface UsdcDeployResult {
-  /** Base58 address of the deployed `FungibleToken` (the USDC token-owner zkApp). */
-  tokenAddress: string;
-  /** Derived Mina token id (`token.deriveTokenId()`) for USDC. */
-  tokenId: string;
-  /** Base58 address of the `FungibleTokenAdmin` contract gating mints. */
-  adminContractAddress: string;
-  /** Base58 address of the admin AUTHORITY (the funded key that signs mints). */
-  adminAuthority: string;
-  /** 6. */
-  decimals: number;
-  network: string;
-}
-
-/**
- * Build (and, when `send` is true, submit) the atomic deploy transaction for the
- * USDC admin + token contracts. Returns the deploy result plus the contract
- * instances so callers (deploy + smoke test) can reuse them for a follow-up mint.
- *
- * Shared by the live path and the local smoke test so the exact deploy sequence
- * is verified without a network.
- */
-export async function deployUsdcToken(opts: {
-  feePayer: PublicKey;
-  /** Private key of the admin AUTHORITY (mint authority) — must be FUNDED. */
-  adminAuthority: PublicKey;
-  /** Account for the FungibleTokenAdmin contract. */
-  adminContractKey: PrivateKey;
-  /** Account for the FungibleToken contract. */
-  tokenKey: PrivateKey;
-  /** Signing keys (fee payer + the two contract account keys). */
-  signers: PrivateKey[];
-  network: string;
-}): Promise<{
-  result: UsdcDeployResult;
-  token: UsdcChannelToken;
-  admin: FungibleTokenAdmin;
-}> {
-  const admin = new FungibleTokenAdmin(opts.adminContractKey.toPublicKey());
-  const token = new UsdcChannelToken(opts.tokenKey.toPublicKey());
-
-  const tx = await Mina.transaction(opts.feePayer, async () => {
-    // Three new accounts pay the account-creation fee: admin, token, circulation.
-    AccountUpdate.fundNewAccount(opts.feePayer, 3);
-    await admin.deploy({ adminPublicKey: opts.adminAuthority });
-    await token.deploy(usdcDeployProps);
-    await token.initialize(
-      opts.adminContractKey.toPublicKey(),
-      USDC_DECIMALS_U8,
-      Bool(false) // start unpaused
-    );
-  });
-  await tx.prove();
-  await tx.sign(opts.signers).send();
-
-  const result: UsdcDeployResult = {
-    tokenAddress: opts.tokenKey.toPublicKey().toBase58(),
-    tokenId: token.deriveTokenId().toString(),
-    adminContractAddress: opts.adminContractKey.toPublicKey().toBase58(),
-    adminAuthority: opts.adminAuthority.toBase58(),
-    decimals: USDC_DECIMALS,
-    network: opts.network,
-  };
-
-  return { result, token, admin };
-}
 
 interface CliArgs {
   network: string;
   out: string | undefined;
   local: boolean;
+  compileOnly: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   let network = '';
   let out: string | undefined;
   let local = false;
+  let compileOnly = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -173,10 +120,12 @@ function parseArgs(argv: string[]): CliArgs {
       i++;
     } else if (arg === '--local') {
       local = true;
+    } else if (arg === '--compile-only') {
+      compileOnly = true;
     }
   }
 
-  if (!local) {
+  if (!local && !compileOnly) {
     if (!network) network = DEFAULT_NETWORK;
     if (!network.startsWith('https://')) {
       console.error(
@@ -188,7 +137,7 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  return { network, out, local };
+  return { network, out, local, compileOnly };
 }
 
 /** Require a base58 private key from env, exiting with a clear message if absent. */
@@ -209,6 +158,26 @@ function requireKey(envVar: string): PrivateKey {
 function keyFromEnvOrRandom(envVar: string): PrivateKey {
   const raw = process.env[envVar];
   return raw ? PrivateKey.fromBase58(raw) : PrivateKey.random();
+}
+
+/**
+ * Compile both circuits the live deploy needs, printing timing + vk hash for
+ * each. Shared by `runLive` and the `--compile-only` dry run so the dry run
+ * exercises the EXACT compile path that broke in the field (#352).
+ */
+async function compileCircuits(): Promise<void> {
+  console.log('Compiling FungibleTokenAdmin + UsdcChannelToken circuits...');
+  for (const [name, contract] of [
+    ['FungibleTokenAdmin', FungibleTokenAdmin],
+    ['UsdcChannelToken', UsdcChannelToken],
+  ] as const) {
+    const t0 = Date.now();
+    const { verificationKey } = await contract.compile();
+    console.log(
+      `  ${name}.compile() ok in ${((Date.now() - t0) / 1000).toFixed(1)}s` +
+        ` — vk hash ${verificationKey.hash.toString()}`
+    );
+  }
 }
 
 /** Local smoke test on Mina.LocalBlockchain — proves deploy + mint with no network. */
@@ -243,19 +212,20 @@ async function runLocal(): Promise<void> {
   console.log(`  ✓ tokenId      = ${result.tokenId}`);
 
   // Prove the admin authority can mint (the funding path).
-  const amount = UInt64.from(1000n * ONE_USDC);
-  const mintTx = await Mina.transaction(deployer, async () => {
-    AccountUpdate.fundNewAccount(deployer, 1);
-    await token.mint(recipient, amount);
+  const wholeUsdc = 1000n;
+  const balance = await mintUsdc({
+    token,
+    feePayer: deployer,
+    recipient,
+    wholeUsdc,
+    signers: [deployer.key, adminAuthority.key],
+    fundRecipient: true,
   });
-  await mintTx.prove();
-  await mintTx.sign([deployer.key, adminAuthority.key]).send();
-
-  const balance = await token.getBalanceOf(recipient);
-  if (balance.toString() !== amount.toString()) {
-    throw new Error(`mint mismatch: ${balance.toString()} != ${amount.toString()}`);
+  const amount = UInt64.from(wholeUsdc * ONE_USDC);
+  if (balance !== amount.toString()) {
+    throw new Error(`mint mismatch: ${balance} != ${amount.toString()}`);
   }
-  console.log(`  ✓ admin-minted 1,000 USDC to a recipient (balance ${balance.toString()})`);
+  console.log(`  ✓ admin-minted 1,000 USDC to a recipient (balance ${balance})`);
   console.log('\nLocal smoke test PASSED.');
 }
 
@@ -270,10 +240,8 @@ async function runLive(args: CliArgs): Promise<void> {
   const Network = Mina.Network({ mina: args.network });
   Mina.setActiveInstance(Network);
 
-  console.log('Compiling FungibleTokenAdmin + UsdcChannelToken circuits...');
   const t0 = Date.now();
-  await FungibleTokenAdmin.compile();
-  await UsdcChannelToken.compile();
+  await compileCircuits();
   console.log(`Compilation complete in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
   const deployerPub = deployer.toPublicKey();
@@ -292,13 +260,7 @@ async function runLive(args: CliArgs): Promise<void> {
     network: args.network,
   });
 
-  console.log('\n=== USDC Token Deployment Complete ===');
-  console.log(`tokenAddress:         ${result.tokenAddress}`);
-  console.log(`tokenId:              ${result.tokenId}`);
-  console.log(`adminContractAddress: ${result.adminContractAddress}`);
-  console.log(`adminAuthority:       ${result.adminAuthority}`);
-  console.log(`decimals:             ${result.decimals}`);
-  console.log(`network:              ${result.network}`);
+  printResult(result);
 
   if (args.out) {
     const outPath = path.resolve(args.out);
@@ -320,18 +282,32 @@ async function runLive(args: CliArgs): Promise<void> {
   );
 }
 
+function printResult(result: UsdcDeployResult): void {
+  console.log('\n=== USDC Token Deployment Complete ===');
+  console.log(`tokenAddress:         ${result.tokenAddress}`);
+  console.log(`tokenId:              ${result.tokenId}`);
+  console.log(`adminContractAddress: ${result.adminContractAddress}`);
+  console.log(`adminAuthority:       ${result.adminAuthority}`);
+  console.log(`decimals:             ${result.decimals}`);
+  console.log(`network:              ${result.network}`);
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  if (args.local) {
+  if (args.compileOnly) {
+    const t0 = Date.now();
+    await compileCircuits();
+    console.log(
+      `Compile-only run complete in ${((Date.now() - t0) / 1000).toFixed(1)}s (no network, nothing deployed).`
+    );
+  } else if (args.local) {
     await runLocal();
   } else {
     await runLive(args);
   }
 }
 
-if (require.main === module) {
-  void main().catch((err: unknown) => {
-    console.error('USDC token deploy failed:', err);
-    process.exit(1);
-  });
-}
+void main().catch((err: unknown) => {
+  console.error('USDC token deploy failed:', err);
+  process.exit(1);
+});

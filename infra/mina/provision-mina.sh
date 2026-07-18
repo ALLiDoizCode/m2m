@@ -11,7 +11,7 @@
 #   1. USDC token zkApp — detect if the token account is live on public devnet.
 #      If live: skip (re-deploying would mint a NEW token at a NEW address and
 #      break every pinned consumer). If NOT live: print the exact deploy command
-#      (deploy-usdc-token.ts) — a deploy needs FUNDED deployer/admin keys that
+#      (deploy-usdc-token.mts) — a deploy needs FUNDED deployer/admin keys that
 #      only the operator holds, so we never auto-deploy silently.
 #
 #   2. Faucet funding — the two faucet/admin accounts that must stay funded with
@@ -100,7 +100,8 @@ if [ -z "$TOKEN_ADDR" ]; then
   echo "  ⚠️  No Mina USDC token address known (MINA_USDC_TOKEN unset and none in" >&2
   echo "      infra/mina/usdc-token.json / endpoints.json). Deploy it ONCE with:" >&2
   echo "        export MINA_DEPLOYER_KEY=<funded base58>  MINA_USDC_ADMIN_KEY=<funded base58>" >&2
-  echo "        npx ts-node tools/mina/deploy-usdc-token.ts --out infra/mina/usdc-token.json" >&2
+  echo "        npm run build:esm --workspace=packages/mina-zkapp" >&2
+  echo "        npx tsx tools/mina/deploy-usdc-token.mts --out infra/mina/usdc-token.json" >&2
   echo "      then pin tokenAddress/tokenId/adminContractAddress into endpoints.json." >&2
 else
   # A deployed token-OWNER zkApp account has on-chain zkappState; a never-deployed
@@ -118,7 +119,8 @@ else
   else
     echo "  ⚠️  USDC token $TOKEN_ADDR is NOT live on $NETWORK." >&2
     echo "      Re-deploy ONCE (operator keys required):" >&2
-    echo "        npx ts-node tools/mina/deploy-usdc-token.ts --out infra/mina/usdc-token.json" >&2
+    echo "        npm run build:esm --workspace=packages/mina-zkapp" >&2
+    echo "        npx tsx tools/mina/deploy-usdc-token.mts --out infra/mina/usdc-token.json" >&2
   fi
 fi
 
