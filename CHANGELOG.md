@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.34.5](https://github.com/toon-protocol/connector/compare/v3.34.4...v3.34.5) (2026-07-18)
+
+### Bug Fixes
+
+- **mina:** single-o1js-instance USDC deploy tooling + circuit-compile CI guard ([#354](https://github.com/toon-protocol/connector/issues/354)) ([8d627b6](https://github.com/toon-protocol/connector/commit/8d627b65d1cf4d1b9996e3549d72df71062fc69b)), closes [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352)
+
 ## [3.34.4](https://github.com/toon-protocol/connector/compare/v3.34.3...v3.34.4) (2026-07-17)
 
 ### Bug Fixes
