@@ -545,6 +545,76 @@ describe('BTPServer Coverage Part 3', () => {
       expect((ilp as ILPRejectPacket).message).toContain('Stale payment claim');
     });
 
+    it('F06-rejects an UNDERPAYING claim through the REAL validator: packet handler and crypto never invoked (#359)', async () => {
+      const mockWs = new (jest.requireMock('ws').default)();
+
+      // A FRESH claim (nonce 7 > watermark 6) that advances the cumulative by
+      // only 1000 base units, on a route priced at 2000 → underpaid. This is
+      // exactly the #359 hole: fresh enough to pass #358, but paying below price.
+      const solClaim = (nonce: number): SolanaClaimMessage => ({
+        version: '1.0',
+        blockchain: 'solana',
+        messageId: `sol-underpay-${nonce}`,
+        timestamp: '2026-07-17T12:00:00.000Z',
+        senderId: 'peer-msg',
+        programId: '11111111111111111111111111111111',
+        channelAccount: 'ChanAcct1111111111111111111111111111111111',
+        nonce,
+        transferredAmount: String(1000 * nonce),
+        signature: 'c2lnbmF0dXJl',
+        signerPublicKey: 'SiGnEr111111111111111111111111111111111111',
+        cluster: 'devnet',
+      });
+      const verifyBalanceProof = jest.fn(async () => true);
+      const registry = new ChainProviderRegistry();
+      registry.register({
+        chainType: 'solana',
+        chainId: 'solana:devnet',
+        verifyBalanceProof,
+      } as any);
+      const validator = new InboundClaimValidator(
+        undefined,
+        'g.connector',
+        createMockLogger() as any,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        registry,
+        async () => solClaim(6), // watermark: cumulative 6000 at nonce 6
+        () => '2000' // route price 2000 > claim delta (7000 − 6000 = 1000)
+      );
+      server.setInboundClaimValidator((pd, pkt, peer) => validator.validate(pd, pkt, peer));
+
+      const msg: BTPMessage = {
+        type: BTPMessageType.MESSAGE,
+        requestId: 12,
+        data: {
+          protocolData: [
+            {
+              protocolName: 'payment-channel-claim',
+              contentType: 1,
+              data: Buffer.from(JSON.stringify(solClaim(7)), 'utf8'),
+            },
+          ],
+          ilpPacket: serializePacket(createILPPreparePacket()),
+        },
+      };
+      await (server as any).handleMessage(makePeerConn(mockWs, 'peer-msg', true), msg);
+
+      // Underpayment dies on local data (watermark + in-memory route price)
+      // before the backend seam or any crypto verification.
+      expect(mockPacketHandler.handlePreparePacket).not.toHaveBeenCalled();
+      expect(verifyBalanceProof).not.toHaveBeenCalled();
+
+      const parsed = parseBTPMessage(mockWs.sentMessages[0]!);
+      expect(parsed.type).toBe(BTPMessageType.RESPONSE);
+      const ilp = deserializePacket((parsed.data as BTPData).ilpPacket!);
+      expect(ilp.type).toBe(PacketType.REJECT);
+      expect((ilp as ILPRejectPacket).code).toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
+      expect((ilp as ILPRejectPacket).message).toContain('Insufficient claim value');
+    });
+
     it('passes when inbound claim validator returns null', async () => {
       const mockWs = new (jest.requireMock('ws').default)();
       server.setInboundClaimValidator(async () => null);

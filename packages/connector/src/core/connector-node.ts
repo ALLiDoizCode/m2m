@@ -1884,7 +1884,16 @@ export class ConnectorNode implements HealthStatusProvider {
             async (peerId, blockchain, channelId) =>
               this._claimReceiver
                 ? this._claimReceiver.getReceivedClaimWatermark(peerId, blockchain, channelId)
-                : null
+                : null,
+            // Issue #359: claim-value ↔ price binding. Resolve the destination's
+            // authoritative flat route price from the #218 RouteTerminationRegistry
+            // (an in-memory prefix map — RPC-free, hot-path-safe) so the gate can
+            // require claimDelta >= price on locally-terminated priced routes and
+            // F06-reject an underpaying claim BEFORE the backend runs. `match`
+            // returns undefined for a forwarded / non-terminated destination →
+            // coalesce to null (this connector is not the pricing authority there;
+            // the gate falls back to freshness-only for such packets).
+            (destination) => this._routeTerminationRegistry.match(destination)?.price ?? null
           );
           this._inboundClaimValidate = (protocolData, ilpPacket, peerId) =>
             inboundClaimValidator.validate(protocolData, ilpPacket, peerId);
