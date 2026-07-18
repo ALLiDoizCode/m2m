@@ -101,10 +101,13 @@ import {
 } from '../../packages/mina-zkapp/dist-esm/usdc-token.js';
 import { UsdcChannelToken } from '../../packages/mina-zkapp/dist-esm/usdc-channel-token.js';
 import { RateLimitedUsdcAdmin } from '../../packages/mina-zkapp/dist-esm/usdc-rate-limited-admin.js';
+import { PermissionlessRateLimitedUsdcAdmin } from '../../packages/mina-zkapp/dist-esm/usdc-permissionless-admin.js';
 import {
+  deployPermissionlessUsdcToken,
   deployRateLimitedUsdcToken,
   deployUsdcToken,
   mintUsdc,
+  mintUsdcPermissionless,
   selfMintUsdc,
 } from '../../packages/mina-zkapp/dist-esm/usdc-deploy.js';
 // Type-only import (erased at runtime — loads NO module, so no dual-o1js risk).
@@ -121,10 +124,17 @@ interface CliArgs {
    * Deploy with the RATE-LIMITED admin (`RateLimitedUsdcAdmin`): anyone can
    * mint to themselves up to the per-address daily cap (enforced in-proof +
    * in-ledger); the admin authority keeps only pause/upgrade rights and does
-   * NOT need to be funded. This is the canonical shared-devnet flavor since
-   * the rate-limited mint redeploy (#352 follow-up).
+   * NOT need to be funded. The RECIPIENT must sign each mint (legacy flavor).
    */
   rateLimited: boolean;
+  /**
+   * Deploy with the FULLY PERMISSIONLESS rate-limited admin
+   * (`PermissionlessRateLimitedUsdcAdmin`): any fee payer mints to ANY address
+   * up to the per-recipient daily cap, enforced in-proof + in-ledger, with NO
+   * recipient signature. The canonical shared-devnet flavor since the
+   * permissionless-mint redeploy. Admin authority = pause/upgrade only.
+   */
+  permissionless: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -133,6 +143,7 @@ function parseArgs(argv: string[]): CliArgs {
   let local = false;
   let compileOnly = false;
   let rateLimited = false;
+  let permissionless = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -149,6 +160,8 @@ function parseArgs(argv: string[]): CliArgs {
       compileOnly = true;
     } else if (arg === '--rate-limited') {
       rateLimited = true;
+    } else if (arg === '--permissionless') {
+      permissionless = true;
     }
   }
 
@@ -164,7 +177,7 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  return { network, out, local, compileOnly, rateLimited };
+  return { network, out, local, compileOnly, rateLimited, permissionless };
 }
 
 /** Require a base58 private key from env, exiting with a clear message if absent. */
@@ -194,10 +207,15 @@ function keyFromEnvOrRandom(envVar: string): PrivateKey {
  * EXACT compile path that broke in the field (#352). Returns the vk hashes so
  * the live deploy can persist them in the deploy record.
  */
-async function compileCircuits(rateLimited: boolean): Promise<Record<string, string>> {
-  const adminEntry = rateLimited
-    ? (['RateLimitedUsdcAdmin', RateLimitedUsdcAdmin] as const)
-    : (['FungibleTokenAdmin', FungibleTokenAdmin] as const);
+async function compileCircuits(args: {
+  rateLimited: boolean;
+  permissionless: boolean;
+}): Promise<Record<string, string>> {
+  const adminEntry = args.permissionless
+    ? (['PermissionlessRateLimitedUsdcAdmin', PermissionlessRateLimitedUsdcAdmin] as const)
+    : args.rateLimited
+      ? (['RateLimitedUsdcAdmin', RateLimitedUsdcAdmin] as const)
+      : (['FungibleTokenAdmin', FungibleTokenAdmin] as const);
   console.log(`Compiling ${adminEntry[0]} + UsdcChannelToken circuits...`);
   const vkHashes: Record<string, string> = {};
   for (const [name, contract] of [adminEntry, ['UsdcChannelToken', UsdcChannelToken] as const]) {
@@ -214,7 +232,11 @@ async function compileCircuits(rateLimited: boolean): Promise<Record<string, str
 
 /** Local smoke test on Mina.LocalBlockchain — proves deploy + mint with no network. */
 async function runLocal(args: CliArgs): Promise<void> {
-  const flavor = args.rateLimited ? 'RATE-LIMITED' : 'admin-gated';
+  const flavor = args.permissionless
+    ? 'PERMISSIONLESS'
+    : args.rateLimited
+      ? 'RATE-LIMITED (recipient-signed)'
+      : 'admin-gated';
   console.log(
     `Local smoke test: deploying ${flavor} USDC on Mina.LocalBlockchain (proofsEnabled: false)\n`
   );
@@ -223,7 +245,11 @@ async function runLocal(args: CliArgs): Promise<void> {
   const [deployer, recipient, adminAuthority] = Local.testAccounts;
 
   // Cache verification keys so deploy() can find them (cheap with proofs off).
-  await (args.rateLimited ? RateLimitedUsdcAdmin.compile() : FungibleTokenAdmin.compile());
+  await (args.permissionless
+    ? PermissionlessRateLimitedUsdcAdmin.compile()
+    : args.rateLimited
+      ? RateLimitedUsdcAdmin.compile()
+      : FungibleTokenAdmin.compile());
   await UsdcChannelToken.compile();
 
   const adminContractKey = PrivateKey.random();
@@ -237,9 +263,11 @@ async function runLocal(args: CliArgs): Promise<void> {
     signers: [deployer.key, adminContractKey, tokenKey],
     network: 'LocalBlockchain',
   };
-  const { result, token } = args.rateLimited
-    ? await deployRateLimitedUsdcToken(deployOpts)
-    : await deployUsdcToken(deployOpts);
+  const { result, token } = args.permissionless
+    ? await deployPermissionlessUsdcToken(deployOpts)
+    : args.rateLimited
+      ? await deployRateLimitedUsdcToken(deployOpts)
+      : await deployUsdcToken(deployOpts);
 
   const decimals = token.decimals.get().toString();
   if (decimals !== String(USDC_DECIMALS)) {
@@ -250,30 +278,45 @@ async function runLocal(args: CliArgs): Promise<void> {
   console.log(`  ✓ tokenId      = ${result.tokenId}`);
 
   const wholeUsdc = 1000n;
-  const balance = args.rateLimited
-    ? // Prove the PERMISSIONLESS path: recipient self-mints (no admin key).
-      await selfMintUsdc({
+  const balance = args.permissionless
+    ? // Prove the PERMISSIONLESS path: fee payer mints to a recipient that does
+      // NOT sign (only deployer.key signs — recipient.key is absent).
+      await mintUsdcPermissionless({
         token,
         feePayer: deployer,
         recipient,
         wholeUsdc,
-        signers: [deployer.key, recipient.key],
+        signers: [deployer.key],
         fundNewAccounts: 2, // token account + mint-receipt account
       })
-    : // Prove the admin authority can mint (the funding path).
-      await mintUsdc({
-        token,
-        feePayer: deployer,
-        recipient,
-        wholeUsdc,
-        signers: [deployer.key, adminAuthority.key],
-        fundRecipient: true,
-      });
+    : args.rateLimited
+      ? // Recipient-signed permissionless path (legacy rate-limited admin).
+        await selfMintUsdc({
+          token,
+          feePayer: deployer,
+          recipient,
+          wholeUsdc,
+          signers: [deployer.key, recipient.key],
+          fundNewAccounts: 2, // token account + mint-receipt account
+        })
+      : // Prove the admin authority can mint (the funding path).
+        await mintUsdc({
+          token,
+          feePayer: deployer,
+          recipient,
+          wholeUsdc,
+          signers: [deployer.key, adminAuthority.key],
+          fundRecipient: true,
+        });
   const amount = UInt64.from(wholeUsdc * ONE_USDC);
   if (balance !== amount.toString()) {
     throw new Error(`mint mismatch: ${balance} != ${amount.toString()}`);
   }
-  const verb = args.rateLimited ? 'self-minted (permissionless)' : 'admin-minted';
+  const verb = args.permissionless
+    ? 'minted permissionlessly (recipient did NOT sign)'
+    : args.rateLimited
+      ? 'self-minted (recipient-signed)'
+      : 'admin-minted';
   console.log(`  ✓ ${verb} 1,000 USDC to a recipient (balance ${balance})`);
   console.log('\nLocal smoke test PASSED.');
 }
@@ -285,16 +328,18 @@ async function runLocal(args: CliArgs): Promise<void> {
  * The stock flavor still requires the private key (MINA_USDC_ADMIN_KEY), which
  * must be FUNDED (it signs + pays on every mint — the #190 gotcha).
  */
-function requireAdminAuthorityPublic(rateLimited: boolean): PublicKey {
+function requireAdminAuthorityPublic(adminIsBarePublic: boolean): PublicKey {
   const pub = process.env['MINA_USDC_ADMIN_PUBLIC'];
-  if (rateLimited && pub) return PublicKey.fromBase58(pub);
+  if (adminIsBarePublic && pub) return PublicKey.fromBase58(pub);
   return requireKey('MINA_USDC_ADMIN_KEY').toPublicKey();
 }
 
 /** Live deploy against a Mina GraphQL endpoint. */
 async function runLive(args: CliArgs): Promise<void> {
   const deployer = requireKey('MINA_DEPLOYER_KEY');
-  const adminAuthority = requireAdminAuthorityPublic(args.rateLimited);
+  // Both rate-limited flavors keep the admin key cold (it never mints): a bare
+  // MINA_USDC_ADMIN_PUBLIC is accepted.
+  const adminAuthority = requireAdminAuthorityPublic(args.rateLimited || args.permissionless);
   const adminContractKey = keyFromEnvOrRandom('MINA_USDC_ADMIN_CONTRACT_KEY');
   const tokenKey = keyFromEnvOrRandom('MINA_USDC_TOKEN_KEY');
 
@@ -303,11 +348,15 @@ async function runLive(args: CliArgs): Promise<void> {
   Mina.setActiveInstance(Network);
 
   const t0 = Date.now();
-  const vkHashes = await compileCircuits(args.rateLimited);
+  const vkHashes = await compileCircuits(args);
   console.log(`Compilation complete in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
   const deployerPub = deployer.toPublicKey();
-  const flavor = args.rateLimited ? 'RATE-LIMITED (permissionless mint)' : 'admin-gated';
+  const flavor = args.permissionless
+    ? 'PERMISSIONLESS (any fee payer mints to any address, no recipient signature)'
+    : args.rateLimited
+      ? 'RATE-LIMITED (recipient-signed)'
+      : 'admin-gated';
   console.log(`Admin flavor:           ${flavor}`);
   console.log(`Deployer address:       ${deployerPub.toBase58()}`);
   console.log(`Admin authority:        ${adminAuthority.toBase58()}`);
@@ -325,7 +374,9 @@ async function runLive(args: CliArgs): Promise<void> {
   };
   let result: UsdcDeployResult;
   let txHash: string | undefined;
-  if (args.rateLimited) {
+  if (args.permissionless) {
+    ({ result, txHash } = await deployPermissionlessUsdcToken(deployOpts));
+  } else if (args.rateLimited) {
     ({ result, txHash } = await deployRateLimitedUsdcToken(deployOpts));
   } else {
     ({ result } = await deployUsdcToken(deployOpts));
@@ -369,7 +420,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.compileOnly) {
     const t0 = Date.now();
-    await compileCircuits(args.rateLimited);
+    await compileCircuits(args);
     console.log(
       `Compile-only run complete in ${((Date.now() - t0) / 1000).toFixed(1)}s (no network, nothing deployed).`
     );
