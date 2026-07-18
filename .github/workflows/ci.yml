@@ -546,7 +546,6 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' && needs.changes.outputs.mina == 'true')
     timeout-minutes: 10
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -621,7 +620,6 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' && needs.changes.outputs.evm == 'true')
     timeout-minutes: 15
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
