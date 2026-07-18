@@ -24,6 +24,14 @@ contract MockERC20 {
         balanceOf[msg.sender] = totalSupply;
     }
 
+    /// @notice Mint new tokens to an address (test/mock helper — intentionally ungated)
+    /// @dev Used by deploy scripts to fund a testnet distributor. Not production-safe.
+    function mint(address to, uint256 value) public virtual {
+        totalSupply += value;
+        balanceOf[to] += value;
+        emit Transfer(address(0), to, value);
+    }
+
     function transfer(address to, uint256 value) public virtual returns (bool) {
         require(balanceOf[msg.sender] >= value, "Insufficient balance");
         balanceOf[msg.sender] -= value;
