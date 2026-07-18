@@ -868,3 +868,125 @@ describe('IlpHttpAdapter × InboundClaimValidator — stale-claim replay gate (#
     expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
   });
 });
+
+describe('IlpHttpAdapter × InboundClaimValidator — claim-value ↔ price binding (#359)', () => {
+  const CHANNEL_ACCOUNT = 'ChanAcct2222222222222222222222222222222222';
+  const SIGNER_PUBKEY = 'SiGnEr222222222222222222222222222222222222';
+  const PROGRAM_ID = '11111111111111111111111111111111';
+
+  const solanaClaim = (nonce: number): SolanaClaimMessage => ({
+    version: '1.0',
+    blockchain: 'solana',
+    messageId: `sol-msg-${nonce}-${Math.random().toString(36).slice(2)}`,
+    timestamp: '2026-07-17T12:00:00.000Z',
+    senderId: 'peer-a',
+    programId: PROGRAM_ID,
+    channelAccount: CHANNEL_ACCOUNT,
+    nonce,
+    transferredAmount: String(1000 * nonce), // cumulative advances 1000/nonce
+    signature: 'c2lnbmF0dXJl',
+    signerPublicKey: SIGNER_PUBKEY,
+    cluster: 'devnet',
+  });
+
+  interface Harness {
+    adapter: IlpHttpAdapter;
+    handlePrepare: jest.Mock;
+    recordClaim: jest.Mock;
+    verifyBalanceProof: jest.Mock;
+    routePriceLookup: jest.Mock;
+  }
+
+  /**
+   * Adapter wrapped around a real validator with both the watermark and the
+   * route-price resolver wired — the full #353+#359 gate over the real HTTP
+   * path, so "backend not hit" is a genuine end-to-end assertion.
+   */
+  const makeHarness = (watermark: BTPClaimMessage | null, routePrice: string | null): Harness => {
+    const verifyBalanceProof = jest.fn(async () => true);
+    const registry = new ChainProviderRegistry();
+    registry.register({
+      chainType: 'solana',
+      chainId: 'solana:devnet',
+      verifyBalanceProof,
+    } as unknown as PaymentChannelProvider);
+
+    const routePriceLookup = jest.fn(() => routePrice);
+    const validator = new InboundClaimValidator(
+      undefined,
+      'g.connector',
+      createMockLogger() as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      registry,
+      jest.fn(async () => watermark),
+      routePriceLookup
+    );
+
+    const handlePrepare = jest.fn(async () => fulfill);
+    const recordClaim = jest.fn(async () => {});
+    const adapter = new IlpHttpAdapter({
+      logger: createMockLogger(),
+      nodeId: 'g.connector',
+      handlePrepare,
+      validateClaim: (pd, pkt, peer) => validator.validate(pd, pkt, peer),
+      recordClaim,
+    });
+    return { adapter, handlePrepare, recordClaim, verifyBalanceProof, routePriceLookup };
+  };
+
+  const paidReq = (nonce: number): MockReq =>
+    new MockReq(serializePacket(createPrepare()), {
+      'ilp-payment-channel-claim': Buffer.from(JSON.stringify(solanaClaim(nonce)), 'utf8').toString(
+        'base64'
+      ),
+    });
+
+  it('F06-rejects an underpaying claim end-to-end: backend NOT hit, claim NOT recorded, no crypto', async () => {
+    // watermark nonce 6 (cumulative 6000) → claim nonce 7 (cumulative 7000):
+    // delta 1000; route price 2000 → underpaid.
+    const h = makeHarness(solanaClaim(6), '2000');
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(res.statusCode).toBe(200);
+    const out = deserializePacket(res.body) as ILPRejectPacket;
+    expect(out.type).toBe(PacketType.REJECT);
+    expect(out.code).toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
+    expect(out.message).toContain('Insufficient claim value');
+    expect(h.handlePrepare).not.toHaveBeenCalled(); // zero backend calls
+    expect(h.recordClaim).not.toHaveBeenCalled();
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('admits an exact-price claim: crypto gate runs, backend hit, claim recorded', async () => {
+    const h = makeHarness(solanaClaim(6), '1000'); // delta 1000 == price
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1);
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(h.recordClaim).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+
+  it('admits an overpaying claim (delta > price)', async () => {
+    const h = makeHarness(solanaClaim(6), '500'); // delta 1000 > price 500
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+
+  it('does not enforce value on a forwarded / non-terminated destination (no route price)', async () => {
+    const h = makeHarness(solanaClaim(6), null); // resolver → null
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+});

@@ -21,7 +21,7 @@
  */
 
 import { InboundClaimValidator } from './inbound-claim-validator';
-import type { ReceivedClaimWatermarkLookup } from './inbound-claim-validator';
+import type { ReceivedClaimWatermarkLookup, RoutePriceResolver } from './inbound-claim-validator';
 import type {
   BTPClaimMessage,
   EVMClaimMessage,
@@ -132,11 +132,13 @@ interface Harness {
   /** Always-verifying EVM SDK crypto. */
   verifyBalanceProofWithDomain: jest.Mock;
   watermarkLookup: jest.Mock;
+  /** Route-price resolver (#359); undefined when the binding is not wired. */
+  routePriceLookup?: jest.Mock;
 }
 
 const makeHarness = (
   watermarkByChannel: Record<string, BTPClaimMessage | null>,
-  opts: { wired?: boolean } = {}
+  opts: { wired?: boolean; routePrice?: (destination: string) => string | null } = {}
 ): Harness => {
   const verifyBalanceProof = jest.fn(async () => true);
   const registry = new ChainProviderRegistry();
@@ -162,6 +164,10 @@ const makeHarness = (
       watermarkByChannel[channelId] ?? null
   );
 
+  const routePriceLookup = opts.routePrice
+    ? jest.fn((destination: string) => opts.routePrice!(destination))
+    : undefined;
+
   const validator = new InboundClaimValidator(
     evmSdk,
     'test-node',
@@ -171,10 +177,17 @@ const makeHarness = (
     undefined,
     undefined,
     registry,
-    opts.wired === false ? undefined : (watermarkLookup as ReceivedClaimWatermarkLookup)
+    opts.wired === false ? undefined : (watermarkLookup as ReceivedClaimWatermarkLookup),
+    routePriceLookup as RoutePriceResolver | undefined
   );
 
-  return { validator, verifyBalanceProof, verifyBalanceProofWithDomain, watermarkLookup };
+  return {
+    validator,
+    verifyBalanceProof,
+    verifyBalanceProofWithDomain,
+    watermarkLookup,
+    routePriceLookup,
+  };
 };
 
 const expectF06 = (result: ILPRejectPacket | null): ILPRejectPacket => {
@@ -315,5 +328,183 @@ describe('InboundClaimValidator — received-claim watermark gate (#353)', () =>
 
     expect(result).toBeNull();
     expect(h.watermarkLookup).toHaveBeenCalledWith('peer-a', 'mina', MINA_ZKAPP_ADDRESS);
+  });
+});
+
+/**
+ * Claim value ↔ route price binding (Issue #359)
+ *
+ * After #358 closed the freshness/replay hole, a *fresh* claim that advances the
+ * channel's cumulative amount by a single base unit still FULFILLed a job of any
+ * price — the operator was underpaid. This gate binds the two: on a
+ * locally-terminated priced route the claim must advance the cumulative amount
+ * by at least the route's flat `price`, else F06 BEFORE any crypto verification
+ * (and therefore before the backend). The delta is
+ *   claimDelta = cumulative(claim) − cumulative(watermark ?? 0).
+ *
+ * The fixtures set `transferredAmount = 1000 * nonce`, so consecutive claims
+ * advance the cumulative by exactly 1000 base units. Crypto is mocked to always
+ * pass (as above), so any REJECT is attributable to the value check alone, and
+ * "crypto never called" is the unit-level proxy for "backend never reached".
+ */
+describe('InboundClaimValidator — claim-value ↔ price binding (#359)', () => {
+  // Only EVM and Solana carry a plaintext cumulative `transferredAmount`; Mina's
+  // opaque balanceCommitment is a documented deferred path, exercised separately.
+  describe.each([
+    ['EVM', EVM_CHANNEL_ID, evmClaim] as const,
+    ['Solana', SOLANA_CHANNEL_ACCOUNT, solanaClaim] as const,
+  ])('%s claims', (_label, channelId, makeClaim) => {
+    it('F06-rejects an underpaying claim (delta < price) before any crypto/backend', async () => {
+      // watermark nonce 6 (cumulative 6000) → claim nonce 7 (cumulative 7000):
+      // delta 1000, route price 2000 → underpaid.
+      const h = makeHarness({ [channelId]: makeClaim(6) }, { routePrice: () => '2000' });
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(7)),
+        createPrepare(),
+        'peer-a'
+      );
+
+      const reject = expectF06(result);
+      expect(reject.message).toContain('Insufficient claim value');
+      expect(reject.message).toContain('1000'); // delta
+      expect(reject.message).toContain('2000'); // price
+      // Underpayment is decided on local data only — no crypto verification runs,
+      // so the packet never reaches the backend.
+      expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+      expect(h.verifyBalanceProofWithDomain).not.toHaveBeenCalled();
+      expect(h.routePriceLookup).toHaveBeenCalledWith('g.alice.wallet');
+    });
+
+    it('admits a claim whose delta EXACTLY equals the price (crypto gate runs)', async () => {
+      const h = makeHarness(
+        { [channelId]: makeClaim(6) },
+        { routePrice: () => '1000' } // delta 1000 == price
+      );
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(7)),
+        createPrepare(),
+        'peer-a'
+      );
+
+      expect(result).toBeNull();
+      expect(
+        h.verifyBalanceProof.mock.calls.length + h.verifyBalanceProofWithDomain.mock.calls.length
+      ).toBe(1);
+    });
+
+    it('admits an overpaying claim (delta > price)', async () => {
+      const h = makeHarness(
+        { [channelId]: makeClaim(6) },
+        { routePrice: () => '500' } // delta 1000 > price 500
+      );
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(7)),
+        createPrepare(),
+        'peer-a'
+      );
+
+      expect(result).toBeNull();
+      expect(
+        h.verifyBalanceProof.mock.calls.length + h.verifyBalanceProofWithDomain.mock.calls.length
+      ).toBe(1);
+    });
+
+    it('binds value on the FIRST claim too (no watermark → cumulative baseline 0)', async () => {
+      // No watermark: claim nonce 1 has cumulative 1000; price 2000 → underpaid.
+      const h = makeHarness({}, { routePrice: () => '2000' });
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(1)),
+        createPrepare(),
+        'peer-a'
+      );
+
+      const reject = expectF06(result);
+      expect(reject.message).toContain('Insufficient claim value');
+      expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+      expect(h.verifyBalanceProofWithDomain).not.toHaveBeenCalled();
+    });
+
+    it('does not enforce value on a forwarded / non-terminated destination (price resolver → null)', async () => {
+      // resolveRoutePrice returns null: this connector is not the pricing
+      // authority for the destination → freshness only, value skipped.
+      const h = makeHarness({ [channelId]: makeClaim(6) }, { routePrice: () => null });
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(7)), // delta 1000, but no price to bind
+        createPrepare(),
+        'peer-a'
+      );
+
+      expect(result).toBeNull();
+      expect(
+        h.verifyBalanceProof.mock.calls.length + h.verifyBalanceProofWithDomain.mock.calls.length
+      ).toBe(1);
+    });
+
+    it('does not enforce value on a free route (price 0)', async () => {
+      const h = makeHarness({ [channelId]: makeClaim(6) }, { routePrice: () => '0' });
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(7)),
+        createPrepare(),
+        'peer-a'
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('preserves freshness precedence: a STALE underpaying claim is rejected as stale', async () => {
+      const h = makeHarness({ [channelId]: makeClaim(6) }, { routePrice: () => '2000' });
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(4)), // stale nonce
+        createPrepare(),
+        'peer-a'
+      );
+
+      const reject = expectF06(result);
+      // Freshness runs first, so the message is the stale one, not underpayment.
+      expect(reject.message).toContain('Stale payment claim');
+    });
+  });
+
+  it('does not enforce value when the binding is not wired (pre-#359 behavior)', async () => {
+    // No routePrice option → resolveRoutePrice undefined; an underpaying claim
+    // still passes the value dimension (freshness-only), matching deployments
+    // built before #359.
+    const h = makeHarness({ [EVM_CHANNEL_ID]: evmClaim(6) });
+
+    const result = await h.validator.validate(
+      asProtocolData(evmClaim(7)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    expect(result).toBeNull();
+    expect(h.routePriceLookup).toBeUndefined();
+    expect(h.verifyBalanceProofWithDomain).toHaveBeenCalledTimes(1);
+  });
+
+  it('DEFERRED: a Mina claim on a priced route is not value-bound (opaque commitment) — freshness-only', async () => {
+    // Mina carries only balanceCommitment (opaque), so claimDelta is not
+    // computable at the gate. The claim must still pass the value dimension
+    // (freshness applies), and this is the enumerated per-chain follow-up.
+    const h = makeHarness(
+      { [MINA_ZKAPP_ADDRESS]: minaClaim(6) },
+      { routePrice: () => '999999999' } // would underpay IF it were enforceable
+    );
+
+    const result = await h.validator.validate(
+      asProtocolData(minaClaim(7)), // fresh (nonce advances)
+      createPrepare(),
+      'peer-a'
+    );
+
+    expect(result).toBeNull(); // not rejected: value binding is deferred for Mina
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1); // proceeded to crypto
   });
 });

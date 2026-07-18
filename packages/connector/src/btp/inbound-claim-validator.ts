@@ -70,6 +70,25 @@ export type ReceivedClaimWatermarkLookup = (
 ) => Promise<BTPClaimMessage | null>;
 
 /**
+ * Resolves the authoritative flat PRICE of a locally-terminated route for an
+ * ILP destination — the connector's operator-configured `RouteTermination.price`
+ * (decimal atomic-unit string, e.g. nano-USDC), used to bind a claim's value to
+ * what the request costs (issue #359).
+ *
+ * Backed by the in-memory `RouteTerminationRegistry.match(destination)` (a LOCAL
+ * map lookup keyed on ILP-address prefix, never a chain RPC), so consulting it
+ * keeps the per-packet hot path RPC-free.
+ *
+ * Returns `null` when the destination is NOT a locally-terminated priced route
+ * — a forwarded packet this connector merely relays, or a destination with no
+ * termination registered. In those cases this connector is not the pricing
+ * authority (the terminating node enforces its own price), so the value binding
+ * does not apply and the gate falls back to freshness-only (issue #359 documents
+ * this uncovered path explicitly).
+ */
+export type RoutePriceResolver = (destination: string) => string | null;
+
+/**
  * Callback type for inbound claim validation.
  * Returns null if the packet should proceed, or an ILPRejectPacket to reject it.
  */
@@ -113,6 +132,19 @@ export class InboundClaimValidator {
    */
   private readonly getReceivedClaimWatermark?: ReceivedClaimWatermarkLookup;
 
+  /**
+   * Route-price resolver (issue #359). When wired, an inbound claim on a
+   * locally-terminated priced route must advance the received-claim cumulative
+   * amount by AT LEAST that route's flat `price` — binding the claim's VALUE to
+   * the request's PRICE, so a minimal fresh claim can no longer pay for an
+   * expensive job (the operator-underpayment hole #359 flagged after #358 closed
+   * the freshness/replay hole). Optional: when absent the gate is
+   * freshness+crypto only, preserving the pre-#359 behavior. Enforced only for
+   * chains whose claim carries a plaintext cumulative amount (EVM / Solana);
+   * Mina's opaque `balanceCommitment` is a documented deferred path.
+   */
+  private readonly resolveRoutePrice?: RoutePriceResolver;
+
   constructor(
     paymentChannelSDK: PaymentChannelSDK | undefined,
     nodeId: string,
@@ -122,7 +154,8 @@ export class InboundClaimValidator {
     nip59PrivateKey?: Uint8Array,
     getPeerRelation?: PeerRelationResolver,
     chainRegistry?: ChainProviderRegistry,
-    getReceivedClaimWatermark?: ReceivedClaimWatermarkLookup
+    getReceivedClaimWatermark?: ReceivedClaimWatermarkLookup,
+    resolveRoutePrice?: RoutePriceResolver
   ) {
     this.paymentChannelSDK = paymentChannelSDK;
     this.nodeId = nodeId;
@@ -133,6 +166,7 @@ export class InboundClaimValidator {
     this.getPeerRelation = getPeerRelation;
     this.chainRegistry = chainRegistry;
     this.getReceivedClaimWatermark = getReceivedClaimWatermark;
+    this.resolveRoutePrice = resolveRoutePrice;
   }
 
   /**
@@ -220,16 +254,21 @@ export class InboundClaimValidator {
       );
     }
 
-    // Freshness gate (issue #353): before any cryptographic verification,
-    // require the claim to STRICTLY advance the received-claim nonce watermark
-    // for its (peer, channel). A replayed stale claim carries a perfectly
-    // valid signature/proof, so a crypto-only gate admits it forever — the
-    // watermark (the ClaimReceiver's own monotonicity reference) is the only
-    // thing that distinguishes a replay from a fresh payment. Running it first
-    // also means a replay never pays the cost of signature/zk verification.
-    const staleReject = await this.checkClaimFreshness(claim, peerId);
-    if (staleReject) {
-      return staleReject;
+    // Watermark gate (issues #353 + #359): before any cryptographic
+    // verification, a SINGLE local watermark read feeds two checks —
+    //  (1) FRESHNESS (#353): the claim's nonce must STRICTLY advance the
+    //      received-claim nonce watermark for its (peer, channel), else the
+    //      replay is F06-rejected. A replayed stale claim carries a perfectly
+    //      valid signature/proof, so a crypto-only gate admits it forever.
+    //  (2) VALUE↔PRICE (#359): on a locally-terminated priced route the claim
+    //      must advance the cumulative amount by at least the route's flat
+    //      price, else the underpayment is F06-rejected. A minimal fresh claim
+    //      must not buy an expensive job.
+    // Running both first also means a replay/underpayment never pays the cost
+    // of signature/zk verification, and the packet never reaches the backend.
+    const gateReject = await this.checkClaimAgainstWatermark(claim, ilpPacket, peerId);
+    if (gateReject) {
+      return gateReject;
     }
 
     // Dispatch verification based on blockchain type
@@ -285,43 +324,55 @@ export class InboundClaimValidator {
   }
 
   /**
-   * Reject a claim that does not STRICTLY advance the received-claim nonce
-   * watermark for its (peer, channel) — the fix for issue #353, where a
-   * replayed stale-nonce claim (validly signed, so it passed the crypto gate)
-   * got every job executed and FULFILLed for free while the ClaimReceiver's
-   * replay verdict went nowhere.
+   * The received-claim watermark gate: a single local watermark read backing
+   * both the freshness/replay check (issue #353) and the claim-value↔price
+   * binding (issue #359), run before any cryptographic verification.
    *
-   * Semantics:
-   * - No lookup wired, no watermark yet (first claim on this channel), or a
-   *   watermark read failure → `null` (proceed to the cryptographic gate,
-   *   which decides exactly as before this check existed). Fail-open on read
-   *   errors is deliberate: a local DB hiccup must not F06-blackhole
-   *   legitimate paid traffic — the crypto gate still stands.
-   * - `claim.nonce <= watermark.nonce` → F06 reject. EQUAL nonce (a byte-exact
-   *   replay of the latest verified claim) is deliberately rejected too:
-   *   well-behaved clients sign a FRESH claim (nonce+1, cumulative amount
-   *   bumped) for every paid write, so an equal nonce is always a replay,
-   *   never a "retry with the same payment".
-   * - Chain-agnostic: the watermark store keys on (peer, blockchain, channel),
-   *   and all three claim types (EVM / Solana / Mina) carry a numeric `nonce`,
-   *   so EVM and Solana get the same replay protection as Mina.
+   * FRESHNESS (#353): reject a claim that does not STRICTLY advance the
+   * received-claim nonce watermark for its (peer, channel) — a replayed
+   * stale-nonce claim (validly signed, so it passed the crypto gate) otherwise
+   * gets every job executed and FULFILLed for free while the ClaimReceiver's
+   * replay verdict goes nowhere. EQUAL nonce (a byte-exact replay of the latest
+   * verified claim) is rejected too: well-behaved clients sign a FRESH claim
+   * (nonce+1, cumulative amount bumped) for every paid write, so an equal nonce
+   * is always a replay, never a "retry with the same payment".
    *
-   * This is a LOCAL DB read (the ClaimReceiver's `received_claims` store); the
-   * per-packet hot path gains no chain RPC. The deeper per-chain checks — and
-   * the Mina provider's on-chain-nonce comparison inside `verifyBalanceProof`,
-   * which still covers the no-watermark case — are unchanged and run after
-   * this gate.
+   * VALUE↔PRICE (#359): once fresh, the claim must advance the cumulative
+   * amount by at least the route's flat price (see {@link checkClaimValue}) —
+   * closing the secondary hole where a minimal fresh claim FULFILLs an
+   * arbitrarily-priced job.
+   *
+   * Fail-open posture (deliberate): no lookup wired, no watermark yet (first
+   * claim), or a watermark read failure → `null` (proceed to the crypto gate,
+   * which decides exactly as before these checks existed). A local DB hiccup
+   * must not F06-blackhole legitimate paid traffic, and without the prior
+   * cumulative the value delta cannot be computed soundly.
+   *
+   * Chain-agnostic: the watermark store keys on (peer, blockchain, channel).
+   * All three claim types carry a numeric `nonce` (so freshness covers EVM /
+   * Solana / Mina uniformly); value binding additionally requires a plaintext
+   * cumulative, which EVM and Solana carry but Mina does not (deferred there).
+   *
+   * LOCAL data only (the ClaimReceiver's `received_claims` store + the
+   * in-memory route registry); the per-packet hot path gains no chain RPC and
+   * at most one DB read.
    *
    * @param claim - Structurally validated claim message
+   * @param ilpPacket - The PREPARE (its `destination` keys the route price)
    * @param peerId - Authenticated (or claim-derived ephemeral) peer ID
    * @returns null to proceed to crypto verification, or an F06 reject
    * @private
    */
-  private async checkClaimFreshness(
+  private async checkClaimAgainstWatermark(
     claim: BTPClaimMessage,
+    ilpPacket: ILPPreparePacket,
     peerId: string
   ): Promise<ILPRejectPacket | null> {
     if (!this.getReceivedClaimWatermark) {
+      // No watermark store wired (routing-only mode): neither the freshness
+      // reference (#353) nor the prior-cumulative baseline the value check
+      // (#359) needs is available, so fall back to the crypto gate exactly as
+      // before either check existed.
       return null;
     }
 
@@ -345,14 +396,15 @@ export class InboundClaimValidator {
         },
         'Received-claim watermark read failed; falling back to cryptographic gate only'
       );
+      // Fail-open on a local DB hiccup for BOTH checks (#353 & #359): a
+      // transient read error must not F06-blackhole legitimate paid traffic,
+      // and without the prior cumulative the value delta cannot be computed
+      // soundly (a 0 baseline would OVER-count the delta and weaken the gate).
       return null;
     }
 
-    if (!watermark) {
-      return null; // First claim on this channel → the crypto gate decides.
-    }
-
-    if (claim.nonce <= watermark.nonce) {
+    // ── (1) Freshness / replay (issue #353) ──
+    if (watermark && claim.nonce <= watermark.nonce) {
       this.logger.warn(
         {
           event: 'inbound_claim_stale_nonce',
@@ -369,7 +421,152 @@ export class InboundClaimValidator {
       );
     }
 
+    // ── (2) Claim value ↔ route price (issue #359) ──
+    // `watermark` here is null (first claim → cumulative baseline 0) or the
+    // strictly-older verified claim (its cumulative amount is the prior paid
+    // total). Reusing the same read keeps the hot path to ONE local DB read.
+    return this.checkClaimValue(claim, ilpPacket, watermark, channelId, peerId);
+  }
+
+  /**
+   * Bind an inbound claim's VALUE to the request's PRICE (issue #359).
+   *
+   * After freshness (#353) proves the claim is fresh, this requires the claim
+   * to advance the channel's cumulative paid amount by at least the route's
+   * flat price — otherwise a validly-signed, strictly-advancing claim that
+   * bumps the cumulative by a single base unit would still FULFILL an
+   * arbitrarily expensive job, underpaying the operator (the secondary hole
+   * #353 flagged and #358 scoped out).
+   *
+   *   claimDelta = cumulative(claim) − cumulative(watermark ?? 0)
+   *   reject (F06) iff claimDelta < resolvedRoutePrice
+   *
+   * Scope & fail-open posture (all deliberate, all documented in #359):
+   * - **Not wired / no price resolver** → freshness-only (pre-#359 behavior).
+   * - **Destination is not a locally-terminated priced route** (`resolveRoutePrice`
+   *   returns `null`: a forwarded packet, or no termination registered) → this
+   *   connector is not the pricing authority; the terminating node enforces its
+   *   own price. Freshness still applied above. Enumerated uncovered path.
+   * - **Free route** (price ≤ 0) → nothing to enforce.
+   * - **Mina claim** → `balanceCommitment` is an opaque zk commitment, NOT a
+   *   plaintext cumulative amount, so the delta is not computable at the gate.
+   *   This is structural (called out in #358) — logged `warn` and enumerated as
+   *   the remaining per-chain follow-up, NOT silently dropped.
+   *
+   * Local data only (in-memory route registry + the already-read watermark) —
+   * no chain RPC, no extra DB read.
+   *
+   * @param claim - Structurally validated, freshness-passed claim
+   * @param ilpPacket - The PREPARE (its `destination` keys the route price)
+   * @param watermark - The prior verified claim (or null on the first claim)
+   * @param channelId - Chain-appropriate channel identifier (for logs)
+   * @param peerId - Authenticated peer ID (for logs)
+   * @returns null to proceed, or an F06 reject on underpayment
+   * @private
+   */
+  private checkClaimValue(
+    claim: BTPClaimMessage,
+    ilpPacket: ILPPreparePacket,
+    watermark: BTPClaimMessage | null,
+    channelId: string,
+    peerId: string
+  ): ILPRejectPacket | null {
+    if (!this.resolveRoutePrice) {
+      return null; // Value binding not wired → freshness-only (pre-#359).
+    }
+
+    const priceStr = this.resolveRoutePrice(ilpPacket.destination);
+    if (priceStr === null) {
+      // Forwarded / non-terminated destination: not this connector's price to
+      // enforce. Documented uncovered path (#359).
+      return null;
+    }
+
+    let priceUnits: bigint;
+    try {
+      priceUnits = BigInt(priceStr);
+    } catch {
+      // A malformed configured price must not blackhole traffic; treat as
+      // unenforceable and fall back to freshness-only.
+      this.logger.error(
+        {
+          event: 'inbound_claim_price_malformed',
+          peerId,
+          destination: ilpPacket.destination,
+          priceStr,
+        },
+        'Route price is not a valid integer string; skipping claim-value binding for this packet'
+      );
+      return null;
+    }
+
+    if (priceUnits <= 0n) {
+      return null; // Free route → no value to bind.
+    }
+
+    const cumulative = this.extractCumulativeAmount(claim);
+    if (cumulative === null) {
+      // Mina opaque balanceCommitment: value binding is structurally
+      // impossible at the gate. Enumerated deferred path (#359) — freshness
+      // (applied above) is the only guard here, exactly as in #358.
+      this.logger.warn(
+        {
+          event: 'inbound_claim_value_unenforceable',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId,
+          destination: ilpPacket.destination,
+          routePrice: priceUnits.toString(),
+        },
+        'Claim value not bindable to price for this chain (opaque cumulative); freshness-only for this packet'
+      );
+      return null;
+    }
+
+    const prior = watermark ? (this.extractCumulativeAmount(watermark) ?? 0n) : 0n;
+    const claimDelta = cumulative - prior;
+
+    if (claimDelta < priceUnits) {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_underpaid',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId,
+          destination: ilpPacket.destination,
+          claimDelta: claimDelta.toString(),
+          routePrice: priceUnits.toString(),
+        },
+        'Rejecting ILP PREPARE: claim value does not cover the route price (underpayment)'
+      );
+      return this.createReject(
+        `Insufficient claim value: claim advances the channel by ${claimDelta} but route price is ${priceUnits} (destination ${ilpPacket.destination})`
+      );
+    }
+
     return null;
+  }
+
+  /**
+   * Extract a claim's PLAINTEXT cumulative channel amount as a bigint, or null
+   * when the chain's claim carries no plaintext cumulative (issue #359).
+   *
+   * EVM and Solana claims carry `transferredAmount` — the cumulative amount
+   * transferred over the channel's lifetime — as a decimal string. Mina claims
+   * carry only `balanceCommitment`, an opaque zk commitment, so no cumulative
+   * value is derivable at the gate (returns null → value binding deferred).
+   *
+   * @private
+   */
+  private extractCumulativeAmount(claim: BTPClaimMessage): bigint | null {
+    try {
+      if (isEVMClaim(claim) || isSolanaClaim(claim)) {
+        return BigInt(claim.transferredAmount);
+      }
+      return null; // Mina: opaque balanceCommitment.
+    } catch {
+      return null;
+    }
   }
 
   /**
