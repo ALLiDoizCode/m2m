@@ -25,6 +25,7 @@ import type {
   EVMClaimMessage,
   SolanaClaimMessage,
   MinaClaimMessage,
+  BlockchainType,
 } from './btp-claim-types';
 import {
   type NIP59ClaimWrapper,
@@ -53,6 +54,20 @@ import type { Logger } from '../utils/logger';
  * unregistered peer.
  */
 export type PeerRelationResolver = (peerId: string) => PeerRelation | undefined;
+
+/**
+ * Reads the received-claim nonce watermark for a (peer, blockchain, channel)
+ * tuple — the latest claim this connector has VERIFIED from that peer on that
+ * channel. Backed by the ClaimReceiver's `received_claims` store
+ * (`ClaimReceiver.getReceivedClaimWatermark`): a LOCAL DB read, never a chain
+ * RPC, so consulting it keeps the per-packet hot path RPC-free.
+ * Returns `null` when the channel has no verified claim yet.
+ */
+export type ReceivedClaimWatermarkLookup = (
+  peerId: string,
+  blockchain: BlockchainType,
+  channelId: string
+) => Promise<BTPClaimMessage | null>;
 
 /**
  * Callback type for inbound claim validation.
@@ -88,6 +103,16 @@ export class InboundClaimValidator {
    */
   private readonly getPeerRelation?: PeerRelationResolver;
 
+  /**
+   * Received-claim watermark lookup (issue #353). When wired, every inbound
+   * claim must STRICTLY advance the last verified claim's nonce for its
+   * (peer, channel) before any cryptographic verification runs — closing the
+   * replay hole where a stale-but-validly-signed claim passed the gate
+   * forever. Optional: when absent the gate is crypto-only, preserving the
+   * pre-#353 behavior for deployments without a ClaimReceiver store.
+   */
+  private readonly getReceivedClaimWatermark?: ReceivedClaimWatermarkLookup;
+
   constructor(
     paymentChannelSDK: PaymentChannelSDK | undefined,
     nodeId: string,
@@ -96,7 +121,8 @@ export class InboundClaimValidator {
     nip59Wrapper?: NIP59ClaimWrapper,
     nip59PrivateKey?: Uint8Array,
     getPeerRelation?: PeerRelationResolver,
-    chainRegistry?: ChainProviderRegistry
+    chainRegistry?: ChainProviderRegistry,
+    getReceivedClaimWatermark?: ReceivedClaimWatermarkLookup
   ) {
     this.paymentChannelSDK = paymentChannelSDK;
     this.nodeId = nodeId;
@@ -106,6 +132,7 @@ export class InboundClaimValidator {
     this.nip59PrivateKey = nip59PrivateKey;
     this.getPeerRelation = getPeerRelation;
     this.chainRegistry = chainRegistry;
+    this.getReceivedClaimWatermark = getReceivedClaimWatermark;
   }
 
   /**
@@ -193,6 +220,18 @@ export class InboundClaimValidator {
       );
     }
 
+    // Freshness gate (issue #353): before any cryptographic verification,
+    // require the claim to STRICTLY advance the received-claim nonce watermark
+    // for its (peer, channel). A replayed stale claim carries a perfectly
+    // valid signature/proof, so a crypto-only gate admits it forever — the
+    // watermark (the ClaimReceiver's own monotonicity reference) is the only
+    // thing that distinguishes a replay from a fresh payment. Running it first
+    // also means a replay never pays the cost of signature/zk verification.
+    const staleReject = await this.checkClaimFreshness(claim, peerId);
+    if (staleReject) {
+      return staleReject;
+    }
+
     // Dispatch verification based on blockchain type
     if (isEVMClaim(claim)) {
       // EVM claims require the EVM PaymentChannelSDK for EIP-712 verification.
@@ -243,6 +282,94 @@ export class InboundClaimValidator {
     return this.createReject(
       `Unsupported claim blockchain: ${(claim as BTPClaimMessage).blockchain}`
     );
+  }
+
+  /**
+   * Reject a claim that does not STRICTLY advance the received-claim nonce
+   * watermark for its (peer, channel) — the fix for issue #353, where a
+   * replayed stale-nonce claim (validly signed, so it passed the crypto gate)
+   * got every job executed and FULFILLed for free while the ClaimReceiver's
+   * replay verdict went nowhere.
+   *
+   * Semantics:
+   * - No lookup wired, no watermark yet (first claim on this channel), or a
+   *   watermark read failure → `null` (proceed to the cryptographic gate,
+   *   which decides exactly as before this check existed). Fail-open on read
+   *   errors is deliberate: a local DB hiccup must not F06-blackhole
+   *   legitimate paid traffic — the crypto gate still stands.
+   * - `claim.nonce <= watermark.nonce` → F06 reject. EQUAL nonce (a byte-exact
+   *   replay of the latest verified claim) is deliberately rejected too:
+   *   well-behaved clients sign a FRESH claim (nonce+1, cumulative amount
+   *   bumped) for every paid write, so an equal nonce is always a replay,
+   *   never a "retry with the same payment".
+   * - Chain-agnostic: the watermark store keys on (peer, blockchain, channel),
+   *   and all three claim types (EVM / Solana / Mina) carry a numeric `nonce`,
+   *   so EVM and Solana get the same replay protection as Mina.
+   *
+   * This is a LOCAL DB read (the ClaimReceiver's `received_claims` store); the
+   * per-packet hot path gains no chain RPC. The deeper per-chain checks — and
+   * the Mina provider's on-chain-nonce comparison inside `verifyBalanceProof`,
+   * which still covers the no-watermark case — are unchanged and run after
+   * this gate.
+   *
+   * @param claim - Structurally validated claim message
+   * @param peerId - Authenticated (or claim-derived ephemeral) peer ID
+   * @returns null to proceed to crypto verification, or an F06 reject
+   * @private
+   */
+  private async checkClaimFreshness(
+    claim: BTPClaimMessage,
+    peerId: string
+  ): Promise<ILPRejectPacket | null> {
+    if (!this.getReceivedClaimWatermark) {
+      return null;
+    }
+
+    const channelId = isEVMClaim(claim)
+      ? claim.channelId
+      : isSolanaClaim(claim)
+        ? claim.channelAccount
+        : claim.zkAppAddress;
+
+    let watermark: BTPClaimMessage | null;
+    try {
+      watermark = await this.getReceivedClaimWatermark(peerId, claim.blockchain, channelId);
+    } catch (error) {
+      this.logger.error(
+        {
+          event: 'inbound_claim_watermark_read_failed',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Received-claim watermark read failed; falling back to cryptographic gate only'
+      );
+      return null;
+    }
+
+    if (!watermark) {
+      return null; // First claim on this channel → the crypto gate decides.
+    }
+
+    if (claim.nonce <= watermark.nonce) {
+      this.logger.warn(
+        {
+          event: 'inbound_claim_stale_nonce',
+          peerId,
+          blockchain: claim.blockchain,
+          channelId,
+          claimNonce: claim.nonce,
+          watermarkNonce: watermark.nonce,
+        },
+        'Rejecting ILP PREPARE: claim nonce does not advance the received-claim watermark (replay)'
+      );
+      return this.createReject(
+        `Stale payment claim: nonce ${claim.nonce} does not advance the received-claim watermark (latest verified nonce ${watermark.nonce})`
+      );
+    }
+
+    return null;
   }
 
   /**
@@ -370,6 +497,8 @@ export class InboundClaimValidator {
    * public key — the same primitive ClaimReceiver uses for redemption. The gate
    * does not query on-chain state (the per-packet hot path stays RPC-free);
    * full on-chain channel-state validation remains ClaimReceiver's job.
+   * Replay freshness is enforced BEFORE this method by the received-claim
+   * watermark check (issue #353) — this method verifies cryptography only.
    *
    * @param claim - Validated Solana claim message
    * @param peerId - Authenticated peer ID
@@ -444,9 +573,12 @@ export class InboundClaimValidator {
    * Delegates the actual cryptography to the resolved `PaymentChannelProvider`
    * (`MinaPaymentChannelProvider.verifyBalanceProof`), which deserializes and
    * verifies the zk-SNARK proof — the same primitive ClaimReceiver uses for
-   * redemption. The gate does not query on-chain state (the per-packet hot path
-   * stays RPC-free); full on-chain channel-state validation remains
-   * ClaimReceiver's job.
+   * redemption. (Note: the Mina provider's verifyBalanceProof also reads the
+   * on-chain nonceField via getChannelState — an existing RPC that only gates
+   * against the LAST-SETTLED nonce, so it cannot catch off-chain replays; the
+   * received-claim watermark check that runs before this method (issue #353)
+   * is the replay gate. Full on-chain channel-state validation remains
+   * ClaimReceiver's job.)
    *
    * @param claim - Validated Mina claim message
    * @param peerId - Authenticated peer ID

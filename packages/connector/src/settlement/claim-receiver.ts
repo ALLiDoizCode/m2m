@@ -573,8 +573,11 @@ export class ClaimReceiver extends EventEmitter {
       }
     }
 
-    // Check nonce monotonicity - nonce must strictly increase
-    const latestClaim = await this.getLatestVerifiedClaim(
+    // Check nonce monotonicity - nonce must strictly increase.
+    // Uses the received-claim watermark (which INCLUDES already-redeemed
+    // claims, issue #353) so a stale pre-redemption claim can never re-enter
+    // the store as verified after a redemption clears the unredeemed set.
+    const latestClaim = await this.getReceivedClaimWatermark(
       peerId,
       claim.blockchain,
       claim.channelId
@@ -759,8 +762,9 @@ export class ClaimReceiver extends EventEmitter {
       }
     }
 
-    // Check nonce monotonicity - nonce must strictly increase
-    const latestClaim = await this.getLatestVerifiedClaim(
+    // Check nonce monotonicity - nonce must strictly increase.
+    // Watermark includes redeemed claims (issue #353) — see verifyEVMClaim.
+    const latestClaim = await this.getReceivedClaimWatermark(
       peerId,
       claim.blockchain,
       claim.channelAccount
@@ -943,8 +947,9 @@ export class ClaimReceiver extends EventEmitter {
       }
     }
 
-    // Check nonce monotonicity - nonce must strictly increase
-    const latestClaim = await this.getLatestVerifiedClaim(
+    // Check nonce monotonicity - nonce must strictly increase.
+    // Watermark includes redeemed claims (issue #353) — see verifyEVMClaim.
+    const latestClaim = await this.getReceivedClaimWatermark(
       peerId,
       claim.blockchain,
       claim.zkAppAddress
@@ -1091,6 +1096,61 @@ export class ClaimReceiver extends EventEmitter {
       return JSON.parse(row.claim_data) as BTPClaimMessage;
     } catch (error) {
       this.logger.error({ error }, 'Failed to query latest verified claim');
+      return null;
+    }
+  }
+
+  /**
+   * Received-claim nonce watermark for a (peer, blockchain, channel) tuple:
+   * the most recently VERIFIED claim, including already-redeemed ones.
+   *
+   * This is the freshness reference shared by the per-packet inbound claim
+   * gate (`InboundClaimValidator`, issue #353) and this receiver's own
+   * monotonicity check, so the two components can never disagree about what
+   * "stale" means. Unlike {@link getLatestVerifiedClaim} (the redemption
+   * path, which deliberately excludes redeemed claims), the watermark must
+   * NEVER regress: a channel's nonce sequence keeps advancing across
+   * redemptions, so a stale pre-redemption claim must still compare against
+   * the all-time high-water nonce. Verified claims are nonce-monotonic by
+   * construction (this class refuses to store a non-advancing claim as
+   * verified), so the newest verified row carries the high-water nonce.
+   *
+   * Local DB read only — never touches the chain, safe on the per-packet
+   * hot path.
+   *
+   * @param peerId - Peer ID (claim sender)
+   * @param blockchain - Blockchain type
+   * @param channelId - Channel or owner identifier
+   * @returns The watermark claim, or null when the channel has no verified
+   *   claim yet (first-claim case) or the read fails (fail-open to the
+   *   cryptographic gate, matching this class's non-blocking DB error posture)
+   */
+  async getReceivedClaimWatermark(
+    peerId: string,
+    blockchain: BlockchainType,
+    channelId: string
+  ): Promise<BTPClaimMessage | null> {
+    try {
+      const stmt = this.db.prepare(`
+        SELECT claim_data
+        FROM received_claims
+        WHERE peer_id = ?
+          AND blockchain = ?
+          AND channel_id = ?
+          AND verified = 1
+        ORDER BY received_at DESC, rowid DESC
+        LIMIT 1
+      `);
+
+      const row = stmt.get(peerId, blockchain, channelId) as { claim_data: string } | undefined;
+
+      if (!row) {
+        return null;
+      }
+
+      return JSON.parse(row.claim_data) as BTPClaimMessage;
+    } catch (error) {
+      this.logger.error({ error }, 'Failed to query received-claim watermark');
       return null;
     }
   }
