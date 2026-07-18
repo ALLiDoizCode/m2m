@@ -1,20 +1,24 @@
 /**
- * Smoke test for the Mina USDC devnet tooling (ticket #193).
+ * Smoke test for the Mina USDC devnet deploy + funding logic (ticket #193).
  *
- * Verifies the deploy + funding LOGIC used by tools/mina/deploy-usdc-token.ts and
- * tools/mina/fund-usdc.ts against an o1js Mina.LocalBlockchain (proofsEnabled:
- * false) — no live devnet, no funded key. Mirrors packages/mina-zkapp's
- * usdc-token.test.ts deploy sequence, but exercises THIS package's exported
- * functions so the devnet scripts stay honest.
+ * Verifies the deploy + funding LOGIC used by tools/mina/deploy-usdc-token.mts
+ * and tools/mina/fund-usdc.mts against an o1js Mina.LocalBlockchain
+ * (proofsEnabled: false) — no live devnet, no funded key. Mirrors
+ * usdc-token.test.ts's deploy sequence, but exercises the exported
+ * `deployUsdcToken` / `mintUsdc` functions so the devnet CLIs stay honest.
+ *
+ * Moved here from tools/mina/usdc-devnet.test.ts as part of the #352 fix (the
+ * shared logic now lives in src/usdc-deploy.ts so the pure-ESM CLIs and this
+ * CJS jest suite consume ONE implementation) — which also puts it in CI, where
+ * the tools/mina jest config never ran.
  *
  * Epic: USDC settlement across all chains (connector#188), ticket #193.
  */
 
 import { Mina, PrivateKey } from 'o1js';
 
-import { ONE_USDC, USDC_DECIMALS } from '../../packages/mina-zkapp/src/usdc-token';
-import { deployUsdcToken } from './deploy-usdc-token';
-import { mintUsdc } from './fund-usdc';
+import { ONE_USDC, USDC_DECIMALS } from './usdc-token';
+import { deployUsdcToken, mintUsdc } from './usdc-deploy';
 
 describe('Mina USDC devnet tooling (#193)', () => {
   let Local: Awaited<ReturnType<typeof Mina.LocalBlockchain>>;

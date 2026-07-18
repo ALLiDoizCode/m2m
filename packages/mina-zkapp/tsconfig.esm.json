@@ -19,6 +19,7 @@
     "src/constants.ts",
     "src/usdc-token.ts",
     "src/usdc-channel-token.ts",
+    "src/usdc-deploy.ts",
     "src/PaymentChannel.ts"
   ]
 }

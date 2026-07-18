@@ -91,7 +91,7 @@ write_endpoints() {
   fi
 
   # Mina USDC token zkApp is deployed ONCE to the public devnet (we only proxy it,
-  # no node here) by tools/mina/deploy-usdc-token.ts, which writes the deploy
+  # no node here) by tools/mina/deploy-usdc-token.mts, which writes the deploy
   # result to infra/mina/usdc-token.json. Read tokenAddress/tokenId from it.
   #
   # Source order: the gitignored live deploy result (usdc-token.json) wins; else
@@ -148,7 +148,7 @@ write_endpoints() {
     "adminAuthority": ${mina_admin_authority_json},
     "tokenDecimals": 6,
     "_fund": "POST {address} to https://faucet.${DOMAIN}/api/mina/request — drips native MINA AND admin-mints USDC. Or infra/mina/fund-mina-usdc.sh <b58> [usdc] from the box.",
-    "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.ts → infra/mina/usdc-token.json); null here means not yet deployed. The faucet admin-mints USDC via tools/mina/fund-usdc.ts's mint path using MINA_USDC_ADMIN_KEY (a CI secret); adminAuthority is its derived public key."
+    "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.mts → infra/mina/usdc-token.json); null here means not yet deployed. The faucet admin-mints USDC via tools/mina/fund-usdc.mts's mint path using MINA_USDC_ADMIN_KEY (a CI secret); adminAuthority is its derived public key."
   }
 }
 JSON

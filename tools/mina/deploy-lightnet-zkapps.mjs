@@ -3,7 +3,7 @@
 // LIGHTNET in ONE pure-ESM process (single o1js instance — required: o1js is a
 // dual package and the FungibleToken provers/circuit cache are per-instance
 // static state; a CJS/ESM split breaks proving). Mirrors the deploy sequences in
-// tools/mina/deploy-usdc-token.ts + tools/mina/deploy-zkapp.ts, but imports the
+// tools/mina/deploy-usdc-token.mts + tools/mina/deploy-zkapp.ts, but imports the
 // COMPILED ESM token+channel classes from packages/mina-zkapp/dist-esm/ (built by
 // `node packages/mina-zkapp/scripts/build-esm.mjs`) so o1js stays single-instance.
 //

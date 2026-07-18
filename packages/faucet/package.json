@@ -16,8 +16,8 @@
     "@solana/web3.js": "^1.95.3",
     "@solana/spl-token": "^0.4.8",
     "mina-signer": "^4.0.0",
-    "o1js": "^2.2.0",
-    "mina-fungible-token": "^1.1.0"
+    "o1js": "2.14.0",
+    "mina-fungible-token": "1.1.0"
   },
   "keywords": [
     "faucet",

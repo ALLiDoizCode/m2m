@@ -70,7 +70,7 @@ Fund a **Solana** address: `./devnet.sh fund-sol <pubkey> [usdc] [sol]` → aird
 Fund a **Mina** address (native MINA **+ USDC**): `curl -X POST https://faucet.<DOMAIN>/api/mina/request -H 'content-type: application/json' -d '{"address":"B62…"}'` → drips **both** 5 MINA (gas) **and** 1000 USDC, matching the EVM (ETH+USDC) and Solana (SOL+USDC) faucets. Two independent legs:
 
 - **Native MINA** — the faucet signs a native payment client-side with `mina-signer` (no o1js proving) and submits it via `sendPayment`. Needs the **`MINA_FAUCET_KEY`** secret (treasury base58 private key, HD index 2). The treasury is `B62qqEMaUpm1aZ5M2weUoGXQRGbF3j6VjEtaEdzfM1NAWmeHnywiC2P`; it **must be FUNDED** with native MINA (top up at `https://faucet.minaprotocol.com` if it runs dry — an unfunded treasury "succeeds" but transfers nothing). When unset, the route 503s with a public-faucet link.
-- **USDC** — the faucet admin-mints the deployed `UsdcChannelToken` via o1js proving (`packages/faucet/src/mina-usdc.mjs`, reusing `tools/mina/fund-usdc.ts`'s mint path). Needs the **`MINA_USDC_ADMIN_KEY`** secret (the mint-authority base58 private key) — **MUST be FUNDED** (it pays each recipient's token-account creation fee on first mint, the #190 gotcha). The token + admin-contract ADDRESSES are public (resolved by `devnet.sh` from `infra/mina/usdc-token.json` or `endpoints.json`), so only the key is a secret. When unset, the route drips native MINA only and notes that USDC minting was skipped.
+- **USDC** — the faucet admin-mints the deployed `UsdcChannelToken` via o1js proving (`packages/faucet/src/mina-usdc.mjs`, reusing `tools/mina/fund-usdc.mts`'s mint path). Needs the **`MINA_USDC_ADMIN_KEY`** secret (the mint-authority base58 private key) — **MUST be FUNDED** (it pays each recipient's token-account creation fee on first mint, the #190 gotcha). The token + admin-contract ADDRESSES are public (resolved by `devnet.sh` from `infra/mina/usdc-token.json` or `endpoints.json`), so only the key is a secret. When unset, the route drips native MINA only and notes that USDC minting was skipped.
 
 > The Mina USDC mint uses o1js zk-PROVING, which does **not** work on `node:22-alpine` (musl). The faucet image is therefore built on `node:22-bookworm-slim` (glibc) and bundles a single-instance o1js ESM build of the token classes. The first mint after boot compiles the circuits once (~6s); subsequent mints are warm.
 
@@ -83,12 +83,15 @@ The USDC token-owner zkApp (`mina-fungible-token`, 6 decimals) is deployed **onc
 ```bash
 export MINA_DEPLOYER_KEY=<base58 priv key, FUNDED>
 export MINA_USDC_ADMIN_KEY=<base58 priv key, FUNDED>   # the mint authority
-npx ts-node tools/mina/deploy-usdc-token.ts \
+npm run build:esm --workspace=packages/mina-zkapp   # the CLI imports the pure-ESM build
+npx tsx tools/mina/deploy-usdc-token.mts \
   --network https://api.minascan.io/node/devnet/v1/graphql \
   --out infra/mina/usdc-token.json
 ```
 
-It prints + persists `{ tokenAddress, tokenId, adminContractAddress, adminAuthority }` to `infra/mina/usdc-token.json`; `devnet.sh endpoints` then reads that file (via `jq`) to emit `mina.tokenAddress` / `mina.tokenId` into `endpoints.json`. Pin the same `tokenAddress`/`tokenId` into the committed sample `endpoints.json` (currently placeholders). Smoke-test the deploy + mint logic with `npx jest --config tools/mina/jest.config.js`.
+(The CLI is pure ESM run via `tsx` — o1js must load as a SINGLE module instance or `UsdcChannelToken.compile()` fails; see issue #352. `npx tsx tools/mina/deploy-usdc-token.mts --compile-only` dry-runs the circuit compile with no network/keys.)
+
+It prints + persists `{ tokenAddress, tokenId, adminContractAddress, adminAuthority }` to `infra/mina/usdc-token.json`; `devnet.sh endpoints` then reads that file (via `jq`) to emit `mina.tokenAddress` / `mina.tokenId` into `endpoints.json`. Pin the same `tokenAddress`/`tokenId` into the committed sample `endpoints.json` (currently placeholders). Smoke-test the deploy + mint logic with `npm test --workspace=packages/mina-zkapp -- usdc-deploy` (the `usdc-deploy.test.ts` suite, which runs in CI).
 
 ## Reset semantics
 
