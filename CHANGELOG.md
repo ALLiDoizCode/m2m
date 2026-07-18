@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.34.8](https://github.com/toon-protocol/connector/compare/v3.34.7...v3.34.8) (2026-07-18)
+
+### Bug Fixes
+
+- **connector:** bind Mina claim value to route price by opening the balance commitment at the gate ([#359](https://github.com/toon-protocol/connector/issues/359)) ([#361](https://github.com/toon-protocol/connector/issues/361)) ([74dbfc3](https://github.com/toon-protocol/connector/commit/74dbfc3b83efa480bf5a1d9470816457761d3cd5)), closes [#360](https://github.com/toon-protocol/connector/issues/360) [#360](https://github.com/toon-protocol/connector/issues/360) [toon-meta#168](https://github.com/toon-protocol/toon-meta/issues/168) [#358](https://github.com/toon-protocol/connector/issues/358) [#360](https://github.com/toon-protocol/connector/issues/360)
+
 ## [3.34.7](https://github.com/toon-protocol/connector/compare/v3.34.6...v3.34.7) (2026-07-18)
 
 ### Bug Fixes
