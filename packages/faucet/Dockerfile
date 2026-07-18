@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 # ---------------------------------------------------------------------------
-# Faucet image — EVM + Solana + Mina (native MINA + USDC admin-mint)
+# Faucet image — EVM + Solana + Mina (native MINA + USDC treasury drip)
 # ---------------------------------------------------------------------------
-# BASE IMAGE: glibc, NOT alpine. The Mina USDC admin-mint path (src/mina-usdc.mjs)
+# BASE IMAGE: glibc, NOT alpine. The Mina USDC drip path (src/mina-usdc.mjs:
+# treasury self-mint + transfer against the rate-limited public-devnet token)
 # uses o1js zk-PROVING (`tx.prove()`), and o1js's native bindings do NOT work on
 # node:22-alpine (musl). `node:22-bookworm-slim` is glibc and proves correctly.
 #

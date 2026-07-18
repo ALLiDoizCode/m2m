@@ -1,9 +1,19 @@
 /**
- * Admin-mint USDC to a recipient on a Mina network (the Mina funding path).
+ * Admin-mint USDC to a recipient on a Mina network — LEGACY (stock-admin
+ * deploys ONLY, e.g. the lightnet box's local token).
+ *
+ * ⚠️  DOES NOT WORK against the CURRENT public-devnet USDC token
+ * (infra/linode/endpoints.json "mina"): that token is gated by
+ * `RateLimitedUsdcAdmin` — mints are permissionless but require the
+ * RECIPIENT's signature and are capped per address per ~24h, and the admin
+ * key holds pause/upgrade rights only (no mint monopoly). For that token use
+ * `tools/mina/self-mint-usdc.mts` (or `infra/mina/fund-mina-usdc.sh`, which
+ * wraps it; this CLI stays reachable via its `--admin-mint` legacy flag), or
+ * the faucet's POST /api/mina/usdc-request treasury-transfer drip for
+ * zero-MINA recipients (packages/faucet).
  *
  * Analogous to `infra/solana/fund-solana.sh` (SPL transfer from a treasury), but
  * Mina has no token CLI — minting requires o1js, so this is the funding core.
- * `infra/mina/fund-mina-usdc.sh` is a thin wrapper that calls into this.
  *
  * The `FungibleTokenAdmin` gates `mint`; the admin AUTHORITY key
  * (`MINA_USDC_ADMIN_KEY`) must sign and must be a FUNDED account (it pays the

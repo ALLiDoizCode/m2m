@@ -354,8 +354,10 @@
             submitBtn.disabled = true;
           }
         } else if (chain === 'mina') {
-          a1L.textContent = 'MINA per request:';
-          a1.textContent = c.enabled ? `${c.drips.mina} MINA` : 'disabled';
+          a1L.textContent = 'Per request:';
+          a1.textContent = c.enabled
+            ? `${c.drips.mina} MINA${c.drips.usdc ? ` + ${c.drips.usdc} USDC` : ''}`
+            : 'disabled';
           a2L.textContent = 'Network:';
           a2.textContent = `${c.network || 'devnet'} (public)`;
           cL.textContent = c.enabled ? 'Treasury:' : 'Public faucet:';
@@ -441,9 +443,24 @@
             addressInput.value = '';
           } else if (chain === 'mina') {
             const p = data.payment;
+            const u = data.usdc || {};
+            // The USDC leg is a treasury TRANSFER (the rate-limited token has
+            // no admin-mint); it may be pending (circuits warming), limited
+            // (per-address cooldown), skipped, or failed — all alongside a
+            // successful native drip.
+            const usdcLine = u.amount
+              ? `<br/>✅ Sent ${u.amount} USDC (treasury transfer)<br/><small>transfer hash: ${u.transferHash || '-'}</small>`
+              : u.pending
+                ? '<br/>⏳ USDC transfer queued (zk circuits still warming — it will land shortly).'
+                : u.limited
+                  ? '<br/>ℹ️ USDC skipped: this address is in its drip cooldown window.'
+                  : u.error
+                    ? `<br/>⚠️ USDC drip failed: ${u.message || u.error}`
+                    : '';
             showMessage(
               `✅ Sent ${p.amount} MINA to ${address}<br/>` +
-                `<small>payment hash: ${p.hash || p.id}</small>`,
+                `<small>payment hash: ${p.hash || p.id}</small>` +
+                usdcLine,
               'success'
             );
             addressInput.value = '';

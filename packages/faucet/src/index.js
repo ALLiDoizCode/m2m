@@ -3,7 +3,9 @@ import cors from 'cors';
 import { ethers, NonceManager } from 'ethers';
 import { createSolanaFaucet } from './solana.js';
 import { isValidMinaAddress, minaInfo, minaFallbackLink, createMinaFaucet } from './mina.js';
-// Mina USDC admin-mint lives in a SEPARATE pure-ESM module (`mina-usdc.mjs`)
+import { createDripLimiter } from './drip-limiter.js';
+// The Mina USDC drip (treasury self-mint + TRANSFER — the rate-limited token
+// has no admin-mint) lives in a SEPARATE pure-ESM module (`mina-usdc.mjs`)
 // because it pulls in o1js for zk-proving. It is loaded via a dynamic import so
 // a deploy that lacks the compiled mina-zkapp ESM build (or runs on a non-glibc
 // base) degrades to native-MINA-only instead of crashing boot. See mina-usdc.mjs.
@@ -54,12 +56,12 @@ const solanaFaucet = createSolanaFaucet();
 // derived pubkey must equal the treasury), which we want to crash boot.
 const minaFaucet = createMinaFaucet();
 
-// Mina USDC admin-minter (null when MINA_USDC_* env is unset — native MINA still
+// Mina USDC dripper (null when MINA_USDC_* env is unset — native MINA still
 // drips). Loaded via dynamic import so the o1js dependency only loads when the
-// module is present; a failed load is logged and treated as "USDC mint disabled"
+// module is present; a failed load is logged and treated as "USDC drip disabled"
 // rather than crashing the whole faucet (which also drips EVM + Solana).
-let minaUsdcMinter = null;
-let minaUsdcInfoFn = () => ({ usdcMint: false });
+let minaUsdcDripper = null;
+let minaUsdcInfoFn = () => ({ usdcDrip: false });
 {
   let mod;
   try {
@@ -67,28 +69,37 @@ let minaUsdcInfoFn = () => ({ usdcMint: false });
     // soft-failed — a missing build or non-glibc base degrades to MINA-only.
     mod = await import('./mina-usdc.mjs');
   } catch (error) {
-    console.error('⚠️  Mina USDC mint unavailable (module load failed):', error.message);
+    console.error('⚠️  Mina USDC drip unavailable (module load failed):', error.message);
   }
   if (mod) {
     minaUsdcInfoFn = mod.minaUsdcInfo;
-    // createMinaUsdcMinter() returns null when MINA_USDC_* is unset (fine), and
-    // throws fail-loud on a structurally invalid admin key (operator
+    // createMinaUsdcDripper() returns null when MINA_USDC_* is unset (fine), and
+    // throws fail-loud on a structurally invalid treasury key (operator
     // misconfiguration we WANT to crash boot — not swallowed here).
-    minaUsdcMinter = mod.createMinaUsdcMinter();
+    minaUsdcDripper = mod.createMinaUsdcDripper();
   }
 }
 
+// Per-address off-chain cooldown for the USDC leg: the treasury can only
+// replenish 1,000 USDC per ~24h (the on-chain self-mint cap), so without this
+// one address could drain the whole daily allowance via repeated (uncapped)
+// transfers. claim() reserves BEFORE the drip runs; release() rolls back on
+// failure. See drip-limiter.js.
+const minaUsdcLimiter = minaUsdcDripper
+  ? createDripLimiter({ cooldownMs: minaUsdcDripper.cooldownMs })
+  : null;
+
 // Warm the o1js circuit cache in the BACKGROUND at boot (issue #348): compiling
-// FungibleTokenAdmin + UsdcChannelToken takes ~3 minutes on the 2 GB devnet box
-// (178.6s observed), and before this warm-up the compile ran lazily inside the
-// FIRST /api/mina/request — pushing that request to ~4min15s total (compile +
-// ~76s prove) while clients time out at ~2min. Failures here are non-fatal:
-// compileOnce resets its cache so the next mint retries.
-if (minaUsdcMinter) {
-  minaUsdcMinter
+// RateLimitedUsdcAdmin + UsdcChannelToken takes ~3 minutes on the 2 GB devnet
+// box (178.6s observed), and before this warm-up the compile ran lazily inside
+// the FIRST /api/mina/request — pushing that request to ~4min15s total (compile
+// + ~76s prove) while clients time out at ~2min. Failures here are non-fatal:
+// compileOnce resets its cache so the next drip retries.
+if (minaUsdcDripper) {
+  minaUsdcDripper
     .compile()
     .catch((err) =>
-      console.error('⚠️  Mina USDC circuit warm-up failed (will retry on first mint):', err.message)
+      console.error('⚠️  Mina USDC circuit warm-up failed (will retry on first drip):', err.message)
     );
 }
 
@@ -210,7 +221,7 @@ app.get('/api/info', async (req, res) => {
               rpcUrl: solanaFaucet.rpcUrl,
             }
           : { enabled: false, route: '/api/solana/request', ready: false },
-        mina: minaInfo(minaFaucet, minaUsdcInfoFn(minaUsdcMinter)),
+        mina: minaInfo(minaFaucet, minaUsdcInfoFn(minaUsdcDripper)),
       },
     });
   } catch (error) {
@@ -386,55 +397,76 @@ app.post('/api/mina/request', (req, res) => {
       // 1. Native-MINA treasury drip (mina-signer, no proving).
       const result = await minaFaucet.drip(address);
 
-      // 2. ALSO admin-mint USDC when configured (o1js proving). This is
-      //    independent of the native drip and must NOT fail the whole route when
-      //    the minter is unconfigured — we just note it was skipped. A USDC mint
-      //    FAILURE (when configured) is surfaced in the response (usdc.error) but
-      //    still returns 200 because the native drip already succeeded.
+      // 2. ALSO drip USDC when configured (o1js proving): a plain TRANSFER
+      //    from the treasury, which lazily replenishes itself by SELF-MINT
+      //    (≤1,000 USDC/~24h — the rate-limited token has no admin-mint; see
+      //    mina-usdc.mjs). This is independent of the native drip and must NOT
+      //    fail the whole route when the dripper is unconfigured — we just note
+      //    it was skipped. A USDC drip FAILURE (when configured) is surfaced in
+      //    the response (usdc.error) but still returns 200 because the native
+      //    drip already succeeded.
       //
       //    While the circuit cache is still WARMING (~3min after boot on the
       //    2 GB devnet box — see the boot-time warm-up above), we do NOT hold
       //    the response for compile+prove (~4min total, past client timeouts):
-      //    we answer with the native payment + usdc.pending and finish the mint
-      //    in the background ON THIS SAME QUEUE, so a later drip's mint can
-      //    never race the admin account's nonce (issue #348).
+      //    we answer with the native payment + usdc.pending and finish the drip
+      //    in the background ON THIS SAME QUEUE, so a later drip can never race
+      //    the treasury account's nonce (issue #348).
       let usdc;
-      let pendingMint = null;
-      if (minaUsdcMinter) {
-        if (minaUsdcMinter.isWarm()) {
+      let pendingDrip = null;
+      if (minaUsdcDripper) {
+        // Per-address cooldown (claim BEFORE the drip; released on failure).
+        const claim = minaUsdcLimiter.claim(address);
+        if (!claim.allowed) {
+          usdc = {
+            limited: true,
+            retryAfterMs: claim.retryAfterMs,
+            note:
+              'This address already received a USDC drip inside the cooldown window ' +
+              '(the treasury can only replenish 1,000 USDC/day). Native MINA was still dripped.',
+            selfMintHint: minaUsdcDripper.selfMintHint,
+          };
+        } else if (minaUsdcDripper.isWarm()) {
           try {
-            usdc = await minaUsdcMinter.mint(address);
-          } catch (mintErr) {
+            usdc = await minaUsdcDripper.drip(address);
+          } catch (dripErr) {
+            minaUsdcLimiter.release(address);
             console.error(
-              '  ⚠️  Mina USDC mint failed (native drip still succeeded):',
-              mintErr.message
+              '  ⚠️  Mina USDC drip failed (native drip still succeeded):',
+              dripErr.message
             );
-            usdc = { error: 'USDC mint failed', message: mintErr.message };
+            usdc = {
+              error: 'USDC drip failed',
+              message: dripErr.message,
+              ...(dripErr.code === 'USDC_TREASURY_EMPTY' ? { treasuryEmpty: true } : {}),
+              selfMintHint: minaUsdcDripper.selfMintHint,
+            };
           }
         } else {
           usdc = {
             pending: true,
             note:
-              'USDC mint queued: the zk circuits are still compiling on this host ' +
-              '(first ~3min after a faucet restart). The mint will land shortly after; ' +
+              'USDC drip queued: the zk circuits are still compiling on this host ' +
+              '(first ~3min after a faucet restart). The transfer will land shortly after; ' +
               'native MINA was dripped now.',
           };
-          pendingMint = () =>
-            minaUsdcMinter
-              .mint(address)
-              .then(() => console.log(`  ✅ Background Mina USDC mint completed for ${address}`))
-              .catch((mintErr) =>
+          pendingDrip = () =>
+            minaUsdcDripper
+              .drip(address)
+              .then(() => console.log(`  ✅ Background Mina USDC drip completed for ${address}`))
+              .catch((dripErr) => {
+                minaUsdcLimiter.release(address);
                 console.error(
-                  `  ⚠️  Background Mina USDC mint failed for ${address}:`,
-                  mintErr.message
-                )
-              );
+                  `  ⚠️  Background Mina USDC drip failed for ${address}:`,
+                  dripErr.message
+                );
+              });
         }
       } else {
         usdc = {
           skipped: true,
           note:
-            'USDC minting is not configured on this host (set MINA_USDC_ADMIN_KEY + ' +
+            'USDC drip is not configured on this host (set MINA_USDC_TREASURY_KEY + ' +
             'MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT to enable). Native MINA was dripped.',
         };
       }
@@ -442,9 +474,9 @@ app.post('/api/mina/request', (req, res) => {
       console.log(`  ✅ Mina faucet request completed for ${address}`);
       res.json({ success: true, chain: 'mina', address, payment: result, usdc });
 
-      // Keep the queue serialized through the background mint (nonce safety);
+      // Keep the queue serialized through the background drip (nonce safety);
       // its errors are already handled above so it can never poison the queue.
-      if (pendingMint) await pendingMint();
+      if (pendingDrip) await pendingDrip();
     })
     .catch((error) => {
       console.error('❌ Mina faucet request failed:', error.message);
@@ -456,6 +488,101 @@ app.post('/api/mina/request', (req, res) => {
         return;
       }
       res.status(500).json({ error: 'Mina faucet request failed', message: error.message });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Mina USDC route — POST /api/mina/usdc-request { address }
+//
+// USDC-only drip (no native MINA leg): a plain token TRANSFER from the faucet
+// treasury, which lazily replenishes itself by rate-limited SELF-MINT (≤1,000
+// USDC per ~24h — the token's permissionless mint requires the recipient's
+// signature, so the faucet cannot mint to users directly; see mina-usdc.mjs).
+// Useful for addresses that already hold MINA. Anyone can also bypass the
+// faucet entirely (`selfMintHint` in every response): ~1.2 devnet MINA +
+// tools/mina/self-mint-usdc.mts yields 1,000 USDC/day directly.
+// ---------------------------------------------------------------------------
+app.post('/api/mina/usdc-request', (req, res) => {
+  const { address } = req.body || {};
+
+  if (!address || !isValidMinaAddress(address)) {
+    res.status(400).json({ error: 'Invalid Mina address (expected B62… public key)' });
+    return;
+  }
+
+  if (!minaUsdcDripper) {
+    res.status(503).json({
+      error: 'Mina USDC drip not configured',
+      message:
+        'Set MINA_USDC_TREASURY_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT to enable ' +
+        'the USDC drip. Anyone holding ~1.2 devnet MINA can self-mint 1,000 USDC/day directly ' +
+        'with tools/mina/self-mint-usdc.mts (the token mint is permissionless, rate-limited ' +
+        'per address).',
+    });
+    return;
+  }
+
+  // Per-address cooldown: claim BEFORE enqueueing (reserves the slot so
+  // concurrent requests for the same address cannot double-drip); released
+  // below if the drip fails.
+  const claim = minaUsdcLimiter.claim(address);
+  if (!claim.allowed) {
+    res
+      .status(429)
+      .set('Retry-After', String(Math.ceil(claim.retryAfterMs / 1000)))
+      .json({
+        error: 'USDC drip rate limit',
+        message:
+          'This address already received a USDC drip inside the cooldown window ' +
+          '(the treasury can only replenish 1,000 USDC/day).',
+        retryAfterMs: claim.retryAfterMs,
+        selfMintHint: minaUsdcDripper.selfMintHint,
+      });
+    return;
+  }
+
+  // Unlike the combined route (whose native leg is worth answering immediately)
+  // there is nothing to return until the transfer is submitted — so while the
+  // circuits are still compiling after boot, answer an honest 503-retry instead
+  // of holding the request past client timeouts.
+  if (!minaUsdcDripper.isWarm()) {
+    minaUsdcLimiter.release(address);
+    res
+      .status(503)
+      .set('Retry-After', '180')
+      .json({
+        error: 'Mina USDC circuits are still compiling',
+        message:
+          'The zk circuits compile for ~3min after a faucet restart. Retry shortly — ' +
+          'or self-mint directly (see selfMintHint).',
+        selfMintHint: minaUsdcDripper.selfMintHint,
+      });
+    return;
+  }
+
+  console.log(`💧 Mina USDC drip request for ${address}`);
+  minaQueue = minaQueue
+    .then(async () => {
+      const usdc = await minaUsdcDripper.drip(address);
+      console.log(`  ✅ Mina USDC drip completed for ${address}`);
+      res.json({ success: true, chain: 'mina', address, usdc });
+    })
+    .catch((error) => {
+      minaUsdcLimiter.release(address);
+      console.error('❌ Mina USDC drip failed:', error.message);
+      if (res.headersSent) return;
+      // Treasury empty + mint window exhausted is an honest capacity limit of
+      // the design (the treasury replenishes ≤1,000 USDC/day), not a bug —
+      // 503 with the diagnosis and the self-mint bypass.
+      if (error.code === 'USDC_TREASURY_EMPTY') {
+        res.status(503).json({
+          error: 'Mina USDC treasury exhausted',
+          message: error.message,
+          selfMintHint: minaUsdcDripper.selfMintHint,
+        });
+        return;
+      }
+      res.status(500).json({ error: 'Mina USDC drip failed', message: error.message });
     });
 });
 
@@ -474,7 +601,7 @@ app.listen(PORT, async () => {
     `   Mina:          ${minaFaucet ? `drip ${minaFaucet.dripAmount} MINA (treasury)` : 'disabled (503 + public-faucet link)'}`
   );
   console.log(
-    `   Mina USDC:     ${minaUsdcMinter ? `admin-mint ${minaUsdcMinter.usdcAmount} USDC (o1js)` : 'disabled (native MINA only)'}`
+    `   Mina USDC:     ${minaUsdcDripper ? `drip ${minaUsdcDripper.usdcAmount} USDC (treasury transfer, self-mint replenished ≤${minaUsdcDripper.dailyCapUsdc}/day)` : 'disabled (native MINA only)'}`
   );
   console.log('═══════════════════════════════════════════════');
   console.log('');

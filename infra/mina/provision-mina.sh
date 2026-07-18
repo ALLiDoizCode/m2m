@@ -18,8 +18,10 @@
 #      native MINA on public devnet (Mina has no self-hosted faucet to airdrop
 #      from — they're topped from https://faucet.minaprotocol.com):
 #        - the native-MINA drip treasury   (derived from MINA_FAUCET_KEY)
-#        - the USDC mint authority / fee payer (derived from MINA_USDC_ADMIN_KEY,
-#          which also pays each recipient's token-account creation fee)
+#        - the USDC drip treasury (derived from MINA_USDC_TREASURY_KEY, legacy
+#          name MINA_USDC_ADMIN_KEY): it SELF-MINTS its own daily allowance
+#          (the rate-limited token has no admin-mint), pays each drip's tx fee
+#          and each fresh recipient's 1-MINA token-account creation fee
 #      We can't auto-fund these on public devnet, so we CHECK their balances and
 #      warn LOUDLY (with the address + the faucet link) when underfunded — this is
 #      what silently broke the Mina round-trip before (an unfunded treasury drips
@@ -134,12 +136,13 @@ if command -v node >/dev/null 2>&1; then
     echo "  ℹ️  MINA_FAUCET_KEY unset — native-MINA drip disabled (faucet route 503s + links out)."
   fi
 
-  if [ -n "${MINA_USDC_ADMIN_KEY:-}" ]; then
-    APK="$(mina_pubkey "$MINA_USDC_ADMIN_KEY" || true)"
-    [ -n "$APK" ] && warn_balance "USDC mint authority / fee payer" "$APK" "$(mina_liquid "$APK" || true)" \
-      || echo "  ⚠️  MINA_USDC_ADMIN_KEY set but not a valid base58 private key." >&2
+  USDC_TREASURY_SK="${MINA_USDC_TREASURY_KEY:-${MINA_USDC_ADMIN_KEY:-}}"
+  if [ -n "$USDC_TREASURY_SK" ]; then
+    APK="$(mina_pubkey "$USDC_TREASURY_SK" || true)"
+    [ -n "$APK" ] && warn_balance "USDC drip treasury (self-mint + transfer fee payer)" "$APK" "$(mina_liquid "$APK" || true)" \
+      || echo "  ⚠️  MINA_USDC_TREASURY_KEY/MINA_USDC_ADMIN_KEY set but not a valid base58 private key." >&2
   else
-    echo "  ℹ️  MINA_USDC_ADMIN_KEY unset — faucet drips native MINA only (no USDC mint)."
+    echo "  ℹ️  MINA_USDC_TREASURY_KEY unset — faucet drips native MINA only (no USDC drip)."
   fi
 else
   echo "  ℹ️  node not on PATH — skipping faucet/admin balance checks."

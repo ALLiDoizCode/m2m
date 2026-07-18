@@ -22,3 +22,18 @@ export {
   RECEIPT_STATE_SLOT,
   RATE_LIMIT_ASSERT,
 } from './usdc-rate-limited-admin';
+export {
+  buildUsdcTransferTx,
+  dripUsdcFromTreasury,
+  getUsdcBalance,
+  readMintReceiptState,
+  remainingMintAllowance,
+  USDC_TREASURY_EMPTY,
+  UsdcTreasuryEmptyError,
+} from './usdc-faucet';
+export type {
+  MintReceiptState,
+  TreasuryDripOptions,
+  TreasuryDripResult,
+  UsdcTransferTxOptions,
+} from './usdc-faucet';

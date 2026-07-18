@@ -116,8 +116,13 @@ compile + per-tx proving time; keep Mina settlement **nightly, not per-PR**
 - Deploy the USDC `FungibleToken` to public Mina devnet; pin `mina.tokenAddress` /
   `mina.tokenId` in `infra/linode/endpoints.json` + the linode `devnet.sh`
   generator (currently `mina.tokenId: null`).
-- Add a Mina USDC funding path (admin-mint to a peer) analogous to
-  `fund-solana.sh` / the EVM faucet.
+- Add a Mina USDC funding path analogous to `fund-solana.sh` / the EVM faucet.
+  (DONE, updated for the rate-limited redeploy: the token's mint is
+  permissionless-but-recipient-signed, so funding is either the
+  `tools/mina/self-mint-usdc.mts` self-mint — wrapped by
+  `infra/mina/fund-mina-usdc.sh` — or the faucet's `/api/mina/usdc-request`
+  treasury TRANSFER for zero-MINA recipients; admin-mint is legacy,
+  stock-admin deploys only.)
 
 ## Risks
 
