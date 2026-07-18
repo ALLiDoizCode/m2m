@@ -19,15 +19,15 @@
   "mina": {
     "graphqlUrl": "https://mina.<DOMAIN>/graphql",
     "upstream": "https://api.minascan.io/node/devnet/v1/graphql",
-    "tokenAddress": "B62qqwnm9NZs7MPFRSK4AjAw4kHJ7F5ttfbb4pFSqZvCHqpZWpx6yYk",
-    "tokenId": "13770394610291091689442727083129874284486561081541786615444915557572882540748",
-    "adminContractAddress": "B62qiUWJWjW7BFGadLskmKwFiiyD6zMCwCLRbZWoXWHrrkeh4x2pUxj",
-    "adminAuthority": "B62qm8GRwyrotPSFVghAiY272pvz514Jg82qNHNjRAjS2UAHASDV7yj",
+    "tokenAddress": "B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d",
+    "tokenId": "9497120696276615621907376728658022802954262638363646162765282600447713419198",
+    "adminContractAddress": "B62qpeGPgEhz6Vbd9E11PoTzz2EZZCJjqhwALxJ2BnkdozFm2rZtmRB",
+    "adminAuthority": "B62qqss8MphndS1nGNdtwaE936AaojqLu4wPFfw9yjA5Ga66XdVBoiE",
     "demoChannelZkApp": "B62qigQwEwBAsSZad4GhSun8CAwkh3GUbx2YN2TbUHU8tzVFcFTE95x",
     "tokenDecimals": 6,
-    "_fund": "infra/mina/fund-mina-usdc.sh <b58> [usdc] — admin-mints USDC on the public devnet (admin authority = MINA_USDC_ADMIN_KEY)",
-    "_connectorNote": "On the live box the connector reads via the minascan upstream directly (the mina.<DOMAIN> proxy 504s on send). Set chainProviders[mina].graphqlUrl to the upstream, tokenAddress/tokenId to these live values. The connector verify path follows the per-claim channelAccount, so client-opened channels work; demoChannelZkApp is a pre-OPEN USDC channel for quick checks.",
-    "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). USDC FungibleToken (UsdcChannelToken, 6dp) deployed ONCE to public devnet (deploy tx 5JuCoRk6xvJDZ82Hz2VFGzqUYsu24Y1rusEQzkKFxS8CNZF48Wdn); survives box rebuilds. Deploy keys (deployer/admin/token) are NOT committed — held by the operator. Faucet should admin-mint USDC (via tools/mina/fund-usdc.ts using MINA_USDC_ADMIN_KEY) alongside its native-MINA drip."
+    "_fund": "npx tsx tools/mina/self-mint-usdc.mts --token <tokenAddress> --admin-contract <adminContractAddress> [--first-mint] — PERMISSIONLESS self-mint (recipient signs; capped at 1,000 USDC per address per ~24h in-circuit). No admin key involved; infra/mina/fund-mina-usdc.sh (admin-mint) does NOT work against this token.",
+    "_connectorNote": "On the live box the connector reads via the minascan upstream directly (the mina.<DOMAIN> proxy 504s on send). Set chainProviders[mina].graphqlUrl to the upstream, tokenAddress/tokenId to these live values. The connector verify path follows the per-claim channelAccount, so client-opened channels work; demoChannelZkApp is a pre-OPEN USDC channel for quick checks (predates this token — settles in the superseded 2026-06 token).",
+    "_note": "Passthrough proxy of the PUBLIC Mina devnet (no node). USDC FungibleToken (UsdcChannelToken, 6dp) gated by the RATE-LIMITED admin (RateLimitedUsdcAdmin: anyone mints to themselves, 1,000 USDC/address/~24h enforced in-proof + in-ledger; admin key = pause/upgrade ONLY) — deployed to public devnet (deploy tx 5JuiWcRt7BhamqsBRsJn8parsjzSgceYbs1Jw7XspVuEMhBuUvDM) (rate-limited mint redeploy, #352 follow-up). Supersedes the 2026-07-17 token B62qmM6queHpUAWW1G6Hkb5MCEk1xKZ2wmydVdke4LvtZ8mL3AYkRKw (throwaway mint authority) and the earlier B62qqwnm9NZs…. Deploy keys are NOT committed — held by the operator."
   },
   "_decimalsNote": "USDC is 6-decimal on every chain (EVM + Solana), so claim base units are uniform — no cross-chain normalization needed."
 }
