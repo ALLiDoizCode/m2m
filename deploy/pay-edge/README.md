@@ -47,7 +47,7 @@ payer ──POST /ilp (3000)──▶ connector ──proxies the paid HTTP requ
    ```bash
    NODE_TLS_REJECT_UNAUTHORIZED=0 \
    CONNECTOR_ILP_URL=http://127.0.0.1:3000/ilp \
-   EVM_RPC_URL=https://evm-rpc.devnet.toonprotocol.dev \
+   EVM_RPC_URL=https://sepolia.base.org \
    FAUCET_URL=https://faucet.devnet.toonprotocol.dev \
    npx ts-node --project packages/connector/tsconfig.json \
      deploy/pay-edge/prove-roundtrip.ts
@@ -68,8 +68,8 @@ A client/agent paying this edge needs **three** URLs (live values for this deplo
 | Purpose                                          | URL                                                                                   |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------- |
 | **Paid edge** — where paid requests go           | `https://connector.pay.toonprotocol.dev/ilp` (or call your origin and read the `402`) |
-| **Chain RPC** — to open/fund the payment channel | `https://evm-rpc.devnet.toonprotocol.dev` (+ `solana-rpc.*`, `mina.*/graphql`)        |
-| **Faucet** — to get test funds                   | `https://faucet.devnet.toonprotocol.dev` (`POST /api/request {"address":"0x…"}`)      |
+| **Chain RPC** — to open/fund the payment channel | `https://sepolia.base.org` (+ Solana `https://api.devnet.solana.com`, Mina `https://api.minascan.io/node/devnet/v1/graphql`) |
+| **Faucet** — to get test funds                   | `https://faucet.devnet.toonprotocol.dev` (web UI, or `POST /api/base-sepolia/request {"address":"0x…"}`) |
 
 - **Payers speak ILP-over-HTTP, not plain HTTP.** A paid call serializes an ILP PREPARE
   (the HTTP request in `data`) + a channel-claim header and POSTs it to `/ilp`. Use the
@@ -77,8 +77,9 @@ A client/agent paying this edge needs **three** URLs (live values for this deplo
 - **No relay endpoint here.** pay-edge fronts a _generic_ HTTP backend, so there is **no
   `relay-ws`** to point at. (`relay-ws.devnet.toonprotocol.dev` belongs to the separate
   chains-box `with_connector_edge` deploy — its free-read Nostr WS — not to pay-edge.)
-- The public edge serves a **trusted** Let's Encrypt cert (Caddy); only the devnet _chain_
-  endpoints are self-signed (hence `NODE_TLS_REJECT_UNAUTHORIZED=0` for chain/faucet calls).
+- The public edge serves a **trusted** Let's Encrypt cert (Caddy). The chain RPCs are the
+  **public** testnets (trusted certs), so `NODE_TLS_REJECT_UNAUTHORIZED=0` is only needed
+  if you point at a self-signed endpoint.
 
 ## Files
 

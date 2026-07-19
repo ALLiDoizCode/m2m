@@ -1,6 +1,13 @@
 # USDC settlement across all chains (design)
 
-> Status: design + decomposition. Implementation tracked in the linked tickets.
+> Status: design + decomposition (historical). Implementation tracked in the linked tickets.
+> ⚠️ **Note (2026-07-19):** the self-hosted devnet chains referenced below
+> (anvil `0x5FbDB2…`, self-hosted Solana validator mint `H8HSreUF…`) are
+> **deleted** — the devnet now settles on public chains (Base Sepolia, public
+> Solana devnet, public Mina devnet); see
+> [`infra/linode/endpoints.json`](../infra/linode/endpoints.json) for live
+> values. The addresses below remain valid for the **local** docker-compose
+> chains only.
 > Driver: make the shared devnet (and protocol) settle **USDC** on every supported
 > chain — EVM, Solana, **and Mina** — with one canonical decimal scale.
 

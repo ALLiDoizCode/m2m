@@ -11,10 +11,15 @@ Live token (devnet):
 
 |                |                                                           |
 | -------------- | --------------------------------------------------------- |
-| token          | `B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa` |
-| admin contract | `B62qk3RsLgL38Vk7nDzGT3XHBjtzN9W9zz4A6WS2a6DhBMac9N8NKDs` |
+| token          | `B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d` |
+| admin contract | `B62qpeGPgEhz6Vbd9E11PoTzz2EZZCJjqhwALxJ2BnkdozFm2rZtmRB` |
 | decimals       | 6 · daily cap 1000 USDC / recipient / 480-slot window     |
 | node           | `https://api.minascan.io/node/devnet/v1/graphql`          |
+
+> The table above reflects the **canonical live devnet USDC token** as of
+> 2026-07-19 (`B62qqN1Pu…` — the token the hosted faucet drips and the devnet
+> announces). The permissionless-admin token `B62qnZnmV3jAD…` documented in
+> earlier revisions of this README is not the live devnet token.
 
 ## How it works
 
