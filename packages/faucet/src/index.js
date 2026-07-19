@@ -210,9 +210,20 @@ app.get('/api/info', async (req, res) => {
       ready: !!tokenContract,
 
       // ── Per-chain capability map ──
+      //
+      // The PUBLIC devnet/testnet legs are `baseSepolia`, `solana`, and `mina`.
+      // The `evm` leg below drips against the LOCAL anvil chain (chainId 31337)
+      // and is retained only for local-dev / CI standalone-e2e — it is NOT a
+      // public faucet and the web UI no longer surfaces it. Flagged `local:true`
+      // + `deprecated:true` so any consumer can distinguish it from the public
+      // legs. On the public devnet box (where anvil is torn down) it reports
+      // ready:false.
       chains: {
         evm: {
           enabled: true,
+          local: true,
+          deprecated: true,
+          note: 'Local anvil (chainId 31337) — dev/CI only, not a public faucet.',
           route: '/api/request',
           ready: !!tokenContract,
           drips: { eth: ETH_AMOUNT, token: TOKEN_AMOUNT, tokenSymbol },

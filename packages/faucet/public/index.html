@@ -209,7 +209,9 @@
   <body>
     <div class="container">
       <h1>🚰 Multichain Faucet</h1>
-      <p class="subtitle">Get free testnet funds for the TOON devnet (EVM · Solana · Mina)</p>
+      <p class="subtitle">
+        Get free public-testnet funds for TOON (Base Sepolia · Solana devnet · Mina devnet)
+      </p>
 
       <div id="notReady" class="not-ready" style="display: none">
         ⚠️ Waiting for token contract deployment...
@@ -227,19 +229,19 @@
             font-size: 1em;
           "
         >
-          <option value="evm">EVM (ETH + USDC)</option>
-          <option value="solana">Solana (SOL + USDC)</option>
-          <option value="mina">Mina (public devnet)</option>
+          <option value="baseSepolia">Base Sepolia (mock USDC)</option>
+          <option value="solana">Solana devnet (SOL + mock USDC)</option>
+          <option value="mina">Mina devnet (MINA + USDC)</option>
         </select>
       </div>
 
       <div class="info-box" id="infoBox">
         <div class="info-row">
-          <span class="info-label" id="amount1Label">ETH per request:</span>
+          <span class="info-label" id="amount1Label">USDC per request:</span>
           <span class="info-value" id="amount1">-</span>
         </div>
         <div class="info-row">
-          <span class="info-label" id="amount2Label">Tokens per request:</span>
+          <span class="info-label" id="amount2Label">Network:</span>
           <span class="info-value" id="amount2">-</span>
         </div>
         <div class="info-row">
@@ -269,7 +271,7 @@
 
       <div class="message" id="message"></div>
 
-      <div class="footer">Local Development Faucet</div>
+      <div class="footer">TOON Public Testnet Faucet</div>
     </div>
 
     <script>
@@ -282,10 +284,12 @@
       const loading = document.getElementById('loading');
       const notReady = document.getElementById('notReady');
 
-      // Per-chain UI config. `route` matches the server endpoints.
+      // Per-chain UI config. `route` matches the server endpoints. These are the
+      // PUBLIC testnet legs — the old local anvil EVM leg (/api/request) has been
+      // retired in favour of Base Sepolia.
       const CHAINS = {
-        evm: {
-          route: '/api/request',
+        baseSepolia: {
+          route: '/api/base-sepolia/request',
           addressLabel: 'Your Ethereum Address',
           placeholder: '0x...',
           validate: (a) => /^0x[a-fA-F0-9]{40}$/.test(a),
@@ -330,14 +334,15 @@
         if (!info) return;
         const c = info.chains?.[chain] || {};
 
-        if (chain === 'evm') {
-          a1L.textContent = 'ETH per request:';
-          a1.textContent = `${info.ethAmount} ETH`;
-          a2L.textContent = 'Tokens per request:';
-          a2.textContent = `${info.tokenAmount} ${info.tokenSymbol}`;
-          cL.textContent = 'Token contract:';
-          cV.textContent = info.tokenAddress || 'Not deployed yet';
-          if (!info.ready) {
+        if (chain === 'baseSepolia') {
+          a1L.textContent = 'USDC per request:';
+          a1.textContent = c.enabled ? `${c.drips.usdc} USDC (fresh mint)` : 'disabled';
+          a2L.textContent = 'Network:';
+          a2.textContent = `Base Sepolia (chainId ${c.chainId || 84532})`;
+          cL.textContent = 'Mock USDC token:';
+          cV.textContent = c.tokenAddress || 'not configured';
+          if (!c.enabled) {
+            notReady.textContent = '⚠️ Base Sepolia faucet not configured on this host.';
             notReady.style.display = 'block';
             submitBtn.disabled = true;
           }
@@ -427,9 +432,18 @@
             return;
           }
 
-          if (chain === 'evm') {
+          if (chain === 'baseSepolia') {
+            const t = data.transactions;
+            // Best-effort ETH gas drip: only present when the faucet key had a
+            // surplus above its reserve; the USDC mint always lands.
+            const ethLine =
+              t.eth && t.eth.dripped
+                ? `<br/><small>+ ${t.eth.amount} ETH gas — tx: ${t.eth.hash}</small>`
+                : '';
             showMessage(
-              `✅ Sent ${data.transactions.eth.amount} ETH and ${data.transactions.token.amount} ${data.transactions.token.symbol} to ${address}`,
+              `✅ Minted ${t.usdc.amount} ${t.usdc.symbol} to ${address}<br/>` +
+                `<small>mint tx: ${t.usdc.hash}</small>` +
+                ethLine,
               'success'
             );
             addressInput.value = '';
