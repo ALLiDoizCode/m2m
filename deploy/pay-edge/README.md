@@ -65,11 +65,11 @@ payer ──POST /ilp (3000)──▶ connector ──proxies the paid HTTP requ
 
 A client/agent paying this edge needs **three** URLs (live values for this deploy):
 
-| Purpose                                          | URL                                                                                   |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| **Paid edge** — where paid requests go           | `https://connector.pay.toonprotocol.dev/ilp` (or call your origin and read the `402`) |
+| Purpose                                          | URL                                                                                                                          |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Paid edge** — where paid requests go           | `https://connector.pay.toonprotocol.dev/ilp` (or call your origin and read the `402`)                                        |
 | **Chain RPC** — to open/fund the payment channel | `https://sepolia.base.org` (+ Solana `https://api.devnet.solana.com`, Mina `https://api.minascan.io/node/devnet/v1/graphql`) |
-| **Faucet** — to get test funds                   | `https://faucet.devnet.toonprotocol.dev` (web UI, or `POST /api/base-sepolia/request {"address":"0x…"}`) |
+| **Faucet** — to get test funds                   | `https://faucet.devnet.toonprotocol.dev` (web UI, or `POST /api/base-sepolia/request {"address":"0x…"}`)                     |
 
 - **Payers speak ILP-over-HTTP, not plain HTTP.** A paid call serializes an ILP PREPARE
   (the HTTP request in `data`) + a channel-claim header and POSTs it to `/ilp`. Use the
