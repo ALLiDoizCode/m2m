@@ -1,10 +1,18 @@
 # Connector
 
-[![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)](CHANGELOG.md)
+[![npm](https://img.shields.io/npm/v/@toon-protocol/connector)](https://www.npmjs.com/package/@toon-protocol/connector)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3.3-blue.svg)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **The payment infrastructure for agent networks.** Route micropayments between autonomous agents using proven protocols. Messages carry value. Routing earns fees. Settlement happens on-chain.
+
+**Live devnet:** the TOON devnet settles on **public chains** (Base Sepolia, Solana
+devnet, Mina devnet). Get test funds from the
+[devnet faucet](https://faucet.devnet.toonprotocol.dev) (3-chain web UI), and see
+the toon-client rig README's
+["Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains)
+and [toon-meta `docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md)
+for the current endpoints, contract addresses, and token mints.
 
 ## What is a Connector?
 
@@ -409,7 +417,7 @@ The connector supports two deployment modes via the `deploymentMode` configurati
 - No HTTP overhead
 - Fastest performance
 
-**Example:** [Town relay](https://github.com/ALLiDoizCode/crosstown) uses `embedded` mode to integrate ILP payments directly into the Nostr relay.
+**Example:** [Town relay](https://github.com/toon-protocol/town) uses `embedded` mode to integrate ILP payments directly into the Nostr relay.
 
 ### `standalone` Mode
 
@@ -436,7 +444,7 @@ This repo is a monorepo with multiple packages:
 | [`@toon-protocol/connector`](packages/connector) | Connector node — routing, accounting, settlement, CLI                                                     |
 | [`@toon-protocol/shared`](packages/shared)       | Shared types and OER codec utilities                                                                      |
 | [`@toon-protocol/contracts`](packages/contracts) | EVM payment channel smart contracts (Foundry/Solidity)                                                    |
-| [`@m2m-connector/faucet`](packages/faucet)       | Multi-chain devnet faucet (EVM ETH+USDC, Solana SOL+USDC, Mina MINA+USDC via treasury self-mint/transfer) |
+| [`@toon-protocol/faucet`](packages/faucet)       | Multi-chain devnet faucet (EVM ETH+USDC, Solana SOL+USDC, Mina MINA+USDC via treasury self-mint/transfer) |
 
 ## Explorer UI
 
@@ -459,7 +467,7 @@ Perfect for development and debugging. Disable in production.
 
 ## Example: Town Integration
 
-[Town](https://github.com/ALLiDoizCode/crosstown) is a Nostr relay that uses connector as its payment layer. Town is a separate project — see its repository for full integration details.
+[Town](https://github.com/toon-protocol/town) is a Nostr relay that uses connector as its payment layer. Town is a separate project — see its repository for full integration details.
 
 **How it works conceptually:**
 
@@ -887,7 +895,7 @@ EVM_RPC_URL=… FAUCET_URL=… \
 
 ```bash
 # Clone and install
-git clone https://github.com/ALLiDoizCode/connector.git
+git clone https://github.com/toon-protocol/connector.git
 cd connector
 npm install
 
@@ -958,7 +966,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Links
 
-- **GitHub:** [github.com/ALLiDoizCode/connector](https://github.com/ALLiDoizCode/connector)
-- **Town:** [github.com/ALLiDoizCode/crosstown](https://github.com/ALLiDoizCode/crosstown)
+- **GitHub:** [github.com/toon-protocol/connector](https://github.com/toon-protocol/connector)
+- **Town:** [github.com/toon-protocol/town](https://github.com/toon-protocol/town)
 - **Interledger:** [interledger.org](https://interledger.org)
 - **TigerBeetle:** [tigerbeetle.com](https://tigerbeetle.com)
