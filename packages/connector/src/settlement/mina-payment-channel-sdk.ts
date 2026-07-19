@@ -12,6 +12,13 @@
  * runtime. If o1js is not installed, a descriptive MinaChannelError (code 9999)
  * is thrown on first use, not on import.
  *
+ * o1js is a DUAL CJS/ESM package whose proof-system worker pool is
+ * per-module-instance state; loading it as both a CJS `require` and an ESM
+ * `import` produces two instances and breaks settlement PROVING with
+ * "workersReadyResolve is not a function". To keep o1js a SINGLE instance the
+ * loaders below force GENUINE ESM imports of o1js and the mina-zkapp `dist-esm/`
+ * build — see {@link esmDynamicImport} and issue #368.
+ *
  * @module mina-payment-channel-sdk
  */
 
@@ -110,6 +117,67 @@ export interface MinaSubscription {
 // Dynamic Import Helpers (o1js and mina-zkapp)
 // ---------------------------------------------------------------------------
 
+/**
+ * GENUINE ESM dynamic import — bypasses tsc's `module: commonjs` downleveling of
+ * `import()` to `require()`.
+ *
+ * Why this exists (the Mina zkApp worker-init bug — "workersReadyResolve is not
+ * a function", issue #368): o1js is a DUAL CJS/ESM package. `require('o1js')`
+ * resolves the CJS build (`dist/node/index.cjs`) while `import 'o1js'` resolves
+ * the ESM build (`dist/node/index.js`) — two SEPARATE module instances, each
+ * with its own Snarky bindings AND its own worker-pool state. The proof-system
+ * worker pool wires a single `globalThis.startWorkers`; whichever instance loads
+ * last wins that slot. `mina-fungible-token` is ESM-only, so the moment the
+ * mina-zkapp package graph loads it, a SECOND (ESM) o1js instance's
+ * `startWorkers` clobbers the global — and when `.compile()` on the FIRST (CJS)
+ * instance calls `initThreadPool`, the wasm invokes the OTHER instance's
+ * `startWorkers`, whose `workersReadyResolve` was never assigned. Result:
+ * `TypeError: workersReadyResolve is not a function` at `node-backend.js`, i.e.
+ * settlement PROVING (`claimFromChannel` etc.) can never run. (Claim VERIFY —
+ * signature + nonce — never compiles a circuit, so it is unaffected; matching
+ * the field observation on ghcr.io/toon-protocol/connector:3.35.0.)
+ *
+ * The deploy tooling already solved this (#352) by running the proving path as
+ * pure ESM against the mina-zkapp `dist-esm/` build; the faucet mint path does
+ * the same. The connector runtime is CJS, so it must force GENUINE ESM imports
+ * of BOTH o1js and the mina-zkapp classes — one shared ESM o1js instance across
+ * o1js + mina-zkapp + mina-fungible-token. `tsc` would otherwise rewrite our
+ * `import()` back into `require()` (re-splitting the instance), so we go through
+ * a `Function` indirection it does not transform. Verified VK-stable: the
+ * PaymentChannel / UsdcChannel token verification keys are byte-identical to the
+ * CJS-compiled ones (o1js compilation is deterministic across module systems).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const esmDynamicImport: (specifier: string) => Promise<any> = new Function(
+  'specifier',
+  'return import(specifier);'
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+) as (specifier: string) => Promise<any>;
+
+/**
+ * The mina-zkapp package's parallel pure-ESM build (`dist-esm/`, produced by
+ * `packages/mina-zkapp/scripts/build-esm.mjs`). Importing these ESM entrypoints
+ * (rather than the package's default CJS `dist/`) is what keeps o1js a SINGLE
+ * instance — see {@link esmDynamicImport}. There is no `dist-esm/index.js`
+ * barrel, so each class is imported from its own module.
+ */
+const MINA_ZKAPP_ESM_PAYMENT_CHANNEL = '@toon-protocol/mina-zkapp/dist-esm/PaymentChannel.js';
+const MINA_ZKAPP_ESM_USDC_CHANNEL_TOKEN =
+  '@toon-protocol/mina-zkapp/dist-esm/usdc-channel-token.js';
+
+/**
+ * True inside the jest runner. The genuine ESM import above cannot be
+ * intercepted by `jest.mock('o1js' | '@toon-protocol/mina-zkapp')` (which hooks
+ * `require`), and jest's VM provides no dynamic-import callback, so under jest
+ * the loaders fall back to a plain `import()` — which tsc downlevels to
+ * `require`, keeping the existing mocked SDK unit suite working. The REAL
+ * single-instance compile/prove path (genuine ESM, no mocks) is exercised by the
+ * mina-zkapp connector-runtime compile guard (#368) and the e2e settlement flow,
+ * not by these mocked unit tests. In production `JEST_WORKER_ID` is unset, so the
+ * genuine ESM import always runs.
+ */
+const IS_JEST = typeof process !== 'undefined' && !!process.env.JEST_WORKER_ID;
+
 /** Cached o1js module */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let o1jsModule: any = null;
@@ -121,7 +189,9 @@ let o1jsModule: any = null;
 async function getO1js(): Promise<any> {
   if (!o1jsModule) {
     try {
-      o1jsModule = await import('o1js');
+      // GENUINE ESM import (single-instance requirement) — see esmDynamicImport.
+      // Under jest, a plain (mockable) import().
+      o1jsModule = IS_JEST ? await import('o1js') : await esmDynamicImport('o1js');
     } catch {
       throw new MinaChannelError(
         'o1js is required for Mina payment channels but is not installed. ' +
@@ -145,7 +215,12 @@ let PaymentChannelContract: any = null;
 async function getPaymentChannelContract(): Promise<any> {
   if (!PaymentChannelContract) {
     try {
-      const mod = await import('@toon-protocol/mina-zkapp');
+      // GENUINE ESM import of the pure-ESM build (single-o1js-instance
+      // requirement) — see esmDynamicImport for the worker-init bug this avoids.
+      // Under jest, a plain (mockable) import() of the package.
+      const mod = IS_JEST
+        ? await import('@toon-protocol/mina-zkapp')
+        : await esmDynamicImport(MINA_ZKAPP_ESM_PAYMENT_CHANNEL);
       PaymentChannelContract = mod.PaymentChannel;
     } catch (err) {
       // Surface the REAL underlying error. A blanket "not installed" masks the
@@ -188,7 +263,12 @@ let UsdcChannelTokenContract: any = null;
 async function getUsdcChannelTokenContract(): Promise<any> {
   if (!UsdcChannelTokenContract) {
     try {
-      const mod = await import('@toon-protocol/mina-zkapp');
+      // GENUINE ESM import of the pure-ESM build (single-o1js-instance
+      // requirement) — see esmDynamicImport for the worker-init bug this avoids.
+      // Under jest, a plain (mockable) import() of the package.
+      const mod = IS_JEST
+        ? await import('@toon-protocol/mina-zkapp')
+        : await esmDynamicImport(MINA_ZKAPP_ESM_USDC_CHANNEL_TOKEN);
       UsdcChannelTokenContract = mod.UsdcChannelToken;
     } catch (err) {
       // Surface the REAL underlying error instead of a misleading "not

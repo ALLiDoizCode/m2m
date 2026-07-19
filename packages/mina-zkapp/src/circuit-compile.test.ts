@@ -86,6 +86,16 @@ const DEPLOYED_RATE_LIMITED_ADMIN_VK_HASH =
 const DEPLOYED_PERMISSIONLESS_ADMIN_VK_HASH =
   '24054879512104605220650652318050994093349025874736442573804562558001657468018';
 
+/**
+ * The UsdcChannelToken verification-key hash of the pinned o1js 2.14.0
+ * resolution — the in-proof escrow-mover the connector compiles for USDC
+ * settlement proving. Pinned here so the connector-runtime compile guard below
+ * fails loudly if it ever drifts (which would orphan the deployed USDC channel
+ * token). Do not update to make CI green; that is a redeploy decision.
+ */
+const DEPLOYED_USDC_CHANNEL_TOKEN_VK_HASH =
+  '9692307225143487166733467413506207145324336685411164992097971188215422741850';
+
 const PKG_ROOT = path.resolve(__dirname, '..');
 
 describe('circuit compile guard (#352)', () => {
@@ -172,6 +182,41 @@ describe('circuit compile guard (#352)', () => {
       expect(vkHashes.get('PermissionlessRateLimitedUsdcAdmin')).toBe(
         DEPLOYED_PERMISSIONLESS_ADMIN_VK_HASH
       );
+    },
+    COMPILE_TIMEOUT_MS
+  );
+
+  it(
+    'the connector runtime (CJS + genuine ESM import) compiles both settlement circuits — worker-init guard (#368)',
+    () => {
+      // Build the pure-ESM lib the connector runtime imports (idempotent).
+      execFileSync(process.execPath, [path.join(PKG_ROOT, 'scripts', 'build-esm.mjs')], {
+        cwd: PKG_ROOT,
+        stdio: 'pipe',
+      });
+
+      // Reproduce the CONNECTOR runtime modality: a CJS process doing a GENUINE
+      // ESM dynamic import of o1js + dist-esm (mina-payment-channel-sdk.ts's
+      // esmDynamicImport). Before #368 this graph loaded o1js TWICE (CJS +
+      // ESM-via-mina-fungible-token) and `.compile()` threw
+      // "workersReadyResolve is not a function". If that seam returns, or
+      // dist-esm stops shipping, this fails in CI instead of on a live node.
+      const stdout = execFileSync(
+        process.execPath,
+        [path.join(PKG_ROOT, 'scripts', 'compile-circuits-connector-runtime.cjs')],
+        { cwd: PKG_ROOT, stdio: ['ignore', 'pipe', 'inherit'], encoding: 'utf8' }
+      );
+      // eslint-disable-next-line no-console
+      console.log(stdout);
+
+      const vkHashes = new Map<string, string>();
+      for (const line of stdout.split('\n')) {
+        const m = /^(\w+)\.compile\(\) ok in [\d.]+s — vk hash (\d+)$/.exec(line.trim());
+        if (m) vkHashes.set(m[1], m[2]);
+      }
+      expect([...vkHashes.keys()].sort()).toEqual(['PaymentChannel', 'UsdcChannelToken']);
+      expect(vkHashes.get('PaymentChannel')).toBe(DEPLOYED_PAYMENT_CHANNEL_VK_HASH);
+      expect(vkHashes.get('UsdcChannelToken')).toBe(DEPLOYED_USDC_CHANNEL_TOKEN_VK_HASH);
     },
     COMPILE_TIMEOUT_MS
   );

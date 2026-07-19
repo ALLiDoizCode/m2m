@@ -7,14 +7,26 @@
 // `src/zkapp-compiled/*.js`, and the prover worker imports THOSE — Vite then
 // only sees already-lowered JS. Mirrors packages/mina-zkapp/scripts/build-esm.mjs.
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const outDir = join(root, 'src', 'zkapp-compiled');
-const tsc = join(root, 'node_modules', 'typescript', 'bin', 'tsc');
+
+// Resolve the REAL tsc binary. In a hoisted npm workspace install `typescript`
+// lives in the REPO-ROOT node_modules, not this package's — the package-local
+// path only exists on a non-hoisted install. Prefer the local copy, else fall
+// back to the workspace root; picking the first that exists keeps `npm run build`
+// (root build → this prebuild) working in CI/release, which is where the
+// hardcoded local-only path failed (release pipeline blocked at 3.35.0). Mirrors
+// the same fallback in packages/mina-zkapp/scripts/build-esm.mjs.
+const tsc =
+  [
+    join(root, 'node_modules', 'typescript', 'bin', 'tsc'),
+    join(root, '..', '..', 'node_modules', 'typescript', 'bin', 'tsc'),
+  ].find((p) => existsSync(p)) || join(root, 'node_modules', 'typescript', 'bin', 'tsc');
 
 execFileSync(process.execPath, [tsc, '-p', join(root, 'tsconfig.zkapp.json')], {
   stdio: 'inherit',
