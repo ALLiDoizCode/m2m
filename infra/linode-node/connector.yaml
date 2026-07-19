@@ -40,14 +40,23 @@ chainProviders:
       initialDepositMultiplier: 2
       ledgerSnapshotPath: /app/data/ledger-evm.json
 
+  # Public Solana devnet (real https://api.devnet.solana.com) — replaces the
+  # self-hosted local-validator proxy. Program + mock USDC (6-dp) deployed
+  # 2026-07-18; see packages/solana-program/deployments/devnet-public.md.
   - chainType: solana
     chainId: solana:devnet
-    rpcUrl: https://solana-rpc.devnet.toonprotocol.dev
-    wsUrl: wss://solana-ws.devnet.toonprotocol.dev
-    programId: 'D2Z35z8ShA4K7odczUysBYRP5hXQGDp6r5c2EBSxRsHh'
-    tokenMint: 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H'
+    rpcUrl: https://api.devnet.solana.com
+    wsUrl: wss://api.devnet.solana.com
+    programId: '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip'
+    tokenMint: 'xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in'
     keyId: 'placeholder-overwritten-by-mnemonic'
     cluster: devnet
+    settlementOptions:
+      threshold: '5000'
+      pollingIntervalMs: 100
+      settlementTimeoutSecs: 3600
+      initialDepositMultiplier: 2
+      ledgerSnapshotPath: /app/data/ledger-solana.json
 
   - chainType: mina
     chainId: mina:devnet
