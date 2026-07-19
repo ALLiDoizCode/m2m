@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.38.0](https://github.com/toon-protocol/connector/compare/v3.37.0...v3.38.0) (2026-07-19)
+
+### Features
+
+- **faucet-web:** TOON branding + native-gas faucet links ([#373](https://github.com/toon-protocol/connector/issues/373)) ([4c71d0d](https://github.com/toon-protocol/connector/commit/4c71d0d96cda6ac33a02308accf8d56c5400615f))
+
 ## [3.37.0](https://github.com/toon-protocol/connector/compare/v3.36.1...v3.37.0) (2026-07-19)
 
 ### Features
