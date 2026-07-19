@@ -191,6 +191,19 @@ export class ConnectorNode implements HealthStatusProvider {
   // proxy-down assertion fires in CI-acceptable time without reaching into
   // private state. This is the ONLY production-code seam Story 35.6 introduces.
   private readonly _transportHealthIntervalMs: number;
+  // Periodic re-evaluation of the peer-connectivity health status. The primary
+  // driver is event-based (BTPClientManager fires on every peer connect/
+  // disconnect), but a low-frequency timer is a robust backstop against any
+  // missed edge — e.g. a connection state transition that races startup, or a
+  // future transport that doesn't emit clean connect/disconnect events. Bound
+  // to node lifecycle: started at the end of start(), cleared in stop() and in
+  // the start() rollback path so no interval leaks.
+  private _healthStatusInterval: NodeJS.Timeout | null = null;
+  // Cadence (ms) for the periodic health re-evaluation backstop. Default 10s —
+  // small enough that /health converges quickly after a post-startup peer
+  // connect even if an event were ever missed, large enough to be negligible
+  // overhead. Optional constructor override lets tests shrink it.
+  private readonly _healthStatusIntervalMs: number;
   // Optional mnemonic override (mnemonic signing mode). When set, takes
   // precedence over `process.env.TOON_MNEMONIC` at boot so multi-node tests can
   // derive distinct settlement keys without mutating global env. NEVER logged.
@@ -239,6 +252,13 @@ export class ConnectorNode implements HealthStatusProvider {
     opts?: {
       transportHealthIntervalMs?: number;
       /**
+       * Cadence (ms) for the periodic peer-connectivity health re-evaluation
+       * backstop. Defaults to 10s. Tests shrink this to sub-second to assert
+       * timer-driven convergence without waiting. Event-driven updates fire
+       * regardless of this value.
+       */
+      healthStatusIntervalMs?: number;
+      /**
        * Mnemonic signing mode override. When provided, this BIP-39 mnemonic
        * derives the per-chain settlement keys at boot, taking precedence over
        * `process.env.TOON_MNEMONIC`. Intended for multi-node test isolation so
@@ -254,6 +274,7 @@ export class ConnectorNode implements HealthStatusProvider {
     // pre-35.6 behavior (30s). All existing callers (2-arg form) continue to
     // work unchanged — new arg is optional.
     this._transportHealthIntervalMs = opts?.transportHealthIntervalMs ?? 30000;
+    this._healthStatusIntervalMs = opts?.healthStatusIntervalMs ?? 10000;
     this._mnemonicOverride = opts?.mnemonic;
     this._mnemonicAccountIndex = opts?.mnemonicAccountIndex;
     // Load and validate configuration
@@ -319,6 +340,13 @@ export class ConnectorNode implements HealthStatusProvider {
     // Direct TCP transport only: the agent factory always returns undefined so
     // BTPClient dials each peer's WebSocket directly (pre-Epic-35 default).
     this._btpClientManager.setAgentFactory(() => undefined);
+    // Re-evaluate /health whenever a peer connects or disconnects. This is the
+    // primary fix for the one-shot health-status race: the boot-time snapshot
+    // in start() is no longer the only evaluation, so peers that finish
+    // connecting AFTER startup correctly flip /health to "healthy" (and a peer
+    // dropping below threshold flips it back). _updateHealthStatus() is a
+    // cheap, idempotent recompute that no-ops until the BTP server is up.
+    this._btpClientManager.setConnectionStateChangeCallback(() => this._updateHealthStatus());
 
     // ILP-over-HTTP egress (Epic 38, Story 38.1). With direct-only transport the
     // provider never supplies a custom agent, so HttpPeerClientManager falls
@@ -2283,8 +2311,22 @@ export class ConnectorNode implements HealthStatusProvider {
       // self-announce (after the BTP peer set exists). Best-effort.
       this._startRouteLearning();
 
-      // Update health status to healthy after all components started
+      // Initial health-status snapshot after all components started. NOTE: at
+      // this instant peers may still be mid-connect (e.g. BTP handshakes that
+      // complete a few seconds later), so this snapshot alone is NOT
+      // authoritative — hence the event-driven callback wired in the
+      // constructor plus the periodic backstop below.
       this._updateHealthStatus();
+
+      // Periodic health re-evaluation backstop. Event-driven updates (peer
+      // connect/disconnect) are the primary trigger; this timer guarantees
+      // convergence even if an event were ever missed. Cleared in stop() and
+      // the start() rollback path so no interval leaks. unref() so the timer
+      // never keeps the process alive on its own.
+      this._healthStatusInterval = setInterval(() => {
+        this._updateHealthStatus();
+      }, this._healthStatusIntervalMs);
+      this._healthStatusInterval.unref?.();
 
       this._logger.info(
         {
@@ -2314,6 +2356,10 @@ export class ConnectorNode implements HealthStatusProvider {
       if (this._transportHealthInterval) {
         clearInterval(this._transportHealthInterval);
         this._transportHealthInterval = null;
+      }
+      if (this._healthStatusInterval) {
+        clearInterval(this._healthStatusInterval);
+        this._healthStatusInterval = null;
       }
       if (this._transportProvider) {
         // AC #11: hide the provider from the public getter immediately — the
@@ -2490,6 +2536,11 @@ export class ConnectorNode implements HealthStatusProvider {
       if (this._transportHealthInterval) {
         clearInterval(this._transportHealthInterval);
         this._transportHealthInterval = null;
+      }
+      // Clear the periodic health re-evaluation backstop so no interval leaks.
+      if (this._healthStatusInterval) {
+        clearInterval(this._healthStatusInterval);
+        this._healthStatusInterval = null;
       }
       if (this._transportProvider) {
         // AC #11: flip the getter to null BEFORE awaiting provider.stop() so

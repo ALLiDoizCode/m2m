@@ -128,6 +128,63 @@ describe('BTPClientManager', () => {
       expect(mockClient.on).toHaveBeenCalledWith('error', expect.any(Function));
     });
 
+    it('invokes the connection-state-change callback on connect and disconnect', async () => {
+      // Health-status race fix: the manager must notify a registered consumer
+      // (the connector) whenever a peer's connection state changes so /health
+      // can be re-evaluated after startup.
+      const peer = createTestPeer('peerCb');
+      const handlers: Record<string, () => void> = {};
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        sendPacket: jest.fn(),
+        get isConnected() {
+          return true;
+        },
+        on: jest.fn((event: string, cb: () => void) => {
+          handlers[event] = cb;
+        }),
+      } as unknown as jest.Mocked<BTPClient>;
+      MockedBTPClient.mockImplementation(() => mockClient);
+
+      const onStateChange = jest.fn();
+      manager.setConnectionStateChangeCallback(onStateChange);
+
+      await manager.addPeer(peer);
+
+      handlers['connected']!();
+      expect(onStateChange).toHaveBeenCalledTimes(1);
+
+      handlers['disconnected']!();
+      expect(onStateChange).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not throw when the connection-state-change callback throws', async () => {
+      const peer = createTestPeer('peerCbThrow');
+      const handlers: Record<string, () => void> = {};
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        sendPacket: jest.fn(),
+        get isConnected() {
+          return true;
+        },
+        on: jest.fn((event: string, cb: () => void) => {
+          handlers[event] = cb;
+        }),
+      } as unknown as jest.Mocked<BTPClient>;
+      MockedBTPClient.mockImplementation(() => mockClient);
+
+      manager.setConnectionStateChangeCallback(() => {
+        throw new Error('boom');
+      });
+
+      await manager.addPeer(peer);
+
+      // The 'connected' handler must swallow the callback's throw.
+      expect(() => handlers['connected']!()).not.toThrow();
+    });
+
     it('should skip if peer already exists', async () => {
       // Arrange
       const peer = createTestPeer('peerC');
