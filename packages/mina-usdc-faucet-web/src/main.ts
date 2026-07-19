@@ -21,13 +21,7 @@ import {
   TOKEN_ADDRESS,
 } from './config';
 import { fetchAllowance, formatUsdc, type AllowanceInfo } from './allowance';
-import {
-  connect,
-  getNetwork,
-  isAuroInstalled,
-  onWalletChange,
-  sendProvenTx,
-} from './wallet';
+import { connect, getNetwork, isAuroInstalled, onWalletChange, sendProvenTx } from './wallet';
 import type { ProveStage, WorkerRequest, WorkerResponse } from './protocol';
 
 // ─── Prover worker (compile happens once, in the background, per session) ─────
@@ -141,7 +135,10 @@ const state: State = {
   compileError: false,
 };
 
-function setBanner(kind: State['banner'] extends null ? never : 'ok' | 'err' | 'warn' | 'info', html: string) {
+function setBanner(
+  kind: State['banner'] extends null ? never : 'ok' | 'err' | 'warn' | 'info',
+  html: string
+) {
   state.banner = { kind, html };
   render();
 }
@@ -152,7 +149,10 @@ const isValidAddr = (a: string) => /^B62q[1-9A-HJ-NP-Za-km-z]{40,60}$/.test(a.tr
 // ─── Actions ──────────────────────────────────────────────────────────────────
 async function doConnect() {
   if (!isAuroInstalled()) {
-    setBanner('err', `Auro wallet is not installed. <a href="${AURO_URL}" target="_blank" rel="noopener">Install Auro</a> and reload.`);
+    setBanner(
+      'err',
+      `Auro wallet is not installed. <a href="${AURO_URL}" target="_blank" rel="noopener">Install Auro</a> and reload.`
+    );
     return;
   }
   try {
