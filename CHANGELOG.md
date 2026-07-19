@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.36.1](https://github.com/toon-protocol/connector/compare/v3.36.0...v3.36.1) (2026-07-19)
+
+### Bug Fixes
+
+- **connector:** re-evaluate /health on peer connect/disconnect and via periodic backstop ([#372](https://github.com/toon-protocol/connector/issues/372)) ([e53f279](https://github.com/toon-protocol/connector/commit/e53f2798b91e350815c1195a883474c3036fca68))
+
 ## [3.36.0](https://github.com/toon-protocol/connector/compare/v3.35.0...v3.36.0) (2026-07-19)
 
 ### Features
