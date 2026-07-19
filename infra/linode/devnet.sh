@@ -21,14 +21,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 set -a; . "$HERE/.env"; set +a
 
-# ── Mina USDC token addresses for the faucet's USDC admin-mint ────────────────
-# The faucet container admin-mints USDC (see packages/faucet/src/mina-usdc.mjs),
-# which needs the deployed token + admin-contract addresses. Resolve them (env
-# overrides win, else the committed live deploy result infra/mina/usdc-token.json)
-# and EXPORT them so docker compose substitutes ${MINA_USDC_TOKEN} /
-# ${MINA_USDC_ADMIN_CONTRACT} into the faucet service. (MINA_USDC_ADMIN_KEY — the
-# mint authority private key — is a SECRET that comes from .env / the CI secret,
-# never from this file.) Empty when not yet deployed → faucet drips native only.
+# ── Mina USDC token addresses for the faucet's USDC drip ─────────────────────
+# The faucet container drips USDC by treasury TRANSFER, replenished by the
+# treasury's own rate-limited SELF-MINT (see packages/faucet/src/mina-usdc.mjs
+# — the rate-limited public-devnet token has no admin-mint), which needs the
+# deployed token + admin-contract addresses. Resolve them (env overrides win,
+# else the committed live deploy result infra/mina/usdc-token.json) and EXPORT
+# them so docker compose substitutes ${MINA_USDC_TOKEN} /
+# ${MINA_USDC_ADMIN_CONTRACT} into the faucet service. (MINA_USDC_TREASURY_KEY
+# — the treasury private key; legacy name MINA_USDC_ADMIN_KEY still accepted —
+# is a SECRET that comes from .env / the CI secret, never from this file.)
+# Empty when not yet deployed → faucet drips native only.
 MINA_USDC_TOKEN_JSON="$ROOT/infra/mina/usdc-token.json"
 MINA_ENDPOINTS_JSON="$HERE/endpoints.json"
 if command -v jq >/dev/null 2>&1; then
@@ -91,7 +94,7 @@ write_endpoints() {
   fi
 
   # Mina USDC token zkApp is deployed ONCE to the public devnet (we only proxy it,
-  # no node here) by tools/mina/deploy-usdc-token.ts, which writes the deploy
+  # no node here) by tools/mina/deploy-usdc-token.mts, which writes the deploy
   # result to infra/mina/usdc-token.json. Read tokenAddress/tokenId from it.
   #
   # Source order: the gitignored live deploy result (usdc-token.json) wins; else
@@ -147,8 +150,8 @@ write_endpoints() {
     "adminContractAddress": ${mina_admin_contract_json},
     "adminAuthority": ${mina_admin_authority_json},
     "tokenDecimals": 6,
-    "_fund": "POST {address} to https://faucet.${DOMAIN}/api/mina/request — drips native MINA AND admin-mints USDC. Or infra/mina/fund-mina-usdc.sh <b58> [usdc] from the box.",
-    "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.ts → infra/mina/usdc-token.json); null here means not yet deployed. The faucet admin-mints USDC via tools/mina/fund-usdc.ts's mint path using MINA_USDC_ADMIN_KEY (a CI secret); adminAuthority is its derived public key."
+    "_fund": "POST {address} to https://faucet.${DOMAIN}/api/mina/request (native MINA + USDC) or /api/mina/usdc-request (USDC only) — USDC drips by treasury TRANSFER (replenished via the treasury's rate-limited self-mint, ≤1,000 USDC/day, per-address cooldown). Holders of ~1.2 devnet MINA can self-mint 1,000 USDC/day directly: infra/mina/fund-mina-usdc.sh <b58> [usdc] (wraps tools/mina/self-mint-usdc.mts).",
+    "_note": "Passthrough proxy of the PUBLIC Mina devnet. USDC token zkApp deployed once to public devnet (deploy-usdc-token.mts → infra/mina/usdc-token.json); null here means not yet deployed. The token is gated by RateLimitedUsdcAdmin (permissionless recipient-signed mints, 1,000 USDC/address/~24h; NO admin-mint — admin = pause/upgrade only). The faucet's USDC leg is a treasury self-mint + transfer using MINA_USDC_TREASURY_KEY (a CI secret; legacy name MINA_USDC_ADMIN_KEY)."
   }
 }
 JSON

@@ -1,0 +1,24 @@
+{
+  "name": "@toon-protocol/mina-usdc-faucet-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser dApp: Mina devnet mock-USDC faucet. Connect Auro, mint 1000 rate-limited test-USDC to any address (permissionless, in-proof daily cap).",
+  "type": "module",
+  "scripts": {
+    "build:zkapp": "node scripts/build-zkapp.mjs",
+    "predev": "npm run build:zkapp",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "prebuild": "npm run build:zkapp",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "mina-fungible-token": "1.1.0",
+    "o1js": "2.14.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.10"
+  }
+}

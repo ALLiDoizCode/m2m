@@ -431,12 +431,12 @@ The connector supports two deployment modes via the `deploymentMode` configurati
 
 This repo is a monorepo with multiple packages:
 
-| Package                                          | Description                                            |
-| ------------------------------------------------ | ------------------------------------------------------ |
-| [`@toon-protocol/connector`](packages/connector) | Connector node — routing, accounting, settlement, CLI  |
-| [`@toon-protocol/shared`](packages/shared)       | Shared types and OER codec utilities                   |
-| [`@toon-protocol/contracts`](packages/contracts) | EVM payment channel smart contracts (Foundry/Solidity) |
-| [`@m2m-connector/faucet`](packages/faucet)       | Token faucet for local EVM testing                     |
+| Package                                          | Description                                                                                               |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| [`@toon-protocol/connector`](packages/connector) | Connector node — routing, accounting, settlement, CLI                                                     |
+| [`@toon-protocol/shared`](packages/shared)       | Shared types and OER codec utilities                                                                      |
+| [`@toon-protocol/contracts`](packages/contracts) | EVM payment channel smart contracts (Foundry/Solidity)                                                    |
+| [`@m2m-connector/faucet`](packages/faucet)       | Multi-chain devnet faucet (EVM ETH+USDC, Solana SOL+USDC, Mina MINA+USDC via treasury self-mint/transfer) |
 
 ## Explorer UI
 

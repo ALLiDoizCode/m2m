@@ -20,7 +20,16 @@
 # ============================================
 # Stage 1: Builder (build platform — native)
 # ============================================
-FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
+# Base image is pinned to a Node >= 22.12 line (NOT the floating `node:22-alpine`).
+# The connector loads the Mina claim-verification path via a dynamic
+# `import('@toon-protocol/mina-zkapp')`, which TypeScript (module: commonjs) lowers
+# to `require()`. That package statically imports the ESM-only `mina-fungible-token`,
+# so the runtime must support `require()` of an ES module. Node enables that by
+# default only from >= 22.12 (and >= 20.19); on older Node it throws
+# `ERR_REQUIRE_ESM` and every Mina claim F06-rejects. Pinning >= 22.12 makes this
+# deterministic instead of depending on whatever `node:22-alpine` happens to float
+# to at build time. See the CI Mina ESM smoke guard in build-and-publish.yml.
+FROM --platform=$BUILDPLATFORM node:22.20-alpine AS builder
 
 # Set working directory
 WORKDIR /app
@@ -44,6 +53,12 @@ RUN npm install --ignore-scripts
 COPY packages/connector/tsconfig.json ./packages/connector/
 COPY packages/shared/tsconfig.json ./packages/shared/
 COPY packages/mina-zkapp/tsconfig.json ./packages/mina-zkapp/
+# The mina-zkapp pure-ESM build (tsconfig.esm.json + scripts/build-esm.mjs) is
+# what the connector runtime imports so o1js stays a SINGLE module instance —
+# see packages/connector/src/settlement/mina-payment-channel-sdk.ts
+# (esmDynamicImport) and the "Mina zkApp worker-init bug" (#368).
+COPY packages/mina-zkapp/tsconfig.esm.json ./packages/mina-zkapp/
+COPY packages/mina-zkapp/scripts ./packages/mina-zkapp/scripts
 COPY packages/connector/src ./packages/connector/src
 COPY packages/shared/src ./packages/shared/src
 COPY packages/mina-zkapp/src ./packages/mina-zkapp/src
@@ -53,8 +68,10 @@ COPY packages/mina-zkapp/src ./packages/mina-zkapp/src
 # dynamic import but its tsc step still needs their .d.ts files on disk.
 # Use direct cd instead of --workspace to avoid npm workspace resolution
 # issues when not all workspace dirs have package.json (contracts, solana-program).
+# mina-zkapp also emits a parallel pure-ESM build (dist-esm/) that the connector
+# runtime imports to keep o1js single-instance for settlement PROVING (#368).
 RUN cd packages/shared && npm run build && \
-    cd ../mina-zkapp && npm run build && \
+    cd ../mina-zkapp && npm run build && npm run build:esm && \
     cd ../connector && npm run build
 
 # ============================================
@@ -71,7 +88,7 @@ RUN cd packages/shared && npm run build && \
 # - @libsql/linux-{x64,arm64}-musl (issue #79 — libsql ships N-API prebuilds,
 #   replacing native better-sqlite3 which needed a python3/make/g++ build)
 # - @img/sharp-linuxmusl-{x64,arm64} + matching sharp-libvips package
-FROM --platform=$BUILDPLATFORM node:22-alpine AS proddeps
+FROM --platform=$BUILDPLATFORM node:22.20-alpine AS proddeps
 
 ARG TARGETARCH
 
@@ -126,7 +143,7 @@ RUN NPM_ARCH=$(case "$TARGETARCH" in \
 # ============================================
 # No node/npm execution happens in this stage at build time — only apk and
 # busybox commands, which run fine under QEMU emulation.
-FROM node:22-alpine AS runtime
+FROM node:22.20-alpine AS runtime
 
 # Set production environment
 ENV NODE_ENV=production
@@ -144,6 +161,10 @@ COPY --from=proddeps /app ./
 COPY --from=builder /app/packages/connector/dist ./packages/connector/dist
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/mina-zkapp/dist ./packages/mina-zkapp/dist
+# The pure-ESM mina-zkapp build the connector runtime imports for single-instance
+# o1js settlement proving (#368). Without this the compile path falls back to the
+# CJS dist and dies with "workersReadyResolve is not a function".
+COPY --from=builder /app/packages/mina-zkapp/dist-esm ./packages/mina-zkapp/dist-esm
 
 # Install wget for health check (minimal package, available in Alpine)
 # Used by Docker HEALTHCHECK to query HTTP health endpoint

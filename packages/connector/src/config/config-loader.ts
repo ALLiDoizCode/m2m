@@ -24,10 +24,19 @@ import {
   ChainProviderConfigEntry,
   TransportConfig,
   SelfAnnounceConfig,
+  RouteLearningConfig,
+  ChildConfig,
+  BootstrapConfig,
+  BootstrapSeedEntry,
+  PeeringPolicyConfig,
 } from './types';
 import { validateRouteTermination } from './types';
 import { validateEnvironment } from './environment-validator';
+import { isValidILPAddress } from '@toon-protocol/shared';
 import { isValidNonNegativeIntegerString } from '../settlement/types';
+import { normalizeCapabilityName } from '../discovery/ilp-peer-info-event';
+import { ChildConfigError, expandChildren } from './child-expander';
+import { deriveLocalPrefixes, validateRelationRoute } from '../routing/relation-route-validator';
 
 /**
  * Custom Error Class for Configuration Errors
@@ -194,9 +203,41 @@ export class ConfigLoader {
     // Validate required fields and structure.
     this.validateRequiredFields(rawConfig);
     const transport = this.validateTransport(rawConfig.transport);
+    const bootstrap = this.validateBootstrap(rawConfig.bootstrap);
     this.validatePeers(rawConfig.peers as PeerConfig[]);
     this.validateRoutes(rawConfig.routes as RouteConfig[], rawConfig.peers as PeerConfig[]);
     this.validatePorts(rawConfig);
+
+    // Expand `children` bindings into routes under the apex (toon-meta#153).
+    // Runs BEFORE the ConnectorNode builds its RoutingTable and
+    // RouteTerminationRegistry from `routes`, so the packet path is identical
+    // for internal (`upstream`) and external (`peerId`) children.
+    const apex = this.validateApex(rawConfig.apex);
+    const children = this.validateChildrenShape(rawConfig.children);
+    const nodeId = rawConfig.nodeId as string;
+    const peers = rawConfig.peers as PeerConfig[];
+    let routes = rawConfig.routes as RouteConfig[];
+    if (children && children.length > 0) {
+      let expandedRoutes: RouteConfig[];
+      try {
+        expandedRoutes = expandChildren(children, apex, routes, peers, nodeId);
+      } catch (error) {
+        if (error instanceof ChildConfigError) {
+          throw new ConfigurationError(`Invalid children config: ${error.message}`);
+        }
+        throw error;
+      }
+      // Expanded routes go through the same route validation as hand-written
+      // ones (prefix format + termination shape).
+      this.validateRoutes(expandedRoutes, peers);
+      routes = [...routes, ...expandedRoutes];
+    }
+
+    // Relation ↔ route enforcement at config load (toon-meta#153): every route
+    // whose nextHop is a peer with a declared relation must be consistent with
+    // that relation's topology (child ⇒ strict descendant of a self-prefix or
+    // the apex; parent ⇒ not under the self subtree).
+    this.enforceRelationRoutes(routes, peers, nodeId, apex);
 
     // Load blockchain configuration from environment variables
     const blockchain = this.loadBlockchainConfig(environment);
@@ -206,12 +247,14 @@ export class ConfigLoader {
 
     // Apply default values for optional fields and pass through all optional config
     const connectorConfig: ConnectorConfig = {
-      nodeId: rawConfig.nodeId as string,
+      nodeId,
       btpServerPort,
       healthCheckPort,
       logLevel: (rawConfig.logLevel as 'debug' | 'info' | 'warn' | 'error' | undefined) ?? 'info',
-      peers: rawConfig.peers as PeerConfig[],
-      routes: rawConfig.routes as RouteConfig[],
+      peers,
+      routes,
+      ...(apex !== undefined ? { apex } : {}),
+      ...(children !== undefined ? { children } : {}),
       environment,
       blockchain,
       // Pass through optional fields from input object
@@ -226,8 +269,17 @@ export class ConfigLoader {
       deploymentMode: rawConfig.deploymentMode as 'embedded' | 'standalone' | undefined,
       nip59: rawConfig.nip59 as { enabled: boolean } | undefined,
       // relay#37 / store#22: opt-in kind:10032 self-announce. Passed through
-      // unchanged; the SelfAnnounceService validates required fields at start.
-      selfAnnounce: rawConfig.selfAnnounce as SelfAnnounceConfig | undefined,
+      // unchanged apart from the explicit `capabilities` list, which is
+      // validated here (toon-meta#153); the SelfAnnounceService validates the
+      // remaining required fields at start.
+      selfAnnounce: this.validateSelfAnnounce(rawConfig.selfAnnounce),
+      // toon-meta#153: opt-in multi-hop route learning (validated shape).
+      routeLearning: this.validateRouteLearning(rawConfig.routeLearning),
+      // toon-meta#153: opt-in cold-start bootstrap. Validated above (URL
+      // schemes, hex pubkeys, positive integers); absent → disabled.
+      bootstrap,
+      // toon-meta#153 (discovered-vs-peered): bounded funded-peering policy.
+      peeringPolicy: this.validatePeeringPolicy(rawConfig.peeringPolicy),
       transport,
     };
 
@@ -235,6 +287,195 @@ export class ConfigLoader {
     validateEnvironment(connectorConfig);
 
     return connectorConfig;
+  }
+
+  /**
+   * Validate the optional `selfAnnounce` block's explicit `capabilities`
+   * directory entries (toon-meta#153). The rest of the block is passed
+   * through unchanged — the SelfAnnounceService validates its required
+   * fields at start (relay#37 / store#22 behavior, unchanged).
+   *
+   * Each entry must be an object with:
+   * - `capability`: a string satisfying the capability name grammar
+   *   (alphanumeric start, then alphanumerics / `.` / `_` / `-`);
+   * - `address`: a valid ILP address;
+   * - `price` (optional): a non-negative decimal string (atomic units);
+   * - `schema` (optional): a non-empty string.
+   *
+   * @param raw - The untrusted `selfAnnounce` value from the config input.
+   * @returns The block (capabilities validated), or `undefined` when absent.
+   * @throws ConfigurationError on any malformed capabilities entry.
+   * @private
+   */
+  private static validateSelfAnnounce(raw: unknown): SelfAnnounceConfig | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ConfigurationError('selfAnnounce must be an object');
+    }
+    const block = raw as Record<string, unknown>;
+
+    if (block.capabilities !== undefined) {
+      if (!Array.isArray(block.capabilities)) {
+        throw new ConfigurationError('selfAnnounce.capabilities must be an array');
+      }
+      for (const entry of block.capabilities) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          throw new ConfigurationError('selfAnnounce.capabilities entries must be objects');
+        }
+        const { capability, address, price, schema } = entry as Record<string, unknown>;
+        if (typeof capability !== 'string' || normalizeCapabilityName(capability) === null) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities: capability must be a name like 'os.put' ` +
+              `(alphanumeric start, then alphanumerics/'.'/'_'/'-'), got ${String(capability)}`
+          );
+        }
+        if (typeof address !== 'string' || !isValidILPAddress(address)) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities['${capability}']: address must be a valid ILP address, ` +
+              `got ${String(address)}`
+          );
+        }
+        if (
+          price !== undefined &&
+          (typeof price !== 'string' || !isValidNonNegativeIntegerString(price))
+        ) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities['${capability}']: price must be a non-negative decimal ` +
+              `string (atomic units), got ${String(price)}`
+          );
+        }
+        if (schema !== undefined && (typeof schema !== 'string' || schema.length === 0)) {
+          throw new ConfigurationError(
+            `selfAnnounce.capabilities['${capability}']: schema must be a non-empty string, ` +
+              `got ${String(schema)}`
+          );
+        }
+      }
+    }
+
+    return raw as SelfAnnounceConfig;
+  }
+
+  /**
+   * Validate the optional `peeringPolicy` block (toon-meta#153,
+   * discovered-vs-peered split).
+   *
+   * `maxFundedChannels` must be a positive integer when present.
+   * `autoRegister` must be a boolean, and `true` is REJECTED for v0: funding
+   * a settlement channel stays a deliberate operator action; auto-funding
+   * policy is future work.
+   *
+   * @param raw - The untrusted `peeringPolicy` value from the config input.
+   * @returns The validated block, or `undefined` when absent.
+   * @throws ConfigurationError on any malformed field or `autoRegister: true`.
+   * @private
+   */
+  private static validatePeeringPolicy(raw: unknown): PeeringPolicyConfig | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ConfigurationError('peeringPolicy must be an object');
+    }
+    const block = raw as Record<string, unknown>;
+
+    if (block.maxFundedChannels !== undefined) {
+      if (
+        typeof block.maxFundedChannels !== 'number' ||
+        !Number.isInteger(block.maxFundedChannels) ||
+        block.maxFundedChannels <= 0
+      ) {
+        throw new ConfigurationError('peeringPolicy.maxFundedChannels must be a positive integer');
+      }
+    }
+
+    if (block.autoRegister !== undefined) {
+      if (typeof block.autoRegister !== 'boolean') {
+        throw new ConfigurationError('peeringPolicy.autoRegister must be a boolean');
+      }
+      if (block.autoRegister === true) {
+        throw new ConfigurationError(
+          'peeringPolicy.autoRegister: true is not yet supported — funding a settlement ' +
+            'channel is a deliberate operator action (review GET /admin/discovered-nodes ' +
+            'and promote via POST /admin/peers)'
+        );
+      }
+    }
+
+    return {
+      ...(block.maxFundedChannels !== undefined
+        ? { maxFundedChannels: block.maxFundedChannels as number }
+        : {}),
+      ...(block.autoRegister !== undefined ? { autoRegister: block.autoRegister as boolean } : {}),
+    };
+  }
+
+  /**
+   * Validate the optional `routeLearning` block (toon-meta#153).
+   *
+   * @param raw - The untrusted `routeLearning` value from the config input.
+   * @returns The validated block, or `undefined` when absent.
+   * @throws ConfigurationError on any malformed field.
+   * @private
+   */
+  private static validateRouteLearning(raw: unknown): RouteLearningConfig | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ConfigurationError('routeLearning must be an object');
+    }
+    const block = raw as Record<string, unknown>;
+
+    if (typeof block.enabled !== 'boolean') {
+      throw new ConfigurationError('routeLearning.enabled must be a boolean');
+    }
+
+    if (block.relayUrls !== undefined) {
+      if (!Array.isArray(block.relayUrls)) {
+        throw new ConfigurationError(
+          'routeLearning.relayUrls must be an array of ws:// or wss:// URLs'
+        );
+      }
+      for (const url of block.relayUrls) {
+        if (typeof url !== 'string' || !/^wss?:\/\/.+/.test(url)) {
+          throw new ConfigurationError(
+            `routeLearning.relayUrls entries must be ws:// or wss:// URLs, got: ${String(url)}`
+          );
+        }
+      }
+    }
+
+    if (block.refreshIntervalSecs !== undefined) {
+      if (
+        typeof block.refreshIntervalSecs !== 'number' ||
+        !Number.isFinite(block.refreshIntervalSecs) ||
+        block.refreshIntervalSecs <= 0
+      ) {
+        throw new ConfigurationError('routeLearning.refreshIntervalSecs must be a positive number');
+      }
+    }
+
+    if (block.maxRoutes !== undefined) {
+      if (
+        typeof block.maxRoutes !== 'number' ||
+        !Number.isInteger(block.maxRoutes) ||
+        block.maxRoutes <= 0
+      ) {
+        throw new ConfigurationError('routeLearning.maxRoutes must be a positive integer');
+      }
+    }
+
+    return {
+      enabled: block.enabled,
+      ...(block.relayUrls !== undefined ? { relayUrls: block.relayUrls as string[] } : {}),
+      ...(block.refreshIntervalSecs !== undefined
+        ? { refreshIntervalSecs: block.refreshIntervalSecs as number }
+        : {}),
+      ...(block.maxRoutes !== undefined ? { maxRoutes: block.maxRoutes as number } : {}),
+    };
   }
 
   /**
@@ -692,6 +933,102 @@ export class ConfigLoader {
   }
 
   /**
+   * Validate the optional top-level `apex` field (toon-meta#153).
+   *
+   * @param raw - Unvalidated `apex` value from the YAML input
+   * @returns The apex string, or undefined when absent
+   * @throws ConfigurationError when present but not a non-empty string
+   * @private
+   */
+  private static validateApex(raw: unknown): string | undefined {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      throw new ConfigurationError(
+        `Invalid type for apex: expected non-empty string, got ${typeof raw}`
+      );
+    }
+    return raw;
+  }
+
+  /**
+   * Shape-validate the optional `children` section (toon-meta#153): must be an
+   * array of objects when present. Per-entry semantic validation (name label,
+   * exactly-one-of upstream|peerId, peer admission, …) is performed by
+   * `expandChildren`.
+   *
+   * @param raw - Unvalidated `children` value from the YAML input
+   * @returns The children entries, or undefined when absent
+   * @throws ConfigurationError when present but not an array of objects
+   * @private
+   */
+  private static validateChildrenShape(raw: unknown): ChildConfig[] | undefined {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(raw)) {
+      throw new ConfigurationError(`Invalid type for children: expected array, got ${typeof raw}`);
+    }
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ConfigurationError('Invalid children entry: expected an object');
+      }
+    }
+    return raw as ChildConfig[];
+  }
+
+  /**
+   * Enforce relation ↔ route consistency at config load (toon-meta#153).
+   *
+   * For every route whose `nextHop` is a peer with a declared `relation`, the
+   * route prefix must be consistent with that relation's topology:
+   * - `child`  ⇒ a strict descendant of one of the node's self-prefixes (a
+   *   route with nextHop === nodeId or 'local') or the apex;
+   * - `parent` ⇒ NOT under the node's own subtree.
+   *
+   * Mirrors the runtime admission checks in `ConnectorNode.registerPeer` /
+   * the admin API, turning the latent F06/T00 mis-tagged-child trap into an
+   * immediate boot-time `ConfigurationError` naming the offending route.
+   *
+   * @param routes - All routes (including expanded children)
+   * @param peers - Configured peers (relation source)
+   * @param nodeId - This node's id (self-prefix derivation)
+   * @param apex - Optional explicit apex, counted as a self-prefix
+   * @throws ConfigurationError listing the offending route on violation
+   * @private
+   */
+  private static enforceRelationRoutes(
+    routes: RouteConfig[],
+    peers: PeerConfig[],
+    nodeId: string,
+    apex?: string
+  ): void {
+    const peersWithRelation = peers.filter((p) => p.relation !== undefined);
+    if (peersWithRelation.length === 0) {
+      return;
+    }
+
+    const localPrefixes = deriveLocalPrefixes(routes, nodeId);
+    if (apex !== undefined && !localPrefixes.includes(apex)) {
+      localPrefixes.push(apex);
+    }
+
+    for (const peer of peersWithRelation) {
+      const routePrefixes = routes.filter((r) => r.nextHop === peer.id).map((r) => r.prefix);
+      if (routePrefixes.length === 0) {
+        continue;
+      }
+      const result = validateRelationRoute(peer.relation, localPrefixes, routePrefixes);
+      if (!result.ok) {
+        throw new ConfigurationError(
+          `Relation/route mismatch for peer '${peer.id}' (relation '${peer.relation}'): ${result.error}`
+        );
+      }
+    }
+  }
+
+  /**
    * Validate and Normalize the `transport` Block.
    *
    * Only direct TCP transport is supported; any other `transport.type` is
@@ -731,5 +1068,160 @@ export class ConfigLoader {
 
     // direct discards any extra fields unconditionally.
     return { type: 'direct' };
+  }
+
+  /**
+   * Validate and Normalize the `bootstrap` Block (toon-meta#153).
+   *
+   * Opt-in: absent (or explicit undefined) returns undefined and no bootstrap
+   * runs. When present: `enabled` is a required boolean; `registryUrl` must be
+   * https:// (the curated registry is signed AND transported over TLS);
+   * `curatorPubkey` and per-seed `pubkey` are 64-char lowercase hex (BIP-340
+   * x-only / Nostr keys); seed `relayUrl`s are ws:// or wss:// WebSocket URLs
+   * (ws:// permitted for local dev, mirroring peer URL validation);
+   * `sampleSize` and `refreshIntervalSecs` are positive integers.
+   *
+   * @param raw - Unvalidated `bootstrap` field value from the YAML input
+   * @returns Normalized `BootstrapConfig`, or undefined when absent
+   * @throws ConfigurationError on any schema violation
+   * @private
+   */
+  private static validateBootstrap(raw: unknown): BootstrapConfig | undefined {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      const actualType = raw === null ? 'null' : Array.isArray(raw) ? 'array' : typeof raw;
+      throw new ConfigurationError(
+        `Invalid type for bootstrap: expected object, got ${actualType}`
+      );
+    }
+
+    const rawBootstrap = raw as Record<string, unknown>;
+    const hex64 = /^[0-9a-f]{64}$/;
+    const wsUrl = /^wss?:\/\/.+/;
+
+    if (typeof rawBootstrap.enabled !== 'boolean') {
+      throw new ConfigurationError(
+        `Invalid type for bootstrap.enabled: expected boolean, got ${typeof rawBootstrap.enabled}`
+      );
+    }
+
+    if (rawBootstrap.registryUrl !== undefined) {
+      if (
+        typeof rawBootstrap.registryUrl !== 'string' ||
+        !/^https:\/\/.+/.test(rawBootstrap.registryUrl)
+      ) {
+        throw new ConfigurationError(
+          `Invalid bootstrap.registryUrl: must be an https:// URL, got ${String(
+            rawBootstrap.registryUrl
+          )}`
+        );
+      }
+    }
+
+    if (rawBootstrap.curatorPubkey !== undefined) {
+      if (
+        typeof rawBootstrap.curatorPubkey !== 'string' ||
+        !hex64.test(rawBootstrap.curatorPubkey)
+      ) {
+        throw new ConfigurationError(
+          'Invalid bootstrap.curatorPubkey: must be 64-char lowercase hex (BIP-340 x-only pubkey)'
+        );
+      }
+    }
+
+    let seeds: BootstrapSeedEntry[] | undefined;
+    if (rawBootstrap.seeds !== undefined) {
+      if (!Array.isArray(rawBootstrap.seeds)) {
+        throw new ConfigurationError(
+          `Invalid type for bootstrap.seeds: expected array, got ${typeof rawBootstrap.seeds}`
+        );
+      }
+      seeds = [];
+      for (const [index, rawSeed] of rawBootstrap.seeds.entries()) {
+        if (rawSeed === null || typeof rawSeed !== 'object' || Array.isArray(rawSeed)) {
+          throw new ConfigurationError(`Invalid bootstrap.seeds[${index}]: expected object`);
+        }
+        const seed = rawSeed as Record<string, unknown>;
+        if (typeof seed.relayUrl !== 'string' || !wsUrl.test(seed.relayUrl)) {
+          throw new ConfigurationError(
+            `Invalid bootstrap.seeds[${index}].relayUrl: must be a ws:// or wss:// URL, got ${String(
+              seed.relayUrl
+            )}`
+          );
+        }
+        if (
+          seed.pubkey !== undefined &&
+          (typeof seed.pubkey !== 'string' || !hex64.test(seed.pubkey))
+        ) {
+          throw new ConfigurationError(
+            `Invalid bootstrap.seeds[${index}].pubkey: must be 64-char lowercase hex`
+          );
+        }
+        seeds.push(
+          seed.pubkey !== undefined
+            ? { relayUrl: seed.relayUrl, pubkey: seed.pubkey as string }
+            : { relayUrl: seed.relayUrl }
+        );
+      }
+    }
+
+    if (rawBootstrap.cachePath !== undefined) {
+      if (typeof rawBootstrap.cachePath !== 'string' || rawBootstrap.cachePath.trim() === '') {
+        throw new ConfigurationError(
+          'Invalid bootstrap.cachePath: must be a non-empty file path string'
+        );
+      }
+    }
+
+    if (rawBootstrap.sampleSize !== undefined) {
+      if (
+        typeof rawBootstrap.sampleSize !== 'number' ||
+        !Number.isInteger(rawBootstrap.sampleSize) ||
+        rawBootstrap.sampleSize < 1
+      ) {
+        throw new ConfigurationError(
+          `Invalid bootstrap.sampleSize: must be a positive integer, got ${String(
+            rawBootstrap.sampleSize
+          )}`
+        );
+      }
+    }
+
+    if (rawBootstrap.refreshIntervalSecs !== undefined) {
+      if (
+        typeof rawBootstrap.refreshIntervalSecs !== 'number' ||
+        !Number.isInteger(rawBootstrap.refreshIntervalSecs) ||
+        rawBootstrap.refreshIntervalSecs < 1
+      ) {
+        throw new ConfigurationError(
+          `Invalid bootstrap.refreshIntervalSecs: must be a positive integer, got ${String(
+            rawBootstrap.refreshIntervalSecs
+          )}`
+        );
+      }
+    }
+
+    const bootstrap: BootstrapConfig = { enabled: rawBootstrap.enabled };
+    if (rawBootstrap.registryUrl !== undefined) {
+      bootstrap.registryUrl = rawBootstrap.registryUrl as string;
+    }
+    if (rawBootstrap.curatorPubkey !== undefined) {
+      bootstrap.curatorPubkey = rawBootstrap.curatorPubkey as string;
+    }
+    if (seeds !== undefined) {
+      bootstrap.seeds = seeds;
+    }
+    if (rawBootstrap.cachePath !== undefined) {
+      bootstrap.cachePath = rawBootstrap.cachePath as string;
+    }
+    if (rawBootstrap.sampleSize !== undefined) {
+      bootstrap.sampleSize = rawBootstrap.sampleSize as number;
+    }
+    if (rawBootstrap.refreshIntervalSecs !== undefined) {
+      bootstrap.refreshIntervalSecs = rawBootstrap.refreshIntervalSecs as number;
+    }
+    return bootstrap;
   }
 }

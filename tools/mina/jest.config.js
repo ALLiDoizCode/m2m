@@ -1,5 +1,7 @@
 /**
- * Jest config for the Mina USDC devnet tooling smoke tests (ticket #193).
+ * Jest config for the on-demand Mina lightnet deploy test (deploy-lightnet.test.ts).
+ * (The USDC devnet tooling smoke tests moved to
+ * packages/mina-zkapp/src/usdc-deploy.test.ts — CI-run — as part of the #352 fix.)
  *
  * Mirrors packages/mina-zkapp/jest.config.ts: the audited `mina-fungible-token`
  * lib ships ESM (.js with `export`), so it MUST be compiled to CJS (not ignored)

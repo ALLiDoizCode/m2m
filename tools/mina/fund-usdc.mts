@@ -1,9 +1,19 @@
 /**
- * Admin-mint USDC to a recipient on a Mina network (the Mina funding path).
+ * Admin-mint USDC to a recipient on a Mina network — LEGACY (stock-admin
+ * deploys ONLY, e.g. the lightnet box's local token).
+ *
+ * ⚠️  DOES NOT WORK against the CURRENT public-devnet USDC token
+ * (infra/linode/endpoints.json "mina"): that token is gated by
+ * `RateLimitedUsdcAdmin` — mints are permissionless but require the
+ * RECIPIENT's signature and are capped per address per ~24h, and the admin
+ * key holds pause/upgrade rights only (no mint monopoly). For that token use
+ * `tools/mina/self-mint-usdc.mts` (or `infra/mina/fund-mina-usdc.sh`, which
+ * wraps it; this CLI stays reachable via its `--admin-mint` legacy flag), or
+ * the faucet's POST /api/mina/usdc-request treasury-transfer drip for
+ * zero-MINA recipients (packages/faucet).
  *
  * Analogous to `infra/solana/fund-solana.sh` (SPL transfer from a treasury), but
  * Mina has no token CLI — minting requires o1js, so this is the funding core.
- * `infra/mina/fund-mina-usdc.sh` is a thin wrapper that calls into this.
  *
  * The `FungibleTokenAdmin` gates `mint`; the admin AUTHORITY key
  * (`MINA_USDC_ADMIN_KEY`) must sign and must be a FUNDED account (it pays the
@@ -12,9 +22,18 @@
  * Unlike the EVM faucet / Solana treasury (which transfer from a pre-funded
  * balance), here we MINT directly — simplest funding primitive for a devnet mock.
  *
+ * ── Why this CLI is a PURE-ESM `.mts` (issue #352) ───────────────────────────
+ * Same single-o1js-instance requirement as tools/mina/deploy-usdc-token.mts
+ * (see its header): the ESM-only `mina-fungible-token` + o1js's dual CJS/ESM
+ * build means any CJS-transpiled run (the old `npx ts-node`) loads TWO o1js
+ * copies and `UsdcChannelToken.compile()` dies with `TypeError: Cannot read
+ * properties of undefined (reading 'run')`. Run as ESM via `tsx`, importing the
+ * pure-ESM `packages/mina-zkapp/dist-esm/` build:
+ *     npm run build:esm --workspace=packages/mina-zkapp   # required first
+ *
  * ── Live mint ────────────────────────────────────────────────────────────────
  *   export MINA_USDC_ADMIN_KEY=<base58 admin authority private key, FUNDED>
- *   npx ts-node tools/mina/fund-usdc.ts \
+ *   npx tsx tools/mina/fund-usdc.mts \
  *     --network https://api.minascan.io/node/devnet/v1/graphql \
  *     --token <tokenAddress base58> \
  *     --admin-contract <adminContractAddress base58> \
@@ -22,87 +41,35 @@
  *     --amount 1000          # whole USDC (default 1000)
  *
  * ── Local smoke test ─────────────────────────────────────────────────────────
- *   Authoritative smoke test (shares one o1js via the jest CJS transform):
- *     npx jest --config tools/mina/jest.config.js
- *   The `--local` flag runs the same mint flow standalone, but only works when
- *   o1js is a single module instance (bundled); under bare ts-node the ESM/CJS
- *   split breaks it (see deploy-usdc-token.ts header). Prefer the jest suite.
- *     npx ts-node tools/mina/fund-usdc.ts --local
+ *   Deploys a fresh USDC token then mints, on Mina.LocalBlockchain:
+ *     npx tsx tools/mina/fund-usdc.mts --local
+ *   The same flow is jest-tested in packages/mina-zkapp/src/usdc-deploy.test.ts
+ *   (runs in CI).
  *
- * Epic: USDC settlement across all chains (connector#188), ticket #193.
+ * Epic: USDC settlement across all chains (connector#188), ticket #193; the
+ * pure-ESM runner is the fix for the o1js UsdcChannelToken compile skew issue
+ * (#352).
  *
  * @module fund-usdc
  */
 
 /* eslint-disable no-console */
 
-import { AccountUpdate, Bool, Mina, PrivateKey, PublicKey, UInt64 } from 'o1js';
+import { Mina, PrivateKey, PublicKey } from 'o1js';
 
-import {
-  FungibleToken,
-  FungibleTokenAdmin,
-  ONE_USDC,
-  USDC_DECIMALS_U8,
-  usdcDeployProps,
-} from '../../packages/mina-zkapp/src/usdc-token';
+// Pure-ESM build of the zkApp lib (npm run build:esm --workspace=packages/mina-zkapp).
+// Importing src/ (or the CJS dist/) here would re-introduce the dual-o1js seam.
+import { ONE_USDC } from '../../packages/mina-zkapp/dist-esm/usdc-token.js';
+import { FungibleTokenAdmin } from '../../packages/mina-zkapp/dist-esm/usdc-token.js';
 // The deployed USDC owner is `UsdcChannelToken` (Phase A). Its on-chain
 // verification key is the SUBCLASS's, so we must instantiate/compile that exact
 // class for mint proofs to be accepted on-chain. `mint` itself is inherited
 // unchanged from `FungibleToken`.
-import { UsdcChannelToken } from '../../packages/mina-zkapp/src/usdc-channel-token';
+import { UsdcChannelToken } from '../../packages/mina-zkapp/dist-esm/usdc-channel-token.js';
+import { deployUsdcToken, mintUsdc } from '../../packages/mina-zkapp/dist-esm/usdc-deploy.js';
 
 const DEFAULT_NETWORK = 'https://api.minascan.io/node/devnet/v1/graphql';
 const DEFAULT_AMOUNT_USDC = 1000n;
-
-/**
- * Fee (in nanomina) for the mint zkApp command. A zkApp command on the public
- * Mina devnet is rejected with "Insufficient fee" at the default (~0.001 MINA)
- * fee floor that `Mina.transaction` would otherwise pick — proof commands cost
- * more than plain payments. 0.1 MINA is the well-worn devnet zkApp fee and is
- * what the manual mint used. Override with MINA_TX_FEE (whole MINA) if the
- * mempool fee floor rises. 1 MINA = 1e9 nanomina.
- */
-const MINT_FEE_NANOMINA = (() => {
-  const whole = process.env['MINA_TX_FEE'];
-  if (whole && Number.isFinite(Number(whole))) {
-    // Parse "0.1" → 100_000_000 nanomina without floating point drift.
-    const [w, f = ''] = String(whole).split('.');
-    return BigInt(w || '0') * 1_000_000_000n + BigInt((f + '000000000').slice(0, 9) || '0');
-  }
-  return 100_000_000n; // 0.1 MINA
-})();
-
-/**
- * Admin-mint `wholeUsdc` USDC (whole tokens, scaled to 6-dp base units) to
- * `recipient`. The admin authority signs; the fee payer (default: the admin
- * authority) pays fees + the recipient token-account creation fee.
- *
- * Returns the recipient's post-mint balance (base units) as a string.
- */
-export async function mintUsdc(opts: {
-  token: FungibleToken;
-  feePayer: PublicKey;
-  recipient: PublicKey;
-  wholeUsdc: bigint;
-  /** Fee payer + admin authority signing keys. */
-  signers: PrivateKey[];
-  /** Whether the recipient's token account must be funded (true on first mint). */
-  fundRecipient: boolean;
-  /** zkApp tx fee in nanomina; defaults to MINT_FEE_NANOMINA (0.1 MINA). */
-  feeNanomina?: bigint;
-}): Promise<string> {
-  const amount = UInt64.from(opts.wholeUsdc * ONE_USDC);
-  const tx = await Mina.transaction(
-    { sender: opts.feePayer, fee: UInt64.from(opts.feeNanomina ?? MINT_FEE_NANOMINA) },
-    async () => {
-      if (opts.fundRecipient) AccountUpdate.fundNewAccount(opts.feePayer, 1);
-      await opts.token.mint(opts.recipient, amount);
-    }
-  );
-  await tx.prove();
-  await tx.sign(opts.signers).send();
-  return (await opts.token.getBalanceOf(opts.recipient)).toString();
-}
 
 interface CliArgs {
   network: string;
@@ -178,17 +145,15 @@ async function runLocal(): Promise<void> {
 
   const adminContractKey = PrivateKey.random();
   const tokenKey = PrivateKey.random();
-  const admin = new FungibleTokenAdmin(adminContractKey.toPublicKey());
-  const token = new UsdcChannelToken(tokenKey.toPublicKey());
 
-  const deployTx = await Mina.transaction(deployer, async () => {
-    AccountUpdate.fundNewAccount(deployer, 3);
-    await admin.deploy({ adminPublicKey: adminAuthority });
-    await token.deploy(usdcDeployProps);
-    await token.initialize(adminContractKey.toPublicKey(), USDC_DECIMALS_U8, Bool(false));
+  const { token } = await deployUsdcToken({
+    feePayer: deployer,
+    adminAuthority,
+    adminContractKey,
+    tokenKey,
+    signers: [deployer.key, adminContractKey, tokenKey],
+    network: 'LocalBlockchain',
   });
-  await deployTx.prove();
-  await deployTx.sign([deployer.key, adminContractKey, tokenKey]).send();
 
   const wholeUsdc = 1000n;
   const balance = await mintUsdc({
@@ -262,9 +227,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (require.main === module) {
-  void main().catch((err: unknown) => {
-    console.error('USDC mint failed:', err);
-    process.exit(1);
-  });
-}
+void main().catch((err: unknown) => {
+  console.error('USDC mint failed:', err);
+  process.exit(1);
+});

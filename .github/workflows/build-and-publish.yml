@@ -35,7 +35,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/connector
-  NODE_VERSION: '22.11.0'
+  NODE_VERSION: '22.20.0'
 
 jobs:
   # Build stage - shared across all publish jobs
@@ -191,6 +191,18 @@ jobs:
         run: |
           docker run --rm --entrypoint node connector:smoke-test \
             -e "require('libsql'); console.log('native bindings OK')"
+
+      # Regression gate for the Mina claim-verification ESM-require bug: the
+      # connector loads @toon-protocol/mina-zkapp via a dynamic import that tsc
+      # (module: commonjs) lowers to require(); that package statically imports
+      # the ESM-only mina-fungible-token, so a Node runtime without require(esm)
+      # support (< 22.12) throws ERR_REQUIRE_ESM and every Mina claim F06-rejects.
+      # This exercises the exact require() boundary in the shipped image and fails
+      # the build if the base image ever regresses below the require(esm) floor.
+      - name: Smoke-test Mina claim-verification ESM load in built image
+        run: |
+          docker run --rm --entrypoint node connector:smoke-test \
+            -e "require('@toon-protocol/mina-zkapp'); require('mina-fungible-token'); console.log('Mina ESM require OK')"
 
       - name: Push Docker image
         id: push-connector

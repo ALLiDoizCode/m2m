@@ -5,6 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.37.0](https://github.com/toon-protocol/connector/compare/v3.36.1...v3.37.0) (2026-07-19)
+
+### Features
+
+- **faucet:** add Base Sepolia mock-USDC mint leg ([#366](https://github.com/toon-protocol/connector/issues/366)) ([6f57723](https://github.com/toon-protocol/connector/commit/6f57723880a8f578d0534884d0d9686c3dd231fb)), closes [#363](https://github.com/toon-protocol/connector/issues/363)
+
+## [3.36.1](https://github.com/toon-protocol/connector/compare/v3.36.0...v3.36.1) (2026-07-19)
+
+### Bug Fixes
+
+- **connector:** re-evaluate /health on peer connect/disconnect and via periodic backstop ([#372](https://github.com/toon-protocol/connector/issues/372)) ([e53f279](https://github.com/toon-protocol/connector/commit/e53f2798b91e350815c1195a883474c3036fca68))
+
+## [3.36.0](https://github.com/toon-protocol/connector/compare/v3.35.0...v3.36.0) (2026-07-19)
+
+### Features
+
+- **faucet-web:** browser dApp to mint devnet mock-USDC via Auro ([#363](https://github.com/toon-protocol/connector/issues/363)) ([a965f52](https://github.com/toon-protocol/connector/commit/a965f5275adfef016ea6593d87781193e93f22e4))
+
+### Bug Fixes
+
+- **connector:** load o1js single-instance so Mina settlement circuits compile ([#368](https://github.com/toon-protocol/connector/issues/368)) ([#369](https://github.com/toon-protocol/connector/issues/369)) ([4dc47b6](https://github.com/toon-protocol/connector/commit/4dc47b6d5ec6ff113b50d4f1764ae3173a768326)), closes [#363](https://github.com/toon-protocol/connector/issues/363)
+- **connector:** pin Node >=22.12 base image so require(esm) loads the Mina claim path ([#364](https://github.com/toon-protocol/connector/issues/364)) ([48564b4](https://github.com/toon-protocol/connector/commit/48564b45cbf51cc5cafea500e18599a1eed43135))
+
+## [3.35.0](https://github.com/toon-protocol/connector/compare/v3.34.8...v3.35.0) (2026-07-18)
+
+### Features
+
+- **mina:** permissionless USDC mint (mint to any address, recipient does not sign) ([#362](https://github.com/toon-protocol/connector/issues/362)) ([55ef944](https://github.com/toon-protocol/connector/commit/55ef9440846ff1fe702e99d610b3b214ec5f3035))
+
+## [3.34.8](https://github.com/toon-protocol/connector/compare/v3.34.7...v3.34.8) (2026-07-18)
+
+### Bug Fixes
+
+- **connector:** bind Mina claim value to route price by opening the balance commitment at the gate ([#359](https://github.com/toon-protocol/connector/issues/359)) ([#361](https://github.com/toon-protocol/connector/issues/361)) ([74dbfc3](https://github.com/toon-protocol/connector/commit/74dbfc3b83efa480bf5a1d9470816457761d3cd5)), closes [#360](https://github.com/toon-protocol/connector/issues/360) [#360](https://github.com/toon-protocol/connector/issues/360) [toon-meta#168](https://github.com/toon-protocol/toon-meta/issues/168) [#358](https://github.com/toon-protocol/connector/issues/358) [#360](https://github.com/toon-protocol/connector/issues/360)
+
+## [3.34.7](https://github.com/toon-protocol/connector/compare/v3.34.6...v3.34.7) (2026-07-18)
+
+### Bug Fixes
+
+- **connector:** bind inbound claim value to the flat route price at the gate ([#359](https://github.com/toon-protocol/connector/issues/359)) ([#360](https://github.com/toon-protocol/connector/issues/360)) ([e9fc6aa](https://github.com/toon-protocol/connector/commit/e9fc6aa4ddcf35801594fefa993d42ae74adb550)), closes [#358](https://github.com/toon-protocol/connector/issues/358) [#353](https://github.com/toon-protocol/connector/issues/353) [#358](https://github.com/toon-protocol/connector/issues/358) [#358](https://github.com/toon-protocol/connector/issues/358) [162/#163](https://github.com/162/connector/issues/163)
+
+## [3.34.6](https://github.com/toon-protocol/connector/compare/v3.34.5...v3.34.6) (2026-07-18)
+
+### Bug Fixes
+
+- **connector:** gate paid packets on the received-claim nonce watermark ([#353](https://github.com/toon-protocol/connector/issues/353)) ([#358](https://github.com/toon-protocol/connector/issues/358)) ([dd650c8](https://github.com/toon-protocol/connector/commit/dd650c86a54bc254a0e0091bf9ef3cb838dd890c)), closes [#220](https://github.com/toon-protocol/connector/issues/220)
+
+## [3.34.5](https://github.com/toon-protocol/connector/compare/v3.34.4...v3.34.5) (2026-07-18)
+
+### Bug Fixes
+
+- **mina:** single-o1js-instance USDC deploy tooling + circuit-compile CI guard ([#354](https://github.com/toon-protocol/connector/issues/354)) ([8d627b6](https://github.com/toon-protocol/connector/commit/8d627b65d1cf4d1b9996e3549d72df71062fc69b)), closes [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352) [#352](https://github.com/toon-protocol/connector/issues/352)
+
+## [3.34.4](https://github.com/toon-protocol/connector/compare/v3.34.3...v3.34.4) (2026-07-17)
+
+### Bug Fixes
+
+- **faucet:** fail fast on wedged Solana validator; fix Mina drip timeout + Invalid_nonce (closes [#348](https://github.com/toon-protocol/connector/issues/348)) ([#350](https://github.com/toon-protocol/connector/issues/350)) ([67f3c5a](https://github.com/toon-protocol/connector/commit/67f3c5a8a102138e545e6968ce487a92d3c01735)), closes [#277](https://github.com/toon-protocol/connector/issues/277)
+
+## [3.34.3](https://github.com/toon-protocol/connector/compare/v3.34.2...v3.34.3) (2026-07-17)
+
+### Bug Fixes
+
+- **discovery:** real devnet curator key + signed seed manifest, drop placeholder seeds (closes [#343](https://github.com/toon-protocol/connector/issues/343)) ([#349](https://github.com/toon-protocol/connector/issues/349)) ([580f1f1](https://github.com/toon-protocol/connector/commit/580f1f19a6e0e97948a72b97390b040b07fa7bdc))
+
+## [3.34.2](https://github.com/toon-protocol/connector/compare/v3.34.1...v3.34.2) (2026-07-17)
+
+### Bug Fixes
+
+- **http:** enforce funded-channel cap on first-time settlement add via PUT /admin/peers (closes [#344](https://github.com/toon-protocol/connector/issues/344)) ([#347](https://github.com/toon-protocol/connector/issues/347)) ([ea2e5cf](https://github.com/toon-protocol/connector/commit/ea2e5cff3cc7dfd17f91965b7a7728c9682cbb85))
+
+## [3.34.1](https://github.com/toon-protocol/connector/compare/v3.34.0...v3.34.1) (2026-07-17)
+
+### Bug Fixes
+
+- **http:** record runtime peer URLs on the admin POST/DELETE peer surface (closes [#345](https://github.com/toon-protocol/connector/issues/345)) ([#346](https://github.com/toon-protocol/connector/issues/346)) ([16af9ee](https://github.com/toon-protocol/connector/commit/16af9ee9bbf4b5aef861cf75f5bd77b569c41319))
+
+## [3.34.0](https://github.com/toon-protocol/connector/compare/v3.33.1...v3.34.0) (2026-07-17)
+
+### Features
+
+- **config:** general child-prefix registration + apex aggregation (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([0448414](https://github.com/toon-protocol/connector/commit/04484141bc20d0fd9e569b4f3b38370890bd6401))
+- **discovery:** capability directory in kind:10032 announcements (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([c7bcd67](https://github.com/toon-protocol/connector/commit/c7bcd67707754065e66cb2abe044f7e8bebb19e9))
+- **discovery:** cold-start bootstrap — curated signed seeds, peer cache, sample-and-verify (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([900fb0e](https://github.com/toon-protocol/connector/commit/900fb0ecdc9a320dc3195b6c5f331e588cef28cc)), closes [connector#289](https://github.com/toon-protocol/connector/issues/289)
+- **discovery:** discovered-vs-peered split + bounded funding policy (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([bed8dbd](https://github.com/toon-protocol/connector/commit/bed8dbd94c709d04d1b72cccd3914b89196905d4))
+- **routing:** multi-hop route learning via link-state over kind:10032 (toon-meta[#153](https://github.com/toon-protocol/connector/issues/153)) ([937cfcb](https://github.com/toon-protocol/connector/commit/937cfcbb5862c8c7854f2616ec474fdb6f1b7594))
+
+### Bug Fixes
+
+- **ci:** inventory the discovered-nodes route and restore function coverage on feat/153-control-plane ([471cea0](https://github.com/toon-protocol/connector/commit/471cea03bddd27766ef971e416ccf67d6033f599)), closes [#333](https://github.com/toon-protocol/connector/issues/333) [toon-meta#153](https://github.com/toon-protocol/toon-meta/issues/153)
+- **core:** restore stop() block brace lost in three-way merge ([3386fee](https://github.com/toon-protocol/connector/commit/3386fee251ae99bb046e70ec4150bb2da22b616d))
+
+## [3.33.1](https://github.com/toon-protocol/connector/compare/v3.33.0...v3.33.1) (2026-07-17)
+
+### Bug Fixes
+
+- **test:** send unconditional packets in packet-flow counter invariants suite ([#321](https://github.com/toon-protocol/connector/issues/321)) ([#340](https://github.com/toon-protocol/connector/issues/340)) ([2821cf5](https://github.com/toon-protocol/connector/commit/2821cf51338e9b46f983c6615f3ddcf8d28d2d7b)), closes [#314](https://github.com/toon-protocol/connector/issues/314) [#309](https://github.com/toon-protocol/connector/issues/309) [#309](https://github.com/toon-protocol/connector/issues/309) [pre-#314-equivalent](https://github.com/toon-protocol/pre-/issues/314-equivalent) [#314](https://github.com/toon-protocol/connector/issues/314)
+
 ## [3.33.0](https://github.com/toon-protocol/connector/compare/v3.32.0...v3.33.0) (2026-07-16)
 
 ### Features

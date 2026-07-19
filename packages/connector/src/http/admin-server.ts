@@ -83,6 +83,10 @@ export class AdminServer {
     httpPeerEgress?: import('../transport/http-peer-transport').PeerEgress;
     setPeerProtocol?: (peerId: string, protocol: 'btp' | 'ilp-http') => void;
     routeTerminationRegistry?: import('./admin-api').RouteTerminationSink;
+    getDiscoveredNodes?: () => import('../discovery/discovered-node-registry').DiscoveredNode[];
+    checkFundedChannelCap?: (peerId: string) => string | null;
+    recordRuntimePeerUrl?: (peerId: string, url: string) => void;
+    forgetRuntimePeerUrl?: (peerId: string) => void;
   };
 
   /**
@@ -140,6 +144,29 @@ export class AdminServer {
      * same in-memory registry #216's HttpProxyHandler resolves against.
      */
     routeTerminationRegistry?: import('./admin-api').RouteTerminationSink;
+    /**
+     * Discovered-node reader (toon-meta#153). Forwarded to the admin router
+     * so `GET /admin/discovered-nodes` lists the discovered set with each
+     * entry's `funded` flag. Omitted when route learning is disabled.
+     */
+    getDiscoveredNodes?: () => import('../discovery/discovered-node-registry').DiscoveredNode[];
+    /**
+     * Funded-channel cap gate (toon-meta#153). Forwarded to the admin router
+     * so `POST /admin/peers` with a settlement block enforces
+     * `peeringPolicy.maxFundedChannels` with the same error string as
+     * `ConnectorNode.registerPeer`.
+     */
+    checkFundedChannelCap?: (peerId: string) => string | null;
+    /**
+     * Runtime peer-URL bookkeeping hooks (issue #345). Forwarded to the admin
+     * router so `POST /admin/peers` records (and `DELETE /admin/peers/:peerId`
+     * forgets) the peer's BTP url in the same map `ConnectorNode.registerPeer`
+     * / `removePeer` maintain — keeping the discovered-node registry's
+     * endpoint-fallback funded matching correct for peers promoted via the
+     * admin HTTP surface.
+     */
+    recordRuntimePeerUrl?: (peerId: string, url: string) => void;
+    forgetRuntimePeerUrl?: (peerId: string) => void;
   }) {
     this._options = options;
     this._nodeId = options.nodeId;
@@ -180,6 +207,10 @@ export class AdminServer {
       httpPeerEgress,
       setPeerProtocol,
       routeTerminationRegistry,
+      getDiscoveredNodes,
+      checkFundedChannelCap,
+      recordRuntimePeerUrl,
+      forgetRuntimePeerUrl,
     } = this._options;
 
     this._app = express();
@@ -212,6 +243,10 @@ export class AdminServer {
       httpPeerEgress,
       setPeerProtocol,
       routeTerminationRegistry,
+      getDiscoveredNodes,
+      checkFundedChannelCap,
+      recordRuntimePeerUrl,
+      forgetRuntimePeerUrl,
     });
 
     this._app.use('/admin', adminRouter);
@@ -268,6 +303,7 @@ export class AdminServer {
                 'GET /admin/peers',
                 'POST /admin/peers',
                 'DELETE /admin/peers/:peerId',
+                'GET /admin/discovered-nodes',
                 'GET /admin/routes',
                 'POST /admin/routes',
                 'DELETE /admin/routes/:prefix',

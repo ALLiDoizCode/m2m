@@ -17,7 +17,7 @@
  * request to a *locally-terminated* route (one carrying a `RouteTermination` in
  * the injected registry) short-circuits into an HTTP `402 Payment Required`
  * advertising both a vanilla on-chain `exact` option and the `toon-channel`
- * upgrade, *before* the claim-record/validate seams run. This is a self-contained
+ * upgrade, *before* the claim-validate/record seams run. This is a self-contained
  * early return that performs no claim *validation* — a present claim simply
  * suppresses the greeting and the request flows through the shared seams
  * unchanged. (#220's verifier wiring is inserted adjacent, just before the seams.)
@@ -306,7 +306,7 @@ export class IlpHttpAdapter {
     // Greet an UNPAID request to a locally-terminated route with an x402 v2
     // `402 Payment Required` advertising both the vanilla on-chain `exact`
     // option and the toon-channel upgrade. Self-contained early return: it runs
-    // BEFORE the claim-record/validate seams and performs NO claim validation —
+    // BEFORE the claim-validate/record seams and performs NO claim validation —
     // a present claim merely suppresses the greeting so the request flows through
     // the shared seams unchanged. (#220's verifier wiring goes adjacent, just
     // before the seams in the try-block below; keep this branch standalone.)
@@ -354,24 +354,13 @@ export class IlpHttpAdapter {
       }
       // --- end RFC 9421 claim↔request binding (#220) ---
 
-      // Record the claim for event-driven settlement, independent of the packet
-      // outcome — mirroring the BTP onMessage→ClaimReceiver path (which records
-      // every message's claim). Best-effort: a recording failure never blocks
-      // the ILP response.
-      if (this.recordClaim && protocolData.length > 0) {
-        await this.recordClaim(peerId, protocolData).catch((err) => {
-          this.logger.warn(
-            {
-              event: 'ilp_http_claim_record_failed',
-              peerId,
-              error: err instanceof Error ? err.message : String(err),
-            },
-            'Failed to record inbound claim for settlement'
-          );
-        });
-      }
-
-      // Seam 1: the single claim gate (shared with BTP). Skipped only when no
+      // Seam 1: the single claim gate (shared with BTP). Runs BEFORE the claim
+      // is recorded (issue #353): the gate's freshness check reads the
+      // received-claim nonce watermark, and recording first would advance the
+      // watermark to this claim's own nonce — the strictly-advancing check
+      // would then reject the very claim being recorded. Gate-then-record
+      // mirrors BTP, where handleMessage (gate + packet handler) completes
+      // before the onMessage→ClaimReceiver ingest fires. Skipped only when no
       // validator is wired (routing-only mode), matching BTP behavior.
       if (this.validateClaim) {
         const rejection = await this.validateClaim(protocolData, prepare, peerId);
@@ -388,6 +377,27 @@ export class IlpHttpAdapter {
           this.respondPacket(res, rejection);
           return;
         }
+      }
+
+      // Record the gate-passed claim for event-driven settlement — mirroring
+      // the BTP onMessage→ClaimReceiver path. Runs before the packet is routed
+      // so a verified claim advances the watermark independent of the BACKEND
+      // outcome. Best-effort: a recording failure never blocks the ILP
+      // response. (A gate-REJECTED claim is not recorded here; on BTP such a
+      // claim still reaches the ClaimReceiver via onMessage and is persisted
+      // with verified=0 — forensic-only, never a watermark advance — so the
+      // two transports agree on every watermark-relevant write.)
+      if (this.recordClaim && protocolData.length > 0) {
+        await this.recordClaim(peerId, protocolData).catch((err) => {
+          this.logger.warn(
+            {
+              event: 'ilp_http_claim_record_failed',
+              peerId,
+              error: err instanceof Error ? err.message : String(err),
+            },
+            'Failed to record inbound claim for settlement'
+          );
+        });
       }
 
       // Seam 2: routing/fees/forward/settlement (shared with BTP). Pass the

@@ -80,6 +80,59 @@ export type {
   FetchLike,
 } from './client/connector-admin-client';
 
+// Multi-hop route learning via link-state over kind:10032 (toon-meta#153)
+export {
+  RouteLearningService,
+  DEFAULT_ROUTE_LEARNING_REFRESH_SECS,
+  DEFAULT_MAX_LEARNED_ROUTES,
+  LEARNED_ROUTE_PRIORITY,
+} from './discovery/route-learning-service';
+export type {
+  RouteLearningServiceDeps,
+  DiscoveredNodeSink,
+} from './discovery/route-learning-service';
+// Discovered-vs-peered split (toon-meta#153): the discovered set as a
+// first-class registry, distinct from the few deliberately funded peers.
+export { DiscoveredNodeRegistry } from './discovery/discovered-node-registry';
+export type {
+  DiscoveredNode,
+  DiscoveredNodeIngestResult,
+  DiscoveredNodeRegistryDeps,
+  FundedPeerRef,
+} from './discovery/discovered-node-registry';
+export { createNostrRelayClient } from './discovery/nostr-relay-client';
+export type {
+  RouteLearningRelayClient,
+  RelaySubscriptionHandle,
+  RelayEventFilter,
+} from './discovery/nostr-relay-client';
+export { LinkStateDatabase, parseExpirationTag } from './routing/link-state-db';
+export type {
+  LinkStateEntry,
+  LinkStateEventInput,
+  LinkStateIngestResult,
+} from './routing/link-state-db';
+export { computeRoutes } from './routing/path-computation';
+export type { ComputedRoute, DirectNeighbor } from './routing/path-computation';
+export {
+  parseRoutingInfo,
+  parseCapabilityDirectory,
+  normalizeCapabilityName,
+  CAPABILITY_NAME_PATTERN,
+} from './discovery/ilp-peer-info-event';
+export type {
+  IlpRoutingInfo,
+  IlpRoutingPrefix,
+  IlpCapabilityEntry,
+} from './discovery/ilp-peer-info-event';
+export {
+  buildCapabilityDirectory,
+  buildRoutingInfo,
+  nip59KeyToNostrPubkey,
+  PUBLISH_HINT_CAPABILITY,
+  STORE_HINT_CAPABILITY,
+} from './discovery/self-announce-builder';
+
 // Export configuration types
 export type {
   ConnectorConfig,
@@ -99,7 +152,40 @@ export type {
   IlpSendRequest,
   IlpSendResponse,
   TransportConfig,
+  RouteLearningConfig,
+  PeeringPolicyConfig,
+  ChildConfig,
 } from './config/types';
+
+// Child-prefix registration + apex derivation (toon-meta#153)
+export { ChildConfigError, deriveApex, expandChildren } from './config/child-expander';
+
+// Cold-start bootstrap (toon-meta#153): relay-seed resolution, signed seed
+// registry verification, learned-peer cache, and sample-and-verify probing.
+export {
+  BootstrapService,
+  DEFAULT_SAMPLE_SIZE,
+  DEFAULT_BOOTSTRAP_REFRESH_INTERVAL_SECS,
+} from './discovery/bootstrap-service';
+export type {
+  BootstrapServiceDeps,
+  ResolvedRelaySeed,
+  RelayProbeFn,
+  RelayProbeResult,
+  RelaysResolvedListener,
+} from './discovery/bootstrap-service';
+export { FALLBACK_RELAY_SEEDS, FALLBACK_CURATOR_PUBKEY } from './discovery/bootstrap-seeds';
+export type { RelaySeed } from './discovery/bootstrap-seeds';
+export {
+  signSeedManifest,
+  parseSeedManifest,
+  verifySeedManifest,
+} from './discovery/bootstrap-manifest';
+export type { SeedManifest, SeedManifestPayload } from './discovery/bootstrap-manifest';
+export { FileBootstrapCacheStore } from './discovery/bootstrap-cache';
+export type { BootstrapCacheStore, CachedRelaySeed } from './discovery/bootstrap-cache';
+export { createKind10032RelayProbe } from './discovery/relay-probe';
+export type { BootstrapConfig, BootstrapSeedEntry } from './config/types';
 
 // Re-export settlement types for library consumers
 export type { AdminSettlementConfig } from './settlement/types';

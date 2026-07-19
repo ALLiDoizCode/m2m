@@ -348,19 +348,16 @@ async function assertCounterConsistency(peerId: string): Promise<void> {
 }
 
 /**
- * Generate a fulfillment condition for ILP packets.
- */
-function generateCondition(): string {
-  // Generate 32 random bytes as base64 (48 characters)
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    bytes[i] = Math.floor(Math.random() * 256);
-  }
-  return Buffer.from(bytes).toString('base64');
-}
-
-/**
  * Send an ILP PREPARE packet via POST /admin/ilp/send.
+ *
+ * Deliberately sends NO `condition`: since PR #314 the admin API honors a
+ * sender-chosen execution condition (issue #309), and the terminating app must
+ * then supply the matching sha256 preimage or the connector converts the
+ * FULFILL into an F99 REJECT. The standalone-e2e stub app
+ * (scripts/standalone-e2e/app.js) never learns a preimage, so any packet
+ * carrying a condition is rejected by construction. This suite exercises
+ * counter observability, not conditional delivery — packets must be
+ * unconditional so they take the auto-fulfill path and count as forwarded.
  */
 async function sendIlpPacket(
   destination: string,
@@ -371,7 +368,6 @@ async function sendIlpPacket(
     destination,
     amount,
     expiresAt,
-    condition: generateCondition(),
     data: Buffer.from('test data').toString('base64'),
   };
 
