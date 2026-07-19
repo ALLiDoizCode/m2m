@@ -58,7 +58,11 @@ test('createMinaFaucet() throws when the key derives the WRONG treasury (guard f
   assert.notEqual(client.derivePublicKey(kp.privateKey), TREASURY);
 
   const saved = process.env.MINA_FAUCET_KEY;
+  const savedTreasury = process.env.MINA_TREASURY_ADDRESS;
   process.env.MINA_FAUCET_KEY = kp.privateKey;
+  // The guard is opt-in: it only fires when MINA_TREASURY_ADDRESS pins the
+  // expected treasury (unset deploys accept any valid funded key).
+  process.env.MINA_TREASURY_ADDRESS = TREASURY;
   try {
     assert.throws(
       () => createMinaFaucet(),
@@ -72,6 +76,8 @@ test('createMinaFaucet() throws when the key derives the WRONG treasury (guard f
   } finally {
     if (saved === undefined) delete process.env.MINA_FAUCET_KEY;
     else process.env.MINA_FAUCET_KEY = saved;
+    if (savedTreasury === undefined) delete process.env.MINA_TREASURY_ADDRESS;
+    else process.env.MINA_TREASURY_ADDRESS = savedTreasury;
   }
 });
 
@@ -120,6 +126,45 @@ test('minaInfo() reports treasury-drip mode when a faucet is configured', () => 
   assert.equal(info.mode, 'treasury-drip');
   assert.equal(info.treasury, TREASURY);
   assert.equal(info.drips.mina, '5');
+});
+
+test('minaInfo() defaults to usdcDrip:false when no USDC fragment is supplied', () => {
+  const info = minaInfo({
+    treasury: TREASURY,
+    dripAmount: '5',
+    graphqlUrl: 'http://x',
+    fee: '0.1',
+  });
+  assert.equal(info.usdcDrip, false);
+  assert.equal(info.drips.usdc, undefined);
+  assert.equal(minaInfo(null).usdcDrip, false);
+});
+
+test('minaInfo() advertises the USDC transfer-drip leg (route, ceiling, self-mint bypass)', () => {
+  const info = minaInfo(
+    { treasury: TREASURY, dripAmount: '5', graphqlUrl: 'http://x', fee: '0.1' },
+    {
+      usdcDrip: true,
+      usdcAmount: '50',
+      usdcToken: 'B62qToken',
+      usdcTokenId: '123',
+      treasury: 'B62qUsdcTreasury',
+      dailyTreasuryCapUsdc: '1000',
+      cooldownHours: '24',
+      selfMint: { dailyCapUsdc: '1000', note: 'self-mint-usdc.mts …' },
+    }
+  );
+  assert.equal(info.usdcDrip, true);
+  assert.equal(info.usdcRoute, '/api/mina/usdc-request');
+  assert.equal(info.drips.usdc, '50');
+  assert.equal(info.usdcToken, 'B62qToken');
+  assert.equal(info.usdcTreasury, 'B62qUsdcTreasury');
+  // The honest ceiling: the treasury replenishes by self-mint, ≤1,000/day.
+  assert.equal(info.usdcDailyTreasuryCap, '1000');
+  assert.equal(info.usdcCooldownHours, '24');
+  // The bypass hint (anyone can self-mint their own 1,000 USDC/day) is
+  // surfaced so the faucet never presents itself as the only path.
+  assert.ok(info.selfMint.note.includes('self-mint'));
 });
 
 test('minaFallbackLink encodes the address into the public faucet URL', () => {

@@ -6,7 +6,7 @@
  * claim is recorded by the receiver's ClaimReceiver and, once the cumulative
  * amount crosses the threshold, redeemed on-chain via claimFromChannel.
  *
- *   [BLS2] <-- /handle-packet -- [peer2 standalone + chainProviders]
+ *   [App2] <-- /handle-packet -- [peer2 standalone + chainProviders]
  *                                          ^
  *                            POST /ilp (PREPARE + claim header)
  *                                          |
@@ -57,16 +57,16 @@ const describeEvm = RUN_EVM ? describe : describe.skip;
 
 jest.setTimeout(180_000);
 
-// ── Minimal BLS that records delivered packets ──────────────────────────────
-interface TestBls {
+// ── Minimal app that records delivered packets ──────────────────────────────
+interface TestApp {
   received: Array<{ destination: string; amount: string }>;
   stop(): Promise<void>;
 }
 
-async function startBls(port: number): Promise<TestBls> {
+async function startApp(port: number): Promise<TestApp> {
   const app = express();
   app.use(express.json());
-  const received: TestBls['received'] = [];
+  const received: TestApp['received'] = [];
   app.post('/handle-packet', (req: Request, res: Response) => {
     const body = req.body as { destination: string; amount: string };
     received.push({ destination: body.destination, amount: body.amount });
@@ -151,8 +151,8 @@ const buildPrepare = (amount: bigint): ILPPreparePacket => ({
 describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
   let peer1: ConnectorNode;
   let peer2: ConnectorNode;
-  let bls1: TestBls;
-  let bls2: TestBls;
+  let app1: TestApp;
+  let app2: TestApp;
   let peer1Admin: number;
   let peer2Admin: number;
   let peer2Btp: number;
@@ -168,20 +168,20 @@ describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
     peer2Btp = base + 1;
     peer1Admin = base + 2;
     peer2Admin = base + 3;
-    const bls1Port = base + 4;
-    const bls2Port = base + 5;
+    const app1Port = base + 4;
+    const app2Port = base + 5;
     const peer1Health = base + 6;
     const peer2Health = base + 7;
 
-    bls1 = await startBls(bls1Port);
-    bls2 = await startBls(bls2Port);
+    app1 = await startApp(app1Port);
+    app2 = await startApp(app2Port);
 
     const buildConfig = (opts: {
       nodeId: string;
       btpPort: number;
       adminPort: number;
       healthPort: number;
-      blsPort: number;
+      appPort: number;
       peer: { id: string; port: number; evmAddress: string };
       keyId: string;
     }): ConnectorConfig => ({
@@ -192,7 +192,7 @@ describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
       environment: 'development',
       deploymentMode: 'standalone',
       adminApi: { enabled: true, port: opts.adminPort, host: '127.0.0.1' },
-      localDelivery: { enabled: true, handlerUrl: `http://127.0.0.1:${opts.blsPort}` },
+      localDelivery: { enabled: true, handlerUrl: `http://127.0.0.1:${opts.appPort}` },
       peers: [
         {
           id: opts.peer.id,
@@ -238,7 +238,7 @@ describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
         btpPort: peer2Btp,
         adminPort: peer2Admin,
         healthPort: peer2Health,
-        blsPort: bls2Port,
+        appPort: app2Port,
         peer: { id: 'peer1', port: peer1Btp, evmAddress: PEER_EVM_ADDRESSES[0]! },
         keyId: PEER_PRIVATE_KEYS[1]!,
       }),
@@ -253,7 +253,7 @@ describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
         btpPort: peer1Btp,
         adminPort: peer1Admin,
         healthPort: peer1Health,
-        blsPort: bls1Port,
+        appPort: app1Port,
         peer: { id: 'peer2', port: peer2Btp, evmAddress: PEER_EVM_ADDRESSES[1]! },
         keyId: PEER_PRIVATE_KEYS[0]!,
       }),
@@ -305,12 +305,12 @@ describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
   afterAll(async () => {
     await peer1?.stop().catch(() => undefined);
     await peer2?.stop().catch(() => undefined);
-    await bls1?.stop().catch(() => undefined);
-    await bls2?.stop().catch(() => undefined);
+    await app1?.stop().catch(() => undefined);
+    await app2?.stop().catch(() => undefined);
   });
 
-  it('POST /ilp with a signed claim fulfills end-to-end and reaches the BLS', async () => {
-    const before = bls2.received.length;
+  it('POST /ilp with a signed claim fulfills end-to-end and reaches the app', async () => {
+    const before = app2.received.length;
     const amount = 1000n;
     const claim = await claimSvc.generateClaimForPacket('peer2', settlementTokenId, amount);
     expect(claim).not.toBeNull();
@@ -322,8 +322,8 @@ describeEvm('ILP-over-HTTP Settlement E2E (real Anvil)', () => {
 
     expect(status).toBe(200);
     expect(deserializePacket(body).type).toBe(PacketType.FULFILL);
-    expect(bls2.received.length).toBe(before + 1);
-    expect(bls2.received[before]!.amount).toBe('1000'); // terminal delivery: no fee
+    expect(app2.received.length).toBe(before + 1);
+    expect(app2.received[before]!.amount).toBe('1000'); // terminal delivery: no fee
   });
 
   it('crossing the threshold over HTTP triggers on-chain claimFromChannel', async () => {

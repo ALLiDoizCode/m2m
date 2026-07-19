@@ -5,7 +5,7 @@
  * table. Every runtime mutation funneled through `ConnectorNode`
  * (`registerPeer` / `removePeer` / `addRoute` / `removeRoute`) mirrors itself
  * here so that, on the next boot, runtime-added peers/routes are replayed
- * instead of being silently dropped (the "re-POST the town route after a
+ * instead of being silently dropped (the "re-POST the relay route after a
  * restart" RUNBOOK workaround).
  *
  * Backed by the same `libsql` (better-sqlite3-compatible) driver the settlement

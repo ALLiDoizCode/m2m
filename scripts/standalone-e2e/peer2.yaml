@@ -12,7 +12,7 @@ adminApi:
 
 localDelivery:
   enabled: true
-  handlerUrl: http://standalone-bls2:3100
+  handlerUrl: http://standalone-app2:3100
   timeout: 5000
 
 peers:

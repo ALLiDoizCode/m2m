@@ -65,6 +65,18 @@ export class RoutingTable {
   private persistence?: RoutePersistenceSink;
 
   /**
+   * Prefixes installed via {@link addLearnedRoute} (link-state route learning,
+   * toon-meta#153). Learned routes are SOFT state: they are derived from live
+   * relay announcements, so they deliberately bypass the persistence sink
+   * (persisting them as `'runtime'` would replay stale routes on boot) and are
+   * re-learned from the relay after every restart. This set also fences the
+   * two route populations off from each other: a learned install never
+   * overwrites a config/runtime route for the same prefix, and a learned
+   * withdraw never removes one.
+   */
+  private readonly learnedPrefixes = new Set<string>();
+
+  /**
    * Creates a new RoutingTable instance
    * @param initialRoutes - Optional array of routes to initialize the table
    * @param logger - Optional logger instance for structured logging
@@ -110,9 +122,87 @@ export class RoutingTable {
 
     const entry: RoutingTableEntry = { prefix, nextHop, priority };
     this.routes.set(prefix, entry);
+    // A config/runtime add for a prefix that was previously LEARNED promotes
+    // it to hard state: it must now persist and survive learned withdrawal.
+    this.learnedPrefixes.delete(prefix);
     this.persistence?.saveRoute({ prefix, nextHop, priority: priority ?? 0, source: 'runtime' });
 
     this.logger?.info({ prefix, nextHop, priority }, `Added route: ${prefix} -> ${nextHop}`);
+  }
+
+  /**
+   * Install a LEARNED route (link-state route learning, toon-meta#153).
+   *
+   * Differences from {@link addRoute}:
+   * - never reaches the persistence sink (learned routes are soft state,
+   *   re-derived from live announcements after every boot);
+   * - never overwrites an existing config/runtime route for the same prefix —
+   *   returns `false` instead, so operator configuration always wins.
+   *
+   * Callers should pass a priority BELOW the config-route default (0) so that
+   * equal-length-prefix ties across different prefixes also resolve in favor
+   * of config routes.
+   *
+   * @param prefix - ILP address prefix (validated per RFC-0015).
+   * @param nextHop - Directly-connected peer id to forward to.
+   * @param priority - Route priority (negative for below-config precedence).
+   * @returns `true` when installed/updated; `false` when a non-learned route
+   *   already owns the prefix.
+   * @throws {Error} If prefix is not a valid ILP address per RFC-0015.
+   */
+  addLearnedRoute(prefix: ILPAddress, nextHop: string, priority: number): boolean {
+    if (!isValidILPAddress(prefix)) {
+      const error = new Error(`Invalid ILP address prefix: ${prefix}`);
+      this.logger?.error({ prefix, nextHop, priority }, error.message);
+      throw error;
+    }
+
+    if (this.routes.has(prefix) && !this.learnedPrefixes.has(prefix)) {
+      return false;
+    }
+
+    this.routes.set(prefix, { prefix, nextHop, priority });
+    this.learnedPrefixes.add(prefix);
+    this.logger?.info(
+      { event: 'route_learned', prefix, nextHop, priority },
+      `Learned route: ${prefix} -> ${nextHop}`
+    );
+    return true;
+  }
+
+  /**
+   * Withdraw a LEARNED route. Only removes the prefix when it was installed
+   * via {@link addLearnedRoute} — config/runtime routes are never touched.
+   * Bypasses the persistence sink (learned routes were never persisted).
+   *
+   * @param prefix - ILP address prefix to withdraw.
+   * @returns `true` when a learned route was removed; `false` otherwise.
+   */
+  removeLearnedRoute(prefix: string): boolean {
+    if (!this.learnedPrefixes.has(prefix)) {
+      return false;
+    }
+    this.learnedPrefixes.delete(prefix);
+    this.routes.delete(prefix);
+    this.logger?.info({ event: 'route_withdrawn', prefix }, `Withdrew learned route: ${prefix}`);
+    return true;
+  }
+
+  /**
+   * Whether the given prefix is currently installed as a LEARNED route.
+   */
+  isLearnedRoute(prefix: string): boolean {
+    return this.learnedPrefixes.has(prefix);
+  }
+
+  /**
+   * Snapshot of the currently-installed learned routes (deep copy).
+   */
+  getLearnedRoutes(): RoutingTableEntry[] {
+    return Array.from(this.learnedPrefixes)
+      .map((prefix) => this.routes.get(prefix))
+      .filter((entry): entry is RoutingTableEntry => entry !== undefined)
+      .map((entry) => ({ prefix: entry.prefix, nextHop: entry.nextHop, priority: entry.priority }));
   }
 
   /**
@@ -133,6 +223,7 @@ export class RoutingTable {
   removeRoute(prefix: string): void {
     const existed = this.routes.has(prefix);
     this.routes.delete(prefix);
+    this.learnedPrefixes.delete(prefix);
     this.persistence?.deleteRoute(prefix);
 
     if (existed) {

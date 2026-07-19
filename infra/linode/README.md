@@ -12,13 +12,13 @@ nginx + Let's Encrypt TLS in front of them.
 
 ## What runs
 
-| Service                     | From                            | Public endpoint                                            | Notes                                                                                                                                                                                         |
-| --------------------------- | ------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                                                                                           |
-| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`, `POST /api/request {address}` → 100 ETH + 10k USDC. **EVM only.**                                                                                             |
-| Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals)                                                               |
-| Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>` |
-| nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                                                                                       |
+| Service                     | From                            | Public endpoint                                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------- | ------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                                                                                                                                                                                                                                                                                                                                                |
+| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`; `POST /api/request` → 100 ETH + 10k USDC (EVM); `POST /api/solana/request` → SOL + USDC; `POST /api/mina/request` → native MINA **+ USDC** (admin-mint); `POST /api/base-sepolia/request` → mints 1000 USDC on **Base Sepolia** (chainId 84532, ungated `mint()`; needs `BASE_SEPOLIA_FAUCET_KEY` funded with Base Sepolia ETH for gas). Drips native + USDC on all three local chains, plus USDC on Base Sepolia. |
+| Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals)                                                                                                                                                                                                                                                                                                                    |
+| Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>`                                                                                                                                                                                                                                                      |
+| nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 > **Chains-only.** This box deploys blockchain infrastructure only. The
 > payment-proxy / connector edge and the oblivious relay deploy **separately**
@@ -67,9 +67,16 @@ Fund an **EVM** address: `curl -X POST https://faucet.<DOMAIN>/api/request -H 'c
 
 Fund a **Solana** address: `./devnet.sh fund-sol <pubkey> [usdc] [sol]` → airdrops SOL + transfers mock USDC from the treasury (auto-creates the recipient ATA). The mock-USDC SPL mint is `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` (6 decimals); the payment-channel program is already SPL-aware, so channels settle in it directly.
 
-Fund a **Mina** address with native MINA (gas): `curl -X POST https://faucet.<DOMAIN>/api/mina/request -H 'content-type: application/json' -d '{"address":"B62…"}'` → drips 5 MINA from the treasury. The faucet signs a native payment client-side with `mina-signer` (no o1js proving — lightweight enough for the 2 GB box) and submits it to the public devnet via the `sendPayment` GraphQL mutation. This needs the **`MINA_FAUCET_KEY`** secret set (treasury base58 private key, HD index 2) — set it once with `gh secret set MINA_FAUCET_KEY --repo toon-protocol/connector` and the deploy workflow injects it into `infra/linode/.env`. If the secret is unset the route 503s with a public-faucet link (`https://faucet.minaprotocol.com`). The treasury is `B62qqEMaUpm1aZ5M2weUoGXQRGbF3j6VjEtaEdzfM1NAWmeHnywiC2P`; top it up there if it runs dry.
+Fund a **Base Sepolia** address (mock USDC, 6-dp): `curl -X POST https://faucet.<DOMAIN>/api/base-sepolia/request -H 'content-type: application/json' -d '{"address":"0x…"}'` → mints 1000 USDC on the **PUBLIC Base Sepolia testnet** (chainId 84532). The mock USDC `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` has an **ungated `mint(address,uint256)`**, so the faucet coins fresh tokens straight to the recipient — the **`BASE_SEPOLIA_FAUCET_KEY`** secret needs **no USDC balance**, only a little Base Sepolia ETH for gas. Per-address 24h cooldown. Optionally also drips a little Base Sepolia ETH for gas (`BASE_SEPOLIA_ETH_AMOUNT`, best-effort — skipped when the faucet key's ETH is low, so the mint never fails). When the key is unset the route 503s.
 
-Fund a **Mina** address with **USDC**: `./devnet.sh fund-mina <b58> [usdc]` → admin-mints USDC on the public devnet (no token CLI exists for Mina, so it mints via o1js through `infra/mina/fund-mina-usdc.sh` → `tools/mina/fund-usdc.ts`; the recipient's token account is auto-created on first mint). This needs `MINA_USDC_ADMIN_KEY` (the funded admin authority set at deploy time) in the environment. (Before this faucet route existed, recipients topped up native MINA from the public faucet by hand.)
+Fund a **Mina** address (native MINA **+ USDC**): `curl -X POST https://faucet.<DOMAIN>/api/mina/request -H 'content-type: application/json' -d '{"address":"B62…"}'` → drips **both** 5 MINA (gas) **and** 1000 USDC, matching the EVM (ETH+USDC) and Solana (SOL+USDC) faucets. Two independent legs:
+
+- **Native MINA** — the faucet signs a native payment client-side with `mina-signer` (no o1js proving) and submits it via `sendPayment`. Needs the **`MINA_FAUCET_KEY`** secret (treasury base58 private key, HD index 2). The treasury is `B62qqEMaUpm1aZ5M2weUoGXQRGbF3j6VjEtaEdzfM1NAWmeHnywiC2P`; it **must be FUNDED** with native MINA (top up at `https://faucet.minaprotocol.com` if it runs dry — an unfunded treasury "succeeds" but transfers nothing). When unset, the route 503s with a public-faucet link.
+- **USDC** — the faucet admin-mints the deployed `UsdcChannelToken` via o1js proving (`packages/faucet/src/mina-usdc.mjs`, reusing `tools/mina/fund-usdc.mts`'s mint path). Needs the **`MINA_USDC_ADMIN_KEY`** secret (the mint-authority base58 private key) — **MUST be FUNDED** (it pays each recipient's token-account creation fee on first mint, the #190 gotcha). The token + admin-contract ADDRESSES are public (resolved by `devnet.sh` from `infra/mina/usdc-token.json` or `endpoints.json`), so only the key is a secret. When unset, the route drips native MINA only and notes that USDC minting was skipped.
+
+> The Mina USDC mint uses o1js zk-PROVING, which does **not** work on `node:22-alpine` (musl). The faucet image is therefore built on `node:22-bookworm-slim` (glibc) and bundles a single-instance o1js ESM build of the token classes. The first mint after boot compiles the circuits once (~6s); subsequent mints are warm.
+
+Set both secrets once: `gh secret set MINA_FAUCET_KEY --repo toon-protocol/connector` and `gh secret set MINA_USDC_ADMIN_KEY --repo toon-protocol/connector`; the deploy workflow injects them into `infra/linode/.env`. Verify their funding (and that the token is live) any time with `./devnet.sh mina-provision`. To mint USDC from the box without going through the faucet HTTP route: `./devnet.sh fund-mina <b58> [usdc]`.
 
 ### Deploying the Mina USDC token (one-time, to public devnet)
 
@@ -78,12 +85,15 @@ The USDC token-owner zkApp (`mina-fungible-token`, 6 decimals) is deployed **onc
 ```bash
 export MINA_DEPLOYER_KEY=<base58 priv key, FUNDED>
 export MINA_USDC_ADMIN_KEY=<base58 priv key, FUNDED>   # the mint authority
-npx ts-node tools/mina/deploy-usdc-token.ts \
+npm run build:esm --workspace=packages/mina-zkapp   # the CLI imports the pure-ESM build
+npx tsx tools/mina/deploy-usdc-token.mts \
   --network https://api.minascan.io/node/devnet/v1/graphql \
   --out infra/mina/usdc-token.json
 ```
 
-It prints + persists `{ tokenAddress, tokenId, adminContractAddress, adminAuthority }` to `infra/mina/usdc-token.json`; `devnet.sh endpoints` then reads that file (via `jq`) to emit `mina.tokenAddress` / `mina.tokenId` into `endpoints.json`. Pin the same `tokenAddress`/`tokenId` into the committed sample `endpoints.json` (currently placeholders). Smoke-test the deploy + mint logic with `npx jest --config tools/mina/jest.config.js`.
+(The CLI is pure ESM run via `tsx` — o1js must load as a SINGLE module instance or `UsdcChannelToken.compile()` fails; see issue #352. `npx tsx tools/mina/deploy-usdc-token.mts --compile-only` dry-runs the circuit compile with no network/keys.)
+
+It prints + persists `{ tokenAddress, tokenId, adminContractAddress, adminAuthority }` to `infra/mina/usdc-token.json`; `devnet.sh endpoints` then reads that file (via `jq`) to emit `mina.tokenAddress` / `mina.tokenId` into `endpoints.json`. Pin the same `tokenAddress`/`tokenId` into the committed sample `endpoints.json` (currently placeholders). Smoke-test the deploy + mint logic with `npm test --workspace=packages/mina-zkapp -- usdc-deploy` (the `usdc-deploy.test.ts` suite, which runs in CI).
 
 ## Reset semantics
 
@@ -156,9 +166,16 @@ means the same thing everywhere — no cross-chain normalization required.
 ## Known gaps / follow-ups
 
 - **Mina USDC.** The USDC token-owner zkApp (6-dp, `mina-fungible-token`) is
-  deployed to the public Mina devnet and fundable via `devnet.sh fund-mina`
-  (admin-mint). The `PaymentChannel` zkApp now custodies this token (#191); the
+  deployed to the public Mina devnet; the faucet now drips it (native MINA +
+  admin-minted USDC) on `POST /api/mina/request` and `devnet.sh fund-mina` mints
+  it from the box. The `PaymentChannel` zkApp now custodies this token (#191); the
   SDK/provider threading of the token into open/settle is the remaining follow-up.
+- **Mina faucet/admin funding is operator-managed.** Unlike EVM (anvil pre-funds)
+  and Solana (validator airdrop), the public Mina devnet has no self-hosted faucet,
+  so the native-MINA treasury (`MINA_FAUCET_KEY`) and the USDC mint authority
+  (`MINA_USDC_ADMIN_KEY`) must be topped up by hand at `faucet.minaprotocol.com`.
+  `devnet.sh mina-provision` (run automatically on every `up`/`redeploy`) checks
+  the token is live and warns when either account is underfunded.
 - **No block explorer.** Otterscan (what Akash advertised) needs Erigon's `ots_*`
   RPC namespace, which Anvil doesn't implement, so it's intentionally omitted
   rather than shipped broken.

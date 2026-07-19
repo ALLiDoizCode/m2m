@@ -23,7 +23,7 @@ Final shape locked in response doc §9.4 + §10.3. Auth model locked in §10.2 (
 
 ```gherkin
 Scenario: GET /admin/metrics.json returns the AdminMetricsJson shape
-  Given a connector with peers ['town', 'mill'] and some packet activity
+  Given a connector with peers ['relay', 'swap'] and some packet activity
   When GET /admin/metrics.json is requested with a valid X-Api-Key
   Then the response status is 200
   And the body conforms to:
@@ -58,19 +58,19 @@ Scenario: /admin/metrics.json requires X-Api-Key
 
 ```gherkin
 Scenario: A registered but idle peer still appears in the peers array
-  Given peer 'dvm' is registered via /admin/peers but has never sent or received a packet
+  Given peer 'store' is registered via /admin/peers but has never sent or received a packet
   When GET /admin/metrics.json is requested
-  Then peers[] contains an entry with peerId='dvm', counters all 0, lastPacketAt null
+  Then peers[] contains an entry with peerId='store', counters all 0, lastPacketAt null
 ```
 
 ### AC 4: connected flag reflects BTPClientManager state
 
 ```gherkin
 Scenario: peers[].connected reflects live connection state
-  Given btpClientManager.getPeerStatus() reports 'town' => true, 'mill' => false
+  Given btpClientManager.getPeerStatus() reports 'relay' => true, 'swap' => false
   When GET /admin/metrics.json is requested
-  Then peers[peerId='town'].connected is true
-  And peers[peerId='mill'].connected is false
+  Then peers[peerId='relay'].connected is true
+  And peers[peerId='swap'].connected is false
 ```
 
 ### AC 5: 503 when observability not wired
@@ -125,10 +125,10 @@ _Code review 2026-04-21 (3-layer adversarial)_
 - [x] [Review][Patch] **O(n²) peer lookup in `/metrics.json` handler** — `peerSnapshots.find(...)` called once per peer inside `.map()`. Build `Map<peerId, snap>` once before the map. [`packages/connector/src/http/admin-api.ts:1587`]
 - [x] [Review][Patch] **Missing `Cache-Control: no-store` on `/metrics.json`** — dashboard polls at 1 Hz; intermediate proxies/browsers may cache. [`packages/connector/src/http/admin-api.ts:1618`]
 - [x] [Review][Patch] **`_ilpMetrics` field lacks `readonly` and definite-assignment** — set once in constructor body; mark `private readonly _ilpMetrics!: IlpMetricsRegistry` or initialise inline for consistency with sibling fields. [`packages/connector/src/core/connector-node.ts:113`]
-- [x] [Review][Patch] **Test mock of `getPeerStatus()` drops `dvm` key** — real `BTPClientManager.getPeerStatus()` always returns an entry for every peer in `getPeerIds()`. Fix mock to include all three peers so the `connected:false` fallback isn't over-exercised. [`packages/connector/src/http/admin-api-metrics-json.test.ts:62`]
+- [x] [Review][Patch] **Test mock of `getPeerStatus()` drops `store` key** — real `BTPClientManager.getPeerStatus()` always returns an entry for every peer in `getPeerIds()`. Fix mock to include all three peers so the `connected:false` fallback isn't over-exercised. [`packages/connector/src/http/admin-api-metrics-json.test.ts:62`]
 - [x] [Review][Patch] **Missing test: snapshot-only peer path (removed-but-counters-remain case)** — now inverted per D1: test asserts snapshot-only peer is dropped. _Original:_ — union-fallback branch is claimed in dev notes but not directly exercised (tests cover registerPeer-only path via `dvm2`, not the "in snapshot, not in getPeerIds" case). Add test that pre-populates counters for a peer not in `getPeerIds()` and asserts it appears with `connected:false`. [`packages/connector/src/http/admin-api-metrics-json.test.ts`]
 - [x] [Review][Patch] **Aggregate-sum invariant only tested for `packetsForwarded`** — AC 1 calls out this invariant explicitly for one field, but implementation sums three. Add parallel assertions for `packetsRejected` and `bytesSent`. [`packages/connector/src/http/admin-api-metrics-json.test.ts:126`]
-- [x] [Review][Patch] **`dvm2` test asserts only `packetsForwarded===0`** — obsoleted by D1 (dvm2 is now asserted NOT to appear); the idle-peer full-contract check moved onto the `mill` test with `toMatchObject`.
+- [x] [Review][Patch] **`dvm2` test asserts only `packetsForwarded===0`** — obsoleted by D1 (dvm2 is now asserted NOT to appear); the idle-peer full-contract check moved onto the `swap` test with `toMatchObject`.
 - [x] [Review][Defer] **AC 6 latency test is single-sample, not p95** [`packages/connector/src/http/admin-api-metrics-json.test.ts:252`] — deferred, pre-existing; proper NFR check belongs to E2E/perf layer.
 - [x] [Review][Defer] **500 catch branch untested** [`packages/connector/src/http/admin-api.ts:1628`] — deferred, pre-existing; low value, requires fault injection into prom-client.
 

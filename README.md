@@ -431,12 +431,12 @@ The connector supports two deployment modes via the `deploymentMode` configurati
 
 This repo is a monorepo with multiple packages:
 
-| Package                                          | Description                                            |
-| ------------------------------------------------ | ------------------------------------------------------ |
-| [`@toon-protocol/connector`](packages/connector) | Connector node — routing, accounting, settlement, CLI  |
-| [`@toon-protocol/shared`](packages/shared)       | Shared types and OER codec utilities                   |
-| [`@toon-protocol/contracts`](packages/contracts) | EVM payment channel smart contracts (Foundry/Solidity) |
-| [`@m2m-connector/faucet`](packages/faucet)       | Token faucet for local EVM testing                     |
+| Package                                          | Description                                                                                               |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| [`@toon-protocol/connector`](packages/connector) | Connector node — routing, accounting, settlement, CLI                                                     |
+| [`@toon-protocol/shared`](packages/shared)       | Shared types and OER codec utilities                                                                      |
+| [`@toon-protocol/contracts`](packages/contracts) | EVM payment channel smart contracts (Foundry/Solidity)                                                    |
+| [`@m2m-connector/faucet`](packages/faucet)       | Multi-chain devnet faucet (EVM ETH+USDC, Solana SOL+USDC, Mina MINA+USDC via treasury self-mint/transfer) |
 
 ## Explorer UI
 
@@ -501,7 +501,7 @@ Perfect for development and debugging. Disable in production.
 
 ```
 ┌──────────────┐   /handle-packet   ┌──────────────┐
-│  Your BLS    │◄──────────────────│  @toon-protocol/ │
+│  Your app    │◄──────────────────│  @toon-protocol/ │
 │              │                    │  connector   │
 │  Outbound:   │  /admin/ilp/send  │              │
 │  POST ───────│──────────────────►│              │
@@ -514,18 +514,18 @@ Perfect for development and debugging. Disable in production.
 
 ## Docker Deployment
 
-The simplest production-ready topology is a **standalone connector paired with your Business Logic Server (BLS)**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships this pattern out of the box.
+The simplest production-ready topology is a **standalone connector paired with your app**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships this pattern out of the box.
 
 Two compose files ship at the repo root:
 
 | Compose file              | Purpose                                                                                                                                                                                                                                                                  |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `docker-compose.prod.yml` | **Production deployment.** Connector + BLS, secure by default.                                                                                                                                                                                                           |
+| `docker-compose.prod.yml` | **Production deployment.** Connector + app, secure by default.                                                                                                                                                                                                           |
 | `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, the standalone-mode E2E test profiles (`standalone-e2e`, `standalone-allowlist`), and the `app` profile (see [Local "App behind the Connector"](#local-app-behind-the-connector-issue-221)). Not for production use. |
 
-### Production Deployment: Standalone Connector + BLS
+### Production Deployment: Standalone Connector + App
 
-The production stack runs a single connector and your BLS on an isolated Docker bridge network. The admin API is reachable only from the BLS container — it is **not** published to the host interface.
+The production stack runs a single connector and your app on an isolated Docker bridge network. The admin API is reachable only from the app container — it is **not** published to the host interface.
 
 **Step 1 — Pull the image** (or build locally)
 
@@ -558,7 +558,7 @@ adminApi:
 
 localDelivery:
   enabled: true
-  handlerUrl: http://bls:3100 # compose-DNS resolves to sibling container
+  handlerUrl: http://app:3100 # compose-DNS resolves to sibling container
 
 peers: []
 routes: []
@@ -572,20 +572,20 @@ docker compose -f docker-compose.prod.yml up -d
 # Verify both containers are healthy:
 docker compose -f docker-compose.prod.yml ps
 
-# The BLS health endpoint is the only host-exposed port:
+# The app health endpoint is the only host-exposed port:
 curl http://127.0.0.1:3100/health
 ```
 
-**Step 4 — Verify the BLS can call the admin API**
+**Step 4 — Verify the app can call the admin API**
 
 ```bash
-# The BLS container drives admin calls over the compose network:
+# The app container drives admin calls over the compose network:
 curl -X POST http://127.0.0.1:3100/trigger-admin-send \
   -H 'Content-Type: application/json' \
   -d '{"destination":"test.prod-connector.self","amount":"0"}'
 # → {"accepted":false,"code":"F02","message":"No route to destination: ..."}
 # (F02 is expected with an empty routes list — it proves the admin API accepted
-# the call from the BLS but had nowhere to forward it.)
+# the call from the app but had nowhere to forward it.)
 
 # Direct access to the admin API from the host is refused:
 curl -m 2 http://127.0.0.1:8081/admin/peers
@@ -599,9 +599,9 @@ docker compose -f docker-compose.prod.yml down           # preserves the connect
 docker compose -f docker-compose.prod.yml down --volumes  # wipes the data volume too
 ```
 
-### Writing Your Own BLS
+### Writing Your Own App
 
-The compose file ships a minimal BLS (`scripts/standalone-e2e/bls.js`) that fulfills every inbound packet — fine for smoke-testing, not for production. Your real BLS is a plain HTTP server that speaks two endpoints. Any language works: if it can serve HTTP + JSON, it can be a BLS.
+The compose file ships a minimal app (`scripts/standalone-e2e/app.js`) that fulfills every inbound packet — fine for smoke-testing, not for production. Your real app is a plain HTTP server that speaks two endpoints. Any language works: if it can serve HTTP + JSON, it can be an app.
 
 #### The HTTP contract
 
@@ -658,18 +658,18 @@ Your business `code` is auto-mapped to an ILP error code by the connector:
 | `timeout`            | `T00` | operation timed out         |
 | _(anything else)_    | `F99` | fallback                    |
 
-#### Minimal Node.js BLS (drop-in replacement)
+#### Minimal Node.js App (drop-in replacement)
 
-Create a `bls/` directory alongside `docker-compose.prod.yml`:
+Create an `app/` directory alongside `docker-compose.prod.yml`:
 
 ```text
-bls/
+app/
 ├── Dockerfile
 ├── package.json
 └── server.js
 ```
 
-`bls/server.js`:
+`app/server.js`:
 
 ```javascript
 import express from 'express';
@@ -682,7 +682,7 @@ app.get('/health', (_req, res) => res.json({ status: 'healthy' }));
 app.post('/handle-packet', async (req, res) => {
   const { paymentId, destination, amount, data, isTransit } = req.body;
   console.log(
-    `[BLS] ${isTransit ? 'transit' : 'deliver'} ${amount} → ${destination} (${paymentId})`
+    `[App] ${isTransit ? 'transit' : 'deliver'} ${amount} → ${destination} (${paymentId})`
   );
 
   // Your business logic here. Return accept:true/false based on whatever
@@ -713,21 +713,21 @@ app.post('/send', async (req, res) => {
 });
 
 app.listen(Number(process.env.PORT ?? 3100), '0.0.0.0', () =>
-  console.log(`BLS listening on :${process.env.PORT ?? 3100}`)
+  console.log(`App listening on :${process.env.PORT ?? 3100}`)
 );
 ```
 
-`bls/package.json`:
+`app/package.json`:
 
 ```json
 {
-  "name": "my-bls",
+  "name": "my-app",
   "type": "module",
   "dependencies": { "express": "^4.19.0" }
 }
 ```
 
-`bls/Dockerfile`:
+`app/Dockerfile`:
 
 ```dockerfile
 FROM node:22-alpine
@@ -739,11 +739,11 @@ EXPOSE 3100
 CMD ["node", "server.js"]
 ```
 
-#### Minimal Python BLS (Flask)
+#### Minimal Python App (Flask)
 
 If you prefer Python, the contract is identical:
 
-`bls/app.py`:
+`app/app.py`:
 
 ```python
 import os
@@ -760,7 +760,7 @@ def handle_packet():
     body = request.get_json()
     amount = int(body['amount'])   # amount is a string; parse carefully
     destination = body['destination']
-    print(f"[BLS] {amount} → {destination} ({body['paymentId']})")
+    print(f"[App] {amount} → {destination} ({body['paymentId']})")
 
     if amount > 100_000:
         return jsonify(accept=False, rejectReason={
@@ -772,7 +772,7 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 3100)))
 ```
 
-`bls/Dockerfile`:
+`app/Dockerfile`:
 
 ```dockerfile
 FROM python:3.12-alpine
@@ -785,12 +785,12 @@ CMD ["python", "app.py"]
 
 #### Wire it into `docker-compose.prod.yml`
 
-Replace the sample BLS block with your own:
+Replace the sample app block with your own:
 
 ```yaml
 services:
-  bls:
-    build: ./bls # your Dockerfile above
+  app:
+    build: ./app # your Dockerfile above
     restart: unless-stopped
     environment:
       PORT: '3100'
@@ -811,33 +811,33 @@ services:
       - app_net
 ```
 
-Everything else in the compose file stays as-is — same network, same allowlist picks up your BLS's bridge-subnet IP automatically, same admin API reachable at `http://connector:8081`.
+Everything else in the compose file stays as-is — same network, same allowlist picks up your app's bridge-subnet IP automatically, same admin API reachable at `http://connector:8081`.
 
 #### Run it
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
 
-# Health check your BLS:
+# Health check your app:
 curl http://127.0.0.1:3100/health
 
-# Drive a test packet from your BLS through the connector:
+# Drive a test packet from your app through the connector:
 curl -X POST http://127.0.0.1:3100/send \
   -H 'Content-Type: application/json' \
   -d '{"destination":"test.peer-b.user","amount":"10"}'
 
-# Follow BLS logs to see inbound `/handle-packet` calls:
-docker compose -f docker-compose.prod.yml logs -f bls
+# Follow app logs to see inbound `/handle-packet` calls:
+docker compose -f docker-compose.prod.yml logs -f app
 ```
 
-That's the whole integration. The connector handles ILP routing, settlement, claim validation, transport, and admin APIs. Your BLS handles the part that matters to your application: _what do we do with this payment?_
+That's the whole integration. The connector handles ILP routing, settlement, claim validation, transport, and admin APIs. Your app handles the part that matters to your application: _what do we do with this payment?_
 
 ### Troubleshooting
 
 ```bash
 # Follow logs:
 docker compose -f docker-compose.prod.yml logs -f connector
-docker compose -f docker-compose.prod.yml logs -f bls
+docker compose -f docker-compose.prod.yml logs -f app
 
 # Rebuild from source after local changes:
 docker compose -f docker-compose.prod.yml build --no-cache connector
@@ -854,73 +854,34 @@ The production compose ships secure-by-default:
 | ----------------------------- | ---------------------------------------------------------------- |
 | Admin API reachable on host   | **No** — port 8081 is not published                              |
 | Admin API reachable cross-net | **No** — `allowedIPs` restricts callers to docker bridge subnets |
-| Packet-delivery BLS exposed   | Loopback only — `127.0.0.1:3100`                                 |
+| Packet-delivery app exposed   | Loopback only — `127.0.0.1:3100`                                 |
 | Connector runs as root        | **No** — image runs as non-root user `node` (uid 1000)           |
 | Secrets in YAML               | None in the template — `apiKey` is commented out by default      |
 
 If your deployment publishes the admin API (e.g., behind a reverse proxy), you **must** additionally set `adminApi.apiKey` in the config and inject the value from a secrets manager — do not commit keys to the YAML.
 
-### Local "App behind the Connector" (issue #221)
+### App behind the Connector — lives in the app repos
 
-The "hello-world" of deploying an app behind the connector locally: one command brings up a standalone **connector** (acting as a paid reverse proxy) that fronts a single oblivious **app** (a relay) for _paid writes_, plus a local EVM devnet. This is the simplest demonstration of the paid-reverse-proxy pattern (issues #216 / #218): a paid `POST /ilp` request is validated by the connector, then reverse-proxied to the app over the compose network; the app never sees ILP, payment, or settlement.
+The connector is the **payment proxy** (nginx-for-payments); **apps own the
+connector+app composition.** Each app repo ships a `deploy/docker-compose.yml`
+that runs the published connector image in front of that app (RouteTermination —
+a paid `POST /ilp` is validated by the connector, then reverse-proxied to the
+app; the app never sees ILP/payment/settlement). See:
 
-**Four services** (compose profile `app` in `docker-compose.yml`):
+- **relay** — `relay/deploy/` (connector + relay; `ghcr.io/toon-protocol/relay-connector`)
+- **store** — `store/deploy/` (connector + store; `ghcr.io/toon-protocol/store-connector`)
 
-| Service     | Role                                                     | Host-published port              | Notes                                                                        |
-| ----------- | -------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------- |
-| `anvil`     | EVM devnet + deployed contracts                          | `127.0.0.1:8545`                 | Reused from the `evm` profile.                                               |
-| `faucet`    | ETH/USDC faucet                                          | `127.0.0.1:3500`                 | Reused from the `evm` profile.                                               |
-| `connector` | Standalone connector (paid reverse proxy)                | `127.0.0.1:3000` (`POST /ilp`)   | Admin API (8081) is **not** published. Config: `scripts/app/connector.yaml`. |
-| `app`       | The oblivious app (`ghcr.io/toon-protocol/relay:latest`) | `127.0.0.1:7100` (Nostr WS read) | Paid-write store port (`3100`, `POST /write`) is **not** published.          |
-
-**One command up / down**
-
-```bash
-make app-up      # build + start connector + app + anvil + faucet
-make app-logs    # follow logs
-make app-down    # tear down
-```
-
-**The app is reachable ONLY through the connector for paid writes**
-
-The app's paid-write store port (`3100`, oblivious-mode `POST /write`, per relay#24) is **never published** to the host — only the connector dials it over the compose network by service name (`http://app:3100`, set as the route's `upstream` in `connector.yaml`). So a paid write MUST flow through the connector:
+To verify an app edge end-to-end (paid round-trip + negatives), run the
+acceptance probes from this repo against the app repo's compose:
 
 ```bash
-# A paid write enters at the connector's POST /ilp edge. The ILP PREPARE
-# `data` carries a literal HTTP request envelope; a signed payment-channel
-# claim rides in the `ILP-Payment-Channel-Claim` header. The connector
-# validates the payment, then reverse-proxies the HTTP request to the app.
-curl -X POST http://127.0.0.1:3000/ilp \
-  -H 'Content-Type: application/octet-stream' \
-  -H 'ILP-Payment-Channel-Claim: <base64 signed claim>' \
-  --data-binary @paid-prepare.bin
-# → 200 + serialized ILP FULFILL once the connector validates and the app stores.
-
-# An UNPAID POST /ilp (no claim header) is rejected by the inbound claim gate
-# BEFORE it ever reaches the app → serialized ILP REJECT (F-class).
+# relay edge:  scripts/app/ci-acceptance-probe.ts
+# store edge:  scripts/app/ci-acceptance-probe-store.ts
+CONNECTOR_ILP_URL=http://localhost:3000/ilp \
+EVM_RPC_URL=… FAUCET_URL=… \
+  npx ts-node --project packages/connector/tsconfig.probe.json \
+    scripts/app/ci-acceptance-probe.ts
 ```
-
-In production this is what `h402Fetch` drives for you; the `curl` above is the underlying wire call.
-
-**Free reads stay on the app's Nostr WS**
-
-Free reads do **not** go through the connector at all. Clients connect directly to the app's Nostr WS read port, published at `ws://127.0.0.1:7100`. Only _paid writes_ are gated by the connector.
-
-**Overriding the relay image**
-
-The relay image is built from the separate relay repo and published as `ghcr.io/toon-protocol/relay:latest` (the compose default). Its entrypoint is the `relay` CLI, which runs as a standalone oblivious read/write relay out of the box. Pin a specific build via the `RELAY_IMAGE` env override:
-
-```bash
-RELAY_IMAGE=ghcr.io/toon-protocol/relay:sha-b8ec120 make app-up
-```
-
-**Smoke test**
-
-```bash
-make app-test
-```
-
-Under `APP_E2E=1` the full suite runs against the real relay image: AC1 (compose-up + connector health), AC2 (the app's write port is unreachable from the host, and an unpaid `POST /ilp` is rejected), and AC3 (the full paid-write round-trip — a signed payment-channel claim rides the `POST /ilp` edge, the connector reverse-proxies the write to the app's `POST /write`, and the stored event is read back over the free Nostr WS).
 
 ## Development
 

@@ -54,18 +54,18 @@ const describeEvm = RUN_EVM ? describe : describe.skip;
 jest.setTimeout(180_000);
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test BLS — tracks packets that leak past the claim gate (should be zero)
+// Test app — tracks packets that leak past the claim gate (should be zero)
 // ────────────────────────────────────────────────────────────────────────────
 
-interface TestBls {
+interface TestApp {
   received: Array<{ destination: string; amount: string }>;
   stop(): Promise<void>;
 }
 
-async function startBls(port: number): Promise<TestBls> {
+async function startApp(port: number): Promise<TestApp> {
   const app = express();
   app.use(express.json());
-  const received: TestBls['received'] = [];
+  const received: TestApp['received'] = [];
   app.post('/handle-packet', (req: Request, res: Response) => {
     const body = req.body as { destination: string; amount: string };
     received.push({ destination: body.destination, amount: body.amount });
@@ -191,7 +191,7 @@ function createTestPrepare(destination: string, amount: bigint): ILPPreparePacke
 
 describeEvm('Standalone Claim Validation Gate E2E', () => {
   let peer2: ConnectorNode;
-  let bls2: TestBls;
+  let app2: TestApp;
   let peer2BtpPort: number;
 
   beforeAll(async () => {
@@ -202,9 +202,9 @@ describeEvm('Standalone Claim Validation Gate E2E', () => {
     peer2BtpPort = base;
     const adminPort = base + 1;
     const healthPort = base + 2;
-    const blsPort = base + 3;
+    const appPort = base + 3;
 
-    bls2 = await startBls(blsPort);
+    app2 = await startApp(appPort);
 
     const peer2Config: ConnectorConfig = {
       nodeId: 'peer2',
@@ -216,7 +216,7 @@ describeEvm('Standalone Claim Validation Gate E2E', () => {
       adminApi: { enabled: true, port: adminPort, host: '127.0.0.1' },
       localDelivery: {
         enabled: true,
-        handlerUrl: `http://127.0.0.1:${blsPort}`,
+        handlerUrl: `http://127.0.0.1:${appPort}`,
       },
       peers: [
         {
@@ -263,13 +263,13 @@ describeEvm('Standalone Claim Validation Gate E2E', () => {
 
   afterAll(async () => {
     await peer2?.stop().catch(() => undefined);
-    await bls2?.stop().catch(() => undefined);
+    await app2?.stop().catch(() => undefined);
   });
 
-  it('BTP prepare without a signed claim → F06 reject, BLS not invoked', async () => {
+  it('BTP prepare without a signed claim → F06 reject, app not invoked', async () => {
     const ws = await connectRawBTPClient(peer2BtpPort, 'peer1');
     try {
-      const beforeCount = bls2.received.length;
+      const beforeCount = app2.received.length;
 
       const prepare = createTestPrepare('test.peer2.receiver', 1000n);
       const response = await sendRawBTPPrepare(ws, prepare);
@@ -281,9 +281,9 @@ describeEvm('Standalone Claim Validation Gate E2E', () => {
       // code that carries this semantic.
       expect(reject.code.startsWith('F')).toBe(true);
 
-      // Critical: BLS must NOT have been called — the gate must reject
+      // Critical: the app must NOT have been called — the gate must reject
       // BEFORE the packet reaches localDelivery.
-      expect(bls2.received.length).toBe(beforeCount);
+      expect(app2.received.length).toBe(beforeCount);
     } finally {
       ws.close();
     }
@@ -292,12 +292,12 @@ describeEvm('Standalone Claim Validation Gate E2E', () => {
   it('second unsigned prepare also rejected (gate stays armed)', async () => {
     const ws = await connectRawBTPClient(peer2BtpPort, 'peer1');
     try {
-      const beforeCount = bls2.received.length;
+      const beforeCount = app2.received.length;
       const prepare = createTestPrepare('test.peer2.receiver', 42n);
       const response = await sendRawBTPPrepare(ws, prepare);
 
       expect(response.type).toBe(PacketType.REJECT);
-      expect(bls2.received.length).toBe(beforeCount);
+      expect(app2.received.length).toBe(beforeCount);
 
       // Silence unused-var lint on ILPErrorCode.F06 by referencing it
       expect(typeof ILPErrorCode.F06_UNEXPECTED_PAYMENT).toBe('string');

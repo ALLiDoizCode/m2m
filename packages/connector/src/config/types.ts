@@ -39,6 +39,7 @@
  */
 
 import type { ProviderConfig } from '../settlement/provider/payment-channel-provider';
+import type { IlpCapabilityEntry } from '../discovery/ilp-peer-info-event';
 
 /**
  * Configuration entry for a chain provider.
@@ -293,6 +294,78 @@ export interface RouteTermination {
 }
 
 /**
+ * Child-prefix binding under the connector's apex (toon-meta#153).
+ *
+ * A general, first-class way to bind `<apex>.<name>` to either an INTERNAL
+ * handler (`upstream`) or an EXTERNAL child peer link (`peerId`) — replacing
+ * the old hardcoded `.relay`/`.store` label conventions. Exactly one of
+ * `upstream` | `peerId` must be set.
+ *
+ * Each child expands (at config load, before the routing table and route
+ * termination registry are built) into an ordinary {@link RouteConfig} under
+ * the node's apex, so the packet path is identical either way:
+ * - `upstream` → a locally-terminated route (`nextHop` = this node, reverse
+ *   proxied to `upstream` by the HttpProxyHandler);
+ * - `peerId`  → a forwarding route (`nextHop` = the peer), which must exist in
+ *   `peers` with `relation: 'child'`.
+ *
+ * @example
+ * ```yaml
+ * apex: g.proxy
+ * children:
+ *   - name: relay            # internal handler → g.proxy.relay terminates here
+ *     upstream: http://relay:3100
+ *     price: '1000'
+ *   - name: store            # external child peer → g.proxy.store forwards
+ *     peerId: store-box      # peers[store-box].relation must be 'child'
+ * ```
+ */
+export interface ChildConfig {
+  /**
+   * Single ILP label appended to the apex (lowercase alphanumeric, `-`, `_`).
+   * The joined address `<apex>.<name>` must be a valid ILP address.
+   */
+  name: string;
+
+  /**
+   * Internal binding: HTTP(S) base URL of the handler the connector reverse
+   * proxies `<apex>.<name>` traffic to. Mutually exclusive with {@link peerId}.
+   */
+  upstream?: string;
+
+  /**
+   * External binding: id of a configured peer (must have `relation: 'child'`)
+   * that `<apex>.<name>` traffic forwards to. Mutually exclusive with
+   * {@link upstream}.
+   */
+  peerId?: string;
+
+  /**
+   * Price to terminate at this child (atomic units, decimal string). Only
+   * meaningful for `upstream` children; defaults to `'0'` (free).
+   */
+  price?: string;
+
+  /**
+   * Optional advisory capability tag (e.g. `'nostr-relay'`, `'blob-store'`,
+   * or a namespaced `'os.put'`). Carried on the config for discovery layers
+   * (a child with a capability is advertised in the kind:10032 `capabilities`
+   * directory at `<apex>.<name>` — toon-meta#153); not consulted by the
+   * packet path. Must satisfy the capability name grammar (alphanumeric
+   * start, then alphanumerics / `.` / `_` / `-`).
+   */
+  capability?: string;
+
+  /**
+   * Optional content address / URI of the capability's interface descriptor
+   * (e.g. `sha256:ab01…`), advertised as `capabilities[].schema` in the
+   * kind:10032 directory (toon-meta#153). Names are for humans; hashes are
+   * for binding. Only meaningful together with {@link capability}.
+   */
+  schema?: string;
+}
+
+/**
  * Route Configuration Interface
  *
  * Defines a routing table entry mapping ILP address prefixes
@@ -440,6 +513,28 @@ export interface ConnectorConfig {
   routes: RouteConfig[];
 
   /**
+   * Optional explicit ILP apex address for this node (toon-meta#153).
+   *
+   * The apex is the address subtree this node owns: `children` expand to
+   * `<apex>.<name>` routes, and self-announce aggregation collapses covered
+   * routes to the apex. When omitted, the apex is derived from the node's
+   * first self route (a route whose `nextHop` is this node's `nodeId` or
+   * `'local'`), using its `ilpAddress` (else `prefix`). Prefer setting it
+   * explicitly when using `children`.
+   */
+  apex?: string;
+
+  /**
+   * Optional child-prefix bindings under the apex (toon-meta#153).
+   *
+   * Each entry binds `<apex>.<name>` to an internal handler (`upstream`) or an
+   * external child peer link (`peerId`), expanding into ordinary routes at
+   * config load — see {@link ChildConfig}. Replaces the legacy hardcoded
+   * `.relay`/`.store` label conventions with a general mechanism.
+   */
+  children?: ChildConfig[];
+
+  /**
    * Optional settlement configuration for TigerBeetle integration
    * When provided, enables settlement recording for packet forwarding
    * Defaults to settlement disabled if not specified
@@ -493,7 +588,7 @@ export interface ConnectorConfig {
    *
    * - **standalone**: Connector runs as separate process/container
    *   → Validates that `localDelivery.handlerUrl` is set (required for HTTP forwarding)
-   *   → Warns if `adminApi.enabled` is false (external BLS typically needs admin API)
+   *   → Warns if `adminApi.enabled` is false (external app typically needs admin API)
    *   → Use with HTTP endpoints: `/handle-packet` (incoming) and `/admin/ilp/send` (outgoing)
    *
    * When omitted, mode is **inferred** from configuration flags (backward compatible):
@@ -608,18 +703,385 @@ export interface ConnectorConfig {
   btpAuthToken?: string;
 
   /**
-   * Optional local delivery configuration for forwarding packets to agent runtime
+   * Optional local delivery configuration for forwarding packets to the app
    * When enabled, packets destined for local addresses are forwarded via HTTP
-   * to an external agent runtime instead of using the built-in auto-fulfill stub
+   * to the app's HTTP handler instead of using the built-in auto-fulfill stub
    *
    * Environment variables:
    * - LOCAL_DELIVERY_ENABLED: Enable/disable local delivery (default: false)
-   * - LOCAL_DELIVERY_URL: URL to agent runtime (e.g., "http://connector:3100")
+   * - LOCAL_DELIVERY_URL: URL to the app's HTTP handler (e.g., "http://connector:3100")
    * - LOCAL_DELIVERY_TIMEOUT: Request timeout in ms (default: 30000)
-   * - LOCAL_DELIVERY_AUTH_TOKEN: Bearer token for BLS authentication (no default)
-   * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop BLS notification (default: false)
+   * - LOCAL_DELIVERY_AUTH_TOKEN: Bearer token for app authentication (no default)
+   * - LOCAL_DELIVERY_PER_HOP_NOTIFICATION: Enable per-hop app notification (default: false)
    */
   localDelivery?: LocalDeliveryConfig;
+
+  /**
+   * Optional self-announce configuration (relay#37 / store#22).
+   *
+   * When enabled, the connector builds, signs, and continuously republishes a
+   * `kind:10032` `IlpPeerInfo` announcement describing its OWN apex routes to a
+   * relay's event store, so a client holding only the genesis seed can discover
+   * the publish/store routes + settlement info out of band (instead of falling
+   * back to hardcoded `publishDestination`/`storeDestination`). Disabled by
+   * default — absent this block the connector announces nothing.
+   *
+   * @see SelfAnnounceConfig
+   */
+  selfAnnounce?: SelfAnnounceConfig;
+
+  /**
+   * Optional multi-hop route learning configuration (toon-meta#153).
+   *
+   * When enabled, the connector subscribes to kind:10032 `IlpPeerInfo`
+   * announcements on the configured relay read endpoints (free reads),
+   * maintains a link-state database from each announcement's `routing` block
+   * (reachable prefixes + neighbor adjacency), computes shortest paths, and
+   * installs LEARNED routes whose first hop is a directly-connected peer.
+   * Learned routes sit BELOW static config routes (negative priority, never
+   * overwrite an existing prefix) and are withdrawn when the sourcing
+   * announcement expires or the destination becomes unreachable. Disabled by
+   * default — absent this block the connector consumes no announcements.
+   *
+   * @see RouteLearningConfig
+   */
+  routeLearning?: RouteLearningConfig;
+
+  /**
+   * Optional cold-start bootstrap configuration (toon-meta#153).
+   *
+   * Everything in the TOON network is discovered THROUGH a relay, but a cold
+   * node needs an out-of-band seed to reach its FIRST relay. When enabled, the
+   * connector resolves relay seeds (curated signed registry → learned-peer
+   * cache → config seeds → hardcoded fallback), probes candidates
+   * (sample-and-verify) before trusting them, and persists verified relays so
+   * seeds stay refreshable data instead of frozen config (connector#289).
+   * Disabled by default — absent this block, no bootstrap runs.
+   *
+   * @see BootstrapConfig
+   */
+  bootstrap?: BootstrapConfig;
+
+  /**
+   * Optional funded-peering policy (toon-meta#153, discovered-vs-peered).
+   *
+   * Discovery (kind:10032 ingest → the discovered-node registry + learned
+   * multi-hop routes) is free and unbounded; FUNDING a settlement channel to
+   * an upstream is a deliberate, bounded operator choice. This block bounds
+   * that choice. Absent → unlimited funded channels, no auto-registration
+   * (identical to pre-existing behavior).
+   *
+   * @see PeeringPolicyConfig
+   */
+  peeringPolicy?: PeeringPolicyConfig;
+}
+
+/**
+ * Funded-Peering Policy (toon-meta#153, discovered-vs-peered split).
+ *
+ * The epic's thesis is "sparse channels, dense reachability": a node funds
+ * settlement channels to a FEW upstreams and reaches everything else through
+ * them via learned multi-hop routes. This block makes the sparsity an
+ * enforced policy instead of an operator convention.
+ *
+ * @example
+ * ```yaml
+ * peeringPolicy:
+ *   maxFundedChannels: 3
+ *   autoRegister: false   # v0: false is the only supported value
+ * ```
+ */
+export interface PeeringPolicyConfig {
+  /**
+   * Maximum number of FUNDED peer channels this node may hold at once.
+   * Enforced in `ConnectorNode.registerPeer` (and the mirrored
+   * `POST /admin/peers` surface): registering a peer WITH a settlement block
+   * that would open a new funded channel beyond the cap fails with a clear
+   * error.
+   *
+   * What is counted: currently-registered peers (live in the BTP / ILP-HTTP
+   * client managers) that carry runtime settlement config — i.e. entries in
+   * the connector's settlement-peer map, created by
+   * `registerPeer`/`POST /admin/peers` settlement blocks (including those
+   * replayed from the persistent registry at boot). Peers registered WITHOUT
+   * a settlement block (route-only links) do not count, and re-registering an
+   * already-funded peer never consumes a new slot. Static YAML `peers[]`
+   * settlement fields (`evmAddress` etc.) predate this policy and are not
+   * counted — the cap governs the runtime funding admission path.
+   *
+   * Omitted → unlimited (backward compatible). Must be a positive integer.
+   */
+  maxFundedChannels?: number;
+
+  /**
+   * Whether the connector may AUTOMATICALLY register (fund) discovered nodes.
+   *
+   * v0: `false` is the ONLY supported value — funding stays a deliberate
+   * operator action (inspect `GET /admin/discovered-nodes`, promote via the
+   * existing `POST /admin/peers`). Setting `true` is rejected at config load
+   * with "not yet supported"; auto-funding policy is future work. Defaults to
+   * `false`.
+   */
+  autoRegister?: boolean;
+}
+
+/**
+ * Route Learning Configuration Interface (toon-meta#153)
+ *
+ * Drives the connector's consumption of OTHER nodes' kind:10032 announcements
+ * for multi-hop route learning — the read-side complement of
+ * {@link SelfAnnounceConfig}. Reads are FREE (a relay's public WS endpoint),
+ * so no payment config is involved.
+ *
+ * @example
+ * ```yaml
+ * routeLearning:
+ *   enabled: true
+ *   relayUrls:
+ *     - wss://relay-ws.devnet.toonprotocol.dev
+ *   refreshIntervalSecs: 60
+ *   maxRoutes: 1000
+ * ```
+ */
+export interface RouteLearningConfig {
+  /**
+   * Whether route learning is enabled. When false (default), the connector
+   * subscribes to nothing and installs no learned routes.
+   */
+  enabled: boolean;
+
+  /**
+   * Public Nostr relay WS URLs to subscribe to for kind:10032 announcements.
+   * When omitted, falls back to `selfAnnounce.relayUrl` when that is set
+   * (the relay a node announces TO is usually also worth learning FROM).
+   */
+  relayUrls?: string[];
+
+  /**
+   * Seconds between periodic expiry sweeps / recomputes (route withdrawal for
+   * lapsed NIP-40 expirations also happens on this cadence, in addition to
+   * the recompute-on-ingest path). Default: 60.
+   */
+  refreshIntervalSecs?: number;
+
+  /**
+   * Maximum number of learned routes to install (a safety valve against a
+   * flooded relay). The best (lowest-cost) routes win, deterministically.
+   * Default: 1000.
+   */
+  maxRoutes?: number;
+}
+
+/**
+ * A single operator-configured relay seed for cold-start bootstrap.
+ * Structurally identical to the discovery layer's `RelaySeed`.
+ */
+export interface BootstrapSeedEntry {
+  /** Nostr relay WebSocket URL (`wss://…`; `ws://…` allowed for local dev). */
+  relayUrl: string;
+  /** Optional relay operator Nostr pubkey (64-char lowercase hex). */
+  pubkey?: string;
+}
+
+/**
+ * Cold-Start Bootstrap Configuration (toon-meta#153).
+ *
+ * Governs how a cold connector finds its first relay(s). Resolution order:
+ * fresh signed registry (`registryUrl`) → persisted learned-peer cache
+ * (`cachePath`) → `seeds` below → hardcoded fallback list. Candidates are
+ * merged, deduped by relay URL, and sample-and-verified (probe: connect +
+ * fetch at least one valid kind:10032 event or an EOSE) before being trusted.
+ *
+ * @example
+ * ```yaml
+ * bootstrap:
+ *   enabled: true
+ *   registryUrl: https://seeds.toonprotocol.dev/relays.json
+ *   curatorPubkey: 3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d
+ *   seeds:
+ *     - relayUrl: wss://relay-ws.devnet.toonprotocol.dev
+ *   sampleSize: 3
+ *   refreshIntervalSecs: 3600
+ * ```
+ */
+export interface BootstrapConfig {
+  /** Whether cold-start bootstrap is enabled. Default (absent block): disabled. */
+  enabled: boolean;
+
+  /**
+   * HTTPS URL of the curated signed seed registry (a JSON `SeedManifest`,
+   * whole-manifest schnorr signature). When omitted, resolution starts at the
+   * learned-peer cache. Must be `https://`.
+   */
+  registryUrl?: string;
+
+  /**
+   * Pinned curator pubkey (BIP-340 x-only, 64-char lowercase hex) the
+   * registry manifest signature is verified against. Falls back to the
+   * hardcoded `FALLBACK_CURATOR_PUBKEY` (the real v0 devnet curator key) when
+   * omitted. Operators should still pin this explicitly when using
+   * `registryUrl` — config always wins over the hardcoded fallback.
+   */
+  curatorPubkey?: string;
+
+  /** Operator-provided seed relays, tried after the registry and cache tiers. */
+  seeds?: BootstrapSeedEntry[];
+
+  /**
+   * Path of the learned-peer JSON cache file. Default:
+   * `./data/bootstrap-cache-<nodeId>.json` (the connector's data dir).
+   */
+  cachePath?: string;
+
+  /**
+   * Sample-and-verify width: how many candidate relays are probed
+   * concurrently per wave, and the maximum number of verified relays kept.
+   * Default: 3.
+   */
+  sampleSize?: number;
+
+  /** Seconds between seed re-resolutions. Default: 3600 (1 hour). */
+  refreshIntervalSecs?: number;
+}
+
+/**
+ * Self-Announce Configuration Interface (relay#37 / store#22)
+ *
+ * Drives the connector's `kind:10032` `IlpPeerInfo` self-announcement. The
+ * advertised peer info is DERIVED from the connector's own config (its
+ * locally-terminated routes' `ilpAddress` + `settlementAddresses`, the
+ * `chainProviders` chain ids, and the BTP endpoint) — the operator does not
+ * re-type it. The optional overrides below cover only the values the connector
+ * cannot infer (its public BTP/HTTP/relay hostnames, terminated behind TLS) or
+ * wishes to pin explicitly.
+ *
+ * The publish TRANSPORT is the connector's own routing: `announceTo` names the
+ * ILP address to write the announcement THROUGH, and the connector resolves it
+ * against its own routing table — a locally-terminated route delivers the write
+ * FREE through its `RouteTermination` upstream, while a remote route originates
+ * a PAID write over ILP funded from the connector's own settlement channel
+ * (exactly how it would pay for any write). There is no raw private-port URL in
+ * config.
+ *
+ * @example
+ * ```yaml
+ * selfAnnounce:
+ *   enabled: true
+ *   announceTo: g.proxy.relay           # ILP route to publish the write THROUGH
+ *   refreshIntervalSecs: 300            # republish every 5m; TTL = 2x = 10m
+ *   btpEndpoint: wss://proxy.devnet.toonprotocol.dev:443
+ *   relayUrl: wss://relay-ws.devnet.toonprotocol.dev
+ * ```
+ */
+export interface SelfAnnounceConfig {
+  /**
+   * Whether self-announce is enabled. When false (default), the connector
+   * publishes no `kind:10032` announcement.
+   */
+  enabled: boolean;
+
+  /**
+   * The ILP address (relay/publish route) to publish the kind:10032 write
+   * THROUGH. The connector resolves it against its OWN routing table and writes
+   * the SAME way it handles any write:
+   * - **Locally terminated** (this connector fronts the relay — e.g. an apex
+   *   whose `g.proxy.relay` route has a `RouteTermination` `upstream`) → the
+   *   write is delivered through that termination = **FREE** (no payment; the
+   *   upstream comes from the resolved route, not config).
+   * - **Forwarded** (a remote relay — e.g. the store box writing through
+   *   `g.proxy.relay`, which forwards to the apex) → a **PAID** write is
+   *   originated over ILP, funded from the connector's own settlement channel to
+   *   its next hop (`announcePrice` below).
+   *
+   * Distinct from the announcement CONTENT's own `ilpAddress` (derived from this
+   * node's terminated routes): e.g. the store box sets `announceTo: g.proxy.relay`
+   * (where to write) while announcing its own `g.proxy.store` peer info.
+   */
+  announceTo: string;
+
+  /**
+   * Price to pay (atomic units, e.g. nano-USDC, decimal-string) when `announceTo`
+   * resolves to a REMOTE (forwarded) route — the connector pays this for its own
+   * write, like any client. Must be ≥ the remote relay route's price. IGNORED
+   * when `announceTo` is locally terminated (that path is free). Default `'1000'`.
+   */
+  announcePrice?: string;
+
+  /**
+   * Seconds between republishes. The announcement carries a NIP-40 `expiration`
+   * tag of `2 × refreshIntervalSecs`, so each refresh lands a fresh, unexpired
+   * event at half the TTL and the announcement never goes stale while the node
+   * is up. Default: 300 (5 minutes → 10-minute TTL).
+   */
+  refreshIntervalSecs?: number;
+
+  /**
+   * Public BTP WebSocket endpoint to advertise (e.g.
+   * `wss://proxy.devnet.toonprotocol.dev:443`). The connector cannot infer its
+   * own public hostname behind TLS termination, so set this for clients/peers to
+   * dial. When omitted, `btpEndpoint` is left out of the announcement.
+   */
+  btpEndpoint?: string;
+
+  /**
+   * Public ILP-over-HTTP ingress endpoint to advertise (RFC-0035 `POST /ilp`),
+   * for stateless one-shot writes. Optional.
+   */
+  httpEndpoint?: string;
+
+  /**
+   * Public Nostr relay read WS URL to advertise for FREE reads (e.g.
+   * `wss://relay-ws.devnet.toonprotocol.dev`). Lets a client discover where to
+   * subscribe without out-of-band config. Optional.
+   */
+  relayUrl?: string;
+
+  /**
+   * Asset code advertised in the announcement. Default: `USDC`.
+   */
+  assetCode?: string;
+
+  /**
+   * Asset scale (decimal places) advertised. Default: 6 (USDC).
+   */
+  assetScale?: number;
+
+  /**
+   * Apex aggregation opt-out (toon-meta#153).
+   *
+   * When true, the announcement advertises only the node's apex upward:
+   * `ilpAddress`/`ilpAddresses` collapse every route covered by the apex
+   * (equal to it or a strict descendant) to the apex itself. Terminated routes
+   * NOT under the apex are still advertised individually (uncovered standalone
+   * routes). Defaults to `true` when `children` or `apex` config is present,
+   * `false` otherwise — so legacy configs keep enumerating every terminated
+   * route exactly as before.
+   */
+  aggregate?: boolean;
+
+  /**
+   * Optional explicit route-hint overrides. When omitted, the publish/store
+   * route addresses are DERIVED from `children` named `relay`/`store` first
+   * (toon-meta#153), then from the connector's configured routes (the
+   * `.relay` route is the publish address; the direct `.store` route is the
+   * store address). Override only for non-standard topologies.
+   */
+  routes?: {
+    /** ILP address a client should PUBLISH (Nostr writes) to, e.g. `g.proxy.relay`. */
+    publish?: string;
+    /** ILP address a client should STORE (blob uploads) to, e.g. `g.proxy.store`. */
+    store?: string;
+  };
+
+  /**
+   * Optional explicit capability directory entries (toon-meta#153), appended
+   * AFTER the entries derived from `children` capabilities and the legacy
+   * publish/store hints — an override/extension list for capabilities the
+   * derivation cannot express. Validated at config load (capability name
+   * grammar, ILP address, non-negative decimal price, non-empty schema); the
+   * merged directory is deduped by (capability, address).
+   */
+  capabilities?: IlpCapabilityEntry[];
 }
 
 /**
@@ -860,6 +1322,24 @@ export interface SettlementConfig {
    * Defaults to threshold monitoring disabled if not specified
    */
   thresholds?: SettlementThresholdConfig;
+
+  /**
+   * Mina claim value-binding migration switch (issue #359 / toon-meta#168).
+   *
+   * The inbound gate binds a Mina claim's VALUE to the route PRICE by opening
+   * the claim's plaintext balance preimage against its signature-bound Poseidon
+   * commitment (Option B). A claim that PRESENTS a preimage which does not open
+   * the commitment is always F06-rejected (tamper). This flag governs only the
+   * migration-sensitive ABSENT-preimage case (a client predating the `balanceB`
+   * emit, or a proof with no parseable commitment):
+   * - `false` / omitted (default) → fail-open-and-log during the client-rollout
+   *   window (freshness-only for such packets), so a wire/version gap never
+   *   blackholes paid Mina traffic.
+   * - `true` (flip post-rollout, once the client fleet emits the openable
+   *   preimage everywhere) → F06-reject Mina claims on priced routes that carry
+   *   no openable preimage.
+   */
+  minaValueBindingStrict?: boolean;
 }
 
 /**
@@ -892,12 +1372,12 @@ export type Environment = 'development' | 'staging' | 'production';
  *
  * **Standalone Mode** (`'standalone'`):
  * - Connector runs as a separate process/container from business logic
- * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external BLS
+ * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external app
  * - Outgoing packets sent via HTTP POST to `/admin/ilp/send` on connector's admin API
  * - Admin API enabled for external control
- * - Local delivery enabled with `handlerUrl` pointing to BLS
+ * - Local delivery enabled with `handlerUrl` pointing to the app
  * - **Use cases**: Microservices, multi-language integrations, process isolation
- * - **Example**: Connector container + separate Python/Go/Rust business logic server
+ * - **Example**: Connector container + separate Python/Go/Rust app
  *
  * **Configuration Behavior**:
  * - When `deploymentMode` is **specified**: Configuration is validated against mode expectations
@@ -1457,9 +1937,9 @@ export interface SecurityConfig {
 /**
  * Local Delivery Configuration Interface
  *
- * Configures local delivery to an agent runtime for handling packets
+ * Configures local delivery to the app for handling packets
  * destined for local addresses. When enabled, packets routed to 'local'
- * or the connector's own nodeId are forwarded to an external agent runtime
+ * or the connector's own nodeId are forwarded to the app's HTTP handler
  * via HTTP instead of using the built-in auto-fulfill stub.
  *
  * @property enabled - Enable/disable local delivery forwarding (default: false)
@@ -1494,7 +1974,7 @@ export interface LocalDeliveryConfig {
   enabled?: boolean;
 
   /**
-   * URL to the business logic server's base endpoint
+   * URL to the app's base endpoint
    * The connector will POST to {handlerUrl}/handle-packet
    * Environment variable: LOCAL_DELIVERY_URL
    * Example: 'http://localhost:8080'
@@ -1510,18 +1990,18 @@ export interface LocalDeliveryConfig {
   timeout?: number;
 
   /**
-   * Optional bearer token for authenticating outbound requests to the BLS
+   * Optional bearer token for authenticating outbound requests to the app
    * When set, the connector sends `Authorization: Bearer {authToken}` on
-   * all outbound HTTP requests to the business logic server
+   * all outbound HTTP requests to the app
    * Environment variable: LOCAL_DELIVERY_AUTH_TOKEN (no default)
    */
   authToken?: string;
 
   /**
-   * Enable per-hop BLS notification for transit packets
-   * When enabled, intermediate connectors fire a non-blocking POST to the BLS
+   * Enable per-hop app notification for transit packets
+   * When enabled, intermediate connectors fire a non-blocking POST to the app
    * for packets transiting through, in addition to forwarding via BTP.
-   * The BLS notification is fire-and-forget — failures do not affect forwarding.
+   * The app notification is fire-and-forget — failures do not affect forwarding.
    * Environment variable: LOCAL_DELIVERY_PER_HOP_NOTIFICATION (default: 'false')
    * Default: false
    */
@@ -1566,7 +2046,7 @@ export interface LocalDeliveryConfig {
  * ```
  */
 /**
- * Request sent to BLS for local delivery.
+ * Request sent to the app for local delivery.
  */
 export interface LocalDeliveryRequest {
   /** Full ILP destination address */
@@ -1581,16 +2061,45 @@ export interface LocalDeliveryRequest {
   sourcePeer: string;
   /** Whether this is a transit notification (fire-and-forget) at an intermediate hop */
   isTransit?: boolean;
+  /**
+   * Sender-chosen ILP execution condition (base64-encoded, 32 bytes) — issue #309.
+   *
+   * Present iff the terminating PREPARE carried a NON-ZERO `executionCondition`
+   * (a condition minted end-to-end by the original sender, e.g. a rolling-swap
+   * fill packet per toon-meta#145 §3). When present, the terminating
+   * application owns the fulfillment: it MUST return the matching 32-byte
+   * preimage in {@link LocalDeliveryResponse}'s `fulfill.fulfillment`, and the
+   * connector enforces `sha256(fulfillment) === executionCondition` before
+   * FULFILLing upstream — a missing or mismatching preimage converts the
+   * fulfill into an F99 REJECT and nothing is recorded as delivered. The
+   * connector never substitutes its NIP-59/HKDF-derived preimage on this path.
+   *
+   * Absent for legacy zero-condition traffic — those packets keep the pre-#309
+   * behavior (NIP-59 receiver-side preimage injection when available).
+   */
+  executionCondition?: string;
 }
 
 /**
- * Response from BLS.
+ * Response from the app.
  */
 export interface LocalDeliveryResponse {
   /** Fulfill response (mutually exclusive with reject) */
   fulfill?: {
     /** Optional response data (base64) */
     data?: string;
+    /**
+     * FULFILL preimage (base64-encoded, exactly 32 bytes) — issue #309.
+     *
+     * REQUIRED when {@link LocalDeliveryRequest} carried `executionCondition`:
+     * the connector enforces `sha256(fulfillment) === executionCondition` and
+     * converts a missing/mismatching preimage into an F99 REJECT. When the
+     * request carried no `executionCondition`, an app-supplied preimage is
+     * still placed on the FULFILL, but the legacy NIP-59 receiver-side
+     * derivation (when active) takes precedence — preserving pre-#309
+     * behavior for zero-condition traffic.
+     */
+    fulfillment?: string;
   };
   /** Reject response (mutually exclusive with fulfill) */
   reject?: {
@@ -1627,6 +2136,24 @@ export interface SendPacketParams {
   expiresAt: Date;
   /** Optional application data payload */
   data?: Buffer;
+  /**
+   * Optional sender-chosen SHA-256 execution condition (egress symmetry for
+   * issue #309/PR #310; toon-meta#145 §3 R4 — e.g. a rolling-swap leg-B
+   * PREPARE carrying leg A's condition). Accepts raw bytes (`Uint8Array`) or
+   * a base64-encoded string; MUST decode to exactly 32 bytes and MUST NOT be
+   * all-zero (all-zero is the wire encoding for "no condition" and would be
+   * replaced by the connector-derived condition — omit the field instead).
+   * Invalid values throw `InvalidExecutionConditionError` before any packet
+   * is sent.
+   *
+   * When present, the condition rides the outgoing PREPARE verbatim — the
+   * claim/NIP-59 derivation path only sets its own condition when none exists
+   * (PR #310's rule) — and the resolved FULFILL's `fulfillment` preimage is
+   * returned on the ILPFulfillPacket result so the caller can verify
+   * `sha256(fulfillment) === executionCondition`. When absent, behavior is
+   * unchanged (zero/derived condition per existing semantics).
+   */
+  executionCondition?: Uint8Array | string;
 }
 
 /** Re-export AdminSettlementConfig for use in PeerRegistrationRequest */
@@ -1722,7 +2249,7 @@ export interface RemovePeerResult {
 
 /**
  * Request body for `POST /admin/ilp/send`.
- * Used by the BLS to initiate outbound ILP packets through the connector.
+ * Used by the app to initiate outbound ILP packets through the connector.
  *
  * @property destination - Valid ILP address (RFC-0015 format)
  * @property amount - Non-negative integer string (smallest currency unit)

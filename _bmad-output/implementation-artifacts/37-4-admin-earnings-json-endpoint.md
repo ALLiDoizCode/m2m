@@ -40,7 +40,7 @@ Townhouse D21-010 specifies this endpoint is the dashboard's sole source of earn
 
 ```gherkin
 Scenario: GET /admin/earnings.json returns the AdminEarningsJson shape
-  Given a connector with peers ['town-01', 'mill-01', 'dvm-01'] that have received claims in USDC and ETH
+  Given a connector with peers ['relay-01', 'swap-01', 'store-01'] that have received claims in USDC and ETH
   When GET /admin/earnings.json is requested with a valid X-Api-Key
   Then the response status is 200
   And the body conforms to:
@@ -90,9 +90,9 @@ Scenario: /admin/earnings.json requires X-Api-Key
 
 ```gherkin
 Scenario: A registered peer with no claim activity appears in the response
-  Given peer 'dvm-02' is registered via /admin/peers but has no claim history
+  Given peer 'store-02' is registered via /admin/peers but has no claim history
   When GET /admin/earnings.json is requested
-  Then peers[] contains an entry with peerId='dvm-02' and byAsset=[]
+  Then peers[] contains an entry with peerId='store-02' and byAsset=[]
 ```
 
 ### AC 4: Connector fee account posts on every packet-forward

@@ -12,6 +12,10 @@ import { IlpHttpAdapter } from './ilp-http-adapter';
 import { X402_PAYMENT_REQUIRED_HEADER, X402_PAYMENT_SIGNATURE_HEADER } from './x402-greeting';
 import type { RouteTermination } from '../config/types';
 import { BTP_CLAIM_PROTOCOL } from '../btp/btp-claim-types';
+import type { BTPClaimMessage, SolanaClaimMessage } from '../btp/btp-claim-types';
+import { InboundClaimValidator } from '../btp/inbound-claim-validator';
+import { ChainProviderRegistry } from '../settlement/provider/chain-provider-registry';
+import type { PaymentChannelProvider } from '../settlement/provider/payment-channel-provider';
 import { signRequest as signRfc9421Request } from '../auth/rfc9421';
 import { encodeHttpRequest, type HttpRequestEnvelope } from '../core/handlers/http-proxy-handler';
 import { Logger } from '../utils/logger';
@@ -45,7 +49,7 @@ const createMockLogger = (): jest.Mocked<Logger> =>
 const createPrepare = (): ILPPreparePacket => ({
   type: PacketType.PREPARE,
   amount: BigInt(1000),
-  destination: 'g.connector.town',
+  destination: 'g.connector.relay',
   expiresAt: new Date(Date.now() + 10000),
   data: Buffer.from('hello'),
 });
@@ -133,7 +137,7 @@ describe('IlpHttpAdapter', () => {
     expect(claimEntry).toBeDefined();
     expect(claimEntry!.contentType).toBe(BTP_CLAIM_PROTOCOL.CONTENT_TYPE);
     expect(claimEntry!.data.toString('utf8')).toBe(claimJson);
-    expect(ilpPacket.destination).toBe('g.connector.town');
+    expect(ilpPacket.destination).toBe('g.connector.relay');
     expect(peerId).toBe('connector-b'); // authenticated via header (no-auth secret)
 
     // Response is 200 + the serialized FULFILL in the body (RFC-0035).
@@ -141,7 +145,7 @@ describe('IlpHttpAdapter', () => {
     expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
   });
 
-  it('records the claim for settlement (recordClaim) before validation', async () => {
+  it('validates the claim BEFORE recording it for settlement (#353 watermark ordering)', async () => {
     const order: string[] = [];
     const recordClaim = jest.fn(async () => {
       order.push('record');
@@ -170,8 +174,43 @@ describe('IlpHttpAdapter', () => {
     ];
     expect(peerId).toBe('http:0xabc');
     expect(protocolData.find((pd) => pd.protocolName === BTP_CLAIM_PROTOCOL.NAME)).toBeDefined();
-    // Recorded independent of (and ahead of) packet validation, mirroring BTP.
-    expect(order).toEqual(['record', 'validate']);
+    // Gate-then-record (issue #353): the gate's freshness check must read the
+    // received-claim watermark as it stood BEFORE this request — recording
+    // first would advance the watermark to this claim's own nonce and the
+    // strictly-advancing check would reject the claim being recorded. Mirrors
+    // BTP, where handleMessage completes before the onMessage ingest fires.
+    expect(order).toEqual(['validate', 'record']);
+  });
+
+  it('does not record a claim the gate rejected (#353)', async () => {
+    const recordClaim = jest.fn(async () => {});
+    const reject: ILPRejectPacket = {
+      type: PacketType.REJECT,
+      code: ILPErrorCode.F06_UNEXPECTED_PAYMENT,
+      triggeredBy: 'g.connector',
+      message: 'Stale payment claim',
+      data: Buffer.alloc(0),
+    };
+    const handlePrepare = jest.fn(async () => fulfill);
+    const adapter = new IlpHttpAdapter({
+      logger: createMockLogger(),
+      nodeId: 'g.connector',
+      handlePrepare,
+      validateClaim: jest.fn(async () => reject),
+      recordClaim,
+    });
+
+    const req = new MockReq(serializePacket(createPrepare()), {
+      'ilp-payment-channel-claim': Buffer.from(claimJson, 'utf8').toString('base64'),
+    });
+    const res = new MockRes();
+    await run(adapter, req, res);
+
+    expect(recordClaim).not.toHaveBeenCalled();
+    expect(handlePrepare).not.toHaveBeenCalled();
+    expect((deserializePacket(res.body) as ILPRejectPacket).code).toBe(
+      ILPErrorCode.F06_UNEXPECTED_PAYMENT
+    );
   });
 
   it('does not call recordClaim when no claim header is present', async () => {
@@ -280,7 +319,7 @@ describe('IlpHttpAdapter', () => {
       upstream: 'http://127.0.0.1:8080',
       price: '1000', // atomic nano-USDC; must be advertised byte-identical
       chains: ['evm', 'solana', 'mina'],
-      ilpAddress: 'g.connector.town',
+      ilpAddress: 'g.connector.relay',
       settlementAddresses: {
         evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28',
         solana: '7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2',
@@ -340,7 +379,7 @@ describe('IlpHttpAdapter', () => {
       const body = parseGreeting(res);
 
       expect(body.x402Version).toBe(2);
-      expect(body.resource).toEqual({ url: 'g.connector.town' });
+      expect(body.resource).toEqual({ url: 'g.connector.relay' });
       expect(body.error).toBe(`${X402_PAYMENT_SIGNATURE_HEADER} header is required`);
       for (const entry of body.accepts) {
         expect(entry).toHaveProperty('scheme');
@@ -538,7 +577,7 @@ describe('IlpHttpAdapter', () => {
       upstream: 'http://127.0.0.1:8080',
       price: BIND_PRICE,
       chains: ['evm'],
-      ilpAddress: 'g.connector.town',
+      ilpAddress: 'g.connector.relay',
       settlementAddresses: { evm: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28' },
       ...overrides,
     });
@@ -575,7 +614,7 @@ describe('IlpHttpAdapter', () => {
       const prepare: ILPPreparePacket = {
         type: PacketType.PREPARE,
         amount: BigInt(1000),
-        destination: 'g.connector.town',
+        destination: 'g.connector.relay',
         expiresAt: new Date(Date.now() + 10000),
         data: encodeHttpRequest(envelope),
       };
@@ -677,5 +716,277 @@ describe('IlpHttpAdapter', () => {
       expect(res.statusCode).toBe(200);
       expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
     });
+  });
+});
+
+/**
+ * End-to-end replay gate through the HTTP transport (issue #353).
+ *
+ * Wires the REAL InboundClaimValidator (with a mock chain provider whose
+ * crypto verification always passes — isolating the freshness check) plus a
+ * received-claim watermark lookup into the adapter, and asserts the full
+ * economic invariant: a stale/equal-nonce replay is F06-rejected BEFORE the
+ * backend (handlePrepare) or the settlement recorder is ever invoked, while an
+ * advancing claim flows through unchanged. Also proves the hot path adds no
+ * chain RPC: a replay is rejected without even reaching the provider's
+ * verifyBalanceProof.
+ */
+describe('IlpHttpAdapter × InboundClaimValidator — stale-claim replay gate (#353)', () => {
+  const CHANNEL_ACCOUNT = 'ChanAcct1111111111111111111111111111111111';
+  const SIGNER_PUBKEY = 'SiGnEr111111111111111111111111111111111111';
+  const PROGRAM_ID = '11111111111111111111111111111111';
+
+  const solanaClaim = (nonce: number): SolanaClaimMessage => ({
+    version: '1.0',
+    blockchain: 'solana',
+    messageId: `sol-msg-${nonce}-${Math.random().toString(36).slice(2)}`,
+    timestamp: '2026-07-17T12:00:00.000Z',
+    senderId: 'peer-a',
+    programId: PROGRAM_ID,
+    channelAccount: CHANNEL_ACCOUNT,
+    nonce,
+    transferredAmount: String(1000 * nonce),
+    signature: 'c2lnbmF0dXJl',
+    signerPublicKey: SIGNER_PUBKEY,
+    cluster: 'devnet',
+  });
+
+  interface Harness {
+    adapter: IlpHttpAdapter;
+    handlePrepare: jest.Mock;
+    recordClaim: jest.Mock;
+    verifyBalanceProof: jest.Mock;
+    watermarkLookup: jest.Mock;
+  }
+
+  /** Build the adapter around a real validator + a fixed watermark claim. */
+  const makeHarness = (watermark: BTPClaimMessage | null): Harness => {
+    const verifyBalanceProof = jest.fn(async () => true);
+    const provider = {
+      chainType: 'solana',
+      chainId: 'solana:devnet',
+      verifyBalanceProof,
+    } as unknown as PaymentChannelProvider;
+    const registry = new ChainProviderRegistry();
+    registry.register(provider);
+
+    const watermarkLookup = jest.fn(async () => watermark);
+    const validator = new InboundClaimValidator(
+      undefined, // no EVM SDK — Solana path
+      'g.connector',
+      createMockLogger() as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      registry,
+      watermarkLookup
+    );
+
+    const handlePrepare = jest.fn(async () => fulfill);
+    const recordClaim = jest.fn(async () => {});
+    const adapter = new IlpHttpAdapter({
+      logger: createMockLogger(),
+      nodeId: 'g.connector',
+      handlePrepare,
+      validateClaim: (pd, pkt, peer) => validator.validate(pd, pkt, peer),
+      recordClaim,
+    });
+    return { adapter, handlePrepare, recordClaim, verifyBalanceProof, watermarkLookup };
+  };
+
+  const paidReq = (nonce: number): MockReq =>
+    new MockReq(serializePacket(createPrepare()), {
+      'ilp-payment-channel-claim': Buffer.from(JSON.stringify(solanaClaim(nonce)), 'utf8').toString(
+        'base64'
+      ),
+    });
+
+  it('F06-rejects a stale-nonce replay: backend NOT hit, claim NOT recorded, no crypto/RPC', async () => {
+    const h = makeHarness(solanaClaim(6)); // watermark: latest verified nonce 6
+    const res = new MockRes();
+    await run(h.adapter, paidReq(4), res); // replayed old claim (nonce 4)
+
+    expect(res.statusCode).toBe(200); // ILP-level reject rides the 200 body
+    const out = deserializePacket(res.body) as ILPRejectPacket;
+    expect(out.type).toBe(PacketType.REJECT);
+    expect(out.code).toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
+    expect(out.message).toContain('Stale payment claim');
+    expect(h.handlePrepare).not.toHaveBeenCalled(); // zero backend calls
+    expect(h.recordClaim).not.toHaveBeenCalled(); // watermark untouched
+    // Rejected on the local watermark read alone — before signature
+    // verification, and with no chain RPC on the hot path.
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('F06-rejects an equal-nonce replay (clients sign a fresh claim per write)', async () => {
+    const h = makeHarness(solanaClaim(6));
+    const res = new MockRes();
+    await run(h.adapter, paidReq(6), res);
+
+    const out = deserializePacket(res.body) as ILPRejectPacket;
+    expect(out.type).toBe(PacketType.REJECT);
+    expect(out.code).toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
+    expect(h.handlePrepare).not.toHaveBeenCalled();
+    expect(h.recordClaim).not.toHaveBeenCalled();
+  });
+
+  it('admits an advancing-nonce claim: crypto gate runs, backend hit, claim recorded', async () => {
+    const h = makeHarness(solanaClaim(6));
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(h.watermarkLookup).toHaveBeenCalledWith(
+      'http:' + SIGNER_PUBKEY,
+      'solana',
+      CHANNEL_ACCOUNT
+    );
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1);
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(h.recordClaim).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+
+  it('first claim on an unknown channel (no watermark) passes to the crypto gate', async () => {
+    const h = makeHarness(null);
+    const res = new MockRes();
+    await run(h.adapter, paidReq(1), res);
+
+    expect(h.watermarkLookup).toHaveBeenCalledTimes(1);
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1);
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+
+  it('fails open to the crypto gate when the watermark read throws', async () => {
+    const h = makeHarness(null);
+    h.watermarkLookup.mockRejectedValueOnce(new Error('db closed'));
+    const res = new MockRes();
+    await run(h.adapter, paidReq(1), res);
+
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+});
+
+describe('IlpHttpAdapter × InboundClaimValidator — claim-value ↔ price binding (#359)', () => {
+  const CHANNEL_ACCOUNT = 'ChanAcct2222222222222222222222222222222222';
+  const SIGNER_PUBKEY = 'SiGnEr222222222222222222222222222222222222';
+  const PROGRAM_ID = '11111111111111111111111111111111';
+
+  const solanaClaim = (nonce: number): SolanaClaimMessage => ({
+    version: '1.0',
+    blockchain: 'solana',
+    messageId: `sol-msg-${nonce}-${Math.random().toString(36).slice(2)}`,
+    timestamp: '2026-07-17T12:00:00.000Z',
+    senderId: 'peer-a',
+    programId: PROGRAM_ID,
+    channelAccount: CHANNEL_ACCOUNT,
+    nonce,
+    transferredAmount: String(1000 * nonce), // cumulative advances 1000/nonce
+    signature: 'c2lnbmF0dXJl',
+    signerPublicKey: SIGNER_PUBKEY,
+    cluster: 'devnet',
+  });
+
+  interface Harness {
+    adapter: IlpHttpAdapter;
+    handlePrepare: jest.Mock;
+    recordClaim: jest.Mock;
+    verifyBalanceProof: jest.Mock;
+    routePriceLookup: jest.Mock;
+  }
+
+  /**
+   * Adapter wrapped around a real validator with both the watermark and the
+   * route-price resolver wired — the full #353+#359 gate over the real HTTP
+   * path, so "backend not hit" is a genuine end-to-end assertion.
+   */
+  const makeHarness = (watermark: BTPClaimMessage | null, routePrice: string | null): Harness => {
+    const verifyBalanceProof = jest.fn(async () => true);
+    const registry = new ChainProviderRegistry();
+    registry.register({
+      chainType: 'solana',
+      chainId: 'solana:devnet',
+      verifyBalanceProof,
+    } as unknown as PaymentChannelProvider);
+
+    const routePriceLookup = jest.fn(() => routePrice);
+    const validator = new InboundClaimValidator(
+      undefined,
+      'g.connector',
+      createMockLogger() as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      registry,
+      jest.fn(async () => watermark),
+      routePriceLookup
+    );
+
+    const handlePrepare = jest.fn(async () => fulfill);
+    const recordClaim = jest.fn(async () => {});
+    const adapter = new IlpHttpAdapter({
+      logger: createMockLogger(),
+      nodeId: 'g.connector',
+      handlePrepare,
+      validateClaim: (pd, pkt, peer) => validator.validate(pd, pkt, peer),
+      recordClaim,
+    });
+    return { adapter, handlePrepare, recordClaim, verifyBalanceProof, routePriceLookup };
+  };
+
+  const paidReq = (nonce: number): MockReq =>
+    new MockReq(serializePacket(createPrepare()), {
+      'ilp-payment-channel-claim': Buffer.from(JSON.stringify(solanaClaim(nonce)), 'utf8').toString(
+        'base64'
+      ),
+    });
+
+  it('F06-rejects an underpaying claim end-to-end: backend NOT hit, claim NOT recorded, no crypto', async () => {
+    // watermark nonce 6 (cumulative 6000) → claim nonce 7 (cumulative 7000):
+    // delta 1000; route price 2000 → underpaid.
+    const h = makeHarness(solanaClaim(6), '2000');
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(res.statusCode).toBe(200);
+    const out = deserializePacket(res.body) as ILPRejectPacket;
+    expect(out.type).toBe(PacketType.REJECT);
+    expect(out.code).toBe(ILPErrorCode.F06_UNEXPECTED_PAYMENT);
+    expect(out.message).toContain('Insufficient claim value');
+    expect(h.handlePrepare).not.toHaveBeenCalled(); // zero backend calls
+    expect(h.recordClaim).not.toHaveBeenCalled();
+    expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+  });
+
+  it('admits an exact-price claim: crypto gate runs, backend hit, claim recorded', async () => {
+    const h = makeHarness(solanaClaim(6), '1000'); // delta 1000 == price
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(h.verifyBalanceProof).toHaveBeenCalledTimes(1);
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(h.recordClaim).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+
+  it('admits an overpaying claim (delta > price)', async () => {
+    const h = makeHarness(solanaClaim(6), '500'); // delta 1000 > price 500
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
+  });
+
+  it('does not enforce value on a forwarded / non-terminated destination (no route price)', async () => {
+    const h = makeHarness(solanaClaim(6), null); // resolver → null
+    const res = new MockRes();
+    await run(h.adapter, paidReq(7), res);
+
+    expect(h.handlePrepare).toHaveBeenCalledTimes(1);
+    expect(deserializePacket(res.body).type).toBe(PacketType.FULFILL);
   });
 });

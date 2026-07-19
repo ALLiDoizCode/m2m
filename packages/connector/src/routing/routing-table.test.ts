@@ -515,3 +515,105 @@ describe('RoutingTable', () => {
     });
   });
 });
+
+/**
+ * Learned-route support (toon-meta#153): soft-state installs that bypass the
+ * persistence sink and never override config/runtime routes.
+ */
+describe('RoutingTable learned routes', () => {
+  const createSink = (): {
+    saveRoute: jest.Mock;
+    deleteRoute: jest.Mock;
+  } => ({ saveRoute: jest.fn(), deleteRoute: jest.fn() });
+
+  it('installs a learned route without touching the persistence sink', () => {
+    const routingTable = new RoutingTable();
+    const sink = createSink();
+    routingTable.setPersistence(sink);
+
+    expect(routingTable.addLearnedRoute('g.learned', 'peer-a', -100)).toBe(true);
+    expect(routingTable.getNextHop('g.learned.dest')).toBe('peer-a');
+    expect(routingTable.isLearnedRoute('g.learned')).toBe(true);
+    expect(sink.saveRoute).not.toHaveBeenCalled();
+  });
+
+  it('refuses to overwrite an existing config/runtime route for the same prefix', () => {
+    const routingTable = new RoutingTable([{ prefix: 'g.alice', nextHop: 'peer-config' }]);
+
+    expect(routingTable.addLearnedRoute('g.alice', 'peer-learned', -100)).toBe(false);
+    expect(routingTable.getNextHop('g.alice.wallet')).toBe('peer-config');
+    expect(routingTable.isLearnedRoute('g.alice')).toBe(false);
+  });
+
+  it('allows re-learning (updating) an already-learned prefix', () => {
+    const routingTable = new RoutingTable();
+    routingTable.addLearnedRoute('g.learned', 'peer-a', -100);
+    expect(routingTable.addLearnedRoute('g.learned', 'peer-b', -100)).toBe(true);
+    expect(routingTable.getNextHop('g.learned.x')).toBe('peer-b');
+  });
+
+  it('withdraws only learned routes, without touching the persistence sink', () => {
+    const routingTable = new RoutingTable([{ prefix: 'g.config', nextHop: 'peer-config' }]);
+    const sink = createSink();
+    routingTable.setPersistence(sink);
+    routingTable.addLearnedRoute('g.learned', 'peer-a', -100);
+
+    expect(routingTable.removeLearnedRoute('g.config')).toBe(false);
+    expect(routingTable.getNextHop('g.config.x')).toBe('peer-config');
+
+    expect(routingTable.removeLearnedRoute('g.learned')).toBe(true);
+    expect(routingTable.getNextHop('g.learned.x')).toBeNull();
+    expect(routingTable.removeLearnedRoute('g.learned')).toBe(false);
+    expect(sink.deleteRoute).not.toHaveBeenCalled();
+  });
+
+  it('promotes a learned prefix to hard state when addRoute claims it', () => {
+    const routingTable = new RoutingTable();
+    const sink = createSink();
+    routingTable.setPersistence(sink);
+
+    routingTable.addLearnedRoute('g.shared', 'peer-learned', -100);
+    routingTable.addRoute('g.shared', 'peer-runtime', 0);
+
+    expect(sink.saveRoute).toHaveBeenCalledWith({
+      prefix: 'g.shared',
+      nextHop: 'peer-runtime',
+      priority: 0,
+      source: 'runtime',
+    });
+    expect(routingTable.isLearnedRoute('g.shared')).toBe(false);
+    // A learned withdraw must no longer remove it.
+    expect(routingTable.removeLearnedRoute('g.shared')).toBe(false);
+    expect(routingTable.getNextHop('g.shared.x')).toBe('peer-runtime');
+  });
+
+  it('validates the ILP prefix on learned installs', () => {
+    const routingTable = new RoutingTable();
+    expect(() => routingTable.addLearnedRoute('not..valid', 'peer-a', -100)).toThrow(
+      'Invalid ILP address prefix'
+    );
+  });
+
+  it('reports learned routes via getLearnedRoutes and clears them on removeRoute', () => {
+    const routingTable = new RoutingTable([{ prefix: 'g.config', nextHop: 'peer-config' }]);
+    routingTable.addLearnedRoute('g.learned', 'peer-a', -100);
+
+    expect(routingTable.getLearnedRoutes()).toEqual([
+      { prefix: 'g.learned', nextHop: 'peer-a', priority: -100 },
+    ]);
+
+    routingTable.removeRoute('g.learned');
+    expect(routingTable.getLearnedRoutes()).toEqual([]);
+    expect(routingTable.isLearnedRoute('g.learned')).toBe(false);
+  });
+
+  it('keeps longest-prefix semantics: a more specific learned route still wins', () => {
+    // Config routes stay authoritative for their own prefix, but a learned
+    // route for a LONGER prefix legitimately captures more-specific traffic.
+    const routingTable = new RoutingTable([{ prefix: 'g.net', nextHop: 'peer-config' }]);
+    routingTable.addLearnedRoute('g.net.far', 'peer-learned', -100);
+
+    expect(routingTable.getNextHop('g.net.far.dest')).toBe('peer-learned');
+    expect(routingTable.getNextHop('g.net.other')).toBe('peer-config');
+  });
+});

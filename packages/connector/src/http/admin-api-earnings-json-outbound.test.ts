@@ -157,10 +157,10 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     mockBTPClientManager = {
       addPeer: jest.fn().mockResolvedValue(undefined),
       removePeer: jest.fn().mockResolvedValue(undefined),
-      getPeerIds: jest.fn().mockReturnValue(['mill-01', 'solo-payout', 'inbound-only']),
+      getPeerIds: jest.fn().mockReturnValue(['swap-01', 'solo-payout', 'inbound-only']),
       getPeerStatus: jest.fn().mockReturnValue(
         new Map([
-          ['mill-01', true],
+          ['swap-01', true],
           ['solo-payout', true],
           ['inbound-only', true],
         ])
@@ -204,13 +204,13 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     sentClaimsQueries = new SentClaimsQueries(sentClaimsDb, mockLogger);
 
     // Fixture:
-    //   mill-01: bidirectional. Inbound 100k & 250k cumulative on channel A.
+    //   swap-01: bidirectional. Inbound 100k & 250k cumulative on channel A.
     //            Outbound 50k & 150k cumulative on channel B.
     //   solo-payout: outbound-only. 400k cumulative on channel C.
     //   inbound-only: inbound-only. 75k cumulative on channel D.
     insertReceivedClaim({
       messageId: 'rx-1',
-      peerId: 'mill-01',
+      peerId: 'swap-01',
       channelId: '0xchan-A',
       tokenAddress: '0xUSDC',
       transferredAmount: '100000',
@@ -219,7 +219,7 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     });
     insertReceivedClaim({
       messageId: 'rx-2',
-      peerId: 'mill-01',
+      peerId: 'swap-01',
       channelId: '0xchan-A',
       tokenAddress: '0xUSDC',
       transferredAmount: '250000',
@@ -228,7 +228,7 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     });
     insertSentClaim({
       messageId: 'tx-1',
-      peerId: 'mill-01',
+      peerId: 'swap-01',
       channelId: '0xchan-B',
       tokenAddress: '0xUSDC',
       transferredAmount: '50000',
@@ -237,7 +237,7 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     });
     insertSentClaim({
       messageId: 'tx-2',
-      peerId: 'mill-01',
+      peerId: 'swap-01',
       channelId: '0xchan-B',
       tokenAddress: '0xUSDC',
       transferredAmount: '150000',
@@ -277,9 +277,9 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
 
   it('[AC 1] populates claimsSentTotal from the sent_claims table (latest nonce per channel)', async () => {
     const res = await request(app).get('/admin/earnings.json').expect(200);
-    const mill = res.body.peers.find((p: { peerId: string }) => p.peerId === 'mill-01');
-    expect(mill).toBeDefined();
-    const usdc = mill.byAsset.find((a: { assetCode: string }) => a.assetCode === 'USDC');
+    const swap = res.body.peers.find((p: { peerId: string }) => p.peerId === 'swap-01');
+    expect(swap).toBeDefined();
+    const usdc = swap.byAsset.find((a: { assetCode: string }) => a.assetCode === 'USDC');
     expect(usdc.claimsReceivedTotal).toBe('250000'); // max-nonce inbound
     expect(usdc.claimsSentTotal).toBe('150000'); // max-nonce outbound
     // netBalance = sent - received = 150k - 250k = -100k (peer still owes us 100k)
@@ -333,7 +333,7 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     const res = await request(app).get('/admin/earnings.json').expect(200);
     const outboundMill = res.body.recentClaims.filter(
       (c: { peerId: string; direction: string }) =>
-        c.peerId === 'mill-01' && c.direction === 'outbound'
+        c.peerId === 'swap-01' && c.direction === 'outbound'
     );
     // Two outbound rows on channel B: cumulative 50k → 150k. Newest first:
     //   tx-2 (150k): delta = 150k - 50k = 100k
@@ -349,8 +349,8 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
     const noOutboundApp = await createApp({ sentClaimsQueries: undefined });
     const res = await request(noOutboundApp).get('/admin/earnings.json').expect(200);
 
-    const mill = res.body.peers.find((p: { peerId: string }) => p.peerId === 'mill-01');
-    const usdc = mill.byAsset.find((a: { assetCode: string }) => a.assetCode === 'USDC');
+    const swap = res.body.peers.find((p: { peerId: string }) => p.peerId === 'swap-01');
+    const usdc = swap.byAsset.find((a: { assetCode: string }) => a.assetCode === 'USDC');
     // Inbound still present; outbound masked to "0".
     expect(usdc.claimsReceivedTotal).toBe('250000');
     expect(usdc.claimsSentTotal).toBe('0');
@@ -373,7 +373,7 @@ describe('Admin API GET /admin/earnings.json — outbound wiring (Story 37.7)', 
   it('connectorFees remains an inbound-only approximation', async () => {
     const feeApp = await createApp({ connectorFeePercentage: 1 });
     const res = await request(feeApp).get('/admin/earnings.json').expect(200);
-    // Total inbound USDC = 250k (mill-01) + 75k (inbound-only) = 325k. 1% fee = 3.25k.
+    // Total inbound USDC = 250k (swap-01) + 75k (inbound-only) = 325k. 1% fee = 3.25k.
     const usdcFee = res.body.connectorFees.find(
       (f: { assetCode: string }) => f.assetCode === 'USDC'
     );

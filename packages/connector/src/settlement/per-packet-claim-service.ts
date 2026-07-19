@@ -16,6 +16,27 @@
  * - Returns null if no channel exists for a peer (caller must handle as rejection)
  * - Delegates signing to chain-appropriate PaymentChannelProvider via ChainProviderRegistry
  *
+ * ## Reject semantics — claims are issued at FORWARD time, not FULFILL time (issue #316)
+ *
+ * {@link generateClaimForPacket} is called by the PacketHandler *before* it forwards
+ * the PREPARE to the next hop, and it unconditionally advances the channel's cumulative
+ * amount + nonce, signs the balance proof, sets it as `latestClaim`, and persists it.
+ * The signed claim then rides the forwarded PREPARE in BTP protocolData, so the
+ * counterparty holds it the instant the PREPARE arrives (its ClaimReceiver records the
+ * claim at ingest, independent of the eventual FULFILL/REJECT).
+ *
+ * There is therefore NO way to "un-issue" a claim if the forward later REJECTs: the
+ * counterparty already holds a valid signed cumulative proof and can redeem it on-chain,
+ * and this service's own `latestClaim` (read by SettlementExecutor's auto-drive) keeps
+ * the rejected packet's δ folded into the settleable cumulative. This is a *deliberate*
+ * property of the per-packet-claim model (issue #76): the payer pays for the forward
+ * ATTEMPT so the receiving connector is never exposed to an unpaid forward. The only
+ * state reset is {@link resetChannel}, and it is settlement-scoped (post cooperative
+ * settle), never per-reject. A payer-side "void on reject" is intentionally absent —
+ * it would be unsound (the peer already holds the proof) and would break channel
+ * monotonicity (the peer's ClaimReceiver requires strictly increasing nonce + amount).
+ * See docs/local-delivery-fulfillment-contract.md § "Reject semantics" and issue #316.
+ *
  * @module settlement/per-packet-claim-service
  */
 
@@ -149,7 +170,14 @@ export class PerPacketClaimService {
 
     const { channelId } = ctx;
 
-    // Increment cumulative transferred and nonce (synchronous — safe under Node.js single thread)
+    // Increment cumulative transferred and nonce (synchronous — safe under Node.js single thread).
+    //
+    // Issue #316: this advance is unconditional and happens at FORWARD time. If the
+    // packet this claim is minted for is later REJECTed downstream, this δ is NOT rolled
+    // back — the cumulative is monotonic, the peer already receives the signed proof on
+    // the forwarded PREPARE, and `latestClaim` (below) drives on-chain settlement of the
+    // rejected δ too. That is the intended per-packet-claim contract, not a leak to patch
+    // here. See the module-level "Reject semantics" note and issue #316.
     const prevCumulative = this.cumulativeTransferred.get(channelId) ?? 0n;
     const newCumulative = prevCumulative + amount;
     this.cumulativeTransferred.set(channelId, newCumulative);
@@ -174,12 +202,36 @@ export class PerPacketClaimService {
     // lockedAmount and locksRoot are EVM-specific concepts; Solana providers ignore them
     // but the chain-agnostic SignBalanceProofParams interface requires them.
     const locksRoot = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+    // Mina value binding (issue #359 / toon-meta#168): the signed commitment is
+    // `Poseidon([balanceA, balanceB, salt])`, and the inbound gate OPENS that
+    // commitment by recomputing the same hash from the wire `transferredAmount`
+    // (=balanceA), `balanceB`, and `salt`. For that to verify, the salt and
+    // balanceB we SIGN over must be exactly what we put on the wire. So generate
+    // the per-session salt BEFORE signing (as a decimal, Field-parseable string —
+    // the old hex form threw in `safeBigInt` and left the salt effectively 0),
+    // and sign with `balanceB = 0` for the unidirectional per-packet case.
+    let minaBalanceB: string | undefined;
+    let minaSalt: string | undefined;
+    if (ctx.blockchain === 'mina') {
+      if (!ctx.minaSalt) {
+        // 128-bit random rendered as a DECIMAL string (well within the Pallas
+        // field), so signer, wire, gate, and on-chain settlement all parse it
+        // identically via BigInt/Field.
+        ctx.minaSalt = BigInt('0x' + randomBytes(16).toString('hex')).toString();
+      }
+      minaSalt = ctx.minaSalt;
+      minaBalanceB = '0';
+    }
+
     const signature = await ctx.provider.signBalanceProof({
       channelId,
       nonce: newNonce,
       transferredAmount: newCumulative.toString(),
       lockedAmount: '0',
       locksRoot,
+      ...(minaBalanceB !== undefined && { balanceB: minaBalanceB }),
+      ...(minaSalt !== undefined && { salt: minaSalt }),
     });
 
     // Construct self-describing claim message
@@ -244,9 +296,11 @@ export class PerPacketClaimService {
             `but they were not populated for channel ${channelId}`
         );
       }
-      // Generate per-session salt on first claim and cache it
-      if (!ctx.minaSalt) {
-        ctx.minaSalt = randomBytes(16).toString('hex');
+      // Per-session salt was generated (as a decimal string) and signed over
+      // above, before signBalanceProof — see the Mina value-binding note there.
+      // Assert it for the type system (unreachable: set in the mina branch above).
+      if (minaSalt === undefined) {
+        throw new Error('Mina salt was not generated before claim construction (unreachable)');
       }
       const minaClaim: MinaClaimMessage = {
         version: '1.0',
@@ -262,10 +316,14 @@ export class PerPacketClaimService {
         balanceCommitment: newCumulative.toString(),
         // transferredAmount carries participant A's plaintext cumulative balance
         // (the same value that feeds balanceCommitment). It drives the on-chain
-        // claimFromChannel in SettlementExecutor. balanceB/signatureB are left
-        // undefined here: the per-packet path is unidirectional; dual-party
-        // fields only apply to true bidirectional channels.
+        // claimFromChannel in SettlementExecutor.
         transferredAmount: newCumulative.toString(),
+        // balanceB = 0 for the unidirectional per-packet case, emitted EXPLICITLY
+        // (issue #359 / toon-meta#168) so the inbound gate can reconstruct the
+        // Poseidon commitment preimage `[transferredAmount, balanceB, salt]` and
+        // bind claim value to route price. Its presence is also the value-binding
+        // rollout marker the gate keys on.
+        balanceB: '0',
         nonce: newNonce,
         // signBalanceProof returns the serialized (raw-JSON) zk-SNARK proof.
         // The canonical wire encoding for a Mina claim `proof` is base64-encoded
@@ -273,7 +331,7 @@ export class PerPacketClaimService {
         // and the settlement-side verifier base64-decodes before JSON.parse.
         // Encoding here keeps our own produced claims valid against that gate.
         proof: Buffer.from(signature, 'utf8').toString('base64'),
-        salt: ctx.minaSalt,
+        salt: minaSalt,
         // Self-describing signer pubkey (Issue #114): lets the receiver verify the
         // signature against the correct key and resolve participant identity for
         // the on-chain claimFromChannel of an externally-opened channel.

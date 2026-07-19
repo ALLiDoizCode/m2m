@@ -36,7 +36,7 @@ All paths below are relative to `/home/jonathan/Documents/connector` unless note
 
 The requirements doc §5.1 "Implementation hint" states:
 
-> The Prometheus collector already tracks per-peer counters by label (the Prometheus `/metrics` output will contain lines like `toon_packets_forwarded{peer="town"} 42`). Exposing the same map as JSON is a straightforward adapter over the existing registry.
+> The Prometheus collector already tracks per-peer counters by label (the Prometheus `/metrics` output will contain lines like `toon_packets_forwarded{peer="relay"} 42`). Exposing the same map as JSON is a straightforward adapter over the existing registry.
 
 **This is not the case in the current code.**
 
@@ -117,7 +117,7 @@ These are things we need from Town before we can finalize the connector-side sto
 1. **Label cardinality.** The proposed `peers[]` array in `AdminMetricsJson` grows with peer count. For a node operator running 1–3 peers this is trivial; if a connector ever fronts hundreds of peers, the same label cardinality hits the Prom registry. Is the dashboard's expected peer-count ceiling in the 1–10 range? (We'll size `prom-client` usage accordingly.)
 2. **`lastPacketAt` semantics.** "Last forwarded" or "last seen in either direction"? The instrumentation cost differs slightly.
 3. **Auth on `/admin/metrics.json`.** Town's §6 confirms the API-key allowlist is acceptable. Confirming: the dashboard WebSocket in Story 21.8 passes the API key on the initial HTTP upgrade — the same mechanism will work for a plain REST GET, right?
-4. **Ordering constraint on `/admin/metrics.json` vs. a `peerId` filter.** Do you want `GET /admin/metrics.json?peerId=town` as a per-peer convenience route, or is filtering client-side fine given small peer counts?
+4. **Ordering constraint on `/admin/metrics.json` vs. a `peerId` filter.** Do you want `GET /admin/metrics.json?peerId=relay` as a per-peer convenience route, or is filtering client-side fine given small peer counts?
 5. **`bytesReceived`.** Marked "nice-to-have" in the requirements doc. Is it still nice-to-have if it doubles the instrumentation surface in the ILP path, or can we ship Ask 1 without it and add later?
 
 ---
@@ -182,9 +182,9 @@ This finding has immediate consequences on Town's side too:
 
 ### 9.2 Answers to §4 open questions
 
-**Q1 — Label cardinality / peer-count ceiling.** Town's local connector fronts exactly 3 child peers by default (`town`, `mill`, `dvm`). Operators may add remote peers via `POST /admin/peers` (see `docker/src/shared.ts:325`), but the connector dashboard is a per-operator local view — realistic ceiling is **≤ 10 peers**. `prom-client` with default Registry is safe at this cardinality. If the connector is ever deployed as a shared hub fronting hundreds of peers, that's a different deployment profile than connector serves.
+**Q1 — Label cardinality / peer-count ceiling.** Town's local connector fronts exactly 3 child peers by default (`relay`, `swap`, `store`). Operators may add remote peers via `POST /admin/peers` (see `docker/src/shared.ts:325`), but the connector dashboard is a per-operator local view — realistic ceiling is **≤ 10 peers**. `prom-client` with default Registry is safe at this cardinality. If the connector is ever deployed as a shared hub fronting hundreds of peers, that's a different deployment profile than connector serves.
 
-**Q2 — `lastPacketAt` semantics.** **Last seen in either direction.** Rationale: a Town-type node that only consumes events (no outbound publishing) would otherwise appear idle even when actively routing. "Is this node doing work?" is the operator question the field is designed to answer. A single `lastPacketAt: ISO-8601 | null` is enough; Town does not need separate `lastSentAt` / `lastReceivedAt` fields.
+**Q2 — `lastPacketAt` semantics.** **Last seen in either direction.** Rationale: a relay-type node that only consumes events (no outbound publishing) would otherwise appear idle even when actively routing. "Is this node doing work?" is the operator question the field is designed to answer. A single `lastPacketAt: ISO-8601 | null` is enough; Town does not need separate `lastSentAt` / `lastReceivedAt` fields.
 
 **Q3 — Auth on `/admin/metrics.json`.** This needs a short thread of its own because Town's current wrapper doesn't match your assumption:
 

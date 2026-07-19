@@ -26,10 +26,10 @@ Story 37.4 hard-codes `claimsSentTotal = "0"` and omits outbound rows from `rece
 
 ```gherkin
 Scenario: Outbound claim totals appear on the earnings endpoint
-  Given the connector has sent 3 claims to peer 'mill-01' on channel 0xchan-mill:
+  Given the connector has sent 3 claims to peer 'swap-01' on channel 0xchan-swap:
     cumulative 100_000, then 250_000, then 400_000 on nonce 1, 2, 3
   When GET /admin/earnings.json is requested
-  Then peers[peerId='mill-01'].byAsset[assetCode='USDC'].claimsSentTotal == '400000'
+  Then peers[peerId='swap-01'].byAsset[assetCode='USDC'].claimsSentTotal == '400000'
   And netBalance == claimsSentTotal − claimsReceivedTotal
 ```
 
@@ -37,7 +37,7 @@ Scenario: Outbound claim totals appear on the earnings endpoint
 
 ```gherkin
 Scenario: Outbound claims appear in the recentClaims ticker
-  Given claims have been both sent to and received from 'mill-01'
+  Given claims have been both sent to and received from 'swap-01'
   When GET /admin/earnings.json is requested
   Then recentClaims contains entries with direction='outbound' alongside direction='inbound'
   And each outbound entry's amount is the per-claim delta (cumulative − prior)

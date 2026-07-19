@@ -3,6 +3,7 @@ node_modules/
 
 # Build outputs
 dist/
+dist-esm/
 *.tsbuildinfo
 *.js.map
 *.d.ts.map

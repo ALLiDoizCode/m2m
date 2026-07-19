@@ -36,14 +36,14 @@ Scenario: prom-client is a production dependency of packages/connector
 
 ```gherkin
 Scenario: ILP forwarding path records per-peer counters
-  Given a PacketHandler processing an ILP PREPARE from peer 'town'
-  When the packet is forwarded to peer 'mill'
-  Then toon_packets_forwarded_total{peer="mill"} increments by 1
-  And toon_bytes_sent_total{peer="mill"} increments by packet.byteLength
-  And toon_last_packet_timestamp_seconds{peer="mill"} is updated to Date.now()/1000
+  Given a PacketHandler processing an ILP PREPARE from peer 'relay'
+  When the packet is forwarded to peer 'swap'
+  Then toon_packets_forwarded_total{peer="swap"} increments by 1
+  And toon_bytes_sent_total{peer="swap"} increments by packet.byteLength
+  And toon_last_packet_timestamp_seconds{peer="swap"} is updated to Date.now()/1000
   When the packet is REJECTED downstream
-  Then toon_packets_rejected_total{peer="mill"} increments by 1
-  And an incoming packet from 'mill' updates toon_last_packet_timestamp_seconds{peer="mill"} as well (either-direction semantic, per §9.2 Q2)
+  Then toon_packets_rejected_total{peer="swap"} increments by 1
+  And an incoming packet from 'swap' updates toon_last_packet_timestamp_seconds{peer="swap"} as well (either-direction semantic, per §9.2 Q2)
 ```
 
 ### AC 3: Metrics middleware supplied to HealthServer

@@ -1,7 +1,7 @@
 /**
  * ILP Send Handler
  *
- * Handles `POST /admin/ilp/send` requests from the BLS to initiate outbound ILP packets.
+ * Handles `POST /admin/ilp/send` requests from the app to initiate outbound ILP packets.
  * Validates the request, constructs an ILP Prepare packet, sends it via the injected
  * `sendPacket` callback, and maps the response back to HTTP.
  *
@@ -66,6 +66,29 @@ export function validateIlpSendRequest(body: Record<string, unknown>): string | 
   // Validate data size
   if (decodedData.length > MAX_DATA_SIZE) {
     return `Data exceeds maximum size of ${MAX_DATA_SIZE} bytes`;
+  }
+
+  // Validate optional condition (sender-chosen execution condition,
+  // issue #309/PR #310 egress symmetry — base64, exactly 32 bytes, non-zero)
+  if (body.condition !== undefined) {
+    if (typeof body.condition !== 'string') {
+      return 'condition must be a base64 string';
+    }
+    let decodedCondition: Buffer;
+    try {
+      decodedCondition = Buffer.from(body.condition, 'base64');
+      if (decodedCondition.toString('base64') !== body.condition) {
+        return 'condition must be valid base64';
+      }
+    } catch {
+      return 'condition must be valid base64';
+    }
+    if (decodedCondition.length !== 32) {
+      return `condition must decode to exactly 32 bytes, got ${decodedCondition.length}`;
+    }
+    if (decodedCondition.every((b) => b === 0)) {
+      return 'condition must not be all-zero (omit it for unconditional packets)';
+    }
   }
 
   // Validate optional timeoutMs
@@ -163,14 +186,16 @@ export class IlpSendHandler {
         expiresAt = new Date(Date.now() + timeoutMs);
       }
 
-      // Construct SendPacketParams
+      // Construct SendPacketParams. A sender-chosen `condition` (issue #309/
+      // PR #310 egress symmetry) rides the PREPARE verbatim; the connector
+      // verifies the returned fulfillment against it and surfaces the
+      // preimage on the response.
       const params: SendPacketParams = {
         destination: request.destination,
         amount: BigInt(request.amount),
         expiresAt: expiresAt,
         data: rawDataBytes,
-        // Note: condition is handled at the protocol level for conditional transfers
-        // The connector validates fulfillment against execution condition when forwarding
+        ...(request.condition !== undefined ? { executionCondition: request.condition } : {}),
       };
 
       // Send packet with timeout

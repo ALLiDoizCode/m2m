@@ -58,6 +58,7 @@ import type { PacketSenderFn, IsReadyFn } from './ilp-send-handler';
 import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 import type { PeerRelation, RouteTermination, TerminationChain } from '../config/types';
 import { validateRouteTermination, toRouteTermination } from '../config/types';
+import type { DiscoveredNode } from '../discovery/discovered-node-registry';
 
 /**
  * Admin API Configuration
@@ -215,6 +216,51 @@ export interface AdminAPIConfig {
    * not applied (the registry seam is simply absent).
    */
   routeTerminationRegistry?: RouteTerminationSink;
+
+  /**
+   * Optional discovered-node reader (toon-meta#153, discovered-vs-peered).
+   * When provided, `GET /admin/discovered-nodes` lists every node known from
+   * kind:10032 relay ingest with its `funded` flag, so an operator can see
+   * discovered-but-unfunded nodes and choose which to promote via the
+   * EXISTING `POST /admin/peers` (the entry's `btpEndpoint` is the `url`;
+   * its `settlementAddresses`/`supportedChains` seed the settlement block).
+   * When omitted (route learning disabled / test fixtures), the endpoint
+   * returns an empty list.
+   */
+  getDiscoveredNodes?: () => DiscoveredNode[];
+
+  /**
+   * Optional funded-channel cap gate (toon-meta#153). When provided,
+   * `POST /admin/peers` with a `settlement` block calls this with the peer id
+   * before any mutation; a non-null return is the rejection message (HTTP
+   * 409), byte-identical to the error `ConnectorNode.registerPeer` throws
+   * (cross-surface parity). `PUT /admin/peers/:peerId` runs the same gate,
+   * but only for a FIRST-TIME settlement add (no existing `settlementPeers`
+   * entry) — the unfunded → funded transition that consumes a slot (issue
+   * #344); settlement updates to an already-funded peer stay exempt. When
+   * omitted, no cap is enforced on this surface.
+   */
+  checkFundedChannelCap?: (peerId: string) => string | null;
+
+  /**
+   * Optional runtime peer-URL recorder (issue #345, toon-meta#153). When
+   * provided, `POST /admin/peers` calls this after a fresh BTP peer
+   * registration with the peer's id and `url` — the same bookkeeping
+   * `ConnectorNode.registerPeer` performs — so the discovered-node registry's
+   * `btpEndpoint === url` funded-matching fallback also covers peers promoted
+   * via this surface (otherwise the discovered entry stays `funded: false`
+   * until a restart replays the registration). When omitted, no URL is
+   * recorded on this surface.
+   */
+  recordRuntimePeerUrl?: (peerId: string, url: string) => void;
+
+  /**
+   * Symmetric un-record hook for {@link recordRuntimePeerUrl}. When provided,
+   * `DELETE /admin/peers/:peerId` calls this after removing the peer — the
+   * same cleanup `ConnectorNode.removePeer` performs — so a removed peer's
+   * URL no longer funded-matches its discovered entry.
+   */
+  forgetRuntimePeerUrl?: (peerId: string) => void;
 }
 
 /**
@@ -622,6 +668,10 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     httpPeerEgress,
     setPeerProtocol,
     routeTerminationRegistry,
+    getDiscoveredNodes,
+    checkFundedChannelCap,
+    recordRuntimePeerUrl,
+    forgetRuntimePeerUrl,
   } = config;
   const log = logger.child({ component: 'AdminAPI' });
 
@@ -894,6 +944,18 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         }
       }
 
+      // Funded-peering admission (toon-meta#153, discovered-vs-peered): a
+      // settlement block is the intent to FUND a channel; the cap gate mirrors
+      // ConnectorNode.registerPeer with a byte-identical message. Checked
+      // BEFORE any mutation so a rejected request leaves no partial state.
+      if (body.settlement && checkFundedChannelCap) {
+        const capError = checkFundedChannelCap(body.id);
+        if (capError) {
+          res.status(409).json({ error: 'Conflict', message: capError });
+          return;
+        }
+      }
+
       // Relation ↔ route admission validation + child auto-route (Phase 2),
       // mirroring ConnectorNode.registerPeer() for cross-surface parity. The
       // connector's self-prefixes are the routes terminating locally; when none
@@ -946,6 +1008,12 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
           };
 
           await btpClientManager.addPeer(peer);
+
+          // Discovered-vs-peered (issue #345): record the runtime peer's BTP
+          // url — the same bookkeeping ConnectorNode.registerPeer performs —
+          // so the discovered registry's endpoint-fallback funded matching
+          // covers peers promoted via this surface without a restart.
+          recordRuntimePeerUrl?.(body.id, body.url);
 
           log.info(
             {
@@ -1149,6 +1217,10 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
 
       // Remove peer
       await btpClientManager.removePeer(peerId);
+      // Discovered-vs-peered (issue #345): drop the runtime-url record — the
+      // same cleanup ConnectorNode.removePeer performs — so the removed peer
+      // immediately stops funded-matching its discovered entry.
+      forgetRuntimePeerUrl?.(peerId);
       log.info({ event: 'admin_peer_removed', peerId }, `Removed peer: ${peerId}`);
 
       // Remove settlement config if exists
@@ -1249,6 +1321,28 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
         }
       }
 
+      // Funded-peering admission (toon-meta#153, issue #344): a FIRST-TIME
+      // settlement add on an existing route-only peer is the unfunded → funded
+      // transition that consumes a peeringPolicy.maxFundedChannels slot, so it
+      // runs the same injected cap gate as POST /admin/peers with the same 409
+      // shape (cross-surface parity). Updating an already-funded peer's
+      // settlement merges config without consuming a new slot (mirroring
+      // ConnectorNode._checkFundedChannelCap's already-funded early return),
+      // and routes-only updates never consult the gate. Checked BEFORE any
+      // mutation so a rejected request leaves no partial state.
+      if (
+        body.settlement &&
+        settlementPeers &&
+        !settlementPeers.has(peerId) &&
+        checkFundedChannelCap
+      ) {
+        const capError = checkFundedChannelCap(peerId);
+        if (capError) {
+          res.status(409).json({ error: 'Conflict', message: capError });
+          return;
+        }
+      }
+
       // Update settlement config if provided
       if (body.settlement && settlementPeers) {
         const s = body.settlement;
@@ -1311,6 +1405,41 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.error({ event: 'admin_api_error', error: errorMessage }, 'Failed to update peer');
+      res.status(500).json({ error: 'Internal server error', message: errorMessage });
+    }
+  });
+
+  /**
+   * GET /admin/discovered-nodes (toon-meta#153, discovered-vs-peered)
+   *
+   * List every node known from kind:10032 relay ingest — the free, unbounded
+   * DISCOVERED set — each entry flagged `funded` when a live registered peer
+   * currently maps to it (matched by configured `nip59PublicKey` pubkey, or
+   * `btpEndpoint === peer.url` as fallback).
+   *
+   * Response schema note: there is deliberately NO promote endpoint. To fund
+   * a discovered-but-unfunded node, use the EXISTING `POST /admin/peers`:
+   * the entry supplies `btpEndpoint` (the peer `url`) plus settlement hints
+   * (`supportedChains`, `settlementAddresses`, `assetCode`/`assetScale`).
+   * Admission is bounded by `peeringPolicy.maxFundedChannels`.
+   */
+  router.get('/discovered-nodes', (_req: Request, res: Response) => {
+    try {
+      const nodes = getDiscoveredNodes ? getDiscoveredNodes() : [];
+      res.json({
+        nodeId,
+        discoveredCount: nodes.length,
+        fundedCount: nodes.filter((n) => n.funded).length,
+        // Promote a node with POST /admin/peers (url = node.btpEndpoint);
+        // no dedicated promote endpoint exists by design.
+        nodes,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(
+        { event: 'admin_api_error', error: errorMessage },
+        'Failed to list discovered nodes'
+      );
       res.status(500).json({ error: 'Internal server error', message: errorMessage });
     }
   });

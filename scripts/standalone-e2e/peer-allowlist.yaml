@@ -7,7 +7,7 @@ logLevel: warn
 
 # Tier-3 topology (see docs): connector binds admin API on all interfaces
 # inside the container but ONLY accepts calls from docker bridge subnets.
-# The admin port is NOT published to the host. The BLS, on the same compose
+# The admin port is NOT published to the host. The app, on the same compose
 # network, reaches the admin API at http://<service-name>:8081 and its source
 # IP falls in the bridge CIDR so the allowlist accepts it. External traffic
 # (internet, other docker networks) has no source IP in these ranges.
@@ -21,7 +21,7 @@ adminApi:
 
 localDelivery:
   enabled: true
-  handlerUrl: http://standalone-allowlist-bls:3100
+  handlerUrl: http://standalone-allowlist-app:3100
   timeout: 30000
 
 peers: []

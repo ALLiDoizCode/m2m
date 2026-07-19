@@ -72,21 +72,21 @@ describe('ConnectorAdminClient', () => {
 
   it('lists routes through the typed client', async () => {
     mockRoutingTable.getAllRoutes.mockReturnValue([
-      { prefix: 'g.connector.town', nextHop: 'town', priority: 0 },
+      { prefix: 'g.connector.relay', nextHop: 'relay', priority: 0 },
     ]);
     const result = (await client.listRoutes()) as { routes: Array<{ prefix: string }> };
-    expect(result.routes).toEqual([{ prefix: 'g.connector.town', nextHop: 'town', priority: 0 }]);
+    expect(result.routes).toEqual([{ prefix: 'g.connector.relay', nextHop: 'relay', priority: 0 }]);
   });
 
   it('adds a route through the typed client', async () => {
-    await client.addRoute({ prefix: 'g.connector.mill', nextHop: 'mill', priority: 3 });
-    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.mill', 'mill', 3);
+    await client.addRoute({ prefix: 'g.connector.swap', nextHop: 'swap', priority: 3 });
+    expect(mockRoutingTable.addRoute).toHaveBeenCalledWith('g.connector.swap', 'swap', 3);
   });
 
   it('removes a peer through the typed client', async () => {
-    mockBTPClientManager.getPeerIds.mockReturnValue(['town']);
-    await client.removePeer('town');
-    expect(mockBTPClientManager.removePeer).toHaveBeenCalledWith('town');
+    mockBTPClientManager.getPeerIds.mockReturnValue(['relay']);
+    await client.removePeer('relay');
+    expect(mockBTPClientManager.removePeer).toHaveBeenCalledWith('relay');
   });
 
   it('throws ConnectorAdminError with status + body on a 4xx', async () => {

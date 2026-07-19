@@ -180,7 +180,7 @@ Scenario: Connector contract suite asserts the documented response shape
 
 (Per issue #58 §"Out of scope" — rejected on the townhouse side, listed here so they don't sneak in during implementation.)
 
-- Adding `'town' | 'mill' | 'dvm'` node-type knowledge to the connector — layering violation; the connector is a generic ILP router. Townhouse owns the type concept.
+- Adding `'relay' | 'swap' | 'store'` node-type knowledge to the connector — layering violation; the connector is a generic ILP router. Townhouse owns the type concept.
 - Per-node-type endpoints — same reason.
 - Time-windowed earnings — Townhouse maintains its own time-series via hourly snapshots; no upstream coupling needed.
 - Forecast/estimated-earnings endpoint — deferred to Townhouse v2.

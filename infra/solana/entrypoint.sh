@@ -35,7 +35,19 @@ cleanup() {
 }
 trap cleanup TERM INT
 
-solana-test-validator --reset --ledger "$LEDGER_DIR" --limit-ledger-size 50000000 &
+# --limit-ledger-size caps how many shreds the rocksdb ledger retains. NOTE the
+# `solana-test-validator` default is only 10000 shreds (NOT the full validator's
+# 200,000,000) — so the old explicit 50,000,000 here was a ~5000x override that
+# let rocksdb grow to ~63 GB in ~21h and fill the 80 GB devnet box's disk. When
+# the disk is full the validator silently STOPS producing blocks (slot freezes)
+# while /health still returns "ok", so faucet/settlement writes hang then 500.
+# 10,000,000 shreds bounds the ledger to ~12-13 GB (~1.26 KB/shred observed) —
+# generous recent history for claim verification, with wide headroom on disk.
+# Verified accepted by this image's validator (agave 4.0.3, ghcr.io/beeman/
+# solana-test-validator): `--limit-ledger-size` defaults to only 10000 shreds and
+# enforces NO 50M minimum (that floor is the full `solana-validator`, not the
+# test validator), so 10,000,000 starts cleanly — no crash-loop risk.
+solana-test-validator --reset --ledger "$LEDGER_DIR" --limit-ledger-size 10000000 &
 VALIDATOR_PID=$!
 
 # Wait for readiness

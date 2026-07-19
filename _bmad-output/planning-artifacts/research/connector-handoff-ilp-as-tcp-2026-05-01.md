@@ -241,7 +241,7 @@ This is the acceptance test for the entire redesign. If an unmodified `strfry` b
 
 ## Full Context
 
-Full architecture spec (ILP-as-TCP, TownHub registry, mill NIP, DVM splitting, multi-connector topology, dashboard UX):  
+Full architecture spec (ILP-as-TCP, TownHub registry, swap NIP, DVM splitting, multi-connector topology, dashboard UX):  
 `_bmad-output/planning-artifacts/research/toon-ilp-as-tcp-townhub-design-2026-05-01.md`
 
 The connector changes described here are one part of a larger redesign. The connector team does not need to understand the full Townhouse dashboard or TownHub registry to build this — the scope above is self-contained. But the full spec is available for context.

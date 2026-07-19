@@ -116,9 +116,39 @@ describe('LocalDeliveryClient', () => {
       expect(capturedBody.amount).toBe('1000');
       expect(capturedBody.expiresAt).toBeDefined();
       expect(capturedBody.data).toBe(packet.data.toString('base64'));
-      // Must NOT contain ILP internals
+      // Must NOT contain ILP internals (executionCondition only travels for
+      // non-zero sender-chosen conditions — issue #309)
       expect(capturedBody).not.toHaveProperty('executionCondition');
       expect(capturedBody).not.toHaveProperty('sourcePeer');
+    });
+
+    it('should send executionCondition (base64) when the packet carries a non-zero condition (issue #309)', async () => {
+      let capturedBody: any = null;
+      global.fetch = jest.fn(async (_url: any, init: any) => {
+        capturedBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ accept: true }), { status: 200 });
+      }) as any;
+
+      const condition = new Uint8Array(32).fill(0xab);
+      const packet = createTestPacket({ executionCondition: condition });
+      const client = createClient();
+      await client.deliver(packet, 'peerA');
+
+      expect(capturedBody.executionCondition).toBe(Buffer.from(condition).toString('base64'));
+    });
+
+    it('should NOT send executionCondition for an all-zero condition (legacy)', async () => {
+      let capturedBody: any = null;
+      global.fetch = jest.fn(async (_url: any, init: any) => {
+        capturedBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ accept: true }), { status: 200 });
+      }) as any;
+
+      const packet = createTestPacket({ executionCondition: new Uint8Array(32) });
+      const client = createClient();
+      await client.deliver(packet, 'peerA');
+
+      expect(capturedBody).not.toHaveProperty('executionCondition');
     });
 
     it('should omit data field when packet data is empty', async () => {
@@ -164,6 +194,44 @@ describe('LocalDeliveryClient', () => {
       expect(result.type).toBe(PacketType.FULFILL);
       if (result.type !== PacketType.FULFILL) throw new Error('Expected FULFILL');
       expect(result.data).toEqual(Buffer.from(responseData, 'base64'));
+    });
+
+    it('should map an app-supplied 32-byte fulfillment onto the FULFILL packet (issue #309)', async () => {
+      const preimage = new Uint8Array(32).fill(0x42);
+      global.fetch = jest.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ accept: true, fulfillment: Buffer.from(preimage).toString('base64') }),
+            { status: 200 }
+          )
+      ) as any;
+
+      const client = createClient();
+      const result = await client.deliver(createTestPacket(), 'peerA');
+
+      expect(result.type).toBe(PacketType.FULFILL);
+      if (result.type !== PacketType.FULFILL) throw new Error('Expected FULFILL');
+      expect(Buffer.from(result.fulfillment!)).toEqual(Buffer.from(preimage));
+    });
+
+    it('should treat a malformed (non-32-byte) fulfillment as withheld', async () => {
+      global.fetch = jest.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              accept: true,
+              fulfillment: Buffer.from('short').toString('base64'),
+            }),
+            { status: 200 }
+          )
+      ) as any;
+
+      const client = createClient();
+      const result = await client.deliver(createTestPacket(), 'peerA');
+
+      expect(result.type).toBe(PacketType.FULFILL);
+      if (result.type !== PacketType.FULFILL) throw new Error('Expected FULFILL');
+      expect(result.fulfillment).toBeUndefined();
     });
   });
 

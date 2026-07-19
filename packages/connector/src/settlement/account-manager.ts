@@ -910,7 +910,7 @@ export class AccountManager {
     // Ensure peer accounts exist before posting the settlement transfer.
     // getPeerAccountPair only derives IDs; if packet flow never triggered
     // ensurePeerAccounts (e.g., inbound receiver in standalone mode where
-    // packets terminate at the BLS without outbound forwarding), the ledger
+    // packets terminate at the app without outbound forwarding), the ledger
     // would reject the transfer with "Debit account not found".
     const accountPair = await this.ensurePeerAccounts(peerId, tokenId);
 

@@ -57,6 +57,7 @@ import {
   ConfigLoader,
   ConfigurationError,
   ConnectorNotStartedError,
+  InvalidExecutionConditionError,
 } from '../config/config-loader';
 import { HealthServer } from '../http/health-server';
 import { IlpHttpAdapter, type InboundClaimValidateFn } from '../http/ilp-http-adapter';
@@ -97,7 +98,24 @@ import {
 import { InboundClaimValidator } from '../btp/inbound-claim-validator';
 import { NIP59ClaimWrapper } from '../settlement/privacy/nip59-claim-wrapper';
 import { deriveChainKeysFromMnemonic } from '../wallet/mnemonic-keys';
+import { SelfAnnounceService, type PublishOutcome } from '../discovery/self-announce-service';
+import { planAnnouncePublish } from '../discovery/self-announce-publish';
+import { RouteLearningService } from '../discovery/route-learning-service';
+import {
+  DiscoveredNodeRegistry,
+  type DiscoveredNode,
+  type FundedPeerRef,
+} from '../discovery/discovered-node-registry';
+import { nip59KeyToNostrPubkey } from '../discovery/self-announce-builder';
+import { createNostrRelayClient } from '../discovery/nostr-relay-client';
+import { getPublicKey, type NostrEvent } from 'nostr-tools';
+import { BootstrapService } from '../discovery/bootstrap-service';
+import { FileBootstrapCacheStore } from '../discovery/bootstrap-cache';
+import { createKind10032RelayProbe } from '../discovery/relay-probe';
 import { hexToBytes } from '@noble/hashes/utils';
+
+/** Round-trip timeout (ms) for a self-announce write PREPARE. */
+const SELF_ANNOUNCE_PREPARE_TIMEOUT_MS = 30_000;
 import { promises as dns } from 'dns';
 // Import package.json for version information
 import packageJson from '../../package.json';
@@ -147,7 +165,7 @@ export class ConnectorNode implements HealthStatusProvider {
   private readonly _settlementPeers: Map<string, SettlementPeerConfig> = new Map();
   // Persistent peer/route registry (Epic: persistent registry). Mirrors every
   // runtime peer/route mutation to SQLite so they survive a restart instead of
-  // being dropped (the "re-POST the town route" RUNBOOK workaround). Stays null
+  // being dropped (the "re-POST the relay route" RUNBOOK workaround). Stays null
   // when `libsql` is unavailable — registration then degrades to in-memory only.
   private _registryStore: RegistryStore | null = null;
   private _healthStatus: 'healthy' | 'unhealthy' | 'starting' = 'starting';
@@ -173,11 +191,46 @@ export class ConnectorNode implements HealthStatusProvider {
   // proxy-down assertion fires in CI-acceptable time without reaching into
   // private state. This is the ONLY production-code seam Story 35.6 introduces.
   private readonly _transportHealthIntervalMs: number;
+  // Periodic re-evaluation of the peer-connectivity health status. The primary
+  // driver is event-based (BTPClientManager fires on every peer connect/
+  // disconnect), but a low-frequency timer is a robust backstop against any
+  // missed edge — e.g. a connection state transition that races startup, or a
+  // future transport that doesn't emit clean connect/disconnect events. Bound
+  // to node lifecycle: started at the end of start(), cleared in stop() and in
+  // the start() rollback path so no interval leaks.
+  private _healthStatusInterval: NodeJS.Timeout | null = null;
+  // Cadence (ms) for the periodic health re-evaluation backstop. Default 10s —
+  // small enough that /health converges quickly after a post-startup peer
+  // connect even if an event were ever missed, large enough to be negligible
+  // overhead. Optional constructor override lets tests shrink it.
+  private readonly _healthStatusIntervalMs: number;
   // Optional mnemonic override (mnemonic signing mode). When set, takes
   // precedence over `process.env.TOON_MNEMONIC` at boot so multi-node tests can
   // derive distinct settlement keys without mutating global env. NEVER logged.
   private readonly _mnemonicOverride?: string;
   private readonly _mnemonicAccountIndex?: number;
+  // Self-announce service (relay#37 / store#22). When `selfAnnounce.enabled` is
+  // set, publishes + refreshes this node's own kind:10032 IlpPeerInfo. Null when
+  // disabled or no signing identity is available.
+  private _selfAnnounceService: SelfAnnounceService | null = null;
+  // Route learning service (toon-meta#153). When `routeLearning.enabled` is
+  // set, consumes peers' kind:10032 announcements from the relay and installs
+  // learned multi-hop routes. Null when disabled.
+  private _routeLearningService: RouteLearningService | null = null;
+  // Discovered-node registry (toon-meta#153, discovered-vs-peered). Fed by the
+  // route-learning ingest seam; surfaces the free, unbounded "discovered" set
+  // (getDiscoveredNodes / GET /admin/discovered-nodes) as distinct from the
+  // few deliberately FUNDED peers. Null when route learning is disabled (no
+  // ingest feed → nothing discovered).
+  private _discoveredNodeRegistry: DiscoveredNodeRegistry | null = null;
+  // BTP `url` of peers registered at RUNTIME via registerPeer (static config
+  // peers carry their url in `_config.peers`). Feeds the discovered registry's
+  // funded-matching endpoint fallback. Maintained by registerPeer/removePeer.
+  private readonly _runtimePeerUrls = new Map<string, string>();
+  // Cold-start bootstrap service (toon-meta#153). When `bootstrap.enabled` is
+  // set, resolves relay seeds (signed registry → cache → config → fallback),
+  // sample-and-verifies them, and refreshes on an interval. Null when disabled.
+  private _bootstrapService: BootstrapService | null = null;
 
   /**
    * The canonical token symbol resolved from the on-chain ERC-20 contract at startup.
@@ -199,6 +252,13 @@ export class ConnectorNode implements HealthStatusProvider {
     opts?: {
       transportHealthIntervalMs?: number;
       /**
+       * Cadence (ms) for the periodic peer-connectivity health re-evaluation
+       * backstop. Defaults to 10s. Tests shrink this to sub-second to assert
+       * timer-driven convergence without waiting. Event-driven updates fire
+       * regardless of this value.
+       */
+      healthStatusIntervalMs?: number;
+      /**
        * Mnemonic signing mode override. When provided, this BIP-39 mnemonic
        * derives the per-chain settlement keys at boot, taking precedence over
        * `process.env.TOON_MNEMONIC`. Intended for multi-node test isolation so
@@ -214,6 +274,7 @@ export class ConnectorNode implements HealthStatusProvider {
     // pre-35.6 behavior (30s). All existing callers (2-arg form) continue to
     // work unchanged — new arg is optional.
     this._transportHealthIntervalMs = opts?.transportHealthIntervalMs ?? 30000;
+    this._healthStatusIntervalMs = opts?.healthStatusIntervalMs ?? 10000;
     this._mnemonicOverride = opts?.mnemonic;
     this._mnemonicAccountIndex = opts?.mnemonicAccountIndex;
     // Load and validate configuration
@@ -279,6 +340,13 @@ export class ConnectorNode implements HealthStatusProvider {
     // Direct TCP transport only: the agent factory always returns undefined so
     // BTPClient dials each peer's WebSocket directly (pre-Epic-35 default).
     this._btpClientManager.setAgentFactory(() => undefined);
+    // Re-evaluate /health whenever a peer connects or disconnects. This is the
+    // primary fix for the one-shot health-status race: the boot-time snapshot
+    // in start() is no longer the only evaluation, so peers that finish
+    // connecting AFTER startup correctly flip /health to "healthy" (and a peer
+    // dropping below threshold flips it back). _updateHealthStatus() is a
+    // cheap, idempotent recompute that no-ops until the BTP server is up.
+    this._btpClientManager.setConnectionStateChangeCallback(() => this._updateHealthStatus());
 
     // ILP-over-HTTP egress (Epic 38, Story 38.1). With direct-only transport the
     // provider never supplies a custom agent, so HttpPeerClientManager falls
@@ -313,7 +381,7 @@ export class ConnectorNode implements HealthStatusProvider {
     // Link BTPServer to PacketHandler for bidirectional forwarding (resolves circular dependency)
     this._packetHandler.setBTPServer(this._btpServer);
 
-    // Configure local delivery if enabled (forwards local packets to agent runtime)
+    // Configure local delivery if enabled (forwards local packets to app handler)
     const localDeliveryEnabled =
       resolvedConfig.localDelivery?.enabled || process.env.LOCAL_DELIVERY_ENABLED === 'true';
     if (localDeliveryEnabled) {
@@ -474,13 +542,13 @@ export class ConnectorNode implements HealthStatusProvider {
    *    - Other combinations → defaults to 'embedded'
    *
    * **Deployment Modes:**
-   * - **embedded**: Connector runs in same process as business logic
+   * - **embedded**: Connector runs in same process as the app
    *   - Use `setPacketHandler()` or `setLocalDeliveryHandler()` for incoming packets
    *   - Use `node.sendPacket()` for outgoing packets
    *   - Admin API typically disabled
    *
    * - **standalone**: Connector runs as separate process/container
-   *   - Incoming packets forwarded via HTTP to `/handle-packet` on external BLS
+   *   - Incoming packets forwarded via HTTP to `/handle-packet` on external app
    *   - Outgoing packets sent via HTTP to `/admin/ilp/send` on connector admin API
    *   - Admin API enabled for external control
    *
@@ -526,7 +594,7 @@ export class ConnectorNode implements HealthStatusProvider {
   /**
    * Check if the connector is running in embedded mode.
    *
-   * Embedded mode means the connector runs in the same process as business logic:
+   * Embedded mode means the connector runs in the same process as the app:
    * - Incoming packets handled via `setPacketHandler()` or `setLocalDeliveryHandler()`
    * - Outgoing packets sent via `node.sendPacket()` library calls
    * - Admin API typically disabled (not needed for in-process communication)
@@ -552,10 +620,10 @@ export class ConnectorNode implements HealthStatusProvider {
    * Check if the connector is running in standalone mode.
    *
    * Standalone mode means the connector runs as a separate process/container:
-   * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external BLS
+   * - Incoming packets forwarded via HTTP POST to `/handle-packet` on external app
    * - Outgoing packets sent via HTTP POST to `/admin/ilp/send` on connector admin API
    * - Admin API enabled for external control
-   * - Local delivery enabled with `handlerUrl` pointing to external BLS
+   * - Local delivery enabled with `handlerUrl` pointing to external app
    *
    * @returns true if deployment mode is 'standalone', false otherwise
    *
@@ -564,7 +632,7 @@ export class ConnectorNode implements HealthStatusProvider {
    * if (node.isStandalone()) {
    *   console.log('Connector running in standalone mode');
    *   console.log('Admin API:', node._config.adminApi?.port);
-   *   console.log('BLS URL:', node._config.localDelivery?.handlerUrl);
+   *   console.log('App URL:', node._config.localDelivery?.handlerUrl);
    * }
    * ```
    */
@@ -576,14 +644,25 @@ export class ConnectorNode implements HealthStatusProvider {
    * Send an ILP Prepare packet through the connector's routing logic.
    * Routes through PacketHandler using RoutingTable longest-prefix matching.
    *
+   * When `params.executionCondition` is provided (sender-chosen condition,
+   * issue #309/PR #310 egress symmetry; toon-meta#145 §3 R4), it rides the
+   * outgoing PREPARE verbatim — the claim/NIP-59 path never overwrites an
+   * existing condition — and the resolved FULFILL carries the terminating
+   * application's `fulfillment` preimage so the caller can verify
+   * `sha256(fulfillment) === executionCondition`.
+   *
    * @param params - Packet parameters (destination, amount, condition, expiry, data)
    * @returns ILP Fulfill or Reject packet
    * @throws ConnectorNotStartedError if connector has not been started
+   * @throws InvalidExecutionConditionError if `executionCondition` is malformed
+   *   (not base64 / not exactly 32 bytes / all-zero)
    */
   async sendPacket(params: SendPacketParams): Promise<ILPFulfillPacket | ILPRejectPacket> {
     if (!this._btpServerStarted) {
       throw new ConnectorNotStartedError();
     }
+
+    const executionCondition = this._decodeExecutionCondition(params.executionCondition);
 
     const packet: ILPPreparePacket = {
       type: PacketType.PREPARE,
@@ -591,6 +670,7 @@ export class ConnectorNode implements HealthStatusProvider {
       amount: params.amount,
       expiresAt: params.expiresAt,
       data: params.data ?? Buffer.alloc(0),
+      ...(executionCondition ? { executionCondition } : {}),
     };
 
     this._logger.info(
@@ -599,6 +679,7 @@ export class ConnectorNode implements HealthStatusProvider {
         destination: params.destination,
         amount: params.amount.toString(),
         expiresAt: params.expiresAt.toISOString(),
+        hasExecutionCondition: !!executionCondition,
       },
       'Sending packet via public API'
     );
@@ -622,6 +703,54 @@ export class ConnectorNode implements HealthStatusProvider {
         data: Buffer.alloc(0),
       } as ILPRejectPacket;
     }
+  }
+
+  /**
+   * Decode and validate a caller-supplied execution condition for
+   * {@link sendPacket} (issue #309/PR #310 egress symmetry).
+   *
+   * Accepts raw bytes or a base64 string; returns `undefined` when absent.
+   * Enforces exactly 32 bytes after decode and rejects an all-zero condition:
+   * all-zero is the wire encoding for "no condition" (the OER codec drops it
+   * on decode and the claim path would replace it with a derived condition),
+   * so it can never ride verbatim — callers wanting legacy behavior must omit
+   * the field instead.
+   *
+   * @throws InvalidExecutionConditionError on malformed input
+   */
+  private _decodeExecutionCondition(
+    condition: Uint8Array | string | undefined
+  ): Uint8Array | undefined {
+    if (condition === undefined) {
+      return undefined;
+    }
+
+    let bytes: Uint8Array;
+    if (typeof condition === 'string') {
+      const decoded = Buffer.from(condition, 'base64');
+      // Round-trip check: Buffer.from(..., 'base64') silently tolerates
+      // invalid input; mirror the admin API's strict base64 validation.
+      if (decoded.toString('base64') !== condition) {
+        throw new InvalidExecutionConditionError('executionCondition must be valid base64');
+      }
+      bytes = new Uint8Array(decoded);
+    } else {
+      bytes = new Uint8Array(condition);
+    }
+
+    if (bytes.length !== 32) {
+      throw new InvalidExecutionConditionError(
+        `executionCondition must be exactly 32 bytes, got ${bytes.length}`
+      );
+    }
+    if (bytes.every((b) => b === 0)) {
+      throw new InvalidExecutionConditionError(
+        'executionCondition must not be all-zero (all-zero means "no condition" on the wire); ' +
+          'omit the field for unconditional packets'
+      );
+    }
+
+    return bytes;
   }
 
   /**
@@ -694,6 +823,300 @@ export class ConnectorNode implements HealthStatusProvider {
       },
       'Mnemonic signing mode active: derived per-chain settlement keys from TOON_MNEMONIC'
     );
+  }
+
+  /**
+   * Resolve the connector's Nostr secret key (NIP-06) for self-announce signing.
+   *
+   * The NIP-06 Nostr key IS the connector's secp256k1 EVM settlement key
+   * (`m/44'/1237'/0'/0/0`), so the self-announcement is signed under the SAME
+   * identity the node settles with — matching how the devnet store apex pubkey
+   * (`f9308a019258…036f9`) is derived. Resolution order:
+   *
+   * 1. The EVM `chainProviders[].keyId` (a raw 0x-hex private key). After
+   *    `_applyMnemonicSigningMode()`, this already holds the mnemonic-derived
+   *    key, so this branch covers both raw-key and mnemonic deploys.
+   * 2. Otherwise derive directly from the mnemonic (env `TOON_MNEMONIC` or the
+   *    test override).
+   *
+   * Returns null (with a warning) when no signing identity is available.
+   *
+   * SECURITY: never logs the key bytes or the mnemonic.
+   */
+  private _resolveNostrSecretKey(): Uint8Array | null {
+    const evmProvider = this._config.chainProviders?.find((p) => p.chainType === 'evm');
+    const keyId = (evmProvider as { keyId?: string } | undefined)?.keyId;
+    if (keyId && /^(0x)?[0-9a-fA-F]{64}$/.test(keyId)) {
+      return hexToBytes(keyId.replace(/^0x/, ''));
+    }
+
+    const mnemonic = this._mnemonicOverride ?? process.env.TOON_MNEMONIC;
+    if (mnemonic) {
+      try {
+        const keys = deriveChainKeysFromMnemonic(mnemonic, this._mnemonicAccountIndex ?? 0);
+        return hexToBytes(keys.evm.privateKey.replace(/^0x/, ''));
+      } catch (err) {
+        this._logger.warn(
+          {
+            event: 'self_announce_key_derive_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'Failed to derive Nostr key for self-announce'
+        );
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Start the cold-start bootstrap service (toon-meta#153) when configured.
+   *
+   * Opt-in via `bootstrap.enabled`. Resolves relay seeds through the curated
+   * signed registry → learned-peer cache → config seeds → hardcoded fallback
+   * chain, sample-and-verifies candidates with a minimal kind:10032 probe, and
+   * persists the survivors. Consumers stay loosely coupled: the discovered
+   * relays are exposed via the public {@link bootstrapService} getter and the
+   * service's `onRelaysResolved` callback — deep integration (self-announce
+   * targets, kind:10032 route learning) belongs to the route-learning branch.
+   * Best-effort: any failure logs and skips so startup is never blocked.
+   */
+  private _startBootstrap(): void {
+    const bootstrap = this._config.bootstrap;
+    if (!bootstrap?.enabled) {
+      return;
+    }
+
+    try {
+      const cachePath = bootstrap.cachePath ?? `./data/bootstrap-cache-${this._config.nodeId}.json`;
+      const service = new BootstrapService({
+        config: bootstrap,
+        relayProbe: createKind10032RelayProbe(this._logger),
+        cacheStore: new FileBootstrapCacheStore(cachePath, this._logger),
+        logger: this._logger,
+      });
+      service.onRelaysResolved((relayUrls) => {
+        // The route-learning branch will consume these; for now surface them.
+        // Flag when self-announce carries no relay hint of its own — the
+        // bootstrap result is then the node's only view of the relay set.
+        this._logger.info(
+          {
+            event: 'bootstrap_relays_available',
+            relayUrls,
+            selfAnnounceHasRelayHint: Boolean(this._config.selfAnnounce?.relayUrl),
+          },
+          'Bootstrap discovered verified relays'
+        );
+      });
+      service.start();
+      this._bootstrapService = service;
+    } catch (err) {
+      this._bootstrapService = null;
+      this._logger.warn(
+        {
+          event: 'bootstrap_start_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start cold-start bootstrap service; continuing without it'
+      );
+    }
+  }
+
+  /**
+   * Start the self-announce service (relay#37 / store#22) when configured.
+   *
+   * Opt-in via `selfAnnounce.enabled`. Builds the kind:10032 IlpPeerInfo from
+   * this node's own routes/chainProviders/endpoints, signs with the NIP-06 key,
+   * and publishes + refreshes it THROUGH this connector's own routing via
+   * {@link _publishAnnouncement}. Best-effort: any failure logs and skips so
+   * startup is never blocked.
+   */
+  private _startSelfAnnounce(): void {
+    const selfAnnounce = this._config.selfAnnounce;
+    if (!selfAnnounce?.enabled) {
+      return;
+    }
+
+    const secretKey = this._resolveNostrSecretKey();
+    if (!secretKey) {
+      this._logger.warn(
+        { event: 'self_announce_no_identity' },
+        'selfAnnounce.enabled but no Nostr signing identity (set TOON_MNEMONIC or an EVM keyId); not announcing'
+      );
+      return;
+    }
+
+    try {
+      this._selfAnnounceService = new SelfAnnounceService({
+        config: this._config,
+        selfAnnounce,
+        secretKey,
+        // Route the write through THIS connector's own pipe: a locally-terminated
+        // announceTo delivers free; a remote announceTo pays from our channel.
+        publish: (event) => this._publishAnnouncement(event),
+        // Runtime-only announce fields: the EVM TokenNetwork contract is an
+        // on-chain registry lookup, so it comes from the live providers rather
+        // than config (Solana/Mina channel params are config-derived in the
+        // builder). Resolved lazily by the service and cached.
+        resolveTokenNetworks: () => this._resolveAnnounceTokenNetworks(),
+        logger: this._logger,
+      });
+      this._selfAnnounceService.start();
+    } catch (err) {
+      this._selfAnnounceService = null;
+      this._logger.warn(
+        {
+          event: 'self_announce_start_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start self-announce service; continuing without it'
+      );
+    }
+  }
+
+  /**
+   * Start the route-learning service (toon-meta#153) when configured.
+   *
+   * Opt-in via `routeLearning.enabled`. Subscribes to kind:10032 announcements
+   * on the relay's FREE public read endpoint (SimplePool over WS), maintains a
+   * link-state database, and installs/withdraws LEARNED routes in the routing
+   * table below config precedence. Best-effort: any failure logs and skips so
+   * startup is never blocked.
+   */
+  private _startRouteLearning(): void {
+    const routeLearning = this._config.routeLearning;
+    if (!routeLearning?.enabled) {
+      return;
+    }
+
+    // Own pubkey (to ignore our own announcement in the relay stream). Derived
+    // from the same NIP-06 key self-announce signs with; optional — without a
+    // signing identity the node still learns, it just can't self-filter.
+    const secretKey = this._resolveNostrSecretKey();
+    const ownPubkey = secretKey ? getPublicKey(secretKey) : undefined;
+
+    try {
+      // Discovered-vs-peered (toon-meta#153): the registry rides the SAME
+      // relay subscription via the route-learning ingest seam — discovery
+      // stays free and opens no links; funding stays a bounded operator
+      // choice (registerPeer + peeringPolicy.maxFundedChannels).
+      this._discoveredNodeRegistry = new DiscoveredNodeRegistry({
+        getFundedPeers: () => this._getFundedPeerRefs(),
+        ...(ownPubkey ? { ownPubkey } : {}),
+        logger: this._logger,
+      });
+      this._ilpMetrics.setDiscoveredNodeCountsProvider(
+        () => this._discoveredNodeRegistry?.counts() ?? { discovered: 0, funded: 0 }
+      );
+      this._routeLearningService = new RouteLearningService({
+        config: this._config,
+        routeLearning,
+        routingTable: this._routingTable,
+        relayClient: createNostrRelayClient(),
+        // Legal first hops are the BTP client peer set (the ids PacketHandler
+        // can actually egress on).
+        getDirectPeerIds: () => this._btpClientManager.getPeerIds(),
+        ...(ownPubkey ? { ownPubkey } : {}),
+        discoveredNodes: this._discoveredNodeRegistry,
+        logger: this._logger,
+      });
+      this._routeLearningService.start();
+    } catch (err) {
+      this._routeLearningService = null;
+      this._discoveredNodeRegistry = null;
+      this._logger.warn(
+        {
+          event: 'route_learning_start_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start route-learning service; continuing without it'
+      );
+    }
+  }
+
+  /**
+   * Resolve the runtime-only `tokenNetworks` announce entries from the live
+   * chain providers: for each EVM provider, the TokenNetwork contract address
+   * looked up on-chain from the configured TokenNetworkRegistry (toon-client#378
+   * consumes it as `tokenNetworks[chainId]`). Solana/Mina entries are
+   * config-derived inside the announce builder and need no runtime resolution.
+   *
+   * Keyed by the providers' `chainId` — the exact identifiers the announcement
+   * lists in `supportedChains` (both derive from `config.chainProviders`).
+   * Per-provider failures are logged and skipped (a chain whose RPC is down
+   * must not blank the whole map); an empty result is fine — the announcement
+   * simply omits those entries.
+   */
+  private async _resolveAnnounceTokenNetworks(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    const providers = this._chainRegistry?.getAllProviders() ?? [];
+    for (const provider of providers) {
+      if (!(provider instanceof EVMPaymentChannelProvider)) {
+        continue;
+      }
+      try {
+        const { tokenNetworkAddress } = await provider.getSigningContext();
+        if (tokenNetworkAddress) {
+          out[provider.chainId] = tokenNetworkAddress;
+        }
+      } catch (err) {
+        this._logger.warn(
+          {
+            event: 'self_announce_token_network_lookup_failed',
+            chainId: provider.chainId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'Failed to resolve TokenNetwork contract for announce (entry omitted)'
+        );
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Publish a signed kind:10032 announcement THROUGH this connector's own
+   * routing (relay#37 / store#22). The same write path any client uses:
+   *
+   * - `announceTo` resolves to a LOCAL terminated route (this connector fronts
+   *   the relay) → `sendPacket` with amount `0` → routed to this node's local
+   *   delivery handler (the route's `HttpProxyHandler`), which reverse-proxies
+   *   the inner `POST /write` to the route's resolved upstream. Local delivery
+   *   returns before the forward/claim path, so it is **free**.
+   * - `announceTo` is REMOTE (forwarded) → `sendPacket` with amount =
+   *   `announcePrice` (> 0) → forwarded to the next-hop peer, where the forward
+   *   path attaches a per-packet settlement claim funded from THIS connector's
+   *   own channel. The connector **pays for its own write**.
+   *
+   * `routeTerminationRegistry.match(announceTo)` is the local-vs-remote signal;
+   * `planAnnouncePublish` turns it into the `sendPacket` amount + envelope. The
+   * write is delivered through `sendPacket`, never a raw POST to a private port.
+   */
+  private async _publishAnnouncement(event: NostrEvent): Promise<PublishOutcome> {
+    const selfAnnounce = this._config.selfAnnounce!;
+    const announceTo = selfAnnounce.announceTo;
+    const isLocallyTerminated = this._routeTerminationRegistry.match(announceTo) !== undefined;
+
+    const plan = planAnnouncePublish({
+      announceTo,
+      event,
+      isLocallyTerminated,
+      ...(selfAnnounce.announcePrice ? { remotePriceAtomic: selfAnnounce.announcePrice } : {}),
+    });
+
+    const expiresAt = new Date(Date.now() + SELF_ANNOUNCE_PREPARE_TIMEOUT_MS);
+    const response = await this.sendPacket({
+      destination: plan.destination,
+      amount: plan.amount,
+      expiresAt,
+      data: plan.data,
+    });
+
+    if (response.type === PacketType.FULFILL) {
+      return { mode: plan.mode, ok: true };
+    }
+    const reject = response as ILPRejectPacket;
+    return { mode: plan.mode, ok: false, detail: `${reject.code}: ${reject.message ?? ''}`.trim() };
   }
 
   /**
@@ -1477,7 +1900,35 @@ export class ConnectorNode implements HealthStatusProvider {
             (peerId) => this._packetHandler.getPeerRelation(peerId),
             // Issue #86: pass the registry so non-EVM inbound claims (Solana/Mina)
             // are accepted when a provider is registered for the claim's chain.
-            chainRegistry
+            chainRegistry,
+            // Issue #353: freshness gate. The validator consults the
+            // ClaimReceiver's received-claim nonce watermark (a LOCAL DB read,
+            // no chain RPC) so a replayed stale-nonce claim is F06-rejected
+            // BEFORE the packet ever reaches the local delivery handler /
+            // backend. Lazy closure: the ClaimReceiver is constructed a few
+            // steps below this validator; by the time packets flow it is
+            // wired. When it is absent (routing-only mode, or init failure)
+            // the gate falls back to crypto-only, the pre-#353 behavior.
+            async (peerId, blockchain, channelId) =>
+              this._claimReceiver
+                ? this._claimReceiver.getReceivedClaimWatermark(peerId, blockchain, channelId)
+                : null,
+            // Issue #359: claim-value ↔ price binding. Resolve the destination's
+            // authoritative flat route price from the #218 RouteTerminationRegistry
+            // (an in-memory prefix map — RPC-free, hot-path-safe) so the gate can
+            // require claimDelta >= price on locally-terminated priced routes and
+            // F06-reject an underpaying claim BEFORE the backend runs. `match`
+            // returns undefined for a forwarded / non-terminated destination →
+            // coalesce to null (this connector is not the pricing authority there;
+            // the gate falls back to freshness-only for such packets).
+            (destination) => this._routeTerminationRegistry.match(destination)?.price ?? null,
+            // Issue #359 / toon-meta#168: Mina value-binding migration switch.
+            // Default fail-open-and-log for an ABSENT/unopenable Mina preimage
+            // during the client-rollout window; the operator flips it to strict
+            // (reject) once the fleet emits the openable `[transferredAmount,
+            // balanceB, salt]` preimage everywhere. A PRESENT-but-mismatched
+            // preimage is always rejected regardless of this flag.
+            this._config.settlement?.minaValueBindingStrict ?? false
           );
           this._inboundClaimValidate = (protocolData, ilpPacket, peerId) =>
             inboundClaimValidator.validate(protocolData, ilpPacket, peerId);
@@ -1708,6 +2159,20 @@ export class ConnectorNode implements HealthStatusProvider {
           // local-termination config (upstream/price/chains/…) into the same
           // in-memory registry #216's proxy handler resolves against.
           routeTerminationRegistry: this._routeTerminationRegistry,
+          // toon-meta#153 (discovered-vs-peered): surface the discovered set
+          // read-only, and mirror the funded-channel cap on POST /admin/peers
+          // with the exact error string registerPeer throws (cross-surface
+          // parity).
+          getDiscoveredNodes: () => this.getDiscoveredNodes(),
+          checkFundedChannelCap: (peerId) => this._checkFundedChannelCap(peerId),
+          // Issue #345: POST/DELETE /admin/peers mutate the client managers
+          // directly (they do not call registerPeer/removePeer), so they must
+          // maintain the same runtime-url map the discovered registry's
+          // endpoint-fallback funded matching reads — otherwise a peer
+          // promoted via the admin surface shows `funded: false` until a
+          // restart replays the registration.
+          recordRuntimePeerUrl: (peerId, url) => this._runtimePeerUrls.set(peerId, url),
+          forgetRuntimePeerUrl: (peerId) => this._runtimePeerUrls.delete(peerId),
         });
 
         await this._adminServer.start();
@@ -1771,7 +2236,7 @@ export class ConnectorNode implements HealthStatusProvider {
       }
 
       // Replay any runtime-added peers/routes from a previous run so they
-      // survive this restart (instead of the "re-POST the town route" RUNBOOK
+      // survive this restart (instead of the "re-POST the relay route" RUNBOOK
       // recovery). The store itself was opened earlier (before the admin server)
       // so the admin HTTP surface shares it. Best-effort.
       await this._reconcileRegistry();
@@ -1828,8 +2293,40 @@ export class ConnectorNode implements HealthStatusProvider {
         );
       }
 
-      // Update health status to healthy after all components started
+      // Cold-start bootstrap (toon-meta#153): resolve + verify relay seeds so
+      // a cold node can find its first relay. Started alongside self-announce
+      // (below) once the node is otherwise up. Best-effort: a failure logs and
+      // skips rather than aborting startup.
+      this._startBootstrap();
+
+      // Self-announce (relay#37 / store#22): publish + refresh this node's own
+      // kind:10032 IlpPeerInfo so its apex routes are discoverable out of band.
+      // Started last (after the BTP/HTTP/admin surfaces are up) so the
+      // announcement reflects a fully-running node. Best-effort: a build/key
+      // failure logs and skips rather than aborting startup.
+      this._startSelfAnnounce();
+
+      // Route learning (toon-meta#153): consume peers' kind:10032
+      // announcements and install learned multi-hop routes. Started alongside
+      // self-announce (after the BTP peer set exists). Best-effort.
+      this._startRouteLearning();
+
+      // Initial health-status snapshot after all components started. NOTE: at
+      // this instant peers may still be mid-connect (e.g. BTP handshakes that
+      // complete a few seconds later), so this snapshot alone is NOT
+      // authoritative — hence the event-driven callback wired in the
+      // constructor plus the periodic backstop below.
       this._updateHealthStatus();
+
+      // Periodic health re-evaluation backstop. Event-driven updates (peer
+      // connect/disconnect) are the primary trigger; this timer guarantees
+      // convergence even if an event were ever missed. Cleared in stop() and
+      // the start() rollback path so no interval leaks. unref() so the timer
+      // never keeps the process alive on its own.
+      this._healthStatusInterval = setInterval(() => {
+        this._updateHealthStatus();
+      }, this._healthStatusIntervalMs);
+      this._healthStatusInterval.unref?.();
 
       this._logger.info(
         {
@@ -1859,6 +2356,10 @@ export class ConnectorNode implements HealthStatusProvider {
       if (this._transportHealthInterval) {
         clearInterval(this._transportHealthInterval);
         this._transportHealthInterval = null;
+      }
+      if (this._healthStatusInterval) {
+        clearInterval(this._healthStatusInterval);
+        this._healthStatusInterval = null;
       }
       if (this._transportProvider) {
         // AC #11: hide the provider from the public getter immediately — the
@@ -1905,6 +2406,28 @@ export class ConnectorNode implements HealthStatusProvider {
     );
 
     try {
+      // Stop the self-announce refresh loop first (clears its unref'd timer).
+      if (this._selfAnnounceService) {
+        this._selfAnnounceService.stop();
+        this._selfAnnounceService = null;
+      }
+
+      // Stop route learning (closes the relay subscription, withdraws all
+      // learned soft-state routes, clears its unref'd sweep timer, and clears
+      // the discovered-node registry it feeds — soft state, re-learned after
+      // boot).
+      if (this._routeLearningService) {
+        this._routeLearningService.stop();
+        this._routeLearningService = null;
+      }
+      this._discoveredNodeRegistry = null;
+
+      // Stop the cold-start bootstrap refresh loop (clears its unref'd timer).
+      if (this._bootstrapService) {
+        this._bootstrapService.stop();
+        this._bootstrapService = null;
+      }
+
       // Stop settlement monitor FIRST to stop polling the ledger during drain.
       // The executor already unsubscribes in its own stop(), so no new events fire.
       if (this._settlementMonitor) {
@@ -2013,6 +2536,11 @@ export class ConnectorNode implements HealthStatusProvider {
       if (this._transportHealthInterval) {
         clearInterval(this._transportHealthInterval);
         this._transportHealthInterval = null;
+      }
+      // Clear the periodic health re-evaluation backstop so no interval leaks.
+      if (this._healthStatusInterval) {
+        clearInterval(this._healthStatusInterval);
+        this._healthStatusInterval = null;
       }
       if (this._transportProvider) {
         // AC #11: flip the getter to null BEFORE awaiting provider.stop() so
@@ -2135,6 +2663,20 @@ export class ConnectorNode implements HealthStatusProvider {
     // torn down. During the in-flight `provider.start()` await and during any
     // part of stop()/rollback, this getter returns `null`.
     return this._transportProviderReady ? this._transportProvider : null;
+  }
+
+  /**
+   * Get the cold-start bootstrap service (toon-meta#153), or `null` when
+   * `bootstrap.enabled` is false or the node is stopped.
+   *
+   * The deliberate coupling surface for consumers of discovered relays
+   * (self-announce targets, the future kind:10032 route-learning client):
+   * read `getRelayUrls()` for the current verified list, or subscribe with
+   * `onRelaysResolved()`. Callers MUST NOT invoke `start()`/`stop()` on the
+   * returned service — lifecycle is managed exclusively by ConnectorNode.
+   */
+  get bootstrapService(): BootstrapService | null {
+    return this._bootstrapService;
   }
 
   /**
@@ -2475,18 +3017,42 @@ export class ConnectorNode implements HealthStatusProvider {
       }
     }
 
+    // Funded-peering admission (toon-meta#153, discovered-vs-peered): a
+    // settlement block on a registration is the intent to FUND a channel to
+    // this peer. peeringPolicy.maxFundedChannels bounds how many such funded
+    // channels may exist at once — discovery/routing-through stays free and
+    // unbounded. Checked BEFORE any mutation so a rejected registration
+    // leaves no partial state.
+    if (config.settlement) {
+      const capError = this._checkFundedChannelCap(config.id);
+      if (capError) {
+        throw new Error(capError);
+      }
+    }
+
+    // Config-declared child binding (toon-meta#153): when this peer id is
+    // bound as a `children[].peerId`, its route `<apex>.<name>` was already
+    // expanded at config load with an admission contract of relation 'child'.
+    // Reject a contradictory relation at runtime registration, and skip the
+    // auto-derived `<self>.<peerId>` route (the expanded binding already
+    // routes to this peer).
+    const childBinding = this._config.children?.find((c) => c.peerId === config.id);
+    if (childBinding && config.relation !== undefined && config.relation !== 'child') {
+      throw new Error(
+        `Peer '${config.id}' is bound as child '${childBinding.name}' in config; relation must be 'child' (got '${config.relation}')`
+      );
+    }
+
     // Relation ↔ route admission validation + child auto-route (Phase 2).
-    // The connector's self-prefixes are the routes that terminate locally; when
-    // none exist the validator no-ops, so this never breaks routing-only nodes.
+    // The connector's self-prefixes are the routes that terminate locally
+    // (plus the explicit apex, toon-meta#153); when none exist the validator
+    // no-ops, so this never breaks routing-only nodes.
     // A `child` registered without an explicit route gets `<self>.<peerId>`
     // derived, collapsing the old two-step (register peer, then add route) and
     // closing the mis-tagged-child F06/T00 trap before any packet flows.
-    const localPrefixes = deriveLocalPrefixes(
-      this._routingTable.getAllRoutes(),
-      this._config.nodeId
-    );
+    const localPrefixes = this._selfPrefixesWithApex();
     let effectiveRoutes = config.routes;
-    if (!effectiveRoutes || effectiveRoutes.length === 0) {
+    if ((!effectiveRoutes || effectiveRoutes.length === 0) && !childBinding) {
       const autoRoute = deriveDefaultChildRoute(config.relation, localPrefixes, config.id);
       if (autoRoute) {
         effectiveRoutes = [autoRoute];
@@ -2537,6 +3103,10 @@ export class ConnectorNode implements HealthStatusProvider {
           transport: config.transport,
         };
         await this._btpClientManager.addPeer(peer);
+        // Discovered-vs-peered (toon-meta#153): remember the runtime peer's
+        // BTP url so the discovered registry's endpoint-fallback funded
+        // matching also covers peers registered after boot.
+        this._runtimePeerUrls.set(config.id, config.url);
         // Story 37.2/37.3: prime metrics labels so runtime-added peers appear in both
         // the Prometheus scrape (with zero counters) and /admin/metrics.json before
         // their first packet.
@@ -2674,6 +3244,10 @@ export class ConnectorNode implements HealthStatusProvider {
 
     // Remove BTP peer
     await this._btpClientManager.removePeer(peerId);
+    // Discovered-vs-peered (toon-meta#153): removing a peer frees its funded
+    // slot (the settlement config is deleted below) and drops its runtime-url
+    // record from the discovered registry's funded-matching set.
+    this._runtimePeerUrls.delete(peerId);
     // Story 37.2/37.3: drop peer from the metrics "known peers" set so it stops
     // being surfaced as idle in Prometheus scrapes. Historical counter totals
     // are preserved internally but no longer exposed via /admin/metrics.json
@@ -2753,6 +3327,98 @@ export class ConnectorNode implements HealthStatusProvider {
   }
 
   /**
+   * List the DISCOVERED node set (toon-meta#153, discovered-vs-peered):
+   * every node known from kind:10032 relay ingest, each flagged `funded`
+   * when a live registered peer currently maps to it. Equivalent to
+   * GET /admin/discovered-nodes.
+   *
+   * Discovered-but-unfunded nodes are reachable through learned multi-hop
+   * routes at zero capital cost; an operator promotes one to a FUNDED peer
+   * via the existing {@link registerPeer} / POST /admin/peers (the entry
+   * supplies `btpEndpoint` for `url` plus settlement hints), subject to
+   * `peeringPolicy.maxFundedChannels`.
+   *
+   * @returns The discovered nodes (empty when route learning is disabled —
+   *   there is no ingest feed without it).
+   */
+  getDiscoveredNodes(): DiscoveredNode[] {
+    return this._discoveredNodeRegistry ? this._discoveredNodeRegistry.list() : [];
+  }
+
+  /**
+   * Funded-matching source for the discovered-node registry: the LIVE
+   * registered peers (BTP + ILP-HTTP), each carrying the identifiers a
+   * discovered entry can be matched on — the x-only Nostr pubkey derived from
+   * the configured `nip59PublicKey`, and the BTP `url` (from static config,
+   * or the runtime-registration record for peers added after boot).
+   */
+  private _getFundedPeerRefs(): FundedPeerRef[] {
+    const refsById = new Map<string, FundedPeerRef>();
+    for (const peerId of this._btpClientManager.getPeerIds()) {
+      refsById.set(peerId, { peerId });
+    }
+    for (const peerId of this._httpPeerClientManager.getPeerIds()) {
+      if (!refsById.has(peerId)) refsById.set(peerId, { peerId });
+    }
+    for (const peer of this._config.peers) {
+      const ref = refsById.get(peer.id);
+      if (!ref) continue;
+      const nostrPubkey = nip59KeyToNostrPubkey(peer.nip59PublicKey);
+      if (nostrPubkey) ref.nostrPubkey = nostrPubkey;
+      if (peer.url) ref.btpUrl = peer.url;
+    }
+    for (const [peerId, url] of this._runtimePeerUrls) {
+      const ref = refsById.get(peerId);
+      if (ref && ref.btpUrl === undefined) ref.btpUrl = url;
+    }
+    return Array.from(refsById.values());
+  }
+
+  /**
+   * Count the FUNDED channels currently held (toon-meta#153): registered
+   * peers (live in the BTP / ILP-HTTP client managers) that carry runtime
+   * settlement config — i.e. an entry in `_settlementPeers`, created by
+   * `registerPeer`/POST /admin/peers settlement blocks (including those
+   * replayed from the persistent registry at boot). Route-only peers do not
+   * count. See {@link PeeringPolicyConfig.maxFundedChannels} for the exact
+   * counting contract.
+   */
+  private _countFundedChannels(): number {
+    const liveIds = new Set([
+      ...this._btpClientManager.getPeerIds(),
+      ...this._httpPeerClientManager.getPeerIds(),
+    ]);
+    let count = 0;
+    for (const peerId of this._settlementPeers.keys()) {
+      if (liveIds.has(peerId)) count++;
+    }
+    return count;
+  }
+
+  /**
+   * Enforce `peeringPolicy.maxFundedChannels` for a registration that carries
+   * a settlement block. Returns the rejection message, or `null` when
+   * admission is allowed: no cap configured, the peer is ALREADY funded
+   * (re-registration merges config without consuming a new slot), or the cap
+   * has headroom. Shared verbatim by `registerPeer` and the mirrored
+   * POST /admin/peers handler for cross-surface error parity.
+   */
+  private _checkFundedChannelCap(peerId: string): string | null {
+    const maxFundedChannels = this._config.peeringPolicy?.maxFundedChannels;
+    if (maxFundedChannels === undefined) return null;
+    if (this._settlementPeers.has(peerId)) return null;
+    const funded = this._countFundedChannels();
+    if (funded < maxFundedChannels) return null;
+    return (
+      `Funded-channel cap reached: ${funded}/${maxFundedChannels} funded channels in use ` +
+      `(peeringPolicy.maxFundedChannels). Registering '${peerId}' with settlement config would ` +
+      `open another funded channel — remove a funded peer first (DELETE /admin/peers/:peerId) ` +
+      `or raise the cap. Discovered nodes stay reachable through learned multi-hop routes ` +
+      `without a funded channel.`
+    );
+  }
+
+  /**
    * Get balance for a specific peer from TigerBeetle.
    * Equivalent to GET /admin/balances/:peerId — same response shape.
    *
@@ -2799,6 +3465,24 @@ export class ConnectorNode implements HealthStatusProvider {
   }
 
   /**
+   * The connector's self-prefixes for relation ↔ route admission checks: the
+   * locally-terminating routes' prefixes plus the explicit config `apex`
+   * (toon-meta#153) when set — so child admission works even when the apex has
+   * no local route of its own.
+   */
+  private _selfPrefixesWithApex(): string[] {
+    const localPrefixes = deriveLocalPrefixes(
+      this._routingTable.getAllRoutes(),
+      this._config.nodeId
+    );
+    const apex = this._config.apex;
+    if (apex !== undefined && !localPrefixes.includes(apex)) {
+      localPrefixes.push(apex);
+    }
+    return localPrefixes;
+  }
+
+  /**
    * Add a static route to the routing table.
    * Equivalent to POST /admin/routes — same validation.
    *
@@ -2831,10 +3515,7 @@ export class ConnectorNode implements HealthStatusProvider {
     // (no constraint), so this only rejects an unambiguously child/parent-shaped
     // mismatch and never blocks routing-only or local routes.
     const nextHopRelation = this._packetHandler.getPeerRelation(route.nextHop);
-    const localPrefixes = deriveLocalPrefixes(
-      this._routingTable.getAllRoutes(),
-      this._config.nodeId
-    );
+    const localPrefixes = this._selfPrefixesWithApex();
     const relationValidation = validateRelationRoute(nextHopRelation, localPrefixes, [
       route.prefix,
     ]);
@@ -2882,7 +3563,7 @@ export class ConnectorNode implements HealthStatusProvider {
    *     refresh of the mirror — it never re-applies them.
    *  2. Replay every `source='runtime'` peer/route that isn't already present.
    *     These are the admin-API additions from a previous run; without this they
-   *     would be lost on restart (the "re-POST the town route" RUNBOOK step).
+   *     would be lost on restart (the "re-POST the relay route" RUNBOOK step).
    *
    * Best-effort: if `libsql` is unavailable the store stays null and the
    * connector keeps today's in-memory-only behavior.

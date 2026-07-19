@@ -177,12 +177,12 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     mockBTPClientManager = {
       addPeer: jest.fn().mockResolvedValue(undefined),
       removePeer: jest.fn().mockResolvedValue(undefined),
-      getPeerIds: jest.fn().mockReturnValue(['town-01', 'mill-01', 'dvm-01']),
+      getPeerIds: jest.fn().mockReturnValue(['relay-01', 'swap-01', 'store-01']),
       getPeerStatus: jest.fn().mockReturnValue(
         new Map([
-          ['town-01', true],
-          ['mill-01', true],
-          ['dvm-01', false],
+          ['relay-01', true],
+          ['swap-01', true],
+          ['store-01', false],
         ])
       ),
       isConnected: jest.fn(),
@@ -221,29 +221,29 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     initializeClaimReceiverSchema(claimsDb);
     claimReceiver = new ClaimReceiver(claimsDb, stubRegistry, mockLogger);
 
-    // Settlement peer config: town-01 declares USDC+ETH, mill-01 declares USDC,
-    // dvm-01 has no settlement config (idle).
+    // Settlement peer config: relay-01 declares USDC+ETH, swap-01 declares USDC,
+    // store-01 has no settlement config (idle).
     settlementPeers = new Map<string, SettlementPeerConfig>();
-    settlementPeers.set('town-01', {
-      peerId: 'town-01',
-      address: 'g.town-01',
+    settlementPeers.set('relay-01', {
+      peerId: 'relay-01',
+      address: 'g.relay-01',
       settlementPreference: 'evm',
       settlementTokens: ['0xUSDC', '0xETH'],
       tokenAddress: '0xUSDC',
     });
-    settlementPeers.set('mill-01', {
-      peerId: 'mill-01',
-      address: 'g.mill-01',
+    settlementPeers.set('swap-01', {
+      peerId: 'swap-01',
+      address: 'g.swap-01',
       settlementPreference: 'evm',
       settlementTokens: ['0xUSDC'],
       tokenAddress: '0xUSDC',
     });
 
-    // Seed some packet-forward volume for town-01 and mill-01, leave dvm-01 idle.
-    // town-01 received 1_000_000 from us (outgoing) in USDC and sent us 500_000
-    // (incoming) in USDC. mill-01 received 2_000_000 from us in USDC.
+    // Seed some packet-forward volume for relay-01 and swap-01, leave store-01 idle.
+    // relay-01 received 1_000_000 from us (outgoing) in USDC and sent us 500_000
+    // (incoming) in USDC. swap-01 received 2_000_000 from us in USDC.
     await accountManager.recordPacketTransfers(
-      'town-01', // fromPeer (sent to us)
+      'relay-01', // fromPeer (sent to us)
       'bob', // toPeer (downstream, unused in this test but needed by API)
       '0xUSDC',
       500_000n,
@@ -255,7 +255,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     );
     await accountManager.recordPacketTransfers(
       'alice',
-      'town-01', // toPeer (we forward to town-01)
+      'relay-01', // toPeer (we forward to relay-01)
       '0xUSDC',
       1_000_000n,
       1_000_000n,
@@ -266,7 +266,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     );
     await accountManager.recordPacketTransfers(
       'alice',
-      'mill-01',
+      'swap-01',
       '0xUSDC',
       2_000_000n,
       2_000_000n,
@@ -277,12 +277,12 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     );
 
     // Seed a few verified claims for the lastClaimAt and recentClaims paths.
-    // town-01 has sent 2 USDC claims on the same channel: 100_000 then 250_000
-    // cumulative. mill-01 has one claim.
+    // relay-01 has sent 2 USDC claims on the same channel: 100_000 then 250_000
+    // cumulative. swap-01 has one claim.
     insertClaim({
       messageId: 'msg-1',
-      peerId: 'town-01',
-      channelId: '0xchan-town-usdc',
+      peerId: 'relay-01',
+      channelId: '0xchan-relay-usdc',
       tokenAddress: '0xUSDC',
       transferredAmount: '100000',
       receivedAt: 1_700_000_000_000,
@@ -290,8 +290,8 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     });
     insertClaim({
       messageId: 'msg-2',
-      peerId: 'town-01',
-      channelId: '0xchan-town-usdc',
+      peerId: 'relay-01',
+      channelId: '0xchan-relay-usdc',
       tokenAddress: '0xUSDC',
       transferredAmount: '250000',
       receivedAt: 1_700_000_060_000, // 60s later
@@ -299,8 +299,8 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     });
     insertClaim({
       messageId: 'msg-3',
-      peerId: 'mill-01',
-      channelId: '0xchan-mill-usdc',
+      peerId: 'swap-01',
+      channelId: '0xchan-swap-usdc',
       tokenAddress: '0xUSDC',
       transferredAmount: '75000',
       receivedAt: 1_700_000_120_000, // 120s after msg-1
@@ -340,17 +340,17 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     it('maps each peer to a byAsset entry with correct fields and decimal-string amounts', async () => {
       const res = await request(app).get('/admin/earnings.json').expect(200);
 
-      const town = res.body.peers.find((p: { peerId: string }) => p.peerId === 'town-01');
-      expect(town).toBeDefined();
-      expect(Array.isArray(town.byAsset)).toBe(true);
-      expect(town.byAsset.length).toBeGreaterThan(0);
+      const relay = res.body.peers.find((p: { peerId: string }) => p.peerId === 'relay-01');
+      expect(relay).toBeDefined();
+      expect(Array.isArray(relay.byAsset)).toBe(true);
+      expect(relay.byAsset.length).toBeGreaterThan(0);
 
-      const usdc = town.byAsset.find((a: { assetCode: string }) => a.assetCode === 'USDC');
+      const usdc = relay.byAsset.find((a: { assetCode: string }) => a.assetCode === 'USDC');
       expect(usdc).toBeDefined();
       expect(usdc.assetCode).toBe('USDC');
       expect(usdc.assetScale).toBe(6);
       // claimsReceivedTotal = latest-nonce cumulative per channel, summed.
-      // town-01 has two claims on 0xchan-town-usdc (nonces 1, 2) with
+      // relay-01 has two claims on 0xchan-relay-usdc (nonces 1, 2) with
       // cumulative 100_000 then 250_000 — max-nonce = 250_000.
       expect(usdc.claimsReceivedTotal).toBe('250000');
       // Outbound (sent_claims) path is not wired through in this release —
@@ -401,12 +401,12 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
   // ---------- AC 3: Idle peers appear ----------
 
   describe('AC 3: idle peers appear in the response', () => {
-    it('includes dvm-01 with byAsset=[] (no claims, no config)', async () => {
+    it('includes store-01 with byAsset=[] (no claims, no config)', async () => {
       const res = await request(app).get('/admin/earnings.json').expect(200);
 
-      const dvm = res.body.peers.find((p: { peerId: string }) => p.peerId === 'dvm-01');
-      expect(dvm).toBeDefined();
-      expect(dvm.byAsset).toEqual([]);
+      const store = res.body.peers.find((p: { peerId: string }) => p.peerId === 'store-01');
+      expect(store).toBeDefined();
+      expect(store.byAsset).toEqual([]);
     });
 
     it('includes a peer with configured tokens but no claim history, surfacing the configured asset', async () => {
@@ -419,9 +419,9 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
         tokenAddress: '0xUSDC',
       });
       mockBTPClientManager.getPeerIds.mockReturnValue([
-        'town-01',
-        'mill-01',
-        'dvm-01',
+        'relay-01',
+        'swap-01',
+        'store-01',
         'idle-peer',
       ]);
 
@@ -449,8 +449,8 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
 
     it('returns proportional fee totals when a fee percentage is configured', async () => {
       // Total cumulative-inbound USDC across peers:
-      //   town-01: max-nonce on 0xchan-town-usdc = 250_000
-      //   mill-01: max-nonce on 0xchan-mill-usdc =  75_000
+      //   relay-01: max-nonce on 0xchan-relay-usdc = 250_000
+      //   swap-01: max-nonce on 0xchan-swap-usdc =  75_000
       //   sum = 325_000. At 1% fee (basis points 100), expected = 3_250.
       const feeApp = await createApp({ connectorFeePercentage: 1 });
       const res = await request(feeApp).get('/admin/earnings.json').expect(200);
@@ -470,7 +470,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
       const ethFee = res.body.connectorFees.find(
         (f: { assetCode: string }) => f.assetCode === 'ETH'
       );
-      // ETH appears as a configured token on town-01 but has no incoming
+      // ETH appears as a configured token on relay-01 but has no incoming
       // volume — fee row must be omitted, not zero.
       expect(ethFee).toBeUndefined();
     });
@@ -495,7 +495,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
       for (let i = 0; i < 60; i++) {
         insertClaim({
           messageId: `bulk-${i}`,
-          peerId: 'town-01',
+          peerId: 'relay-01',
           channelId: `0xbulk-${i}`,
           tokenAddress: '0xUSDC',
           transferredAmount: '10000',
@@ -511,17 +511,17 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
     it('amount field is the per-claim delta, not the cumulative value', async () => {
       const res = await request(app).get('/admin/earnings.json').expect(200);
 
-      // town-01's two claims on channel 0xchan-town-usdc: cumulative 100_000,
+      // relay-01's two claims on channel 0xchan-relay-usdc: cumulative 100_000,
       // then 250_000. Deltas: first (newest) should be 250_000 - 100_000 = 150_000;
       // second (oldest) should be 100_000 (no prior claim on that channel).
-      const townClaims = res.body.recentClaims.filter(
+      const relayClaims = res.body.recentClaims.filter(
         (c: { peerId: string; assetCode: string }) =>
-          c.peerId === 'town-01' && c.assetCode === 'USDC'
+          c.peerId === 'relay-01' && c.assetCode === 'USDC'
       );
       // 2 rows for that channel
-      expect(townClaims.length).toBe(2);
-      expect(townClaims[0].amount).toBe('150000'); // newest first
-      expect(townClaims[1].amount).toBe('100000');
+      expect(relayClaims.length).toBe(2);
+      expect(relayClaims[0].amount).toBe('150000'); // newest first
+      expect(relayClaims[1].amount).toBe('100000');
     });
 
     it('each entry carries peerId, assetCode, assetScale, amount, direction, at', async () => {
@@ -612,12 +612,17 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
         settlementTokens: ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'],
         tokenAddress: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
       });
-      mockBTPClientManager.getPeerIds.mockReturnValue(['town-01', 'mill-01', 'dvm-01', 'sol-01']);
+      mockBTPClientManager.getPeerIds.mockReturnValue([
+        'relay-01',
+        'swap-01',
+        'store-01',
+        'sol-01',
+      ]);
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
-          ['town-01', true],
-          ['mill-01', true],
-          ['dvm-01', false],
+          ['relay-01', true],
+          ['swap-01', true],
+          ['store-01', false],
           ['sol-01', true],
         ])
       );
@@ -653,12 +658,17 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
         settlementTokens: [tokenId],
         tokenAddress: tokenId,
       });
-      mockBTPClientManager.getPeerIds.mockReturnValue(['town-01', 'mill-01', 'dvm-01', 'mina-01']);
+      mockBTPClientManager.getPeerIds.mockReturnValue([
+        'relay-01',
+        'swap-01',
+        'store-01',
+        'mina-01',
+      ]);
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
-          ['town-01', true],
-          ['mill-01', true],
-          ['dvm-01', false],
+          ['relay-01', true],
+          ['swap-01', true],
+          ['store-01', false],
           ['mina-01', true],
         ])
       );
@@ -703,17 +713,17 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
         tokenAddress: 'wUPsSR5SSUHHBQSEsB4Bxhb3G3iC1xrs1Csq3QL2S9qtJ1Yp7yYr',
       });
       mockBTPClientManager.getPeerIds.mockReturnValue([
-        'town-01',
-        'mill-01',
-        'dvm-01',
+        'relay-01',
+        'swap-01',
+        'store-01',
         'sol-01',
         'mina-01',
       ]);
       mockBTPClientManager.getPeerStatus.mockReturnValue(
         new Map([
-          ['town-01', true],
-          ['mill-01', true],
-          ['dvm-01', false],
+          ['relay-01', true],
+          ['swap-01', true],
+          ['store-01', false],
           ['sol-01', true],
           ['mina-01', true],
         ])
@@ -745,7 +755,7 @@ describe('Admin API GET /admin/earnings.json (Story 37.4)', () => {
 
       const solPeer = res.body.peers.find((p: { peerId: string }) => p.peerId === 'sol-01');
       const minaPeer = res.body.peers.find((p: { peerId: string }) => p.peerId === 'mina-01');
-      const evmPeer = res.body.peers.find((p: { peerId: string }) => p.peerId === 'town-01');
+      const evmPeer = res.body.peers.find((p: { peerId: string }) => p.peerId === 'relay-01');
 
       expect(solPeer.byAsset[0].assetScale).toBe(9);
       expect(solPeer.byAsset[0].assetCode).toBe('SOL');

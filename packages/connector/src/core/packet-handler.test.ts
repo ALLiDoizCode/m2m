@@ -568,6 +568,50 @@ describe('PacketHandler', () => {
     });
   });
 
+  // Issue #316: the per-packet claim is minted BEFORE the forward, so it is issued even
+  // when the forward then REJECTs (the payer pays for the forward attempt, and the claim
+  // rides the PREPARE to the peer regardless of outcome). Pin that behavior here; see
+  // docs/local-delivery-fulfillment-contract.md § "Reject semantics".
+  describe('handlePreparePacket() - claim issued at forward time on REJECT (issue #316)', () => {
+    it('generates the per-packet claim even when the downstream forward REJECTs', async () => {
+      const routingTable = new RoutingTable([{ prefix: 'g.alice', nextHop: 'peer-alice' }]);
+      const mockLogger = createMockLogger();
+      const btpClientManager = createMockBTPClientManager();
+      // Force the downstream forward to REJECT.
+      (btpClientManager.sendToPeer as jest.Mock).mockResolvedValue({
+        type: PacketType.REJECT,
+        code: 'F99',
+        triggeredBy: 'g.alice',
+        message: 'application error',
+        data: Buffer.alloc(0),
+      });
+      const handler = new PacketHandler(
+        routingTable,
+        btpClientManager,
+        'test.connector',
+        mockLogger
+      );
+      const claimService = createMockPerPacketClaimService();
+      handler.setPerPacketClaimService(claimService);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.alice.wallet',
+        amount: BigInt(2000),
+      });
+
+      const result = await handler.handlePreparePacket(packet);
+
+      // The forward rejected...
+      expect(result.type).toBe(PacketType.REJECT);
+      // ...but the claim was still generated at forward time, for the full δ.
+      expect(claimService.generateClaimForPacket).toHaveBeenCalledWith(
+        'peer-alice',
+        expect.any(String),
+        BigInt(2000)
+      );
+    });
+  });
+
   describe('handlePreparePacket() - No Route Found', () => {
     let handler: PacketHandler;
     let mockLogger: ReturnType<typeof createMockLogger>;
@@ -968,7 +1012,7 @@ describe('PacketHandler', () => {
     });
   });
 
-  describe('handlePreparePacket() - Per-Hop BLS Notification', () => {
+  describe('handlePreparePacket() - Per-Hop App Notification', () => {
     let routingTable: RoutingTable;
     let mockLogger: jest.Mocked<Logger>;
     let btpClientManager: jest.Mocked<BTPClientManager>;
@@ -1797,6 +1841,345 @@ describe('PacketHandler', () => {
       expect(result.type).toBe(PacketType.FULFILL);
       // Without NIP-59, fulfillment is undefined (auto-fulfill stub)
       expect((result as ILPFulfillPacket).fulfillment).toBeUndefined();
+    });
+  });
+
+  describe('handlePreparePacket() - Sender-Chosen Execution Conditions on Local Delivery (issue #309)', () => {
+    /** Fresh sender-minted preimage/condition pair (spec R1: C_i = sha256(P_i)). */
+    const appPreimage = new Uint8Array(32).fill(0x42);
+    const senderCondition = new Uint8Array(sha256(appPreimage));
+
+    /** NIP-59-derived preimage that MUST NOT be substituted on this path. */
+    const nip59Preimage = new Uint8Array(32).fill(0x99);
+
+    /** Valid `claim-wrapped` protocolData entry so preimage derivation succeeds. */
+    const wrappedClaimProtocolData = [
+      {
+        protocolName: 'claim-wrapped',
+        contentType: 0,
+        data: Buffer.from(
+          JSON.stringify({
+            ephemeralPublicKey: 'aa'.repeat(33),
+            encryptedPayload: 'bb',
+            timestamp: 123,
+            version: '1.0',
+          }),
+          'utf8'
+        ),
+      },
+    ];
+
+    const createMockNip59Wrapper = (): never =>
+      ({
+        isEnabled: jest.fn().mockReturnValue(true),
+        unwrapClaimWithPreimage: jest.fn().mockReturnValue({
+          claim: {},
+          fulfillmentPreimage: nip59Preimage,
+        }),
+      }) as never;
+
+    const createMockIlpMetrics = (): never =>
+      ({
+        recordInbound: jest.fn(),
+        recordLocalDeliver: jest.fn(),
+        recordPreRoutingReject: jest.fn(),
+        recordForwardFulfill: jest.fn(),
+        recordForwardReject: jest.fn(),
+        registerPeer: jest.fn(),
+      }) as never;
+
+    let handler: PacketHandler;
+
+    beforeEach(() => {
+      const routingTable = new RoutingTable([{ prefix: 'g.local', nextHop: 'test.connector' }]);
+      handler = new PacketHandler(
+        routingTable,
+        createMockBTPClientManager(),
+        'test.connector',
+        createMockLogger()
+      );
+    });
+
+    it('should pass the sender condition (base64) to the local delivery handler', async () => {
+      const mockHandler = jest.fn().mockResolvedValue({
+        fulfill: { fulfillment: Buffer.from(appPreimage).toString('base64') },
+      });
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+      });
+      await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(mockHandler).toHaveBeenCalledTimes(1);
+      const [request] = mockHandler.mock.calls[0];
+      expect(request.executionCondition).toBe(Buffer.from(senderCondition).toString('base64'));
+    });
+
+    it('should NOT pass executionCondition to the handler for absent or all-zero conditions (legacy)', async () => {
+      const mockHandler = jest.fn().mockResolvedValue({ fulfill: {} });
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      await handler.handlePreparePacket(
+        createValidPreparePacket({ destination: 'g.local.wallet' }),
+        'source-peer-1'
+      );
+      await handler.handlePreparePacket(
+        createValidPreparePacket({
+          destination: 'g.local.wallet',
+          executionCondition: new Uint8Array(32), // all-zero
+        }),
+        'source-peer-1'
+      );
+
+      expect(mockHandler).toHaveBeenCalledTimes(2);
+      expect(mockHandler.mock.calls[0][0].executionCondition).toBeUndefined();
+      expect(mockHandler.mock.calls[1][0].executionCondition).toBeUndefined();
+    });
+
+    it('should FULFILL with the app-supplied preimage when it matches the sender condition', async () => {
+      const mockHandler = jest.fn().mockResolvedValue({
+        fulfill: { fulfillment: Buffer.from(appPreimage).toString('base64') },
+      });
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+      });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect(Buffer.from((result as ILPFulfillPacket).fulfillment!)).toEqual(
+        Buffer.from(appPreimage)
+      );
+    });
+
+    it('should NOT substitute the NIP-59-derived preimage when the PREPARE carries a sender condition', async () => {
+      const mockHandler = jest.fn().mockResolvedValue({
+        fulfill: { fulfillment: Buffer.from(appPreimage).toString('base64') },
+      });
+      handler.setLocalDeliveryHandler(mockHandler);
+      handler.setNip59Wrapper(createMockNip59Wrapper(), new Uint8Array(32).fill(1));
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+      });
+      const result = await handler.handlePreparePacket(
+        packet,
+        'source-peer-1',
+        wrappedClaimProtocolData
+      );
+
+      // The app-supplied preimage wins; the injected NIP-59 preimage would
+      // fail sha256 verification and turn every coupled packet into an F99.
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect(Buffer.from((result as ILPFulfillPacket).fulfillment!)).toEqual(
+        Buffer.from(appPreimage)
+      );
+    });
+
+    it('should reject with F99 when the app supplies a wrong preimage, and record nothing as delivered', async () => {
+      const metrics = createMockIlpMetrics();
+      handler.setIlpMetrics(metrics);
+      const wrongPreimage = new Uint8Array(32).fill(0x7e);
+      const mockHandler = jest.fn().mockResolvedValue({
+        fulfill: { fulfillment: Buffer.from(wrongPreimage).toString('base64') },
+      });
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+      });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.F99_APPLICATION_ERROR);
+      expect((result as ILPRejectPacket).message).toContain(
+        'Fulfillment does not match execution condition'
+      );
+      expect(
+        (metrics as never as { recordLocalDeliver: jest.Mock }).recordLocalDeliver
+      ).not.toHaveBeenCalled();
+    });
+
+    it('should reject with F99 when the app withholds the preimage on a sender-condition packet', async () => {
+      const metrics = createMockIlpMetrics();
+      handler.setIlpMetrics(metrics);
+      const mockHandler = jest.fn().mockResolvedValue({ fulfill: {} });
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+      });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.F99_APPLICATION_ERROR);
+      expect(
+        (metrics as never as { recordLocalDeliver: jest.Mock }).recordLocalDeliver
+      ).not.toHaveBeenCalled();
+    });
+
+    it('should reject with F99 when the app supplies a malformed (non-32-byte) preimage', async () => {
+      const mockHandler = jest.fn().mockResolvedValue({
+        fulfill: { fulfillment: Buffer.from('too-short').toString('base64') },
+      });
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+      });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.F99_APPLICATION_ERROR);
+    });
+
+    it('should keep the legacy zero-condition path unchanged (NIP-59 preimage injected)', async () => {
+      const mockHandler = jest.fn().mockResolvedValue({ fulfill: {} });
+      handler.setLocalDeliveryHandler(mockHandler);
+      handler.setNip59Wrapper(createMockNip59Wrapper(), new Uint8Array(32).fill(1));
+
+      const packet = createValidPreparePacket({ destination: 'g.local.wallet' });
+      const result = await handler.handlePreparePacket(
+        packet,
+        'source-peer-1',
+        wrappedClaimProtocolData
+      );
+
+      // Pre-#309 behavior byte-for-byte: FULFILL carries the derived preimage,
+      // no verification is applied to a zero-condition packet.
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect(Buffer.from((result as ILPFulfillPacket).fulfillment!)).toEqual(
+        Buffer.from(nip59Preimage)
+      );
+    });
+
+    it('should not verify or reject legacy zero-condition fulfills without app fulfillment', async () => {
+      const mockHandler = jest.fn().mockResolvedValue({ fulfill: {} });
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: new Uint8Array(32), // explicit all-zero condition
+      });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.FULFILL);
+      expect((result as ILPFulfillPacket).fulfillment).toBeUndefined();
+    });
+
+    it('should reject with F99 when a sender-condition packet reaches the auto-fulfill stub (no handler)', async () => {
+      // No local delivery handler, no HTTP client — the stub cannot mint the preimage
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+      });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.F99_APPLICATION_ERROR);
+      expect((result as ILPRejectPacket).message).toContain(
+        'No local delivery handler available to satisfy execution condition'
+      );
+    });
+
+    it('should keep the auto-fulfill stub unchanged for zero-condition packets', async () => {
+      const packet = createValidPreparePacket({ destination: 'g.local.wallet' });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.FULFILL);
+    });
+
+    it('should reject an expired sender-condition packet with R00 without invoking the handler', async () => {
+      const mockHandler = jest.fn();
+      handler.setLocalDeliveryHandler(mockHandler);
+
+      const packet = createValidPreparePacket({
+        destination: 'g.local.wallet',
+        executionCondition: senderCondition,
+        expiresAt: new Date(Date.now() - 1000),
+      });
+      const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+      expect(result.type).toBe(PacketType.REJECT);
+      expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.R00_TRANSFER_TIMED_OUT);
+      expect(mockHandler).not.toHaveBeenCalled();
+    });
+
+    it('should verify the app-supplied preimage over the HTTP local-delivery path (correct → FULFILL)', async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = jest.fn(async (_url, init) => {
+          const body = JSON.parse((init as { body: string }).body);
+          // The wire PaymentRequest carries the sender condition
+          expect(body.executionCondition).toBe(Buffer.from(senderCondition).toString('base64'));
+          return {
+            ok: true,
+            json: async () => ({
+              accept: true,
+              fulfillment: Buffer.from(appPreimage).toString('base64'),
+            }),
+          } as never;
+        }) as never;
+
+        handler.setLocalDelivery({
+          enabled: true,
+          handlerUrl: 'http://app:8080',
+          timeout: 1000,
+        });
+
+        const packet = createValidPreparePacket({
+          destination: 'g.local.wallet',
+          executionCondition: senderCondition,
+        });
+        const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+        expect(result.type).toBe(PacketType.FULFILL);
+        expect(Buffer.from((result as ILPFulfillPacket).fulfillment!)).toEqual(
+          Buffer.from(appPreimage)
+        );
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it('should reject with F99 over the HTTP local-delivery path when the preimage is wrong', async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = jest.fn(async () => {
+          return {
+            ok: true,
+            json: async () => ({
+              accept: true,
+              fulfillment: Buffer.from(new Uint8Array(32).fill(0x13)).toString('base64'),
+            }),
+          } as never;
+        }) as never;
+
+        handler.setLocalDelivery({
+          enabled: true,
+          handlerUrl: 'http://app:8080',
+          timeout: 1000,
+        });
+
+        const packet = createValidPreparePacket({
+          destination: 'g.local.wallet',
+          executionCondition: senderCondition,
+        });
+        const result = await handler.handlePreparePacket(packet, 'source-peer-1');
+
+        expect(result.type).toBe(PacketType.REJECT);
+        expect((result as ILPRejectPacket).code).toBe(ILPErrorCode.F99_APPLICATION_ERROR);
+      } finally {
+        global.fetch = originalFetch;
+      }
     });
   });
 });

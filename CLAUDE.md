@@ -7,7 +7,7 @@ Multi-chain ILP connector with EVM, Solana, and Mina payment channel settlement.
 ## Terminology
 
 - Use **"app"** (or **"handler"** when referring to the HTTP endpoint specifically) for the HTTP service the connector POSTs local delivery to — the thing the operator runs at `handler_url` in `toon.json`. Examples: "the app returns 200/4xx", "the handler endpoint", "any HTTP service is a TOON node app".
-- The legacy term **"BLS"** (Business Logic Server) is **deprecated** as of 2026-05-01 (Epic 39, Story 39.15). It originated when the local delivery handler had to import the TOON SDK and do ILP-aware work; that role no longer exists post-Epic-39. Do not introduce "BLS" in new code, comments, docs, or commit messages. Existing occurrences in code/config (e.g., `packages/connector/src/core/local-delivery-client.ts` comments) are migration debt to be cleared by Story 39.15.
+- The legacy term **"BLS"** (Business Logic Server) is **deprecated** as of 2026-05-01 (Epic 39, Story 39.15). It originated when the local delivery handler had to import the TOON SDK and do ILP-aware work; that role no longer exists post-Epic-39. Do not introduce "BLS" in new code, comments, docs, or commit messages. The migration is complete in code: `packages/` has zero remaining "BLS" occurrences. Other repo locations — `CHANGELOG.md`, `docs/`, `scripts/`, `_bmad-output/` — may still reference the legacy term as historical record.
 - The term **"terminator"** (and "connector-as-terminator", "app-behind-terminator") is **deprecated**. There is no separate "terminator" role: it is just the **connector** acting as a paid reverse proxy in front of an **app**. The two roles are **`app`** and **`connector`**. Use "connector" (or "the connector acting as a paid reverse proxy") instead. Do not introduce "terminator" in new code, comments, docs, config, compose services/profiles, route addresses, or commit messages. NOTE: this does **not** affect the route-**termination** feature schema — the TypeScript types `RouteTermination`/`RouteTerminationRegistry`/`RouteTerminationSink`, functions `resolveTermination`/`toRouteTermination`, the `termination` config fields, and `checkRequestBinding` are the "route termination" feature and are unchanged.
 - **Never** use "agent runtime" — that term is deprecated from before "BLS" and is not coming back.
 
@@ -60,8 +60,11 @@ make solana-up     # Start Solana container only
 make mina-up       # Start Mina container only
 
 # Run tests against live containers
-npm run test:e2e
-npm run test:integration
+npm run test:integration --workspace=packages/connector
+npm run test:admin-surface --workspace=packages/connector
+npm run test:cross-surface --workspace=packages/connector
+npm run test:packet-flow --workspace=packages/connector
+npm run test:standalone-docker --workspace=packages/connector
 
 make infra-down    # Stop all containers
 ```
@@ -132,7 +135,8 @@ When the user asks about Interledger protocols or RFCs, **immediately activate**
 
 There is **no production or staging deploy target yet.** `.github/workflows/cd.yml`
 (`appleboy/ssh-action`) fails on every push to `main` with `missing server host`
-because the `DEPLOY_HOST` secret is intentionally unset. **This is expected, not a
-regression** — do not flag the failing CD run as quality drift or open issues for it
-until a real deploy target is configured. (On-chain contract deployment for
-Solana/Mina is unrelated — see "Chain-Specific Build & Deploy" above.)
+because the `STAGING_HOST` and `PRODUCTION_HOST` secrets are intentionally unset.
+**This is expected, not a regression** — do not flag the failing CD run as quality
+drift or open issues for it until a real deploy target is configured. (On-chain
+contract deployment for Solana/Mina is unrelated — see "Chain-Specific Build &
+Deploy" above.)

@@ -352,6 +352,7 @@ describe('ConnectorNode branch coverage', () => {
       getConnectionHealth: jest.fn().mockReturnValue(100),
       setPacketHandler: jest.fn(),
       setAgentFactory: jest.fn(),
+      setConnectionStateChangeCallback: jest.fn(),
       getPeerTransport: jest.fn().mockReturnValue(undefined),
     } as unknown as jest.Mocked<BTPClientManager>;
 
@@ -503,7 +504,7 @@ describe('ConnectorNode branch coverage', () => {
 
     it('uses env var fallbacks for handlerUrl, timeout, authToken, perHopNotification', () => {
       process.env.LOCAL_DELIVERY_ENABLED = 'true';
-      process.env.LOCAL_DELIVERY_URL = 'http://bls-env:8080';
+      process.env.LOCAL_DELIVERY_URL = 'http://app-env:8080';
       process.env.LOCAL_DELIVERY_TIMEOUT = '15000';
       process.env.LOCAL_DELIVERY_AUTH_TOKEN = 'env-token';
       process.env.LOCAL_DELIVERY_PER_HOP_NOTIFICATION = 'true';
@@ -516,7 +517,7 @@ describe('ConnectorNode branch coverage', () => {
       expect(mockPacketHandler.setLocalDelivery).toHaveBeenCalledWith(
         expect.objectContaining({
           enabled: true,
-          handlerUrl: 'http://bls-env:8080',
+          handlerUrl: 'http://app-env:8080',
           timeout: 15000,
           authToken: 'env-token',
           perHopNotification: true,
