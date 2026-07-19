@@ -53,6 +53,12 @@ RUN npm install --ignore-scripts
 COPY packages/connector/tsconfig.json ./packages/connector/
 COPY packages/shared/tsconfig.json ./packages/shared/
 COPY packages/mina-zkapp/tsconfig.json ./packages/mina-zkapp/
+# The mina-zkapp pure-ESM build (tsconfig.esm.json + scripts/build-esm.mjs) is
+# what the connector runtime imports so o1js stays a SINGLE module instance —
+# see packages/connector/src/settlement/mina-payment-channel-sdk.ts
+# (esmDynamicImport) and the "Mina zkApp worker-init bug" (#368).
+COPY packages/mina-zkapp/tsconfig.esm.json ./packages/mina-zkapp/
+COPY packages/mina-zkapp/scripts ./packages/mina-zkapp/scripts
 COPY packages/connector/src ./packages/connector/src
 COPY packages/shared/src ./packages/shared/src
 COPY packages/mina-zkapp/src ./packages/mina-zkapp/src
@@ -62,8 +68,10 @@ COPY packages/mina-zkapp/src ./packages/mina-zkapp/src
 # dynamic import but its tsc step still needs their .d.ts files on disk.
 # Use direct cd instead of --workspace to avoid npm workspace resolution
 # issues when not all workspace dirs have package.json (contracts, solana-program).
+# mina-zkapp also emits a parallel pure-ESM build (dist-esm/) that the connector
+# runtime imports to keep o1js single-instance for settlement PROVING (#368).
 RUN cd packages/shared && npm run build && \
-    cd ../mina-zkapp && npm run build && \
+    cd ../mina-zkapp && npm run build && npm run build:esm && \
     cd ../connector && npm run build
 
 # ============================================
@@ -153,6 +161,10 @@ COPY --from=proddeps /app ./
 COPY --from=builder /app/packages/connector/dist ./packages/connector/dist
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/mina-zkapp/dist ./packages/mina-zkapp/dist
+# The pure-ESM mina-zkapp build the connector runtime imports for single-instance
+# o1js settlement proving (#368). Without this the compile path falls back to the
+# CJS dist and dies with "workersReadyResolve is not a function".
+COPY --from=builder /app/packages/mina-zkapp/dist-esm ./packages/mina-zkapp/dist-esm
 
 # Install wget for health check (minimal package, available in Alpine)
 # Used by Docker HEALTHCHECK to query HTTP health endpoint
