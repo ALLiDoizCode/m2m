@@ -3,6 +3,7 @@ import cors from 'cors';
 import { ethers, NonceManager } from 'ethers';
 import { createSolanaFaucet } from './solana.js';
 import { isValidMinaAddress, minaInfo, minaFallbackLink, createMinaFaucet } from './mina.js';
+import { createBaseSepoliaFaucet, baseSepoliaInfo } from './base-sepolia.js';
 import { createDripLimiter } from './drip-limiter.js';
 // The Mina USDC drip (treasury self-mint + TRANSFER — the rate-limited token
 // has no admin-mint) lives in a SEPARATE pure-ESM module (`mina-usdc.mjs`)
@@ -55,6 +56,11 @@ const solanaFaucet = createSolanaFaucet();
 // createMinaFaucet throws fail-loud ONLY when a WRONG key is configured (the
 // derived pubkey must equal the treasury), which we want to crash boot.
 const minaFaucet = createMinaFaucet();
+
+// Base Sepolia faucet (null when BASE_SEPOLIA_FAUCET_KEY unset — route 503s).
+// Mints the ungated public mock USDC on the PUBLIC Base Sepolia testnet
+// (chainId 84532) + best-effort ETH gas. Mirrors createSolanaFaucet's shape.
+const baseSepoliaFaucet = createBaseSepoliaFaucet();
 
 // Mina USDC dripper (null when MINA_USDC_* env is unset — native MINA still
 // drips). Loaded via dynamic import so the o1js dependency only loads when the
@@ -110,6 +116,10 @@ let solanaQueue = Promise.resolve();
 // Serialize Mina drips: the treasury nonce is read-then-spent, so concurrent
 // requests must not both read the same nonce (the second would be rejected).
 let minaQueue = Promise.resolve();
+
+// Serialize Base Sepolia drips the same way the anvil EVM leg is — the faucet
+// key's nonce is read-then-spent, so concurrent mint txs must not race it.
+let baseSepoliaQueue = Promise.resolve();
 
 // Initialize token contract.
 //
@@ -222,6 +232,7 @@ app.get('/api/info', async (req, res) => {
             }
           : { enabled: false, route: '/api/solana/request', ready: false },
         mina: minaInfo(minaFaucet, minaUsdcInfoFn(minaUsdcDripper)),
+        baseSepolia: baseSepoliaInfo(baseSepoliaFaucet),
       },
     });
   } catch (error) {
@@ -355,6 +366,68 @@ app.post('/api/solana/request', (req, res) => {
         }
         res.status(500).json({
           error: 'Solana faucet request failed',
+          message: error.message,
+        });
+      }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Base Sepolia route — POST /api/base-sepolia/request { address }
+//
+// Mints the ungated mock USDC on the PUBLIC Base Sepolia testnet (chainId 84532)
+// to `address`, and best-effort drips a little Base Sepolia ETH for gas when the
+// faucet key holds a surplus. Because mint() is ungated the faucet key holds no
+// USDC — it coins fresh tokens on demand; it only needs Base Sepolia ETH for
+// gas. Returns a clear 503 when the leg isn't configured (so other legs still
+// work), and honours the same per-address cooldown as the Mina USDC leg.
+// ---------------------------------------------------------------------------
+app.post('/api/base-sepolia/request', (req, res) => {
+  if (!baseSepoliaFaucet) {
+    res.status(503).json({
+      error: 'Base Sepolia faucet not configured',
+      message:
+        'Set BASE_SEPOLIA_FAUCET_KEY (an EVM key funded with Base Sepolia ETH for gas) to enable the Base Sepolia route.',
+    });
+    return;
+  }
+
+  const { address } = req.body || {};
+  if (!address || !baseSepoliaFaucet.isValidAddress(address)) {
+    res.status(400).json({ error: 'Invalid Ethereum address' });
+    return;
+  }
+
+  // Per-address cooldown: claim BEFORE enqueueing (reserves the slot so
+  // concurrent requests for the same address cannot double-drip); released
+  // below if the drip fails.
+  const claim = baseSepoliaFaucet.claim(address);
+  if (!claim.allowed) {
+    res
+      .status(429)
+      .set('Retry-After', String(Math.ceil(claim.retryAfterMs / 1000)))
+      .json({
+        error: 'Base Sepolia drip rate limit',
+        message: 'This address already received a Base Sepolia drip inside the cooldown window.',
+        retryAfterMs: claim.retryAfterMs,
+      });
+    return;
+  }
+
+  console.log(`💧 Base Sepolia faucet request for ${address}`);
+  baseSepoliaQueue = baseSepoliaQueue
+    .then(async () => {
+      const result = await baseSepoliaFaucet.drip(address);
+      console.log(`  ✅ Base Sepolia faucet request completed for ${address}`);
+      res.json({ success: true, chain: 'base-sepolia', address, transactions: result });
+    })
+    .catch((error) => {
+      // A failed drip must not burn the address's cooldown.
+      baseSepoliaFaucet.release(address);
+      console.error('❌ Base Sepolia faucet request failed:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Base Sepolia faucet request failed',
           message: error.message,
         });
       }
@@ -602,6 +675,9 @@ app.listen(PORT, async () => {
   );
   console.log(
     `   Mina USDC:     ${minaUsdcDripper ? `drip ${minaUsdcDripper.usdcAmount} USDC (treasury transfer, self-mint replenished ≤${minaUsdcDripper.dailyCapUsdc}/day)` : 'disabled (native MINA only)'}`
+  );
+  console.log(
+    `   Base Sepolia:  ${baseSepoliaFaucet ? `mint ${baseSepoliaFaucet.usdcAmount} USDC (chainId ${baseSepoliaFaucet.chainId}, ungated mint)` : 'disabled (503)'}`
   );
   console.log('═══════════════════════════════════════════════');
   console.log('');
