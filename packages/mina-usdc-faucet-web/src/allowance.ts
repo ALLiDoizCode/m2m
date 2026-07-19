@@ -66,7 +66,9 @@ async function fetchCurrentSlot(): Promise<bigint> {
   try {
     const data = await gql<{
       bestChain?: { protocolState: { consensusState: { slotSinceGenesis: string } } }[];
-    }>(`query { bestChain(maxLength: 1) { protocolState { consensusState { slotSinceGenesis } } } }`);
+    }>(
+      `query { bestChain(maxLength: 1) { protocolState { consensusState { slotSinceGenesis } } } }`
+    );
     const slot = data.bestChain?.[0]?.protocolState.consensusState.slotSinceGenesis;
     return slot ? BigInt(slot) : 0n;
   } catch {

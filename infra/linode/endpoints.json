@@ -16,6 +16,17 @@
     "tokenDecimals": 6,
     "_fund": "infra/solana/fund-solana.sh <pubkey> — airdrops SOL + transfers mock USDC from the treasury"
   },
+  "baseSepolia": {
+    "rpcUrl": "https://sepolia.base.org",
+    "chainId": 84532,
+    "tokenAddress": "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce",
+    "tokenDecimals": 6,
+    "registryAddress": "0xcC9079adE929b168B54145f6d25262b64FAB9D5b",
+    "tokenNetworkUsdc": "0x1E95493fEF46707E034b4a1945f25a8C76A1823D",
+    "faucetUrl": "https://faucet.<DOMAIN>",
+    "_fund": "curl -X POST https://faucet.<DOMAIN>/api/base-sepolia/request -d '{\"address\":\"0x…\"}' → mints 1000 USDC. The mock USDC mint(address,uint256) is UNGATED (anyone can coin fresh tokens to any address), so the faucet key holds no USDC — it only needs Base Sepolia ETH for gas. Per-address 24h cooldown. Basescan: https://sepolia.basescan.org/address/0x49beE1Bca5d15Fb0963117923403F9498119a9Ce",
+    "_note": "PUBLIC Base Sepolia testnet (chainId 84532) — no self-hosted node; the faucet mints against the public RPC. Deployed 2026-07-18."
+  },
   "mina": {
     "graphqlUrl": "https://mina.<DOMAIN>/graphql",
     "upstream": "https://api.minascan.io/node/devnet/v1/graphql",

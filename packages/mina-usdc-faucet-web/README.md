@@ -4,17 +4,17 @@ A one-screen web app that mints **mock USDC on Mina devnet** to any address the
 user types. It connects the **Auro wallet**, builds + proves the mint transaction
 **in the browser** (o1js in a web worker), and hands the proven transaction to
 Auro for the fee-payer signature + broadcast. The recipient never signs — this is
-the *permissionless* token gated by `PermissionlessRateLimitedUsdcAdmin`, which
+the _permissionless_ token gated by `PermissionlessRateLimitedUsdcAdmin`, which
 enforces a **1000-USDC-per-address-per-~24h** cap inside the proof + the ledger.
 
 Live token (devnet):
 
-| | |
-|---|---|
-| token | `B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa` |
+|                |                                                           |
+| -------------- | --------------------------------------------------------- |
+| token          | `B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa` |
 | admin contract | `B62qk3RsLgL38Vk7nDzGT3XHBjtzN9W9zz4A6WS2a6DhBMac9N8NKDs` |
-| decimals | 6 · daily cap 1000 USDC / recipient / 480-slot window |
-| node | `https://api.minascan.io/node/devnet/v1/graphql` |
+| decimals       | 6 · daily cap 1000 USDC / recipient / 480-slot window     |
+| node           | `https://api.minascan.io/node/devnet/v1/graphql`          |
 
 ## How it works
 
@@ -22,7 +22,7 @@ Live token (devnet):
    `FungibleToken.AdminContract = PermissionlessRateLimitedUsdcAdmin`, compiles
    both circuits (once per session), then reproduces the CLI `buildMintTx`
    exactly: `Mina.transaction({ sender: feePayer, fee }, () => { fundNewAccount?;
-   token.mint(recipient, amount) })` → `tx.prove()`. Returns the proven
+token.mint(recipient, amount) })` → `tx.prove()`. Returns the proven
    `tx.toJSON()`; the fee payer (Auro) signs later.
 2. **`src/wallet.ts`** — Auro (`window.mina`): `requestAccounts`, `requestNetwork`
    (devnet check), `sendTransaction` (fee-payer sign + broadcast).
