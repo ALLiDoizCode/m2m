@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.36.0](https://github.com/toon-protocol/connector/compare/v3.35.0...v3.36.0) (2026-07-19)
+
+### Features
+
+- **faucet-web:** browser dApp to mint devnet mock-USDC via Auro ([#363](https://github.com/toon-protocol/connector/issues/363)) ([a965f52](https://github.com/toon-protocol/connector/commit/a965f5275adfef016ea6593d87781193e93f22e4))
+
+### Bug Fixes
+
+- **connector:** load o1js single-instance so Mina settlement circuits compile ([#368](https://github.com/toon-protocol/connector/issues/368)) ([#369](https://github.com/toon-protocol/connector/issues/369)) ([4dc47b6](https://github.com/toon-protocol/connector/commit/4dc47b6d5ec6ff113b50d4f1764ae3173a768326)), closes [#363](https://github.com/toon-protocol/connector/issues/363)
+- **connector:** pin Node >=22.12 base image so require(esm) loads the Mina claim path ([#364](https://github.com/toon-protocol/connector/issues/364)) ([48564b4](https://github.com/toon-protocol/connector/commit/48564b45cbf51cc5cafea500e18599a1eed43135))
+
 ## [3.35.0](https://github.com/toon-protocol/connector/compare/v3.34.8...v3.35.0) (2026-07-18)
 
 ### Features
