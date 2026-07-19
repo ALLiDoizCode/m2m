@@ -63,18 +63,17 @@ settlement:
     pollingInterval: 100
 
 # ── Settlement / chain providers ─────────────────────────────────────────────
-# THREE public-testnet chains: Base Sepolia (evm:84532), Solana public devnet
-# (solana:devnet), and Mina public devnet (mina:devnet, permissionless USDC).
-# rpcUrl/graphqlUrl values are LITERAL (no ${} interpolation). Per-chain signing
-# keys (keyId) are OVERWRITTEN at boot by keys derived from TOON_MNEMONIC (.env),
-# so the settlement identities are the box's own SETTLE_EVM / SETTLE_SOL /
-# SETTLE_MINA — the keyId literals below are placeholders. TESTNET-ONLY.
+# A single EVM entry pointing at the SHARED LIVE DEVNET (chainId 31337, the same
+# deterministic anvil chain). rpcUrl is LITERAL (no ${} interpolation). The
+# devnet serves a self-signed TLS cert, so the connector container runs with
+# NODE_TLS_REJECT_UNAUTHORIZED=0 (set in docker-compose.yml) for its RPC/faucet
+# calls. DEVNET-ONLY.
 chainProviders:
   - chainType: evm
-    chainId: evm:84532
-    rpcUrl: https://sepolia.base.org
-    registryAddress: '0xcC9079adE929b168B54145f6d25262b64FAB9D5b'
-    tokenAddress: '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce'
+    chainId: evm:31337
+    rpcUrl: https://evm-rpc.devnet.toonprotocol.dev
+    registryAddress: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'
+    tokenAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
     keyId: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
     settlementOptions:
       threshold: '5000'
@@ -82,30 +81,6 @@ chainProviders:
       settlementTimeoutSecs: 3600
       initialDepositMultiplier: 2
       ledgerSnapshotPath: ./data/ledger-connector.json
-
-  - chainType: solana
-    chainId: solana:devnet
-    rpcUrl: https://api.devnet.solana.com
-    wsUrl: wss://api.devnet.solana.com
-    programId: '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip'
-    tokenMint: 'xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in'
-    keyId: 'placeholder-overwritten-by-mnemonic'
-    cluster: devnet
-
-  - chainType: mina
-    chainId: mina:devnet
-    network: devnet
-    # The mina.<DOMAIN> proxy 504s on send, so the connector reads via the
-    # minascan upstream directly (see infra/linode/endpoints.json _connectorNote).
-    graphqlUrl: https://api.minascan.io/node/devnet/v1/graphql
-    # zkAppAddress: bare PaymentChannel deployed 2026-07-19 on public devnet (shared with apex).
-    # Required by the provider; the verify path follows each claim's own
-    # channelAccount, so client-opened channels settle under the live token below.
-    zkAppAddress: 'B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf'
-    tokenAddress: 'B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d'
-    tokenId: '9497120696276615621907376728658022802954262638363646162765282600447713419198'
-    keyId: 'placeholder-overwritten-by-mnemonic'
-    txFeeNanomina: '100000000'
 
 # ── Peers ─────────────────────────────────────────────────────────────────────
 # One upstream peer: the relay-connector, which ABSORBS the g.proxy apex role (it
@@ -123,7 +98,7 @@ peers:
     url: wss://proxy.devnet.toonprotocol.dev:443
     relation: peer
     authToken: ''
-    chain: evm:84532
+    chain: evm:31337
     # The relay-connector/apex settlement address (reuses the demo apex seed).
     settlementAddress: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
 
@@ -143,13 +118,9 @@ routes:
     price: '1000'
     chains:
       - evm
-      - solana
-      - mina
     ilpAddress: g.proxy.store
     settlementAddresses:
       evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
-      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
-      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
 
   - prefix: g.proxy.relay.store
     nextHop: connector
@@ -157,13 +128,9 @@ routes:
     price: '1000'
     chains:
       - evm
-      - solana
-      - mina
     ilpAddress: g.proxy.relay.store
     settlementAddresses:
       evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
-      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
-      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
 
   # ── FORWARD route to the apex relay (OUTBOUND ONLY) ─────────────────────────
   # This route exists SOLELY so this box can publish its OWN kind:10032

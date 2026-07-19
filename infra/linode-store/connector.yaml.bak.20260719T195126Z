@@ -101,7 +101,7 @@ chainProviders:
     # zkAppAddress: bare PaymentChannel deployed 2026-07-19 on public devnet (shared with apex).
     # Required by the provider; the verify path follows each claim's own
     # channelAccount, so client-opened channels settle under the live token below.
-    zkAppAddress: 'B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf'
+    zkAppAddress: 'B62qkv2s1Z3HmLBSxnJDT2KC7cLRRmmMjiJExbyuH7PZeyDHyvejD3i'
     tokenAddress: 'B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d'
     tokenId: '9497120696276615621907376728658022802954262638363646162765282600447713419198'
     keyId: 'placeholder-overwritten-by-mnemonic'

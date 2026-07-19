@@ -98,12 +98,12 @@ chainProviders:
     # The mina.<DOMAIN> proxy 504s on send, so the connector reads via the
     # minascan upstream directly (see infra/linode/endpoints.json _connectorNote).
     graphqlUrl: https://api.minascan.io/node/devnet/v1/graphql
-    # zkAppAddress: bare PaymentChannel deployed 2026-07-19 on public devnet (shared with apex).
+    # zkAppAddress: the documented public-devnet channel zkApp (demoChannelZkApp).
     # Required by the provider; the verify path follows each claim's own
     # channelAccount, so client-opened channels settle under the live token below.
-    zkAppAddress: 'B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf'
-    tokenAddress: 'B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d'
-    tokenId: '9497120696276615621907376728658022802954262638363646162765282600447713419198'
+    zkAppAddress: 'B62qigQwEwBAsSZad4GhSun8CAwkh3GUbx2YN2TbUHU8tzVFcFTE95x'
+    tokenAddress: 'B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa'
+    tokenId: '13195431355853976025555236213553162231466702378883981110250774386432112635553'
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 

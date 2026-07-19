@@ -9,7 +9,7 @@
 
 services:
   connector:
-    image: ghcr.io/toon-protocol/connector:3.36.1
+    image: ghcr.io/toon-protocol/connector:3.33.0
     environment:
       CONFIG_FILE: /app/config/connector.yaml
       TOON_MNEMONIC: ${TOON_MNEMONIC}
@@ -42,8 +42,6 @@ services:
       # kind:5095 ArNS buy (buyfor) — devnet name-buying float
       ARNS_DVM_SOLANA_SECRET_KEY: ${ARNS_DVM_SOLANA_SECRET_KEY}
       ARNS_NETWORK: ${ARNS_NETWORK:-devnet}
-      # kind:5096 gas-station — DEDICATED Solana fee-payer (distinct from ARNS float)
-      GAS_STATION_SOLANA_SECRET_KEY: ${GAS_STATION_SOLANA_SECRET_KEY}
       DVM_BACKEND_MODE: http
       BLS_PORT: '3400'
       HANDLER_PORT: '3300'
