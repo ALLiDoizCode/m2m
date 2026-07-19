@@ -523,8 +523,7 @@ describe('ConnectorNode', () => {
       connectorNode = new ConnectorNode(testConfigPath, mockLogger);
 
       // Capture the callback the connector registered during construction.
-      const registerCall =
-        mockBTPClientManager.setConnectionStateChangeCallback.mock.calls[0]!;
+      const registerCall = mockBTPClientManager.setConnectionStateChangeCallback.mock.calls[0]!;
       const onConnectionStateChange = registerCall[0] as () => void;
 
       await connectorNode.start();
@@ -545,8 +544,8 @@ describe('ConnectorNode', () => {
       // Arrange: healthy at startup (peer connected).
       mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', true]]));
       connectorNode = new ConnectorNode(testConfigPath, mockLogger);
-      const onConnectionStateChange = mockBTPClientManager
-        .setConnectionStateChangeCallback.mock.calls[0]![0] as () => void;
+      const onConnectionStateChange = mockBTPClientManager.setConnectionStateChangeCallback.mock
+        .calls[0]![0] as () => void;
 
       await connectorNode.start();
       expect(connectorNode.getHealthStatus().status).toBe('healthy');
