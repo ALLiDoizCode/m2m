@@ -20,6 +20,7 @@ export class BTPClientManager {
   private readonly _nodeId: string;
   private _packetHandler: PacketHandler | null = null;
   private _agentFactory: ((peer: Peer) => http.Agent | undefined) | null = null;
+  private _onConnectionStateChange: (() => void) | null = null;
 
   /**
    * Create BTPClientManager instance
@@ -52,6 +53,45 @@ export class BTPClientManager {
    */
   setAgentFactory(factory: ((peer: Peer) => http.Agent | undefined) | null): void {
     this._agentFactory = factory;
+  }
+
+  /**
+   * Register a callback invoked whenever any managed peer's BTP connection
+   * state changes (connect or disconnect).
+   *
+   * This exists so the connector can re-evaluate derived state — notably its
+   * `/health` status — as peers connect/disconnect AFTER startup, rather than
+   * relying on a single snapshot taken at boot. Without this hook the health
+   * status freezes at whatever the peer set looked like at the instant the
+   * one-shot evaluation ran during start().
+   *
+   * The callback is fired synchronously from the client's 'connected' /
+   * 'disconnected' event handlers and MUST NOT throw; it is wrapped in a
+   * try/catch so a faulty consumer cannot destabilize the BTP event loop.
+   *
+   * @param callback - invoked on every connect/disconnect; null disables it.
+   */
+  setConnectionStateChangeCallback(callback: (() => void) | null): void {
+    this._onConnectionStateChange = callback;
+  }
+
+  /**
+   * Invoke the connection-state-change callback (if registered), guarding
+   * against throws so a faulty consumer cannot break BTP event handling.
+   */
+  private _notifyConnectionStateChange(): void {
+    if (!this._onConnectionStateChange) return;
+    try {
+      this._onConnectionStateChange();
+    } catch (error) {
+      this._logger.warn(
+        {
+          event: 'btp_connection_state_callback_error',
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Connection-state-change callback threw; ignoring'
+      );
+    }
   }
 
   /**
@@ -114,6 +154,9 @@ export class BTPClientManager {
         { event: 'btp_client_connected', peerId: peer.id },
         'BTP client connected to peer'
       );
+      // Re-evaluate connector-derived state (e.g. /health) now that a peer
+      // connected — possibly long after the boot-time snapshot.
+      this._notifyConnectionStateChange();
     });
 
     client.on('disconnected', () => {
@@ -121,6 +164,9 @@ export class BTPClientManager {
         { event: 'btp_client_disconnected', peerId: peer.id },
         'BTP client disconnected from peer'
       );
+      // Re-evaluate connector-derived state (e.g. /health) so a peer dropping
+      // below the healthy threshold is reflected promptly.
+      this._notifyConnectionStateChange();
     });
 
     client.on('error', (error: Error) => {

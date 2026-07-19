@@ -215,6 +215,10 @@ describe('ConnectorNode', () => {
       setPacketHandler: jest.fn(),
       // Story 35.4: additive mock method for transport agent factory wiring
       setAgentFactory: jest.fn(),
+      // Health-status race fix: additive mock for the connection-state-change
+      // callback the connector registers to re-evaluate /health on peer
+      // connect/disconnect after startup.
+      setConnectionStateChangeCallback: jest.fn(),
       // Per-peer transport selection: additive mock for the new accessor
       // used by registerPeer's re-reg log + listPeers's PeerInfo surface.
       getPeerTransport: jest.fn().mockReturnValue(undefined),
@@ -494,6 +498,112 @@ describe('ConnectorNode', () => {
 
       const healthStatus = connectorNode.getHealthStatus();
       expect(healthStatus.status).toBe('unhealthy');
+    });
+  });
+
+  describe('health-status race — post-startup peer connect/disconnect', () => {
+    // Regression coverage for the one-shot health-status race: before the fix
+    // _updateHealthStatus() ran exactly once near the end of start(), so if a
+    // peer's BTP handshake completed AFTER that snapshot the /health status
+    // froze at "unhealthy" forever even though the peer was up and routing.
+    // The fix re-evaluates health on every peer connect/disconnect (via a
+    // BTPClientManager callback) and on a periodic backstop timer.
+
+    it('registers a connection-state-change callback on the BTP client manager', () => {
+      connectorNode = new ConnectorNode(testConfigPath, mockLogger);
+      expect(mockBTPClientManager.setConnectionStateChangeCallback).toHaveBeenCalledWith(
+        expect.any(Function)
+      );
+    });
+
+    it('flips /health from unhealthy to healthy when a peer connects AFTER the startup snapshot', async () => {
+      // Arrange: at the instant start() takes its one-shot snapshot, NO peers
+      // are connected (mirrors the real bug: BTP handshake still in flight).
+      mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', false]]));
+      connectorNode = new ConnectorNode(testConfigPath, mockLogger);
+
+      // Capture the callback the connector registered during construction.
+      const registerCall = mockBTPClientManager.setConnectionStateChangeCallback.mock.calls[0]!;
+      const onConnectionStateChange = registerCall[0] as () => void;
+
+      await connectorNode.start();
+
+      // The boot snapshot saw 0/1 peers connected → unhealthy (the frozen state).
+      expect(connectorNode.getHealthStatus().status).toBe('unhealthy');
+
+      // Act: the peer finishes connecting a few seconds later. The BTP client
+      // manager would fire the registered callback on the 'connected' event.
+      mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', true]]));
+      onConnectionStateChange();
+
+      // Assert: /health has transitioned to healthy without a restart.
+      expect(connectorNode.getHealthStatus().status).toBe('healthy');
+    });
+
+    it('flips /health back to unhealthy when peers drop below threshold post-startup', async () => {
+      // Arrange: healthy at startup (peer connected).
+      mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', true]]));
+      connectorNode = new ConnectorNode(testConfigPath, mockLogger);
+      const onConnectionStateChange = mockBTPClientManager.setConnectionStateChangeCallback.mock
+        .calls[0]![0] as () => void;
+
+      await connectorNode.start();
+      expect(connectorNode.getHealthStatus().status).toBe('healthy');
+
+      // Act: the peer drops.
+      mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', false]]));
+      onConnectionStateChange();
+
+      // Assert.
+      expect(connectorNode.getHealthStatus().status).toBe('unhealthy');
+    });
+
+    it('periodic backstop timer re-evaluates health after startup', async () => {
+      jest.useFakeTimers();
+      try {
+        // Peer not connected at the startup snapshot → unhealthy.
+        mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', false]]));
+        connectorNode = new ConnectorNode(testConfigPath, mockLogger, {
+          healthStatusIntervalMs: 1000,
+        });
+
+        await connectorNode.start();
+        expect(connectorNode.getHealthStatus().status).toBe('unhealthy');
+
+        // Peer connects, but simulate the event being missed — only the timer
+        // drives the re-evaluation here.
+        mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', true]]));
+        jest.advanceTimersByTime(1000);
+
+        expect(connectorNode.getHealthStatus().status).toBe('healthy');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('clears the periodic health timer on stop (no leaked interval)', async () => {
+      jest.useFakeTimers();
+      try {
+        const clearIntervalSpy = jest.spyOn(global, 'clearInterval');
+        mockBTPClientManager.getPeerStatus.mockReturnValue(new Map([['peerA', true]]));
+        connectorNode = new ConnectorNode(testConfigPath, mockLogger, {
+          healthStatusIntervalMs: 1000,
+        });
+        await connectorNode.start();
+
+        mockBTPClientManager.getPeerIds.mockReturnValue(['peerA']);
+        mockBTPClientManager.removePeer.mockResolvedValue(undefined);
+        mockHealthServer.stop.mockResolvedValue(undefined);
+        mockBTPServer.stop.mockResolvedValue(undefined);
+
+        await connectorNode.stop();
+
+        // The health-status interval handle must have been cleared.
+        expect(clearIntervalSpy).toHaveBeenCalled();
+        clearIntervalSpy.mockRestore();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 
