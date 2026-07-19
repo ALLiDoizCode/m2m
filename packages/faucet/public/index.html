@@ -3,8 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Multichain Faucet</title>
+    <title>TOON Faucet — public-testnet USDC</title>
+    <link rel="icon" type="image/png" href="/logo.png" />
     <style>
+      /* Palette drawn from the TOON logo: warm cream field, charcoal maze
+         squares, a single gold accent tile. */
+      :root {
+        --cream: #f2efe6;
+        --card: #faf8f1;
+        --ink: #2a2d34;
+        --ink-soft: #3a3e47;
+        --line: #565a63;
+        --muted: #6b6f77;
+        --gold: #b8912e;
+        --gold-deep: #9a7825;
+        --ok-bg: #e9efe2;
+        --ok-ink: #3d5230;
+        --err-bg: #f3e3e0;
+        --err-ink: #7a3a30;
+        --warn-bg: #f5ecd6;
+        --warn-ink: #6e5a1e;
+      }
+
       * {
         margin: 0;
         padding: 0;
@@ -15,48 +35,121 @@
         font-family:
           -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
           sans-serif;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: var(--cream);
+        color: var(--ink);
         min-height: 100vh;
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 20px;
+        padding: 24px;
       }
 
       .container {
-        background: white;
-        border-radius: 20px;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-        padding: 40px;
-        max-width: 600px;
+        background: var(--card);
+        border: 2px solid var(--ink);
+        border-radius: 14px;
+        box-shadow: 8px 8px 0 rgba(42, 45, 52, 0.12);
+        padding: 36px;
+        max-width: 640px;
         width: 100%;
       }
 
-      h1 {
-        font-size: 2.5em;
-        margin-bottom: 10px;
-        color: #667eea;
-        text-align: center;
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 6px;
+      }
+
+      .brand img {
+        width: 56px;
+        height: 56px;
+        border-radius: 10px;
+        border: 2px solid var(--ink);
+      }
+
+      .brand h1 {
+        font-size: 1.9em;
+        letter-spacing: 0.02em;
+      }
+
+      .brand h1 .accent {
+        color: var(--gold);
       }
 
       .subtitle {
+        color: var(--muted);
+        margin: 10px 0 26px;
+        font-size: 1em;
+        line-height: 1.45;
+      }
+
+      /* Chain selector: three charcoal tiles echoing the logo's 2x2 squares. */
+      .chains {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin-bottom: 22px;
+      }
+
+      .chain-tile {
+        background: var(--ink);
+        color: var(--cream);
+        border: 2px solid var(--ink);
+        border-radius: 10px;
+        padding: 12px 8px;
         text-align: center;
-        color: #666;
-        margin-bottom: 30px;
-        font-size: 1.1em;
+        cursor: pointer;
+        font-size: 0.92em;
+        font-weight: 600;
+        line-height: 1.3;
+        transition:
+          transform 0.12s,
+          box-shadow 0.12s;
+        position: relative;
+      }
+
+      .chain-tile small {
+        display: block;
+        font-weight: 400;
+        color: #b9bcc2;
+        font-size: 0.82em;
+        margin-top: 2px;
+      }
+
+      .chain-tile:hover {
+        transform: translateY(-1px);
+      }
+
+      .chain-tile.selected {
+        border-color: var(--gold);
+        box-shadow: 4px 4px 0 rgba(184, 145, 46, 0.35);
+      }
+
+      .chain-tile.selected::after {
+        content: '';
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        width: 9px;
+        height: 9px;
+        background: var(--gold);
+        border-radius: 2px;
       }
 
       .info-box {
-        background: #f8f9fa;
+        background: var(--cream);
+        border: 1px solid #ddd8c8;
         border-radius: 10px;
-        padding: 20px;
-        margin-bottom: 30px;
+        padding: 16px 18px;
+        margin-bottom: 16px;
       }
 
       .info-row {
         display: flex;
         justify-content: space-between;
-        margin-bottom: 10px;
+        gap: 14px;
+        margin-bottom: 8px;
         font-size: 0.95em;
       }
 
@@ -65,116 +158,151 @@
       }
 
       .info-label {
-        color: #666;
+        color: var(--muted);
         font-weight: 500;
+        white-space: nowrap;
       }
 
       .info-value {
-        color: #333;
+        color: var(--ink);
         font-weight: 600;
+        text-align: right;
+        overflow-wrap: anywhere;
+      }
+
+      /* Native-gas pointers for the selected chain. */
+      .gas-box {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        flex-wrap: wrap;
+        background: #f7f3e4;
+        border: 1px dashed var(--gold);
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin-bottom: 22px;
+        font-size: 0.92em;
+      }
+
+      .gas-box .gas-label {
+        color: var(--gold-deep);
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      a {
+        color: var(--gold-deep);
+        font-weight: 600;
+        text-decoration: none;
+        border-bottom: 1px solid rgba(184, 145, 46, 0.45);
+      }
+
+      a:hover {
+        border-bottom-color: var(--gold-deep);
       }
 
       .form-group {
-        margin-bottom: 20px;
+        margin-bottom: 18px;
       }
 
       label {
         display: block;
         margin-bottom: 8px;
-        color: #333;
-        font-weight: 500;
+        color: var(--ink);
+        font-weight: 600;
+        font-size: 0.95em;
       }
 
       input {
         width: 100%;
-        padding: 12px;
-        border: 2px solid #e0e0e0;
+        padding: 12px 14px;
+        border: 2px solid var(--ink);
         border-radius: 8px;
         font-size: 1em;
-        transition: border-color 0.3s;
-        font-family: 'Courier New', monospace;
+        background: #fff;
+        color: var(--ink);
+        transition: box-shadow 0.15s;
+        font-family: ui-monospace, 'SF Mono', Menlo, 'Courier New', monospace;
       }
 
       input:focus {
         outline: none;
-        border-color: #667eea;
+        box-shadow: 3px 3px 0 rgba(184, 145, 46, 0.4);
+        border-color: var(--gold);
       }
 
       button {
         width: 100%;
         padding: 14px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
+        background: var(--gold);
+        color: var(--ink);
+        border: 2px solid var(--ink);
         border-radius: 8px;
-        font-size: 1.1em;
-        font-weight: 600;
+        font-size: 1.05em;
+        font-weight: 700;
         cursor: pointer;
         transition:
-          transform 0.2s,
-          box-shadow 0.2s;
+          transform 0.12s,
+          box-shadow 0.12s,
+          background 0.12s;
       }
 
       button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        box-shadow: 4px 4px 0 rgba(42, 45, 52, 0.25);
       }
 
       button:active {
         transform: translateY(0);
+        box-shadow: none;
       }
 
       button:disabled {
-        background: #ccc;
+        background: #d8d3c4;
+        color: var(--muted);
         cursor: not-allowed;
         transform: none;
+        box-shadow: none;
       }
 
       .message {
-        padding: 12px;
+        padding: 12px 14px;
         border-radius: 8px;
         margin-top: 20px;
         display: none;
+        font-size: 0.95em;
+        overflow-wrap: anywhere;
       }
 
       .message.success {
-        background: #d4edda;
-        color: #155724;
-        border: 1px solid #c3e6cb;
+        background: var(--ok-bg);
+        color: var(--ok-ink);
+        border: 1px solid #c9d6ba;
       }
 
       .message.error {
-        background: #f8d7da;
-        color: #721c24;
-        border: 1px solid #f5c6cb;
+        background: var(--err-bg);
+        color: var(--err-ink);
+        border: 1px solid #e0c4be;
       }
 
       .message.show {
         display: block;
       }
 
-      .tx-link {
-        color: #667eea;
-        text-decoration: none;
-        font-weight: 600;
-      }
-
-      .tx-link:hover {
-        text-decoration: underline;
-      }
-
       .loading {
         display: none;
         text-align: center;
         margin-top: 20px;
+        color: var(--muted);
       }
 
       .spinner {
-        border: 3px solid #f3f3f3;
-        border-top: 3px solid #667eea;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
+        border: 3px solid #e4dfd0;
+        border-top: 3px solid var(--gold);
+        border-radius: 6px; /* square-ish spinner, on brand */
+        width: 34px;
+        height: 34px;
         animation: spin 1s linear infinite;
         margin: 0 auto;
       }
@@ -189,50 +317,60 @@
       }
 
       .footer {
-        text-align: center;
-        margin-top: 30px;
-        color: #999;
-        font-size: 0.9em;
+        margin-top: 28px;
+        padding-top: 18px;
+        border-top: 1px solid #ddd8c8;
+        color: var(--muted);
+        font-size: 0.88em;
+        line-height: 1.7;
+      }
+
+      .footer strong {
+        color: var(--ink-soft);
       }
 
       .not-ready {
-        background: #fff3cd;
-        color: #856404;
-        border: 1px solid #ffeaa7;
+        background: var(--warn-bg);
+        color: var(--warn-ink);
+        border: 1px solid #e4d29a;
         padding: 12px;
         border-radius: 8px;
-        margin-bottom: 20px;
+        margin-bottom: 18px;
         text-align: center;
+        display: none;
       }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>🚰 Multichain Faucet</h1>
+      <div class="brand">
+        <img src="/logo.png" alt="TOON logo" />
+        <h1>TOON <span class="accent">Faucet</span></h1>
+      </div>
       <p class="subtitle">
-        Get free public-testnet funds for TOON (Base Sepolia · Solana devnet · Mina devnet)
+        Free public-testnet <strong>USDC</strong> for building on TOON — Base Sepolia ·
+        Solana devnet · Mina devnet. This faucet drips the exact tokens the TOON devnet
+        settles in.
       </p>
 
-      <div id="notReady" class="not-ready" style="display: none">
-        ⚠️ Waiting for token contract deployment...
-      </div>
+      <div id="notReady" class="not-ready">⚠️ Waiting for token contract deployment...</div>
 
-      <div class="form-group">
-        <label for="chain">Chain</label>
-        <select
-          id="chain"
-          style="
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            font-size: 1em;
-          "
+      <div class="chains" id="chainTabs" role="radiogroup" aria-label="Chain">
+        <div
+          class="chain-tile selected"
+          data-chain="baseSepolia"
+          role="radio"
+          aria-checked="true"
+          tabindex="0"
         >
-          <option value="baseSepolia">Base Sepolia (mock USDC)</option>
-          <option value="solana">Solana devnet (SOL + mock USDC)</option>
-          <option value="mina">Mina devnet (MINA + USDC)</option>
-        </select>
+          Base Sepolia<small>mock USDC</small>
+        </div>
+        <div class="chain-tile" data-chain="solana" role="radio" aria-checked="false" tabindex="0">
+          Solana devnet<small>SOL + mock USDC</small>
+        </div>
+        <div class="chain-tile" data-chain="mina" role="radio" aria-checked="false" tabindex="0">
+          Mina devnet<small>MINA + USDC</small>
+        </div>
       </div>
 
       <div class="info-box" id="infoBox">
@@ -249,10 +387,15 @@
           <span
             class="info-value"
             id="contractValue"
-            style="font-size: 0.8em; font-family: monospace"
+            style="font-size: 0.8em; font-family: ui-monospace, Menlo, monospace"
             >-</span
           >
         </div>
+      </div>
+
+      <div class="gas-box">
+        <span class="gas-label">Need native gas?</span>
+        <span id="gasLinks"></span>
       </div>
 
       <form id="faucetForm">
@@ -261,7 +404,7 @@
           <input type="text" id="address" placeholder="0x..." required />
         </div>
 
-        <button type="submit" id="submitBtn">Request Funds 💧</button>
+        <button type="submit" id="submitBtn">Request funds</button>
       </form>
 
       <div class="loading" id="loading">
@@ -271,55 +414,120 @@
 
       <div class="message" id="message"></div>
 
-      <div class="footer">TOON Public Testnet Faucet</div>
+      <div class="footer">
+        <strong>Native-coin faucets</strong> (gas for channel opens &amp; on-chain ops):
+        Base Sepolia ETH via
+        <a href="https://www.alchemy.com/faucets/base-sepolia" target="_blank" rel="noopener"
+          >Alchemy</a
+        >
+        or
+        <a href="https://portal.cdp.coinbase.com/products/faucet" target="_blank" rel="noopener"
+          >Coinbase</a
+        >
+        · SOL via
+        <a href="https://faucet.solana.com" target="_blank" rel="noopener">faucet.solana.com</a>
+        · MINA via
+        <a href="https://faucet.minaprotocol.com" target="_blank" rel="noopener"
+          >faucet.minaprotocol.com</a
+        >
+        (choose <em>Devnet</em>) · devnet ARIO for
+        <a href="https://docs.ar.io/arns" target="_blank" rel="noopener">ArNS names</a>
+        via
+        <a href="https://faucet.services.ar-io.dev/" target="_blank" rel="noopener"
+          >faucet.services.ar-io.dev</a
+        >.<br />
+        TOON public-testnet faucet — funds have no monetary value.
+        <a href="https://github.com/toon-protocol" target="_blank" rel="noopener"
+          >github.com/toon-protocol</a
+        >
+      </div>
     </div>
 
     <script>
       const form = document.getElementById('faucetForm');
       const addressInput = document.getElementById('address');
       const addressLabel = document.getElementById('addressLabel');
-      const chainSelect = document.getElementById('chain');
+      const chainTabs = document.getElementById('chainTabs');
       const submitBtn = document.getElementById('submitBtn');
       const message = document.getElementById('message');
       const loading = document.getElementById('loading');
       const notReady = document.getElementById('notReady');
+      const gasLinks = document.getElementById('gasLinks');
 
       // Per-chain UI config. `route` matches the server endpoints. These are the
       // PUBLIC testnet legs — the old local anvil EVM leg (/api/request) has been
-      // retired in favour of Base Sepolia.
+      // retired in favour of Base Sepolia. `gas` links point at the upstream
+      // native-coin faucets (this faucet drips USDC; gas mostly comes from the
+      // chains' own faucets).
       const CHAINS = {
         baseSepolia: {
           route: '/api/base-sepolia/request',
           addressLabel: 'Your Ethereum Address',
           placeholder: '0x...',
           validate: (a) => /^0x[a-fA-F0-9]{40}$/.test(a),
+          gas: [
+            ['Base Sepolia ETH — Alchemy', 'https://www.alchemy.com/faucets/base-sepolia'],
+            ['Coinbase faucet', 'https://portal.cdp.coinbase.com/products/faucet'],
+          ],
         },
         solana: {
           route: '/api/solana/request',
           addressLabel: 'Your Solana Address (base58)',
           placeholder: 'Base58 pubkey...',
           validate: (a) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a),
+          gas: [['SOL — faucet.solana.com', 'https://faucet.solana.com']],
         },
         mina: {
           route: '/api/mina/request',
           addressLabel: 'Your Mina Address (B62…)',
           placeholder: 'B62q...',
           validate: (a) => /^B62q[1-9A-HJ-NP-Za-km-z]{48,55}$/.test(a),
+          gas: [['MINA — faucet.minaprotocol.com (Devnet)', 'https://faucet.minaprotocol.com']],
         },
       };
 
       let info = null;
+      let selectedChain = 'baseSepolia';
 
       function currentChain() {
-        return chainSelect.value;
+        return selectedChain;
       }
 
-      // Render the info-box + address field for the selected chain.
+      // Chain tile selection (radio-style).
+      function selectChain(chain) {
+        selectedChain = chain;
+        for (const tile of chainTabs.querySelectorAll('.chain-tile')) {
+          const on = tile.dataset.chain === chain;
+          tile.classList.toggle('selected', on);
+          tile.setAttribute('aria-checked', on ? 'true' : 'false');
+        }
+        hideMessage();
+        renderChain();
+      }
+
+      chainTabs.addEventListener('click', (e) => {
+        const tile = e.target.closest('.chain-tile');
+        if (tile) selectChain(tile.dataset.chain);
+      });
+      chainTabs.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          const tile = e.target.closest('.chain-tile');
+          if (tile) {
+            e.preventDefault();
+            selectChain(tile.dataset.chain);
+          }
+        }
+      });
+
+      // Render the info-box + gas links + address field for the selected chain.
       function renderChain() {
         const chain = currentChain();
         const cfg = CHAINS[chain];
         addressLabel.textContent = cfg.addressLabel;
         addressInput.placeholder = cfg.placeholder;
+        gasLinks.innerHTML = cfg.gas
+          .map(([label, url]) => `<a href="${url}" target="_blank" rel="noopener">${label}</a>`)
+          .join(' · ');
 
         const a1L = document.getElementById('amount1Label');
         const a1 = document.getElementById('amount1');
@@ -395,11 +603,6 @@
       function hideMessage() {
         message.className = 'message';
       }
-
-      chainSelect.addEventListener('change', () => {
-        hideMessage();
-        renderChain();
-      });
 
       // Handle form submission
       form.addEventListener('submit', async (e) => {
