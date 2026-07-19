@@ -6,7 +6,7 @@
 
 services:
   connector:
-    image: ghcr.io/toon-protocol/connector:3.36.1
+    image: ghcr.io/toon-protocol/relay-connector:latest
     environment:
       CONFIG_FILE: /app/config/connector.yaml
       TOON_MNEMONIC: ${TOON_MNEMONIC}
@@ -20,17 +20,14 @@ services:
       - '8080:8080'
     restart: unless-stopped
     healthcheck:
-      # wget (not curl): the connector slim image has no curl, so a curl-based
-      # check always reports "unhealthy" even when /health is up. Mirrors the
-      # relay/faucet wget checks below.
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:8080/health || exit 1']
+      test: ['CMD-SHELL', 'curl -sf http://localhost:8080/health || exit 1']
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
 
   relay:
-    image: ghcr.io/toon-protocol/relay:sha-a8693a9
+    image: ghcr.io/toon-protocol/relay:latest
     environment:
       TOON_OBLIVIOUS_MODE: 'true'
       TOON_BLS_PORT: '3100'
@@ -78,22 +75,13 @@ services:
       MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
       MINA_USDC_AMOUNT: ${MINA_USDC_AMOUNT:-1000}
       MINA_TX_FEE: ${MINA_TX_FEE:-0.2}
-      # Base Sepolia — PUBLIC Base testnet (chainId 84532). Mints the ungated
-      # mock USDC (mint() needs no faucet USDC balance); the faucet key only
-      # needs Base Sepolia ETH for gas. Unset key → route 503s. Secret via .env.
-      BASE_SEPOLIA_FAUCET_KEY: ${BASE_SEPOLIA_FAUCET_KEY:-}
-      BASE_SEPOLIA_RPC_URL: ${BASE_SEPOLIA_RPC_URL:-https://sepolia.base.org}
-      BASE_SEPOLIA_USDC: ${BASE_SEPOLIA_USDC:-0x49beE1Bca5d15Fb0963117923403F9498119a9Ce}
-      BASE_SEPOLIA_USDC_AMOUNT: ${BASE_SEPOLIA_USDC_AMOUNT:-1000}
-      BASE_SEPOLIA_ETH_AMOUNT: ${BASE_SEPOLIA_ETH_AMOUNT:-0}
-      BASE_SEPOLIA_ETH_RESERVE: ${BASE_SEPOLIA_ETH_RESERVE:-0.01}
     volumes:
       - ../../infra/solana/usdc-authority.json:/keys/usdc-authority.json:ro
     ports:
       - '3500:3500'
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3500/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3500/health || exit 1']
       interval: 30s
       timeout: 10s
       retries: 3

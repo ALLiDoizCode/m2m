@@ -28,10 +28,10 @@ settlement:
 
 chainProviders:
   - chainType: evm
-    chainId: evm:84532
-    rpcUrl: https://sepolia.base.org
-    registryAddress: '0xcC9079adE929b168B54145f6d25262b64FAB9D5b'
-    tokenAddress: '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce'
+    chainId: evm:31337
+    rpcUrl: https://evm-rpc.devnet.toonprotocol.dev
+    registryAddress: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'
+    tokenAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
     keyId: 'placeholder-overwritten-by-mnemonic'
     settlementOptions:
       threshold: '5000'
@@ -42,23 +42,23 @@ chainProviders:
 
   - chainType: solana
     chainId: solana:devnet
-    rpcUrl: https://api.devnet.solana.com
-    wsUrl: wss://api.devnet.solana.com
-    programId: '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip'
-    tokenMint: 'xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in'
+    rpcUrl: https://solana-rpc.devnet.toonprotocol.dev
+    wsUrl: wss://solana-ws.devnet.toonprotocol.dev
+    programId: 'D2Z35z8ShA4K7odczUysBYRP5hXQGDp6r5c2EBSxRsHh'
+    tokenMint: 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H'
     keyId: 'placeholder-overwritten-by-mnemonic'
     cluster: devnet
 
   - chainType: mina
     chainId: mina:devnet
     network: devnet
-    graphqlUrl: https://api.minascan.io/node/devnet/v1/graphql
+    graphqlUrl: https://mina.devnet.toonprotocol.dev/graphql
     # PaymentChannel deployed to Mina lightnet 2026-06-23.
     # USDC FungibleToken: needs deploy-usdc-token.ts run from dev machine (ESM/CJS
     # conflict blocks it on server). Update tokenAddress + tokenId after deploy.
     zkAppAddress: 'B62qoMNmZQQYSxuoNx42JnZtNZwHfwL16wxUYNEuLGyrVq1bXfS15Rn'
-    tokenAddress: 'B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa'
-    tokenId: '13195431355853976025555236213553162231466702378883981110250774386432112635553'
+    tokenAddress: 'B62qjfa5osSnjaAhgiJTu5WRg7RCw66mY6bhaxZecyMTTtESKBwQ4x3'
+    tokenId: '26807032406297178681731937210594998657168795100878204131916024453275711913842'
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
@@ -69,7 +69,7 @@ peers:
     url: wss://proxy.store.devnet.toonprotocol.dev:443
     relation: peer
     authToken: ''
-    chain: evm:84532
+    chain: evm:31337
     settlementAddress: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
 
 routes:
@@ -85,7 +85,7 @@ routes:
     settlementAddresses:
       # Derived from TOON_MNEMONIC (account index 0) — update if mnemonic changes.
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
   # Store forwards. `g.proxy.relay.store` MUST be listed (it is more specific than
@@ -97,26 +97,18 @@ routes:
     price: '1000'
     chains:
       - evm
-      - solana
-      - mina
     ilpAddress: g.proxy.relay.store
     settlementAddresses:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
-      mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
   - prefix: g.proxy.store
     nextHop: store-box
     price: '1000'
     chains:
       - evm
-      - solana
-      - mina
     ilpAddress: g.proxy.store
     settlementAddresses:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
-      mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
 # ── Self-announce (kind:10032 IlpPeerInfo) — relay#37 / store#22 / toon-meta#69 ──
 # The apex publishes its own IlpPeerInfo THROUGH its own routing: announceTo is its

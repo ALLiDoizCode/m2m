@@ -37,7 +37,10 @@ const NANO = 1_000_000_000n;
 // Leave unset to accept any valid funded key (e.g. lightnet genesis accounts,
 // which the provisioning acquires fresh on each reset — their address is not
 // known ahead of time, so a hardcoded treasury would break the lightnet drip).
-const EXPECTED_TREASURY = process.env.MINA_TREASURY_ADDRESS || null;
+// Read LAZILY (inside createMinaFaucet) rather than at module load, so the
+// guard actually sees the env the factory is called under — and so the tests
+// can exercise it.
+const expectedTreasury = () => process.env.MINA_TREASURY_ADDRESS || null;
 
 const MINA_NETWORK = process.env.MINA_NETWORK || 'devnet';
 const MINA_GRAPHQL_URL =
@@ -104,9 +107,10 @@ export function createMinaFaucet() {
     // Don't echo the key or the raw error (which may embed it).
     throw new Error('MINA_FAUCET_KEY is not a valid base58 Mina private key.');
   }
-  if (EXPECTED_TREASURY && derived !== EXPECTED_TREASURY) {
+  const expected = expectedTreasury();
+  if (expected && derived !== expected) {
     throw new Error(
-      `MINA_FAUCET_KEY derives ${derived} but MINA_TREASURY_ADDRESS is set to ${EXPECTED_TREASURY}. ` +
+      `MINA_FAUCET_KEY derives ${derived} but MINA_TREASURY_ADDRESS is set to ${expected}. ` +
         'Set MINA_FAUCET_KEY to the correct treasury private key, or unset MINA_TREASURY_ADDRESS.'
     );
   }
@@ -205,11 +209,30 @@ export function createMinaFaucet() {
 
 // Capability descriptor surfaced at /api/info. `faucet` is the live
 // createMinaFaucet() (or null when unconfigured). `usdcInfo` is the optional
-// fragment from `minaUsdcInfo(minter)` (mina-usdc.mjs) describing the admin-mint
-// USDC capability — when the minter is configured this advertises `drips.usdc`
-// and `usdcMint: true` alongside the native-MINA drip; when it's null we still
-// advertise the native drip and set `usdcMint: false`.
-export function minaInfo(faucet, usdcInfo = { usdcMint: false }) {
+// fragment from `minaUsdcInfo(dripper)` (mina-usdc.mjs) describing the USDC
+// drip capability (treasury self-mint + TRANSFER — the rate-limited token has
+// no admin-mint): when the dripper is configured this advertises `drips.usdc`,
+// the dedicated `usdcRoute`, and the `selfMint` bypass hint alongside the
+// native-MINA drip; when it's null we still advertise the native drip and set
+// `usdcDrip: false`.
+export function minaInfo(faucet, usdcInfo = { usdcDrip: false }) {
+  const usdcFragment = usdcInfo.usdcDrip
+    ? {
+        usdcDrip: true,
+        usdcRoute: '/api/mina/usdc-request',
+        usdcToken: usdcInfo.usdcToken,
+        usdcTokenId: usdcInfo.usdcTokenId,
+        usdcTreasury: usdcInfo.treasury,
+        // The treasury replenishes by SELF-MINT, capped on-chain at this many
+        // USDC per ~24h — the honest ceiling on total daily drips.
+        usdcDailyTreasuryCap: usdcInfo.dailyTreasuryCapUsdc,
+        usdcCooldownHours: usdcInfo.cooldownHours,
+        // Anyone can bypass the faucet: the token's mint is permissionless
+        // (rate-limited per address, recipient signs). See the note inside.
+        selfMint: usdcInfo.selfMint,
+      }
+    : { usdcDrip: false };
+
   if (faucet) {
     return {
       enabled: true,
@@ -220,17 +243,10 @@ export function minaInfo(faucet, usdcInfo = { usdcMint: false }) {
       drip: true,
       mode: 'treasury-drip', // real native-MINA drip from a funded treasury
       treasury: faucet.treasury,
-      drips: usdcInfo.usdcMint
+      drips: usdcInfo.usdcDrip
         ? { mina: faucet.dripAmount, usdc: usdcInfo.usdcAmount }
         : { mina: faucet.dripAmount },
-      usdcMint: !!usdcInfo.usdcMint,
-      ...(usdcInfo.usdcMint
-        ? {
-            usdcToken: usdcInfo.usdcToken,
-            usdcTokenId: usdcInfo.usdcTokenId,
-            mintAuthority: usdcInfo.mintAuthority,
-          }
-        : {}),
+      ...usdcFragment,
       graphqlUrl: faucet.graphqlUrl,
     };
   }
@@ -241,7 +257,7 @@ export function minaInfo(faucet, usdcInfo = { usdcMint: false }) {
     network: MINA_NETWORK,
     chain: 'public-devnet',
     drip: false,
-    usdcMint: !!usdcInfo.usdcMint,
+    ...usdcFragment,
     mode: 'link', // unconfigured: link out to the public faucet
     faucetUrl: MINA_PUBLIC_FAUCET_URL,
     note:

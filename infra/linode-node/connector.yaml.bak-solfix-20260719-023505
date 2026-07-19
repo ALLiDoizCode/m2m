@@ -85,7 +85,7 @@ routes:
     settlementAddresses:
       # Derived from TOON_MNEMONIC (account index 0) — update if mnemonic changes.
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
   # Store forwards. `g.proxy.relay.store` MUST be listed (it is more specific than
@@ -102,7 +102,7 @@ routes:
     ilpAddress: g.proxy.relay.store
     settlementAddresses:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
   - prefix: g.proxy.store
@@ -115,7 +115,7 @@ routes:
     ilpAddress: g.proxy.store
     settlementAddresses:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
 # ── Self-announce (kind:10032 IlpPeerInfo) — relay#37 / store#22 / toon-meta#69 ──

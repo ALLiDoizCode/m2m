@@ -6,7 +6,7 @@
 
 services:
   connector:
-    image: ghcr.io/toon-protocol/connector:3.36.1
+    image: ghcr.io/toon-protocol/connector:3.35.0
     environment:
       CONFIG_FILE: /app/config/connector.yaml
       TOON_MNEMONIC: ${TOON_MNEMONIC}
