@@ -27,9 +27,4 @@ export type WorkerResponse =
     }
   | { id: number; kind: 'error'; message: string };
 
-export type ProveStage =
-  | 'compiling'
-  | 'fetching'
-  | 'building'
-  | 'proving'
-  | 'done';
+export type ProveStage = 'compiling' | 'fetching' | 'building' | 'proving' | 'done';

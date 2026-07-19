@@ -149,7 +149,11 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
     enqueue(() => compileOnce())
       .then(() => post({ id: req.id, kind: 'compiled' }))
       .catch((err) =>
-        post({ id: req.id, kind: 'error', message: err instanceof Error ? err.message : String(err) })
+        post({
+          id: req.id,
+          kind: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        })
       );
   } else if (req.kind === 'buildAndProve') {
     enqueue(() => buildAndProve(req.feePayer, req.recipient, BigInt(req.wholeUsdc)))
@@ -157,7 +161,11 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
         post({ id: req.id, kind: 'proven', txJson: r.txJson, fundNewAccounts: r.fundNewAccounts })
       )
       .catch((err) =>
-        post({ id: req.id, kind: 'error', message: err instanceof Error ? err.message : String(err) })
+        post({
+          id: req.id,
+          kind: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        })
       );
   }
 };
