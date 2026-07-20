@@ -154,7 +154,12 @@ export class SolanaPaymentChannelProvider implements PaymentChannelProvider {
     try {
       await this._sdk.getChannelState(pda);
       this._logger.info(
-        { event: 'open_channel_adopt_existing', channelId: pda, participant, chainId: this.chainId },
+        {
+          event: 'open_channel_adopt_existing',
+          channelId: pda,
+          participant,
+          chainId: this.chainId,
+        },
         'Solana channel already exists for this pair — adopting (skip initialize)'
       );
       return { channelId: pda, txHash: '' };
