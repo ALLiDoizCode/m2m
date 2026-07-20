@@ -233,6 +233,7 @@ app.get('/api/info', async (req, res) => {
           ? {
               enabled: true,
               route: '/api/solana/request',
+              usdcOnlyRoute: '/api/solana/usdc-request',
               ready: true,
               drips: {
                 sol: String(solanaFaucet.solAmount),
@@ -377,6 +378,60 @@ app.post('/api/solana/request', (req, res) => {
         }
         res.status(500).json({
           error: 'Solana faucet request failed',
+          message: error.message,
+        });
+      }
+    });
+});
+
+// Solana USDC-only route — POST /api/solana/usdc-request { address }
+//
+// Transfers mock USDC from the devnet treasury with NO SOL airdrop leg. The
+// treasury pays the fee + ATA rent, so this succeeds even when the public devnet
+// airdrop is dry/rate-limited (the coupling that makes /api/solana/request 429)
+// and even if the recipient holds 0 SOL. Use it for addresses already funded with
+// SOL. Mirrors /api/mina/usdc-request.
+// ---------------------------------------------------------------------------
+app.post('/api/solana/usdc-request', (req, res) => {
+  if (!solanaFaucet) {
+    res.status(503).json({
+      error: 'Solana faucet not configured',
+      message: 'Set SOLANA_USDC_MINT and mount SOLANA_FAUCET_KEYPAIR to enable the Solana route.',
+    });
+    return;
+  }
+
+  const { address } = req.body || {};
+  if (!address || !solanaFaucet.isValidAddress(address)) {
+    res.status(400).json({ error: 'Invalid Solana address (expected base58 pubkey)' });
+    return;
+  }
+
+  console.log(`💧 Solana USDC-only faucet request for ${address}`);
+  solanaQueue = solanaQueue
+    .then(async () => {
+      const result = await solanaFaucet.dripUsdcOnly(address);
+      console.log(`  ✅ Solana USDC-only request completed for ${address}`);
+      res.json({
+        success: true,
+        chain: 'solana',
+        mode: 'usdc-only',
+        address,
+        transactions: result,
+      });
+    })
+    .catch((error) => {
+      console.error('❌ Solana USDC-only request failed:', error);
+      if (!res.headersSent) {
+        if (error.code === 'VALIDATOR_STALLED') {
+          res.status(503).json({
+            error: 'Solana validator not producing blocks',
+            message: error.message,
+          });
+          return;
+        }
+        res.status(500).json({
+          error: 'Solana USDC-only request failed',
           message: error.message,
         });
       }
