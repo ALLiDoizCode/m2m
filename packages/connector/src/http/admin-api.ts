@@ -59,6 +59,7 @@ import type { IlpMetricsRegistry } from '../observability/metrics-registry';
 import type { PeerRelation, RouteTermination, TerminationChain } from '../config/types';
 import { validateRouteTermination, toRouteTermination } from '../config/types';
 import type { DiscoveredNode } from '../discovery/discovered-node-registry';
+import { DASHBOARD_HTML } from './dashboard-page';
 
 /**
  * Admin API Configuration
@@ -2434,6 +2435,17 @@ export async function createAdminRouter(config: AdminAPIConfig): Promise<Router>
    * JSON projection of per-peer ILP counters from the metrics registry.
    * Story 37.3 — mirrors the Prometheus counters in a dashboard-friendly format.
    */
+  /**
+   * GET /admin/dashboard
+   * Self-contained operator dashboard (zero deps). Served from inside the admin
+   * router so it inherits the IP allowlist / API-key auth, and is same-origin
+   * with the /admin/metrics.json + /admin/earnings.json data it polls.
+   */
+  router.get('/dashboard', (_req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    res.type('html').send(DASHBOARD_HTML);
+  });
+
   router.get('/metrics.json', async (_req: Request, res: Response) => {
     try {
       if (!metricsRegistry) {

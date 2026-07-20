@@ -300,6 +300,7 @@ export class AdminServer {
               port,
               host,
               endpoints: [
+                'GET /admin/dashboard',
                 'GET /admin/peers',
                 'POST /admin/peers',
                 'DELETE /admin/peers/:peerId',
