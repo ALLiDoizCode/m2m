@@ -2,7 +2,7 @@
 # TOON store (Arweave DVM) node — connector apex + DVM + TLS.
 # Mirrors infra/linode-node/docker-compose.node.yml but for a store-only box:
 # no relay, no faucet, no Mina lightnet (this box settles against the existing
-# devnet chain boxes). The connector apex serves g.proxy.store -> store:3300.
+# devnet chain boxes). The connector apex serves g.toon.ario -> store:3300.
 # Run from the CONNECTOR REPO ROOT:
 #   docker compose -f infra/linode-store/docker-compose.store.yml up -d
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -55,14 +55,14 @@ services:
       # Standalone-mode connector this DVM announces through + receives jobs from.
       CONNECTOR_URL: http://connector:3000
       # Advertised kind:10032 ILP address — MUST equal the connector route's
-      # ilpAddress (g.proxy.store) or discovery and routing disagree.
-      ILP_ADDRESS: g.proxy.store
+      # ilpAddress (g.toon.ario) or discovery and routing disagree.
+      ILP_ADDRESS: g.toon.ario
       # Advertise on the toon relay (PAID write via the connector) so clients can
-      # DISCOVER + pay g.proxy.store directly. The advertised endpoint + settlement
+      # DISCOVER + pay g.toon.ario directly. The advertised endpoint + settlement
       # are THIS box's own (direct path: client -> store box -> DVM). The relay-hop
-      # fee path is g.proxy.relay.store (separate). Settlement addrs are the store
+      # fee path is g.toon.relay.ario (separate). Settlement addrs are the store
       # connector's distinct identity (STORE_TOON_MNEMONIC acct 0).
-      RELAY_PUBLISH_DEST: g.proxy.relay
+      RELAY_PUBLISH_DEST: g.toon.relay
       PUBLIC_BTP_ENDPOINT: wss://proxy.store.devnet.toonprotocol.dev:443
       SETTLE_EVM: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
       SETTLE_SOL: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
