@@ -22,6 +22,7 @@ import {
   resolveRouteHints,
   PUBLISH_HINT_CAPABILITY,
   STORE_HINT_CAPABILITY,
+  FORWARDED_ROUTE_CAPABILITY,
 } from './self-announce-builder';
 
 const APEX_EVM = '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab';
@@ -753,6 +754,10 @@ describe('buildCapabilityDirectory (toon-meta#153)', () => {
     expect(directory).toEqual([
       { capability: PUBLISH_HINT_CAPABILITY, address: 'g.proxy.relay', price: '1000' },
       { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store', price: '1000' },
+      // The forwarded `g.proxy.relay.store` route (price 1000, no upstream) is
+      // NOT the store hint (which resolves to the direct g.proxy.store), so it
+      // is surfaced here so a client can floor its claim against it (else F06).
+      { capability: FORWARDED_ROUTE_CAPABILITY, address: 'g.proxy.relay.store', price: '1000' },
     ]);
   });
 
@@ -786,8 +791,10 @@ describe('buildCapabilityDirectory (toon-meta#153)', () => {
     };
     const directory = buildCapabilityDirectory(config, selfAnnounce);
     expect(directory).toEqual([
-      // Derived os.publish gone (explicit wins); derived os.store intact.
+      // Derived os.publish gone (explicit wins); derived os.store intact; the
+      // forwarded g.proxy.relay.store toll is surfaced (address uncovered).
       { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store', price: '1000' },
+      { capability: FORWARDED_ROUTE_CAPABILITY, address: 'g.proxy.relay.store', price: '1000' },
       { capability: 'os.publish', address: 'g.elsewhere.relay', price: '5' },
     ]);
   });
@@ -852,6 +859,7 @@ describe('buildCapabilityDirectory (toon-meta#153)', () => {
     expect(info.capabilities).toEqual([
       { capability: PUBLISH_HINT_CAPABILITY, address: 'g.proxy.relay', price: '1000' },
       { capability: STORE_HINT_CAPABILITY, address: 'g.proxy.store', price: '1000' },
+      { capability: FORWARDED_ROUTE_CAPABILITY, address: 'g.proxy.relay.store', price: '1000' },
     ]);
     // Deployed consumers parse the legacy block — it must not change shape.
     expect(info.routes).toEqual({ publish: 'g.proxy.relay', store: 'g.proxy.store' });
@@ -867,5 +875,129 @@ describe('buildCapabilityDirectory (toon-meta#153)', () => {
     };
     const info = buildSelfAnnouncementInfo(empty, { enabled: true, announceTo: 'g.x' });
     expect('capabilities' in info).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Forwarded priced routes surface their price so a bootstrapping client floors
+// its per-packet claim against them (else the downstream connector F06-rejects
+// `Insufficient claim value: claim advances by N but route price is P`).
+// ---------------------------------------------------------------------------
+
+/**
+ * A forwarding entry node (mirrors the devnet apex + sandbox topology): it
+ * TERMINATES `g.toon.relay` (upstream) and FORWARDS priced routes to a store
+ * peer — `g.toon.ario` (a store hint) and `g.toon.relay.ario` (NOT a hint) —
+ * plus a forwarding route with NO price (an ordinary route, nothing to charge).
+ */
+function forwardingEntryNodeConfig(): ConnectorConfig {
+  return {
+    nodeId: 'connector',
+    btpServerPort: 3000,
+    environment: 'development',
+    peers: [{ id: 'store-box', url: 'ws://store-box:3000', authToken: 's' }],
+    chainProviders: relayConnectorConfig().chainProviders,
+    routes: [
+      {
+        prefix: 'g.toon.relay',
+        nextHop: 'connector',
+        upstream: 'http://relay:3100',
+        price: '1000',
+        chains: ['evm'],
+        ilpAddress: 'g.toon.relay',
+        settlementAddresses: { evm: APEX_EVM },
+      },
+      // Forwarded WITH a price, NOT resolved as a publish/store hint → the bug.
+      {
+        prefix: 'g.toon.relay.ario',
+        nextHop: 'store-box',
+        price: '1000',
+        chains: ['evm'],
+        ilpAddress: 'g.toon.relay.ario',
+        settlementAddresses: { evm: APEX_EVM },
+      },
+      // Forwarded WITH a price, and IS the store hint (via the override below).
+      {
+        prefix: 'g.toon.ario',
+        nextHop: 'store-box',
+        price: '1000',
+        chains: ['evm'],
+        ilpAddress: 'g.toon.ario',
+        settlementAddresses: { evm: APEX_EVM },
+      },
+      // Forwarded WITHOUT a price → nothing to advertise, must be omitted.
+      { prefix: 'g.toon.free', nextHop: 'store-box', ilpAddress: 'g.toon.free' },
+    ],
+  };
+}
+
+const entrySelfAnnounce: SelfAnnounceConfig = {
+  ...baseSelfAnnounce,
+  routes: { publish: 'g.toon.relay', store: 'g.toon.ario' },
+};
+
+describe('buildCapabilityDirectory — forwarded priced routes', () => {
+  it('advertises a forwarded route WITH a price under os.forward', () => {
+    const directory = buildCapabilityDirectory(forwardingEntryNodeConfig(), entrySelfAnnounce);
+    // The uncovered forwarded route carries its price at its own address.
+    expect(directory).toContainEqual({
+      capability: FORWARDED_ROUTE_CAPABILITY,
+      address: 'g.toon.relay.ario',
+      price: '1000',
+    });
+  });
+
+  it('does NOT advertise a forwarded route WITHOUT a price', () => {
+    const directory = buildCapabilityDirectory(forwardingEntryNodeConfig(), entrySelfAnnounce);
+    expect(directory.some((e) => e.address === 'g.toon.free')).toBe(false);
+  });
+
+  it('leaves the store hint (a forwarded route that IS a hint) to os.store, not os.forward', () => {
+    const directory = buildCapabilityDirectory(forwardingEntryNodeConfig(), entrySelfAnnounce);
+    // g.toon.ario is the resolved store hint → advertised once, as os.store.
+    expect(directory).toContainEqual({
+      capability: STORE_HINT_CAPABILITY,
+      address: 'g.toon.ario',
+      price: '1000',
+    });
+    expect(
+      directory.filter((e) => e.address === 'g.toon.ario' && e.capability === FORWARDED_ROUTE_CAPABILITY)
+    ).toHaveLength(0);
+  });
+
+  it('still advertises the terminated route via its publish hint, unchanged', () => {
+    const directory = buildCapabilityDirectory(forwardingEntryNodeConfig(), entrySelfAnnounce);
+    expect(directory).toContainEqual({
+      capability: PUBLISH_HINT_CAPABILITY,
+      address: 'g.toon.relay',
+      price: '1000',
+    });
+  });
+
+  it('rides along in buildSelfAnnouncementInfo and folds forwarded settlement addresses in', () => {
+    const info = buildSelfAnnouncementInfo(forwardingEntryNodeConfig(), entrySelfAnnounce);
+    expect(info.capabilities).toContainEqual({
+      capability: FORWARDED_ROUTE_CAPABILITY,
+      address: 'g.toon.relay.ario',
+      price: '1000',
+    });
+    // The forwarded priced routes' settlement identity rides the announce, so a
+    // client can open a channel to (and pay) this node for those forwards —
+    // removing the need for the prod hand-patch on forwarding nodes.
+    expect(info.settlementAddresses).toEqual({ 'evm:31337': APEX_EVM });
+  });
+
+  it('does not advertise a forwarded price when the config carries none (backward compatible)', () => {
+    // A pure forwarding route with no price → the announce advertises no toll
+    // (identical to pre-fix behavior; only a configured price is surfaced).
+    const config: ConnectorConfig = {
+      nodeId: 'connector',
+      btpServerPort: 3000,
+      environment: 'development',
+      peers: [],
+      routes: [{ prefix: 'g.fwd.only', nextHop: 'peer' }],
+    };
+    const directory = buildCapabilityDirectory(config, { enabled: true, announceTo: 'g.fwd.only' });
+    expect(directory.some((e) => e.capability === FORWARDED_ROUTE_CAPABILITY)).toBe(false);
   });
 });

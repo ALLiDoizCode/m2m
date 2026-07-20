@@ -330,6 +330,20 @@ export const PUBLISH_HINT_CAPABILITY = 'os.publish';
 export const STORE_HINT_CAPABILITY = 'os.store';
 
 /**
+ * Capability advertised for a FORWARDED route that carries a `price`.
+ *
+ * A route this node forwards (no `upstream`) but that still charges a `price`
+ * is a toll to route THROUGH this node to a downstream provider. It must be
+ * surfaced in the announced `capabilities` so a client flooring its per-packet
+ * upload claim at the route price does not under-claim and get F06-rejected
+ * (`Insufficient claim value`) by the downstream connector. Clients key the
+ * price directory by ADDRESS, not by capability name (see toon-client's
+ * standalone route-price floors), so this name is a stable, semantically
+ * neutral handle for the "forward through me" toll rather than a core service.
+ */
+export const FORWARDED_ROUTE_CAPABILITY = 'os.forward';
+
+/**
  * Derive the announcement's `capabilities` directory (toon-meta#153,
  * connector-control-plane.md §4.3) from the connector's config:
  *
@@ -344,6 +358,13 @@ export const STORE_HINT_CAPABILITY = 'os.store';
  *    rationale), carrying the matching child/route price when configured.
  *    The legacy `routes: { publish, store }` block itself is still emitted
  *    unchanged alongside — deployed consumers parse it.
+ * 2b. **Forwarded priced routes** — every route this node FORWARDS (no
+ *    `upstream`) that still carries a `price` is advertised at its own address
+ *    under {@link FORWARDED_ROUTE_CAPABILITY}, so a client flooring its claim
+ *    at the route price does not under-claim and get F06-rejected downstream.
+ *    A forwarded route WITHOUT a price has nothing to advertise and is
+ *    skipped; a route whose address is already covered by an explicit/child/
+ *    derived entry above is left to that entry (its capability + price win).
  * 3. **Explicit `selfAnnounce.capabilities`** — operator-provided entries
  *    (validated at config load) appended after the derived ones.
  *
@@ -449,10 +470,37 @@ export function buildCapabilityDirectory(
     derivedEntries.push({ capability, address, ...(price !== undefined ? { price } : {}) });
   }
 
+  // 2b. Forwarded priced routes: surface the toll of routing THROUGH this node
+  //     so a client floors its per-packet claim at the route price (else F06
+  //     downstream). Skipped when the route carries no price (nothing to
+  //     advertise) or when its address is already covered by an explicit/child/
+  //     derived entry above (that entry's capability + price win).
+  const coveredAddresses = new Set(
+    [...childEntries, ...derivedEntries, ...explicitEntries].map((e) => e.address)
+  );
+  const forwardedEntries: IlpCapabilityEntry[] = [];
+  for (const route of config.routes) {
+    if (isTerminated(route)) continue; // terminated routes ride the hints above
+    if (route.price === undefined) continue; // no price → nothing to advertise
+    const address = routeAddress(route);
+    if (coveredAddresses.has(address)) continue;
+    const entry = makeEntry(
+      FORWARDED_ROUTE_CAPABILITY,
+      address,
+      route.price,
+      undefined,
+      `forwarded route '${route.prefix}'`
+    );
+    if (entry) {
+      forwardedEntries.push(entry);
+      coveredAddresses.add(address);
+    }
+  }
+
   // Dedupe by (capability, address), first occurrence wins.
   const seen = new Set<string>();
   const directory: IlpCapabilityEntry[] = [];
-  for (const entry of [...childEntries, ...derivedEntries, ...explicitEntries]) {
+  for (const entry of [...childEntries, ...derivedEntries, ...forwardedEntries, ...explicitEntries]) {
     const key = `${entry.capability} ${entry.address}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -519,11 +567,19 @@ export function buildSelfAnnouncementInfo(
     .map((p) => p.chainId)
     .filter((c): c is string => typeof c === 'string' && c.length > 0);
 
-  // Merge per-route settlement addresses (chain → address) across terminated
-  // routes. They share one settlement identity in the canonical deploys, so a
-  // shallow merge is well-defined.
+  // Merge per-route settlement addresses (chain → address). They share one
+  // settlement identity in the canonical deploys, so a shallow merge is
+  // well-defined. Beyond the terminated routes we also fold in FORWARDED routes
+  // that carry a `price`: on a forwarding entry node a client must be able to
+  // open a channel to (and pay) this node for those priced forwards, so their
+  // settlement identity has to ride the announce too (removes the prod
+  // hand-patch that added price/chains/settlementAddresses to forward routes).
+  const settlementSourceRoutes = [
+    ...sourceRoutes,
+    ...config.routes.filter((r) => !isTerminated(r) && r.price !== undefined),
+  ];
   const mergedAddresses: Record<string, string> = {};
-  for (const route of sourceRoutes) {
+  for (const route of settlementSourceRoutes) {
     if (route.settlementAddresses) {
       for (const [chain, addr] of Object.entries(route.settlementAddresses)) {
         if (addr) mergedAddresses[chain] = addr;
