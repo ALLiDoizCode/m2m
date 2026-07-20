@@ -1,6 +1,8 @@
 import { ChannelManager, ChannelManagerConfig } from './channel-manager';
 import { PaymentChannelSDK } from './payment-channel-sdk';
 import { SettlementExecutor } from './settlement-executor';
+import { ChainProviderRegistry } from './provider/chain-provider-registry';
+import type { PaymentChannelProvider } from './provider/payment-channel-provider';
 import { EventEmitter } from 'events';
 import pino from 'pino';
 
@@ -118,6 +120,170 @@ describe('ChannelManager', () => {
 
       expect(channelId).toBe(mockChannelId);
       expect(mockPaymentChannelSDK.openChannel).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('multi-chain channel open (issue #86)', () => {
+    // Minimal mock PaymentChannelProvider — only openChannel/deposit are exercised
+    // by ChannelManager.openChannelForPeer's provider path.
+    function createMockProvider(
+      chainId: string,
+      overrides: Partial<jest.Mocked<PaymentChannelProvider>> = {}
+    ): jest.Mocked<PaymentChannelProvider> {
+      return {
+        chainType: 'solana',
+        chainId,
+        openChannel: jest.fn().mockResolvedValue({ channelId: 'SoLPDA', txHash: 'sig' }),
+        deposit: jest.fn().mockResolvedValue({ txHash: 'sig2' }),
+        claimFromChannel: jest.fn(),
+        closeChannel: jest.fn(),
+        settleChannel: jest.fn(),
+        signBalanceProof: jest.fn(),
+        verifyBalanceProof: jest.fn(),
+        getChannelState: jest.fn(),
+        subscribeToEvents: jest.fn(),
+        ...overrides,
+      } as unknown as jest.Mocked<PaymentChannelProvider>;
+    }
+
+    const SOL_ADDR = 'So1anaPeerAddress11111111111111111111111111';
+
+    it('opens a Solana channel when peer.chain=solana:devnet', async () => {
+      const provider = createMockProvider('solana:devnet');
+      const registry = new ChainProviderRegistry();
+      registry.register(provider);
+
+      const solConfig: ChannelManagerConfig = {
+        ...config,
+        // Solana peer address is base58 (not in the default EVM map)
+        peerIdToAddressMap: new Map([['peer-sol', SOL_ADDR]]),
+      };
+
+      const cm = new ChannelManager(
+        solConfig,
+        mockPaymentChannelSDK,
+        mockSettlementExecutor,
+        mockLogger,
+        registry,
+        new Map([['peer-sol', 'solana:devnet']])
+      );
+
+      // tokenId 'M2M' is intentionally absent from the EVM tokenAddressMap — the
+      // provider path must not require a map hit (dual-chain tokenAddressMap gap).
+      const channelId = await cm.ensureChannelExists('peer-sol', 'M2M', {
+        chain: 'solana:devnet',
+      });
+
+      expect(channelId).toBe('SoLPDA');
+      // openChannel called with (base58Addr, settlementTimeout) — no token/deposit args
+      expect(provider.openChannel).toHaveBeenCalledWith(SOL_ADDR, 86400);
+      // deposit called with (channelId, initialDeposit string)
+      const expectedDeposit = (1000000n * BigInt(config.initialDepositMultiplier)).toString();
+      expect(provider.deposit).toHaveBeenCalledWith('SoLPDA', expectedDeposit);
+      // The EVM SDK path was NOT taken
+      expect(mockPaymentChannelSDK.openChannel).not.toHaveBeenCalled();
+
+      const metadata = cm.getChannelById('SoLPDA');
+      expect(metadata?.chain).toBe('solana:devnet');
+      expect(metadata?.peerId).toBe('peer-sol');
+      expect(metadata?.status).toBe('open');
+
+      cm.stop();
+    });
+
+    it('still opens EVM channel when no chain / evm (regression)', async () => {
+      const provider = createMockProvider('solana:devnet');
+      const registry = new ChainProviderRegistry();
+      registry.register(provider);
+
+      mockPaymentChannelSDK.openChannel.mockResolvedValue({
+        channelId: '0xEvmChannel',
+        txHash: '0xTx',
+      });
+
+      const cm = new ChannelManager(
+        config,
+        mockPaymentChannelSDK,
+        mockSettlementExecutor,
+        mockLogger,
+        registry,
+        // peer-a has no chain entry → EVM path
+        new Map()
+      );
+
+      const channelId = await cm.ensureChannelExists('peer-a', 'TEST_TOKEN');
+
+      expect(channelId).toBe('0xEvmChannel');
+      expect(mockPaymentChannelSDK.openChannel).toHaveBeenCalledWith(
+        '0xPeerAddress',
+        '0xTokenAddress',
+        86400,
+        expect.any(BigInt)
+      );
+      // The registry provider was NOT touched for an EVM peer
+      expect(provider.openChannel).not.toHaveBeenCalled();
+      expect(provider.deposit).not.toHaveBeenCalled();
+
+      cm.stop();
+    });
+
+    it('throws if the Solana provider is missing from the registry', async () => {
+      const emptyRegistry = new ChainProviderRegistry();
+
+      const solConfig: ChannelManagerConfig = {
+        ...config,
+        peerIdToAddressMap: new Map([['peer-sol', SOL_ADDR]]),
+      };
+
+      const cm = new ChannelManager(
+        solConfig,
+        mockPaymentChannelSDK,
+        mockSettlementExecutor,
+        mockLogger,
+        emptyRegistry,
+        new Map([['peer-sol', 'solana:devnet']])
+      );
+
+      await expect(
+        cm.ensureChannelExists('peer-sol', 'M2M', { chain: 'solana:devnet' })
+      ).rejects.toThrow('No provider registered for chain solana:devnet');
+
+      expect(mockPaymentChannelSDK.openChannel).not.toHaveBeenCalled();
+
+      cm.stop();
+    });
+
+    it('does not register a funded channel when deposit fails after open', async () => {
+      const provider = createMockProvider('solana:devnet', {
+        deposit: jest.fn().mockRejectedValue(new Error('deposit reverted')),
+      });
+      const registry = new ChainProviderRegistry();
+      registry.register(provider);
+
+      const solConfig: ChannelManagerConfig = {
+        ...config,
+        peerIdToAddressMap: new Map([['peer-sol', SOL_ADDR]]),
+      };
+
+      const cm = new ChannelManager(
+        solConfig,
+        mockPaymentChannelSDK,
+        mockSettlementExecutor,
+        mockLogger,
+        registry,
+        new Map([['peer-sol', 'solana:devnet']])
+      );
+
+      await expect(
+        cm.ensureChannelExists('peer-sol', 'M2M', { chain: 'solana:devnet' })
+      ).rejects.toThrow('deposit reverted');
+
+      // openChannel succeeded but deposit threw → channel must NOT be registered
+      expect(provider.openChannel).toHaveBeenCalled();
+      expect(cm.getChannelById('SoLPDA')).toBeNull();
+      expect(cm.getChannelForPeer('peer-sol', 'M2M')).toBeNull();
+
+      cm.stop();
     });
   });
 

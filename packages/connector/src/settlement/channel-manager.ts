@@ -3,6 +3,7 @@ import type { Logger } from 'pino';
 import { PaymentChannelSDK } from './payment-channel-sdk';
 import { SettlementExecutor } from './settlement-executor';
 import type { AdminChannelStatus } from './types';
+import type { ChainProviderRegistry } from './provider/chain-provider-registry';
 
 /**
  * ChannelManager configuration
@@ -41,7 +42,9 @@ export interface ChannelMetadata {
 export interface ChannelOpenOptions {
   initialDeposit?: bigint; // Override default deposit
   settlementTimeout?: number; // Override default timeout
-  chain?: string; // Chain identifier for metadata
+  chain?: string; // Chain identifier (e.g., 'solana:devnet'). Load-bearing: selects the
+  // ChainProviderRegistry provider that opens the channel (non-EVM chains route to their
+  // own provider). Falls back to peerIdToChainMap; unset / 'evm:*' keeps the EVM SDK path.
   peerAddress?: string; // Peer's blockchain address for channel opening
 }
 
@@ -59,18 +62,27 @@ export class ChannelManager extends EventEmitter {
   private readonly logger: Logger;
   private readonly channelMetadata: Map<string, ChannelMetadata>; // channelId → metadata
   private readonly peerChannelIndex: Map<string, Map<string, string>>; // peerId → (tokenId → channelId)
+  // Optional multi-chain wiring (issue #86). When present, a peer whose effective
+  // chain is non-EVM has its channel opened via the registry's chain provider
+  // instead of the EVM PaymentChannelSDK.
+  private readonly chainProviderRegistry?: ChainProviderRegistry;
+  private readonly peerIdToChainMap?: Map<string, string>; // peerId → chainId (e.g., 'solana:devnet')
   private idleCheckTimer?: NodeJS.Timeout;
 
   constructor(
     config: ChannelManagerConfig,
     paymentChannelSDK: PaymentChannelSDK,
     settlementExecutor: SettlementExecutor,
-    logger: Logger
+    logger: Logger,
+    chainProviderRegistry?: ChainProviderRegistry,
+    peerIdToChainMap?: Map<string, string>
   ) {
     super();
     this.config = config;
     this.paymentChannelSDK = paymentChannelSDK;
     this.settlementExecutor = settlementExecutor;
+    this.chainProviderRegistry = chainProviderRegistry;
+    this.peerIdToChainMap = peerIdToChainMap;
     this.channelMetadata = new Map<string, ChannelMetadata>();
     this.peerChannelIndex = new Map<string, Map<string, string>>();
     this.idleCheckTimer = undefined;
@@ -296,19 +308,22 @@ export class ChannelManager extends EventEmitter {
     tokenId: string,
     options?: ChannelOpenOptions
   ): Promise<string> {
-    // Get token and peer addresses
-    const tokenAddress = this.config.tokenAddressMap.get(tokenId);
-    if (!tokenAddress) {
-      throw new Error(`Token address not found for tokenId: ${tokenId}`);
-    }
+    // Effective chain: explicit option wins, else the peer→chain map (issue #86).
+    // Load-bearing for provider selection — a non-EVM chain routes to the registry
+    // provider instead of the EVM PaymentChannelSDK.
+    const chain = options?.chain ?? this.peerIdToChainMap?.get(peerId);
+    const isEvmChain = !chain || chain.startsWith('evm');
 
+    // Resolve peer address (shared by both paths). For the EVM path this is the
+    // 0x settlement address; for the provider path it is the chain-native
+    // (e.g. base58) address already resolved into peerIdToAddressMap/options.
     const peerAddress = options?.peerAddress || this.config.peerIdToAddressMap.get(peerId);
     if (!peerAddress) {
       throw new Error(`Peer address not found for peerId: ${peerId}`);
     }
 
     this.logger.info(
-      { peerId, peerAddress, source: options?.peerAddress ? 'options' : 'config' },
+      { peerId, peerAddress, chain, source: options?.peerAddress ? 'options' : 'config' },
       'Resolved peer address for channel opening'
     );
 
@@ -323,6 +338,78 @@ export class ChannelManager extends EventEmitter {
       // reverted on-chain with "Insufficient balance" (broke standalone settlement E2E).
       const defaultInitialDeposit = BigInt(1000000); // 1 USDC (1e6 base units)
       initialDeposit = defaultInitialDeposit * BigInt(this.config.initialDepositMultiplier);
+    }
+
+    // -------------------------------------------------------------------------
+    // Non-EVM path: open + deposit via the registered chain provider (issue #86).
+    // On a dual evm+solana node, tokenAddressMap only carries EVM entries, so we
+    // MUST NOT require a map hit here — the provider bakes in its own token mint.
+    // -------------------------------------------------------------------------
+    if (chain && !isEvmChain && this.chainProviderRegistry) {
+      const provider = this.chainProviderRegistry.getProviderForPeer({ peerId, chain });
+      if (!provider) {
+        throw new Error(`No provider registered for chain ${chain} (peer ${peerId})`);
+      }
+
+      // Display/metadata only — never a hard requirement on the provider path.
+      const tokenAddressForMeta = this.config.tokenAddressMap.get(tokenId) ?? tokenId;
+
+      // Two-step open then deposit. Only register a funded channel AFTER deposit
+      // resolves: if openChannel succeeds but deposit throws, we deliberately let
+      // it throw and do NOT index the channel as available (avoids advertising an
+      // unfunded channel). The partial on-chain state is logged for operators.
+      const { channelId, txHash } = await provider.openChannel(peerAddress, settlementTimeout);
+      this.logger.info(
+        { channelId, txHash, chain, provider: provider.chainId },
+        'Channel opened via chain provider (awaiting deposit)'
+      );
+
+      try {
+        const depositResult = await provider.deposit(channelId, initialDeposit.toString());
+        this.logger.info(
+          { channelId, txHash: depositResult.txHash, chain },
+          'Channel deposit confirmed via chain provider'
+        );
+      } catch (error) {
+        this.logger.error(
+          { channelId, chain, initialDeposit: initialDeposit.toString(), error },
+          'Channel opened on-chain but deposit failed — channel NOT registered as funded/available'
+        );
+        throw error;
+      }
+
+      // Deposit succeeded: register metadata + peer index (mirrors the EVM path).
+      const metadata: ChannelMetadata = {
+        channelId,
+        peerId,
+        tokenId,
+        tokenAddress: tokenAddressForMeta,
+        chain,
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        status: 'open',
+      };
+
+      this.channelMetadata.set(channelId, metadata);
+      if (!this.peerChannelIndex.has(peerId)) {
+        this.peerChannelIndex.set(peerId, new Map<string, string>());
+      }
+      this.peerChannelIndex.get(peerId)!.set(tokenId, channelId);
+
+      this.logger.info(
+        { channelId, peerId, tokenId, chain, initialDeposit: initialDeposit.toString() },
+        'Channel opened (chain provider)'
+      );
+
+      return channelId;
+    }
+
+    // -------------------------------------------------------------------------
+    // EVM path (unchanged): the ERC20 token address is required from the map.
+    // -------------------------------------------------------------------------
+    const tokenAddress = this.config.tokenAddressMap.get(tokenId);
+    if (!tokenAddress) {
+      throw new Error(`Token address not found for tokenId: ${tokenId}`);
     }
 
     // Open channel on-chain
