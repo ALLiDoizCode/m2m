@@ -647,6 +647,32 @@ export const ADMIN_API_INVENTORY: readonly InventoryEntry[] = [
   },
 
   /**
+   * GET /admin/dashboard
+   * Self-contained operator dashboard (static HTML/JS, zero deps) served from
+   * inside the admin router so it inherits the auth/allowlist and is same-origin
+   * with /admin/metrics.json + /admin/earnings.json.
+   */
+  {
+    path: '/dashboard',
+    method: 'GET',
+    server: 'AdminServer',
+    mountPrefix: '/admin',
+    authModel: 'X-Api-Key',
+    successStatus: 200,
+    failureModes: [
+      { status: 401, description: 'Missing or invalid X-Api-Key' },
+      { status: 403, description: 'IP not in allowlist' },
+    ],
+    requestContract: 'none',
+    responseContract: 'text/html — the DASHBOARD_HTML page (http/dashboard-page.ts)',
+    owningModule: 'http/admin-api.ts',
+    relatedStories: ['47.x'],
+    crossSurfaceGroupId: 'packet-counters',
+    operationalNotes:
+      'Cache-Control: no-store. Polls /admin/metrics.json (1Hz) + /admin/earnings.json. Dependency-free; ships with the node.',
+  },
+
+  /**
    * GET /health (AdminServer)
    * Health check for the admin server itself (separate from HealthServer)
    */
