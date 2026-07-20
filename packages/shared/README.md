@@ -124,7 +124,7 @@ All events share a `type` discriminator and are combined in the `TelemetryEvent`
 
 ## Monorepo
 
-This package is part of the [connector](https://github.com/ALLiDoizCode/connector) monorepo.
+This package is part of the [connector](https://github.com/toon-protocol/connector) monorepo.
 
 ## License
 

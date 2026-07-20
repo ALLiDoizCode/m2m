@@ -1,5 +1,19 @@
 # TOON devnet on Linode
 
+> ⚠️ **Historical (pre-2026-07-19): this documents the self-hosted chain boxes, which are DELETED.**
+> The devnet settles on **public chains** — Base Sepolia (`evm:84532`), public Solana
+> devnet, and public Mina devnet. See
+> [toon-meta `docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md)
+> and the toon-client rig README's
+> ["Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains)
+> for the live endpoints. Still live: the faucet
+> (`https://faucet.devnet.toonprotocol.dev`, 3-chain web UI), the relay
+> (`wss://relay-ws.devnet.toonprotocol.dev`), and the proxy
+> (`wss://proxy.devnet.toonprotocol.dev:443`). The
+> [`endpoints.json`](./endpoints.json) in this directory is kept current for the
+> public chains; the rest of this README is retained for historical reference,
+> with the worst landmines annotated "(deleted)" below.
+
 A self-hosted, public **devnet** for TOON's supported chains, so peers can point a
 TOON node/SDK at one stable set of endpoints instead of juggling rate-limited
 public faucets and devnets that reset out from under them. **Replaces the old
@@ -12,13 +26,13 @@ nginx + Let's Encrypt TLS in front of them.
 
 ## What runs
 
-| Service                     | From                            | Public endpoint                                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| --------------------------- | ------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Anvil (EVM, chain-id 31337) | base compose `anvil`            | `https://evm-rpc.<DOMAIN>`                                 | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                                                                                                                                                                                                                                                                                                                                                |
-| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                  | `GET /health`, `GET /api/info`; `POST /api/request` → 100 ETH + 10k USDC (EVM); `POST /api/solana/request` → SOL + USDC; `POST /api/mina/request` → native MINA **+ USDC** (admin-mint); `POST /api/base-sepolia/request` → mints 1000 USDC on **Base Sepolia** (chainId 84532, ungated `mint()`; needs `BASE_SEPOLIA_FAUCET_KEY` funded with Base Sepolia ETH for gas). Drips native + USDC on all three local chains, plus USDC on Base Sepolia. |
-| Solana test validator       | base compose `solana-validator` | `https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>` | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals)                                                                                                                                                                                                                                                                                                                    |
-| Mina (public devnet)        | nginx passthrough               | `https://mina.<DOMAIN>/graphql`                            | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>`                                                                                                                                                                                                                                                      |
-| nginx + certbot             | this overlay                    | 80/443                                                     | the only public surface                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Service                     | From                            | Public endpoint                                                                                                           | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anvil (EVM, chain-id 31337) | base compose `anvil`            | ~~`https://evm-rpc.<DOMAIN>`~~ **(deleted — EVM settles on public Base Sepolia, `https://sepolia.base.org`)**             | auto-deploys Mock USDC `0x5FbDB2…` + `TokenNetworkRegistry` via `DeployLocal.s.sol`                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Faucet                      | base compose `faucet`           | `https://faucet.<DOMAIN>`                                                                                                 | `GET /health`, `GET /api/info`; ~~`POST /api/request` → 100 ETH + 10k USDC (EVM)~~ **(retired with the anvil chain)**; `POST /api/solana/request` → SOL + USDC; `POST /api/mina/request` → native MINA **+ USDC** (admin-mint); `POST /api/base-sepolia/request` → mints 1000 USDC on **Base Sepolia** (chainId 84532, ungated `mint()`; needs `BASE_SEPOLIA_FAUCET_KEY` funded with Base Sepolia ETH for gas). Drips native + USDC on all three local chains, plus USDC on Base Sepolia. |
+| Solana test validator       | base compose `solana-validator` | ~~`https://solana-rpc.<DOMAIN>` + `wss://solana-ws.<DOMAIN>`~~ **(deleted — use public `https://api.devnet.solana.com`)** | auto-deploys the payment-channel program; `devnet.sh mint` creates a deterministic mock-USDC SPL mint (`H8HSreUF…`, 6 decimals)                                                                                                                                                                                                                                                                                                                                                           |
+| Mina (public devnet)        | nginx passthrough               | ~~`https://mina.<DOMAIN>/graphql`~~ **(deleted — use `https://api.minascan.io/node/devnet/v1/graphql` directly)**         | **proxy only** — no Mina node here (lightnet is too heavy); state is the public devnet's. USDC token zkApp (6-dp) deployed once to public devnet; fund peers with `devnet.sh fund-mina <b58>`                                                                                                                                                                                                                                                                                             |
+| nginx + certbot             | this overlay                    | 80/443                                                                                                                    | the only public surface                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 > **Chains-only.** This box deploys blockchain infrastructure only. The
 > payment-proxy / connector edge and the oblivious relay deploy **separately**
@@ -31,7 +45,7 @@ nginx + Let's Encrypt TLS in front of them.
 git clone https://github.com/toon-protocol/connector.git
 cd connector/infra/linode
 cp .env.example .env && $EDITOR .env      # set DOMAIN, LETSENCRYPT_EMAIL, PUBLIC_IFACE
-# Create DNS A-records → this box's IP for: evm-rpc / solana-rpc / solana-ws / faucet / mina .<DOMAIN>
+# Create DNS A-records → this box's IP for: evm-rpc / solana-rpc / solana-ws / faucet / mina .<DOMAIN>   # (historical — these records are deleted)
 ./bootstrap.sh
 ```
 
@@ -53,19 +67,20 @@ re-run `./init-letsencrypt.sh` for trusted certs.
 
 ## Pointing a TOON node at the devnet
 
-Consume [`endpoints.json`](./endpoints.json), or set env / `chainRpcUrls` directly:
+Consume [`endpoints.json`](./endpoints.json) (kept current for the **public**
+chains), or set env / `chainRpcUrls` directly:
 
 ```ts
 chainRpcUrls: {
-  'evm:anvil:31337': 'https://evm-rpc.<DOMAIN>',
-  'solana:devnet':   'https://solana-rpc.<DOMAIN>',
-  'mina:devnet':     'https://mina.<DOMAIN>/graphql',
+  'evm:84532':     'https://sepolia.base.org',                          // public Base Sepolia
+  'solana:devnet': 'https://api.devnet.solana.com',                     // public Solana devnet
+  'mina:devnet':   'https://api.minascan.io/node/devnet/v1/graphql',    // public Mina devnet
 }
 ```
 
-Fund an **EVM** address: `curl -X POST https://faucet.<DOMAIN>/api/request -H 'content-type: application/json' -d '{"address":"0x…"}'` → 100 ETH + 10k USDC.
+~~Fund an **EVM** address: `curl -X POST https://faucet.<DOMAIN>/api/request -H 'content-type: application/json' -d '{"address":"0x…"}'` → 100 ETH + 10k USDC.~~ **(retired with the anvil chain — use the Base Sepolia route below, or the [faucet web UI](https://faucet.devnet.toonprotocol.dev))**
 
-Fund a **Solana** address: `./devnet.sh fund-sol <pubkey> [usdc] [sol]` → airdrops SOL + transfers mock USDC from the treasury (auto-creates the recipient ATA). The mock-USDC SPL mint is `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` (6 decimals); the payment-channel program is already SPL-aware, so channels settle in it directly.
+Fund a **Solana** address: `./devnet.sh fund-sol <pubkey> [usdc] [sol]` → airdrops SOL + transfers mock USDC from the treasury (auto-creates the recipient ATA). ~~The mock-USDC SPL mint is `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` (6 decimals)~~ **(deleted with the self-hosted validator — the live devnet settles on public Solana devnet: program `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`, mint `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`)**; the payment-channel program is SPL-aware, so channels settle in USDC directly.
 
 Fund a **Base Sepolia** address (mock USDC, 6-dp): `curl -X POST https://faucet.<DOMAIN>/api/base-sepolia/request -H 'content-type: application/json' -d '{"address":"0x…"}'` → mints 1000 USDC on the **PUBLIC Base Sepolia testnet** (chainId 84532). The mock USDC `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` has an **ungated `mint(address,uint256)`**, so the faucet coins fresh tokens straight to the recipient — the **`BASE_SEPOLIA_FAUCET_KEY`** secret needs **no USDC balance**, only a little Base Sepolia ETH for gas. Per-address 24h cooldown. Optionally also drips a little Base Sepolia ETH for gas (`BASE_SEPOLIA_ETH_AMOUNT`, best-effort — skipped when the faucet key's ETH is low, so the mint never fails). When the key is unset the route 503s.
 
@@ -154,11 +169,11 @@ change recreates the box (new IP → new domain → new cert).
 
 ## USDC across chains
 
-| Chain  | Token                 | Decimals | Status                                                                                                         |
-| ------ | --------------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
-| EVM    | MockERC20 `0x5FbDB2…` | **6**    | ✅ TokenNetwork EIP-712 settlement                                                                             |
-| Solana | SPL mint `H8HSreUF…`  | **6**    | ✅ program is SPL-aware; mint + faucet via `devnet.sh`                                                         |
-| Mina   | token zkApp           | **6**    | ✅ USDC `FungibleToken` (mina-fungible-token) deployed to public devnet; mint + fund via `devnet.sh fund-mina` |
+| Chain  | Token                                                                                                         | Decimals | Status                                                                                                         |
+| ------ | ------------------------------------------------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| EVM    | ~~MockERC20 `0x5FbDB2…`~~ **(deleted — live: `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` on Base Sepolia)**  | **6**    | ✅ TokenNetwork EIP-712 settlement                                                                             |
+| Solana | ~~SPL mint `H8HSreUF…`~~ **(deleted — live: `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in` on public devnet)** | **6**    | ✅ program is SPL-aware                                                                                        |
+| Mina   | token zkApp                                                                                                   | **6**    | ✅ USDC `FungibleToken` (mina-fungible-token) deployed to public devnet; mint + fund via `devnet.sh fund-mina` |
 
 **Decimals:** USDC is 6-decimal on every chain, so a claim's base-unit amount
 means the same thing everywhere — no cross-chain normalization required.
