@@ -1800,6 +1800,10 @@ export class ConnectorNode implements HealthStatusProvider {
           // built only for EVM nodes (issue #86). For non-EVM-only nodes it stays
           // null; the SettlementExecutor's Wave-2 ClaimReceiver fallback derives
           // channel ids from verified inbound claims instead.
+          // TODO(follow-up): a Solana-ONLY node (hasEvm=false) still cannot open
+          // channels — this guard would need relaxing so ChannelManager is built
+          // from the chainRegistry alone (no EVM SDK/registry/rpc/key). Out of
+          // scope here; dual evm+solana nodes hit hasEvm=true and are covered.
           if (hasEvm) {
             this._channelManager = new ChannelManager(
               {
@@ -1817,7 +1821,12 @@ export class ConnectorNode implements HealthStatusProvider {
               },
               this._paymentChannelSDK!,
               this._settlementExecutor,
-              this._logger
+              this._logger,
+              // Feed the shared registry + peer→chain map so a peer on a non-EVM
+              // chain (e.g. solana:devnet) has its channel opened via that chain's
+              // provider instead of always the EVM SDK (issue #86).
+              chainRegistry,
+              peerIdToChainMap
             );
 
             // Wire ChannelManager to SettlementExecutor for chain-agnostic channel lookup
