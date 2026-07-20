@@ -53,11 +53,12 @@ chainProviders:
     chainId: mina:devnet
     network: devnet
     graphqlUrl: https://api.minascan.io/node/devnet/v1/graphql
-    # BARE PaymentChannel (issue #185) + rate-limited mock USDC on PUBLIC Mina
-    # devnet, deployed 2026-07-19 from dev machine (zkApp = TOON_MNEMONIC mina idx 98).
-    zkAppAddress: 'B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf'
-    tokenAddress: 'B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d'
-    tokenId: '9497120696276615621907376728658022802954262638363646162765282600447713419198'
+    # PaymentChannel deployed to Mina lightnet 2026-06-23.
+    # USDC FungibleToken: needs deploy-usdc-token.ts run from dev machine (ESM/CJS
+    # conflict blocks it on server). Update tokenAddress + tokenId after deploy.
+    zkAppAddress: 'B62qoMNmZQQYSxuoNx42JnZtNZwHfwL16wxUYNEuLGyrVq1bXfS15Rn'
+    tokenAddress: 'B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa'
+    tokenId: '13195431355853976025555236213553162231466702378883981110250774386432112635553'
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
@@ -72,7 +73,7 @@ peers:
     settlementAddress: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
 
 routes:
-  - prefix: g.toon.relay
+  - prefix: g.proxy.relay
     nextHop: toon-devnet-proxy
     upstream: http://relay:3100
     price: '1000'
@@ -80,52 +81,52 @@ routes:
       - evm
       - solana
       - mina
-    ilpAddress: g.toon.relay
+    ilpAddress: g.proxy.relay
     settlementAddresses:
       # Derived from TOON_MNEMONIC (account index 0) — update if mnemonic changes.
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
-  # Store forwards. `g.toon.relay.ario` MUST be listed (it is more specific than
-  # `g.toon.relay`) so longest-prefix routing forwards it to the store box instead
+  # Store forwards. `g.proxy.relay.store` MUST be listed (it is more specific than
+  # `g.proxy.relay`) so longest-prefix routing forwards it to the store box instead
   # of falling through to the relay terminate route above (which 404s on /store).
   # The store box's own connector terminates these → POST /store → Arweave.
-  - prefix: g.toon.relay.ario
+  - prefix: g.proxy.relay.store
     nextHop: store-box
     price: '1000'
     chains:
       - evm
       - solana
       - mina
-    ilpAddress: g.toon.relay.ario
+    ilpAddress: g.proxy.relay.store
     settlementAddresses:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
-  - prefix: g.toon.ario
+  - prefix: g.proxy.store
     nextHop: store-box
     price: '1000'
     chains:
       - evm
       - solana
       - mina
-    ilpAddress: g.toon.ario
+    ilpAddress: g.proxy.store
     settlementAddresses:
       evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      solana: 'A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
 # ── Self-announce (kind:10032 IlpPeerInfo) — relay#37 / store#22 / toon-meta#69 ──
 # The apex publishes its own IlpPeerInfo THROUGH its own routing: announceTo is its
-# OWN terminated route (g.toon.relay → relay:3100), so the write is delivered
+# OWN terminated route (g.proxy.relay → relay:3100), so the write is delivered
 # LOCALLY = free. Lands in the relay event store → served on the free read WS, so a
 # genesis-seed-only client discovers the publish + store routes out of band.
 # Requires connector >= 3.28.0 (the relay-connector:latest image was rebuilt on it).
 selfAnnounce:
   enabled: true
-  announceTo: g.toon.relay
+  announceTo: g.proxy.relay
   refreshIntervalSecs: 300
   btpEndpoint: wss://proxy.devnet.toonprotocol.dev:443
   httpEndpoint: https://proxy.devnet.toonprotocol.dev/ilp
@@ -133,5 +134,5 @@ selfAnnounce:
   assetCode: USDC
   assetScale: 6
   routes:
-    publish: g.toon.relay
-    store: g.toon.ario
+    publish: g.proxy.relay
+    store: g.proxy.store

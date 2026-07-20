@@ -1,0 +1,113 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TOON store (Arweave DVM) node — connector apex + DVM + TLS.
+# Mirrors infra/linode-node/docker-compose.node.yml but for a store-only box:
+# no relay, no faucet, no Mina lightnet (this box settles against the existing
+# devnet chain boxes). The connector apex serves g.proxy.store -> store:3300.
+# Run from the CONNECTOR REPO ROOT:
+#   docker compose -f infra/linode-store/docker-compose.store.yml up -d
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+services:
+  connector:
+    image: ghcr.io/toon-protocol/connector:3.33.0
+    environment:
+      CONFIG_FILE: /app/config/connector.yaml
+      TOON_MNEMONIC: ${TOON_MNEMONIC}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_TLS_REJECT_UNAUTHORIZED: '0'
+    volumes:
+      - ./connector.yaml:/app/config/connector.yaml:ro
+      - connector_data:/app/data
+    ports:
+      - '3000:3000'
+      - '8080:8080'
+    restart: unless-stopped
+    healthcheck:
+      # wget (not curl): the connector slim image has no curl. Mirrors the node box.
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:8080/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  store:
+    # Arweave store/DVM (kind:5094). Built from store repo Dockerfile.store,
+    # published as ghcr.io/toon-protocol/store (renamed from dvm). HTTP-backend
+    # mode (DVM_BACKEND_MODE=http): a payment-oblivious POST /store backend on
+    # 3300 that the connector RouteTermination reverse-proxies to — matching the
+    # connector's payment-proxy model (closes the raw-TOON vs HTTP-envelope gap).
+    #   3300 — POST /store HTTP backend       3400 — BLS / health
+    image: ghcr.io/toon-protocol/store:latest
+    environment:
+      # kind:5095 ArNS buy (buyfor) — devnet name-buying float
+      ARNS_DVM_SOLANA_SECRET_KEY: ${ARNS_DVM_SOLANA_SECRET_KEY}
+      ARNS_NETWORK: ${ARNS_NETWORK:-devnet}
+      DVM_BACKEND_MODE: http
+      BLS_PORT: '3400'
+      HANDLER_PORT: '3300'
+      NODE_TLS_REJECT_UNAUTHORIZED: '0'
+      # DVM Nostr identity (64-char hex, NOT a mnemonic — the entrypoint reads
+      # NODE_NOSTR_SECRET_KEY, not TOON_MNEMONIC). Deterministic devnet key,
+      # distinct from the relay's (…0002).
+      NODE_NOSTR_SECRET_KEY: ${STORE_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000003}
+      # Standalone-mode connector this DVM announces through + receives jobs from.
+      CONNECTOR_URL: http://connector:3000
+      # Advertised kind:10032 ILP address — MUST equal the connector route's
+      # ilpAddress (g.proxy.store) or discovery and routing disagree.
+      ILP_ADDRESS: g.proxy.store
+      # Advertise on the toon relay (PAID write via the connector) so clients can
+      # DISCOVER + pay g.proxy.store directly. The advertised endpoint + settlement
+      # are THIS box's own (direct path: client -> store box -> DVM). The relay-hop
+      # fee path is g.proxy.relay.store (separate). Settlement addrs are the store
+      # connector's distinct identity (STORE_TOON_MNEMONIC acct 0).
+      RELAY_PUBLISH_DEST: g.proxy.relay
+      PUBLIC_BTP_ENDPOINT: wss://proxy.store.devnet.toonprotocol.dev:443
+      SETTLE_EVM: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+      SETTLE_SOL: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
+      SETTLE_MINA: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
+      # NOTE (Stage 5): the DVM advertises per-byte pricing (basePricePerByte,
+      # default 10 µUSDC/byte) while the connector route pins a flat price '1000'.
+      # Reconcile these — set FEE_PER_JOB / KIND_PRICING_5094 here to match the
+      # route, or switch the route to per-byte — before relying on paid jobs.
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - store_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3400/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      connector:
+        condition: service_healthy
+        required: false
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - store_certbot_conf:/etc/letsencrypt:ro
+      - store_certbot_www:/var/www/certbot:ro
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - store_certbot_conf:/etc/letsencrypt
+      - store_certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+
+volumes:
+  connector_data:
+  store_data:
+  store_certbot_conf:
+  store_certbot_www:

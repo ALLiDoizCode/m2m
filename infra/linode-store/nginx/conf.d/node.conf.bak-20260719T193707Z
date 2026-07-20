@@ -1,0 +1,61 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TOON store (Arweave DVM) box nginx config.
+# Serves: proxy.store.DOMAIN (connector ILP edge)  dvm.DOMAIN (DVM health)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+limit_req_zone $binary_remote_addr zone=store:10m rate=30r/s;
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+map $host $backend {
+    default                   "";
+    proxy.store.devnet.toonprotocol.dev     "http://connector:3000";
+    dvm.devnet.toonprotocol.dev             "http://store:3400";
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name proxy.store.devnet.toonprotocol.dev dvm.devnet.toonprotocol.dev;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name proxy.store.devnet.toonprotocol.dev dvm.devnet.toonprotocol.dev;
+
+    ssl_certificate     /etc/letsencrypt/live/proxy.store.devnet.toonprotocol.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/proxy.store.devnet.toonprotocol.dev/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location / {
+        if ($backend = "") { return 404; }
+        limit_req zone=store burst=60 nodelay;
+
+        proxy_pass $backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+
+        # DVM blob uploads (kind:5094) can be large; allow up to the connector's
+        # 1 MB ILP body limit plus headroom.
+        client_max_body_size 4m;
+    }
+}

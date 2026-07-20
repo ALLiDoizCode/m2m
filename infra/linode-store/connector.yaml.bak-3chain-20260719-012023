@@ -1,0 +1,215 @@
+# =============================================================================
+# store deploy — TOON connector (payment proxy) in front of the Arweave store
+# =============================================================================
+# BAKED into the store-connector image at /app/config/connector.yaml (see
+# deploy/Dockerfile) — NOT bind-mounted. TLS is terminated by the deployment
+# environment (no Caddy in this compose).
+#
+# Topology (RouteTermination — same model as the relay deploy):
+#
+#   payer ──POST /ilp (3000)──▶ connector ──POST /store──▶ store:3300  (store backend; PRIVATE)
+#                                  (terminates the payment)   (payment-oblivious)
+#
+# - The connector's edge is `POST /ilp` (ILP-over-HTTP, RFC-0035). A paid PREPARE
+#   addressed to `g.connector.store.*` terminates here; the literal HTTP request
+#   carried in the PREPARE `data` (`POST /store`, body `{event}` — a signed
+#   kind:5094 blob-storage event) is reverse-proxied to `upstream` (the store's
+#   PRIVATE backend port 3300), and the store's HTTP response (`{txId}`) is
+#   returned in the ILP FULFILL `data`. The store never sees ILP / settlement —
+#   it is a payment-oblivious POST /store backend.
+# - An UNPAID PREPARE is REJECTED — never reaches the store.
+#
+# PRICING: the connector enforces the FLAT route `price` below. Keep it aligned
+# with the store's FEE_PER_JOB. Variable per-byte pricing is a connector-side
+# follow-up.
+#
+# SETTLEMENT IDENTITY: ships with the anvil account-0 deterministic key as a
+# working DEVNET FALLBACK (account 0 is pre-funded on the shared devnet) and its
+# address as the route's settlement address. To run under YOUR OWN identity, set
+# TOON_MNEMONIC in .env — it is derived at boot and OVERWRITES the `keyId` below;
+# you must then also update routes[].settlementAddresses.evm to the derived EVM
+# address (see README). The config loader does NOT interpolate ${...}; every
+# value here is literal.
+# =============================================================================
+
+nodeId: connector
+btpServerPort: 3000
+healthCheckPort: 8080
+environment: development
+deploymentMode: standalone
+logLevel: info
+
+# ── Admin REST API ──────────────────────────────────────────────────────────
+# Binds inside the container only; the compose service does NOT publish 8081.
+adminApi:
+  enabled: true
+  host: 0.0.0.0
+  port: 8081
+  allowedIPs:
+    - 172.16.0.0/12 # docker user-defined-bridge default pool
+    - 192.168.0.0/16 # fallback when 172.16/12 is occupied
+
+# NOTE: deliberately NO `localDelivery:` block. A global localDelivery handler
+# would short-circuit the per-route HttpProxyHandler. Leaving it unset lets the
+# terminated route below drive the HTTP reverse-proxy to the store backend.
+
+settlement:
+  connectorFeePercentage: 0.1
+  enableSettlement: true
+  tigerBeetleClusterId: 0
+  tigerBeetleReplicas: []
+  thresholds:
+    defaultThreshold: '5000'
+    pollingInterval: 100
+
+# ── Settlement / chain providers ─────────────────────────────────────────────
+# A single EVM entry pointing at the SHARED LIVE DEVNET (chainId 31337, the same
+# deterministic anvil chain). rpcUrl is LITERAL (no ${} interpolation). The
+# devnet serves a self-signed TLS cert, so the connector container runs with
+# NODE_TLS_REJECT_UNAUTHORIZED=0 (set in docker-compose.yml) for its RPC/faucet
+# calls. DEVNET-ONLY.
+chainProviders:
+  - chainType: evm
+    chainId: evm:31337
+    rpcUrl: https://evm-rpc.devnet.toonprotocol.dev
+    registryAddress: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'
+    tokenAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+    keyId: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+    settlementOptions:
+      threshold: '5000'
+      pollingIntervalMs: 100
+      settlementTimeoutSecs: 3600
+      initialDepositMultiplier: 2
+      ledgerSnapshotPath: ./data/ledger-connector.json
+
+# ── Peers ─────────────────────────────────────────────────────────────────────
+# One upstream peer: the relay-connector, which ABSORBS the g.proxy apex role (it
+# replaced the old toon box). It both routes the direct g.proxy.store here (apex
+# role) AND forwards the relay-hop g.proxy.relay.store here, settling over a
+# single channel. It dials in over BTP at the apex hostname; this entry is for
+# bilateral settlement accounting.
+#
+# DISTINCT SETTLEMENT IDENTITY: set in .env (devnet):
+#   TOON_MNEMONIC="portion symbol pencil track twenty vault love raccoon rigid gravity glide aerobic"
+#   → EVM 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e (NIP-06 path m/44'/1237'/0'/0/0)
+# Distinct from the relay-connector/apex (0xC0E55…), so the channel doesn't self-pay.
+peers:
+  - id: relay-connector
+    url: wss://proxy.devnet.toonprotocol.dev:443
+    relation: peer
+    authToken: ''
+    chain: evm:31337
+    # The relay-connector/apex settlement address (reuses the demo apex seed).
+    settlementAddress: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
+
+# ── Routes ──────────────────────────────────────────────────────────────────
+# This box TERMINATES both paths to the same Arweave DVM (store:3300, POST /store):
+#   1. g.proxy.store        — the DIRECT path (client → apex → here).
+#   2. g.proxy.relay.store  — the RELAY-HOP path (client → apex → relay-connector → here).
+# Both reverse-proxy POST /store to the private store:3300 backend; the relay's
+# hop fee is added upstream by the relay-connector, so this box charges only the
+# flat DVM job price on each.
+#
+# settlementAddresses.evm is the store box's OWN derived address (its income).
+routes:
+  - prefix: g.proxy.store
+    nextHop: connector
+    upstream: http://store:3300
+    price: '1000'
+    chains:
+      - evm
+    ilpAddress: g.proxy.store
+    settlementAddresses:
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+
+  - prefix: g.proxy.relay.store
+    nextHop: connector
+    upstream: http://store:3300
+    price: '1000'
+    chains:
+      - evm
+    ilpAddress: g.proxy.relay.store
+    settlementAddresses:
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+
+  # ── FORWARD route to the apex relay (OUTBOUND ONLY) ─────────────────────────
+  # This route exists SOLELY so this box can publish its OWN kind:10032
+  # announcement THROUGH the apex relay (see `selfAnnounce` below). Without it the
+  # routing table has NO match for `g.proxy.relay` (longest-prefix, no default
+  # route) and the announce write would F02 Unreachable.
+  #
+  # The store box NEVER terminates or receives on this route — it only ORIGINATES
+  # writes through it, which the connector forwards to the existing `relay-connector`
+  # peer (the apex), where `g.proxy.relay` is locally terminated → relay:3100.
+  # Because it is outbound-only and NOT a `RouteTermination`, the termination-only
+  # fields (`upstream`, `price`, `chains`, `ilpAddress`, `settlementAddresses`) do
+  # NOT apply: `validateRouteTermination` is a no-op without `upstream`, and the
+  # RouteTerminationRegistry only indexes upstream-bearing routes, so a payTo
+  # (`settlementAddresses`) on this route would never surface anywhere. Routing
+  # (`getNextHop`) needs only `prefix` + `nextHop`; settlement to the apex uses the
+  # `relay-connector` peer entry above (chain + settlementAddress). So we deliberately
+  # carry ONLY `prefix` + `nextHop` here (omit, don't cargo-cult, the termination fields).
+  #
+  # Longest-prefix safe: `g.proxy.relay.store` (more specific) still terminates
+  # locally above; only the bare `g.proxy.relay` write is forwarded to the apex.
+  # Relation-safe: `relay-connector` is a `peer` (no parent/child subtree constraint).
+  - prefix: g.proxy.relay
+    nextHop: relay-connector
+
+# ── Self-announce (kind:10032 IlpPeerInfo) — REMOTE / PAID branch ──────────────
+# Closes the store-side half of the discovery gap behind toon-protocol/store#22
+# (+ relay#37). The connector periodically builds, signs (its NIP-06 key, derived
+# from TOON_MNEMONIC — NO new secret), and republishes a fresh kind:10032
+# announcement DERIVED FROM THIS BOX'S OWN CONFIG: its terminated routes'
+# `ilpAddress` + `settlementAddresses` (g.proxy.store → 0x1f4E12…), chain info, and
+# the public endpoints below. The result advertises THIS box's own g.proxy.store
+# settlement address, so the store route is discoverable from its OWNING node — not
+# only as advertised by the apex.
+#
+# The announcement is published THROUGH this connector's own routing by addressing
+# `announceTo` (an ILP route); routing decides the transport:
+#   - LOCAL  — announceTo resolves to a route THIS node terminates → free local
+#              delivery (amount 0). That is the APEX's case (relay deploy).
+#   - REMOTE — announceTo resolves to a FORWARDED route → a real PAID ILP write
+#              funded from THIS node's own channel. ← THIS BOX.
+# Here `announceTo: g.proxy.relay` resolves to the OUTBOUND forward route added
+# above (→ relay-connector). The RouteTerminationRegistry has no g.proxy.relay
+# entry on this box, so the publish takes the REMOTE/PAID branch: the store box
+# pays the apex (over its existing store↔apex settlement channel) to store its OWN
+# g.proxy.store peer-info announcement on the relay. This costs the store box a
+# small PAID write on EVERY refresh and REQUIRES its funded channel to the apex.
+#
+# announcePrice — the apex's `g.proxy.relay` terminate price is '1000'. But the
+# store box deducts its OWN connectorFeePercentage (0.1% = floor(amount/1000)) when
+# it FORWARDS its originated write to the relay-connector peer, so a bare '1000'
+# would deliver only 999 to the apex and UNDERPAY. We send '2000' → the box keeps
+# floor(2000/1000)=2, forwards 1998 ≥ 1000 to the apex: a safe ~2× buffer that also
+# absorbs any additional hop fee. (Overpaying our own announcement is harmless — it
+# is the box's own money, a tiny amount once per refresh.)
+#
+# NIP-40 expiration is refreshed at half the TTL (refreshIntervalSecs → TTL = 2×),
+# so the announcement stays continuously fresh while the node is up.
+#
+# REQUIRES connector >= 3.28.0 — the self-announce feature
+# (toon-protocol/connector#265) shipped in v3.28.0. CONNECTOR_TAG (.env / Dockerfile)
+# is pinned to 3.28.0; older images ignore this block.
+selfAnnounce:
+  enabled: true
+  # The ILP route to publish the kind:10032 THROUGH. Resolves to the outbound
+  # forward route above → relay-connector (apex) → REMOTE/PAID branch.
+  announceTo: g.proxy.relay
+  # ≥ the apex g.proxy.relay terminate price (1000) PLUS this box's own 0.1% forward
+  # fee (see header). '2000' forwards 1998 net — comfortably above 1000.
+  announcePrice: '2000'
+  refreshIntervalSecs: 300
+  # Public-facing endpoints for the STORE box (TLS terminated by the env, so the
+  # connector can't infer them).
+  btpEndpoint: wss://proxy.store.devnet.toonprotocol.dev:443
+  httpEndpoint: https://proxy.store.devnet.toonprotocol.dev/ilp
+  relayUrl: wss://relay-ws.devnet.toonprotocol.dev
+  assetCode: USDC
+  assetScale: 6
+  # Route hints carried in announcement CONTENT so clients learn routing out of band.
+  routes:
+    publish: g.proxy.relay
+    store: g.proxy.store
