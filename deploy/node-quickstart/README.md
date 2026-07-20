@@ -60,13 +60,20 @@ The default `keyId` boots but is **unfunded** on Base Sepolia. To settle as **yo
 ```bash
 docker compose --profile peer up -d
 ./verify.sh --peer
-curl -s http://127.0.0.1:8081/admin/peers | jq     # node A now shows node B's inbound session
+# Verify from the DIALER (node B, :8083) — it lists the peer it opened:
+curl -s http://127.0.0.1:8083/admin/peers | jq   # → g.proxy, connected: true
 ```
 
 `--profile peer` starts a **second** connector+relay (`-peer`, node `g.peer`) that dials node A over
 BTP (`ws://connector:3000`) and installs a static route to `g.proxy`. A write addressed to
 `g.proxy.relay` sent to **node B** (`127.0.0.1:3001`) is forwarded across the peer link to node A and
 delivered to node A's relay — cross-node routing, on one machine.
+
+> **Which side to check.** `/admin/peers` lists a node's **outbound** (client) peers — the sessions
+> it dialed. So the link shows on **node B** (`:8083`), the dialer. Node A (the dialee) accepts the
+> inbound session at its BTP server but does **not** surface it in `/admin/peers`; confirm node A's
+> side in its logs instead: `docker compose logs connector | grep btp_auth` →
+> `peerId":"g.peer","success":true`.
 
 The peer YAML schema is the thing to learn here (`connector-peer.yaml`):
 
