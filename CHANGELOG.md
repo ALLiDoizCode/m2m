@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.40.0](https://github.com/toon-protocol/connector/compare/v3.39.0...v3.40.0) (2026-07-20)
+
+### Features
+
+- **infra:** add toon-devnet-store (Arweave DVM) node ([2aa3e66](https://github.com/toon-protocol/connector/commit/2aa3e667a6bb5b7c9caad69e44e7c804f1f404ca))
+- **infra:** distinct store-box settlement identity for peer settlement ([3ae65ff](https://github.com/toon-protocol/connector/commit/3ae65ff2050897473bb2e2dfb4844e40c31d316e))
+- **infra:** env-required store seed + no-auth BTP authToken on peers ([e08d846](https://github.com/toon-protocol/connector/commit/e08d846b83bb2c2f7ecf494237f85c3d126702af))
+- **infra:** peer the store box to the apex so routing fees are charged ([8119655](https://github.com/toon-protocol/connector/commit/8119655cad539cf592f8af964c722d2503c9eb1d))
+- **infra:** store box advertises g.proxy.store on the relay (paid) ([b04b5a3](https://github.com/toon-protocol/connector/commit/b04b5a3d16179b0fa03557f7fc6e6e2e8209979a))
+- **infra:** store box runs the HTTP backend (DVM_BACKEND_MODE=http, store image) ([d27ec06](https://github.com/toon-protocol/connector/commit/d27ec060506b03d40c6d52f32420ef97a1571c5c))
+
+### Bug Fixes
+
+- **infra:** add :443 to peer BTP urls (config validator requires a port) ([0647735](https://github.com/toon-protocol/connector/commit/06477357e6a47a4b452d2f3f72ca43047e8c6601))
+- **infra:** drop parens from STORE_TOON_MNEMONIC guard (broke case parsing) ([8c490e3](https://github.com/toon-protocol/connector/commit/8c490e350e61f969ab96d4bd479f4785827b2fde))
+- **infra:** robust DNS create + quote mnemonic in store .env ([c699d9d](https://github.com/toon-protocol/connector/commit/c699d9d453723856971cf6fea0d6c5a378b22f01))
+- **infra:** store box upstream route g.proxy -> toon-apex (F02 fix) ([6586a1f](https://github.com/toon-protocol/connector/commit/6586a1ffc5b7f0ead8f45ad9e61dfef1f89dd8f4))
+
 ## [3.39.0](https://github.com/toon-protocol/connector/compare/v3.38.1...v3.39.0) (2026-07-20)
 
 ### Features
