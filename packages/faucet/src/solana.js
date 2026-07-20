@@ -153,19 +153,21 @@ export function createSolanaFaucet() {
       // Cap the whole drip so a MID-drip stall cannot hang the request queue.
       return withDeadline(dripInner(address), SOLANA_DRIP_DEADLINE_MS, 'Solana drip');
     },
+
+    // USDC-only drip: a plain treasury→recipient token transfer with NO SOL
+    // airdrop. The TREASURY (not the recipient) pays the tx fee + ATA rent, so
+    // this works even when the public devnet airdrop is dry/rate-limited and even
+    // if the recipient currently holds 0 SOL. Use it for addresses already funded
+    // with SOL (mirrors the Mina `/api/mina/usdc-request` USDC-only leg).
+    async dripUsdcOnly(address) {
+      await assertSlotAdvancing(() => connection.getSlot('processed'));
+      return withDeadline(usdcOnlyInner(address), SOLANA_DRIP_DEADLINE_MS, 'Solana USDC drip');
+    },
   };
 
-  // The actual drip body — always entered through the liveness probe +
-  // deadline in `drip` above.
-  async function dripInner(address) {
-    const recipient = new PublicKey(address);
-
-    // 1. Airdrop SOL from the validator faucet. Confirm with the modern
-    //    blockhash/lastValidBlockHeight strategy: the wait is tied to actual
-    //    chain progress (the 150-block validity window, ~65s at the observed
-    //    ~2.3 slots/s) instead of the deprecated signature-only overload's
-    //    arbitrary 30s wall clock — a slow-but-live validator confirms
-    //    instead of 500ing at 30s (issue #277).
+  // Airdrop SOL to the recipient and confirm it (blockhash/lastValidBlockHeight
+  // strategy — tied to actual chain progress, not a 30s wall clock; issue #277).
+  async function airdropSol(recipient) {
     const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
     const latest = await connection.getLatestBlockhash('confirmed');
     const airdropSig = await connection.requestAirdrop(recipient, lamports);
@@ -178,8 +180,13 @@ export function createSolanaFaucet() {
       'confirmed'
     );
     console.log(`  📤 Airdropped ${SOLANA_SOL_AMOUNT} SOL: ${airdropSig}`);
+    return airdropSig;
+  }
 
-    // 2. Transfer USDC from the treasury, auto-creating the recipient ATA.
+  // Transfer USDC from the treasury to the recipient, auto-creating the recipient
+  // ATA (the treasury is the fee payer + rent payer, so the recipient needs no
+  // SOL for this leg). Returns the `usdc` result object.
+  async function transferUsdc(recipient) {
     const sourceAta = await getOrCreateAssociatedTokenAccount(
       connection,
       authority, // fee payer
@@ -203,15 +210,56 @@ export function createSolanaFaucet() {
       rawAmount
     );
     console.log(`  📤 Transferred ${SOLANA_USDC_AMOUNT} USDC: ${usdcSig}`);
-
     return {
-      sol: { signature: airdropSig, amount: String(SOLANA_SOL_AMOUNT) },
-      usdc: {
-        signature: usdcSig,
-        amount: String(SOLANA_USDC_AMOUNT),
-        mint: mint.toBase58(),
-        ata: destAta.address.toBase58(),
-      },
+      signature: usdcSig,
+      amount: String(SOLANA_USDC_AMOUNT),
+      mint: mint.toBase58(),
+      ata: destAta.address.toBase58(),
     };
+  }
+
+  // Full drip: SOL + USDC — but the USDC leg is DECOUPLED from the airdrop. The
+  // airdrop is SKIPPED when the recipient is already funded, and a FAILED airdrop
+  // (public devnet dry / rate-limited) no longer aborts the request: the USDC
+  // transfer still runs (it is funded by the treasury, not this airdrop). USDC
+  // drips as long as the treasury holds SOL (fees) + USDC.
+  async function dripInner(address) {
+    const recipient = new PublicKey(address);
+
+    // Skip the airdrop when the recipient already holds enough SOL to transact.
+    const SKIP_AIRDROP_LAMPORTS = Math.round(0.02 * LAMPORTS_PER_SOL);
+    const startBalance = await connection.getBalance(recipient, 'confirmed');
+
+    let sol;
+    if (startBalance >= SKIP_AIRDROP_LAMPORTS) {
+      console.log(
+        `  ⏭️  Recipient holds ${startBalance / LAMPORTS_PER_SOL} SOL — skipping airdrop`
+      );
+      sol = {
+        skipped: true,
+        reason: 'recipient already funded',
+        balanceSol: String(startBalance / LAMPORTS_PER_SOL),
+      };
+    } else {
+      try {
+        const signature = await airdropSol(recipient);
+        sol = { signature, amount: String(SOLANA_SOL_AMOUNT) };
+      } catch (err) {
+        // Airdrop unavailable (public devnet airdrop dry / rate-limited). Do NOT
+        // abort — the USDC leg is treasury-funded and independent of this drip.
+        console.log(`  ⚠️  Airdrop unavailable (${err.message}); continuing to the USDC transfer`);
+        sol = { skipped: true, reason: 'airdrop unavailable', error: String(err.message || err) };
+      }
+    }
+
+    const usdc = await transferUsdc(recipient);
+    return { sol, usdc };
+  }
+
+  // USDC-only body — a treasury→recipient transfer with no airdrop leg at all.
+  async function usdcOnlyInner(address) {
+    const recipient = new PublicKey(address);
+    const usdc = await transferUsdc(recipient);
+    return { sol: { skipped: true, reason: 'usdc-only route' }, usdc };
   }
 }
