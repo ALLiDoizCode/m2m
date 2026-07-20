@@ -240,28 +240,72 @@ describe('SolanaPaymentChannelProvider (Story 33.5)', () => {
   // -------------------------------------------------------------------------
 
   describe('openChannel (T-33.5-03)', () => {
-    it('should delegate to SDK with correct params and return OpenChannelResult', async () => {
+    const COUNTERPARTY = 'CounterpartyAddr111111111111111111111111111';
+
+    beforeEach(() => {
+      // The provider derives the sorted-pair PDA before deciding init-vs-adopt.
+      (SolanaPaymentChannelSDK.deriveChannelPDA as jest.Mock).mockReturnValue({
+        pda: TEST_CHANNEL_PDA,
+        bump: 255,
+      });
+    });
+
+    it('should INITIALIZE a fresh channel when none exists', async () => {
+      mockSDK.getChannelState.mockRejectedValue(
+        new Error(`Channel account not found: ${TEST_CHANNEL_PDA}`)
+      );
       mockSDK.openChannel.mockResolvedValue({
         channelPDA: TEST_CHANNEL_PDA,
         txSignature: 'sig123',
       });
 
-      const result = await provider.openChannel(
-        'CounterpartyAddr111111111111111111111111111',
-        3600
-      );
+      const result = await provider.openChannel(COUNTERPARTY, 3600);
 
+      expect(SolanaPaymentChannelSDK.deriveChannelPDA).toHaveBeenCalledWith(
+        mockSigner.address,
+        COUNTERPARTY,
+        TEST_TOKEN_MINT,
+        TEST_PROGRAM_ID
+      );
       expect(mockSDK.openChannel).toHaveBeenCalledWith(
         mockSigner,
         mockSigner.address,
-        'CounterpartyAddr111111111111111111111111111',
+        COUNTERPARTY,
         TEST_TOKEN_MINT,
         3600n
       );
-      expect(result).toEqual({
-        channelId: TEST_CHANNEL_PDA,
-        txHash: 'sig123',
-      });
+      expect(result).toEqual({ channelId: TEST_CHANNEL_PDA, txHash: 'sig123' });
+    });
+
+    it('should ADOPT an existing channel (skip initialize) when the pair already has one', async () => {
+      // Counterparty already initialized the shared PDA.
+      mockSDK.getChannelState.mockResolvedValue(createSampleChannelState());
+
+      const result = await provider.openChannel(COUNTERPARTY, 3600);
+
+      expect(mockSDK.getChannelState).toHaveBeenCalledWith(TEST_CHANNEL_PDA);
+      expect(mockSDK.openChannel).not.toHaveBeenCalled();
+      expect(result).toEqual({ channelId: TEST_CHANNEL_PDA, txHash: '' });
+    });
+
+    it('should ADOPT if initialize loses a race (channel appears after our check)', async () => {
+      // First lookup: absent → we try to init. Init collides. Re-check: now present → adopt.
+      mockSDK.getChannelState
+        .mockRejectedValueOnce(new Error(`Channel account not found: ${TEST_CHANNEL_PDA}`))
+        .mockResolvedValueOnce(createSampleChannelState());
+      mockSDK.openChannel.mockRejectedValue(new Error('custom program error: 0x0'));
+
+      const result = await provider.openChannel(COUNTERPARTY, 3600);
+
+      expect(mockSDK.openChannel).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({ channelId: TEST_CHANNEL_PDA, txHash: '' });
+    });
+
+    it('should NOT initialize on a transient lookup error (avoid duplicate-init collision)', async () => {
+      mockSDK.getChannelState.mockRejectedValue(new Error('RPC timeout'));
+
+      await expect(provider.openChannel(COUNTERPARTY, 3600)).rejects.toThrow();
+      expect(mockSDK.openChannel).not.toHaveBeenCalled();
     });
   });
 
@@ -657,6 +701,13 @@ describe('SolanaPaymentChannelProvider (Story 33.5)', () => {
     });
 
     it('should pass through non-SolanaChannelError errors unchanged', async () => {
+      (SolanaPaymentChannelSDK.deriveChannelPDA as jest.Mock).mockReturnValue({
+        pda: TEST_CHANNEL_PDA,
+        bump: 255,
+      });
+      mockSDK.getChannelState.mockRejectedValue(
+        new Error(`Channel account not found: ${TEST_CHANNEL_PDA}`)
+      );
       const genericError = new Error('Network timeout');
       mockSDK.openChannel.mockRejectedValue(genericError);
 
@@ -918,6 +969,13 @@ describe('SolanaPaymentChannelProvider (Story 33.5)', () => {
     );
 
     it('should wrap SolanaChannelError from openChannel', async () => {
+      (SolanaPaymentChannelSDK.deriveChannelPDA as jest.Mock).mockReturnValue({
+        pda: TEST_CHANNEL_PDA,
+        bump: 255,
+      });
+      mockSDK.getChannelState.mockRejectedValue(
+        new Error(`Channel account not found: ${TEST_CHANNEL_PDA}`)
+      );
       mockSDK.openChannel.mockRejectedValue(sdkError);
 
       await expect(
@@ -980,6 +1038,13 @@ describe('SolanaPaymentChannelProvider (Story 33.5)', () => {
     });
 
     it('should wrap non-Error values as string errors', async () => {
+      (SolanaPaymentChannelSDK.deriveChannelPDA as jest.Mock).mockReturnValue({
+        pda: TEST_CHANNEL_PDA,
+        bump: 255,
+      });
+      mockSDK.getChannelState.mockRejectedValue(
+        new Error(`Channel account not found: ${TEST_CHANNEL_PDA}`)
+      );
       mockSDK.openChannel.mockRejectedValue('some string error');
 
       await expect(
