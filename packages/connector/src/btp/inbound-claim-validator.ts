@@ -351,10 +351,12 @@ export class InboundClaimValidator {
    * received-claim nonce watermark for its (peer, channel) — a replayed
    * stale-nonce claim (validly signed, so it passed the crypto gate) otherwise
    * gets every job executed and FULFILLed for free while the ClaimReceiver's
-   * replay verdict goes nowhere. EQUAL nonce (a byte-exact replay of the latest
-   * verified claim) is rejected too: well-behaved clients sign a FRESH claim
-   * (nonce+1, cumulative amount bumped) for every paid write, so an equal nonce
-   * is always a replay, never a "retry with the same payment".
+   * replay verdict goes nowhere. EQUAL nonce is rejected too UNLESS the claim is
+   * a byte-identical re-delivery of the already-verified claim at that nonce
+   * (issue #383): a transport retry after a lost FULFILL, or the same claim over
+   * two paths, is idempotently re-FULFILLed rather than F06-rejected (see
+   * {@link isBenignReDelivery}). A DIFFERENT claim at an equal nonce, and any
+   * claim at a lower nonce, remain replays and are still rejected.
    *
    * VALUE↔PRICE (#359): once fresh, the claim must advance the cumulative
    * amount by at least the route's flat price (see {@link checkClaimValue}) —
@@ -422,8 +424,57 @@ export class InboundClaimValidator {
       return null;
     }
 
-    // ── (1) Freshness / replay (issue #353) ──
+    // ── (1) Freshness / replay (issues #353, #383) ──
     if (watermark && claim.nonce <= watermark.nonce) {
+      // Idempotent re-delivery carve-out (issue #383).
+      //
+      // The FIRST paid claim on a fresh channel was observed F06-rejected on a
+      // benign RE-DELIVERY of the *same* claim: a transport retry after its
+      // FULFILL was lost, or the identical claim arriving over two delivery
+      // paths (BTP + HTTP, or a standalone push followed by the PREPARE that
+      // carries it). Such a re-delivery is byte-identical to the claim we
+      // already verified and recorded as the watermark — same nonce, same
+      // messageId, and every signature/amount field the signature binds
+      // unchanged. The client is owed the FULFILL it never received, and
+      // re-running the request is safe: the ClaimReceiver dedups on messageId
+      // (its `Duplicate claim message ignored` idempotency), so nothing is
+      // double-recorded. So instead of F06 we let this PROCEED to the crypto
+      // gate and re-FULFILL idempotently, aligning the PREPARE gate with the
+      // claim-receiver's existing message-level dedup.
+      //
+      // ANTI-REPLAY (unchanged — this carve-out is deliberately narrow):
+      //   • Fires ONLY at nonce === watermark.nonce AND FULL byte-identity to
+      //     the recorded claim (see {@link isBenignReDelivery}). Adding fields
+      //     to that identity test only makes the carve-out fire LESS often, so
+      //     it can never admit a claim the pre-#383 gate would have rejected on
+      //     grounds other than "identical re-delivery".
+      //   • A DIFFERENT claim at the same nonce (any bound field — signature,
+      //     amount, channel, signer — or the messageId differs) does NOT match
+      //     and falls through to the F06 reject below.
+      //   • ANY claim at nonce < watermark.nonce cannot be byte-identical to the
+      //     higher-nonce watermark, so it also falls through to F06.
+      // A stale-but-validly-signed replay that differs in any way is therefore
+      // still rejected exactly as before #383 — the #353 replay hole stays shut.
+      if (claim.nonce === watermark.nonce && this.isBenignReDelivery(claim, watermark)) {
+        this.logger.info(
+          {
+            event: 'inbound_claim_idempotent_redelivery',
+            peerId,
+            blockchain: claim.blockchain,
+            channelId,
+            nonce: claim.nonce,
+            messageId: claim.messageId,
+          },
+          'Idempotent re-delivery of an already-verified claim; re-fulfilling instead of F06 (issue #383)'
+        );
+        // Proceed to the crypto gate → FULFILL. Deliberately DO NOT run the
+        // value↔price check (#359): this claim already paid for this nonce, so
+        // its cumulative delta against the (identical) watermark is exactly 0
+        // and would spuriously trip the underpayment gate. The original
+        // delivery of this same claim already satisfied the value binding.
+        return null;
+      }
+
       this.logger.warn(
         {
           event: 'inbound_claim_stale_nonce',
@@ -445,6 +496,79 @@ export class InboundClaimValidator {
     // strictly-older verified claim (its cumulative amount is the prior paid
     // total). Reusing the same read keeps the hot path to ONE local DB read.
     return this.checkClaimValue(claim, ilpPacket, watermark, channelId, peerId);
+  }
+
+  /**
+   * Byte-identity test for the idempotent re-delivery carve-out (issue #383):
+   * is `claim` a genuine re-delivery of the SAME claim we already verified and
+   * recorded as `watermark`, rather than a distinct claim at a stale nonce?
+   *
+   * Returns true ONLY when every field that would make this "the same payment"
+   * matches:
+   *  - the same chain and the same nonce (the caller already asserts nonce
+   *    equality; re-checked here so this helper is safe in isolation),
+   *  - the same `messageId` — the ClaimReceiver's idempotency key (its
+   *    `Duplicate claim message ignored` dedup and the `received_claims`
+   *    message_id UNIQUE constraint key on exactly this), so the PREPARE gate
+   *    and the receiver agree on what "the same message" means, and
+   *  - every chain-specific field the SIGNATURE binds (the signature/proof
+   *    itself, the cumulative amount, and the channel/signer identifiers).
+   *
+   * Because the signature covers the amount and channel state, an attacker
+   * cannot alter the value while keeping the signature — any tampered field
+   * flips one of these comparisons and this returns false. A false result sends
+   * the caller to the F06 reject, so anti-replay is preserved: only a
+   * bit-for-bit re-delivery of the already-verified claim is treated as benign.
+   *
+   * @param claim - The inbound (structurally validated) claim under the gate.
+   * @param watermark - The most-recently-verified recorded claim on this channel.
+   * @returns true iff `claim` is a byte-identical re-delivery of `watermark`.
+   * @private
+   */
+  private isBenignReDelivery(claim: BTPClaimMessage, watermark: BTPClaimMessage): boolean {
+    // Cross-chain / nonce / message-identity guards. messageId inclusion aligns
+    // this gate with the ClaimReceiver's message-level dedup and makes the test
+    // strictly narrower (safer for anti-replay) than amount+signature alone.
+    if (claim.blockchain !== watermark.blockchain) return false;
+    if (claim.nonce !== watermark.nonce) return false;
+    if (claim.messageId !== watermark.messageId) return false;
+
+    if (isEVMClaim(claim) && isEVMClaim(watermark)) {
+      return (
+        claim.channelId === watermark.channelId &&
+        claim.signerAddress === watermark.signerAddress &&
+        claim.signature === watermark.signature &&
+        claim.transferredAmount === watermark.transferredAmount &&
+        claim.lockedAmount === watermark.lockedAmount &&
+        claim.locksRoot === watermark.locksRoot
+      );
+    }
+
+    if (isSolanaClaim(claim) && isSolanaClaim(watermark)) {
+      return (
+        claim.channelAccount === watermark.channelAccount &&
+        claim.signerPublicKey === watermark.signerPublicKey &&
+        claim.signature === watermark.signature &&
+        claim.transferredAmount === watermark.transferredAmount
+      );
+    }
+
+    if (isMinaClaim(claim) && isMinaClaim(watermark)) {
+      // Compare the signed proof, the commitment, and the (optional) plaintext
+      // preimage fields. undefined===undefined for absent-preimage legacy
+      // claims; a preimage present on only one side flips the result to false.
+      return (
+        claim.zkAppAddress === watermark.zkAppAddress &&
+        claim.proof === watermark.proof &&
+        claim.balanceCommitment === watermark.balanceCommitment &&
+        claim.transferredAmount === watermark.transferredAmount &&
+        claim.balanceB === watermark.balanceB &&
+        claim.salt === watermark.salt
+      );
+    }
+
+    // Mismatched or unknown discriminants: not provably identical → not benign.
+    return false;
   }
 
   /**
