@@ -137,6 +137,42 @@ export class SolanaPaymentChannelProvider implements PaymentChannelProvider {
       'Opening Solana payment channel'
     );
 
+    // The channel PDA is derived from the SORTED participant pair (seeds
+    // [b"channel", min, max, mint]), so BOTH peers resolve the SAME account and
+    // only one INITIALIZE_CHANNEL can ever succeed. If the counterparty already
+    // opened it, ADOPT the existing channel (skip init) so this side can simply
+    // DEPOSIT into its own balance and pay over the same channel — this is what
+    // makes the link bidirectional (either peer may be the opener). Without this,
+    // the second peer's INITIALIZE collides with ChannelAlreadyExists.
+    const { pda } = SolanaPaymentChannelSDK.deriveChannelPDA(
+      this._signer.address as string,
+      participant,
+      this._tokenMint,
+      this._programId
+    );
+
+    try {
+      await this._sdk.getChannelState(pda);
+      this._logger.info(
+        {
+          event: 'open_channel_adopt_existing',
+          channelId: pda,
+          participant,
+          chainId: this.chainId,
+        },
+        'Solana channel already exists for this pair — adopting (skip initialize)'
+      );
+      return { channelId: pda, txHash: '' };
+    } catch (lookupErr: unknown) {
+      const msg = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+      if (!msg.includes('not found')) {
+        // Transient/unexpected lookup failure — do NOT blindly initialize (that
+        // would risk a duplicate-init collision). Surface it; open is retried later.
+        throw this._wrapError(lookupErr, 'openChannel', 'lookup');
+      }
+      // Channel not found → fall through and initialize a fresh one.
+    }
+
     try {
       const result = await this._sdk.openChannel(
         this._signer,
@@ -148,6 +184,19 @@ export class SolanaPaymentChannelProvider implements PaymentChannelProvider {
 
       return { channelId: result.channelPDA, txHash: result.txSignature };
     } catch (err: unknown) {
+      // Race: another party may have initialized the shared PDA between our
+      // existence check and our init. If the channel now exists, adopt it rather
+      // than surfacing the collision.
+      try {
+        await this._sdk.getChannelState(pda);
+        this._logger.info(
+          { event: 'open_channel_adopt_after_race', channelId: pda, chainId: this.chainId },
+          'Initialize failed but channel now exists — adopting'
+        );
+        return { channelId: pda, txHash: '' };
+      } catch {
+        /* still absent — the original init error stands */
+      }
       throw this._wrapError(err, 'openChannel', 'new');
     }
   }
