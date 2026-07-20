@@ -25,15 +25,19 @@ deploymentMode: standalone
 logLevel: info
 
 # ── Admin REST API + operator dashboard ──────────────────────────────────────
-# GET /admin/dashboard (the operator UI) is served on this port. The allowlist
-# covers the docker user-defined-bridge pool, which is the source IP a host
-# request via the published 127.0.0.1:8081 port arrives as (NAT'd through the
-# bridge gateway). Open http://127.0.0.1:8081/admin/dashboard on the host.
+# GET /admin/dashboard (the operator UI) is served on this port, behind this
+# allowlist. It covers loopback (direct 127.0.0.1 access / an SSH tunnel) AND the
+# docker user-defined-bridge pool (the source IP a host request via the published
+# 127.0.0.1:8081 port arrives as when NAT'd through the bridge gateway). Open
+# http://127.0.0.1:8081/admin/dashboard on the host. Set an ADMIN_API_KEY before
+# publishing 8081 beyond loopback.
 adminApi:
   enabled: true
   host: 0.0.0.0
   port: 8081
   allowedIPs:
+    - 127.0.0.1/32 # direct loopback (curl on the box / SSH tunnel)
+    - ::1/128 # IPv6 loopback
     - 172.16.0.0/12 # docker user-defined-bridge default pool
     - 192.168.0.0/16 # fallback when 172.16/12 is occupied
 

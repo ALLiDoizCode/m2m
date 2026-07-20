@@ -42,8 +42,10 @@ http://127.0.0.1:8081/admin/dashboard
 
 Live throughput, reject rate, estimated fee earnings, per-peer activity, and node health — polled
 from the connector's own `/admin/metrics.json` (1 Hz) and `/admin/earnings.json`. It is served from
-the admin API, so it inherits the same IP allowlist; the default `172.16.0.0/12` range covers a
-host request arriving through the docker bridge. No external services, no build step.
+the admin API, so it inherits the admin IP allowlist — configured here for loopback + the docker
+bridge, which covers host access to the published `127.0.0.1:8081` port and an SSH tunnel. No
+external services, no build step. **Before publishing `8081` beyond loopback, set an `ADMIN_API_KEY`**
+(the admin API is otherwise unauthenticated).
 
 ## 3. Use your own settlement identity
 
