@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.40.1](https://github.com/toon-protocol/connector/compare/v3.40.0...v3.40.1) (2026-07-20)
+
+### Bug Fixes
+
+- **announce:** surface forwarded-route prices in kind:10032 self-announce ([#382](https://github.com/toon-protocol/connector/issues/382)) ([3b85ff4](https://github.com/toon-protocol/connector/commit/3b85ff4bf619063642bc545b295947a3802f6f47))
+- **settlement:** open payment channels on the peer's chain + adopt existing per-pair Solana channel ([#381](https://github.com/toon-protocol/connector/issues/381)) ([b0a92e5](https://github.com/toon-protocol/connector/commit/b0a92e5ba2a4b06b22bdcaa6e408fdce75be3209))
+
 ## [3.40.0](https://github.com/toon-protocol/connector/compare/v3.39.0...v3.40.0) (2026-07-20)
 
 ### Features
