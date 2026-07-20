@@ -410,7 +410,10 @@ describe('InboundClaimValidator — idempotent re-delivery carve-out (#383)', ()
       // re-delivery's cumulative delta vs the identical watermark would be 0 and
       // trip the underpayment gate. It must be skipped for a benign duplicate.
       const claim = makeClaim(1);
-      const h = makeHarness({ [channelId]: claim }, { routePrice: () => '1000', openResult: 'match' });
+      const h = makeHarness(
+        { [channelId]: claim },
+        { routePrice: () => '1000', openResult: 'match' }
+      );
 
       const result = await h.validator.validate(asProtocolData(claim), createPrepare(), 'peer-a');
 
