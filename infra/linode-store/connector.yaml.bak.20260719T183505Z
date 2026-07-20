@@ -98,19 +98,19 @@ chainProviders:
     # The mina.<DOMAIN> proxy 504s on send, so the connector reads via the
     # minascan upstream directly (see infra/linode/endpoints.json _connectorNote).
     graphqlUrl: https://api.minascan.io/node/devnet/v1/graphql
-    # zkAppAddress: bare PaymentChannel deployed 2026-07-19 on public devnet (shared with apex).
+    # zkAppAddress: the documented public-devnet channel zkApp (demoChannelZkApp).
     # Required by the provider; the verify path follows each claim's own
     # channelAccount, so client-opened channels settle under the live token below.
-    zkAppAddress: 'B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf'
-    tokenAddress: 'B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d'
-    tokenId: '9497120696276615621907376728658022802954262638363646162765282600447713419198'
+    zkAppAddress: 'B62qigQwEwBAsSZad4GhSun8CAwkh3GUbx2YN2TbUHU8tzVFcFTE95x'
+    tokenAddress: 'B62qnZnmV3jADwYCpofKdbS23Z6vP89w7TC6rsXw9ejR53YfTwmKLsa'
+    tokenId: '13195431355853976025555236213553162231466702378883981110250774386432112635553'
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
 # ── Peers ─────────────────────────────────────────────────────────────────────
-# One upstream peer: the relay-connector, which ABSORBS the g.toon apex role (it
-# replaced the old toon box). It both routes the direct g.toon.ario here (apex
-# role) AND forwards the relay-hop g.toon.relay.ario here, settling over a
+# One upstream peer: the relay-connector, which ABSORBS the g.proxy apex role (it
+# replaced the old toon box). It both routes the direct g.proxy.store here (apex
+# role) AND forwards the relay-hop g.proxy.relay.store here, settling over a
 # single channel. It dials in over BTP at the apex hostname; this entry is for
 # bilateral settlement accounting.
 #
@@ -129,15 +129,15 @@ peers:
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 # This box TERMINATES both paths to the same Arweave DVM (store:3300, POST /store):
-#   1. g.toon.ario        — the DIRECT path (client → apex → here).
-#   2. g.toon.relay.ario  — the RELAY-HOP path (client → apex → relay-connector → here).
+#   1. g.proxy.store        — the DIRECT path (client → apex → here).
+#   2. g.proxy.relay.store  — the RELAY-HOP path (client → apex → relay-connector → here).
 # Both reverse-proxy POST /store to the private store:3300 backend; the relay's
 # hop fee is added upstream by the relay-connector, so this box charges only the
 # flat DVM job price on each.
 #
 # settlementAddresses.evm is the store box's OWN derived address (its income).
 routes:
-  - prefix: g.toon.ario
+  - prefix: g.proxy.store
     nextHop: connector
     upstream: http://store:3300
     price: '1000'
@@ -145,13 +145,13 @@ routes:
       - evm
       - solana
       - mina
-    ilpAddress: g.toon.ario
+    ilpAddress: g.proxy.store
     settlementAddresses:
       evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
       solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
       mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
 
-  - prefix: g.toon.relay.ario
+  - prefix: g.proxy.relay.store
     nextHop: connector
     upstream: http://store:3300
     price: '1000'
@@ -159,7 +159,7 @@ routes:
       - evm
       - solana
       - mina
-    ilpAddress: g.toon.relay.ario
+    ilpAddress: g.proxy.relay.store
     settlementAddresses:
       evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
       solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
@@ -168,12 +168,12 @@ routes:
   # ── FORWARD route to the apex relay (OUTBOUND ONLY) ─────────────────────────
   # This route exists SOLELY so this box can publish its OWN kind:10032
   # announcement THROUGH the apex relay (see `selfAnnounce` below). Without it the
-  # routing table has NO match for `g.toon.relay` (longest-prefix, no default
+  # routing table has NO match for `g.proxy.relay` (longest-prefix, no default
   # route) and the announce write would F02 Unreachable.
   #
   # The store box NEVER terminates or receives on this route — it only ORIGINATES
   # writes through it, which the connector forwards to the existing `relay-connector`
-  # peer (the apex), where `g.toon.relay` is locally terminated → relay:3100.
+  # peer (the apex), where `g.proxy.relay` is locally terminated → relay:3100.
   # Because it is outbound-only and NOT a `RouteTermination`, the termination-only
   # fields (`upstream`, `price`, `chains`, `ilpAddress`, `settlementAddresses`) do
   # NOT apply: `validateRouteTermination` is a no-op without `upstream`, and the
@@ -183,10 +183,10 @@ routes:
   # `relay-connector` peer entry above (chain + settlementAddress). So we deliberately
   # carry ONLY `prefix` + `nextHop` here (omit, don't cargo-cult, the termination fields).
   #
-  # Longest-prefix safe: `g.toon.relay.ario` (more specific) still terminates
-  # locally above; only the bare `g.toon.relay` write is forwarded to the apex.
+  # Longest-prefix safe: `g.proxy.relay.store` (more specific) still terminates
+  # locally above; only the bare `g.proxy.relay` write is forwarded to the apex.
   # Relation-safe: `relay-connector` is a `peer` (no parent/child subtree constraint).
-  - prefix: g.toon.relay
+  - prefix: g.proxy.relay
     nextHop: relay-connector
 
 # ── Self-announce (kind:10032 IlpPeerInfo) — REMOTE / PAID branch ──────────────
@@ -194,8 +194,8 @@ routes:
 # (+ relay#37). The connector periodically builds, signs (its NIP-06 key, derived
 # from TOON_MNEMONIC — NO new secret), and republishes a fresh kind:10032
 # announcement DERIVED FROM THIS BOX'S OWN CONFIG: its terminated routes'
-# `ilpAddress` + `settlementAddresses` (g.toon.ario → 0x1f4E12…), chain info, and
-# the public endpoints below. The result advertises THIS box's own g.toon.ario
+# `ilpAddress` + `settlementAddresses` (g.proxy.store → 0x1f4E12…), chain info, and
+# the public endpoints below. The result advertises THIS box's own g.proxy.store
 # settlement address, so the store route is discoverable from its OWNING node — not
 # only as advertised by the apex.
 #
@@ -205,14 +205,14 @@ routes:
 #              delivery (amount 0). That is the APEX's case (relay deploy).
 #   - REMOTE — announceTo resolves to a FORWARDED route → a real PAID ILP write
 #              funded from THIS node's own channel. ← THIS BOX.
-# Here `announceTo: g.toon.relay` resolves to the OUTBOUND forward route added
-# above (→ relay-connector). The RouteTerminationRegistry has no g.toon.relay
+# Here `announceTo: g.proxy.relay` resolves to the OUTBOUND forward route added
+# above (→ relay-connector). The RouteTerminationRegistry has no g.proxy.relay
 # entry on this box, so the publish takes the REMOTE/PAID branch: the store box
 # pays the apex (over its existing store↔apex settlement channel) to store its OWN
-# g.toon.ario peer-info announcement on the relay. This costs the store box a
+# g.proxy.store peer-info announcement on the relay. This costs the store box a
 # small PAID write on EVERY refresh and REQUIRES its funded channel to the apex.
 #
-# announcePrice — the apex's `g.toon.relay` terminate price is '1000'. But the
+# announcePrice — the apex's `g.proxy.relay` terminate price is '1000'. But the
 # store box deducts its OWN connectorFeePercentage (0.1% = floor(amount/1000)) when
 # it FORWARDS its originated write to the relay-connector peer, so a bare '1000'
 # would deliver only 999 to the apex and UNDERPAY. We send '2000' → the box keeps
@@ -230,8 +230,8 @@ selfAnnounce:
   enabled: true
   # The ILP route to publish the kind:10032 THROUGH. Resolves to the outbound
   # forward route above → relay-connector (apex) → REMOTE/PAID branch.
-  announceTo: g.toon.relay
-  # ≥ the apex g.toon.relay terminate price (1000) PLUS this box's own 0.1% forward
+  announceTo: g.proxy.relay
+  # ≥ the apex g.proxy.relay terminate price (1000) PLUS this box's own 0.1% forward
   # fee (see header). '2000' forwards 1998 net — comfortably above 1000.
   announcePrice: '2000'
   refreshIntervalSecs: 300
@@ -244,5 +244,5 @@ selfAnnounce:
   assetScale: 6
   # Route hints carried in announcement CONTENT so clients learn routing out of band.
   routes:
-    publish: g.toon.relay
-    store: g.toon.ario
+    publish: g.proxy.relay
+    store: g.proxy.store
