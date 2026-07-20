@@ -961,7 +961,9 @@ describe('buildCapabilityDirectory — forwarded priced routes', () => {
       price: '1000',
     });
     expect(
-      directory.filter((e) => e.address === 'g.toon.ario' && e.capability === FORWARDED_ROUTE_CAPABILITY)
+      directory.filter(
+        (e) => e.address === 'g.toon.ario' && e.capability === FORWARDED_ROUTE_CAPABILITY
+      )
     ).toHaveLength(0);
   });
 

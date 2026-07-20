@@ -500,7 +500,12 @@ export function buildCapabilityDirectory(
   // Dedupe by (capability, address), first occurrence wins.
   const seen = new Set<string>();
   const directory: IlpCapabilityEntry[] = [];
-  for (const entry of [...childEntries, ...derivedEntries, ...forwardedEntries, ...explicitEntries]) {
+  for (const entry of [
+    ...childEntries,
+    ...derivedEntries,
+    ...forwardedEntries,
+    ...explicitEntries,
+  ]) {
     const key = `${entry.capability} ${entry.address}`;
     if (seen.has(key)) continue;
     seen.add(key);
