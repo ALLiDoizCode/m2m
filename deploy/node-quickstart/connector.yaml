@@ -1,0 +1,95 @@
+# =============================================================================
+# node-quickstart — connector config for a single RELAY node (apex g.proxy)
+# =============================================================================
+# Bind-mounted into the `connector` service at /app/config/connector.yaml.
+#
+# Topology:
+#   payer ──POST /ilp (3000)──▶ connector ──localDelivery──▶ http://relay:3100
+#            (g.proxy)            terminates the paid PREPARE for g.proxy.relay
+#            (apex)              and POSTs the TOON event to the relay's BLS port
+#
+# SETTLEMENT IDENTITY: ships with a deterministic key so the node BOOTS with zero
+# config — but that key is UNFUNDED on Base Sepolia, so it can discover/serve reads
+# but cannot complete a paid settlement. To actually settle, set TOON_MNEMONIC in
+# .env (derived at boot, OVERWRITES the keyId below) and fund it at the faucet
+# (https://faucet.devnet.toonprotocol.dev). The loader does NOT interpolate ${...}:
+# every value here is literal. If you switch to a mnemonic, also set
+# routes[].settlementAddresses.evm to the EVM address the connector prints at boot.
+# =============================================================================
+
+nodeId: g.proxy
+btpServerPort: 3000
+healthCheckPort: 8080
+environment: development
+deploymentMode: standalone
+logLevel: info
+
+# ── Admin REST API + operator dashboard ──────────────────────────────────────
+# GET /admin/dashboard (the operator UI) is served on this port, behind this
+# allowlist. It covers loopback (direct 127.0.0.1 access / an SSH tunnel) AND the
+# docker user-defined-bridge pool (the source IP a host request via the published
+# 127.0.0.1:8081 port arrives as when NAT'd through the bridge gateway). Open
+# http://127.0.0.1:8081/admin/dashboard on the host. Set an ADMIN_API_KEY before
+# publishing 8081 beyond loopback.
+adminApi:
+  enabled: true
+  host: 0.0.0.0
+  port: 8081
+  allowedIPs:
+    - 127.0.0.1/32 # direct loopback (curl on the box / SSH tunnel)
+    - ::1/128 # IPv6 loopback
+    - 172.16.0.0/12 # docker user-defined-bridge default pool
+    - 192.168.0.0/16 # fallback when 172.16/12 is occupied
+
+settlement:
+  connectorFeePercentage: 0.1 # your cut of every paid write forwarded to the relay
+  enableSettlement: true
+  tigerBeetleClusterId: 0
+  tigerBeetleReplicas: []
+  thresholds:
+    defaultThreshold: '5000'
+    pollingInterval: 100
+
+# ── Settlement / chain provider ──────────────────────────────────────────────
+# One EVM entry pointing at the LIVE PUBLIC DEVNET — Base Sepolia (chainId 84532).
+# rpcUrl is LITERAL (no ${} interpolation); the single-backend publicnode RPC is
+# preferred over the official LB (which serves stale reads that break channel
+# open→deposit sequencing). Addresses are the canonical devnet contracts (see
+# toon-meta docs/deployment.md). The self-hosted anvil devnet was retired 2026-07-19.
+chainProviders:
+  - chainType: evm
+    chainId: evm:84532
+    rpcUrl: https://base-sepolia-rpc.publicnode.com
+    registryAddress: '0xcC9079adE929b168B54145f6d25262b64FAB9D5b'
+    tokenAddress: '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce'
+    keyId: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+    settlementOptions:
+      threshold: '5000'
+      pollingIntervalMs: 100
+      settlementTimeoutSecs: 3600
+      initialDepositMultiplier: 2
+      ledgerSnapshotPath: ./data/ledger-connector.json
+
+# No peers in the single-node default. Fill this in to peer with a neighbour
+# (see connector-peer.yaml + README "Peer with a neighbour").
+peers: []
+
+# ── Routes ──────────────────────────────────────────────────────────────────
+# ONE child route. `upstream` terminates the g.proxy.relay hop at the relay's
+# BLS port over the compose network (`relay:3100`); the relay's ports are never
+# published, so a WRITE can only reach it through this paid edge.
+#
+# `price` is the per-write charge (USDC base units, 6-dp). `settlementAddresses.evm`
+# is the address payers open their channel toward — the address derived from the
+# default keyId above (unfunded on Base Sepolia). With TOON_MNEMONIC set, change it
+# to the mnemonic-derived EVM address (boot log) and fund it at the faucet.
+routes:
+  - prefix: g.proxy.relay
+    nextHop: g.proxy
+    upstream: http://relay:3100
+    price: '1000'
+    chains:
+      - evm
+    ilpAddress: g.proxy.relay
+    settlementAddresses:
+      evm: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'

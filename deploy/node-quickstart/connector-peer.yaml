@@ -1,0 +1,78 @@
+# =============================================================================
+# node-quickstart — node B config (profile: peer). A second connector that
+# PEERS with node A (`g.proxy`) over BTP and can route to it.
+# =============================================================================
+# Bind-mounted into the `connector-peer` service. Node B:
+#   - dials node A's BTP server (ws://connector:3000) as peer `g.proxy`
+#   - installs a static route  g.proxy → g.proxy  (next-hop = the peer link),
+#     so a write addressed to g.proxy.relay is FORWARDED to node A and delivered
+#     to node A's relay. This is the cross-node routing demo.
+#   - also fronts its OWN relay child at g.peer.relay (relay-peer:3100).
+#
+# For full BIDIRECTIONAL peering (node A routing back to g.peer.*), add a matching
+# peers[]/routes[] pair to node A's connector.yaml — mirror
+# scripts/standalone-e2e/peer{1,2}.yaml, which peer both directions.
+# =============================================================================
+
+nodeId: g.peer
+btpServerPort: 3000
+healthCheckPort: 8080
+environment: development
+deploymentMode: standalone
+logLevel: info
+
+adminApi:
+  enabled: true
+  host: 0.0.0.0
+  port: 8081
+  allowedIPs:
+    - 127.0.0.1/32
+    - ::1/128
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
+settlement:
+  connectorFeePercentage: 0.1
+  enableSettlement: true
+  tigerBeetleClusterId: 0
+  tigerBeetleReplicas: []
+  thresholds:
+    defaultThreshold: '5000'
+    pollingInterval: 100
+
+chainProviders:
+  - chainType: evm
+    chainId: evm:84532
+    rpcUrl: https://base-sepolia-rpc.publicnode.com
+    registryAddress: '0xcC9079adE929b168B54145f6d25262b64FAB9D5b'
+    tokenAddress: '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce'
+    keyId: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+    settlementOptions:
+      threshold: '5000'
+      pollingIntervalMs: 100
+      settlementTimeoutSecs: 3600
+      initialDepositMultiplier: 2
+      ledgerSnapshotPath: ./data/ledger-connector.json
+
+# ── Peer with node A over BTP ─────────────────────────────────────────────────
+peers:
+  - id: g.proxy
+    url: ws://connector:3000
+    authToken: ''
+    relation: peer
+
+routes:
+  # Node B's own relay child.
+  - prefix: g.peer.relay
+    nextHop: g.peer
+    upstream: http://relay-peer:3100
+    price: '1000'
+    chains:
+      - evm
+    ilpAddress: g.peer.relay
+    settlementAddresses:
+      evm: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+  # Static route to node A's apex over the peer link. A write to g.proxy.relay
+  # sent to node B (127.0.0.1:3001) is forwarded here to node A.
+  - prefix: g.proxy
+    nextHop: g.proxy

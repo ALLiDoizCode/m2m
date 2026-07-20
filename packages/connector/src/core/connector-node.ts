@@ -2121,6 +2121,19 @@ export class ConnectorNode implements HealthStatusProvider {
           port: this._config.adminApi?.port ?? parseInt(process.env.ADMIN_API_PORT || '8081', 10),
           host: this._config.adminApi?.host ?? process.env.ADMIN_API_HOST ?? '0.0.0.0',
           apiKey: this._config.adminApi?.apiKey ?? process.env.ADMIN_API_KEY,
+          // Forward the IP allowlist / trust-proxy from config (or env) to the
+          // AdminServer. Without this, `adminApi.allowedIPs` set in the YAML was
+          // silently dropped — the admin API bound without the allowlist the
+          // operator configured, leaving it protected only by host/port binding.
+          allowedIPs:
+            this._config.adminApi?.allowedIPs ??
+            (process.env.ADMIN_API_ALLOWED_IPS
+              ? process.env.ADMIN_API_ALLOWED_IPS.split(',')
+                  .map((s) => s.trim())
+                  .filter(Boolean)
+              : undefined),
+          trustProxy:
+            this._config.adminApi?.trustProxy ?? process.env.ADMIN_API_TRUST_PROXY === 'true',
         };
 
         this._adminServer = new AdminServer({
