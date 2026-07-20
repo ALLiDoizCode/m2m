@@ -135,6 +135,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ steps.tag.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.tag.outputs.tag }}
             type=semver,pattern={{major}},value=${{ steps.tag.outputs.tag }}
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push versioned Docker image
         if: steps.tag.outputs.tag != ''
