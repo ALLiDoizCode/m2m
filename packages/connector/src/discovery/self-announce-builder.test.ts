@@ -342,34 +342,46 @@ describe('deriveChainSettlementParams (toon-client#378)', () => {
     } as ChainProvider;
   }
 
-  it('solana: programId → tokenNetworks, tokenMint → preferredTokens (keyed by chainId)', () => {
+  it('solana: programId → tokenNetworks, tokenMint → preferredTokens, rpcUrl → chainRpcUrls', () => {
     expect(deriveChainSettlementParams([solana()])).toEqual({
       tokenNetworks: { 'solana:devnet': SOL_PROGRAM },
       preferredTokens: { 'solana:devnet': SOL_MINT },
+      minaTokenIds: {},
+      chainRpcUrls: { 'solana:devnet': 'http://localhost:8899' },
     });
   });
 
-  it('evm: tokenAddress → preferredTokens only (TokenNetwork is a runtime lookup, not config)', () => {
+  it('evm: tokenAddress → preferredTokens, rpcUrl → chainRpcUrls (TokenNetwork is a runtime lookup)', () => {
     expect(deriveChainSettlementParams([evm()])).toEqual({
       tokenNetworks: {},
       preferredTokens: { 'evm:31337': EVM_TOKEN },
+      minaTokenIds: {},
+      chainRpcUrls: { 'evm:31337': 'http://localhost:8545' },
     });
   });
 
-  it('mina: zkAppAddress → tokenNetworks, token-owner tokenAddress → preferredTokens', () => {
-    expect(deriveChainSettlementParams([mina()])).toEqual({
+  it('mina: zkAppAddress → tokenNetworks, tokenAddress → preferredTokens, tokenId → minaTokenIds, graphqlUrl → chainRpcUrls', () => {
+    expect(deriveChainSettlementParams([mina({ tokenId: '9497' })])).toEqual({
       tokenNetworks: { 'mina:devnet': MINA_ZKAPP },
       preferredTokens: { 'mina:devnet': MINA_TOKEN_OWNER },
+      minaTokenIds: { 'mina:devnet': '9497' },
+      chainRpcUrls: { 'mina:devnet': 'http://localhost:8080/graphql' },
     });
   });
 
   it('multi-chain: merges all families, keys matching the chainProviders chain ids', () => {
-    expect(deriveChainSettlementParams([evm(), solana(), mina()])).toEqual({
+    expect(deriveChainSettlementParams([evm(), solana(), mina({ tokenId: '9497' })])).toEqual({
       tokenNetworks: { 'solana:devnet': SOL_PROGRAM, 'mina:devnet': MINA_ZKAPP },
       preferredTokens: {
         'evm:31337': EVM_TOKEN,
         'solana:devnet': SOL_MINT,
         'mina:devnet': MINA_TOKEN_OWNER,
+      },
+      minaTokenIds: { 'mina:devnet': '9497' },
+      chainRpcUrls: {
+        'evm:31337': 'http://localhost:8545',
+        'solana:devnet': 'http://localhost:8899',
+        'mina:devnet': 'http://localhost:8080/graphql',
       },
     });
   });
@@ -384,24 +396,30 @@ describe('deriveChainSettlementParams (toon-client#378)', () => {
     ).toEqual({
       tokenNetworks: { 'solana:devnet': SOL_PROGRAM },
       preferredTokens: {},
+      minaTokenIds: {},
+      chainRpcUrls: {
+        'evm:31337': 'http://localhost:8545',
+        'solana:devnet': 'http://localhost:8899',
+        'mina:devnet': 'http://localhost:8080/graphql',
+      },
     });
   });
 
   it('returns empty maps for undefined / empty chainProviders and skips empty chainIds', () => {
-    expect(deriveChainSettlementParams(undefined)).toEqual({
+    const empty = {
       tokenNetworks: {},
       preferredTokens: {},
-    });
-    expect(deriveChainSettlementParams([])).toEqual({ tokenNetworks: {}, preferredTokens: {} });
-    expect(deriveChainSettlementParams([solana({ chainId: '' })])).toEqual({
-      tokenNetworks: {},
-      preferredTokens: {},
-    });
+      minaTokenIds: {},
+      chainRpcUrls: {},
+    };
+    expect(deriveChainSettlementParams(undefined)).toEqual(empty);
+    expect(deriveChainSettlementParams([])).toEqual(empty);
+    expect(deriveChainSettlementParams([solana({ chainId: '' })])).toEqual(empty);
   });
 
   it('is wired into buildSelfAnnouncementInfo, alongside the runtime tokenNetworks merge', () => {
     const config = relayConnectorConfig();
-    config.chainProviders = [evm(), solana(), mina()];
+    config.chainProviders = [evm(), solana(), mina({ tokenId: '9497' })];
     const RUNTIME_TN = '0xTokenNetworkResolvedAtRuntime';
     const info = buildSelfAnnouncementInfo(config, baseSelfAnnounce, undefined, {
       'evm:31337': RUNTIME_TN,
@@ -416,6 +434,14 @@ describe('deriveChainSettlementParams (toon-client#378)', () => {
       'evm:31337': EVM_TOKEN,
       'solana:devnet': SOL_MINT,
       'mina:devnet': MINA_TOKEN_OWNER,
+    });
+    // The Mina token id + per-chain RPC endpoints ride along in content so a
+    // standalone client derives its minaChannel and known-good RPC drift-free.
+    expect(info.minaTokenIds).toEqual({ 'mina:devnet': '9497' });
+    expect(info.chainRpcUrls).toEqual({
+      'evm:31337': 'http://localhost:8545',
+      'solana:devnet': 'http://localhost:8899',
+      'mina:devnet': 'http://localhost:8080/graphql',
     });
   });
 
