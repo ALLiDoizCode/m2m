@@ -251,7 +251,11 @@ describe('InboundClaimValidator — received-claim watermark gate (#353)', () =>
       expect(h.verifyBalanceProofWithDomain).not.toHaveBeenCalled();
     });
 
-    it('F06-rejects an equal-nonce (byte-exact) replay — clients sign a fresh claim per write', async () => {
+    it('F06-rejects an equal-nonce replay that is a DIFFERENT claim (distinct messageId, issue #383 anti-replay)', async () => {
+      // Watermark and inbound both sit at nonce 6 but are DISTINCT claims: the
+      // fixtures mint a fresh random messageId per call, so this is not a
+      // byte-identical re-delivery. The #383 carve-out must NOT fire — a
+      // different claim at an already-verified nonce is still a replay.
       const h = makeHarness({ [channelId]: makeClaim(6) });
 
       const result = await h.validator.validate(
@@ -355,6 +359,159 @@ describe('InboundClaimValidator — received-claim watermark gate (#353)', () =>
 
     expect(result).toBeNull();
     expect(h.watermarkLookup).toHaveBeenCalledWith('peer-a', 'mina', MINA_ZKAPP_ADDRESS);
+  });
+});
+
+/**
+ * Idempotent re-delivery carve-out (Issue #383)
+ *
+ * The FIRST paid claim on a fresh channel was F06-rejected when the SAME claim
+ * was re-delivered — a transport retry after a lost FULFILL, or the same claim
+ * arriving over two paths — because the #353 freshness gate rejects any nonce
+ * that does not STRICTLY advance the watermark, and a re-delivery repeats the
+ * watermark nonce. The fix: at nonce === watermark AND full byte-identity
+ * (same messageId + every signature-bound field), the gate treats the packet
+ * as a benign duplicate and lets it PROCEED so the request re-FULFILLs
+ * idempotently, instead of F06.
+ *
+ * Anti-replay is preserved: a DIFFERENT claim at the same nonce, or ANY claim
+ * at a lower nonce, still F06s. Crypto is mocked to always pass (as above), so
+ * a null result means "proceeded to the crypto gate → would FULFILL", and any
+ * F06 is attributable to the freshness decision alone.
+ *
+ * `identicalDelivery(claim)` returns the SAME claim object for both the
+ * recorded watermark and the inbound protocol data, modelling a bit-for-bit
+ * re-delivery (identical messageId included).
+ */
+describe('InboundClaimValidator — idempotent re-delivery carve-out (#383)', () => {
+  describe.each([
+    ['EVM', EVM_CHANNEL_ID, evmClaim] as const,
+    ['Solana', SOLANA_CHANNEL_ACCOUNT, solanaClaim] as const,
+    ['Mina', MINA_ZKAPP_ADDRESS, minaClaim] as const,
+  ])('%s claims', (_label, channelId, makeClaim) => {
+    it('re-delivery of the byte-identical verified claim is NOT F06 — it re-FULFILLs idempotently', async () => {
+      // The exact same claim object is the recorded watermark AND the inbound
+      // claim (same messageId, same signature, same amount) — a benign retry.
+      const claim = makeClaim(1);
+      const h = makeHarness({ [channelId]: claim });
+
+      const result = await h.validator.validate(asProtocolData(claim), createPrepare(), 'peer-a');
+
+      expect(result).toBeNull(); // proceeded — no F06
+      // It reached the crypto gate exactly once (i.e. would FULFILL), instead of
+      // being short-circuited by the freshness reject.
+      expect(
+        h.verifyBalanceProof.mock.calls.length + h.verifyBalanceProofWithDomain.mock.calls.length
+      ).toBe(1);
+    });
+
+    it('the identical re-delivery still passes even with a route price wired (value check skipped, no delta-0 underpayment)', async () => {
+      // If the carve-out naively fell through to the #359 value check, the
+      // re-delivery's cumulative delta vs the identical watermark would be 0 and
+      // trip the underpayment gate. It must be skipped for a benign duplicate.
+      const claim = makeClaim(1);
+      const h = makeHarness(
+        { [channelId]: claim },
+        { routePrice: () => '1000', openResult: 'match' }
+      );
+
+      const result = await h.validator.validate(asProtocolData(claim), createPrepare(), 'peer-a');
+
+      expect(result).toBeNull(); // not rejected as underpaid
+      expect(
+        h.verifyBalanceProof.mock.calls.length + h.verifyBalanceProofWithDomain.mock.calls.length
+      ).toBe(1);
+    });
+
+    it('a DIFFERENT claim at the SAME (equal) nonce is still F06 — anti-replay preserved', async () => {
+      // Same nonce 1, but a distinct claim: mutate a signature-bound field so it
+      // is not byte-identical to the recorded watermark. Must still reject.
+      const recorded = makeClaim(1);
+      const different = { ...makeClaim(1) }; // fresh random messageId already differs
+      const h = makeHarness({ [channelId]: recorded });
+
+      const result = await h.validator.validate(
+        asProtocolData(different),
+        createPrepare(),
+        'peer-a'
+      );
+
+      const reject = expectF06(result);
+      expect(reject.message).toContain('Stale payment claim');
+      expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+      expect(h.verifyBalanceProofWithDomain).not.toHaveBeenCalled();
+    });
+
+    it('a claim at a LOWER nonce than the watermark is still F06 — even the same messageId cannot revive it', async () => {
+      // Watermark at nonce 5; a claim at nonce 1 can never be byte-identical to
+      // the higher-nonce watermark, so the carve-out cannot fire.
+      const h = makeHarness({ [channelId]: makeClaim(5) });
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(1)),
+        createPrepare(),
+        'peer-a'
+      );
+
+      const reject = expectF06(result);
+      expect(reject.message).toContain('Stale payment claim');
+      expect(reject.message).toContain('nonce 1');
+      expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+      expect(h.verifyBalanceProofWithDomain).not.toHaveBeenCalled();
+    });
+
+    it('a byte-identical claim BUT with a mutated signature/proof is treated as different → F06', async () => {
+      // Same messageId and nonce as the watermark, but the signed material
+      // differs: the identity test compares the signature/proof, so this cannot
+      // masquerade as a benign re-delivery.
+      const recorded = makeClaim(3);
+      const tampered = { ...recorded };
+      if (tampered.blockchain === 'mina') {
+        tampered.proof = 'dGFtcGVyZWQ=';
+      } else {
+        tampered.signature = tampered.blockchain === 'evm' ? '0x' + 'f'.repeat(130) : 'dGFtcGVy';
+      }
+      const h = makeHarness({ [channelId]: recorded });
+
+      const result = await h.validator.validate(
+        asProtocolData(tampered),
+        createPrepare(),
+        'peer-a'
+      );
+
+      const reject = expectF06(result);
+      expect(reject.message).toContain('Stale payment claim');
+      expect(h.verifyBalanceProof).not.toHaveBeenCalled();
+      expect(h.verifyBalanceProofWithDomain).not.toHaveBeenCalled();
+    });
+
+    it('normal monotonic advance past the watermark still works (control)', async () => {
+      const h = makeHarness({ [channelId]: makeClaim(1) });
+
+      const result = await h.validator.validate(
+        asProtocolData(makeClaim(2)),
+        createPrepare(),
+        'peer-a'
+      );
+
+      expect(result).toBeNull();
+      expect(
+        h.verifyBalanceProof.mock.calls.length + h.verifyBalanceProofWithDomain.mock.calls.length
+      ).toBe(1);
+    });
+  });
+
+  it('first claim on a fresh channel (no watermark) is accepted — the pre-condition for the re-delivery case', async () => {
+    const h = makeHarness({});
+
+    const result = await h.validator.validate(
+      asProtocolData(evmClaim(1)),
+      createPrepare(),
+      'peer-a'
+    );
+
+    expect(result).toBeNull();
+    expect(h.verifyBalanceProofWithDomain).toHaveBeenCalledTimes(1);
   });
 });
 
