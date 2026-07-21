@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.41.0](https://github.com/toon-protocol/connector/compare/v3.40.2...v3.41.0) (2026-07-21)
+
+### Features
+
+- **discovery:** advertise Mina token id + per-chain RPC in self-announce ([#385](https://github.com/toon-protocol/connector/issues/385)) ([d4b2b04](https://github.com/toon-protocol/connector/commit/d4b2b04b223c4561e750a537ed4c6adb380f5537))
+
+### Bug Fixes
+
+- **faucet:** drip Solana SOL from treasury instead of requestAirdrop ([#386](https://github.com/toon-protocol/connector/issues/386)) ([7ddbd86](https://github.com/toon-protocol/connector/commit/7ddbd8621c1ca8e625360b775858281d42b6891f)), closes [#379](https://github.com/toon-protocol/connector/issues/379)
+
 ## [3.40.2](https://github.com/toon-protocol/connector/compare/v3.40.1...v3.40.2) (2026-07-21)
 
 ### Bug Fixes
