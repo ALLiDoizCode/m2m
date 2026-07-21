@@ -29,7 +29,11 @@ settlement:
 chainProviders:
   - chainType: evm
     chainId: evm:84532
-    rpcUrl: https://sepolia.base.org
+    # publicnode over sepolia.base.org: the latter is a stale-read load balancer
+    # that fails openChannel→setTotalDeposit (InvalidChannelState 0xf806e9d9).
+    # This RPC is now also advertised in the self-announce (chainRpcUrls) so a
+    # fresh client picks up the known-good endpoint instead of the baked preset.
+    rpcUrl: https://base-sepolia-rpc.publicnode.com
     registryAddress: '0xcC9079adE929b168B54145f6d25262b64FAB9D5b'
     tokenAddress: '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce'
     keyId: 'placeholder-overwritten-by-mnemonic'

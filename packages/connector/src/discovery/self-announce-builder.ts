@@ -210,6 +210,22 @@ export interface ChainSettlementParams {
    * SPL token MINT on Solana chains, the token-owner zkApp on Mina chains.
    */
   preferredTokens: Record<string, string>;
+  /**
+   * Chain id → Mina token id (decimal string). The Mina payment channel opens
+   * on a specific fungible token, and its token id is deployment-specific —
+   * there is no home for it in core's kind:10032 wire schema, so it is
+   * advertised out-of-band (toon-client#? — the client derives `minaChannel`
+   * from the announce). Empty for chains with no Mina token id configured.
+   */
+  minaTokenIds: Record<string, string>;
+  /**
+   * Chain id → JSON-RPC / GraphQL endpoint the deployment KNOWS works. A fresh
+   * client otherwise falls back to core's baked per-chain preset RPC, which can
+   * be a stale/broken endpoint (Base Sepolia's `sepolia.base.org` load balancer
+   * fails openChannel→setTotalDeposit). Advertising the connector's OWN
+   * configured RPC lets the client prefer the known-good URL over the preset.
+   */
+  chainRpcUrls: Record<string, string>;
 }
 
 /**
@@ -236,6 +252,8 @@ export function deriveChainSettlementParams(
 ): ChainSettlementParams {
   const tokenNetworks: Record<string, string> = {};
   const preferredTokens: Record<string, string> = {};
+  const minaTokenIds: Record<string, string> = {};
+  const chainRpcUrls: Record<string, string> = {};
 
   for (const provider of chainProviders ?? []) {
     const chainId = provider.chainId;
@@ -244,19 +262,24 @@ export function deriveChainSettlementParams(
     switch (provider.chainType) {
       case 'evm':
         if (provider.tokenAddress) preferredTokens[chainId] = provider.tokenAddress;
+        if (provider.rpcUrl) chainRpcUrls[chainId] = provider.rpcUrl;
         break;
       case 'solana':
         if (provider.programId) tokenNetworks[chainId] = provider.programId;
         if (provider.tokenMint) preferredTokens[chainId] = provider.tokenMint;
+        if (provider.rpcUrl) chainRpcUrls[chainId] = provider.rpcUrl;
         break;
       case 'mina':
         if (provider.zkAppAddress) tokenNetworks[chainId] = provider.zkAppAddress;
         if (provider.tokenAddress) preferredTokens[chainId] = provider.tokenAddress;
+        if (provider.tokenId) minaTokenIds[chainId] = provider.tokenId;
+        // The Mina "RPC" the client opens the channel against is the GraphQL URL.
+        if (provider.graphqlUrl) chainRpcUrls[chainId] = provider.graphqlUrl;
         break;
     }
   }
 
-  return { tokenNetworks, preferredTokens };
+  return { tokenNetworks, preferredTokens, minaTokenIds, chainRpcUrls };
 }
 
 /** Compressed secp256k1 pubkey: 02/03 parity byte + 32-byte x coordinate, hex. */
@@ -606,6 +629,12 @@ export function buildSelfAnnouncementInfo(
   const derivedParams = deriveChainSettlementParams(config.chainProviders);
   const tokenNetworks = { ...derivedParams.tokenNetworks, ...(runtimeTokenNetworks ?? {}) };
   const preferredTokens = derivedParams.preferredTokens;
+  // Out-of-band content ride-alongs (no core wire-schema change): the Mina
+  // token id and the deployment's known-good per-chain RPC endpoints, both of
+  // which a standalone client needs to open a channel drift-free from the
+  // announce alone.
+  const minaTokenIds = derivedParams.minaTokenIds;
+  const chainRpcUrls = derivedParams.chainRpcUrls;
 
   const routes = resolveRouteHints(config.routes, selfAnnounce.routes, config.children, apex);
 
@@ -630,6 +659,8 @@ export function buildSelfAnnouncementInfo(
     ...(Object.keys(settlementAddresses).length > 0 ? { settlementAddresses } : {}),
     ...(Object.keys(tokenNetworks).length > 0 ? { tokenNetworks } : {}),
     ...(Object.keys(preferredTokens).length > 0 ? { preferredTokens } : {}),
+    ...(Object.keys(minaTokenIds).length > 0 ? { minaTokenIds } : {}),
+    ...(Object.keys(chainRpcUrls).length > 0 ? { chainRpcUrls } : {}),
     ...(routing ? { routing } : {}),
     ...(capabilities.length > 0 ? { capabilities } : {}),
     routes,

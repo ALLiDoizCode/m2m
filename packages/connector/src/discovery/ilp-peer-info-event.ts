@@ -272,6 +272,23 @@ export interface IlpPeerInfo {
    */
   preferredTokens?: Record<string, string>;
   /**
+   * Out-of-band content ride-along: chain identifier → Mina token id (decimal
+   * string) the payment channel opens on. The channel zkApp already rides
+   * `tokenNetworks`; the fungible-token id is deployment-specific and has no
+   * home in core's kind:10032 wire schema, so it is advertised here. A
+   * standalone client derives its `minaChannel.tokenId` from this map. Absent
+   * for native-MINA settlement.
+   */
+  minaTokenIds?: Record<string, string>;
+  /**
+   * Out-of-band content ride-along: chain identifier → JSON-RPC / GraphQL
+   * endpoint the deployment KNOWS works. Lets a fresh client prefer the
+   * deployment's own RPC over core's baked per-chain preset default (which can
+   * be a stale/broken endpoint — e.g. Base Sepolia's `sepolia.base.org` LB
+   * fails openChannel→setTotalDeposit).
+   */
+  chainRpcUrls?: Record<string, string>;
+  /**
    * Optional link-state block (toon-meta#153): the prefixes this node can
    * deliver plus the Nostr pubkeys of its direct neighbors, consumed by peers'
    * route-learning services to compute multi-hop routes. Backward-compatible
