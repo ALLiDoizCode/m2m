@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.40.2](https://github.com/toon-protocol/connector/compare/v3.40.1...v3.40.2) (2026-07-21)
+
+### Bug Fixes
+
+- **btp:** idempotent re-fulfill of a byte-identical re-delivered claim ([#383](https://github.com/toon-protocol/connector/issues/383)) ([#384](https://github.com/toon-protocol/connector/issues/384)) ([f4c16a5](https://github.com/toon-protocol/connector/commit/f4c16a59e3d4140143ecde421f86279ba1639ad1)), closes [#353](https://github.com/toon-protocol/connector/issues/353) [#359](https://github.com/toon-protocol/connector/issues/359)
+
 ## [3.40.1](https://github.com/toon-protocol/connector/compare/v3.40.0...v3.40.1) (2026-07-20)
 
 ### Bug Fixes
