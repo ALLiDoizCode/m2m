@@ -2,7 +2,13 @@
 // Solana faucet drip
 // ---------------------------------------------------------------------------
 // Mirrors infra/solana/fund-solana.sh, but in-process:
-//   1. requestAirdrop SOL to the recipient via the validator's faucet RPC.
+//   1. Transfer SOL to the recipient from the committed devnet treasury
+//      authority (usdc-authority.json) — a plain treasury→recipient transfer,
+//      same as the USDC leg below and the Mina `treasury-drip` mode. This
+//      avoids `requestAirdrop`, whose public-devnet endpoint is per-IP
+//      rate-limited and frequently dry for outside callers (issue #379). A
+//      `requestAirdrop` call is kept as a fallback for when the treasury
+//      itself runs low.
 //   2. Transfer mock USDC from the committed devnet treasury authority
 //      (usdc-authority.json) — auto-creating the recipient's associated token
 //      account (ATA) if it does not exist yet.
@@ -14,7 +20,15 @@
 // configured (e.g. an EVM-only deploy), `createSolanaFaucet` returns null and
 // the route answers a clear 503 instead of crashing the whole service.
 import fs from 'fs';
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  sendAndConfirmTransaction,
+} from '@solana/web3.js';
 import { getOrCreateAssociatedTokenAccount, transfer } from '@solana/spl-token';
 
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'http://solana-validator:8899';
@@ -165,8 +179,33 @@ export function createSolanaFaucet() {
     },
   };
 
+  // Transfer SOL from the treasury to the recipient — the primary SOL-funding
+  // path (issue #379). The TREASURY pays the tx fee, so this works regardless
+  // of the public devnet airdrop's rate limits, mirroring `transferUsdc` below.
+  async function transferSol(recipient) {
+    const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
+    const latest = await connection.getLatestBlockhash('confirmed');
+    const tx = new Transaction({
+      feePayer: authority.publicKey,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    }).add(
+      SystemProgram.transfer({
+        fromPubkey: authority.publicKey,
+        toPubkey: recipient,
+        lamports,
+      })
+    );
+    const signature = await sendAndConfirmTransaction(connection, tx, [authority], {
+      commitment: 'confirmed',
+    });
+    console.log(`  📤 Transferred ${SOLANA_SOL_AMOUNT} SOL from treasury: ${signature}`);
+    return signature;
+  }
+
   // Airdrop SOL to the recipient and confirm it (blockhash/lastValidBlockHeight
   // strategy — tied to actual chain progress, not a 30s wall clock; issue #277).
+  // Fallback only: used when the treasury itself can't cover the SOL transfer.
   async function airdropSol(recipient) {
     const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
     const latest = await connection.getLatestBlockhash('confirmed');
@@ -218,22 +257,22 @@ export function createSolanaFaucet() {
     };
   }
 
-  // Full drip: SOL + USDC — but the USDC leg is DECOUPLED from the airdrop. The
-  // airdrop is SKIPPED when the recipient is already funded, and a FAILED airdrop
-  // (public devnet dry / rate-limited) no longer aborts the request: the USDC
-  // transfer still runs (it is funded by the treasury, not this airdrop). USDC
-  // drips as long as the treasury holds SOL (fees) + USDC.
+  // Full drip: SOL + USDC — but the USDC leg is DECOUPLED from the SOL leg. The
+  // SOL leg is SKIPPED when the recipient is already funded, and a FAILED SOL
+  // leg no longer aborts the request: the USDC transfer still runs (it is
+  // funded by the treasury, independent of the SOL leg's outcome). USDC drips
+  // as long as the treasury holds SOL (fees) + USDC.
   async function dripInner(address) {
     const recipient = new PublicKey(address);
 
-    // Skip the airdrop when the recipient already holds enough SOL to transact.
+    // Skip the SOL leg when the recipient already holds enough SOL to transact.
     const SKIP_AIRDROP_LAMPORTS = Math.round(0.02 * LAMPORTS_PER_SOL);
     const startBalance = await connection.getBalance(recipient, 'confirmed');
 
     let sol;
     if (startBalance >= SKIP_AIRDROP_LAMPORTS) {
       console.log(
-        `  ⏭️  Recipient holds ${startBalance / LAMPORTS_PER_SOL} SOL — skipping airdrop`
+        `  ⏭️  Recipient holds ${startBalance / LAMPORTS_PER_SOL} SOL — skipping SOL leg`
       );
       sol = {
         skipped: true,
@@ -242,13 +281,27 @@ export function createSolanaFaucet() {
       };
     } else {
       try {
-        const signature = await airdropSol(recipient);
-        sol = { signature, amount: String(SOLANA_SOL_AMOUNT) };
+        // Primary: a treasury→recipient SOL transfer, immune to the public
+        // devnet airdrop's per-IP rate limit (issue #379).
+        const signature = await transferSol(recipient);
+        sol = { signature, amount: String(SOLANA_SOL_AMOUNT), source: 'treasury' };
       } catch (err) {
-        // Airdrop unavailable (public devnet airdrop dry / rate-limited). Do NOT
-        // abort — the USDC leg is treasury-funded and independent of this drip.
-        console.log(`  ⚠️  Airdrop unavailable (${err.message}); continuing to the USDC transfer`);
-        sol = { skipped: true, reason: 'airdrop unavailable', error: String(err.message || err) };
+        console.log(
+          `  ⚠️  Treasury SOL transfer failed (${err.message}); falling back to requestAirdrop`
+        );
+        try {
+          const signature = await airdropSol(recipient);
+          sol = { signature, amount: String(SOLANA_SOL_AMOUNT), source: 'airdrop-fallback' };
+        } catch (airdropErr) {
+          // Neither path worked (e.g. treasury underfunded AND the public
+          // airdrop is dry). Do NOT abort — the USDC leg is treasury-funded
+          // and independent of this leg.
+          sol = {
+            skipped: true,
+            reason: 'sol funding unavailable',
+            error: String(airdropErr.message || airdropErr),
+          };
+        }
       }
     }
 
