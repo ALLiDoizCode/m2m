@@ -573,6 +573,32 @@ describeDocker('Admin API Surface E2E (every inventoried endpoint)', () => {
     });
   });
 
+  describe('AdminServer /admin/discovered-nodes endpoint', () => {
+    it('GET /admin/discovered-nodes returns 200 with empty set (route learning disabled)', async () => {
+      const entry = ADMIN_API_INVENTORY.find(
+        (e) => e.server === 'AdminServer' && e.path === '/discovered-nodes' && e.method === 'GET'
+      )!;
+      markTested(entry);
+
+      const { status, body } = await getJson<{
+        nodeId: string;
+        discoveredCount: number;
+        fundedCount: number;
+        nodes: unknown[];
+      }>(`${BASE_URL.AdminServer}/admin/discovered-nodes`);
+
+      expect(status).toBe(200);
+      expect(body).toHaveProperty('nodeId');
+      expect(typeof body.nodeId).toBe('string');
+      // Standalone topology has no relay-based discovery configured — the
+      // discovered-node registry is unwired, so the set is always empty.
+      expect(body.discoveredCount).toBe(0);
+      expect(body.fundedCount).toBe(0);
+      expect(Array.isArray(body.nodes)).toBe(true);
+      expect(body.nodes).toHaveLength(0);
+    });
+  });
+
   describe('AdminServer /admin/settlement/states endpoint', () => {
     it('GET /admin/settlement/states returns 200 or 503', async () => {
       const entry = ADMIN_API_INVENTORY.find(
