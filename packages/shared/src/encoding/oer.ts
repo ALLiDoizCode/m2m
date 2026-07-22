@@ -63,6 +63,13 @@ export class BufferUnderflowError extends Error {
  * @see {@link https://interledger.org/rfcs/0030-notes-on-oer-encoding/|RFC-0030: VarUInt Encoding}
  */
 export function encodeVarUInt(value: bigint): Buffer {
+  // Reject out-of-contract input: VarUInt is unsigned (0 to 2^64-1). A negative
+  // value would otherwise fall through the length-prefixed path with an empty
+  // `while` loop and silently emit a corrupt 0-length encoding (Buffer<0x80>).
+  if (value < 0n) {
+    throw new InvalidPacketError(`VarUInt cannot encode negative value: ${value}`);
+  }
+
   // Values 0-127 encoded as single byte
   if (value >= 0n && value <= 127n) {
     const buffer = Buffer.alloc(1);
