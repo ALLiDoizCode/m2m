@@ -20,6 +20,13 @@
 //
 // An empty backlog validly prints <plan>{"issues": []}</plan> — that still
 // proves the mechanism end-to-end (auth + sandbox + gh + schema validation).
+//
+// CJS NOTE: connector's root package.json has no `"type": "module"` (it is a
+// CJS npm-workspaces repo), so tsx/esbuild transforms this runner to CommonJS,
+// where top-level `await` is a compile error. The async body therefore lives in
+// `main()` and is invoked below WITHOUT top-level await. Do NOT reintroduce
+// top-level await here. (Every other org repo is `type: module`; connector is
+// the sole exception, which is why only its runner hit this.)
 
 import * as sandcastle from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
@@ -48,27 +55,34 @@ const hooks = {
   },
 };
 
-const plan = await sandcastle.run({
-  hooks,
-  // Forward CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN into the container; the engine's
-  // env resolver does not (see ./sandbox-secrets.ts). The planner needs the
-  // Claude credential and GH_TOKEN for the in-sandbox `gh issue list`.
-  sandbox: docker({ env: sandboxSecrets() }),
-  name: 'planner-dry-run',
-  maxIterations: 1,
-  agent: sandcastle.claudeCode('claude-opus-4-8'),
-  promptFile: './.sandcastle/plan-prompt.md',
-  output: sandcastle.Output.object({ tag: 'plan', schema: planSchema }),
-});
+async function main() {
+  const plan = await sandcastle.run({
+    hooks,
+    // Forward CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN into the container; the engine's
+    // env resolver does not (see ./sandbox-secrets.ts). The planner needs the
+    // Claude credential and GH_TOKEN for the in-sandbox `gh issue list`.
+    sandbox: docker({ env: sandboxSecrets() }),
+    name: 'planner-dry-run',
+    maxIterations: 1,
+    agent: sandcastle.claudeCode('claude-opus-4-8'),
+    promptFile: './.sandcastle/plan-prompt.md',
+    output: sandcastle.Output.object({ tag: 'plan', schema: planSchema }),
+  });
 
-const { issues } = plan.output;
+  const { issues } = plan.output;
 
-console.log(`\n=== DRY-RUN PLAN (${issues.length} unblocked issue(s)) ===\n`);
-if (issues.length === 0) {
-  console.log('No unblocked agent:implement issues. Empty plan is still a valid pass.');
-} else {
-  for (const issue of issues) {
-    console.log(`  ${issue.id}: ${issue.title} -> ${issue.branch}`);
+  console.log(`\n=== DRY-RUN PLAN (${issues.length} unblocked issue(s)) ===\n`);
+  if (issues.length === 0) {
+    console.log('No unblocked agent:implement issues. Empty plan is still a valid pass.');
+  } else {
+    for (const issue of issues) {
+      console.log(`  ${issue.id}: ${issue.title} -> ${issue.branch}`);
+    }
   }
+  console.log('\nDry run complete — nothing was implemented, reviewed, or merged.');
 }
-console.log('\nDry run complete — nothing was implemented, reviewed, or merged.');
+
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
