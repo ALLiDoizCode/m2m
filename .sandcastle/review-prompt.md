@@ -58,3 +58,7 @@ If you find improvements to make:
 If the code is already clean and well-structured, do nothing.
 
 Once complete, output <promise>COMPLETE</promise>.
+
+## Context budget
+
+If you approach ~60% of your context window, STOP: write a structured handoff note (current state + remaining steps) to `.sandcastle/logs/handoff-<task-id>.md` and end your turn so a fresh agent continues. Do not push past ~60% — small, resumable units beat one degraded run.
