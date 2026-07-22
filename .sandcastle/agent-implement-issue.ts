@@ -77,7 +77,29 @@ const issueTitle = execFileSync(
 // modules (o1js WASM, libsql, bigint-buffer) that must resolve inside the
 // Linux sandbox, not be copied from the host.
 const hooks = {
-  sandbox: { onSandboxReady: [{ command: 'npm ci' }] },
+  sandbox: {
+    onSandboxReady: [
+      // Wire `git push` auth DETERMINISTICALLY inside the container.
+      //
+      // ROOT CAUSE: @ai-hero/sandcastle@0.12.0 only configures git
+      // `safe.directory` + `user.name`/`user.email` in the sandbox — it does
+      // NO credential setup (verified in dist: `withSandboxLifecycle`). `gh`
+      // authenticates from GH_TOKEN, but a bare `git push` uses git's own
+      // credential system, which is not wired to the token. Pushes therefore
+      // succeed only by luck (relay#70) and fail silently otherwise (store#50).
+      //
+      // `gh auth setup-git` installs `gh` as git's credential helper for
+      // github.com in the container-global gitconfig, so every subsequent
+      // `git push` reuses GH_TOKEN. The helper stores NO token in any file — it
+      // shells out to `gh auth git-credential`, which reads GH_TOKEN at push
+      // time. Guarded on GH_TOKEN so local dev without a token no-ops instead
+      // of aborting sandbox setup (onSandboxReady failures are fatal).
+      { command: 'if [ -n "$GH_TOKEN" ]; then gh auth setup-git; fi' },
+      // Install command is UNCHANGED — connector uses npm-workspaces (`npm ci`),
+      // never pnpm. Only the auth line above is prepended.
+      { command: 'npm ci' },
+    ],
+  },
 };
 
 console.log(`\n=== agent:implement runner — issue #${issueNumber} "${issueTitle}" ===`);
@@ -89,6 +111,12 @@ console.log(
 // ---------------------------------------------------------------------------
 // Implement -> Review -> (open PR | merge)
 // ---------------------------------------------------------------------------
+
+// Set to a non-null message in the PR-verification step below when the open-pr
+// phase reported success but no PR actually landed. We record it here (rather
+// than calling process.exit inside the try) so the `finally` still closes the
+// sandbox before we fail the job non-zero.
+let openPrVerificationError: string | null = null;
 
 const sandbox = await sandcastle.createSandbox({
   branch,
@@ -165,10 +193,68 @@ try {
         BRANCH: branch,
       },
     });
-    console.log('\nPR opened (or already existed). Awaiting human review.');
+    // FAIL LOUD. The open-pr phase logs COMPLETE from the prompt regardless of
+    // whether the in-sandbox `git push` / `gh pr create` actually succeeded, so
+    // we must NOT trust it. Verify from the HOST (whose `gh` is authenticated
+    // via GH_TOKEN) that an OPEN PR now exists for this branch. If not, dump the
+    // push/PR state and exit non-zero so the Actions job FAILS instead of
+    // green-lying (store#50: implementer committed, but push failed silently and
+    // no PR was ever created, yet the job went green).
+    const openPrs = JSON.parse(
+      execFileSync(
+        'gh',
+        ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url'],
+        { encoding: 'utf8' }
+      )
+    ) as Array<{ number: number; url: string }>;
+
+    if (openPrs.length > 0) {
+      const pr = openPrs[0]!;
+      console.log(`\nVerified: PR #${pr.number} is open — ${pr.url}`);
+      console.log('Awaiting human review.');
+    } else {
+      // No open PR. Gather diagnostics (all via the authenticated host `gh`).
+      const nwo = execFileSync(
+        'gh',
+        ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
+        { encoding: 'utf8' }
+      ).trim();
+
+      let branchPushed = false;
+      try {
+        execFileSync('gh', ['api', `repos/${nwo}/git/ref/heads/${branch}`], {
+          stdio: 'pipe',
+        });
+        branchPushed = true;
+      } catch {
+        branchPushed = false;
+      }
+
+      const anyStatePrs = execFileSync(
+        'gh',
+        ['pr', 'list', '--head', branch, '--state', 'all', '--json', 'number,state,url'],
+        { encoding: 'utf8' }
+      ).trim();
+
+      openPrVerificationError =
+        `\nERROR: the open-pr phase reported COMPLETE, but no OPEN PR exists ` +
+        `for branch '${branch}'.\n` +
+        `  Remote branch pushed to origin: ${branchPushed}\n` +
+        `  PRs for this branch (any state): ${anyStatePrs}\n` +
+        `  The in-sandbox \`git push\` and/or \`gh pr create\` failed ` +
+        `silently. Inspect the open-pr phase logs above. The Actions job is ` +
+        `failing deliberately so this is not mistaken for success.`;
+    }
   }
 } finally {
   await sandbox.close();
+}
+
+// Fail loud AFTER the sandbox is closed: a silently-failed push/PR-create must
+// turn the Actions job red, never green.
+if (openPrVerificationError) {
+  console.error(openPrVerificationError);
+  process.exit(1);
 }
 
 console.log('\nDone.');
