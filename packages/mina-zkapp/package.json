@@ -6,6 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "build:esm": "node scripts/build-esm.mjs",
     "test": "jest",
     "test:unit": "jest",

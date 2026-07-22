@@ -46,6 +46,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "build:publish": "npm run build",
     "start": "node dist/main.js",
     "test": "jest",

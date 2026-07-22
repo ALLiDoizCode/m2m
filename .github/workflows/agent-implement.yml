@@ -1,0 +1,169 @@
+# agent:implement runner — the sandcastle label→runner for building one issue.
+#
+# WHAT THIS DOES (and does NOT do):
+#   Fires when a human applies the `agent:implement` label to an issue. It runs
+#   the single-issue PR-mode sandcastle runner (`npm run sandcastle:implement`),
+#   which implements → reviews → OPENS A PR and STOPS. A human reviews and
+#   merges. It does NOT auto-merge and does NOT close the issue.
+#
+#   Merely committing this file triggers nothing: issue-`labeled` workflows only
+#   fire from the default branch, and only when someone actually applies the
+#   label. The first live run is a deliberate human action.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ AUTO-MERGE TOGGLE (first-run safety)                                       │
+# │                                                                            │
+# │ DEFAULT = PR mode: the agent opens a PR; a human merges. This is enforced  │
+# │ by the runner having no merge phase unless told otherwise.                 │
+# │                                                                            │
+# │ TO RE-ENABLE AUTO-MERGE once the pilot is trusted: add                     │
+# │       SANDCASTLE_AUTO_MERGE: "true"                                        │
+# │ to the `env:` of the "Run sandcastle implement runner" step below. The     │
+# │ runner will then merge the branch into main and close the issue instead of │
+# │ opening a PR. (Confirm the merge path's push-to-main behavior on a         │
+# │ throwaway issue first — it is inherited from the stock engine and is       │
+# │ itself verify-on-first-run.) Leave it unset/false for the pilot.           │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# Coexists with the OLD loops (backlog-manager / issue-executor / pr-reviewer /
+# issue-decomposer): those fire on `agent:ready` / `agent:split` /
+# `review-round:*` — DISJOINT labels — so no issue triggers two engines.
+
+name: agent:implement
+
+on:
+  issues:
+    types: [labeled]
+
+# Least-privilege for this job's GITHUB_TOKEN. The engine itself opens the PR
+# using the GitHub App token generated below (a PR opened by the default
+# GITHUB_TOKEN would NOT trigger ci.yml, so the green gate would never run on
+# the agent's PR). These scopes cover the guard job's read-only gh api calls.
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Guard: refuse the wrong targets before spending an agent run.
+  # ---------------------------------------------------------------------------
+  guard:
+    # Only react to THIS label. Every other labeled event is ignored.
+    if: github.event.label.name == 'agent:implement'
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - name: Evaluate guards
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          proceed=true
+
+          # --- Guard 1: the labeler must have write access -------------------
+          # Refuses drive-by labeling by outside collaborators / bots without
+          # push rights.
+          perm=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" \
+            --jq '.permission' 2>/dev/null || echo "none")
+          echo "Actor ${ACTOR} permission: ${perm}"
+          case "$perm" in
+            admin|maintain|write) ;;
+            *)
+              echo "::warning::Actor ${ACTOR} lacks write permission (${perm}) — skipping."
+              proceed=false ;;
+          esac
+
+          # --- Guard 2: skip triage/parent labels ----------------------------
+          # epic / tracking = PRD-shaped parents; needs:human = held for a human.
+          labels=$(gh issue view "${ISSUE}" --repo "${REPO}" \
+            --json labels --jq '.labels[].name')
+          echo "Issue labels: $(echo "$labels" | paste -sd, -)"
+          for bad in epic tracking needs:human; do
+            if echo "$labels" | grep -qx "$bad"; then
+              echo "::warning::Issue #${ISSUE} carries '${bad}' — not an agent:implement target. Skipping."
+              proceed=false
+            fi
+          done
+
+          # --- Guard 3: refuse parents that have sub-issues ------------------
+          # A PRD-shaped parent (has child issues) must be decomposed, not built
+          # directly. Sub-issues are queried via GraphQL; if the field is
+          # unavailable on this GitHub plan the query errors — we then log and
+          # DO NOT block (documented residual gap: falls back to the epic/
+          # tracking label check above).
+          sub=$(gh api graphql -f query='
+            query($owner:String!,$repo:String!,$num:Int!){
+              repository(owner:$owner,name:$repo){
+                issue(number:$num){ subIssues(first:1){ totalCount } }
+              }
+            }' \
+            -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F num="${ISSUE}" \
+            --jq '.data.repository.issue.subIssues.totalCount' 2>/dev/null || echo "unknown")
+          echo "Sub-issue count: ${sub}"
+          if [ "$sub" != "unknown" ] && [ "${sub:-0}" -gt 0 ]; then
+            echo "::warning::Issue #${ISSUE} has ${sub} sub-issue(s) — it is a parent. Skipping."
+            proceed=false
+          elif [ "$sub" = "unknown" ]; then
+            echo "::warning::Could not query sub-issues (field unavailable). Relying on epic/tracking labels only."
+          fi
+
+          echo "proceed=${proceed}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Implement: run the single-issue PR-mode sandcastle runner.
+  # ---------------------------------------------------------------------------
+  implement:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90 # real backstop; the implementer allows up to 100 iters
+    concurrency:
+      group: agent-implement-issue-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the sandbox can diff/branch cleanly
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+
+      # connector is npm-workspaces (NOT pnpm) — no corepack step. `npm ci`
+      # installs the exact tree from the committed package-lock.json; the host
+      # only needs tsx + @ai-hero/sandcastle to launch the orchestrator (the
+      # build/test gate runs INSIDE the sandbox container).
+      - name: Install dependencies
+        run: npm ci
+
+      # Docker is preinstalled on ubuntu-latest. Build the agent sandbox image
+      # (.sandcastle/Dockerfile) the engine runs each agent inside.
+      - name: Build sandcastle agent image
+        run: npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+
+      # The engine opens the PR via this App token. A PR opened by it (unlike one
+      # opened by the default GITHUB_TOKEN) triggers ci.yml, so the green gate
+      # runs on the agent's PR. Requires the org/repo secrets APP_ID +
+      # APP_PRIVATE_KEY (already used by the existing issue-executor loop).
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Run sandcastle implement runner
+        env:
+          SANDCASTLE_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          # PR mode (default). To re-enable auto-merge later, uncomment:
+          # SANDCASTLE_AUTO_MERGE: "true"
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: npm run sandcastle:implement
