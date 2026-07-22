@@ -59,10 +59,28 @@ if (!headRef) {
 // connector is an npm-workspaces monorepo — install with the committed
 // package-lock.json (`npm ci`). Mirrors main.ts / agent-implement-issue.ts.
 const hooks = {
-  sandbox: { onSandboxReady: [{ command: 'npm ci' }] },
+  sandbox: {
+    onSandboxReady: [
+      // Wire `git push` auth deterministically inside the container. This
+      // reviewer runner PUSHES the reviewer's refinement commits to the PR head
+      // branch (review-push-prompt.md); @ai-hero/sandcastle@0.12.0 wires no git
+      // credential helper, so that push would otherwise be unauthenticated and
+      // only succeed by luck. `gh auth setup-git` installs `gh` as git's helper
+      // (reads GH_TOKEN at push time, stores no token in any file). Guarded on
+      // GH_TOKEN so token-less local dev no-ops. See ./agent-implement-issue.ts.
+      { command: 'if [ -n "$GH_TOKEN" ]; then gh auth setup-git; fi' },
+      // Install command UNCHANGED (npm-workspaces `npm ci`, not pnpm).
+      { command: 'npm ci' },
+    ],
+  },
 };
 
 console.log(`\n=== agent:review runner — PR #${prNumber} (head: ${headRef}) ===\n`);
+
+// Set to a non-null message below if the push-review phase reported success but
+// the reviewer's commits never landed on origin. Recorded here so the `finally`
+// still closes the sandbox before we fail the job non-zero.
+let reviewPushVerificationError: string | null = null;
 
 const sandbox = await sandcastle.createSandbox({
   branch: headRef,
@@ -93,11 +111,53 @@ try {
       promptFile: './.sandcastle/review-push-prompt.md',
       promptArgs: { BRANCH: headRef },
     });
+
+    // FAIL LOUD (analogous to agent-implement-issue.ts). The push-review phase
+    // reports COMPLETE from its prompt whether or not the in-sandbox `git push`
+    // actually landed. Verify from the HOST (authenticated via GH_TOKEN) that
+    // every reviewer commit now exists on origin. A commit that is only local
+    // 404s here, proving the push failed silently — record the error so the job
+    // goes red instead of green-lying (store#50 class of bug).
+    const nwo = execFileSync(
+      'gh',
+      ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
+      { encoding: 'utf8' }
+    ).trim();
+
+    const missing = review.commits.filter((c) => {
+      try {
+        execFileSync('gh', ['api', `repos/${nwo}/commits/${c.sha}`], { stdio: 'pipe' });
+        return false;
+      } catch {
+        return true;
+      }
+    });
+
+    if (missing.length === 0) {
+      console.log(
+        `\nVerified: all ${review.commits.length} reviewer commit(s) are on origin (${headRef}).`
+      );
+    } else {
+      reviewPushVerificationError =
+        `\nERROR: the push-review phase reported COMPLETE, but ${missing.length} ` +
+        `reviewer commit(s) are absent from origin for branch '${headRef}': ` +
+        `${missing.map((c) => c.sha.slice(0, 8)).join(', ')}.\n` +
+        `  The in-sandbox \`git push\` to the PR branch failed silently. ` +
+        `Inspect the push-review phase logs above. The Actions job is failing ` +
+        `deliberately so this is not mistaken for success.`;
+    }
   } else {
     console.log('\nReviewer made no changes — the code was already clean. Nothing to push.');
   }
 } finally {
   await sandbox.close();
+}
+
+// Fail loud AFTER the sandbox is closed: a silently-failed push must turn the
+// Actions job red, never green.
+if (reviewPushVerificationError) {
+  console.error(reviewPushVerificationError);
+  process.exit(1);
 }
 
 console.log('\nReview complete. The PR was NOT merged — a human still merges.');

@@ -35,7 +35,17 @@ const planSchema = z.object({
 // package-lock.json (`npm ci`, mirrors main.ts). We do NOT copyToWorktree
 // node_modules (platform-specific native modules must resolve in the sandbox).
 const hooks = {
-  sandbox: { onSandboxReady: [{ command: 'npm ci' }] },
+  sandbox: {
+    onSandboxReady: [
+      // Wire `git push` auth deterministically inside the container. This
+      // dry-run planner never pushes, but the guard is kept identical across
+      // every runner entrypoint so the factory has one credential-setup story
+      // (idempotent; no-ops without GH_TOKEN). See ./agent-implement-issue.ts.
+      { command: 'if [ -n "$GH_TOKEN" ]; then gh auth setup-git; fi' },
+      // Install command UNCHANGED (npm-workspaces `npm ci`, not pnpm).
+      { command: 'npm ci' },
+    ],
+  },
 };
 
 const plan = await sandcastle.run({
