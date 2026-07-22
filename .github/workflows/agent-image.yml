@@ -1,0 +1,47 @@
+name: Agent image
+
+# Minimal build-only check for the sandcastle agent container image.
+# Proves the `.sandcastle/Dockerfile` (node:22-bookworm + gh + Claude Code CLI,
+# NO corepack/pnpm — connector is npm-workspaces) builds. This is NOT the
+# label→runner: the agent:implement / agent:review triggered runners are
+# agent-implement.yml / agent-review.yml.
+
+on:
+  pull_request:
+    paths:
+      - '.sandcastle/**'
+      - '.github/workflows/agent-image.yml'
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    name: Build sandcastle agent image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      # Docker is preinstalled on ubuntu-latest GitHub-hosted runners.
+      # `sandcastle docker build-image` builds .sandcastle/Dockerfile,
+      # defaulting the AGENT_UID/AGENT_GID build args to the runner's uid/gid.
+      - name: Build agent image
+        run: npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+
+      - name: Verify toolchain inside image
+        run: |
+          docker run --rm --entrypoint bash sandcastle:connector -lc '
+            set -e
+            node --version
+            npm --version
+            gh --version | head -1
+            # connector is npm-workspaces — npm (not pnpm/corepack) is the PM.
+            # mina-zkapp (o1js / bigint-buffer node-gyp) needs a C toolchain +
+            # python3; the full node:22-bookworm base already ships them.
+            python3 --version
+            g++ --version | head -1
+            test "$(whoami)" = "agent"
+            test -x /home/agent/.local/bin/claude
+          '

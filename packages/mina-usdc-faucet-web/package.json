@@ -8,6 +8,7 @@
     "build:zkapp": "node scripts/build-zkapp.mjs",
     "predev": "npm run build:zkapp",
     "dev": "vite",
+    "pretypecheck": "npm run build:zkapp",
     "typecheck": "tsc --noEmit",
     "prebuild": "npm run build:zkapp",
     "build": "tsc --noEmit && vite build",

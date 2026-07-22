@@ -1,0 +1,112 @@
+# agent:review runner — the sandcastle label→runner for reviewing one PR.
+#
+# WHAT THIS DOES (and does NOT do):
+#   Fires when a human applies the `agent:review` label to a PULL REQUEST. It
+#   runs the single-pass reviewer (`npm run sandcastle:review`) against the PR's
+#   head branch, pushing any clarity/standards refinements back onto the PR. It
+#   NEVER merges the PR and NEVER closes anything — a human still merges. This is
+#   the single-pass replacement for the old 4-round `review-round:*` loop
+#   (pr-reviewer.yml).
+#
+#   Committing this file triggers nothing: pull_request-`labeled` workflows fire
+#   only from the default branch and only when someone applies the label.
+#
+# VERIFY ON FIRST RUN — the standalone-review path:
+#   Sandcastle 0.12.0 only exercises the reviewer inside its parallel loop, on a
+#   fresh branch it just created. Running it standalone against an existing PR
+#   head branch is our interpretation (see .sandcastle/agent-review-pr.ts). On
+#   the first live run confirm: (1) the sandbox checks out the existing PR head
+#   rather than erroring on the ref, and (2) review-prompt.md's built-in
+#   {{TARGET_BRANCH}} resolves to `main` so the diff is non-empty.
+#
+# Note: label events on PRs opened from FORKS run without secrets (GitHub
+# security), so this runner only works on same-repo PRs. That is expected for
+# the internal factory flow.
+#
+# Coexists with the old pr-reviewer loop, which fires on `pull_request`
+# opened/synchronize (a different trigger) and the `review-round:*` labels —
+# disjoint from `agent:review`.
+
+name: agent:review
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    if: github.event.label.name == 'agent:review'
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - name: Evaluate guards
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          proceed=true
+
+          # The labeler must have write access — refuses drive-by review
+          # requests from outsiders.
+          perm=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" \
+            --jq '.permission' 2>/dev/null || echo "none")
+          echo "Actor ${ACTOR} permission: ${perm}"
+          case "$perm" in
+            admin|maintain|write) ;;
+            *)
+              echo "::warning::Actor ${ACTOR} lacks write permission (${perm}) — skipping."
+              proceed=false ;;
+          esac
+
+          echo "proceed=${proceed}" >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: agent-review-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Check out the PR head so the reviewer operates on the right branch.
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+
+      # npm-workspaces (NOT pnpm) — no corepack step; `npm ci` on the host just
+      # provides tsx + @ai-hero/sandcastle to launch the orchestrator.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build sandcastle agent image
+        run: npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+
+      # App token so review commits pushed back to the PR re-trigger ci.yml.
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Run sandcastle review runner
+        env:
+          SANDCASTLE_PR_NUMBER: ${{ github.event.pull_request.number }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: npm run sandcastle:review

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "fund": "node dist/index.js"
   },
   "dependencies": {

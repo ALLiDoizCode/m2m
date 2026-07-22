@@ -43,6 +43,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:unit": "jest",
     "test:coverage": "jest --coverage",
