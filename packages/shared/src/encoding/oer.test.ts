@@ -84,6 +84,14 @@ describe('encodeVarUInt', () => {
     expect(result[0]).toBe(0x88); // 0x80 | 8 = 0x88
     expect(result.slice(1)).toEqual(Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]));
   });
+
+  it('should throw InvalidPacketError for -1 instead of emitting corrupt bytes', () => {
+    expect(() => encodeVarUInt(-1n)).toThrow(InvalidPacketError);
+  });
+
+  it('should throw InvalidPacketError for a large negative value', () => {
+    expect(() => encodeVarUInt(-123456789n)).toThrow(InvalidPacketError);
+  });
 });
 
 describe('decodeVarUInt', () => {
