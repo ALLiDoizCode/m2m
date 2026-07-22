@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.41.2](https://github.com/toon-protocol/connector/compare/v3.41.1...v3.41.2) (2026-07-22)
+
+### Bug Fixes
+
+- **sandcastle:** wrap runner entrypoints in main() so CJS transform allows async body ([#392](https://github.com/toon-protocol/connector/issues/392)) ([6254d7c](https://github.com/toon-protocol/connector/commit/6254d7cda96195271bedb809cd3d2f498c9ac5bc)), closes [toon-protocol/toon-meta#178](https://github.com/toon-protocol/toon-meta/issues/178)
+
 ## [3.41.1](https://github.com/toon-protocol/connector/compare/v3.41.0...v3.41.1) (2026-07-22)
 
 ### Bug Fixes
