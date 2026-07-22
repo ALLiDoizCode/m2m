@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.41.1](https://github.com/toon-protocol/connector/compare/v3.41.0...v3.41.1) (2026-07-22)
+
+### Bug Fixes
+
+- **sandcastle:** deterministic git-push auth + fail-loud PR/push verification ([#390](https://github.com/toon-protocol/connector/issues/390)) ([c605c1d](https://github.com/toon-protocol/connector/commit/c605c1db79a6bb7ebafe9d1ec55db2b416945449)), closes [store#52](https://github.com/toon-protocol/store/issues/52) [toon-protocol/toon-meta#178](https://github.com/toon-protocol/toon-meta/issues/178) [gotcha-#7](https://github.com/toon-protocol/gotcha-/issues/7)
+
 ## [3.41.0](https://github.com/toon-protocol/connector/compare/v3.40.2...v3.41.0) (2026-07-21)
 
 ### Features
