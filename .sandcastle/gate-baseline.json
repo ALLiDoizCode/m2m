@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "repo": "connector",
+  "captured_at": "2026-07-22",
+  "captured_from": {
+    "commit": "cb4f27bb16af738fd1124f5ea1778598d8057304",
+    "branch": "main",
+    "ci_run_url": "https://github.com/toon-protocol/connector/actions/runs/29953913670",
+    "spot_check_run_url": "https://github.com/toon-protocol/connector/actions/runs/29951695547"
+  },
+  "gate_shape": {
+    "package_manager": "npm-workspaces",
+    "typecheck_debt": 0,
+    "commands": [
+      "npm run lint --workspaces --if-present",
+      "npm run typecheck",
+      "npm run build",
+      "npm run test --workspaces --if-present"
+    ],
+    "note": "typecheck and build each independently build shared -> mina-zkapp first, then run --workspaces --if-present; this hand-ordering is intentional (project references must resolve before the rest of the workspaces typecheck/build), not duplicated work to fix."
+  },
+  "method": "Two independent measurements against the same commit (cb4f27b, HEAD of main at capture time). (1) Local: ran the 4 gate commands sequentially in a fresh sandbox (npm ci, then build -> lint -> typecheck -> test, matching CLAUDE.md's documented gate order), timing each with `time`. (2) CI: read actual GitHub Actions job timestamps and logs for the equivalent jobs (Lint and Format Check, TypeScript Type Check, Build All Packages, Test Node 22.x, Test Node 22.12.0) via `gh run view <id> --json jobs` and `gh run view <id> --log`, spot-checked against a second recent main-branch run. Reproduce locally with: `npm ci && npm install @libsql/linux-x64-gnu --no-save && npm run build && npm run lint --workspaces --if-present && npm run typecheck && NODE_OPTIONS='--max-old-space-size=8192' npm run test --workspaces --if-present`.",
+  "environment": {
+    "node": "v22.23.1",
+    "npm": "10.9.8",
+    "local_sandbox_cpus": 4,
+    "local_sandbox_mem_gb": 15,
+    "ci_runner": "ubuntu-latest (GitHub-hosted)"
+  },
+  "gate_speed": {
+    "unit": "seconds",
+    "local_sequential": {
+      "build": 21.91,
+      "lint": 11.37,
+      "typecheck": 13.13,
+      "test": 591.74,
+      "total": 638.16,
+      "note": "test run with NODE_OPTIONS=--max-old-space-size=8192 --runInBand-equivalent workspace ordering per CLAUDE.md; the mina-zkapp jest suite (WASM/o1js proof compilation) is the dominant cost inside `test` (433.8s of the 591.7s)."
+    },
+    "ci_parallel_jobs": {
+      "lint_and_format_check": 61,
+      "type_check": 52,
+      "build_all_packages": 59,
+      "test_node_22_x": 753,
+      "test_node_22_12_0": 772,
+      "wall_clock_critical_path": 772,
+      "full_ci_workflow_wall_clock": 1083,
+      "note": "CI runs these 5 jobs concurrently on separate runners; the gate as experienced by a PR author is bounded by the slowest job (Test Node 22.12.0 at 772s / 12m52s), not their sum. full_ci_workflow_wall_clock is the whole CI workflow (includes non-gate jobs: security audit, container scan, Docker integration suites) and is provided for context only, not as the gate number."
+    }
+  },
+  "gate_performance": {
+    "runner_minutes": {
+      "billed": 0,
+      "note": "connector is a public repo, so GitHub Actions minutes are unmetered/free; `gh api .../actions/runs/<id>/timing` reports billable.UBUNTU.total_ms as 0 for every job. As a cost proxy (not a bill), summing the 5 gate jobs' wall-clock on the captured run gives ~45 runner-minutes (61+52+59+753+772 = 1697s)."
+    },
+    "docker_image_size": {
+      "value": null,
+      "note": "Not captured this pass -- no docker binary available in the capture sandbox. Reproduce with `npx --yes @ai-hero/sandcastle@0.12.0 docker build-image && docker images sandcastle:connector --format '{{.Size}}'` (mirrors .github/workflows/agent-image.yml, which builds .sandcastle/Dockerfile but does not report size). A follow-up performance-tuning child should capture this before attempting to shrink the image."
+    },
+    "cache_hit_rate": {
+      "value": "5/5 (100%)",
+      "method": "Grepped each gate job's Setup Node.js step for 'Cache hit for:' vs 'Cache not found' in `gh run view 29953913670 --log`, across the 5 gate-relevant jobs (Lint and Format Check, Build All Packages, TypeScript Type Check, Test Node 22.x, Test Node 22.12.0). All 5 hit the `node-cache-Linux-x64-npm-*` key (actions/setup-node's npm cache, keyed on package-lock.json). Spot-checked run 29951695547 (commit c86dee0) shows the same job-timing pattern, consistent with a warm cache."
+    }
+  },
+  "gate_correctness": {
+    "method": "Ran the full gate locally against commit cb4f27b (HEAD of main): `npm run lint --workspaces --if-present`, `npm run typecheck`, `npm run test --workspaces --if-present` (after `npm run build`). Lint error/warning counts cross-checked per workspace with `npx eslint src --ext .ts -f json`.",
+    "lint": {
+      "errors": 0,
+      "warnings": 0,
+      "workspaces_linted": ["packages/connector", "packages/mina-zkapp", "packages/shared"]
+    },
+    "typecheck": {
+      "errors": 0,
+      "workspaces_typechecked": [
+        "packages/connector",
+        "packages/mina-zkapp",
+        "packages/shared",
+        "packages/mina-usdc-faucet-web",
+        "tools/send-packet",
+        "tools/fund-peers"
+      ]
+    },
+    "test": {
+      "suites_passed": 212,
+      "suites_skipped": 19,
+      "suites_total": 231,
+      "tests_passed": 4860,
+      "tests_skipped": 183,
+      "tests_total": 5043,
+      "tests_failed": 0,
+      "by_workspace": {
+        "connector": {
+          "suites": "191 passed / 209 total (18 skipped)",
+          "tests": "4527 passed / 4707 total (180 skipped)"
+        },
+        "faucet": { "tests": "30 passed / 30 total (node --test, no suite concept)" },
+        "mina-zkapp": {
+          "suites": "15 passed / 16 total (1 skipped)",
+          "tests": "119 passed / 122 total (3 skipped)"
+        },
+        "shared": { "suites": "5 passed / 5 total", "tests": "173 passed / 173 total" },
+        "send-packet": { "suites": "1 passed / 1 total", "tests": "11 passed / 11 total" }
+      }
+    },
+    "no_false_pass_holes": {
+      "value": [],
+      "note": "connector already has 0 lint and 0 typecheck debt (confirmed above), so unlike toon-client (82 tsc errors) or toon (940 lint warnings) there is no existing violation set to freeze as an allowlist. The correctness-hardening follow-up child for this repo is 'add a no-regression guard' only, not a baseline-freeze."
+    },
+    "no_false_fail_flakiness": {
+      "value": "not measured",
+      "note": "Single-run capture; flakiness (no-false-FAIL) requires repeated runs to detect and is out of scope for this capture-baseline child. Track in a follow-up correctness child per the epic's per-repo pattern."
+    }
+  }
+}
