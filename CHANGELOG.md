@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.41.3](https://github.com/toon-protocol/connector/compare/v3.41.2...v3.41.3) (2026-07-22)
+
+### Bug Fixes
+
+- **factory:** scope .sandcastle/ as ESM so the runner can import the ESM-only engine ([#393](https://github.com/toon-protocol/connector/issues/393)) ([205921f](https://github.com/toon-protocol/connector/commit/205921fc19629955b440cb205bb26ba6ae0a63d5)), closes [#392](https://github.com/toon-protocol/connector/issues/392)
+
 ## [3.41.2](https://github.com/toon-protocol/connector/compare/v3.41.1...v3.41.2) (2026-07-22)
 
 ### Bug Fixes
