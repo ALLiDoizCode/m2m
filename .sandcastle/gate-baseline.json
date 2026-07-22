@@ -51,7 +51,7 @@
   "gate_performance": {
     "runner_minutes": {
       "billed": 0,
-      "note": "connector is a public repo, so GitHub Actions minutes are unmetered/free; `gh api .../actions/runs/<id>/timing` reports billable.UBUNTU.total_ms as 0 for every job. As a cost proxy (not a bill), summing the 5 gate jobs' wall-clock on the captured run gives ~45 runner-minutes (61+52+59+753+772 = 1697s)."
+      "note": "connector is a public repo, so GitHub Actions minutes are unmetered/free; `gh api .../actions/runs/<id>/timing` reports billable.UBUNTU.total_ms as 0 for every job. As a cost proxy (not a bill), summing the 5 gate jobs' wall-clock on the captured run gives ~28 runner-minutes (61+52+59+753+772 = 1697s)."
     },
     "docker_image_size": {
       "value": null,
