@@ -70,8 +70,8 @@ export function encodeVarUInt(value: bigint): Buffer {
     throw new InvalidPacketError(`VarUInt cannot encode negative value: ${value}`);
   }
 
-  // Values 0-127 encoded as single byte
-  if (value >= 0n && value <= 127n) {
+  // Values 0-127 encoded as single byte (non-negative guaranteed by guard above)
+  if (value <= 127n) {
     const buffer = Buffer.alloc(1);
     buffer.writeUInt8(Number(value), 0);
     return buffer;
