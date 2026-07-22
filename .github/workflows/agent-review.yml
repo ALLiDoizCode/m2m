@@ -23,9 +23,9 @@
 # security), so this runner only works on same-repo PRs. That is expected for
 # the internal factory flow.
 #
-# Coexists with the old pr-reviewer loop, which fires on `pull_request`
-# opened/synchronize (a different trigger) and the `review-round:*` labels —
-# disjoint from `agent:review`.
+# The old pr-reviewer loop (fired on `pull_request` opened/synchronize +
+# `review-round:*` labels) has been retired now that this factory has a merged
+# agent:implement proof (connector#394). This is the only PR-review automation.
 
 name: agent:review
 

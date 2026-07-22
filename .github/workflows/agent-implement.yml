@@ -25,9 +25,10 @@
 # │ itself verify-on-first-run.) Leave it unset/false for the pilot.           │
 # └───────────────────────────────────────────────────────────────────────────┘
 #
-# Coexists with the OLD loops (backlog-manager / issue-executor / pr-reviewer /
-# issue-decomposer): those fire on `agent:ready` / `agent:split` /
-# `review-round:*` — DISJOINT labels — so no issue triggers two engines.
+# The old 4-loop backlog system (backlog-manager / issue-executor / pr-reviewer /
+# issue-decomposer, which fired on `agent:ready` / `agent:split` / `review-round:*`)
+# has been retired now that this factory has a merged agent:implement proof
+# (connector#394). This is the only automation acting on labeled issues/PRs.
 
 name: agent:implement
 
@@ -151,7 +152,7 @@ jobs:
       # The engine opens the PR via this App token. A PR opened by it (unlike one
       # opened by the default GITHUB_TOKEN) triggers ci.yml, so the green gate
       # runs on the agent's PR. Requires the org/repo secrets APP_ID +
-      # APP_PRIVATE_KEY (already used by the existing issue-executor loop).
+      # APP_PRIVATE_KEY (same App used org-wide for GitHub Project/PR automation).
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v2
