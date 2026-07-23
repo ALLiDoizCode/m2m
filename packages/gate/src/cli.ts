@@ -3,7 +3,8 @@ import { resolve } from 'node:path';
 import { loadBaseline } from './baseline';
 import { evaluateCorrectnessGate } from './correctness-guard';
 import { deriveRegressionBaseline, evaluateRegressionGate } from './regression-guard';
-import { countTscErrors, sumEslintCounts, type EslintFileResult } from './parsers';
+import { countTscErrors, sumEslintCounts } from './parsers';
+import type { EslintFileResult } from './parsers';
 import type { CorrectnessSnapshot, RegressionSnapshot } from './types';
 
 const REPO_ROOT = resolve(__dirname, '../../../');
@@ -71,7 +72,8 @@ function parseNumberArg(args: string[], flag: string): number | undefined {
   if (index === -1) return undefined;
   const value = args[index + 1];
   if (value === undefined) return undefined;
-  return Number(value);
+  const parsed = Number(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
 }
 
 function runRegression(args: string[]): void {
