@@ -101,7 +101,11 @@ const hooks = {
       // shells out to `gh auth git-credential`, which reads GH_TOKEN at push
       // time. Guarded on GH_TOKEN so local dev without a token no-ops instead
       // of aborting sandbox setup (onSandboxReady failures are fatal).
-      { command: 'if [ -n "$GH_TOKEN" ]; then gh auth setup-git; fi' },
+      {
+        command:
+          'if [ -n "$GH_TOKEN" ]; then gh auth setup-git; ' +
+          "git config --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true; fi",
+      },
       // Install command is UNCHANGED — connector uses npm-workspaces (`npm ci`),
       // never pnpm. Only the auth line above is prepended.
       { command: 'npm ci' },
@@ -187,20 +191,45 @@ async function main() {
       });
       console.log('\nMerge phase complete.');
     } else {
-      // DEFAULT path: push the branch and open a PR for a human to review+merge.
+      // DEFAULT path: publish the branch and open a PR for a human to review+merge.
       // Nothing is merged and the issue is NOT closed here.
-      console.log('\nPR mode — pushing branch and opening a PR for human review.');
-      await sandbox.run({
-        name: 'open-pr',
-        maxIterations: 1,
-        agent: sandcastle.claudeCode('claude-sonnet-5'),
-        promptFile: './.sandcastle/open-pr-prompt.md',
-        promptArgs: {
-          TASK_ID: issueNumber,
-          ISSUE_TITLE: issueTitle,
-          BRANCH: branch,
-        },
+      //
+      // DETERMINISTIC (no agent) — see toon-meta#235. The former open-pr agent
+      // (open-pr-prompt.md) reported COMPLETE without reliably running the push
+      // (only 4/19 PRs landed on the 2026-07-23 gate re-run wave). git push +
+      // gh pr create are pure plumbing: push from INSIDE the sandbox (commits live
+      // there; gh auth setup-git wired the credential helper in onSandboxReady),
+      // open the PR from the authenticated HOST. sandbox.exec() surfaces a
+      // non-zero exitCode (it does NOT throw) — check it and fail loud.
+      console.log("\nPR mode — pushing branch and opening a PR for human review.");
+
+      const push = await sandbox.exec(`git push -u origin ${branch}`, {
+        onLine: (line) => console.log(`  [push] ${line}`),
       });
+      if (push.exitCode !== 0) {
+        throw new Error(
+          `git push of '${branch}' failed (exit ${push.exitCode}).\n${push.stderr}`,
+        );
+      }
+
+      const alreadyOpen = JSON.parse(
+        execFileSync(
+          "gh",
+          ["pr", "list", "--head", branch, "--state", "open", "--json", "number"],
+          { encoding: "utf8" },
+        ),
+      ) as Array<{ number: number }>;
+      if (alreadyOpen.length === 0) {
+        const body =
+          "Produced by the sandcastle `agent:implement` runner; awaiting human " +
+          `review.\n\nPart of #${issueNumber}\n\n` +
+          "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+        execFileSync(
+          "gh",
+          ["pr", "create", "--base", "main", "--head", branch, "--title", issueTitle, "--body", body],
+          { stdio: "inherit" },
+        );
+      }
       // FAIL LOUD. The open-pr phase logs COMPLETE from the prompt regardless of
       // whether the in-sandbox `git push` / `gh pr create` actually succeeded, so
       // we must NOT trust it. Verify from the HOST (whose `gh` is authenticated
