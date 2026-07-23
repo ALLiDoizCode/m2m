@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.41.4](https://github.com/toon-protocol/connector/compare/v3.41.3...v3.41.4) (2026-07-23)
+
+### Bug Fixes
+
+- **sandcastle:** deterministic push + unset checkout http.extraheader ([#401](https://github.com/toon-protocol/connector/issues/401)) ([3750f40](https://github.com/toon-protocol/connector/commit/3750f40ada9b62b0b10a08ca3ec4e4e67970dba2)), closes [toon-meta#235](https://github.com/toon-protocol/toon-meta/issues/235) [toon-meta#236](https://github.com/toon-protocol/toon-meta/issues/236) [#237](https://github.com/toon-protocol/connector/issues/237)
+
 ## [3.41.3](https://github.com/toon-protocol/connector/compare/v3.41.2...v3.41.3) (2026-07-22)
 
 ### Bug Fixes
