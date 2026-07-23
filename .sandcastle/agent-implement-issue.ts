@@ -201,33 +201,42 @@ async function main() {
       // there; gh auth setup-git wired the credential helper in onSandboxReady),
       // open the PR from the authenticated HOST. sandbox.exec() surfaces a
       // non-zero exitCode (it does NOT throw) — check it and fail loud.
-      console.log("\nPR mode — pushing branch and opening a PR for human review.");
+      console.log('\nPR mode — pushing branch and opening a PR for human review.');
 
       const push = await sandbox.exec(`git push -u origin ${branch}`, {
         onLine: (line) => console.log(`  [push] ${line}`),
       });
       if (push.exitCode !== 0) {
-        throw new Error(
-          `git push of '${branch}' failed (exit ${push.exitCode}).\n${push.stderr}`,
-        );
+        throw new Error(`git push of '${branch}' failed (exit ${push.exitCode}).\n${push.stderr}`);
       }
 
       const alreadyOpen = JSON.parse(
         execFileSync(
-          "gh",
-          ["pr", "list", "--head", branch, "--state", "open", "--json", "number"],
-          { encoding: "utf8" },
-        ),
+          'gh',
+          ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number'],
+          { encoding: 'utf8' }
+        )
       ) as Array<{ number: number }>;
       if (alreadyOpen.length === 0) {
         const body =
-          "Produced by the sandcastle `agent:implement` runner; awaiting human " +
+          'Produced by the sandcastle `agent:implement` runner; awaiting human ' +
           `review.\n\nPart of #${issueNumber}\n\n` +
-          "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+          '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
         execFileSync(
-          "gh",
-          ["pr", "create", "--base", "main", "--head", branch, "--title", issueTitle, "--body", body],
-          { stdio: "inherit" },
+          'gh',
+          [
+            'pr',
+            'create',
+            '--base',
+            'main',
+            '--head',
+            branch,
+            '--title',
+            issueTitle,
+            '--body',
+            body,
+          ],
+          { stdio: 'inherit' }
         );
       }
       // FAIL LOUD. The open-pr phase logs COMPLETE from the prompt regardless of
