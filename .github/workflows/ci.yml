@@ -396,6 +396,42 @@ jobs:
           echo ""
           echo "All type checks passed! ✓"
 
+  # No-false-PASS guard (issue #398 / ADR-0001): fails only on lint/typecheck
+  # violations that exceed the frozen per-workspace allowlist in
+  # .sandcastle/gate-baseline.json, not on the live thresholds this job
+  # happens to run with. See packages/gate.
+  gate-correctness:
+    name: Gate Correctness Guard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+
+      - name: Install dependencies with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: npm ci --ignore-scripts --verbose
+
+      - name: Build shared and mina-zkapp packages (required for typecheck)
+        run: |
+          npm run build --workspace=packages/shared
+          npm run build --workspace=packages/mina-zkapp
+
+      - name: Build gate-check tool
+        run: npm run build --workspace=packages/gate
+
+      - name: Run correctness guard against frozen baseline
+        run: node packages/gate/dist/cli.js correctness
+
   rfc-links:
     name: Verify RFC Links
     runs-on: ubuntu-latest
@@ -996,6 +1032,7 @@ jobs:
         test,
         build,
         type-check,
+        gate-correctness,
         security,
         rfc-links,
         solana-program,
@@ -1021,6 +1058,7 @@ jobs:
           echo "  Tests: ${{ needs.test.result }}"
           echo "  Build: ${{ needs.build.result }}"
           echo "  Type Check: ${{ needs.type-check.result }}"
+          echo "  Gate Correctness Guard: ${{ needs.gate-correctness.result }}"
           echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Solana Integration: ${{ needs.solana-integration.result }}"
@@ -1040,6 +1078,7 @@ jobs:
              [[ "${{ needs.test.result }}" == "failure" ]] || \
              [[ "${{ needs.build.result }}" == "failure" ]] || \
              [[ "${{ needs.type-check.result }}" == "failure" ]] || \
+             [[ "${{ needs.gate-correctness.result }}" == "failure" ]] || \
              [[ "${{ needs.solana-program.result }}" == "failure" ]]; then
             echo "❌ CI Pipeline FAILED"
             echo ""

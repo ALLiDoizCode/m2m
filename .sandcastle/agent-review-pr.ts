@@ -124,9 +124,7 @@ async function main() {
         onLine: (line) => console.log(`  [push] ${line}`),
       });
       if (push.exitCode !== 0) {
-        throw new Error(
-          `git push of '${headRef}' failed (exit ${push.exitCode}).\n${push.stderr}`,
-        );
+        throw new Error(`git push of '${headRef}' failed (exit ${push.exitCode}).\n${push.stderr}`);
       }
 
       // FAIL LOUD (analogous to agent-implement-issue.ts). The push-review phase

@@ -1,0 +1,52 @@
+name: Gate No-Regression
+
+# Speed/performance no-regression guard (issue #398 / ADR-0001). Runs after
+# CI finishes on main, measures that run's own gate-job timings via the
+# Actions API, and fails if wall-clock or runner-minutes regress beyond the
+# frozen numbers in .sandcastle/gate-baseline.json. Deliberately separate
+# from ci.yml: the gate jobs' own durations aren't known until they finish,
+# so this can't run as a job inside the same workflow run it measures.
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+
+jobs:
+  gate-regression:
+    name: Gate No-Regression Guard
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --verbose
+
+      - name: Build gate-check tool
+        run: npm run build --workspace=packages/gate
+
+      - name: Measure this run's gate-job timings
+        id: measure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node packages/gate/dist/measure-run.js "${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Run regression guard against frozen baseline
+        run: |
+          node packages/gate/dist/cli.js regression \
+            --wall-clock-seconds "${{ steps.measure.outputs.wall_clock_seconds }}" \
+            --runner-minutes "${{ steps.measure.outputs.runner_minutes }}"
