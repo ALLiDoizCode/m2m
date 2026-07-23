@@ -483,6 +483,28 @@ describeDocker('Admin API Surface E2E (every inventoried endpoint)', () => {
     });
   });
 
+  describe('AdminServer /admin/dashboard endpoint', () => {
+    it('GET /admin/dashboard returns 200 with the operator dashboard HTML and no-store header', async () => {
+      const entry = ADMIN_API_INVENTORY.find(
+        (e) => e.server === 'AdminServer' && e.path === '/dashboard' && e.method === 'GET'
+      )!;
+      markTested(entry);
+
+      const { status, headers, body } = await fetchRaw(`${BASE_URL.AdminServer}/admin/dashboard`);
+
+      expect(status).toBe(200);
+      const contentType = headers.get('content-type') || '';
+      expect(contentType).toContain('text/html');
+      expect(body).toContain('<!doctype html>');
+      // Same-origin polling targets must be present so the page finds its data.
+      expect(body).toContain("apiFetch('./metrics.json')");
+      expect(body).toContain("apiFetch('./earnings.json')");
+
+      const cacheControl = headers.get('cache-control') || headers.get('Cache-Control');
+      expect(cacheControl?.toLowerCase()).toBe('no-store');
+    });
+  });
+
   describe('AdminServer /admin/channels endpoints (503 expected — no ChannelManager)', () => {
     it('GET /admin/channels returns 503 (ChannelManager not configured)', async () => {
       const entry = ADMIN_API_INVENTORY.find(
