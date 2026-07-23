@@ -67,7 +67,12 @@
     "lint": {
       "errors": 0,
       "warnings": 0,
-      "workspaces_linted": ["packages/connector", "packages/mina-zkapp", "packages/shared"]
+      "workspaces_linted": ["packages/connector", "packages/mina-zkapp", "packages/shared"],
+      "by_workspace": {
+        "packages/connector": { "errors": 0, "warnings": 0 },
+        "packages/mina-zkapp": { "errors": 0, "warnings": 0 },
+        "packages/shared": { "errors": 0, "warnings": 0 }
+      }
     },
     "typecheck": {
       "errors": 0,
@@ -78,7 +83,15 @@
         "packages/mina-usdc-faucet-web",
         "tools/send-packet",
         "tools/fund-peers"
-      ]
+      ],
+      "by_workspace": {
+        "packages/connector": 0,
+        "packages/mina-zkapp": 0,
+        "packages/shared": 0,
+        "packages/mina-usdc-faucet-web": 0,
+        "tools/send-packet": 0,
+        "tools/fund-peers": 0
+      }
     },
     "test": {
       "suites_passed": 212,
