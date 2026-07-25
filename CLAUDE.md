@@ -133,10 +133,11 @@ When the user asks about Interledger protocols or RFCs, **immediately activate**
 
 ## Deployment status
 
-There is **no production or staging deploy target yet.** `.github/workflows/cd.yml`
-(`appleboy/ssh-action`) fails on every push to `main` with `missing server host`
-because the `STAGING_HOST` and `PRODUCTION_HOST` secrets are intentionally unset.
-**This is expected, not a regression** — do not flag the failing CD run as quality
-drift or open issues for it until a real deploy target is configured. (On-chain
-contract deployment for Solana/Mina is unrelated — see "Chain-Specific Build &
-Deploy" above.)
+There is **no production or staging deploy target yet.** The deploy path is
+`.github/workflows/devnet-deploy.yml` plus the `deploy/` bundle, driven by the
+`LINODE_CLI_TOKEN` secret (the Linode / baked-image model). A prior generic
+SSH-based CD workflow was removed (issue #407) because it assumed secrets
+that never existed at repo or org scope and failed on every push to `main`.
+If staging is wanted later, author it fresh against the Linode/baked-image
+model above, not a resurrected SSH workflow. (On-chain contract deployment
+for Solana/Mina is unrelated — see "Chain-Specific Build & Deploy" above.)
