@@ -817,6 +817,12 @@ version = "0.1.0"
 [[package]]
 name = "connector-signer"
 version = "0.1.0"
+dependencies = [
+ "libsecp256k1",
+ "rand 0.7.3",
+ "sha3",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "console"
