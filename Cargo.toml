@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/solana-program",
+    "crates/connector-domain",
+    "crates/connector-runtime",
+    "crates/connector-settlement-evm",
+    "crates/connector-settlement-solana",
+    "crates/connector-signer",
+    "crates/connector-client-edge",
+    "crates/connector-operator",
+    "crates/connector-cli",
+    "crates/connector-bin",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"

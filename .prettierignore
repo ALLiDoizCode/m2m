@@ -15,7 +15,7 @@ packages/contracts/broadcast
 # its format is owned by anvil, so it must not be hand-/prettier-reformatted.
 packages/contracts/anvil-state.json
 _bmad-output
-packages/solana-program/target
+target
 data
 .devbox
 devbox.lock

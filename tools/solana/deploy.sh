@@ -51,7 +51,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PROGRAM_DIR="$PROJECT_ROOT/packages/solana-program"
-PROGRAM_SO="$PROGRAM_DIR/target/deploy/payment_channel.so"
+# packages/solana-program is a member of the root Cargo workspace, so build
+# output lands in the workspace-root target/, not a per-crate one.
+PROGRAM_SO="$PROJECT_ROOT/target/deploy/payment_channel.so"
 PROGRAM_ID_FILE="$SCRIPT_DIR/program-id.json"
 
 # Network RPC URLs
