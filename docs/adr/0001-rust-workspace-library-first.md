@@ -9,15 +9,22 @@ silently rot back into a god object the way module boundaries in one TypeScript 
 
 ## The shape
 
-Five crates:
+Crate names track the [glossary](../../CONTEXT.md) rather than generic layer names:
 
-- `connector-core` — domain types and rules. No async, no network, no chain SDKs.
-- `connector` — the runtime. `pub struct Connector` plus its ports. Chains are Cargo
-  features (`evm`, `solana`) behind a `SettlementBackend` trait.
-- `connector-api` — the [client edge](../../CONTEXT.md), exposed as
+- `connector-domain` — domain types and rules. No async, no network, no chain SDKs.
+- `connector-runtime` — `pub struct Connector` plus its ports.
+- `connector-settlement-evm`, `connector-settlement-solana` — `SettlementBackend`
+  implementations, selectable so a build can exclude a chain.
+- `connector-signer` — signing and custody.
+- `connector-client-edge` — the client edge, exposed as
   `pub fn router(Arc<Connector>) -> axum::Router`.
-- `connector-admin` — the operator surface, likewise a `Router`.
-- `connectord` — the binary. Loads config, builds a `Connector`, merges routers, serves.
+- `connector-operator` — the operator surface, likewise a `Router`.
+- `connector-cli`, `connector-bin` — the CLI and the binary. The binary loads config, builds a
+  `Connector`, merges routers, and serves.
+
+The existing Solana program joins the workspace as a member at its current path rather than
+being relocated, which achieves one workspace and one lockfile without churning every script
+that references its build output.
 
 ## Consequences
 
