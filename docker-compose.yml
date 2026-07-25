@@ -219,7 +219,7 @@ services:
       # deploy fee-payer (the beeman image has no solana-keygen). The program id
       # stays deterministic via the mounted program keypair in /programs.
       # See infra/solana/entrypoint.sh.
-      - ./packages/solana-program/target/deploy:/programs:ro
+      - ./target/deploy:/programs:ro
     # Validator ledger (genesis keypairs + state) lives in the container's
     # writable layer (DISK), not tmpfs. A RAM-backed tmpfs ledger fills under the
     # accounts/snapshot growth and the validator FREEZES after a few thousand

@@ -87,8 +87,8 @@ write_endpoints() {
   local sol_program="" sol_mint=""
   # Best-effort: derive the deployed program id + USDC mint from their keypairs.
   if command -v solana-keygen >/dev/null 2>&1; then
-    [ -f "$ROOT/packages/solana-program/target/deploy/payment_channel-keypair.json" ] && \
-      sol_program="$(solana-keygen pubkey "$ROOT/packages/solana-program/target/deploy/payment_channel-keypair.json" 2>/dev/null || true)"
+    [ -f "$ROOT/target/deploy/payment_channel-keypair.json" ] && \
+      sol_program="$(solana-keygen pubkey "$ROOT/target/deploy/payment_channel-keypair.json" 2>/dev/null || true)"
     [ -f "$ROOT/infra/solana/usdc-mint.json" ] && \
       sol_mint="$(solana-keygen pubkey "$ROOT/infra/solana/usdc-mint.json" 2>/dev/null || true)"
   fi

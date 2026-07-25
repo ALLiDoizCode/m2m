@@ -78,7 +78,7 @@ make solana-build
 cd packages/solana-program && cargo build-sbf
 ```
 
-This produces the compiled BPF binary at `packages/solana-program/target/deploy/payment_channel.so` (~95KB).
+This produces the compiled BPF binary at `target/deploy/payment_channel.so` (~95KB) -- `packages/solana-program` is a member of the repository's root Cargo workspace, so build output lands in the workspace-root `target/`, not a per-crate one.
 
 ### Deploy to Devnet
 
@@ -315,7 +315,7 @@ make solana-build
 # Or: cd packages/solana-program && cargo build-sbf
 ```
 
-Verify the binary at `packages/solana-program/target/deploy/payment_channel.so`.
+Verify the binary at `target/deploy/payment_channel.so` (workspace-root `target/`, per the note above).
 
 ### Deploying an Upgrade
 

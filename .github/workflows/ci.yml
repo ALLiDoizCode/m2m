@@ -35,6 +35,8 @@ jobs:
               - 'infra/solana/**'
               - 'docker-compose.yml'
               - '.github/workflows/ci.yml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             mina:
               - 'packages/connector/src/settlement/mina-**'
               - 'packages/connector/src/settlement/provider/mina-**'
@@ -431,6 +433,48 @@ jobs:
 
       - name: Run correctness guard against frozen baseline
         run: node packages/gate/dist/cli.js correctness
+
+  # Gate for the Cargo workspace (crates/*, packages/solana-program). Runs
+  # unconditionally, like the npm gate, so a newly added crate is covered by
+  # build/test/clippy/fmt without editing this job. payment-channel
+  # (packages/solana-program) is excluded from test/clippy: it needs the
+  # Solana SBF toolchain to test meaningfully (covered by the solana-program
+  # job below) and pre-dates this gate's warnings-denied clippy policy.
+  rust-gate:
+    name: Rust Workspace Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo registry and workspace target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-gate-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            rust-gate-${{ runner.os }}-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Run tests
+        run: cargo test --workspace --exclude payment-channel
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings
 
   rfc-links:
     name: Verify RFC Links
@@ -849,8 +893,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            packages/solana-program/target
-          key: solana-program-${{ runner.os }}-${{ hashFiles('packages/solana-program/Cargo.lock') }}
+            target
+          key: solana-program-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             solana-program-${{ runner.os }}-
 
@@ -1033,6 +1077,7 @@ jobs:
         build,
         type-check,
         gate-correctness,
+        rust-gate,
         security,
         rfc-links,
         solana-program,
@@ -1059,6 +1104,7 @@ jobs:
           echo "  Build: ${{ needs.build.result }}"
           echo "  Type Check: ${{ needs.type-check.result }}"
           echo "  Gate Correctness Guard: ${{ needs.gate-correctness.result }}"
+          echo "  Rust Workspace Gate: ${{ needs.rust-gate.result }}"
           echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Solana Integration: ${{ needs.solana-integration.result }}"
@@ -1079,6 +1125,7 @@ jobs:
              [[ "${{ needs.build.result }}" == "failure" ]] || \
              [[ "${{ needs.type-check.result }}" == "failure" ]] || \
              [[ "${{ needs.gate-correctness.result }}" == "failure" ]] || \
+             [[ "${{ needs.rust-gate.result }}" == "failure" ]] || \
              [[ "${{ needs.solana-program.result }}" == "failure" ]]; then
             echo "❌ CI Pipeline FAILED"
             echo ""

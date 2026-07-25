@@ -35,10 +35,9 @@ import { SolanaPaymentChannelProvider } from '../../src/settlement/provider/sola
 // Test Gating: skip if program .so not built
 // ---------------------------------------------------------------------------
 
-const PROGRAM_SO_PATH = path.resolve(
-  __dirname,
-  '../../../../packages/solana-program/target/deploy/payment_channel.so'
-);
+// packages/solana-program is a member of the root Cargo workspace, so build
+// output lands in the workspace-root target/, not a per-crate one.
+const PROGRAM_SO_PATH = path.resolve(__dirname, '../../../../target/deploy/payment_channel.so');
 const PROGRAM_SO_EXISTS = fs.existsSync(PROGRAM_SO_PATH);
 const describeBankrun = PROGRAM_SO_EXISTS ? describe : describe.skip;
 

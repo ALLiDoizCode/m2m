@@ -1191,7 +1191,7 @@ describe('SolanaPaymentChannelSDK - Integration Tests (Story 33.4)', () => {
   // Note: These tests require:
   // 1. solana-bankrun installed as dev dependency
   // 2. cargo build-sbf run in packages/solana-program/
-  // 3. payment_channel.so available at packages/solana-program/target/deploy/
+  // 3. payment_channel.so available at target/deploy/ (repo-root workspace target)
   // Uses TEST_CHALLENGE_DURATION (300n = 5 minutes) for channel lifecycle tests.
 
   /** SDK instance created per-test by integration setup (when not skipped) */
