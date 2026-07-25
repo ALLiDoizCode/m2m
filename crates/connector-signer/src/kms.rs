@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
-use libsecp256k1::{Message, PublicKey, SecretKey};
-use rand::rngs::OsRng;
+use libsecp256k1::{PublicKey, SecretKey};
 
+use crate::crypto::{generate_keypair, sign_digest};
 use crate::error::SignerError;
 use crate::signer::{PublicKeyBytes, Signature, Signer};
 
@@ -107,29 +107,9 @@ impl InMemoryKmsBackend {
     }
 }
 
-fn generate_keypair() -> (SecretKey, PublicKey) {
-    let mut rng = OsRng;
-    let secret = SecretKey::random(&mut rng);
-    let public = PublicKey::from_secret_key(&secret);
-    (secret, public)
-}
-
 impl KmsBackend for InMemoryKmsBackend {
     fn sign(&self, key_id: &str, digest: &[u8; 32]) -> Result<Signature, SignerError> {
-        self.with_key(key_id, |key| {
-            let message = Message::parse(digest);
-            let (sig, recovery_id) = libsecp256k1::sign(&message, &key.secret);
-            let serialized = sig.serialize();
-            let mut r = [0u8; 32];
-            let mut s = [0u8; 32];
-            r.copy_from_slice(&serialized[..32]);
-            s.copy_from_slice(&serialized[32..]);
-            Signature {
-                r,
-                s,
-                recovery_id: recovery_id.into(),
-            }
-        })
+        self.with_key(key_id, |key| sign_digest(&key.secret, digest))
     }
 
     fn public_key(&self, key_id: &str) -> Result<PublicKeyBytes, SignerError> {

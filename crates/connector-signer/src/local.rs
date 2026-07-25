@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
-use libsecp256k1::{Message, PublicKey, SecretKey};
-use rand::rngs::OsRng;
+use libsecp256k1::{PublicKey, SecretKey};
 
+use crate::crypto::{generate_keypair, sign_digest};
 use crate::error::SignerError;
 use crate::signer::{PublicKeyBytes, Signature, Signer};
 
@@ -61,13 +61,6 @@ impl LocalSigner {
     }
 }
 
-fn generate_keypair() -> (SecretKey, PublicKey) {
-    let mut rng = OsRng;
-    let secret = SecretKey::random(&mut rng);
-    let public = PublicKey::from_secret_key(&secret);
-    (secret, public)
-}
-
 impl Signer for LocalSigner {
     fn key_id(&self) -> String {
         self.active
@@ -88,18 +81,7 @@ impl Signer for LocalSigner {
 
     fn sign(&self, digest: &[u8; 32]) -> Result<Signature, SignerError> {
         let guard = self.active.read().expect("LocalSigner lock poisoned");
-        let message = Message::parse(digest);
-        let (sig, recovery_id) = libsecp256k1::sign(&message, &guard.secret);
-        let serialized = sig.serialize();
-        let mut r = [0u8; 32];
-        let mut s = [0u8; 32];
-        r.copy_from_slice(&serialized[..32]);
-        s.copy_from_slice(&serialized[32..]);
-        Ok(Signature {
-            r,
-            s,
-            recovery_id: recovery_id.into(),
-        })
+        Ok(sign_digest(&guard.secret, digest))
     }
 
     fn rotate(&self) -> Result<String, SignerError> {

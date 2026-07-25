@@ -13,6 +13,7 @@
 //! watermarks and signature verification on the packet plane.
 
 mod address;
+mod crypto;
 mod error;
 mod kms;
 mod local;
