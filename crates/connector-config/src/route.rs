@@ -55,6 +55,17 @@ pub struct StaticRoute {
 }
 
 impl StaticRoute {
+    /// Construct and fully validate a single static route directly -- the
+    /// same validation [`resolve_routes`] applies, exposed for a caller that
+    /// already has a prefix and handler URL in hand (tests, and any future
+    /// operator-surface route creation) rather than a whole config file.
+    pub fn new(
+        prefix: impl Into<String>,
+        handler_url: impl Into<String>,
+    ) -> Result<StaticRoute, ConfigError> {
+        build_route(prefix.into(), handler_url.into())
+    }
+
     /// The destination prefix this route terminates.
     pub fn prefix(&self) -> &str {
         &self.prefix
@@ -159,6 +170,15 @@ mod tests {
             name: name.to_string(),
             handler_url: handler_url.to_string(),
         }
+    }
+
+    #[test]
+    fn static_route_new_validates_like_resolve_routes() {
+        let route = StaticRoute::new("g.example.app", "http://localhost:4000").expect("new");
+        assert_eq!(route.prefix(), "g.example.app");
+
+        let result = StaticRoute::new("g..app", "http://localhost:4000");
+        assert!(matches!(result, Err(ConfigError::InvalidAddress { .. })));
     }
 
     #[test]
