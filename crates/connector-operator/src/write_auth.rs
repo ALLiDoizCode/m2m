@@ -152,11 +152,8 @@ pub(crate) fn authenticate_write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rfc9421::{
-        build_signature_base, compute_content_digest, keyid_hex, serialize_signature_params,
-        SignatureParams, COVERED_COMPONENTS, SIGNATURE_ALG,
-    };
-    use ed25519_dalek::{ExpandedSecretKey, Keypair};
+    use crate::rfc9421::{keyid_hex, sign_request};
+    use ed25519_dalek::Keypair;
     use rand::rngs::OsRng;
 
     fn keypair() -> Keypair {
@@ -170,22 +167,7 @@ mod tests {
         body: &[u8],
         expires: u64,
     ) -> (String, String, String) {
-        let content_digest = compute_content_digest(body);
-        let params = SignatureParams {
-            created: 1_000,
-            expires: Some(expires),
-            keyid: keyid_hex(keypair),
-            alg: Some(SIGNATURE_ALG.to_string()),
-        };
-        let base = build_signature_base(method, path, &content_digest, &params);
-        let expanded = ExpandedSecretKey::from(&keypair.secret);
-        let signature = expanded.sign(base.as_bytes(), &keypair.public);
-        let signature_input = format!(
-            "sig1={}",
-            serialize_signature_params(COVERED_COMPONENTS, &params)
-        );
-        let sig_value = format!("sig1=:{}:", BASE64.encode(signature.to_bytes()));
-        (signature_input, sig_value, content_digest)
+        sign_request(keypair, method, path, body, 1_000, Some(expires))
     }
 
     #[test]

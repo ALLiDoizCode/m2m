@@ -337,14 +337,9 @@ mod tests {
     /// `tower::ServiceExt::oneshot`.
     mod write_authentication {
         use super::*;
-        use crate::rfc9421::{
-            build_signature_base, compute_content_digest, keyid_hex, serialize_signature_params,
-            SignatureParams, COVERED_COMPONENTS, SIGNATURE_ALG,
-        };
-        use base64::engine::general_purpose::STANDARD as BASE64;
-        use base64::Engine;
+        use crate::rfc9421::{keyid_hex, sign_request};
         use connector_domain::{derive_condition, RejectCode};
-        use ed25519_dalek::{ExpandedSecretKey, Keypair};
+        use ed25519_dalek::Keypair;
         use rand::rngs::OsRng;
 
         // An arbitrary preimage, used only to derive a well-formed,
@@ -371,22 +366,7 @@ mod tests {
         /// Sign an OER-encoded write body bound for `/packets`, returning
         /// the three headers a caller presents.
         fn sign(keypair: &Keypair, body: &[u8], expires: u64) -> (String, String, String) {
-            let digest = compute_content_digest(body);
-            let params = SignatureParams {
-                created: 1_000,
-                expires: Some(expires),
-                keyid: keyid_hex(keypair),
-                alg: Some(SIGNATURE_ALG.to_string()),
-            };
-            let base = build_signature_base("POST", "/packets", &digest, &params);
-            let expanded = ExpandedSecretKey::from(&keypair.secret);
-            let signature = expanded.sign(base.as_bytes(), &keypair.public);
-            let sig_input = format!(
-                "sig1={}",
-                serialize_signature_params(COVERED_COMPONENTS, &params)
-            );
-            let sig_header = format!("sig1=:{}:", BASE64.encode(signature.to_bytes()));
-            (sig_input, sig_header, digest)
+            sign_request(keypair, "POST", "/packets", body, 1_000, Some(expires))
         }
 
         fn packets_request(

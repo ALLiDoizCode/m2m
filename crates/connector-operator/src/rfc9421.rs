@@ -296,6 +296,37 @@ pub(crate) fn keyid_hex(keypair: &ed25519_dalek::Keypair) -> String {
         .collect()
 }
 
+/// Sign a well-formed write request, returning the three headers a
+/// caller needs (`signature-input`, `signature`, `content-digest`).
+/// Shared by every test across this crate that needs to construct a
+/// validly-signed request.
+#[cfg(test)]
+pub(crate) fn sign_request(
+    keypair: &ed25519_dalek::Keypair,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    created: u64,
+    expires: Option<u64>,
+) -> (String, String, String) {
+    let content_digest = compute_content_digest(body);
+    let params = SignatureParams {
+        created,
+        expires,
+        keyid: keyid_hex(keypair),
+        alg: Some(SIGNATURE_ALG.to_string()),
+    };
+    let base = build_signature_base(method, path, &content_digest, &params);
+    let expanded = ed25519_dalek::ExpandedSecretKey::from(&keypair.secret);
+    let signature = expanded.sign(base.as_bytes(), &keypair.public);
+    let signature_input = format!(
+        "sig1={}",
+        serialize_signature_params(COVERED_COMPONENTS, &params)
+    );
+    let sig_value = format!("sig1=:{}:", BASE64.encode(signature.to_bytes()));
+    (signature_input, sig_value, content_digest)
+}
+
 fn parse_content_digest(value: &str) -> Option<(String, String)> {
     let value = value.trim();
     let eq = value.find('=')?;
@@ -477,34 +508,6 @@ mod tests {
 
     fn keypair() -> Keypair {
         Keypair::generate(&mut OsRng)
-    }
-
-    /// Sign a well-formed write request, returning the three headers a
-    /// caller needs (`signature-input`, `signature`, `content-digest`).
-    fn sign_request(
-        keypair: &Keypair,
-        method: &str,
-        path: &str,
-        body: &[u8],
-        created: u64,
-        expires: Option<u64>,
-    ) -> (String, String, String) {
-        let content_digest = compute_content_digest(body);
-        let params = SignatureParams {
-            created,
-            expires,
-            keyid: keyid_hex(keypair),
-            alg: Some(SIGNATURE_ALG.to_string()),
-        };
-        let base = build_signature_base(method, path, &content_digest, &params);
-        let expanded = ExpandedSecretKey::from(&keypair.secret);
-        let signature = expanded.sign(base.as_bytes(), &keypair.public);
-        let signature_input = format!(
-            "sig1={}",
-            serialize_signature_params(COVERED_COMPONENTS, &params)
-        );
-        let sig_value = format!("sig1=:{}:", BASE64.encode(signature.to_bytes()));
-        (signature_input, sig_value, content_digest)
     }
 
     fn allowlist_of(keypair: &Keypair) -> HashSet<[u8; 32]> {
