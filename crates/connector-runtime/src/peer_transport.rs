@@ -150,12 +150,16 @@ mod tests {
     use crate::clock::TestClock;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
+    use connector_domain::derive_condition;
+
+    const FULFILLMENT: [u8; 32] = [7u8; 32];
 
     fn prepare(destination: &str) -> Prepare {
         Prepare {
             amount: 0,
-            expires_at: Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            execution_condition: [0u8; 32],
+            // Comfortably after `test_clock()`'s instant (2030-01-01).
+            expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: derive_condition(&FULFILLMENT),
             destination: destination.to_string(),
             data: b"hello".to_vec(),
         }
@@ -175,6 +179,7 @@ mod tests {
             route.handler_url(),
             AppOutcome::Delivered {
                 data: b"delivered by the peer".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let peer = Arc::new(Connector::new(
@@ -194,7 +199,7 @@ mod tests {
         assert_eq!(
             response,
             PacketResponse::Fulfill(connector_domain::Fulfill {
-                fulfillment: [0u8; 32],
+                fulfillment: FULFILLMENT,
                 data: b"delivered by the peer".to_vec(),
             })
         );
@@ -254,6 +259,7 @@ mod tests {
             route.handler_url(),
             AppOutcome::Delivered {
                 data: b"ok".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let peer = Arc::new(Connector::new(

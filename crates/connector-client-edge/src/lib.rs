@@ -63,17 +63,20 @@ mod tests {
     use axum::http::Request;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::{Fulfill, Reject};
+    use connector_domain::{derive_condition, Fulfill, Reject};
     use connector_runtime::{
         AppOutcome, FakeAppClient, InProcessPeerTransport, PeerRoute, TestClock,
     };
     use tower::ServiceExt;
 
+    const FULFILLMENT: [u8; 32] = [7u8; 32];
+
     fn sample_prepare(destination: &str) -> Prepare {
         Prepare {
             amount: 0,
-            expires_at: Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            execution_condition: [0u8; 32],
+            // Comfortably after `test_clock()`'s instant (2030-01-01).
+            expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: derive_condition(&FULFILLMENT),
             destination: destination.to_string(),
             data: b"hello app".to_vec(),
         }
@@ -100,6 +103,7 @@ mod tests {
             route.handler_url(),
             AppOutcome::Delivered {
                 data: b"app said yes".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let connector = Arc::new(Connector::new(
@@ -226,6 +230,7 @@ mod tests {
             second_hop_route.handler_url(),
             AppOutcome::Delivered {
                 data: b"delivered by the second connector".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let second_hop = Arc::new(Connector::new(
@@ -272,6 +277,7 @@ mod tests {
             second_hop_route.handler_url(),
             AppOutcome::Delivered {
                 data: b"delivered by the second connector".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let second_hop = Arc::new(Connector::new(
