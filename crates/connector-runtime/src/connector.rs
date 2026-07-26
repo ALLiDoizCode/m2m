@@ -7,6 +7,7 @@ use connector_domain::{select_route, Fulfill, PacketResponse, Prepare, Reject, R
 
 use crate::app_client::{AppClient, AppOutcome};
 use crate::clock::Clock;
+use crate::operator_view::{ChannelView, ClaimView, ExposureView, PeerView, RouteView};
 use crate::peer_transport::PeerTransport;
 use crate::route::PeerRoute;
 
@@ -100,6 +101,41 @@ impl Connector {
                 data: Vec::new(),
             }),
         }
+    }
+
+    /// This node's static routes, for the operator surface's read-only
+    /// inspection interface (issue #420).
+    pub fn routes(&self) -> Vec<RouteView> {
+        self.routes
+            .iter()
+            .map(|route| RouteView {
+                prefix: route.prefix().to_string(),
+                handler_url: route.handler_url().to_string(),
+            })
+            .collect()
+    }
+
+    /// This node's peers. Always empty: no peer wire exists yet (#416).
+    pub fn peers(&self) -> Vec<PeerView> {
+        Vec::new()
+    }
+
+    /// This node's payment channels. Always empty: no settlement backend
+    /// tracks channel state yet (#422).
+    pub fn channels(&self) -> Vec<ChannelView> {
+        Vec::new()
+    }
+
+    /// Claims exchanged with peers. Always empty: no claim exchange exists
+    /// yet (#423).
+    pub fn claims(&self) -> Vec<ClaimView> {
+        Vec::new()
+    }
+
+    /// Per-peer exposure. Always empty: no exposure projection exists yet
+    /// (#424).
+    pub fn exposure(&self) -> Vec<ExposureView> {
+        Vec::new()
     }
 }
 
@@ -422,5 +458,31 @@ mod tests {
             })
         );
         assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    #[test]
+    fn routes_reports_every_configured_static_route() {
+        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![route], app_client, clock);
+
+        let routes = connector.routes();
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].prefix, "g.example.app");
+        assert_eq!(routes[0].handler_url, "http://localhost:4000/");
+    }
+
+    #[test]
+    fn peers_channels_claims_and_exposure_are_empty_until_their_tickets_land() {
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![], app_client, clock);
+
+        assert!(connector.peers().is_empty());
+        assert!(connector.channels().is_empty());
+        assert!(connector.claims().is_empty());
+        assert!(connector.exposure().is_empty());
     }
 }

@@ -882,6 +882,18 @@ dependencies = [
 [[package]]
 name = "connector-operator"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "connector-config",
+ "connector-runtime",
+ "connector-signer",
+ "hyper",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
 
 [[package]]
 name = "connector-runtime"
@@ -893,6 +905,7 @@ dependencies = [
  "connector-domain",
  "hyper",
  "reqwest",
+ "serde",
  "tokio",
  "url",
 ]
