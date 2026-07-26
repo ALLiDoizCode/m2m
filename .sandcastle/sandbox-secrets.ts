@@ -39,6 +39,17 @@
 const PASSTHROUGH_KEYS = [
   'CLAUDE_CODE_OAUTH_TOKEN', // Claude Max-plan credential -> authenticates claude-code
   'GH_TOKEN', // in-sandbox `git push` / `gh pr create` / `gh issue list`
+  // Chain credential for tickets that must actually transact (e.g. #459, EVM
+  // settlement against Base Sepolia). LABEL-GATED UPSTREAM: agent-implement.yml
+  // only sets this for issues carrying `chain`, and the loop below omits keys
+  // that are unset or empty, so an ordinary ticket's container does not have the
+  // variable at all.
+  //
+  // Treat it as the most dangerous value here: it is ONE BIP-39 phrase deriving
+  // keys on EVERY chain (NIP-06 m/44'/1237'/0'/0/i), so it is not testnet-scoped,
+  // and this repository is public. Note APP_PRIVATE_KEY is deliberately NOT in
+  // this list — it stays on the host (#462).
+  'E2E_DEV_MNEMONIC',
 ] as const;
 
 /**
