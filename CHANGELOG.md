@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.41.7](https://github.com/toon-protocol/connector/compare/v3.41.6...v3.41.7) (2026-07-26)
+
+### Bug Fixes
+
+- rebase PR [#448](https://github.com/toon-protocol/connector/issues/448) (issue [#421](https://github.com/toon-protocol/connector/issues/421)) onto main — handle_prepare signature and eligibility gate ([#450](https://github.com/toon-protocol/connector/issues/450)) ([236e9d8](https://github.com/toon-protocol/connector/commit/236e9d82c6b27349280f9bc054cb73bd55d4d336)), closes [#409](https://github.com/toon-protocol/connector/issues/409) [#420](https://github.com/toon-protocol/connector/issues/420) [#427](https://github.com/toon-protocol/connector/issues/427) [#422](https://github.com/toon-protocol/connector/issues/422) [#427](https://github.com/toon-protocol/connector/issues/427) [#422](https://github.com/toon-protocol/connector/issues/422) [#420](https://github.com/toon-protocol/connector/issues/420) [#449](https://github.com/toon-protocol/connector/issues/449) [#418](https://github.com/toon-protocol/connector/issues/418) [#417](https://github.com/toon-protocol/connector/issues/417) [0010/#418](https://github.com/0010/connector/issues/418) [#417](https://github.com/toon-protocol/connector/issues/417)
+
 ## [3.41.6](https://github.com/toon-protocol/connector/compare/v3.41.5...v3.41.6) (2026-07-26)
 
 ### Bug Fixes
