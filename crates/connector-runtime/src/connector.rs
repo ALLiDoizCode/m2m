@@ -40,6 +40,21 @@ enum RouteTarget {
     Leased(usize),
 }
 
+impl RouteTarget {
+    /// Break a tie in matched prefix length: a static route always
+    /// outranks a leased route for the same prefix (issue #427) -- an
+    /// operator's explicit configuration cannot be overridden by an
+    /// automated controller. Peer routes from configuration fall in
+    /// between: also static, but forwarding rather than terminating.
+    fn priority(&self) -> u8 {
+        match self {
+            RouteTarget::Leased(_) => 0,
+            RouteTarget::Peer(_) => 1,
+            RouteTarget::App(_) => 2,
+        }
+    }
+}
+
 /// The connector's packet plane: a fixed set of terminated routes and peer
 /// routes, an [`AppClient`] port for delivering to the apps behind
 /// terminated routes, a [`PeerTransport`] port for forwarding to the next
@@ -108,18 +123,26 @@ impl Connector {
         Ok(view)
     }
 
-    /// Leased routes not yet lapsed as of the injected clock, for the
-    /// operator surface's read-only inspection interface. A lapsed route
-    /// is filtered out here immediately -- it disappears from this list
-    /// the moment it disappears from routing, with no sweep delay in
+    /// Leased routes not yet lapsed as of the injected clock. A lapsed
+    /// route is filtered out here immediately -- it disappears from this
+    /// list the moment it disappears from routing, with no sweep delay in
     /// between (issue #427).
-    pub fn leased_routes(&self) -> Vec<LeasedRouteView> {
+    fn active_leased_routes(&self) -> Vec<LeasedRoute> {
         let now = self.clock.now();
         self.leased_routes
             .read()
             .expect("leased routes lock poisoned")
             .values()
             .filter(|route| !is_expired(route.expires_at(), now))
+            .cloned()
+            .collect()
+    }
+
+    /// Leased routes not yet lapsed as of the injected clock, for the
+    /// operator surface's read-only inspection interface.
+    pub fn leased_routes(&self) -> Vec<LeasedRouteView> {
+        self.active_leased_routes()
+            .iter()
             .map(leased_route_view)
             .collect()
     }
@@ -129,12 +152,8 @@ impl Connector {
     /// exactly like a peer route from configuration once expiry has
     /// already been decided.
     fn active_leased_peer_routes(&self) -> Vec<PeerRoute> {
-        let now = self.clock.now();
-        self.leased_routes
-            .read()
-            .expect("leased routes lock poisoned")
-            .values()
-            .filter(|route| !is_expired(route.expires_at(), now))
+        self.active_leased_routes()
+            .iter()
             .map(|route| PeerRoute::new(route.prefix(), route.peer_id(), route.fee()))
             .collect()
     }
@@ -189,38 +208,25 @@ impl Connector {
         let peer_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
         let leased_prefixes: Vec<&str> = leased_routes.iter().map(PeerRoute::prefix).collect();
 
-        // Priority only ever breaks a tie in matched prefix length: a
-        // static route always outranks a leased route for the same prefix
-        // (issue #427) -- an operator's explicit configuration cannot be
-        // overridden by an automated controller. Peer routes from
-        // configuration fall in between: also static, but forwarding
-        // rather than terminating.
-        let app_match = select_route(&prepare.destination, &app_prefixes).map(|index| {
-            (
-                self.routes[index].prefix().len(),
-                2u8,
-                RouteTarget::App(index),
-            )
-        });
+        let app_match = select_route(&prepare.destination, &app_prefixes)
+            .map(|index| (self.routes[index].prefix().len(), RouteTarget::App(index)));
         let peer_match = select_route(&prepare.destination, &peer_prefixes).map(|index| {
             (
                 self.peer_routes[index].prefix().len(),
-                1u8,
                 RouteTarget::Peer(index),
             )
         });
         let leased_match = select_route(&prepare.destination, &leased_prefixes).map(|index| {
             (
                 leased_routes[index].prefix().len(),
-                0u8,
                 RouteTarget::Leased(index),
             )
         });
 
-        let Some((.., target)) = [app_match, peer_match, leased_match]
+        let Some((_, target)) = [app_match, peer_match, leased_match]
             .into_iter()
             .flatten()
-            .max_by_key(|(len, priority, _)| (*len, *priority))
+            .max_by_key(|(len, target)| (*len, target.priority()))
         else {
             return PacketResponse::Reject(Reject {
                 code: RejectCode::f02_unreachable(),
