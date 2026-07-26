@@ -60,7 +60,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
     use connector_domain::{Fulfill, Reject};
-    use connector_runtime::{AppOutcome, FakeAppClient, TestClock};
+    use connector_runtime::{
+        AppOutcome, FakeAppClient, InProcessPeerTransport, PeerRoute, TestClock,
+    };
     use tower::ServiceExt;
 
     fn sample_prepare(destination: &str) -> Prepare {
@@ -89,7 +91,13 @@ mod tests {
                 data: b"app said yes".to_vec(),
             },
         );
-        let connector = Arc::new(Connector::new(vec![route], app_client, test_clock()));
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
         let app = router(connector);
 
         let request = Request::builder()
@@ -113,7 +121,13 @@ mod tests {
     #[tokio::test]
     async fn a_packet_with_no_matching_route_is_rejected_with_a_specific_reason() {
         let app_client = Arc::new(FakeAppClient::new());
-        let connector = Arc::new(Connector::new(vec![], app_client, test_clock()));
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
         let app = router(connector);
 
         let request = Request::builder()
@@ -135,7 +149,13 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_request_body_is_a_400() {
         let app_client = Arc::new(FakeAppClient::new());
-        let connector = Arc::new(Connector::new(vec![], app_client, test_clock()));
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
         let app = router(connector);
 
         let request = Request::builder()
@@ -159,7 +179,13 @@ mod tests {
                 body: b"payment required".to_vec(),
             },
         );
-        let connector = Arc::new(Connector::new(vec![route], app_client, test_clock()));
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
         let app = router(connector);
 
         let request = Request::builder()
@@ -175,5 +201,89 @@ mod tests {
         let reject = Reject::decode(&bytes).expect("decode reject");
         assert_eq!(reject.code.as_str(), "F99");
         assert_eq!(reject.data, b"payment required");
+    }
+
+    /// Two connectors, driven only through the first one's router: a client
+    /// posts a packet to the first connector, which has no app of its own
+    /// for this destination and instead forwards it over an in-process peer
+    /// transport to the second connector, which delivers it to its app.
+    #[tokio::test]
+    async fn a_client_packet_is_forwarded_to_a_second_connector_and_delivered_to_its_app() {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"delivered by the second connector".to_vec(),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Arc::new(Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop")],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        ));
+        let app = router(first_hop);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
+        assert_eq!(fulfill.data, b"delivered by the second connector");
+    }
+
+    /// A packet forwarded to a second connector that has no route for it is
+    /// rejected there, and that rejection reaches the original client
+    /// unchanged through the first connector's router.
+    #[tokio::test]
+    async fn a_reject_with_no_route_at_the_second_hop_reaches_the_original_client() {
+        let second_hop = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Arc::new(Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop")],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        ));
+        let app = router(first_hop);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let reject = Reject::decode(&bytes).expect("decode reject");
+        assert_eq!(reject.code.as_str(), "F02");
+        assert!(reject.message.contains("g.example.app"));
     }
 }
