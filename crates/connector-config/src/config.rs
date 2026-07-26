@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::ConfigError;
+use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::route::{resolve_routes, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
 
@@ -19,6 +20,8 @@ struct RawConfig {
     routes: Vec<RawRoute>,
     #[serde(default)]
     children: Vec<RawChild>,
+    #[serde(default)]
+    operator: Option<RawOperatorConfig>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -34,6 +37,7 @@ pub struct Config {
     client_edge_addr: SocketAddr,
     signer_key: SecretLocation,
     routes: Vec<StaticRoute>,
+    operator: Option<OperatorConfig>,
 }
 
 impl Config {
@@ -67,11 +71,13 @@ impl Config {
 
         let signer_key = SecretLocation::resolve(raw.signer)?;
         let routes = resolve_routes(raw.apex.as_deref(), raw.routes, raw.children)?;
+        let operator = resolve_operator(raw.operator)?;
 
         Ok(Config {
             client_edge_addr,
             signer_key,
             routes,
+            operator,
         })
     }
 
@@ -89,6 +95,15 @@ impl Config {
     /// `[[children]]` entry already expanded under `apex`.
     pub fn routes(&self) -> &[StaticRoute] {
         &self.routes
+    }
+
+    /// The operator surface's authentication, if the surface is enabled.
+    /// `None` means the `[operator]` section was absent -- the surface is
+    /// not started at all. A `Some` value is always fully authenticated
+    /// (ADR 0008): [`Config::load`] refuses to return one that is missing
+    /// a bearer token or a write-key allowlist.
+    pub fn operator(&self) -> Option<&OperatorConfig> {
+        self.operator.as_ref()
     }
 }
 
@@ -221,5 +236,92 @@ key_file = "/nonexistent/does-not-exist.key"
     fn load_reports_the_path_on_a_missing_file() {
         let result = Config::load(&PathBuf::from("/nonexistent/connector.toml"));
         assert!(matches!(result, Err(ConfigError::Io { .. })));
+    }
+
+    #[test]
+    fn a_config_with_no_operator_section_has_no_operator_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.operator(), None);
+    }
+
+    #[test]
+    fn a_fully_configured_operator_section_loads() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token = "secret-token"
+write_keys = ["{key}"]
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        let operator = config.operator().expect("operator config");
+        assert_eq!(operator.bearer_token(), "secret-token");
+        assert_eq!(operator.write_keys().len(), 1);
+    }
+
+    #[test]
+    fn refuses_to_start_when_the_operator_surface_is_enabled_without_write_keys() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token = "secret-token"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::OperatorNoWriteKeys)));
+    }
+
+    #[test]
+    fn refuses_to_start_when_the_operator_surface_is_enabled_without_a_bearer_token() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[operator]
+write_keys = ["{key}"]
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::OperatorMissingBearerToken)
+        ));
     }
 }
