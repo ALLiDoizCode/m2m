@@ -897,7 +897,10 @@ export class ConfigLoader {
   /**
    * Validate Port Ranges
    *
-   * Validates that port numbers are within the valid range (1-65535).
+   * Validates that port numbers are within the valid range (0-65535).
+   * `0` is a legal value on both fields — it asks the OS to assign an
+   * ephemeral port, read back afterwards via `ConnectorNode.getBtpServerPort()`
+   * / `getHealthCheckPort()`, which removes any check-then-bind window.
    * Checks btpServerPort (required) and healthCheckPort (optional).
    *
    * @param config - Configuration object with port fields
@@ -905,7 +908,7 @@ export class ConfigLoader {
    * @private
    */
   private static validatePorts(config: Record<string, unknown>): void {
-    const MIN_PORT = 1;
+    const MIN_PORT = 0;
     const MAX_PORT = 65535;
     const btpPort = config.btpServerPort as number;
 

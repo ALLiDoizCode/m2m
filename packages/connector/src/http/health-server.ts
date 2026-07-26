@@ -319,6 +319,11 @@ export class HealthServer {
     });
   }
 
+  /** The bound HTTP address (after `start()` resolves), or null when not listening. */
+  address(): ReturnType<Server['address']> {
+    return this._server?.address() ?? null;
+  }
+
   /**
    * Stop health check HTTP server gracefully
    * @returns Promise that resolves when server is closed

@@ -126,8 +126,28 @@ describe('ConfigLoader', () => {
       // Act & Assert
       expect(() => ConfigLoader.loadConfig(configPath)).toThrow(ConfigurationError);
       expect(() => ConfigLoader.loadConfig(configPath)).toThrow(
-        /BTP server port must be between 1-65535/
+        /BTP server port must be between 0-65535/
       );
+    });
+
+    it('should accept btpServerPort/healthCheckPort of 0 as a request for an OS-assigned port (issue #464)', () => {
+      // Arrange — 0 asks the OS to bind an ephemeral port, read back afterwards
+      // via ConnectorNode.getBtpServerPort()/getHealthCheckPort(). It must not
+      // be rejected as out-of-range.
+      const raw = {
+        nodeId: 'test-connector',
+        btpServerPort: 0,
+        healthCheckPort: 0,
+        peers: [],
+        routes: [],
+      };
+
+      // Act
+      const config = ConfigLoader.validateConfig(raw);
+
+      // Assert
+      expect(config.btpServerPort).toBe(0);
+      expect(config.healthCheckPort).toBe(0);
     });
   });
 
@@ -510,7 +530,7 @@ describe('ConfigLoader', () => {
       const configPath = path.join(FIXTURES_DIR, 'invalid-health-check-port-range.yaml');
       expect(() => ConfigLoader.loadConfig(configPath)).toThrow(ConfigurationError);
       expect(() => ConfigLoader.loadConfig(configPath)).toThrow(
-        /Health check port must be between 1-65535/
+        /Health check port must be between 0-65535/
       );
     });
   });

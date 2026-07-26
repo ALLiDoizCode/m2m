@@ -229,6 +229,7 @@ describe('ConnectorNode', () => {
       stop: jest.fn().mockResolvedValue(undefined),
       setIlpHttpHandler: jest.fn(),
       setInboundClaimValidator: jest.fn(),
+      address: jest.fn().mockReturnValue(null),
     } as unknown as jest.Mocked<BTPServer>;
 
     mockPacketHandler = {
@@ -253,6 +254,7 @@ describe('ConnectorNode', () => {
     mockHealthServer = {
       start: jest.fn().mockResolvedValue(undefined),
       stop: jest.fn().mockResolvedValue(undefined),
+      address: jest.fn().mockReturnValue(null),
     } as unknown as jest.Mocked<HealthServer>;
 
     // Configure mocks to return our mocked instances
@@ -397,6 +399,37 @@ describe('ConnectorNode', () => {
       expect(startOrder[2]).toBe('client');
       expect(mockBTPServer.start).toHaveBeenCalledWith(3000);
       expect(mockHealthServer.start).toHaveBeenCalledWith(8080);
+    });
+
+    it('should pass an explicit healthCheckPort of 0 through to the health server unchanged (issue #464)', async () => {
+      // A falsy-but-valid port ("let the OS assign one") must not be coerced
+      // to the 8080 default — that was the `||` bug this test guards against.
+      const configWithAutoHealthPort = createTestConfig({ healthCheckPort: 0 });
+      (ConfigLoader.loadConfig as jest.Mock).mockReturnValue(configWithAutoHealthPort);
+      connectorNode = new ConnectorNode(testConfigPath, mockLogger);
+      jest.clearAllMocks();
+
+      await connectorNode.start();
+
+      expect(mockHealthServer.start).toHaveBeenCalledWith(0);
+    });
+
+    it('should expose the actual bound ports read from each server socket (issue #464)', async () => {
+      // getBtpServerPort()/getHealthCheckPort() read the live listening
+      // socket rather than echoing config back, so a config that requested
+      // port 0 (OS-assigned) resolves to the real, collision-proof port.
+      mockBTPServer.address.mockReturnValue({ port: 54321, address: '127.0.0.1', family: 'IPv4' });
+      mockHealthServer.address.mockReturnValue({
+        port: 54322,
+        address: '127.0.0.1',
+        family: 'IPv4',
+      });
+
+      await connectorNode.start();
+
+      expect(connectorNode.getBtpServerPort()).toBe(54321);
+      expect(connectorNode.getHealthCheckPort()).toBe(54322);
+      expect(connectorNode.getAdminApiPort()).toBeNull();
     });
 
     it('should connect all BTP clients in parallel', async () => {
