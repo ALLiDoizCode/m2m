@@ -16,6 +16,9 @@ Crate names track the [glossary](../../CONTEXT.md) rather than generic layer nam
 - `connector-settlement-evm`, `connector-settlement-solana` — `SettlementBackend`
   implementations, selectable so a build can exclude a chain.
 - `connector-signer` — signing and custody.
+- `connector-config` — the typed configuration file, validated once into an immutable value
+  (ADR 0009). Its own crate because the binary and the CLI both need it and the domain crate
+  must not.
 - `connector-client-edge` — the client edge, exposed as
   `pub fn router(Arc<Connector>) -> axum::Router`.
 - `connector-operator` — the operator surface, likewise a `Router`.
