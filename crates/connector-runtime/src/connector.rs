@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use connector_config::StaticRoute;
-use connector_domain::{select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{
+    amount_after_fee, select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
+};
 
 use crate::app_client::{AppClient, AppOutcome};
 use crate::clock::Clock;
@@ -48,7 +50,16 @@ impl Connector {
     /// peer routes together, then either deliver it to the matching app or
     /// forward it to the matching peer -- and translate whatever comes back
     /// into the ILP-level response a client receives.
-    pub async fn handle_prepare(&self, prepare: Prepare) -> PacketResponse {
+    ///
+    /// `minimum_delivery` is the amount the original sender declared must
+    /// reach the destination (ADR 0010). Forwarding to a peer subtracts
+    /// that peering relation's flat fee from `prepare.amount`; if the
+    /// result would fall below `minimum_delivery`, this hop rejects
+    /// (`R01_INSUFFICIENT_SOURCE_AMOUNT`) instead of forwarding a smaller
+    /// amount than declared. Delivering to this connector's own app takes
+    /// no fee -- a fee is earned per peering relation, not for terminating
+    /// traffic at your own destination.
+    pub async fn handle_prepare(&self, prepare: Prepare, minimum_delivery: u64) -> PacketResponse {
         let prefixes: Vec<&str> = self
             .routes
             .iter()
@@ -69,10 +80,38 @@ impl Connector {
             self.deliver_to_app(&self.routes[index], prepare).await
         } else {
             let peer_route = &self.peer_routes[index - self.routes.len()];
-            self.peer_transport
-                .forward(peer_route.peer_id(), prepare)
+            self.forward_to_peer(peer_route, prepare, minimum_delivery)
                 .await
         }
+    }
+
+    async fn forward_to_peer(
+        &self,
+        peer_route: &PeerRoute,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> PacketResponse {
+        let Some(forwarded_amount) =
+            amount_after_fee(prepare.amount, peer_route.fee(), minimum_delivery)
+        else {
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::r01_insufficient_source_amount(),
+                triggered_by: String::new(),
+                message: format!(
+                    "cannot meet minimum delivery {minimum_delivery} after this hop's fee for peer '{}'",
+                    peer_route.peer_id()
+                ),
+                data: Vec::new(),
+            });
+        };
+
+        let outgoing = Prepare {
+            amount: forwarded_amount,
+            ..prepare
+        };
+        self.peer_transport
+            .forward(peer_route.peer_id(), outgoing, minimum_delivery)
+            .await
     }
 
     async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
@@ -121,6 +160,13 @@ mod tests {
         }
     }
 
+    fn prepare_with_amount(destination: &str, amount: u64) -> Prepare {
+        Prepare {
+            amount,
+            ..prepare(destination, b"hello")
+        }
+    }
+
     fn test_clock() -> Arc<TestClock> {
         Arc::new(TestClock::new(
             Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
@@ -155,7 +201,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello app"))
+            .handle_prepare(prepare("g.example.app", b"hello app"), 0)
             .await;
 
         assert_eq!(
@@ -178,7 +224,7 @@ mod tests {
         let connector = connector_with(vec![], app_client.clone(), clock);
 
         let response = connector
-            .handle_prepare(prepare("g.nowhere", b"hello"))
+            .handle_prepare(prepare("g.nowhere", b"hello"), 0)
             .await;
 
         match response {
@@ -206,7 +252,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         match response {
@@ -227,7 +273,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         match response {
@@ -246,7 +292,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
 
         connector
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         let deliveries = app_client.deliveries();
@@ -266,7 +312,7 @@ mod tests {
         let connector = connector_with(vec![general, specific.clone()], app_client.clone(), clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -297,14 +343,14 @@ mod tests {
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop")],
+            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),
         );
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         assert_eq!(
@@ -315,6 +361,87 @@ mod tests {
             })
         );
         assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn forwarding_to_a_peer_subtracts_that_relations_flat_fee() {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"delivered by the second hop".to_vec(),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop", 7)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        );
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .await;
+
+        assert!(matches!(response, PacketResponse::Fulfill(_)));
+        let deliveries = second_hop_app_client.deliveries();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].amount, 93);
+    }
+
+    #[tokio::test]
+    async fn a_hop_that_cannot_meet_the_minimum_delivery_after_its_fee_rejects_without_forwarding()
+    {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered { data: vec![] },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop", 10)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        );
+
+        // amount 100, fee 10 -> would forward 90, but the sender declared
+        // a minimum delivery of 95: this hop must reject rather than
+        // forward the smaller amount.
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 100), 95)
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "R01");
+                assert!(reject.message.contains("95"));
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+        // Never forwarded a smaller amount hoping the far end would cope.
+        assert!(second_hop_app_client.deliveries().is_empty());
     }
 
     #[tokio::test]
@@ -330,14 +457,14 @@ mod tests {
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop")],
+            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),
         );
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         match response {
@@ -351,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_terminated_route_wins_over_a_shorter_peer_route() {
-        let peer_route = PeerRoute::new("g.example", "second-hop");
+        let peer_route = PeerRoute::new("g.example", "second-hop", 0);
         let terminated_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
@@ -369,7 +496,7 @@ mod tests {
         );
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         assert_eq!(
@@ -404,14 +531,14 @@ mod tests {
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
             vec![terminated_route],
-            vec![PeerRoute::new("g.example.app", "second-hop")],
+            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
             app_client,
             Arc::new(peer_transport),
             test_clock(),
         );
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"))
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
             .await;
 
         assert_eq!(

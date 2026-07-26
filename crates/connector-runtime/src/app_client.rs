@@ -109,6 +109,7 @@ pub struct FakeAppClient {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delivery {
     pub handler_url: Url,
+    pub amount: u64,
     pub data: Vec<u8>,
     pub received_at: DateTime<Utc>,
 }
@@ -145,6 +146,7 @@ impl AppClient for FakeAppClient {
             .expect("deliveries lock")
             .push(Delivery {
                 handler_url: handler_url.clone(),
+                amount: prepare.amount,
                 data: prepare.data.clone(),
                 received_at,
             });

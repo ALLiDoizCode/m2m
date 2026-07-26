@@ -19,10 +19,18 @@ use crate::connector::Connector;
 /// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
 /// returns whatever [`PacketResponse`] it produces, unchanged -- a reject
 /// originated at the far end reaches the caller exactly as that peer sent
-/// it.
+/// it. `minimum_delivery` is the amount the original sender declared must
+/// reach the destination (ADR 0010) -- carried alongside `prepare` rather
+/// than inside it, and passed to the peer unchanged so every hop enforces
+/// it against the same figure.
 #[async_trait]
 pub trait PeerTransport: Send + Sync {
-    async fn forward(&self, peer_id: &str, prepare: Prepare) -> PacketResponse;
+    async fn forward(
+        &self,
+        peer_id: &str,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> PacketResponse;
 }
 
 fn peer_unreachable(peer_id: &str) -> PacketResponse {
@@ -38,6 +46,7 @@ fn peer_unreachable(peer_id: &str) -> PacketResponse {
 /// where to send the answer.
 struct PeerRequest {
     prepare: Prepare,
+    minimum_delivery: u64,
     respond_to: oneshot::Sender<PacketResponse>,
 }
 
@@ -62,22 +71,29 @@ impl PeerLink {
         tokio::spawn(async move {
             while let Some(PeerRequest {
                 prepare,
+                minimum_delivery,
                 respond_to,
             }) = receiver.recv().await
             {
-                let response = connector.handle_prepare(prepare).await;
+                let response = connector.handle_prepare(prepare, minimum_delivery).await;
                 let _ = respond_to.send(response);
             }
         });
         PeerLink { sender }
     }
 
-    async fn forward(&self, peer_id: &str, prepare: Prepare) -> PacketResponse {
+    async fn forward(
+        &self,
+        peer_id: &str,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> PacketResponse {
         let (respond_to, receiver) = oneshot::channel();
         if self
             .sender
             .send(PeerRequest {
                 prepare,
+                minimum_delivery,
                 respond_to,
             })
             .await
@@ -114,9 +130,14 @@ impl InProcessPeerTransport {
 
 #[async_trait]
 impl PeerTransport for InProcessPeerTransport {
-    async fn forward(&self, peer_id: &str, prepare: Prepare) -> PacketResponse {
+    async fn forward(
+        &self,
+        peer_id: &str,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> PacketResponse {
         match self.peers.get(peer_id) {
-            Some(link) => link.forward(peer_id, prepare).await,
+            Some(link) => link.forward(peer_id, prepare, minimum_delivery).await,
             None => peer_unreachable(peer_id),
         }
     }
@@ -166,7 +187,9 @@ mod tests {
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
 
-        let response = transport.forward("peer-b", prepare("g.example.app")).await;
+        let response = transport
+            .forward("peer-b", prepare("g.example.app"), 0)
+            .await;
 
         assert_eq!(
             response,
@@ -181,7 +204,9 @@ mod tests {
     async fn returns_peer_unreachable_for_an_unregistered_peer_id() {
         let transport = InProcessPeerTransport::new();
 
-        let response = transport.forward("nowhere", prepare("g.example.app")).await;
+        let response = transport
+            .forward("nowhere", prepare("g.example.app"), 0)
+            .await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -205,7 +230,7 @@ mod tests {
         transport.add_peer("peer-b", peer);
 
         let response = transport
-            .forward("peer-b", prepare("g.nowhere-on-peer-b"))
+            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0)
             .await;
 
         match response {
@@ -246,7 +271,9 @@ mod tests {
         for _ in 0..8 {
             let transport = transport.clone();
             handles.push(tokio::spawn(async move {
-                transport.forward("peer-b", prepare("g.example.app")).await
+                transport
+                    .forward("peer-b", prepare("g.example.app"), 0)
+                    .await
             }));
         }
 

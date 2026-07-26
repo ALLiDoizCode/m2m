@@ -147,6 +147,13 @@ impl RejectCode {
         RejectCode("F99".to_string())
     }
 
+    /// R01: Insufficient Source Amount -- this hop cannot meet the
+    /// packet's declared minimum delivery once its own flat fee is taken
+    /// (ADR 0010, peer-wire-spec.md §4-5.1).
+    pub fn r01_insufficient_source_amount() -> RejectCode {
+        RejectCode("R01".to_string())
+    }
+
     /// T01: Peer Unreachable -- the app could not be reached over HTTP.
     pub fn t01_peer_unreachable() -> RejectCode {
         RejectCode("T01".to_string())
@@ -339,5 +346,6 @@ mod tests {
         assert_eq!(RejectCode::f99_application_error().as_str(), "F99");
         assert_eq!(RejectCode::t01_peer_unreachable().as_str(), "T01");
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
+        assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
     }
 }

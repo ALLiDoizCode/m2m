@@ -39,7 +39,11 @@ async fn handle_ilp(State(connector): State<Arc<Connector>>, body: Bytes) -> Res
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
-    let encoded = match connector.handle_prepare(prepare).await {
+    // client-edge-spec.md v1 carries no minimum-delivery field (§4 of
+    // peer-wire-spec.md scopes it to the peer wire) -- a client-originated
+    // packet declares no guarantee yet, so this hop enforces none, exactly
+    // matching today's actual (unguaranteed) behavior.
+    let encoded = match connector.handle_prepare(prepare, 0).await {
         PacketResponse::Fulfill(fulfill) => fulfill.encode(),
         PacketResponse::Reject(reject) => reject.encode(),
     };
@@ -72,6 +76,13 @@ mod tests {
             execution_condition: [0u8; 32],
             destination: destination.to_string(),
             data: b"hello app".to_vec(),
+        }
+    }
+
+    fn sample_prepare_with_amount(destination: &str, amount: u64) -> Prepare {
+        Prepare {
+            amount,
+            ..sample_prepare(destination)
         }
     }
 
@@ -228,7 +239,7 @@ mod tests {
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Arc::new(Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop")],
+            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),
@@ -249,6 +260,54 @@ mod tests {
         assert_eq!(fulfill.data, b"delivered by the second connector");
     }
 
+    /// The first connector's flat fee (ADR 0010) for its peering relation
+    /// with the second connector is subtracted before forwarding, and the
+    /// second connector -- reachable only through the first one's router,
+    /// exactly like a real client -- observes the discounted amount.
+    #[tokio::test]
+    async fn a_client_packet_forwarded_to_a_peer_is_charged_that_relations_flat_fee() {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"delivered by the second connector".to_vec(),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Arc::new(Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop", 3)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        ));
+        let app = router(first_hop);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(
+                sample_prepare_with_amount("g.example.app", 50).encode(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        Fulfill::decode(&bytes).expect("decode fulfill");
+        assert_eq!(second_hop_app_client.deliveries()[0].amount, 47);
+    }
+
     /// A packet forwarded to a second connector that has no route for it is
     /// rejected there, and that rejection reaches the original client
     /// unchanged through the first connector's router.
@@ -265,7 +324,7 @@ mod tests {
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Arc::new(Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop")],
+            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),
