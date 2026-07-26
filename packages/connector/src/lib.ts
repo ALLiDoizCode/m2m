@@ -69,6 +69,15 @@ export {
   validateIlpSendRequest,
 };
 
+// Client-edge HTTP client (issue #456) — a thin `sendPacket`-shaped shim over
+// `POST /ilp` (docs/protocol/client-edge-spec.md §1.1), for consumers that
+// reach a Rust connector over HTTP instead of embedding ConnectorNode.
+export { ConnectorHttpClient, ConnectorHttpTransportError } from './client/connector-http-client';
+export type {
+  ConnectorHttpClientOptions,
+  SendIlpPacketParams,
+} from './client/connector-http-client';
+
 // Typed admin API client (runtime peer/route management)
 export { ConnectorAdminClient, ConnectorAdminError } from './client/connector-admin-client';
 export type {
