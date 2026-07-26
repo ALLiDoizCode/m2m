@@ -139,15 +139,15 @@ impl RejectCode {
         RejectCode("F00".to_string())
     }
 
-    /// F02: Unreachable -- no route to the destination.
-    pub fn f02_unreachable() -> RejectCode {
-        RejectCode("F02".to_string())
-    }
-
     /// F01: Invalid Packet -- malformed, or (per issue #417) a missing or
     /// all-zero execution condition.
     pub fn f01_invalid_packet() -> RejectCode {
         RejectCode("F01".to_string())
+    }
+
+    /// F02: Unreachable -- no route to the destination.
+    pub fn f02_unreachable() -> RejectCode {
+        RejectCode("F02".to_string())
     }
 
     /// F99: Application Error -- the terminating app declined the delivery,
@@ -155,6 +155,11 @@ impl RejectCode {
     /// condition it was handed.
     pub fn f99_application_error() -> RejectCode {
         RejectCode("F99".to_string())
+    }
+
+    /// R00: Transfer Timed Out -- the packet's expiry has already passed.
+    pub fn r00_transfer_timed_out() -> RejectCode {
+        RejectCode("R00".to_string())
     }
 
     /// R01: Insufficient Source Amount -- this hop cannot meet the
@@ -167,11 +172,6 @@ impl RejectCode {
     /// T01: Peer Unreachable -- the app could not be reached over HTTP.
     pub fn t01_peer_unreachable() -> RejectCode {
         RejectCode("T01".to_string())
-    }
-
-    /// R00: Transfer Timed Out -- the packet's expiry has already passed.
-    pub fn r00_transfer_timed_out() -> RejectCode {
-        RejectCode("R00".to_string())
     }
 
     pub fn as_str(&self) -> &str {

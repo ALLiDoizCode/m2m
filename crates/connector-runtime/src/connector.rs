@@ -113,14 +113,14 @@ impl Connector {
         } else {
             let peer_route = &self.peer_routes[index - self.routes.len()];
             let condition = prepare.execution_condition;
-            let response = self
+            match self
                 .forward_to_peer(peer_route, prepare, minimum_delivery)
-                .await;
-            match response {
+                .await
+            {
                 PacketResponse::Fulfill(fulfill) => {
                     Self::accept_if_fulfilled(&condition, Some(fulfill))
                 }
-                PacketResponse::Reject(_) => response,
+                reject @ PacketResponse::Reject(_) => reject,
             }
         }
     }
