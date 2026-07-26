@@ -1,0 +1,62 @@
+# The metrics surface is decided, not accreted, and logs correlate a packet by its condition
+
+The Rust connector exposes exactly five decided metrics — `toon_packets_total`,
+`toon_packets_rejected_total`, `toon_fees_earned_total`, `toon_exposure` and
+`toon_settlement_total` — as `GET /metrics` on the operator surface, in Prometheus text
+exposition format, gated by the same bearer token as every other read (ADR 0008). Every log
+line emitted while a packet is being handled carries a `correlation_id`: the packet's own
+execution condition, hex-encoded, requiring no new field and no wire change.
+
+## Why
+
+The PRD that started this rewrite (#409) said outright that observability "was not designed
+in this session" and should be settled before the first slice was built rather than accreted
+afterward. It wasn't — issue #429 is where the connector first has a binary worth scraping,
+so it is also where this gets decided.
+
+**Why these five names, and why now, even though three of them are always zero.**
+`toon_packets_total{outcome}` and `toon_packets_rejected_total{code}` are populated today:
+`Connector::handle_prepare` has exactly one choke point every return path passes through
+(`Connector::finish`), so no outcome can be reported without also being counted.
+`toon_fees_earned_total` is populated on fulfilment only, matching ADR 0010: a fee is earned
+when a forwarded packet fulfills, not when it is merely attempted. `toon_exposure` and
+`toon_settlement_total` are declared at their decided names now and report zero until the
+claim/exposure projection (#423, #424) and channel lifecycle (#422) exist to populate them —
+the same shape-first, populate-later precedent `connector_runtime::operator_view` already set
+for `PeerView`/`ChannelView`/`ClaimView`/`ExposureView` in issue #420. A dashboard or alert
+built against these names today does not need to change when those tickets land; it starts
+reporting non-zero.
+
+**Why metrics live behind the operator surface's bearer token rather than an unauthenticated
+port.** ADR 0008 already lists metrics as exactly the kind of thing a read-only dashboard
+needs, alongside peers and routes. Prometheus supports a bearer token per scrape target
+natively, so gating `/metrics` the same way as every other read costs nothing operationally
+and avoids introducing a second, differently-authenticated (or unauthenticated) HTTP surface
+for what is, functionally, one more read. The consequence is direct: a node with no
+`[operator]` section configured exposes no metrics at all, the same way it exposes no peer or
+route inspection — configuring the operator surface is how an operator opts into any of it.
+
+**Why the execution condition, not a new correlation-id field.** `Prepare.execution_condition`
+is already invariant across every hop a packet passes through — forwarding only ever changes
+`amount` (see `Connector::forward_to_peer`), everything else, including the condition, is
+carried unchanged. That makes it a correlation id for free: two independent connectors, each
+logging this same value for the same packet, produce structured logs that `jq
+'select(.fields.correlation_id == "...")'` can join across the hop boundary with no addition
+to the peer wire and no new packet field to keep in sync between implementations.
+
+## Consequences
+
+Logs are structured (one JSON object per line, via `tracing-subscriber`'s JSON formatter) so
+they're greppable/joinable by tooling rather than parsed by regex. Every packet-handling log
+line sits inside one `tracing` span (`"packet"`) carrying `correlation_id` and `destination`,
+so nothing downstream of `Connector::handle_prepare` needs to thread either through by hand.
+
+Verbosity is controlled by `RUST_LOG`, the standard `tracing-subscriber` environment filter —
+this is an operational knob, not a behavioral one, so it does not conflict with ADR 0009's "no
+environment-variable layer": nothing the connector _decides_ is read from the environment,
+only how loudly it talks about what it already decided.
+
+The metric and reject-code label cardinality is bounded by construction: `outcome` is
+`fulfill`/`reject`, `code` is one of `connector_domain::RejectCode`'s fixed set of RFC-0027
+codes, and there is no per-peer or per-destination label anywhere — nothing here can grow
+unbounded as routes or peers are added.

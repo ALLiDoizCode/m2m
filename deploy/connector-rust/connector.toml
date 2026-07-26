@@ -1,0 +1,62 @@
+# =============================================================================
+# connector-rust — documented configuration template (issue #429)
+# =============================================================================
+# One typed file, fully validated at startup (ADR 0009): the connector either
+# runs with the configuration below or refuses to start and tells you why.
+# There is no environment-variable override layer -- every value comes from
+# right here.
+#
+# The [operator] section below is configured, not commented out. Contrast
+# config/connector.prod.yaml (the TypeScript connector's production
+# template), which ships its admin protection as a TODO with the API key
+# commented out -- ADR 0008 makes that impossible here: an [operator]
+# section with an empty bearer_token or no write_keys is a refuse-to-start
+# error (ConfigError::OperatorMissingBearerToken /
+# ConfigError::OperatorNoWriteKeys), not a silently-open surface.
+#
+# Every placeholder value below is deliberately invalid (bearer_token) or
+# fails to parse (write_keys, which must be exactly 64 hex characters) --
+# see deploy/connector-rust/README.md step 2 for exactly how to replace
+# them with real ones before this file will load.
+# =============================================================================
+
+# The client edge's bind address -- POST /ilp, per
+# docs/protocol/client-edge-spec.md. 0.0.0.0 so the container's published
+# port reaches it; change to 127.0.0.1:3000 if you front this with a
+# reverse proxy on the same host instead of publishing the port directly.
+client_edge_addr = "0.0.0.0:3000"
+
+# ── Signer ───────────────────────────────────────────────────────────────
+# Where this node's signing key material lives -- a location, never the
+# key itself (ADR 0012). key_file must contain either 32 raw bytes or 64
+# hex characters encoding a 32-byte secp256k1 secret key. Generate one with
+# `openssl rand -hex 32 > signer.key` (README step 1) and mount it into the
+# container at this path.
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── Routes ───────────────────────────────────────────────────────────────
+# Static routes are explicit and durable (ADR 0006): packets matching
+# `prefix` are delivered to the payment-oblivious app at `handler_url`.
+# Replace with your own app's ILP address and handler URL, or remove this
+# block entirely if this node only forwards to peers.
+[[routes]]
+prefix = "g.example.connector.app"
+handler_url = "http://app:3100"
+
+# ── Operator surface (ADR 0008) ─────────────────────────────────────────
+# Reads (peers, routes, channels, claims, exposure, identity, the write
+# audit log, and GET /metrics) require this bearer token and nothing else.
+# Writes (currently POST /packets) require an RFC 9421 signature from a key
+# on write_keys and nothing else -- a bearer token is never sufficient to
+# move value.
+[operator]
+# CHANGE ME: generate with `openssl rand -hex 32` (README step 2) before
+# running this node anywhere but a local, throwaway test.
+bearer_token = "CHANGE-ME-generate-with-openssl-rand-hex-32"
+
+# CHANGE ME: the hex-encoded ed25519 public key(s) allowed to sign a write.
+# The placeholder below is not 64 hex characters, so this file will refuse
+# to load until you replace it with a real key from README step 3 --
+# removing a key from this list and restarting is how you revoke it.
+write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STEP-3"]
