@@ -73,7 +73,8 @@ impl Connector {
         None
     }
 
-    /// Route `prepare` by longest-prefix match over terminated routes and
+    /// Reject `prepare` outright if it fails [`Self::reject_ineligible`];
+    /// otherwise route it by longest-prefix match over terminated routes and
     /// peer routes together, then either deliver it to the matching app or
     /// forward it to the matching peer -- and translate whatever comes back
     /// into the ILP-level response a client receives.
@@ -119,7 +120,7 @@ impl Connector {
                 PacketResponse::Fulfill(fulfill) => {
                     Self::accept_if_fulfilled(&condition, Some(fulfill))
                 }
-                reject => reject,
+                PacketResponse::Reject(_) => response,
             }
         }
     }
@@ -231,7 +232,7 @@ impl Connector {
             _ => PacketResponse::Reject(Reject {
                 code: RejectCode::f99_application_error(),
                 triggered_by: String::new(),
-                message: "Fulfillment does not match execution condition".to_string(),
+                message: "fulfillment does not match execution condition".to_string(),
                 data: Vec::new(),
             }),
         }
