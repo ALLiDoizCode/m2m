@@ -16,7 +16,7 @@ pub const FRAME_TYPE_PREPARE: u8 = 0x01;
 pub const FRAME_TYPE_FULFILL: u8 = 0x02;
 pub const FRAME_TYPE_REJECT: u8 = 0x03;
 
-const CORRELATION_ID_LEN: usize = 16;
+pub(crate) const CORRELATION_ID_LEN: usize = 16;
 
 /// Protects both sides from unbounded buffering (§1.2): a `length` beyond
 /// this is a transport-level failure, not a payload to keep reading.

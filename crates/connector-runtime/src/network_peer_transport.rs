@@ -29,7 +29,8 @@ use connector_domain::{Fulfill, PacketResponse, Prepare, Reject};
 use crate::connector::Connector;
 use crate::peer_transport::{peer_unreachable, PeerTransport};
 use crate::peer_wire::{
-    read_frame, write_frame, Frame, FRAME_TYPE_FULFILL, FRAME_TYPE_PREPARE, FRAME_TYPE_REJECT,
+    read_frame, write_frame, Frame, CORRELATION_ID_LEN, FRAME_TYPE_FULFILL, FRAME_TYPE_PREPARE,
+    FRAME_TYPE_REJECT,
 };
 
 /// A dialed connection to one peer, redialed lazily on first use and again
@@ -62,7 +63,7 @@ impl PeerConnection {
 
     fn next_frame(&self, prepare: &Prepare) -> Frame {
         let counter = self.next_correlation_id.fetch_add(1, Ordering::Relaxed);
-        let mut correlation_id = [0u8; 16];
+        let mut correlation_id = [0u8; CORRELATION_ID_LEN];
         correlation_id[8..].copy_from_slice(&counter.to_be_bytes());
         Frame {
             frame_type: FRAME_TYPE_PREPARE,
@@ -78,7 +79,7 @@ impl PeerConnection {
         // Attempt at most twice: once against whatever connection is
         // already held (possibly none), and once more against a freshly
         // dialed connection if the first attempt failed for any reason.
-        for attempt in 0..2 {
+        for _ in 0..2 {
             if guard.is_none() {
                 match TcpStream::connect(self.addr).await {
                     Ok(stream) => *guard = Some(stream),
@@ -87,17 +88,13 @@ impl PeerConnection {
             }
 
             let stream = guard.as_mut().expect("connected above");
-            match send_and_receive(stream, &frame).await {
-                Some(response) => return response,
-                None => *guard = None,
+            if let Some(response) = send_and_receive(stream, &frame).await {
+                return response;
             }
-
-            if attempt == 1 {
-                return peer_unreachable(&self.peer_id);
-            }
+            *guard = None;
         }
 
-        unreachable!("loop above always returns within two attempts")
+        peer_unreachable(&self.peer_id)
     }
 }
 
@@ -243,6 +240,7 @@ mod tests {
     use super::*;
     use crate::app_client::{AppOutcome, FakeAppClient};
     use crate::clock::TestClock;
+    use crate::peer_transport::InProcessPeerTransport;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
 
@@ -280,7 +278,7 @@ mod tests {
             vec![route],
             vec![],
             app_client,
-            Arc::new(crate::peer_transport::InProcessPeerTransport::new()),
+            Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
         let server = PeerWireServer::bind(localhost(), peer).await.unwrap();
@@ -334,7 +332,7 @@ mod tests {
             vec![],
             vec![],
             Arc::new(FakeAppClient::new()),
-            Arc::new(crate::peer_transport::InProcessPeerTransport::new()),
+            Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
         let server = PeerWireServer::bind(localhost(), peer).await.unwrap();
@@ -373,7 +371,7 @@ mod tests {
             vec![route.clone()],
             vec![],
             app_client.clone(),
-            Arc::new(crate::peer_transport::InProcessPeerTransport::new()),
+            Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
         let server = PeerWireServer::bind(localhost(), peer.clone())
