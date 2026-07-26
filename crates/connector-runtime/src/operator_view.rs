@@ -10,6 +10,7 @@
 //! already complete as an interface; the tickets above only need to start
 //! populating it.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// A static route as seen by the operator surface.
@@ -17,6 +18,16 @@ use serde::{Deserialize, Serialize};
 pub struct RouteView {
     pub prefix: String,
     pub handler_url: String,
+}
+
+/// A leased route (issue #427) as seen by the operator surface -- only
+/// ever one not yet lapsed as of this node's own clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeasedRouteView {
+    pub prefix: String,
+    pub peer_id: String,
+    pub fee: u64,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// A peer as seen by the operator surface. See the module docs: always
