@@ -192,3 +192,86 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: npm run sandcastle:implement
+
+      # REDACT BEFORE UPLOAD — this repository is PUBLIC.
+      #
+      # Actions masks registered secrets in STEP LOGS, but it does NOT mask
+      # ARTIFACT CONTENTS, and artifacts on a public repo are downloadable by
+      # anyone. The agent runs with GH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN in its
+      # container environment, so any command it happens to run that echoes the
+      # environment (`env`, `git config --list`, a verbose curl) would put a live
+      # credential into the log we are about to publish.
+      #
+      # Two passes, because either alone is insufficient:
+      #   1. Exact values of the secrets this job holds — reliable, catches any
+      #      token shape including ones we have not anticipated.
+      #   2. Known token shapes — catches credentials this job never held, e.g.
+      #      one the agent minted or read from somewhere else mid-run.
+      # Secrets are passed via env and never echoed.
+      - name: Redact credentials from agent logs
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -d .sandcastle/logs ] || { echo "No logs directory — nothing to redact."; exit 0; }
+          python3 - <<'PY'
+          import os, pathlib, re
+
+          # Pass 1: exact secret values held by this job (longest first, so a
+          # secret that contains another is not partially replaced).
+          exact = sorted(
+              (v for v in (os.environ.get(k, "") for k in
+                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY"))
+               if v and len(v.strip()) >= 8),
+              key=len, reverse=True,
+          )
+
+          # Pass 2: token shapes, whether or not this job ever held them.
+          patterns = [
+              re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"),      # classic + App tokens
+              re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),    # fine-grained PAT
+              re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),      # Anthropic API key
+              re.compile(r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----",
+                         re.DOTALL),                          # any PEM block
+          ]
+
+          hits = 0
+          for path in pathlib.Path(".sandcastle/logs").rglob("*"):
+              if not path.is_file():
+                  continue
+              raw = path.read_text(encoding="utf-8", errors="replace")
+              out = raw
+              for value in exact:
+                  for form in {value, value.strip(), value.replace("\n", "\\n")}:
+                      if form and form in out:
+                          out = out.replace(form, "***REDACTED***")
+              for pat in patterns:
+                  out = pat.sub("***REDACTED***", out)
+              if out != raw:
+                  hits += 1
+                  path.write_text(out, encoding="utf-8")
+          # Count only — never print what was found.
+          print(f"Redaction complete. Files modified: {hits}")
+          PY
+
+      # The agent's own reasoning is written to .sandcastle/logs/, NOT to the step
+      # output — the step log only says "Started on branch ..." and then, minutes
+      # later, the outcome. When a run ends with "Implementer produced no commits"
+      # (observed on #457) there is therefore NOTHING to diagnose from: the log
+      # dies with the runner. Upload it so a failed or empty run is explicable.
+      #
+      # `if: always()` because the interesting cases are exactly the ones where
+      # the previous step failed. Same motive as publishing the branch early
+      # (#462): a run that does not produce a PR must still leave something behind.
+      - name: Upload agent logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandcastle-implement-logs-issue-${{ github.event.issue.number }}
+          path: |
+            .sandcastle/logs/
+          if-no-files-found: warn
+          retention-days: 14
