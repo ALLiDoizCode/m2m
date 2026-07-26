@@ -1,7 +1,6 @@
 //! Shared support for connector-settlement-evm's integration tests: whether `anvil` is on
 //! `PATH`, and the CI-vs-local policy for what to do when it is not (issue #471).
 
-use std::process::Command;
 
 /// True if `anvil --version` runs successfully.
 pub fn anvil_available() -> bool {
