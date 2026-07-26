@@ -39,18 +39,21 @@
 const PASSTHROUGH_KEYS = [
   'CLAUDE_CODE_OAUTH_TOKEN', // Claude Max-plan credential -> authenticates claude-code
   'GH_TOKEN', // in-sandbox `git push` / `gh pr create` / `gh issue list`
-  // Chain credential for tickets that must actually transact (e.g. #459, EVM
-  // settlement against Base Sepolia). LABEL-GATED UPSTREAM: agent-implement.yml
-  // only sets this for issues carrying `chain`, and the loop below omits keys
-  // that are unset or empty, so an ordinary ticket's container does not have the
-  // variable at all.
-  //
-  // Treat it as the most dangerous value here: it is ONE BIP-39 phrase deriving
-  // keys on EVERY chain (NIP-06 m/44'/1237'/0'/0/i), so it is not testnet-scoped,
-  // and this repository is public. Note APP_PRIVATE_KEY is deliberately NOT in
-  // this list — it stays on the host (#462).
-  'E2E_DEV_MNEMONIC',
 ] as const;
+
+// DELIBERATELY ABSENT: E2E_DEV_MNEMONIC.
+//
+// It was added (label-gated) so a ticket could transact against Base Sepolia,
+// then removed once Anvil/Foundry became the tooling for tests and checks — a
+// disposable local chain needs no funded key, so no ticket needs a seed in its
+// container. It is ONE BIP-39 phrase deriving keys on EVERY chain (NIP-06
+// m/44'/1237'/0'/0/i), so it is not testnet-scoped, and this repository is
+// public. Do not re-add it without a concrete ticket that cannot be served by a
+// local chain, and re-read the redaction step in agent-implement.yml first.
+//
+// APP_PRIVATE_KEY is absent for the same class of reason: it stays on the host
+// so the runner can mint a fresh push credential without the container ever
+// holding the key (#462).
 
 /**
  * The subset of {@link PASSTHROUGH_KEYS} that is set on the host, as a
