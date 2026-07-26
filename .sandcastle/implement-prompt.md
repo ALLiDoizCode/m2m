@@ -2,7 +2,29 @@
 
 Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
 
-Pull in the issue using `gh issue view <ID>`. If it has a parent PRD, pull that in too.
+Pull in the issue. **Use the `--json` form** — a bare `gh issue view <ID>` FAILS on
+this repository:
+
+```
+gh issue view <ID> --json title,body,labels --jq '"# " + .title + "\n\n" + .body'
+```
+
+A classic Project is attached, so any porcelain `gh issue view` / `gh pr view`
+call dies with `GraphQL: Projects (classic) is being deprecated ...
+(repository.issue.projectCards)` and prints nothing else. The `--json` form takes
+a different code path and works. Issue comments are on the REST API, not that
+command:
+
+```
+gh api repos/toon-protocol/connector/issues/<ID>/comments --jq '.[].body'
+```
+
+Read the comments as well as the body — corrections, blockers and decisions
+frequently live there rather than in the original description.
+
+If the issue has a parent PRD, pull that in the same way. Do not proceed on the
+title alone; if you cannot read the body, say so and stop rather than guessing at
+the acceptance criteria.
 
 Only work on the issue specified.
 
