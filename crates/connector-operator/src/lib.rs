@@ -173,7 +173,21 @@ async fn originate_packet(
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
-    let encoded = match state.connector.handle_prepare(prepare).await {
+    // The operator is the original sender of a packet it originates
+    // (ADR 0010) -- unlike the client edge, which has no wire field yet
+    // to carry a sender-declared minimum (client-edge-spec.md v1) and so
+    // passes 0, the operator already holds the full `Prepare` including
+    // its declared `amount`. The only minimum that is actually "declared"
+    // here, rather than an arbitrary placeholder, is that amount itself:
+    // this hop authorized exactly `amount` to reach the destination, so
+    // no further hop's fee may discount it below that.
+    let minimum_delivery = prepare.amount;
+
+    let encoded = match state
+        .connector
+        .handle_prepare(prepare, minimum_delivery)
+        .await
+    {
         PacketResponse::Fulfill(fulfill) => fulfill.encode(),
         PacketResponse::Reject(reject) => reject.encode(),
     };
@@ -329,9 +343,16 @@ mod tests {
         };
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine;
-        use connector_domain::RejectCode;
+        use connector_domain::{derive_condition, RejectCode};
         use ed25519_dalek::{ExpandedSecretKey, Keypair};
         use rand::rngs::OsRng;
+
+        // An arbitrary preimage, used only to derive a well-formed,
+        // non-all-zero execution condition -- `reject_ineligible` (issue
+        // #417) rejects an all-zero condition before routing is ever
+        // reached, so these tests need a real one to exercise routing at
+        // all.
+        const FULFILLMENT: [u8; 32] = [7u8; 32];
 
         fn keypair() -> Keypair {
             Keypair::generate(&mut OsRng)
@@ -341,7 +362,7 @@ mod tests {
             Prepare {
                 amount: 0,
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(1),
-                execution_condition: [0u8; 32],
+                execution_condition: derive_condition(&FULFILLMENT),
                 destination: "g.example.nowhere".to_string(),
                 data: b"originated by the operator".to_vec(),
             }
@@ -634,6 +655,56 @@ mod tests {
             let app = router_with_write_keys(vec![]);
             let response = get(app, "/routes", None).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        /// The minimum delivery an originated packet carries must be the
+        /// packet's own declared `amount` (ADR 0010), not a placeholder
+        /// zero -- otherwise a peer's fee could silently discount a
+        /// payment the operator itself authorized in full. Routing this
+        /// packet to a fee-charging peer must reject (R01) rather than
+        /// forward a smaller amount than declared.
+        #[tokio::test]
+        async fn an_originated_packet_declares_its_own_amount_as_the_minimum_delivery() {
+            use connector_runtime::PeerRoute;
+
+            let keypair = keypair();
+            let app_client = Arc::new(FakeAppClient::new());
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let connector = Arc::new(Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example", "peer-1", 5)],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            ));
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            let app = router(
+                connector,
+                signer,
+                "correct-token".to_string(),
+                vec![keypair.public.to_bytes()],
+            );
+
+            let mut prepare = sample_prepare();
+            prepare.amount = 100;
+            let body = prepare.encode();
+            let (sig_input, sig, digest) = sign(&keypair, &body, 9_999_999_999);
+
+            let response = app
+                .oneshot(packets_request(
+                    body,
+                    Some(&sig_input),
+                    Some(&sig),
+                    Some(&digest),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = connector_domain::Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code, RejectCode::r01_insufficient_source_amount());
         }
     }
 }
