@@ -6,7 +6,14 @@ Review the code changes on branch `{{BRANCH}}` and improve code clarity, consist
 
 ## Branch diff
 
-!`git diff {{TARGET_BRANCH}}...{{BRANCH}}`
+The diff below is bounded by a ~50,000-token budget (issue #468 — an unbounded
+`git diff` on a large deletion-shaped ticket, e.g. one that removes a whole
+module, previously produced a ~1.72M-token prompt that failed before the agent
+could start). Deleted files are listed by path only, never by content; if a
+truncation note appears, some added/modified file content was left out and you
+must judge those files only from the diff stat, not assume you saw them.
+
+!`node .sandcastle/bounded-diff.js {{TARGET_BRANCH}} {{BRANCH}}`
 
 ## Commits on this branch
 
