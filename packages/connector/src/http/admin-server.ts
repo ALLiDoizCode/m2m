@@ -373,6 +373,11 @@ export class AdminServer {
     });
   }
 
+  /** The bound HTTP address (after `start()` resolves), or null when not listening. */
+  address(): ReturnType<Server['address']> {
+    return this._server?.address() ?? null;
+  }
+
   /**
    * Stop admin API HTTP server gracefully
    *
