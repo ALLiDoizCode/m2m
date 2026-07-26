@@ -1,18 +1,59 @@
 //! `pub struct Connector` -- the packet plane. See ADR 0001.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
+use chrono::Duration;
 use connector_config::StaticRoute;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
-    select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
+    is_valid_ilp_address, select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
+use thiserror::Error;
 
 use crate::app_client::{AppClient, AppOutcome};
 use crate::clock::Clock;
-use crate::operator_view::{ChannelView, ClaimView, ExposureView, PeerView, RouteView};
+use crate::operator_view::{
+    ChannelView, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
+};
 use crate::peer_transport::PeerTransport;
-use crate::route::PeerRoute;
+use crate::route::{LeasedRoute, PeerRoute};
+
+/// What can go wrong creating or renewing a leased route (issue #427).
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LeaseRouteError {
+    #[error("invalid ILP address: '{0}'")]
+    InvalidPrefix(String),
+}
+
+/// Which kind of routing-table entry matched a packet's destination, and
+/// where in its own table -- resolved by [`Connector::handle_prepare`]
+/// before dispatch, so priority among same-length matches (issue #427: a
+/// static route always outranks a leased route) is decided in exactly one
+/// place.
+enum RouteTarget {
+    App(usize),
+    Peer(usize),
+    /// Indexes into the caller's snapshot of currently-active leased
+    /// routes, not `Connector::leased_routes` directly -- see
+    /// [`Connector::active_leased_peer_routes`].
+    Leased(usize),
+}
+
+impl RouteTarget {
+    /// Break a tie in matched prefix length: a static route always
+    /// outranks a leased route for the same prefix (issue #427) -- an
+    /// operator's explicit configuration cannot be overridden by an
+    /// automated controller. Peer routes from configuration fall in
+    /// between: also static, but forwarding rather than terminating.
+    fn priority(&self) -> u8 {
+        match self {
+            RouteTarget::Leased(_) => 0,
+            RouteTarget::Peer(_) => 1,
+            RouteTarget::App(_) => 2,
+        }
+    }
+}
 
 /// The connector's packet plane: a fixed set of terminated routes and peer
 /// routes, an [`AppClient`] port for delivering to the apps behind
@@ -26,6 +67,12 @@ use crate::route::PeerRoute;
 pub struct Connector {
     routes: Vec<StaticRoute>,
     peer_routes: Vec<PeerRoute>,
+    /// Routes pushed at runtime over the operator surface with a time
+    /// limit (ADR 0006, issue #427), keyed by prefix so pushing the same
+    /// prefix again renews it rather than adding a duplicate entry. Lives
+    /// only in memory: unlike `routes` and `peer_routes`, nothing here is
+    /// loaded from configuration, so none of it survives a restart.
+    leased_routes: RwLock<HashMap<String, LeasedRoute>>,
     app_client: Arc<dyn AppClient>,
     peer_transport: Arc<dyn PeerTransport>,
     clock: Arc<dyn Clock>,
@@ -42,10 +89,73 @@ impl Connector {
         Connector {
             routes,
             peer_routes,
+            leased_routes: RwLock::new(HashMap::new()),
             app_client,
             peer_transport,
             clock,
         }
+    }
+
+    /// Create or renew a leased route (ADR 0006, issue #427): a controller
+    /// outside this connector pushes a route to a peer with a time limit,
+    /// keyed by `prefix`. Calling this again for a prefix already leased
+    /// renews it -- `expires_at` is always computed as `ttl` from this
+    /// node's own injected clock, never from the caller, so a controller
+    /// cannot claim a longer lease than this node's clock allows.
+    pub fn upsert_leased_route(
+        &self,
+        prefix: impl Into<String>,
+        peer_id: impl Into<String>,
+        fee: u64,
+        ttl: Duration,
+    ) -> Result<LeasedRouteView, LeaseRouteError> {
+        let prefix = prefix.into();
+        if !is_valid_ilp_address(&prefix) {
+            return Err(LeaseRouteError::InvalidPrefix(prefix));
+        }
+        let expires_at = self.clock.now() + ttl;
+        let route = LeasedRoute::new(prefix.clone(), peer_id.into(), fee, expires_at);
+        let view = leased_route_view(&route);
+        self.leased_routes
+            .write()
+            .expect("leased routes lock poisoned")
+            .insert(prefix, route);
+        Ok(view)
+    }
+
+    /// Leased routes not yet lapsed as of the injected clock. A lapsed
+    /// route is filtered out here immediately -- it disappears from this
+    /// list the moment it disappears from routing, with no sweep delay in
+    /// between (issue #427).
+    fn active_leased_routes(&self) -> Vec<LeasedRoute> {
+        let now = self.clock.now();
+        self.leased_routes
+            .read()
+            .expect("leased routes lock poisoned")
+            .values()
+            .filter(|route| !is_expired(route.expires_at(), now))
+            .cloned()
+            .collect()
+    }
+
+    /// Leased routes not yet lapsed as of the injected clock, for the
+    /// operator surface's read-only inspection interface.
+    pub fn leased_routes(&self) -> Vec<LeasedRouteView> {
+        self.active_leased_routes()
+            .iter()
+            .map(leased_route_view)
+            .collect()
+    }
+
+    /// A snapshot of currently-active leased routes (issue #427),
+    /// converted to [`PeerRoute`] so routing and forwarding can treat them
+    /// exactly like a peer route from configuration once expiry has
+    /// already been decided.
+    fn active_leased_peer_routes(&self) -> Vec<PeerRoute> {
+        self.active_leased_routes()
+            .iter()
+            .map(|route| PeerRoute::new(route.prefix(), route.peer_id(), route.fee()))
+            .collect()
     }
 
     /// Reject `prepare` outright if it isn't even eligible for routing --
@@ -92,14 +202,32 @@ impl Connector {
             return PacketResponse::Reject(reject);
         }
 
-        let prefixes: Vec<&str> = self
-            .routes
-            .iter()
-            .map(StaticRoute::prefix)
-            .chain(self.peer_routes.iter().map(PeerRoute::prefix))
-            .collect();
+        let leased_routes = self.active_leased_peer_routes();
 
-        let Some(index) = select_route(&prepare.destination, &prefixes) else {
+        let app_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
+        let peer_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
+        let leased_prefixes: Vec<&str> = leased_routes.iter().map(PeerRoute::prefix).collect();
+
+        let app_match = select_route(&prepare.destination, &app_prefixes)
+            .map(|index| (self.routes[index].prefix().len(), RouteTarget::App(index)));
+        let peer_match = select_route(&prepare.destination, &peer_prefixes).map(|index| {
+            (
+                self.peer_routes[index].prefix().len(),
+                RouteTarget::Peer(index),
+            )
+        });
+        let leased_match = select_route(&prepare.destination, &leased_prefixes).map(|index| {
+            (
+                leased_routes[index].prefix().len(),
+                RouteTarget::Leased(index),
+            )
+        });
+
+        let Some((_, target)) = [app_match, peer_match, leased_match]
+            .into_iter()
+            .flatten()
+            .max_by_key(|(len, target)| (*len, target.priority()))
+        else {
             return PacketResponse::Reject(Reject {
                 code: RejectCode::f02_unreachable(),
                 triggered_by: String::new(),
@@ -108,20 +236,34 @@ impl Connector {
             });
         };
 
-        if index < self.routes.len() {
-            self.deliver_to_app(&self.routes[index], prepare).await
-        } else {
-            let peer_route = &self.peer_routes[index - self.routes.len()];
-            let condition = prepare.execution_condition;
-            match self
-                .forward_to_peer(peer_route, prepare, minimum_delivery)
-                .await
-            {
-                PacketResponse::Fulfill(fulfill) => {
-                    Self::accept_if_fulfilled(&condition, Some(fulfill))
-                }
-                reject @ PacketResponse::Reject(_) => reject,
+        match target {
+            RouteTarget::App(index) => self.deliver_to_app(&self.routes[index], prepare).await,
+            RouteTarget::Peer(index) => {
+                self.forward_via_peer_route(&self.peer_routes[index], prepare, minimum_delivery)
+                    .await
             }
+            RouteTarget::Leased(index) => {
+                self.forward_via_peer_route(&leased_routes[index], prepare, minimum_delivery)
+                    .await
+            }
+        }
+    }
+
+    async fn forward_via_peer_route(
+        &self,
+        peer_route: &PeerRoute,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> PacketResponse {
+        let condition = prepare.execution_condition;
+        match self
+            .forward_to_peer(peer_route, prepare, minimum_delivery)
+            .await
+        {
+            PacketResponse::Fulfill(fulfill) => {
+                Self::accept_if_fulfilled(&condition, Some(fulfill))
+            }
+            reject @ PacketResponse::Reject(_) => reject,
         }
     }
 
@@ -236,6 +378,15 @@ impl Connector {
                 data: Vec::new(),
             }),
         }
+    }
+}
+
+fn leased_route_view(route: &LeasedRoute) -> LeasedRouteView {
+    LeasedRouteView {
+        prefix: route.prefix().to_string(),
+        peer_id: route.peer_id().to_string(),
+        fee: route.fee(),
+        expires_at: route.expires_at(),
     }
 }
 
@@ -834,6 +985,244 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
+    }
+
+    /// Issue #427: a controller outside this connector pushes a route to a
+    /// peer with a time limit, and it forwards exactly like a
+    /// configuration-sourced peer route until that limit is reached.
+    #[tokio::test]
+    async fn a_leased_route_forwards_to_its_peer_before_it_lapses() {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"delivered by the second hop".to_vec(),
+                fulfillment: Some(FULFILLMENT),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let clock = test_clock();
+        let first_hop = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            clock.clone(),
+        );
+        first_hop
+            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .unwrap();
+
+        let response = first_hop
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .await;
+
+        assert_eq!(
+            response,
+            PacketResponse::Fulfill(Fulfill {
+                fulfillment: FULFILLMENT,
+                data: b"delivered by the second hop".to_vec(),
+            })
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    /// AC: "A lapsed route stops being selected immediately, with no sweep
+    /// delay observable to a sender" -- there is no background task here;
+    /// expiry is decided fresh on every call against the injected clock.
+    #[tokio::test]
+    async fn a_lapsed_leased_route_stops_being_selected_immediately() {
+        let clock = test_clock();
+        let first_hop = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock.clone(),
+        );
+        first_hop
+            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .unwrap();
+
+        // Still active a moment before its limit.
+        clock.advance(Duration::seconds(59));
+        let response = first_hop
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .await;
+        match response {
+            PacketResponse::Reject(reject) => {
+                // second-hop is unregistered on this transport, so a
+                // successful *selection* still surfaces as a peer-transport
+                // reject rather than F02 (no route) -- proving the route
+                // was matched at all, not skipped.
+                assert_ne!(reject.code.as_str(), "F02");
+            }
+            other => panic!("expected some reject, got {other:?}"),
+        }
+
+        // One second later, the lease has lapsed -- selected no longer.
+        clock.advance(Duration::seconds(1));
+        let response = first_hop
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .await;
+        match response {
+            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F02"),
+            other => panic!("expected a reject once the lease lapses, got {other:?}"),
+        }
+    }
+
+    /// AC: "A leased route lapses unless renewed before its limit expires"
+    /// / "A controller that stops renewing causes routes to lapse rather
+    /// than persist" -- renewing before the original limit extends it past
+    /// where it would otherwise have lapsed.
+    #[tokio::test]
+    async fn renewing_a_leased_route_before_it_lapses_keeps_it_active() {
+        let clock = test_clock();
+        let first_hop = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock.clone(),
+        );
+        first_hop
+            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .unwrap();
+
+        clock.advance(Duration::seconds(30));
+        first_hop
+            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .unwrap();
+
+        // Past the *original* lease's limit (60s from the start), but well
+        // within the renewed one (60s from the 30s renewal).
+        clock.advance(Duration::seconds(40));
+        let response = first_hop
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .await;
+        match response {
+            PacketResponse::Reject(reject) => assert_ne!(reject.code.as_str(), "F02"),
+            other => panic!("expected some reject, got {other:?}"),
+        }
+    }
+
+    /// AC: "A static route always outranks a leased route for the same
+    /// prefix" -- an operator's explicit configuration cannot be
+    /// overridden by an automated controller.
+    #[tokio::test]
+    async fn a_static_route_always_outranks_a_leased_route_for_the_same_prefix() {
+        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(
+            route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"handled locally".to_vec(),
+                fulfillment: Some(FULFILLMENT),
+            },
+        );
+        let clock = test_clock();
+        let connector = Connector::new(
+            vec![route],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            clock,
+        );
+        connector
+            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .unwrap();
+
+        let response = connector
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .await;
+
+        assert_eq!(
+            response,
+            PacketResponse::Fulfill(Fulfill {
+                fulfillment: FULFILLMENT,
+                data: b"handled locally".to_vec(),
+            })
+        );
+    }
+
+    /// AC: "Static routes survive a restart; leased routes do not" -- a
+    /// leased route lives only in the `Connector` instance it was pushed
+    /// to, never in configuration, so a freshly constructed instance
+    /// (standing in for "after a restart") never has it.
+    #[test]
+    fn leased_routes_do_not_survive_a_restart() {
+        let clock = test_clock();
+        let before_restart = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock.clone(),
+        );
+        before_restart
+            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .unwrap();
+        assert_eq!(before_restart.leased_routes().len(), 1);
+
+        let after_restart = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock,
+        );
+        assert!(after_restart.leased_routes().is_empty());
+    }
+
+    #[test]
+    fn leased_routes_reports_only_currently_active_leases() {
+        let clock = test_clock();
+        let connector = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock.clone(),
+        );
+        connector
+            .upsert_leased_route("g.example.app", "second-hop", 3, Duration::seconds(60))
+            .unwrap();
+
+        let leases = connector.leased_routes();
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].prefix, "g.example.app");
+        assert_eq!(leases[0].peer_id, "second-hop");
+        assert_eq!(leases[0].fee, 3);
+
+        clock.advance(Duration::seconds(60));
+        assert!(connector.leased_routes().is_empty());
+    }
+
+    #[test]
+    fn upsert_leased_route_rejects_an_invalid_prefix() {
+        let clock = test_clock();
+        let connector = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock,
+        );
+
+        let result =
+            connector.upsert_leased_route("g..app", "second-hop", 0, Duration::seconds(60));
+
+        assert!(matches!(result, Err(LeaseRouteError::InvalidPrefix(_))));
+        assert!(connector.leased_routes().is_empty());
     }
 
     #[test]

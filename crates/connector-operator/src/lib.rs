@@ -12,15 +12,15 @@
 //! retains every accepted signature as its write's audit record (ADR
 //! 0012), exposed for inspection at `GET /audit-log`.
 //!
-//! `POST /packets` -- originating a packet outward, ADR 0008's third kind
-//! of write alongside route CRUD (issue #427) and channel lifecycle
-//! (issue #422), neither of which lands here -- is the one write endpoint
-//! this ticket mounts, reusing [`Connector::handle_prepare`] exactly as
-//! the client edge does. It calls [`write_auth::authenticate_write`]
-//! first and nothing else in this crate accepts a body, so a write cannot
-//! reach [`Connector`] without a valid, allowlisted, unexpired,
-//! non-replayed signature. Bearer tokens gate reads and reads only; no
-//! shared secret is ever sufficient to move value.
+//! `POST /packets` -- originating a packet outward -- and
+//! `POST /routes/leased` -- creating or renewing a leased route (issue
+//! #427; channel lifecycle, ADR 0008's third write, is issue #422 and
+//! doesn't land here) -- are this crate's write endpoints. Both call
+//! [`write_auth::authenticate_write`] first and nothing else in this
+//! crate accepts a body, so a write cannot reach [`Connector`] without a
+//! valid, allowlisted, unexpired, non-replayed signature. Bearer tokens
+//! gate reads and reads only; no shared secret is ever sufficient to move
+//! value.
 //!
 //! Per ADR 0001, each read handler below deserializes nothing beyond the
 //! bearer token (a GET request has no body), calls exactly one
@@ -41,7 +41,10 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare};
-use connector_runtime::{ChannelView, ClaimView, Connector, ExposureView, PeerView, RouteView};
+use connector_runtime::{
+    ChannelView, ClaimView, Connector, ExposureView, LeaseRouteError, LeasedRouteView, PeerView,
+    RouteView,
+};
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
 use write_auth::{authenticate_write, AuditRecord, WriteAuth};
 
@@ -90,6 +93,7 @@ pub fn router(
     let reads = Router::new()
         .route("/peers", get(peers))
         .route("/routes", get(routes))
+        .route("/routes/leased", get(leased_routes))
         .route("/channels", get(channels))
         .route("/claims", get(claims))
         .route("/exposure", get(exposure))
@@ -100,7 +104,9 @@ pub fn router(
             require_bearer_token,
         ));
 
-    let writes = Router::new().route("/packets", post(originate_packet));
+    let writes = Router::new()
+        .route("/packets", post(originate_packet))
+        .route("/routes/leased", post(create_leased_route));
 
     reads.merge(writes).with_state(state)
 }
@@ -128,6 +134,13 @@ async fn peers(State(state): State<OperatorState>) -> Json<Vec<PeerView>> {
 
 async fn routes(State(state): State<OperatorState>) -> Json<Vec<RouteView>> {
     Json(state.connector.routes())
+}
+
+/// `GET /routes/leased`: every leased route (issue #427) not yet lapsed as
+/// of this node's own clock -- the read side of the same table
+/// `POST /routes/leased` writes to.
+async fn leased_routes(State(state): State<OperatorState>) -> Json<Vec<LeasedRouteView>> {
+    Json(state.connector.leased_routes())
 }
 
 async fn channels(State(state): State<OperatorState>) -> Json<Vec<ChannelView>> {
@@ -198,6 +211,62 @@ async fn originate_packet(
         encoded,
     )
         .into_response()
+}
+
+/// A `POST /routes/leased` request body: create or renew a leased route
+/// (ADR 0006, issue #427) forwarding `prefix` to peer `peer_id`, charging
+/// `fee` per packet, for `ttl_seconds` from this node's own clock. Posting
+/// the same `prefix` again before it lapses renews it to a fresh
+/// `ttl_seconds` from whenever the renewal is received -- that is the only
+/// way a leased route stays alive, since nothing in the runtime extends
+/// one on its own.
+#[derive(Debug, Deserialize)]
+struct CreateLeasedRouteRequest {
+    prefix: String,
+    peer_id: String,
+    fee: u64,
+    ttl_seconds: i64,
+}
+
+/// `POST /routes/leased`: a controller outside this connector pushes a
+/// route to a peer with a time limit. Authenticated exactly like
+/// `POST /packets` -- [`authenticate_write`] first, nothing else in this
+/// handler accepts the request until that succeeds.
+async fn create_leased_route(
+    State(state): State<OperatorState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authenticate_write(
+        &state.write_auth,
+        method.as_str(),
+        uri.path(),
+        &headers,
+        &body,
+    ) {
+        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    }
+
+    let request: CreateLeasedRouteRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+
+    match state.connector.upsert_leased_route(
+        request.prefix,
+        request.peer_id,
+        request.fee,
+        chrono::Duration::seconds(request.ttl_seconds),
+    ) {
+        Ok(view) => Json(view).into_response(),
+        Err(LeaseRouteError::InvalidPrefix(prefix)) => (
+            StatusCode::BAD_REQUEST,
+            format!("invalid ILP address: '{prefix}'"),
+        )
+            .into_response(),
+    }
 }
 
 async fn identity(State(state): State<OperatorState>) -> Response {
@@ -685,6 +754,276 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let reject = connector_domain::Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code, RejectCode::r01_insufficient_source_amount());
+        }
+    }
+
+    /// `POST /routes/leased` (issue #427): a controller outside this
+    /// connector pushes a route to a peer with a time limit, driven end to
+    /// end over real HTTP exactly like `POST /packets`'s write-auth suite
+    /// above -- no signature, no write.
+    mod leased_route_writes {
+        use super::*;
+        use crate::rfc9421::sign_request;
+        use chrono::TimeZone;
+        use ed25519_dalek::Keypair;
+        use rand::rngs::OsRng;
+
+        fn keypair() -> Keypair {
+            Keypair::generate(&mut OsRng)
+        }
+
+        fn sign(keypair: &Keypair, body: &[u8], expires: u64) -> (String, String, String) {
+            sign_request(
+                keypair,
+                "POST",
+                "/routes/leased",
+                body,
+                1_000,
+                Some(expires),
+            )
+        }
+
+        fn leased_route_request(
+            body: Vec<u8>,
+            signature_input: Option<&str>,
+            signature: Option<&str>,
+            content_digest: Option<&str>,
+        ) -> Request<Body> {
+            let mut builder = Request::builder().method("POST").uri("/routes/leased");
+            if let Some(v) = signature_input {
+                builder = builder.header("signature-input", v);
+            }
+            if let Some(v) = signature {
+                builder = builder.header("signature", v);
+            }
+            if let Some(v) = content_digest {
+                builder = builder.header("content-digest", v);
+            }
+            builder.body(Body::from(body)).unwrap()
+        }
+
+        fn router_with(clock: Arc<TestClock>, write_keys: Vec<[u8; 32]>) -> Router {
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = Arc::new(Connector::new(
+                vec![],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            ));
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            router(connector, signer, "correct-token".to_string(), write_keys)
+        }
+
+        #[tokio::test]
+        async fn creating_a_leased_route_requires_a_valid_write_signature() {
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let app = router_with(clock, vec![]);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.leased",
+                "peer_id": "peer-1",
+                "fee": 0,
+                "ttl_seconds": 60,
+            }))
+            .unwrap();
+
+            let response = app
+                .oneshot(leased_route_request(body, None, None, None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn a_validly_signed_write_creates_a_leased_route_visible_over_the_read_surface() {
+            let start = chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+            let clock = Arc::new(TestClock::new(start));
+            let keypair = keypair();
+            let app = router_with(clock, vec![keypair.public.to_bytes()]);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.leased",
+                "peer_id": "peer-1",
+                "fee": 3,
+                "ttl_seconds": 60,
+            }))
+            .unwrap();
+            let (sig_input, sig, digest) = sign(&keypair, &body, 9_999_999_999);
+
+            let write_response = app
+                .clone()
+                .oneshot(leased_route_request(
+                    body,
+                    Some(&sig_input),
+                    Some(&sig),
+                    Some(&digest),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(write_response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(write_response.into_body())
+                .await
+                .unwrap();
+            let created: LeasedRouteView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(created.prefix, "g.example.leased");
+            assert_eq!(created.peer_id, "peer-1");
+            assert_eq!(created.fee, 3);
+            assert_eq!(created.expires_at, start + chrono::Duration::seconds(60));
+
+            let read_response = get(app, "/routes/leased", Some("correct-token")).await;
+            assert_eq!(read_response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(read_response.into_body())
+                .await
+                .unwrap();
+            let leases: Vec<LeasedRouteView> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(leases, vec![created]);
+        }
+
+        #[tokio::test]
+        async fn renewing_a_leased_route_extends_its_expiry_from_the_renewal_time() {
+            let start = chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+            let clock = Arc::new(TestClock::new(start));
+            let keypair = keypair();
+            let app = router_with(clock.clone(), vec![keypair.public.to_bytes()]);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.leased",
+                "peer_id": "peer-1",
+                "fee": 0,
+                "ttl_seconds": 60,
+            }))
+            .unwrap();
+            let (sig_input, sig, digest) = sign(&keypair, &body, 9_999_999_999);
+            let response = app
+                .clone()
+                .oneshot(leased_route_request(
+                    body,
+                    Some(&sig_input),
+                    Some(&sig),
+                    Some(&digest),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            clock.advance(chrono::Duration::seconds(30));
+            // A different `ttl_seconds` than the original request, both to
+            // avoid signing an identical body (which the replay cache
+            // would reject) and to prove the renewed expiry is computed
+            // from *this* request's ttl, not the original's.
+            let renewal_body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.leased",
+                "peer_id": "peer-1",
+                "fee": 0,
+                "ttl_seconds": 90,
+            }))
+            .unwrap();
+            let (sig_input, sig, digest) = sign(&keypair, &renewal_body, 9_999_999_999);
+            let response = app
+                .oneshot(leased_route_request(
+                    renewal_body,
+                    Some(&sig_input),
+                    Some(&sig),
+                    Some(&digest),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let renewed: LeasedRouteView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                renewed.expires_at,
+                start + chrono::Duration::seconds(30) + chrono::Duration::seconds(90)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_invalid_prefix_is_rejected_with_bad_request() {
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let keypair = keypair();
+            let app = router_with(clock, vec![keypair.public.to_bytes()]);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g..leased",
+                "peer_id": "peer-1",
+                "fee": 0,
+                "ttl_seconds": 60,
+            }))
+            .unwrap();
+            let (sig_input, sig, digest) = sign(&keypair, &body, 9_999_999_999);
+
+            let response = app
+                .oneshot(leased_route_request(
+                    body,
+                    Some(&sig_input),
+                    Some(&sig),
+                    Some(&digest),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        /// AC: "A route can be created over the operator surface with a
+        /// time limit" -- proven end to end by creating one, then routing
+        /// a packet that only matches it. `peer-1` is unregistered on this
+        /// test's `InProcessPeerTransport`, so a successful *match*
+        /// surfaces as T01 (peer unreachable) rather than F02 (no route)
+        /// -- exactly the distinction issue #427's connector-level tests
+        /// use to prove selection without standing up a second connector.
+        #[tokio::test]
+        async fn a_leased_route_created_over_the_operator_surface_is_used_for_routing() {
+            use connector_domain::{derive_condition, RejectCode};
+
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let keypair = keypair();
+            let app = router_with(clock, vec![keypair.public.to_bytes()]);
+            let route_body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.leased",
+                "peer_id": "peer-1",
+                "fee": 0,
+                "ttl_seconds": 60,
+            }))
+            .unwrap();
+            let (sig_input, sig, digest) = sign(&keypair, &route_body, 9_999_999_999);
+            let response = app
+                .clone()
+                .oneshot(leased_route_request(
+                    route_body,
+                    Some(&sig_input),
+                    Some(&sig),
+                    Some(&digest),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let prepare = Prepare {
+                amount: 0,
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                execution_condition: derive_condition(&[7u8; 32]),
+                destination: "g.example.leased".to_string(),
+                data: b"routed over a freshly created lease".to_vec(),
+            };
+            let packet_body = prepare.encode();
+            let (sig_input, sig, digest) = sign_request(
+                &keypair,
+                "POST",
+                "/packets",
+                &packet_body,
+                1_000,
+                Some(9_999_999_999),
+            );
+            let mut packet_request = Request::builder().method("POST").uri("/packets");
+            packet_request = packet_request
+                .header("signature-input", &sig_input)
+                .header("signature", &sig)
+                .header("content-digest", &digest);
+            let response = app
+                .oneshot(packet_request.body(Body::from(packet_body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = connector_domain::Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code, RejectCode::t01_peer_unreachable());
         }
     }
 }
