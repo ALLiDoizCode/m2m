@@ -884,13 +884,18 @@ name = "connector-operator"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "connector-config",
+ "connector-domain",
  "connector-runtime",
  "connector-signer",
+ "ed25519-dalek",
  "hyper",
+ "rand 0.7.3",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tower",
 ]

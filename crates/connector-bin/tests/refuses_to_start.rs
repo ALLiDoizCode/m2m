@@ -94,3 +94,102 @@ fn exits_non_zero_when_no_config_path_is_given() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage"));
 }
+
+#[test]
+fn exits_zero_with_a_fully_authenticated_operator_surface() {
+    let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    key_file
+        .write_all(b"not real key material, just needs to exist")
+        .expect("write key file");
+
+    let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+    write!(
+        config_file,
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token = "operator-secret"
+write_keys = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+"#,
+        key_file.path().display()
+    )
+    .expect("write config file");
+
+    let output = run(Some(config_file.path()));
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn exits_non_zero_when_the_operator_surface_is_enabled_with_no_write_keys() {
+    let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    key_file
+        .write_all(b"not real key material, just needs to exist")
+        .expect("write key file");
+
+    let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+    write!(
+        config_file,
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token = "operator-secret"
+"#,
+        key_file.path().display()
+    )
+    .expect("write config file");
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("write_keys"),
+        "expected an actionable write_keys error, got: {stderr}"
+    );
+}
+
+#[test]
+fn exits_non_zero_when_the_operator_surface_is_enabled_with_no_bearer_token() {
+    let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    key_file
+        .write_all(b"not real key material, just needs to exist")
+        .expect("write key file");
+
+    let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+    write!(
+        config_file,
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[operator]
+write_keys = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+"#,
+        key_file.path().display()
+    )
+    .expect("write config file");
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bearer_token"),
+        "expected an actionable bearer_token error, got: {stderr}"
+    );
+}

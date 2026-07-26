@@ -1,0 +1,295 @@
+//! The stateful half of write authentication (ADR 0008): the operator
+//! allowlist, a replay cache, and the audit log a verified write is
+//! retained into.
+//!
+//! [`crate::rfc9421::verify_write_signature`] is pure -- it has no memory
+//! of a request it has already seen. [`WriteAuth`] is what gives the
+//! surface memory: [`WriteAuth::authenticate`] rejects a signature it has
+//! already accepted once (replay), and on success retains the signature
+//! itself as the write's audit record (ADR 0012) rather than a log line
+//! asserting that something happened.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::http::HeaderMap;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use serde::Serialize;
+
+use crate::rfc9421::{verify_write_signature, VerifiedWrite, WriteAuthError};
+
+/// A retained record of one authenticated write: the signature itself,
+/// plus enough request context to make it meaningful. This is the audit
+/// record ADR 0012 calls for -- non-repudiable, and naming a specific key
+/// -- rather than a log line asserting that something happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditRecord {
+    pub keyid: String,
+    pub signature: String,
+    pub method: String,
+    pub path: String,
+    pub created: u64,
+    pub expires: u64,
+}
+
+/// The operator write surface's authentication state: which keys may
+/// write, which signatures have already been spent, and the audit trail
+/// of every write accepted so far.
+pub struct WriteAuth {
+    allowlist: HashSet<[u8; 32]>,
+    seen_signatures: Mutex<HashMap<Vec<u8>, u64>>,
+    audit_log: Mutex<Vec<AuditRecord>>,
+}
+
+impl WriteAuth {
+    /// Construct write authentication over `allowlist` -- the ed25519
+    /// public keys permitted to sign a write. Revoking a key is a
+    /// deploy-time change to this list (ADR 0009: config is immutable for
+    /// the process lifetime), not a runtime operation.
+    pub fn new(allowlist: Vec<[u8; 32]>) -> WriteAuth {
+        WriteAuth {
+            allowlist: allowlist.into_iter().collect(),
+            seen_signatures: Mutex::new(HashMap::new()),
+            audit_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Verify a presented write signature against THIS request, reject a
+    /// replay of a signature already accepted, and -- on success --
+    /// retain the signature as this write's audit record.
+    pub fn authenticate(
+        &self,
+        method: &str,
+        path: &str,
+        signature_input: Option<&str>,
+        signature: Option<&str>,
+        content_digest: Option<&str>,
+        body: &[u8],
+    ) -> Result<VerifiedWrite, WriteAuthError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before the Unix epoch")
+            .as_secs();
+
+        let verified = verify_write_signature(
+            method,
+            path,
+            signature_input,
+            signature,
+            content_digest,
+            body,
+            now,
+            &self.allowlist,
+        )?;
+
+        {
+            let mut seen = self
+                .seen_signatures
+                .lock()
+                .expect("write-auth replay cache lock poisoned");
+            // A signature's own `expires` bounds how long it needs to be
+            // remembered: once it can no longer verify as unexpired, it
+            // can never be replayed successfully, so it is safe to forget.
+            seen.retain(|_, expires_at| *expires_at >= now);
+            if seen.contains_key(&verified.signature) {
+                return Err(WriteAuthError::Replayed);
+            }
+            seen.insert(verified.signature.clone(), verified.expires);
+        }
+
+        self.audit_log
+            .lock()
+            .expect("write-auth audit log lock poisoned")
+            .push(AuditRecord {
+                keyid: verified.keyid.clone(),
+                signature: BASE64.encode(&verified.signature),
+                method: method.to_string(),
+                path: path.to_string(),
+                created: verified.created,
+                expires: verified.expires,
+            });
+
+        Ok(verified)
+    }
+
+    /// Every write authenticated so far, in the order it was accepted.
+    pub fn audit_log(&self) -> Vec<AuditRecord> {
+        self.audit_log
+            .lock()
+            .expect("write-auth audit log lock poisoned")
+            .clone()
+    }
+}
+
+/// Authenticate a write request against `write_auth`, reading the three
+/// RFC 9421 headers out of `headers`. Every future write endpoint (route
+/// CRUD, channel lifecycle, packet origination -- ADR 0008) calls this
+/// first, before doing anything else with the request, and maps an `Err`
+/// to `401 Unauthorized` itself -- kept a plain [`WriteAuthError`] here
+/// rather than a pre-built HTTP response, so this stays a small,
+/// `Copy`-free but cheaply-sized value rather than embedding a whole
+/// response type in every call site's `Result`.
+pub(crate) fn authenticate_write(
+    write_auth: &WriteAuth,
+    method: &str,
+    path: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<VerifiedWrite, WriteAuthError> {
+    let header_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    write_auth.authenticate(
+        method,
+        path,
+        header_str("signature-input"),
+        header_str("signature"),
+        header_str("content-digest"),
+        body,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rfc9421::{
+        compute_content_digest, SignatureParams, COVERED_COMPONENTS, SIGNATURE_ALG,
+    };
+    use ed25519_dalek::{ExpandedSecretKey, Keypair};
+    use rand::rngs::OsRng;
+
+    fn keypair() -> Keypair {
+        Keypair::generate(&mut OsRng)
+    }
+
+    fn keyid_hex(keypair: &Keypair) -> String {
+        keypair
+            .public
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    fn serialize_signature_params(params: &SignatureParams) -> String {
+        let inner = COVERED_COMPONENTS
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut out = format!("({inner})");
+        out.push_str(&format!(";created={}", params.created));
+        if let Some(expires) = params.expires {
+            out.push_str(&format!(";expires={expires}"));
+        }
+        out.push_str(&format!(";keyid=\"{}\"", params.keyid));
+        out.push_str(&format!(
+            ";alg=\"{}\"",
+            params.alg.as_deref().unwrap_or(SIGNATURE_ALG)
+        ));
+        out
+    }
+
+    fn sign(
+        keypair: &Keypair,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        expires: u64,
+    ) -> (String, String, String) {
+        let content_digest = compute_content_digest(body);
+        let params = SignatureParams {
+            created: 1_000,
+            expires: Some(expires),
+            keyid: keyid_hex(keypair),
+            alg: Some(SIGNATURE_ALG.to_string()),
+        };
+        let base = format!(
+            "\"@method\": {}\n\"@path\": {}\n\"content-digest\": {}\n\"@signature-params\": {}",
+            method.to_uppercase(),
+            path,
+            content_digest.trim(),
+            serialize_signature_params(&params)
+        );
+        let expanded = ExpandedSecretKey::from(&keypair.secret);
+        let signature = expanded.sign(base.as_bytes(), &keypair.public);
+        let signature_input = format!("sig1={}", serialize_signature_params(&params));
+        let sig_value = format!("sig1=:{}:", BASE64.encode(signature.to_bytes()));
+        (signature_input, sig_value, content_digest)
+    }
+
+    #[test]
+    fn a_valid_write_is_authenticated_and_retained_as_an_audit_record() {
+        let keypair = keypair();
+        let auth = WriteAuth::new(vec![keypair.public.to_bytes()]);
+        let body = b"{\"prefix\":\"g.example\"}";
+        let (sig_input, sig, digest) = sign(&keypair, "POST", "/routes", body, 9_999_999_999);
+
+        let result = auth.authenticate(
+            "POST",
+            "/routes",
+            Some(&sig_input),
+            Some(&sig),
+            Some(&digest),
+            body,
+        );
+        assert!(result.is_ok());
+
+        let log = auth.audit_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].keyid, keyid_hex(&keypair));
+        assert_eq!(log[0].method, "POST");
+        assert_eq!(log[0].path, "/routes");
+    }
+
+    #[test]
+    fn a_rejected_write_is_not_retained_as_an_audit_record() {
+        let keypair = keypair();
+        let auth = WriteAuth::new(vec![]); // key not allowlisted
+        let body = b"body";
+        let (sig_input, sig, digest) = sign(&keypair, "POST", "/routes", body, 9_999_999_999);
+
+        let result = auth.authenticate(
+            "POST",
+            "/routes",
+            Some(&sig_input),
+            Some(&sig),
+            Some(&digest),
+            body,
+        );
+        assert!(result.is_err());
+        assert!(auth.audit_log().is_empty());
+    }
+
+    #[test]
+    fn replaying_the_same_signature_is_rejected_the_second_time() {
+        let keypair = keypair();
+        let auth = WriteAuth::new(vec![keypair.public.to_bytes()]);
+        let body = b"body";
+        let (sig_input, sig, digest) = sign(&keypair, "POST", "/routes", body, 9_999_999_999);
+
+        let first = auth.authenticate(
+            "POST",
+            "/routes",
+            Some(&sig_input),
+            Some(&sig),
+            Some(&digest),
+            body,
+        );
+        assert!(first.is_ok());
+
+        let second = auth.authenticate(
+            "POST",
+            "/routes",
+            Some(&sig_input),
+            Some(&sig),
+            Some(&digest),
+            body,
+        );
+        assert_eq!(second, Err(WriteAuthError::Replayed));
+
+        // Exactly one write was recorded -- the replay never reached the
+        // audit log.
+        assert_eq!(auth.audit_log().len(), 1);
+    }
+}

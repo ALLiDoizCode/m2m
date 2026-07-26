@@ -64,4 +64,22 @@ pub enum ConfigError {
 
     #[error("signer kms_key_id must not be empty")]
     SignerKmsIdEmpty,
+
+    #[error(
+        "the [operator] section is present but bearer_token is empty: \
+         the operator surface would have no read authentication"
+    )]
+    OperatorMissingBearerToken,
+
+    #[error(
+        "the [operator] section is present but write_keys is empty: \
+         the operator surface would accept writes from no one"
+    )]
+    OperatorNoWriteKeys,
+
+    #[error(
+        "invalid operator write_keys entry '{value}': must be 64 hex characters \
+         (a 32-byte ed25519 public key)"
+    )]
+    OperatorInvalidWriteKey { value: String },
 }
