@@ -7,10 +7,13 @@ use connector_domain::{select_route, Fulfill, PacketResponse, Prepare, Reject, R
 
 use crate::app_client::{AppClient, AppOutcome};
 use crate::clock::Clock;
+use crate::peer_transport::PeerTransport;
+use crate::route::PeerRoute;
 
-/// The connector's packet plane: a fixed set of terminated routes, an
-/// [`AppClient`] port for delivering to the apps behind them, and a
-/// [`Clock`] port rather than wall time.
+/// The connector's packet plane: a fixed set of terminated routes and peer
+/// routes, an [`AppClient`] port for delivering to the apps behind
+/// terminated routes, a [`PeerTransport`] port for forwarding to the next
+/// hop on peer routes, and a [`Clock`] port rather than wall time.
 ///
 /// A router (`connector-client-edge`) deserializes a request into a
 /// [`Prepare`], calls exactly one method here -- [`Connector::handle_prepare`]
@@ -18,30 +21,43 @@ use crate::clock::Clock;
 /// in that one method; the router makes none.
 pub struct Connector {
     routes: Vec<StaticRoute>,
+    peer_routes: Vec<PeerRoute>,
     app_client: Arc<dyn AppClient>,
+    peer_transport: Arc<dyn PeerTransport>,
     clock: Arc<dyn Clock>,
 }
 
 impl Connector {
     pub fn new(
         routes: Vec<StaticRoute>,
+        peer_routes: Vec<PeerRoute>,
         app_client: Arc<dyn AppClient>,
+        peer_transport: Arc<dyn PeerTransport>,
         clock: Arc<dyn Clock>,
     ) -> Connector {
         Connector {
             routes,
+            peer_routes,
             app_client,
+            peer_transport,
             clock,
         }
     }
 
-    /// Route `prepare` to the app behind its matching terminated route, and
-    /// translate the app's outcome into the ILP-level response a client
-    /// receives.
+    /// Route `prepare` by longest-prefix match over terminated routes and
+    /// peer routes together, then either deliver it to the matching app or
+    /// forward it to the matching peer -- and translate whatever comes back
+    /// into the ILP-level response a client receives.
     pub async fn handle_prepare(&self, prepare: Prepare) -> PacketResponse {
-        let prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
+        let terminate_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
+        let forward_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
+        let all_prefixes: Vec<&str> = terminate_prefixes
+            .iter()
+            .copied()
+            .chain(forward_prefixes.iter().copied())
+            .collect();
 
-        let Some(index) = select_route(&prepare.destination, &prefixes) else {
+        let Some(index) = select_route(&prepare.destination, &all_prefixes) else {
             return PacketResponse::Reject(Reject {
                 code: RejectCode::f02_unreachable(),
                 triggered_by: String::new(),
@@ -50,7 +66,17 @@ impl Connector {
             });
         };
 
-        let route = &self.routes[index];
+        if index < self.routes.len() {
+            self.deliver_to_app(&self.routes[index], prepare).await
+        } else {
+            let peer_route = &self.peer_routes[index - self.routes.len()];
+            self.peer_transport
+                .forward(peer_route.peer_id(), prepare)
+                .await
+        }
+    }
+
+    async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
         let received_at = self.clock.now();
         let outcome = self
             .app_client
@@ -83,6 +109,7 @@ mod tests {
     use super::*;
     use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
+    use crate::peer_transport::InProcessPeerTransport;
     use chrono::{TimeZone, Utc};
 
     fn prepare(destination: &str, data: &[u8]) -> Prepare {
@@ -100,7 +127,13 @@ mod tests {
         app_client: Arc<FakeAppClient>,
         clock: Arc<TestClock>,
     ) -> Connector {
-        Connector::new(routes, app_client, clock)
+        Connector::new(
+            routes,
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            clock,
+        )
     }
 
     #[tokio::test]
@@ -246,5 +279,167 @@ mod tests {
             app_client.deliveries()[0].handler_url,
             *specific.handler_url()
         );
+    }
+
+    #[tokio::test]
+    async fn forwards_a_packet_matching_a_peer_route_to_the_next_hop() {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"delivered by the second hop".to_vec(),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop")],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        );
+
+        let response = first_hop
+            .handle_prepare(prepare("g.example.app", b"hello"))
+            .await;
+
+        assert_eq!(
+            response,
+            PacketResponse::Fulfill(Fulfill {
+                fulfillment: [0u8; 32],
+                data: b"delivered by the second hop".to_vec(),
+            })
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reject_from_the_next_hop_is_relayed_to_the_original_caller() {
+        let second_hop = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop")],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        );
+
+        let response = first_hop
+            .handle_prepare(prepare("g.example.app", b"hello"))
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "F02");
+                assert!(reject.message.contains("g.example.app"));
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_terminated_route_wins_over_a_shorter_peer_route() {
+        let peer_route = PeerRoute::new("g.example", "second-hop");
+        let terminated_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(
+            terminated_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"handled locally".to_vec(),
+            },
+        );
+        let connector = Connector::new(
+            vec![terminated_route],
+            vec![peer_route],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        );
+
+        let response = connector
+            .handle_prepare(prepare("g.example.app", b"hello"))
+            .await;
+
+        assert_eq!(
+            response,
+            PacketResponse::Fulfill(Fulfill {
+                fulfillment: [0u8; 32],
+                data: b"handled locally".to_vec(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_route_wins_over_a_shorter_terminated_route() {
+        let terminated_route = StaticRoute::new("g.example", "http://localhost:4000").unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:5000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"handled by the second hop".to_vec(),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Connector::new(
+            vec![terminated_route],
+            vec![PeerRoute::new("g.example.app", "second-hop")],
+            app_client,
+            Arc::new(peer_transport),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        );
+
+        let response = first_hop
+            .handle_prepare(prepare("g.example.app", b"hello"))
+            .await;
+
+        assert_eq!(
+            response,
+            PacketResponse::Fulfill(Fulfill {
+                fulfillment: [0u8; 32],
+                data: b"handled by the second hop".to_vec(),
+            })
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
     }
 }
