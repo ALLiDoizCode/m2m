@@ -217,7 +217,7 @@ pub fn verify_write_signature(
 }
 
 /// Render the RFC 9421 §2.3 `@signature-params` inner-list value.
-fn serialize_signature_params(components: &[&str], params: &SignatureParams) -> String {
+pub(crate) fn serialize_signature_params(components: &[&str], params: &SignatureParams) -> String {
     let inner = components
         .iter()
         .map(|c| format!("\"{c}\""))
@@ -242,7 +242,7 @@ fn serialize_signature_params(components: &[&str], params: &SignatureParams) -> 
 /// `@method` and `@path` are always request facts, and `content-digest`
 /// has already been confirmed present by [`verify_content_digest`] before
 /// this is called.
-fn build_signature_base(
+pub(crate) fn build_signature_base(
     method: &str,
     path: &str,
     content_digest: &str,
@@ -281,6 +281,19 @@ fn verify_content_digest(header_value: Option<&str>, body: &[u8]) -> Result<(), 
 #[cfg(test)]
 pub(crate) fn compute_content_digest(body: &[u8]) -> String {
     format!("sha-256=:{}:", BASE64.encode(Sha256::digest(body)))
+}
+
+/// Hex-encode a keypair's public key the way `keyid` is written on the
+/// wire. Shared by every test across this crate that needs to sign a
+/// write request.
+#[cfg(test)]
+pub(crate) fn keyid_hex(keypair: &ed25519_dalek::Keypair) -> String {
+    keypair
+        .public
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn parse_content_digest(value: &str) -> Option<(String, String)> {
@@ -464,15 +477,6 @@ mod tests {
 
     fn keypair() -> Keypair {
         Keypair::generate(&mut OsRng)
-    }
-
-    fn keyid_hex(keypair: &Keypair) -> String {
-        keypair
-            .public
-            .to_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
     }
 
     /// Sign a well-formed write request, returning the three headers a
