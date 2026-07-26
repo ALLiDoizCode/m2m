@@ -13,7 +13,7 @@ use chrono::Duration;
 use connector_settlement::{Claim, SettlementBackend};
 use connector_settlement_evm::EvmSettlementBackend;
 
-use support::{anvil_available, Anvil, DEPLOYER_PRIVATE_KEY};
+use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 
 /// `open`, `fund`, `redeem` and `close` are all real transactions against
 /// a real chain with no manually-specified gas limit anywhere in
@@ -24,8 +24,7 @@ use support::{anvil_available, Anvil, DEPLOYER_PRIVATE_KEY};
 /// failed `eth_estimateGas` call, not a hang.
 #[tokio::test]
 async fn every_channel_operation_estimates_its_own_gas_and_succeeds() {
-    if !anvil_available() {
-        eprintln!("skipping: `anvil` not found on PATH (install via https://getfoundry.sh)");
+    if !require_anvil() {
         return;
     }
 
@@ -70,8 +69,7 @@ async fn every_channel_operation_estimates_its_own_gas_and_succeeds() {
 /// locally rather than re-deriving each one from a racy on-chain read.
 #[tokio::test]
 async fn concurrent_calls_from_the_same_signer_do_not_conflict_on_nonce() {
-    if !anvil_available() {
-        eprintln!("skipping: `anvil` not found on PATH (install via https://getfoundry.sh)");
+    if !require_anvil() {
         return;
     }
 

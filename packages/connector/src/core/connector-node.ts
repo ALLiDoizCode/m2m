@@ -2105,8 +2105,11 @@ export class ConnectorNode implements HealthStatusProvider {
         'BTP + ILP-over-HTTP server started'
       );
 
-      // Start health server
-      const healthCheckPort = this._config.healthCheckPort || 8080;
+      // Start health server. `??` (not `||`) so an explicit port `0` — "ask the
+      // OS to assign an ephemeral port" — is not silently replaced by the
+      // default; ConfigLoader already applies the real 8080 default when the
+      // field is absent, so this only guards direct-construction callers.
+      const healthCheckPort = this._config.healthCheckPort ?? 8080;
       await this._healthServer.start(healthCheckPort);
       this._logger.info(
         {
@@ -2668,6 +2671,39 @@ export class ConnectorNode implements HealthStatusProvider {
    */
   get btpClientManager(): BTPClientManager {
     return this._btpClientManager;
+  }
+
+  /**
+   * The BTP server's actual bound port, once `start()` has resolved.
+   *
+   * Reads the live listening socket rather than echoing `config.btpServerPort`
+   * back, so a config that requested port `0` (OS-assigned, collision-proof)
+   * resolves to the real port here. `null` before `start()` binds the socket.
+   */
+  getBtpServerPort(): number | null {
+    const addr = this._btpServer.address();
+    return addr && typeof addr === 'object' ? addr.port : null;
+  }
+
+  /**
+   * The health-check server's actual bound port, once `start()` has resolved.
+   * See {@link getBtpServerPort} for why this reads the socket rather than
+   * `config.healthCheckPort`. `null` before `start()` binds the socket.
+   */
+  getHealthCheckPort(): number | null {
+    const addr = this._healthServer.address();
+    return addr && typeof addr === 'object' ? addr.port : null;
+  }
+
+  /**
+   * The admin API server's actual bound port, once `start()` has resolved.
+   * See {@link getBtpServerPort} for why this reads the socket rather than
+   * `config.adminApi.port`. `null` when the admin API is disabled or not yet
+   * started.
+   */
+  getAdminApiPort(): number | null {
+    const addr = this._adminServer?.address() ?? null;
+    return addr && typeof addr === 'object' ? addr.port : null;
   }
 
   /**

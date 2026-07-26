@@ -11,12 +11,11 @@ use connector_settlement::contract::assert_upholds_the_contract;
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
 
-use support::{anvil_available, Anvil, DEPLOYER_PRIVATE_KEY};
+use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 
 #[tokio::test]
 async fn evm_settlement_backend_upholds_the_contract() {
-    if !anvil_available() {
-        eprintln!("skipping: `anvil` not found on PATH (install via https://getfoundry.sh)");
+    if !require_anvil() {
         return;
     }
 

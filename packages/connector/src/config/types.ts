@@ -467,7 +467,8 @@ export interface ConnectorConfig {
   /**
    * Port number for BTP server to listen on
    * Accepts incoming BTP connections from peer connectors
-   * Valid range: 1-65535
+   * Valid range: 0-65535 (0 asks the OS to assign an ephemeral port — read the
+   * actual bound port back afterwards via `ConnectorNode.getBtpServerPort()`)
    *
    * Common ports: 3000, 3001, 3002, etc.
    */
@@ -476,7 +477,8 @@ export interface ConnectorConfig {
   /**
    * Port number for HTTP health check endpoint
    * Optional - defaults to 8080 if not specified
-   * Valid range: 1-65535
+   * Valid range: 0-65535 (0 asks the OS to assign an ephemeral port — read the
+   * actual bound port back afterwards via `ConnectorNode.getHealthCheckPort()`)
    *
    * Used by orchestration systems (Docker, Kubernetes) for health monitoring
    */
@@ -2299,7 +2301,8 @@ export interface AdminApiConfig {
    * Port for admin API HTTP server
    * Must not conflict with BTP server port or health port
    * Environment variable: ADMIN_API_PORT (default: '8081')
-   * Valid range: 1-65535
+   * Valid range: 0-65535 (0 asks the OS to assign an ephemeral port — read the
+   * actual bound port back afterwards via `ConnectorNode.getAdminApiPort()`)
    * Default: 8081
    */
   port?: number;

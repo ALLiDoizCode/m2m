@@ -21,12 +21,30 @@
  */
 
 import http from 'http';
+import type { AddressInfo } from 'net';
+import fs from 'fs';
 import express, { Request, Response } from 'express';
 import { ConnectorNode } from '../../src/core/connector-node';
 import { createLogger } from '../../src/utils/logger';
 import type { ConnectorConfig } from '../../src/config/types';
 
 jest.setTimeout(60_000);
+
+// ConnectorNode persists its runtime peer/route registry at a path derived
+// straight from `config.nodeId` (`./data/registry-<nodeId>.db`), replayed on
+// every subsequent `start()`. `standalone-settlement-e2e.test.ts` runs
+// concurrently with this file under `test:standalone` and uses the same
+// literal 'peer1'/'peer2' node ids, so a fixed id here would collide with
+// that file's registry db — and, on a re-run in a workspace that already has
+// this file's own leftover db from a prior invocation, would replay a
+// *stale* peer entry (an old, no-longer-listening BTP port) before this
+// run's own `registerPeer()` call ever executes, hanging the suite exactly
+// like the port collision this file was written to fix (issue #464). A
+// per-process suffix keeps the db path unique across both concurrent workers
+// and repeated runs. Routing labels ('peer1'/'peer2') stay fixed — routing
+// and the registry-db identity are independent concerns, and the destination
+// addresses below (`test.peer2.receiver`) hardcode the label.
+const RUN_SUFFIX = `${process.pid}-${Math.floor(Math.random() * 1e9)}`;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Test App Server
@@ -48,7 +66,12 @@ interface TestAppServer {
   stop(): Promise<void>;
 }
 
-async function startTestApp(port: number): Promise<TestAppServer> {
+// Binds to port 0 (kernel-assigned) and reads the real port back off the
+// listening socket — no port is ever chosen by this process, so two Jest
+// workers running this suite concurrently cannot pick the same one (issue
+// #464). No check-then-bind window exists either: the OS hands out the port
+// as part of the bind itself.
+async function startTestApp(): Promise<TestAppServer> {
   const app = express();
   app.use(express.json());
 
@@ -68,8 +91,9 @@ async function startTestApp(port: number): Promise<TestAppServer> {
   const server = http.createServer(app);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => resolve());
+    server.listen(0, '127.0.0.1', () => resolve());
   });
+  const { port } = server.address() as AddressInfo;
 
   return {
     port,
@@ -86,14 +110,6 @@ async function startTestApp(port: number): Promise<TestAppServer> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Port allocation — pick a random base per run to avoid collisions
-// ────────────────────────────────────────────────────────────────────────────
-
-function randomPortBase(): number {
-  return 30000 + Math.floor(Math.random() * 20000);
-}
-
-// ────────────────────────────────────────────────────────────────────────────
 // Admin API helpers
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -102,6 +118,18 @@ interface IlpSendResponse {
   code?: string;
   message?: string;
   data?: string;
+}
+
+async function registerPeer(adminPort: number, peer: { id: string; url: string }): Promise<void> {
+  const response = await fetch(`http://127.0.0.1:${adminPort}/admin/peers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: peer.id, url: peer.url, authToken: '' }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to register peer ${peer.id}: ${response.status} ${text}`);
+  }
 }
 
 async function ilpSend(
@@ -160,73 +188,70 @@ describe('Standalone Mode Smoke E2E', () => {
   let peer1AdminPort: number;
 
   beforeAll(async () => {
-    const base = randomPortBase();
-    const peer1Btp = base;
-    const peer2Btp = base + 1;
-    peer1AdminPort = base + 2;
-    const peer2AdminPort = base + 3;
-    const app1Port = base + 4;
-    const app2Port = base + 5;
-    const peer1Health = base + 6;
-    const peer2Health = base + 7;
+    // Every listening port below is OS-assigned (bind to 0, read the real
+    // port back off the socket) — no port number is chosen by this process,
+    // so a second Jest worker running this same file concurrently cannot
+    // collide with it (issue #464).
+    app1 = await startTestApp();
+    app2 = await startTestApp();
 
-    app1 = await startTestApp(app1Port);
-    app2 = await startTestApp(app2Port);
-
+    // `label` drives routing (route prefixes + the peer id the other side
+    // registers this node under) and stays fixed across runs — test bodies
+    // below hardcode `test.peer2.receiver`. `nodeId` (config identity + the
+    // registry-db path) gets a RUN_SUFFIX so it can never collide with
+    // another concurrent worker or a prior run's leftover db (see RUN_SUFFIX
+    // comment above).
     const buildConfig = (opts: {
-      nodeId: string;
-      btpPort: number;
-      adminPort: number;
-      healthPort: number;
+      label: string;
+      peerLabel: string;
       appPort: number;
-      peer: { id: string; port: number };
     }): ConnectorConfig => ({
-      nodeId: opts.nodeId,
-      btpServerPort: opts.btpPort,
-      healthCheckPort: opts.healthPort,
+      nodeId: `${opts.label}-${RUN_SUFFIX}`,
+      btpServerPort: 0,
+      healthCheckPort: 0,
       logLevel: 'warn',
       environment: 'development',
       deploymentMode: 'standalone',
-      adminApi: { enabled: true, port: opts.adminPort, host: '127.0.0.1' },
+      adminApi: { enabled: true, port: 0, host: '127.0.0.1' },
       localDelivery: {
         enabled: true,
         handlerUrl: `http://127.0.0.1:${opts.appPort}`,
       },
-      peers: [
-        {
-          id: opts.peer.id,
-          url: `ws://127.0.0.1:${opts.peer.port}`,
-          authToken: '',
-        },
-      ],
+      // Peers are wired up after both nodes are listening (see below) —
+      // neither node's BTP port is known until its own start() resolves, so
+      // it can't be embedded in the other's config up front the way a
+      // pre-guessed port number could.
+      peers: [],
       routes: [
-        { prefix: `test.${opts.nodeId}`, nextHop: opts.nodeId },
-        { prefix: `test.${opts.peer.id}`, nextHop: opts.peer.id },
+        { prefix: `test.${opts.label}`, nextHop: `${opts.label}-${RUN_SUFFIX}` },
+        { prefix: `test.${opts.peerLabel}`, nextHop: opts.peerLabel },
       ],
     });
 
-    const peer1Config = buildConfig({
-      nodeId: 'peer1',
-      btpPort: peer1Btp,
-      adminPort: peer1AdminPort,
-      healthPort: peer1Health,
-      appPort: app1Port,
-      peer: { id: 'peer2', port: peer2Btp },
-    });
-    const peer2Config = buildConfig({
-      nodeId: 'peer2',
-      btpPort: peer2Btp,
-      adminPort: peer2AdminPort,
-      healthPort: peer2Health,
-      appPort: app2Port,
-      peer: { id: 'peer1', port: peer1Btp },
-    });
-
-    peer2 = new ConnectorNode(peer2Config, createLogger('peer2', 'warn'));
-    await peer2.start();
-
+    // peer1 starts first, with no peers configured — its BTP port is read
+    // back below and handed to peer2's config.
+    const peer1Config = buildConfig({ label: 'peer1', peerLabel: 'peer2', appPort: app1.port });
     peer1 = new ConnectorNode(peer1Config, createLogger('peer1', 'warn'));
     await peer1.start();
+    const peer1BtpPort = peer1.getBtpServerPort();
+    peer1AdminPort = peer1.getAdminApiPort()!;
+    if (peer1BtpPort === null || peer1AdminPort === null) {
+      throw new Error('peer1 did not report its bound BTP/admin ports after start()');
+    }
+
+    // peer2 dials peer1 (already listening) from its own config.
+    const peer2Config = buildConfig({ label: 'peer2', peerLabel: 'peer1', appPort: app2.port });
+    peer2Config.peers = [{ id: 'peer1', url: `ws://127.0.0.1:${peer1BtpPort}`, authToken: '' }];
+    peer2 = new ConnectorNode(peer2Config, createLogger('peer2', 'warn'));
+    await peer2.start();
+    const peer2BtpPort = peer2.getBtpServerPort();
+    if (peer2BtpPort === null) {
+      throw new Error('peer2 did not report its bound BTP port after start()');
+    }
+
+    // peer1 learns peer2's now-known BTP port via the same dynamic-peer
+    // admin surface a real operator would use.
+    await registerPeer(peer1AdminPort, { id: 'peer2', url: `ws://127.0.0.1:${peer2BtpPort}` });
 
     await waitForPeerConnected(peer1AdminPort, 'peer2');
   });
@@ -236,6 +261,17 @@ describe('Standalone Mode Smoke E2E', () => {
     await peer2?.stop().catch(() => undefined);
     await app1?.stop().catch(() => undefined);
     await app2?.stop().catch(() => undefined);
+
+    // Each run's RUN_SUFFIX'd nodeId gets its own registry-db file (see
+    // RUN_SUFFIX comment above) rather than reusing one across runs — clean
+    // it up so repeated local runs don't accumulate one file pair per run.
+    for (const label of ['peer1', 'peer2']) {
+      try {
+        fs.unlinkSync(`./data/registry-${label}-${RUN_SUFFIX}.db`);
+      } catch {
+        // best-effort
+      }
+    }
   });
 
   it('should report standalone deployment mode', () => {

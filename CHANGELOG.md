@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.42.0](https://github.com/toon-protocol/connector/compare/v3.41.9...v3.42.0) (2026-07-26)
+
+### Features
+
+- **factory:** label-gated chain credential for agent runs, with mnemonic redaction ([#467](https://github.com/toon-protocol/connector/issues/467)) ([3c470da](https://github.com/toon-protocol/connector/commit/3c470da048200e288ffd06d52455cebbe1c033fd))
+
+## [3.41.9](https://github.com/toon-protocol/connector/compare/v3.41.8...v3.41.9) (2026-07-26)
+
+### Bug Fixes
+
+- **factory:** mint the push credential fresh at push time, publish early ([#462](https://github.com/toon-protocol/connector/issues/462)) ([#463](https://github.com/toon-protocol/connector/issues/463)) ([d9b5a10](https://github.com/toon-protocol/connector/commit/d9b5a10b66ebe7a0eb235bef76aa18514dc8cc50)), closes [#430](https://github.com/toon-protocol/connector/issues/430) [#422](https://github.com/toon-protocol/connector/issues/422) [#459](https://github.com/toon-protocol/connector/issues/459) [#459](https://github.com/toon-protocol/connector/issues/459)
+
 ## [3.41.8](https://github.com/toon-protocol/connector/compare/v3.41.7...v3.41.8) (2026-07-26)
 
 ### Bug Fixes
