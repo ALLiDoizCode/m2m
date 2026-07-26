@@ -471,7 +471,14 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          # Pinned, not `nightly`. The EVM settlement tests were verified green
+          # against anvil 1.7.1 (contract suite 1.01s, gas/nonce 0.60s), so the
+          # gate installs that exact version rather than whatever nightly is on
+          # the day. A gate that exists to prove chain code works should not be
+          # able to break from an upstream build we never ran against.
+          # NOTE: contracts.yml still uses `nightly` in two places -- same
+          # exposure, separate change.
+          version: v1.7.1
         env:
           # foundryup curls api.github.com unauthenticated and gets 403 when the runner IP is
           # rate-limited (same fix as contracts.yml). Exporting the workflow's
