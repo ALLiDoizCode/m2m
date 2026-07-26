@@ -40,6 +40,13 @@ on:
 # using the GitHub App token generated below (a PR opened by the default
 # GITHUB_TOKEN would NOT trigger ci.yml, so the green gate would never run on
 # the agent's PR). These scopes cover the guard job's read-only gh api calls.
+#
+# `contents: read` is DELIBERATE and stays read (reviewed for #462). The push path
+# needs write and gets it exclusively from the GitHub App token, never from this
+# GITHUB_TOKEN. Keeping it read means a bug or a prompt injection inside an agent
+# phase cannot push using the ambient job token: the only write credential in the
+# run is the one the runner mints, hands to a single `git push`, and then deletes.
+# Granting `contents: write` here would silently widen that blast radius.
 permissions:
   contents: read
   issues: read
@@ -123,7 +130,12 @@ jobs:
     needs: guard
     if: needs.guard.outputs.proceed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90 # real backstop; the implementer allows up to 100 iters
+    # Real backstop; the implementer allows up to 100 iters. Raised from 90 for
+    # chain-touching tickets: #459 (EVM settlement against a real chain) was
+    # cancelled at 91 minutes with the Anvil container still running. Raising this
+    # is only safe now that the push credential is minted fresh at push time
+    # (#462) — before that, extra minutes were spent and the push still failed.
+    timeout-minutes: 180
     concurrency:
       group: agent-implement-issue-${{ github.event.issue.number }}
       cancel-in-progress: false
@@ -153,6 +165,12 @@ jobs:
       # opened by the default GITHUB_TOKEN) triggers ci.yml, so the green gate
       # runs on the agent's PR. Requires the org/repo secrets APP_ID +
       # APP_PRIVATE_KEY (same App used org-wide for GitHub Project/PR automation).
+      #
+      # This token is the STARTING credential only. It expires one hour after
+      # issue, and the pushes happen at the END of a run that can last far longer
+      # — which silently destroyed three completed implementations (#462). The
+      # runner therefore mints its OWN fresh token immediately before each push,
+      # from APP_ID + APP_PRIVATE_KEY below. See .sandcastle/mint-app-token.ts.
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v2
@@ -167,4 +185,10 @@ jobs:
           # SANDCASTLE_AUTO_MERGE: "true"
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # For minting a fresh push credential mid-run (#462). These stay on the
+          # HOST: `PASSTHROUGH_KEYS` in .sandcastle/sandbox-secrets.ts lists only
+          # CLAUDE_CODE_OAUTH_TOKEN and GH_TOKEN, so the private key is never
+          # forwarded into the agent's container.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: npm run sandcastle:implement
