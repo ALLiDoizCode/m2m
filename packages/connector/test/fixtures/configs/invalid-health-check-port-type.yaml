@@ -1,6 +1,0 @@
-# Invalid config - healthCheckPort is string instead of number
-nodeId: test-connector
-btpServerPort: 3000
-healthCheckPort: "8080"
-peers: []
-routes: []

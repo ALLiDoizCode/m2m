@@ -4,10 +4,10 @@
  * in, OER-encoded FULFILL/REJECT out).
  *
  * Issue #456: the narrow surface `swap`, `town` and `mill` actually depend on
- * is a single `sendPacket`-shaped call — this mirrors {@link
- * import('../core/connector-node').ConnectorNode.sendPacket}'s shape so a
- * caller can swap the embedded connector for this HTTP client with the same
- * call site. It does not remove or replace `ConnectorNode` (that is #457).
+ * is a single `sendPacket`-shaped call — this mirrors the embedded
+ * `ConnectorNode.sendPacket`'s shape it replaced (issue #457 removed the
+ * embedded connector; see README.md's migration notes) so a caller can swap
+ * to this HTTP client with the same call site.
  *
  * Transport-agnostic: pass any `fetch`-compatible function (defaults to the
  * global `fetch`), so it works in Node 18+, the browser, and test harnesses.

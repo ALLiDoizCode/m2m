@@ -1,8 +1,0 @@
-# Test configuration for Connector C (linear topology integration test)
-# Test topology: A → B → C
-nodeId: connector-c
-btpServerPort: PLACEHOLDER_PORT_C  # Will be replaced dynamically in test
-logLevel: error
-
-peers: []
-routes: []  # Connector C is the destination

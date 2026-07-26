@@ -1,6 +1,0 @@
-# Invalid config - invalid logLevel value
-nodeId: test-connector
-btpServerPort: 3000
-logLevel: invalid-level
-peers: []
-routes: []

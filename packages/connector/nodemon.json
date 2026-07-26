@@ -1,7 +1,0 @@
-{
-  "watch": ["packages/connector/src/**/*.ts", "packages/shared/src/**/*.ts"],
-  "ext": "ts",
-  "ignore": ["**/*.test.ts", "**/*.spec.ts", "**/node_modules/**"],
-  "delay": 1000,
-  "exec": "ts-node packages/connector/src/index.ts"
-}

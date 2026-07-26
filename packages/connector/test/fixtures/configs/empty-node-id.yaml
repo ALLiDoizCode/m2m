@@ -1,5 +1,0 @@
-# Invalid config - nodeId is empty string
-nodeId: ""
-btpServerPort: 3000
-peers: []
-routes: []
