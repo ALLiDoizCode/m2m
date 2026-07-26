@@ -1,6 +1,14 @@
 //! Shared support for connector-settlement-evm's integration tests: whether `anvil` is on
 //! `PATH`, and the CI-vs-local policy for what to do when it is not (issue #471).
 
+// Each integration-test binary compiles this module separately and uses a
+// different subset of it -- `anvil_gate_smoke` needs only `require_anvil`,
+// while `contract_suite` and `gas_and_nonce` need the `Anvil` harness. Under
+// clippy's `-D warnings` on `--all-targets`, whatever a given binary does not
+// touch is a hard `dead_code` error, so the standard shared-support-module
+// allow is required here rather than optional.
+#![allow(dead_code)]
+
 /// True if `anvil --version` runs successfully.
 pub fn anvil_available() -> bool {
     Command::new("anvil")
