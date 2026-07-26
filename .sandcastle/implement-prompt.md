@@ -35,9 +35,38 @@ If applicable, use RGR to complete the task.
 
 # FEEDBACK LOOPS
 
+The gate below is ENFORCED. After you finish, the runner executes it itself and
+will not open a PR if it is red — you get a bounded number of fix iterations with
+the exact failure output, and then the run fails. So running it yourself as you
+go is not a formality; it is the difference between finishing and being handed
+your own compile error.
+
+## Rust — `crates/`, the #409 rewrite
+
+If you touched anything under `crates/`, `Cargo.toml` or `Cargo.lock`, run these
+from the repo root. They are exactly what CI's `Rust Workspace Gate` runs:
+
+- format: `cargo fmt --all -- --check`
+- build: `cargo build --workspace`
+- test: `cargo test --workspace --exclude payment-channel`
+- lint: `cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings`
+
+`anvil` and `cast` (Foundry v1.7.1) are installed in this container, so the EVM
+settlement tests bring up a real local chain and genuinely run. Per ADR 0007 that
+is the design: each integration test spawns its own disposable chain. A chain
+test that reports `finished in 0.00s` did NOT run — treat that as a failure and
+find out why, do not report it as passing.
+
+Two clippy notes that have bitten before: `-D warnings` with `--all-targets`
+makes dead code a hard error, so a shared `tests/support/mod.rs` used by several
+test binaries needs `#![allow(dead_code)]`; and `cargo fmt` is the FIRST step, so
+a formatting slip fails the gate before your tests ever run.
+
+## TypeScript — `packages/`
+
 connector is an npm-workspaces monorepo with a hand-ordered build
-(`shared` → `mina-zkapp` → the rest). Before committing, run connector's real
-gate from the repo root and make sure every command passes:
+(`shared` → `mina-zkapp` → the rest). If you touched anything under `packages/`,
+run connector's real gate from the repo root and make sure every command passes:
 
 - lint: `npm run lint --workspaces --if-present`
 - typecheck: `npm run typecheck` (builds `shared` + `mina-zkapp` first so the
@@ -56,7 +85,13 @@ Two connector-specific gotchas when running the test gate:
   libsql-backed test cannot find its native module (the lockfile was generated
   on macOS), run `npm install @libsql/linux-x64-gnu --no-save`.
 
-Do not commit until lint, typecheck, build, and test all pass.
+Do not commit until the gates that apply to what you changed all pass.
+
+If a gate fails and you cannot fix it, say so plainly and explain what is
+blocking you. Do not weaken, skip, delete or `#[ignore]` a test to get green, and
+do not loosen a lint threshold — a gate that was made to pass proves nothing, and
+the whole reason it is enforced from outside is that self-reported success is not
+evidence.
 
 # COMMIT
 

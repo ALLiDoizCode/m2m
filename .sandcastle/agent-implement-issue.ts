@@ -60,6 +60,7 @@ import * as sandcastle from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
 import { sandboxSecrets } from './sandbox-secrets.ts';
 import { mintAppToken } from './mint-app-token.ts';
+import { fixPrompt, runGate, selectSteps } from './run-gate.ts';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -72,6 +73,12 @@ if (!issueNumber || !/^\d+$/.test(issueNumber)) {
       `(got: ${JSON.stringify(process.env.SANDCASTLE_ISSUE_NUMBER)}).`
   );
 }
+
+// How many times a red gate may be handed back for a fix before the run fails.
+// Two is deliberate: the failures this catches are overwhelmingly small compile
+// or lint errors that one iteration fixes. A larger budget mostly buys a longer
+// run before the same loud failure.
+const MAX_GATE_FIX_ATTEMPTS = 2;
 
 // Default is PR mode. Auto-merge only when the flag is exactly "true".
 const autoMerge = process.env.SANDCASTLE_AUTO_MERGE === 'true';
@@ -277,6 +284,48 @@ async function main() {
     // worth running and the final push below fails loud.
     console.log('\nPublishing the implementer branch early (crash-recovery point).');
     await pushBranch(sandbox, 'push:early', { bestEffort: true });
+
+    // GATE — run by the runner, not asked of the agent.
+    //
+    // implement-prompt.md says "Do not commit until lint, typecheck, build, and
+    // test all pass", but that is advisory prose the agent self-reports on, and
+    // it named only the npm gate — no `cargo` at all — while the #409 rewrite is
+    // Rust. #441, #444, #446, #449 and #454 are the receipts: five remediation
+    // tickets in one epic for PRs that did not compile, every one discovered
+    // only after CI ran. Same failure mode toon-meta#235 fixed for `git push`,
+    // same cure: verifying a build is plumbing, so the runner does it.
+    //
+    // A red gate gets up to MAX_GATE_FIX_ATTEMPTS fix iterations with the exact
+    // failure output fed back, because these are overwhelmingly small compile
+    // errors that are cheap to fix now and expensive to discover later. Still
+    // red after that: push what exists and fail the job loudly, never open a PR
+    // on a known-red branch.
+    const gateSteps = await selectSteps(sandbox, 'main');
+    let gate = await runGate(sandbox, gateSteps);
+
+    for (let attempt = 1; !gate.passed && attempt <= MAX_GATE_FIX_ATTEMPTS; attempt++) {
+      console.log(`\nGate is red — fix attempt ${attempt}/${MAX_GATE_FIX_ATTEMPTS}.`);
+      await sandbox.run({
+        name: `gate-fix-${attempt}`,
+        maxIterations: 20,
+        agent: sandcastle.claudeCode('claude-sonnet-5'),
+        prompt: fixPrompt(gate.failure!, attempt, MAX_GATE_FIX_ATTEMPTS),
+      });
+      // Push after each attempt so the work survives even if the next step dies.
+      await pushBranch(sandbox, `push:gate-fix-${attempt}`, { bestEffort: true });
+      gate = await runGate(sandbox, gateSteps);
+    }
+
+    if (!gate.passed) {
+      throw new Error(
+        `Gate still RED after ${MAX_GATE_FIX_ATTEMPTS} fix attempt(s) — refusing to open a PR.\n` +
+          `  Failing step: ${gate.failure!.step}\n` +
+          `  Command:      ${gate.failure!.command} (exit ${gate.failure!.exitCode})\n` +
+          `Branch '${branch}' has been pushed, so the work is recoverable. ` +
+          `Inspect the agent log artifact, fix it, or re-run the issue.\n\n` +
+          gate.failure!.output
+      );
+    }
 
     // Review (opus, 1 iteration) on the SAME branch. The engine supplies the
     // built-in {{TARGET_BRANCH}} used inside review-prompt.md, so we pass only
