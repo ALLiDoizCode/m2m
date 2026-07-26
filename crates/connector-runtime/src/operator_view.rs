@@ -2,15 +2,17 @@
 //! here is exactly what [`crate::Connector`] hands back to a read handler --
 //! no method beyond what the handler serializes as-is.
 //!
-//! [`PeerView`], [`ChannelView`], [`ClaimView`] and [`ExposureView`] have no
-//! fields yet because nothing in the runtime tracks that state yet: the peer
-//! wire (#416), the EVM settlement backend (#422), claim exchange (#423) and
-//! the exposure projection (#424) haven't landed. [`Connector`]'s accessors
-//! for them return an empty list until each lands; the operator surface is
-//! already complete as an interface; the tickets above only need to start
-//! populating it.
+//! [`PeerView`], [`ClaimView`] and [`ExposureView`] have no fields yet
+//! because nothing in the runtime tracks that state yet: the peer wire
+//! (#416), claim exchange (#423) and the exposure projection (#424) haven't
+//! landed. [`ChannelView`] gained real fields in #459, once a settlement
+//! backend existed for [`Connector`] to project channel state from.
+//! [`Connector`]'s accessors for the still-empty views return an empty list
+//! until each lands; the operator surface is already complete as an
+//! interface; the tickets above only need to start populating it.
 
 use chrono::{DateTime, Utc};
+use connector_settlement::{ChannelState, ChannelStatus};
 use serde::{Deserialize, Serialize};
 
 /// A static route as seen by the operator surface.
@@ -35,10 +37,57 @@ pub struct LeasedRouteView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerView {}
 
-/// A payment channel as seen by the operator surface. See the module docs:
-/// always empty until #422 (the EVM settlement backend) lands.
+/// A payment channel as seen by the operator surface (issue #459).
+/// `counterparty` is hex-encoded (`0x`-prefixed) since it is arbitrary
+/// bytes, not necessarily UTF-8 -- an EVM backend's is a 20-byte address,
+/// but the port itself (`connector_settlement::SettlementBackend::open`)
+/// takes an opaque `Vec<u8>`, so this view makes no assumption about its
+/// shape beyond "some bytes, safe to put in JSON".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelView {}
+pub struct ChannelView {
+    pub id: String,
+    pub counterparty: String,
+    pub status: ChannelViewStatus,
+    pub deposited: u128,
+    pub redeemed: u128,
+}
+
+/// A channel's lifecycle status as reported over the operator surface --
+/// mirrors [`connector_settlement::ChannelStatus`] rather than reusing it
+/// directly, so this crate's read models stay serializable without
+/// requiring that of every port type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelViewStatus {
+    Open,
+    Closed,
+}
+
+impl From<ChannelState> for ChannelView {
+    fn from(state: ChannelState) -> Self {
+        ChannelView {
+            id: state.id.0,
+            counterparty: encode_hex(&state.counterparty),
+            status: match state.status {
+                ChannelStatus::Open => ChannelViewStatus::Open,
+                ChannelStatus::Closed => ChannelViewStatus::Closed,
+            },
+            deposited: state.deposited,
+            redeemed: state.redeemed,
+        }
+    }
+}
+
+/// `0x`-prefixed lowercase hex -- the one encoding this crate uses whenever
+/// arbitrary bytes need to round-trip through JSON.
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(2 + bytes.len() * 2);
+    hex.push_str("0x");
+    for byte in bytes {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
 
 /// A claim as seen by the operator surface. See the module docs: always
 /// empty until #423 (claim exchange) lands.

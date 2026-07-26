@@ -13,15 +13,18 @@
 //! retains every accepted signature as its write's audit record (ADR
 //! 0012), exposed for inspection at `GET /audit-log`.
 //!
-//! `POST /packets` -- originating a packet outward -- and
-//! `POST /routes/leased` -- creating or renewing a leased route (issue
-//! #427; channel lifecycle, ADR 0008's third write, is issue #422 and
-//! doesn't land here) -- are this crate's write endpoints. Both call
+//! `POST /packets` -- originating a packet outward -- `POST /routes/leased`
+//! -- creating or renewing a leased route (issue #427) -- and
+//! `POST /channels`, `POST /channels/:id/fund`, `POST /channels/:id/redeem`
+//! and `POST /channels/:id/close` -- channel lifecycle, ADR 0008's third
+//! write (issue #459) -- are this crate's write endpoints. Every one calls
 //! [`write_auth::authenticate_write`] first and nothing else in this
 //! crate accepts a body, so a write cannot reach [`Connector`] without a
 //! valid, allowlisted, unexpired, non-replayed signature. Bearer tokens
 //! gate reads and reads only; no shared secret is ever sufficient to move
-//! value.
+//! value. Channel writes 503 rather than reach [`Connector`] at all on a
+//! node with no settlement backend configured
+//! ([`connector_runtime::ChannelOperationError::NoSettlementBackend`]).
 //!
 //! Per ADR 0001, each read handler below deserializes nothing beyond the
 //! bearer token (a GET request has no body) and calls exactly one
@@ -35,7 +38,7 @@ mod write_auth;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, Method, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -45,9 +48,10 @@ use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare};
 use connector_runtime::{
-    ChannelView, ClaimView, Connector, ExposureView, LeaseRouteError, LeasedRouteView, PeerView,
-    RouteView,
+    ChannelOperationError, ChannelView, ClaimView, Connector, ExposureView, LeaseRouteError,
+    LeasedRouteView, PeerView, RouteView,
 };
+use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
 use write_auth::{authenticate_write, AuditRecord, WriteAuth};
 
@@ -110,9 +114,39 @@ pub fn router(
 
     let writes = Router::new()
         .route("/packets", post(originate_packet))
-        .route("/routes/leased", post(create_leased_route));
+        .route("/routes/leased", post(create_leased_route))
+        .route("/channels", post(open_channel))
+        .route("/channels/:id/fund", post(fund_channel))
+        .route("/channels/:id/redeem", post(redeem_channel))
+        .route("/channels/:id/close", post(close_channel));
 
     reads.merge(writes).with_state(state)
+}
+
+/// Authenticate a write request against `state`'s [`WriteAuth`], returning
+/// the `401 Unauthorized` status and body to send back immediately on
+/// failure (kept as a plain `(StatusCode, String)` here rather than a
+/// pre-built [`Response`] so this stays a small `Result::Err`, matching
+/// [`write_auth::authenticate_write`]'s own reasoning for returning a plain
+/// [`write_auth::WriteAuthError`] instead). Every write handler below calls
+/// this first, before touching the body for anything else -- see the
+/// module docs.
+fn require_write_auth(
+    state: &OperatorState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(), (StatusCode, String)> {
+    authenticate_write(
+        &state.write_auth,
+        method.as_str(),
+        uri.path(),
+        headers,
+        body,
+    )
+    .map(|_| ())
+    .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))
 }
 
 async fn require_bearer_token<B>(
@@ -148,7 +182,7 @@ async fn leased_routes(State(state): State<OperatorState>) -> Json<Vec<LeasedRou
 }
 
 async fn channels(State(state): State<OperatorState>) -> Json<Vec<ChannelView>> {
-    Json(state.connector.channels())
+    Json(state.connector.channels().await)
 }
 
 async fn claims(State(state): State<OperatorState>) -> Json<Vec<ClaimView>> {
@@ -188,14 +222,8 @@ async fn originate_packet(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     let prepare = match Prepare::decode(&body) {
@@ -256,14 +284,8 @@ async fn create_leased_route(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     let request: CreateLeasedRouteRequest = match serde_json::from_slice(&body) {
@@ -284,6 +306,178 @@ async fn create_leased_route(
         )
             .into_response(),
     }
+}
+
+/// A `POST /channels` request body: open a channel to `counterparty_hex`
+/// (arbitrary bytes, hex-encoded -- an EVM backend expects a 20-byte
+/// address, but the port itself takes opaque bytes) with a
+/// `settlement_timeout_seconds`-second withdrawal-safety window (issue
+/// #459, ADR 0008).
+#[derive(Debug, Deserialize)]
+struct OpenChannelRequest {
+    counterparty_hex: String,
+    settlement_timeout_seconds: i64,
+}
+
+/// A `POST /channels/:id/fund` request body: deposit `amount` into the
+/// channel named by the path.
+#[derive(Debug, Deserialize)]
+struct FundChannelRequest {
+    amount: u128,
+}
+
+/// A `POST /channels/:id/redeem` request body: redeem a claim of
+/// `cumulative_amount`, authorized by `signature_hex` (opaque, hex-encoded
+/// -- this port does not verify it; see `connector_settlement::Claim`).
+#[derive(Debug, Deserialize)]
+struct RedeemChannelRequest {
+    cumulative_amount: u128,
+    signature_hex: String,
+}
+
+fn channel_operation_response(result: Result<ChannelView, ChannelOperationError>) -> Response {
+    match result {
+        Ok(view) => Json(view).into_response(),
+        Err(ChannelOperationError::NoSettlementBackend) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            ChannelOperationError::NoSettlementBackend.to_string(),
+        )
+            .into_response(),
+        Err(error @ ChannelOperationError::Settlement(_)) => {
+            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
+    }
+}
+
+/// Decode `0x`-optional hex into raw bytes; `Err` on odd length or a
+/// non-hex character.
+fn decode_hex(input: &str) -> Result<Vec<u8>, ()> {
+    let trimmed = input.strip_prefix("0x").unwrap_or(input);
+    if !trimmed.len().is_multiple_of(2) {
+        return Err(());
+    }
+    (0..trimmed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&trimmed[i..i + 2], 16).map_err(|_| ()))
+        .collect()
+}
+
+/// `POST /channels`: open a new payment channel (issue #459, ADR 0008).
+/// Authenticated exactly like every other write on this surface --
+/// [`authenticate_write`] first, nothing else in this handler accepts the
+/// request until that succeeds.
+async fn open_channel(
+    State(state): State<OperatorState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    let request: OpenChannelRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    let counterparty = match decode_hex(&request.counterparty_hex) {
+        Ok(bytes) => bytes,
+        Err(()) => {
+            return (StatusCode::BAD_REQUEST, "counterparty_hex must be hex").into_response()
+        }
+    };
+
+    channel_operation_response(
+        state
+            .connector
+            .open_channel(
+                counterparty,
+                chrono::Duration::seconds(request.settlement_timeout_seconds),
+            )
+            .await,
+    )
+}
+
+/// `POST /channels/:id/fund`: deposit into an existing channel (issue
+/// #459, ADR 0008).
+async fn fund_channel(
+    State(state): State<OperatorState>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    let request: FundChannelRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+
+    channel_operation_response(
+        state
+            .connector
+            .fund_channel(&channel_id, request.amount)
+            .await,
+    )
+}
+
+/// `POST /channels/:id/redeem`: redeem a claim against an existing channel
+/// (issue #459, ADR 0008).
+async fn redeem_channel(
+    State(state): State<OperatorState>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    let request: RedeemChannelRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    let signature = match decode_hex(&request.signature_hex) {
+        Ok(bytes) => bytes,
+        Err(()) => return (StatusCode::BAD_REQUEST, "signature_hex must be hex").into_response(),
+    };
+
+    channel_operation_response(
+        state
+            .connector
+            .redeem_channel(
+                &channel_id,
+                Claim {
+                    cumulative_amount: request.cumulative_amount,
+                    signature,
+                },
+            )
+            .await,
+    )
+}
+
+/// `POST /channels/:id/close`: close an existing channel (issue #459, ADR
+/// 0008). No request body.
+async fn close_channel(
+    State(state): State<OperatorState>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    channel_operation_response(state.connector.close_channel(&channel_id).await)
 }
 
 async fn identity(State(state): State<OperatorState>) -> Response {
@@ -1055,6 +1249,197 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let reject = connector_domain::Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code, RejectCode::t01_peer_unreachable());
+        }
+    }
+
+    /// Channel lifecycle (issue #459, ADR 0008) driven entirely through
+    /// this operator surface, against a real, disposable `anvil` chain --
+    /// not a fake settlement backend. Skips itself (rather than failing
+    /// the gate) if `anvil` is not on `PATH`; see
+    /// `connector-settlement-evm/tests/support/mod.rs` for why this crate
+    /// spawns one directly instead of going through `make anvil-up`.
+    mod channel_lifecycle {
+        use super::*;
+        use crate::rfc9421::sign_request;
+        use connector_runtime::ChannelViewStatus;
+        use connector_settlement_evm::EvmSettlementBackend;
+        use ed25519_dalek::Keypair;
+        use rand::rngs::OsRng;
+        use std::process::{Child, Command, Stdio};
+
+        const DEPLOYER_PRIVATE_KEY: &str =
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+        fn anvil_available() -> bool {
+            Command::new("anvil")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+
+        struct Anvil {
+            child: Child,
+            rpc_url: String,
+        }
+
+        impl Anvil {
+            async fn spawn() -> Self {
+                let port = 18_900u16.wrapping_add((std::process::id() as u16) % 1_000);
+                let rpc_url = format!("http://127.0.0.1:{port}");
+                let child = Command::new("anvil")
+                    .args(["--host", "127.0.0.1", "--port"])
+                    .arg(port.to_string())
+                    .args([
+                        "--chain-id",
+                        "31337",
+                        "--accounts",
+                        "1",
+                        "--balance",
+                        "10000",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn anvil");
+
+                use ethers::providers::{Http, Middleware, Provider};
+                let provider = Provider::<Http>::try_from(rpc_url.as_str()).expect("provider");
+                for _ in 0..200 {
+                    if provider.get_chainid().await.is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Self { child, rpc_url }
+            }
+        }
+
+        impl Drop for Anvil {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+
+        fn keypair() -> Keypair {
+            Keypair::generate(&mut OsRng)
+        }
+
+        fn signed_post(keypair: &Keypair, path: &str, body: Vec<u8>) -> Request<Body> {
+            let (sig_input, sig, digest) =
+                sign_request(keypair, "POST", path, &body, 1_000, Some(9_999_999_999));
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("signature-input", sig_input)
+                .header("signature", sig)
+                .header("content-digest", digest)
+                .body(Body::from(body))
+                .unwrap()
+        }
+
+        /// AC: "an EVM implementation opens, funds and closes a payment
+        /// channel against a real chain", "channel lifecycle is driven
+        /// entirely through the operator surface". Every step below is a
+        /// real, signed HTTP write against this crate's actual `router()`,
+        /// reaching a real `SettlementChannel` contract on a real (if
+        /// disposable) chain -- nothing here is faked.
+        #[tokio::test]
+        async fn opening_funding_and_closing_a_channel_over_the_operator_surface_reaches_a_real_chain(
+        ) {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn().await;
+            let settlement = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+                .await
+                .expect("deploy SettlementChannel");
+
+            let app_client = Arc::new(FakeAppClient::new());
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let connector = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    clock,
+                )
+                .with_settlement(Arc::new(settlement)),
+            );
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            let keypair = keypair();
+            let app = router(
+                connector,
+                signer,
+                "correct-token".to_string(),
+                vec![keypair.public.to_bytes()],
+            );
+
+            // Open.
+            let open_body = serde_json::to_vec(&serde_json::json!({
+                "counterparty_hex": "0x000000000000000000000000000000000000aa",
+                "settlement_timeout_seconds": 3600,
+            }))
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(signed_post(&keypair, "/channels", open_body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let opened: ChannelView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(opened.deposited, 0);
+
+            // Fund.
+            let fund_body = serde_json::to_vec(&serde_json::json!({ "amount": 1_000 })).unwrap();
+            let fund_path = format!("/channels/{}/fund", opened.id);
+            let response = app
+                .clone()
+                .oneshot(signed_post(&keypair, &fund_path, fund_body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let funded: ChannelView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(funded.deposited, 1_000);
+
+            // The freshly opened, freshly funded channel is visible over
+            // the read surface too, reported fresh from the real chain.
+            let response = get(app.clone(), "/channels", Some("correct-token")).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let channels: Vec<ChannelView> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(channels, vec![funded.clone()]);
+
+            // Close.
+            let close_path = format!("/channels/{}/close", opened.id);
+            let response = app
+                .clone()
+                .oneshot(signed_post(&keypair, &close_path, Vec::new()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let closed: ChannelView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(closed.status, ChannelViewStatus::Closed);
+
+            // Terminal: funding a closed channel is rejected, not silently
+            // accepted.
+            let fund_again_body = serde_json::to_vec(&serde_json::json!({ "amount": 1 })).unwrap();
+            let response = app
+                .oneshot(signed_post(&keypair, &fund_path, fund_again_body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
     }
 }
