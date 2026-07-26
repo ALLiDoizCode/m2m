@@ -417,13 +417,19 @@ mod tests {
         let expires_at = start + Duration::seconds(30);
 
         let response = connector
-            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at), 0)
+            .handle_prepare(
+                prepare_expiring_at("g.example.app", b"hello", expires_at),
+                0,
+            )
             .await;
         assert!(matches!(response, PacketResponse::Fulfill(_)));
 
         clock.advance(Duration::seconds(30));
         let response = connector
-            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at), 0)
+            .handle_prepare(
+                prepare_expiring_at("g.example.app", b"hello", expires_at),
+                0,
+            )
             .await;
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),

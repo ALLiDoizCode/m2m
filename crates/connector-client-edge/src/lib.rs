@@ -277,6 +277,7 @@ mod tests {
             second_hop_route.handler_url(),
             AppOutcome::Delivered {
                 data: b"delivered by the second connector".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let second_hop = Arc::new(Connector::new(
