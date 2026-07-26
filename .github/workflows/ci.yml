@@ -464,6 +464,20 @@ jobs:
           restore-keys: |
             rust-gate-${{ runner.os }}-
 
+      # anvil (and cast, used by chain-integration tests to talk to it) on PATH for any
+      # crate's tests -- connector-settlement-evm's are the first, connector-settlement-solana
+      # and future settlement crates will need the equivalent Solana tooling separately.
+      # Without this, an anvil-gated test silently skips and reports `passed` (issue #471).
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+        env:
+          # foundryup curls api.github.com unauthenticated and gets 403 when the runner IP is
+          # rate-limited (same fix as contracts.yml). Exporting the workflow's
+          # auto-provisioned GITHUB_TOKEN bumps the limit from 60 -> 5000 req/hr.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -471,7 +485,25 @@ jobs:
         run: cargo build --workspace
 
       - name: Run tests
-        run: cargo test --workspace --exclude payment-channel
+        # CI=true is already set by GitHub Actions for every job; anvil-gated tests key off it
+        # (rather than a bespoke REQUIRE_ANVIL nobody remembers to set) to hard-fail here instead
+        # of silently skipping when anvil isn't on PATH -- see
+        # crates/connector-settlement-evm/tests/support/mod.rs.
+        run: cargo test --workspace --exclude payment-channel 2>&1 | tee /tmp/cargo-test.log
+
+      - name: Assert no integration-test harness executed zero tests
+        # A `tests/*.rs` integration binary exists specifically to hold tests. Unlike a crate's
+        # `unittests`/doctests target -- which legitimately reports "running 0 tests" when the
+        # crate simply has none -- a dedicated harness reporting zero is always a bug: a feature/
+        # cfg mismatch left it compiling with nothing inside, and cargo still reports the target
+        # `ok`. Issue #471 ("a target that executes zero tests does not report success").
+        run: |
+          awk '
+            /^ *Running tests\// { harness = $0; next }
+            /^running 0 tests$/ && harness { print "EMPTY TEST HARNESS (reports success despite running nothing): " harness; found = 1; harness = "" }
+            /^running [0-9]/ { harness = "" }
+            END { if (found) exit 1 }
+          ' /tmp/cargo-test.log
 
       - name: Clippy (warnings denied)
         run: cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings
