@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.44.0](https://github.com/toon-protocol/connector/compare/v3.43.0...v3.44.0) (2026-07-26)
+
+### Features
+
+- **factory:** run the gate from the runner instead of asking the agent ([#477](https://github.com/toon-protocol/connector/issues/477)) ([23997e8](https://github.com/toon-protocol/connector/commit/23997e89e4985ed2df1dbb231e2e21e34d201fd0)), closes [#409](https://github.com/toon-protocol/connector/issues/409) [#441](https://github.com/toon-protocol/connector/issues/441) [#444](https://github.com/toon-protocol/connector/issues/444) [#446](https://github.com/toon-protocol/connector/issues/446) [#449](https://github.com/toon-protocol/connector/issues/449) [#454](https://github.com/toon-protocol/connector/issues/454) [#449](https://github.com/toon-protocol/connector/issues/449) [#448](https://github.com/toon-protocol/connector/issues/448)
+
 ## [3.43.0](https://github.com/toon-protocol/connector/compare/v3.42.1...v3.43.0) (2026-07-26)
 
 ### Features
