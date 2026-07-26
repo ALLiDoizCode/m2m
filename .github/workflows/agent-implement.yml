@@ -191,21 +191,6 @@ jobs:
           # forwarded into the agent's container.
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
-          # Chain credential — LABEL-GATED, and the only secret that reaches the
-          # agent's container besides its own two.
-          #
-          # E2E_DEV_MNEMONIC is one BIP-39 phrase that derives keys on EVERY chain
-          # (NIP-06 m/44'/1237'/0'/0/i), so it is emphatically not testnet-scoped:
-          # the same seed derives whatever mainnet addresses it derives. This repo
-          # is public. It is therefore forwarded ONLY for issues carrying the
-          # `chain` label, so an ordinary ticket's agent never holds it — the
-          # expression below resolves to an empty string otherwise, and
-          # `sandboxSecrets()` omits empty values, so the container simply does
-          # not have the variable.
-          #
-          # Apply `chain` deliberately, only to tickets that genuinely must
-          # transact (e.g. #459 EVM settlement against Base Sepolia).
-          E2E_DEV_MNEMONIC: ${{ contains(github.event.issue.labels.*.name, 'chain') && secrets.E2E_DEV_MNEMONIC || '' }}
         run: npm run sandcastle:implement
 
       # REDACT BEFORE UPLOAD — this repository is PUBLIC.
@@ -222,9 +207,12 @@ jobs:
       #      shape including ones we have not anticipated.
       #   2. Known token shapes — catches credentials this job never held, e.g.
       #      one the agent minted or read from somewhere else mid-run.
-      #   3. BIP-39 mnemonics and labelled private keys — a `chain`-labelled run
-      #      holds a seed that derives keys on every chain, and an agent doing
-      #      settlement work handles derived key material as a matter of course.
+      #   3. BIP-39 mnemonics and labelled private keys — kept as defence in
+      #      depth after the `chain`-gated E2E_DEV_MNEMONIC passthrough was
+      #      removed. No seed is forwarded any more, but settlement agents still
+      #      generate and handle key material against their local Anvil chain
+      #      (Anvil's dev keys are public, but an agent can mint its own), and
+      #      this catches anything that reaches the log by another route.
       # Secrets are passed via env and never echoed.
       #
       # RESIDUAL GAP, stated rather than hidden: a raw 32-byte private key is
@@ -241,7 +229,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
-          E2E_DEV_MNEMONIC: ${{ contains(github.event.issue.labels.*.name, 'chain') && secrets.E2E_DEV_MNEMONIC || '' }}
         run: |
           set -euo pipefail
           [ -d .sandcastle/logs ] || { echo "No logs directory — nothing to redact."; exit 0; }
@@ -252,8 +239,7 @@ jobs:
           # secret that contains another is not partially replaced).
           exact = sorted(
               (v for v in (os.environ.get(k, "") for k in
-                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY",
-                            "E2E_DEV_MNEMONIC"))
+                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY"))
                if v and len(v.strip()) >= 8),
               key=len, reverse=True,
           )
