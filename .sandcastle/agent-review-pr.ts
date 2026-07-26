@@ -9,6 +9,11 @@
 // refinement commits back to the PR. It NEVER merges the PR and NEVER closes
 // anything — a human still merges.
 //
+// DIFF SIZE: this runner shares review-prompt.md with ./main.ts, so it inherits
+// the bounded diff expansion (`.sandcastle/review-diff.ts`, connector#468) —
+// there is no separate diff inlining here to guard. The prompt can no longer be
+// blown up by a large PR; a reduced view says so in the prompt itself.
+//
 // STANDALONE-REVIEW CAVEAT (verify on first run)
 // ----------------------------------------------
 // Sandcastle 0.12.0 exercises the reviewer only INSIDE the parallel loop's

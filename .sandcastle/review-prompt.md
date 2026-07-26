@@ -6,7 +6,16 @@ Review the code changes on branch `{{BRANCH}}` and improve code clarity, consist
 
 ## Branch diff
 
-!`git diff {{TARGET_BRANCH}}...{{BRANCH}}`
+Rendered by `.sandcastle/review-diff.ts`, which bounds the diff to a token
+budget so a large change cannot kill this run with `Prompt is too long`
+(connector#468). Small changes are reproduced in full, byte for byte. Large ones
+are reduced — deleted files appear as paths only, and oversized files are listed
+rather than inlined. **When anything is omitted the block below says so
+explicitly**: treat that view as partial, and read what you need with
+`git diff {{TARGET_BRANCH}}...{{BRANCH}} -- <path>` rather than approving code
+you were not shown.
+
+!`npx tsx .sandcastle/review-diff.ts {{TARGET_BRANCH}} {{BRANCH}}`
 
 ## Commits on this branch
 
@@ -15,6 +24,10 @@ Review the code changes on branch `{{BRANCH}}` and improve code clarity, consist
 # REVIEW PROCESS
 
 1. **Understand the change**: Read the diff and commits above to understand the intent.
+   If the diff block reports a BOUNDED VIEW, close the gap yourself before judging
+   anything: run `git diff {{TARGET_BRANCH}}...{{BRANCH}} -- <path>` on the files whose
+   content was omitted, and `grep` for surviving references to deleted paths. Never
+   report a section as clean on the strength of not having seen it.
 
 2. **Analyze for improvements**: Look for opportunities to:
    - Reduce unnecessary complexity and nesting
