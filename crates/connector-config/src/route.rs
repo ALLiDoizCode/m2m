@@ -69,7 +69,7 @@ impl StaticRoute {
 fn build_route(prefix: String, handler_url: String) -> Result<StaticRoute, ConfigError> {
     if !is_valid_ilp_address(&prefix) {
         return Err(ConfigError::InvalidAddress {
-            field: "prefix".to_string(),
+            field: "prefix",
             value: prefix,
         });
     }
@@ -126,7 +126,7 @@ pub(crate) fn resolve_routes(
     let apex = apex.ok_or(ConfigError::MissingApex)?;
     if !is_valid_ilp_address(apex) {
         return Err(ConfigError::InvalidAddress {
-            field: "apex".to_string(),
+            field: "apex",
             value: apex.to_string(),
         });
     }

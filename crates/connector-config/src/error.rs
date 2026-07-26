@@ -31,7 +31,7 @@ pub enum ConfigError {
     },
 
     #[error("invalid {field} '{value}': not a valid ILP address")]
-    InvalidAddress { field: String, value: String },
+    InvalidAddress { field: &'static str, value: String },
 
     #[error(
         "invalid child name '{name}': must be a single ILP address label \
