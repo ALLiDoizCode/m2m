@@ -323,6 +323,10 @@ mod tests {
     /// `tower::ServiceExt::oneshot`.
     mod write_authentication {
         use super::*;
+        use crate::rfc9421::{
+            build_signature_base, compute_content_digest, keyid_hex, serialize_signature_params,
+            SignatureParams, COVERED_COMPONENTS, SIGNATURE_ALG,
+        };
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine;
         use connector_domain::RejectCode;
@@ -331,15 +335,6 @@ mod tests {
 
         fn keypair() -> Keypair {
             Keypair::generate(&mut OsRng)
-        }
-
-        fn keyid_hex(keypair: &Keypair) -> String {
-            keypair
-                .public
-                .to_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
         }
 
         fn sample_prepare() -> Prepare {
@@ -355,18 +350,20 @@ mod tests {
         /// Sign an OER-encoded write body bound for `/packets`, returning
         /// the three headers a caller presents.
         fn sign(keypair: &Keypair, body: &[u8], expires: u64) -> (String, String, String) {
-            let digest = crate::rfc9421::compute_content_digest(body);
-            let params_value = format!(
-                "(\"@method\" \"@path\" \"content-digest\");created=1000;expires={expires};keyid=\"{}\";alg=\"ed25519\"",
-                keyid_hex(keypair)
-            );
-            let base = format!(
-                "\"@method\": POST\n\"@path\": /packets\n\"content-digest\": {}\n\"@signature-params\": {params_value}",
-                digest.trim(),
-            );
+            let digest = compute_content_digest(body);
+            let params = SignatureParams {
+                created: 1_000,
+                expires: Some(expires),
+                keyid: keyid_hex(keypair),
+                alg: Some(SIGNATURE_ALG.to_string()),
+            };
+            let base = build_signature_base("POST", "/packets", &digest, &params);
             let expanded = ExpandedSecretKey::from(&keypair.secret);
             let signature = expanded.sign(base.as_bytes(), &keypair.public);
-            let sig_input = format!("sig1={params_value}");
+            let sig_input = format!(
+                "sig1={}",
+                serialize_signature_params(COVERED_COMPONENTS, &params)
+            );
             let sig_header = format!("sig1=:{}:", BASE64.encode(signature.to_bytes()));
             (sig_input, sig_header, digest)
         }

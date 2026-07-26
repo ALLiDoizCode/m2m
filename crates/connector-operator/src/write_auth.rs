@@ -153,41 +153,14 @@ pub(crate) fn authenticate_write(
 mod tests {
     use super::*;
     use crate::rfc9421::{
-        compute_content_digest, SignatureParams, COVERED_COMPONENTS, SIGNATURE_ALG,
+        build_signature_base, compute_content_digest, keyid_hex, serialize_signature_params,
+        SignatureParams, COVERED_COMPONENTS, SIGNATURE_ALG,
     };
     use ed25519_dalek::{ExpandedSecretKey, Keypair};
     use rand::rngs::OsRng;
 
     fn keypair() -> Keypair {
         Keypair::generate(&mut OsRng)
-    }
-
-    fn keyid_hex(keypair: &Keypair) -> String {
-        keypair
-            .public
-            .to_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    }
-
-    fn serialize_signature_params(params: &SignatureParams) -> String {
-        let inner = COVERED_COMPONENTS
-            .iter()
-            .map(|c| format!("\"{c}\""))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut out = format!("({inner})");
-        out.push_str(&format!(";created={}", params.created));
-        if let Some(expires) = params.expires {
-            out.push_str(&format!(";expires={expires}"));
-        }
-        out.push_str(&format!(";keyid=\"{}\"", params.keyid));
-        out.push_str(&format!(
-            ";alg=\"{}\"",
-            params.alg.as_deref().unwrap_or(SIGNATURE_ALG)
-        ));
-        out
     }
 
     fn sign(
@@ -204,16 +177,13 @@ mod tests {
             keyid: keyid_hex(keypair),
             alg: Some(SIGNATURE_ALG.to_string()),
         };
-        let base = format!(
-            "\"@method\": {}\n\"@path\": {}\n\"content-digest\": {}\n\"@signature-params\": {}",
-            method.to_uppercase(),
-            path,
-            content_digest.trim(),
-            serialize_signature_params(&params)
-        );
+        let base = build_signature_base(method, path, &content_digest, &params);
         let expanded = ExpandedSecretKey::from(&keypair.secret);
         let signature = expanded.sign(base.as_bytes(), &keypair.public);
-        let signature_input = format!("sig1={}", serialize_signature_params(&params));
+        let signature_input = format!(
+            "sig1={}",
+            serialize_signature_params(COVERED_COMPONENTS, &params)
+        );
         let sig_value = format!("sig1=:{}:", BASE64.encode(signature.to_bytes()));
         (signature_input, sig_value, content_digest)
     }
