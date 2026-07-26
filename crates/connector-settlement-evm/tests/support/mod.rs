@@ -1,7 +1,6 @@
 //! Shared support for connector-settlement-evm's integration tests: whether `anvil` is on
 //! `PATH`, and the CI-vs-local policy for what to do when it is not (issue #471).
 
-
 /// True if `anvil --version` runs successfully.
 pub fn anvil_available() -> bool {
     Command::new("anvil")
@@ -57,7 +56,6 @@ pub const DEPLOYER_PRIVATE_KEY: &str =
     "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 static NEXT_PORT_OFFSET: AtomicU16 = AtomicU16::new(0);
-
 
 /// A freshly spawned `anvil` instance, killed when dropped. Each instance
 /// gets its own port so tests spawning one concurrently don't collide.
