@@ -65,7 +65,8 @@ mod tests {
     use connector_config::StaticRoute;
     use connector_domain::{derive_condition, Fulfill, Reject};
     use connector_runtime::{
-        AppOutcome, FakeAppClient, InProcessPeerTransport, PeerRoute, TestClock,
+        AppOutcome, FakeAppClient, InProcessPeerTransport, NetworkPeerTransport, PeerRoute,
+        PeerWireServer, TestClock,
     };
     use tower::ServiceExt;
 
@@ -350,5 +351,59 @@ mod tests {
         let reject = Reject::decode(&bytes).expect("decode reject");
         assert_eq!(reject.code.as_str(), "F02");
         assert!(reject.message.contains("g.example.app"));
+    }
+
+    /// Two separate connectors, forwarding over the peer wire's network
+    /// implementation (issue #416) rather than the in-process stand-in: a
+    /// client posts to the first connector's router, which has no app of
+    /// its own for this destination and forwards the packet over a real
+    /// TCP connection to the second connector's [`PeerWireServer`], which
+    /// delivers it to its app and the fulfillment travels back the same
+    /// way.
+    #[tokio::test]
+    async fn a_client_packet_is_forwarded_over_the_network_transport_to_a_second_connector() {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: b"delivered over the network transport".to_vec(),
+                fulfillment: Some(FULFILLMENT),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let server = PeerWireServer::bind("127.0.0.1:0".parse().unwrap(), second_hop)
+            .await
+            .unwrap();
+
+        let mut peer_transport = NetworkPeerTransport::new();
+        peer_transport.add_peer("second-hop", server.local_addr());
+        let first_hop = Arc::new(Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        ));
+        let app = router(first_hop);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
+        assert_eq!(fulfill.data, b"delivered over the network transport");
     }
 }

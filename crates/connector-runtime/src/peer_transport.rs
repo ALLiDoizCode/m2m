@@ -1,10 +1,10 @@
 //! The peer transport port: forwards a [`Prepare`] to another connector for
 //! the next hop. See `docs/protocol/peer-wire-spec.md` §1.1 -- production
-//! peering is one persistent duplex stream per relation; this ticket's
-//! implementation is the in-process stand-in that spec calls out for
-//! composing multi-connector tests without a socket. Issue #416 adds the
-//! network implementation of the same port, held to a shared contract
-//! suite.
+//! peering is one persistent duplex stream per relation; [`InProcessPeerTransport`]
+//! here is the in-process stand-in that spec calls out for composing
+//! multi-connector tests without a socket. [`crate::NetworkPeerTransport`]
+//! (issue #416) is the network implementation of the same port; both are
+//! held to the contract suite in this module's `tests::contract`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,7 +33,7 @@ pub trait PeerTransport: Send + Sync {
     ) -> PacketResponse;
 }
 
-fn peer_unreachable(peer_id: &str) -> PacketResponse {
+pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
     PacketResponse::Reject(Reject {
         code: RejectCode::t01_peer_unreachable(),
         triggered_by: String::new(),
@@ -286,6 +286,120 @@ mod tests {
         for handle in handles {
             let response = handle.await.expect("task");
             assert!(matches!(response, PacketResponse::Fulfill(_)));
+        }
+    }
+
+    /// Contract suite (ADR 0007): [`InProcessPeerTransport`] and
+    /// [`crate::NetworkPeerTransport`] uphold the same statement about the
+    /// [`PeerTransport`] port -- a registered peer's response comes back
+    /// unchanged (fulfill or reject), and an unregistered peer id produces a
+    /// `T01` reject -- so nothing above this port can tell which
+    /// implementation is in use.
+    mod contract {
+        use super::*;
+        use crate::network_peer_transport::{NetworkPeerTransport, PeerWireServer};
+        use std::future::Future;
+
+        /// `deliverer` fulfills any destination under `g.example.app`;
+        /// `rejecter` has no routes at all, so it produces the same F02 a
+        /// direct client would get. Both are registered with `build`, which
+        /// wires each implementation up its own way (a direct `Arc<Connector>`
+        /// for the in-process case, a bound [`PeerWireServer`] for the
+        /// network case) and returns a transport that can reach both.
+        async fn assert_upholds_the_contract<F, Fut>(build: F)
+        where
+            F: FnOnce(Vec<(&'static str, Arc<Connector>)>) -> Fut,
+            Fut: Future<Output = Arc<dyn PeerTransport>>,
+        {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"delivered by the peer".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let deliverer = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let rejecter = Arc::new(Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+
+            let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
+
+            let response = transport
+                .forward("peer-b", prepare("g.example.app"), 0)
+                .await;
+            assert_eq!(
+                response,
+                PacketResponse::Fulfill(connector_domain::Fulfill {
+                    fulfillment: FULFILLMENT,
+                    data: b"delivered by the peer".to_vec(),
+                })
+            );
+
+            let response = transport
+                .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0)
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F02");
+                    assert!(reject.message.contains("g.nowhere-on-peer-c"));
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+
+            let response = transport
+                .forward("nowhere", prepare("g.example.app"), 0)
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "T01");
+                    assert!(reject.message.contains("nowhere"));
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn in_process_peer_transport_upholds_the_contract() {
+            assert_upholds_the_contract(|peers| async move {
+                let mut transport = InProcessPeerTransport::new();
+                for (peer_id, connector) in peers {
+                    transport.add_peer(peer_id, connector);
+                }
+                Arc::new(transport) as Arc<dyn PeerTransport>
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn network_peer_transport_upholds_the_contract() {
+            assert_upholds_the_contract(|peers| async move {
+                let mut transport = NetworkPeerTransport::new();
+                for (peer_id, connector) in peers {
+                    let server = PeerWireServer::bind("127.0.0.1:0".parse().unwrap(), connector)
+                        .await
+                        .unwrap();
+                    transport.add_peer(peer_id, server.local_addr());
+                    // Detach: the accept loop and per-connection tasks are
+                    // independent tokio tasks that keep running for the
+                    // test's duration even once `server` is dropped here.
+                    drop(server);
+                }
+                Arc::new(transport) as Arc<dyn PeerTransport>
+            })
+            .await;
         }
     }
 }
