@@ -1,17 +1,32 @@
-//! Thin binary: load configuration, construct the runtime, merge routers, serve. See ADR 0001.
+//! Thin binary: load configuration, construct the runtime, merge routers,
+//! serve -- and nothing else. See ADR 0001.
 
-fn main() {
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .init();
+}
+
+#[tokio::main]
+async fn main() {
+    init_tracing();
+
     let args: Vec<String> = std::env::args().collect();
-    match connector_cli::load_config(&args) {
-        Ok(_config) => {
-            // Nothing else exists to start yet: the runtime, routers and
-            // server land in later tickets (ADR 0001). Loading and fully
-            // validating configuration before any other startup work is
-            // this ticket's entire scope (ADR 0009).
-        }
+    let (app, addr) = match connector_cli::run(&args) {
+        Ok(built) => built,
         Err(err) => {
             eprintln!("{err}");
             std::process::exit(1);
         }
+    };
+
+    let server = axum::Server::bind(&addr).serve(app.into_make_service());
+    tracing::info!(addr = %server.local_addr(), "connector listening");
+    if let Err(err) = server.await {
+        eprintln!("{err}");
+        std::process::exit(1);
     }
 }

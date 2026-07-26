@@ -10,9 +10,11 @@ use connector_domain::{
     is_valid_ilp_address, select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
 use thiserror::Error;
+use tracing::Instrument;
 
 use crate::app_client::{AppClient, AppOutcome};
 use crate::clock::Clock;
+use crate::metrics::Metrics;
 use crate::operator_view::{
     ChannelView, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
 };
@@ -55,6 +57,19 @@ impl RouteTarget {
     }
 }
 
+/// Hex-encode a packet's execution condition for use as a log correlation
+/// id. The condition is invariant across every hop a packet passes through
+/// (forwarding only ever changes `amount`, per [`Connector::forward_to_peer`]),
+/// so independent connectors logging this same value for the same packet
+/// can have their structured logs correlated across the hop boundary with
+/// no wire change and no new field -- ADR 0014.
+fn correlation_id(execution_condition: &[u8; 32]) -> String {
+    execution_condition
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// The connector's packet plane: a fixed set of terminated routes and peer
 /// routes, an [`AppClient`] port for delivering to the apps behind
 /// terminated routes, a [`PeerTransport`] port for forwarding to the next
@@ -76,6 +91,7 @@ pub struct Connector {
     app_client: Arc<dyn AppClient>,
     peer_transport: Arc<dyn PeerTransport>,
     clock: Arc<dyn Clock>,
+    metrics: Arc<Metrics>,
 }
 
 impl Connector {
@@ -93,6 +109,7 @@ impl Connector {
             app_client,
             peer_transport,
             clock,
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -158,6 +175,12 @@ impl Connector {
             .collect()
     }
 
+    /// This connector's own metrics (ADR 0014), for the operator surface's
+    /// `GET /metrics` (bearer-token gated, same as any other read).
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.metrics.clone()
+    }
+
     /// Reject `prepare` outright if it isn't even eligible for routing --
     /// missing/all-zero execution condition (issue #417, no zero-condition
     /// path exists anywhere) or already past its expiry as of the injected
@@ -198,8 +221,25 @@ impl Connector {
     /// no fee -- a fee is earned per peering relation, not for terminating
     /// traffic at your own destination.
     pub async fn handle_prepare(&self, prepare: Prepare, minimum_delivery: u64) -> PacketResponse {
+        let span = tracing::info_span!(
+            "packet",
+            correlation_id = %correlation_id(&prepare.execution_condition),
+            destination = %prepare.destination,
+        );
+        self.handle_prepare_traced(prepare, minimum_delivery)
+            .instrument(span)
+            .await
+    }
+
+    async fn handle_prepare_traced(
+        &self,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> PacketResponse {
+        tracing::info!("packet received");
+
         if let Some(reject) = self.reject_ineligible(&prepare) {
-            return PacketResponse::Reject(reject);
+            return self.finish(PacketResponse::Reject(reject));
         }
 
         let leased_routes = self.active_leased_peer_routes();
@@ -228,25 +268,49 @@ impl Connector {
             .flatten()
             .max_by_key(|(len, target)| (*len, target.priority()))
         else {
-            return PacketResponse::Reject(Reject {
+            return self.finish(PacketResponse::Reject(Reject {
                 code: RejectCode::f02_unreachable(),
                 triggered_by: String::new(),
                 message: format!("no route to destination '{}'", prepare.destination),
                 data: Vec::new(),
-            });
+            }));
         };
 
-        match target {
-            RouteTarget::App(index) => self.deliver_to_app(&self.routes[index], prepare).await,
-            RouteTarget::Peer(index) => {
-                self.forward_via_peer_route(&self.peer_routes[index], prepare, minimum_delivery)
-                    .await
+        let peer_route = match target {
+            RouteTarget::App(index) => {
+                tracing::info!(handler_url = %self.routes[index].handler_url(), "routed to app");
+                let response = self.deliver_to_app(&self.routes[index], prepare).await;
+                return self.finish(response);
             }
-            RouteTarget::Leased(index) => {
-                self.forward_via_peer_route(&leased_routes[index], prepare, minimum_delivery)
-                    .await
+            RouteTarget::Peer(index) => &self.peer_routes[index],
+            RouteTarget::Leased(index) => &leased_routes[index],
+        };
+        tracing::info!(peer_id = %peer_route.peer_id(), "routed to peer");
+        let response = self
+            .forward_via_peer_route(peer_route, prepare, minimum_delivery)
+            .await;
+        if matches!(response, PacketResponse::Fulfill(_)) {
+            self.metrics.record_fee_earned(peer_route.fee());
+        }
+        self.finish(response)
+    }
+
+    /// Record the packet's final outcome -- metrics and a log line -- and
+    /// pass it through unchanged. The single choke point every return path
+    /// in [`Self::handle_prepare_traced`] goes through, so no outcome can be
+    /// reported without also being counted.
+    fn finish(&self, response: PacketResponse) -> PacketResponse {
+        match &response {
+            PacketResponse::Fulfill(_) => {
+                self.metrics.record_fulfill();
+                tracing::info!("packet fulfilled");
+            }
+            PacketResponse::Reject(reject) => {
+                self.metrics.record_reject(reject.code.as_str());
+                tracing::info!(code = %reject.code.as_str(), message = %reject.message, "packet rejected");
             }
         }
+        response
     }
 
     async fn forward_via_peer_route(
@@ -985,6 +1049,77 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
+    }
+
+    #[tokio::test]
+    async fn handle_prepare_records_a_fulfill_in_metrics() {
+        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(
+            route.handler_url(),
+            AppOutcome::Delivered {
+                data: vec![],
+                fulfillment: Some(FULFILLMENT),
+            },
+        );
+        let connector = connector_with(vec![route], app_client, test_clock());
+
+        connector
+            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .await;
+
+        let metrics = connector.metrics().encode();
+        assert!(metrics.contains(r#"toon_packets_total{outcome="fulfill"} 1"#));
+    }
+
+    #[tokio::test]
+    async fn handle_prepare_records_a_reject_by_code_in_metrics() {
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = connector_with(vec![], app_client, test_clock());
+
+        connector
+            .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+            .await;
+
+        let metrics = connector.metrics().encode();
+        assert!(metrics.contains(r#"toon_packets_total{outcome="reject"} 1"#));
+        assert!(metrics.contains(r#"toon_packets_rejected_total{code="F02"} 1"#));
+    }
+
+    #[tokio::test]
+    async fn forwarding_to_a_peer_records_the_earned_fee_only_on_fulfilment() {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            AppOutcome::Delivered {
+                data: vec![],
+                fulfillment: Some(FULFILLMENT),
+            },
+        );
+        let second_hop = Arc::new(Connector::new(
+            vec![second_hop_route],
+            vec![],
+            second_hop_app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop", 7)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        );
+
+        first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .await;
+
+        let metrics = first_hop.metrics().encode();
+        assert!(metrics.contains("toon_fees_earned_total 7"));
     }
 
     /// Issue #427: a controller outside this connector pushes a route to a

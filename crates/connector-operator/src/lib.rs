@@ -2,8 +2,9 @@
 //!
 //! ADR 0008 splits the operator surface into a read half and a write
 //! half. The read half (issue #420) is `GET` endpoints -- peers, routes,
-//! channels, claims, exposure, node identity, and this crate's own write
-//! audit log -- gated by a bearer token and nothing else.
+//! channels, claims, exposure, node identity, this crate's own write
+//! audit log, and the metrics surface (`GET /metrics`, ADR 0014) -- gated
+//! by a bearer token and nothing else.
 //!
 //! This crate also carries the write half's authentication mechanism
 //! (issue #421): [`rfc9421`] verifies an RFC 9421 signature from a key on
@@ -23,8 +24,10 @@
 //! value.
 //!
 //! Per ADR 0001, each read handler below deserializes nothing beyond the
-//! bearer token (a GET request has no body), calls exactly one
-//! [`Connector`] method, and serializes the result as JSON.
+//! bearer token (a GET request has no body) and calls exactly one
+//! [`Connector`] method. Every read serializes its result as JSON except
+//! `GET /metrics`, which is Prometheus text exposition format (ADR 0014)
+//! -- the one format Prometheus itself can scrape.
 
 mod rfc9421;
 mod write_auth;
@@ -99,6 +102,7 @@ pub fn router(
         .route("/exposure", get(exposure))
         .route("/identity", get(identity))
         .route("/audit-log", get(audit_log))
+        .route("/metrics", get(metrics))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer_token,
@@ -157,6 +161,19 @@ async fn exposure(State(state): State<OperatorState>) -> Json<Vec<ExposureView>>
 
 async fn audit_log(State(state): State<OperatorState>) -> Json<Vec<AuditRecord>> {
     Json(state.write_auth.audit_log())
+}
+
+/// `GET /metrics`: the decided metrics surface (ADR 0014) -- packets,
+/// rejects, fees, exposure and settlement -- in Prometheus text exposition
+/// format. A read like any other on this surface: gated by the bearer
+/// token and nothing else, per ADR 0008.
+async fn metrics(State(state): State<OperatorState>) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.connector.metrics().encode(),
+    )
+        .into_response()
 }
 
 /// `POST /packets`: an operator originates a packet outward, exactly as
@@ -358,6 +375,20 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(body, serde_json::json!([]), "path {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_reports_prometheus_text_and_requires_the_bearer_token() {
+        let app = test_router(vec![], "correct-token");
+
+        let unauthenticated = get(app.clone(), "/metrics", None).await;
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let response = get(app, "/metrics", Some("correct-token")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("toon_fees_earned_total"));
     }
 
     #[tokio::test]

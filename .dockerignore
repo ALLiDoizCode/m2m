@@ -8,6 +8,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 build/
+target/
 
 # Tests (not needed in Docker image)
 *.test.ts
