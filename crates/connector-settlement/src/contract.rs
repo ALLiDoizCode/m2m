@@ -124,10 +124,17 @@ where
         }
     );
 
-    // Closing a channel is terminal: its own state reports Closed, and
-    // neither funding nor redemption is possible against it afterward --
-    // nor can it be closed a second time.
+    // Closing a channel is terminal: its own state reports Closed, that
+    // status is durable when queried back separately, and neither funding
+    // nor redemption is possible against it afterward -- nor can it be
+    // closed a second time.
     let state = backend.close(&channel).await.expect("close");
+    assert_eq!(state.status, ChannelStatus::Closed);
+
+    let state = backend
+        .channel_state(&channel)
+        .await
+        .expect("channel_state");
     assert_eq!(state.status, ChannelStatus::Closed);
 
     let err = backend.fund(&channel, 10).await.unwrap_err();

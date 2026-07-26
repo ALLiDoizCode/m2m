@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Duration;
@@ -44,6 +44,12 @@ impl InMemorySettlementBackend {
         InMemorySettlementBackend::default()
     }
 
+    fn channels(&self) -> MutexGuard<'_, HashMap<ChannelId, StoredChannel>> {
+        self.channels
+            .lock()
+            .expect("InMemorySettlementBackend lock poisoned")
+    }
+
     /// Look up `id`, refusing a closed channel to every write operation
     /// (`f`) with the same [`SettlementError::ChannelClosed`] regardless of
     /// which one called -- close is terminal, not a per-method concern.
@@ -52,10 +58,7 @@ impl InMemorySettlementBackend {
         id: &ChannelId,
         f: impl FnOnce(&mut StoredChannel) -> Result<T, SettlementError>,
     ) -> Result<T, SettlementError> {
-        let mut channels = self
-            .channels
-            .lock()
-            .expect("InMemorySettlementBackend lock poisoned");
+        let mut channels = self.channels();
         let channel = channels
             .get_mut(id)
             .ok_or_else(|| SettlementError::ChannelNotFound(id.clone()))?;
@@ -77,18 +80,15 @@ impl SettlementBackend for InMemorySettlementBackend {
             "in-memory-channel-{}",
             self.next_id.fetch_add(1, Ordering::SeqCst)
         ));
-        self.channels
-            .lock()
-            .expect("InMemorySettlementBackend lock poisoned")
-            .insert(
-                id.clone(),
-                StoredChannel {
-                    counterparty,
-                    status: ChannelStatus::Open,
-                    deposited: 0,
-                    redeemed: 0,
-                },
-            );
+        self.channels().insert(
+            id.clone(),
+            StoredChannel {
+                counterparty,
+                status: ChannelStatus::Open,
+                deposited: 0,
+                redeemed: 0,
+            },
+        );
         Ok(id)
     }
 
@@ -134,10 +134,7 @@ impl SettlementBackend for InMemorySettlementBackend {
     }
 
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
-        let channels = self
-            .channels
-            .lock()
-            .expect("InMemorySettlementBackend lock poisoned");
+        let channels = self.channels();
         let stored = channels
             .get(channel)
             .ok_or_else(|| SettlementError::ChannelNotFound(channel.clone()))?;
