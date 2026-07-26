@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.42.1](https://github.com/toon-protocol/connector/compare/v3.42.0...v3.42.1) (2026-07-26)
+
+### Bug Fixes
+
+- **sandcastle:** bound the reviewer's diff expansion to a token budget ([#468](https://github.com/toon-protocol/connector/issues/468)) ([#472](https://github.com/toon-protocol/connector/issues/472)) ([0eef65d](https://github.com/toon-protocol/connector/commit/0eef65d78a4d72f6959a4ca92359f4138def0a59)), closes [#457](https://github.com/toon-protocol/connector/issues/457) [#457](https://github.com/toon-protocol/connector/issues/457)
+
 ## [3.42.0](https://github.com/toon-protocol/connector/compare/v3.41.9...v3.42.0) (2026-07-26)
 
 ### Features
