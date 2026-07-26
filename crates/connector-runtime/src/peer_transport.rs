@@ -317,6 +317,7 @@ mod tests {
                 route.handler_url(),
                 AppOutcome::Delivered {
                     data: b"delivered by the peer".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
                 },
             );
             let deliverer = Arc::new(Connector::new(
@@ -336,17 +337,19 @@ mod tests {
 
             let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
 
-            let response = transport.forward("peer-b", prepare("g.example.app")).await;
+            let response = transport
+                .forward("peer-b", prepare("g.example.app"), 0)
+                .await;
             assert_eq!(
                 response,
                 PacketResponse::Fulfill(connector_domain::Fulfill {
-                    fulfillment: [0u8; 32],
+                    fulfillment: FULFILLMENT,
                     data: b"delivered by the peer".to_vec(),
                 })
             );
 
             let response = transport
-                .forward("peer-c", prepare("g.nowhere-on-peer-c"))
+                .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0)
                 .await;
             match response {
                 PacketResponse::Reject(reject) => {
@@ -356,7 +359,9 @@ mod tests {
                 other => panic!("expected a reject, got {other:?}"),
             }
 
-            let response = transport.forward("nowhere", prepare("g.example.app")).await;
+            let response = transport
+                .forward("nowhere", prepare("g.example.app"), 0)
+                .await;
             match response {
                 PacketResponse::Reject(reject) => {
                     assert_eq!(reject.code.as_str(), "T01");

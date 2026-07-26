@@ -368,6 +368,7 @@ mod tests {
             second_hop_route.handler_url(),
             AppOutcome::Delivered {
                 data: b"delivered over the network transport".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let second_hop = Arc::new(Connector::new(
@@ -385,7 +386,7 @@ mod tests {
         peer_transport.add_peer("second-hop", server.local_addr());
         let first_hop = Arc::new(Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop")],
+            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),

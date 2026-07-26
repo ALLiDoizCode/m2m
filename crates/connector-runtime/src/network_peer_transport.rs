@@ -61,19 +61,19 @@ impl PeerConnection {
         }
     }
 
-    fn next_frame(&self, prepare: &Prepare) -> Frame {
+    fn next_frame(&self, prepare: &Prepare, minimum_delivery: u64) -> Frame {
         let counter = self.next_correlation_id.fetch_add(1, Ordering::Relaxed);
         let mut correlation_id = [0u8; CORRELATION_ID_LEN];
         correlation_id[8..].copy_from_slice(&counter.to_be_bytes());
         Frame {
             frame_type: FRAME_TYPE_PREPARE,
             correlation_id,
-            payload: prepare.encode(),
+            payload: encode_prepare_frame_payload(prepare, minimum_delivery),
         }
     }
 
-    async fn forward(&self, prepare: Prepare) -> PacketResponse {
-        let frame = self.next_frame(&prepare);
+    async fn forward(&self, prepare: Prepare, minimum_delivery: u64) -> PacketResponse {
+        let frame = self.next_frame(&prepare, minimum_delivery);
         let mut guard = self.stream.lock().await;
 
         // Attempt at most twice: once against whatever connection is
@@ -96,6 +96,27 @@ impl PeerConnection {
 
         peer_unreachable(&self.peer_id)
     }
+}
+
+/// `minimumDelivery` (peer-wire-spec.md §4) is a PREPARE-frame field
+/// declared once by the original sender and passed unchanged hop to hop --
+/// not a `Prepare` field itself, since `connector-domain` (RFC-0027) has no
+/// such concept, so it rides alongside the encoded packet as a fixed 8-byte
+/// big-endian suffix rather than inside `Prepare::encode`'s OER bytes.
+const MINIMUM_DELIVERY_LEN: usize = 8;
+
+fn encode_prepare_frame_payload(prepare: &Prepare, minimum_delivery: u64) -> Vec<u8> {
+    let mut payload = prepare.encode();
+    payload.extend_from_slice(&minimum_delivery.to_be_bytes());
+    payload
+}
+
+fn decode_prepare_frame_payload(payload: &[u8]) -> Option<(Prepare, u64)> {
+    let split_at = payload.len().checked_sub(MINIMUM_DELIVERY_LEN)?;
+    let (packet_bytes, minimum_delivery_bytes) = payload.split_at(split_at);
+    let prepare = Prepare::decode(packet_bytes).ok()?;
+    let minimum_delivery = u64::from_be_bytes(minimum_delivery_bytes.try_into().ok()?);
+    Some((prepare, minimum_delivery))
 }
 
 async fn send_and_receive(stream: &mut TcpStream, frame: &Frame) -> Option<PacketResponse> {
@@ -138,9 +159,14 @@ impl NetworkPeerTransport {
 
 #[async_trait]
 impl PeerTransport for NetworkPeerTransport {
-    async fn forward(&self, peer_id: &str, prepare: Prepare) -> PacketResponse {
+    async fn forward(
+        &self,
+        peer_id: &str,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> PacketResponse {
         match self.peers.get(peer_id) {
-            Some(connection) => connection.forward(prepare).await,
+            Some(connection) => connection.forward(prepare, minimum_delivery).await,
             None => peer_unreachable(peer_id),
         }
     }
@@ -212,11 +238,11 @@ async fn serve_connection(mut stream: TcpStream, connector: Arc<Connector>) {
             return;
         }
 
-        let Ok(prepare) = Prepare::decode(&frame.payload) else {
+        let Some((prepare, minimum_delivery)) = decode_prepare_frame_payload(&frame.payload) else {
             return;
         };
 
-        let response_frame = match connector.handle_prepare(prepare).await {
+        let response_frame = match connector.handle_prepare(prepare, minimum_delivery).await {
             PacketResponse::Fulfill(fulfill) => Frame {
                 frame_type: FRAME_TYPE_FULFILL,
                 correlation_id: frame.correlation_id,
@@ -243,12 +269,16 @@ mod tests {
     use crate::peer_transport::InProcessPeerTransport;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
+    use connector_domain::derive_condition;
+
+    const FULFILLMENT: [u8; 32] = [7u8; 32];
 
     fn prepare(destination: &str) -> Prepare {
         Prepare {
             amount: 0,
-            expires_at: Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            execution_condition: [0u8; 32],
+            // Comfortably after `test_clock()`'s instant (2030-01-01).
+            expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: derive_condition(&FULFILLMENT),
             destination: destination.to_string(),
             data: b"hello".to_vec(),
         }
@@ -264,6 +294,22 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
+    #[test]
+    fn a_prepare_frame_payload_round_trips_with_its_minimum_delivery() {
+        let original = prepare("g.example.app");
+
+        let payload = encode_prepare_frame_payload(&original, 42);
+        let (decoded, minimum_delivery) = decode_prepare_frame_payload(&payload).unwrap();
+
+        assert_eq!(decoded, original);
+        assert_eq!(minimum_delivery, 42);
+    }
+
+    #[test]
+    fn decoding_a_payload_shorter_than_the_minimum_delivery_suffix_fails() {
+        assert!(decode_prepare_frame_payload(&[0u8; MINIMUM_DELIVERY_LEN - 1]).is_none());
+    }
+
     #[tokio::test]
     async fn forwards_over_a_real_tcp_connection_and_returns_the_peers_response() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
@@ -272,6 +318,7 @@ mod tests {
             route.handler_url(),
             AppOutcome::Delivered {
                 data: b"delivered by the peer".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let peer = Arc::new(Connector::new(
@@ -286,12 +333,14 @@ mod tests {
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", server.local_addr());
 
-        let response = transport.forward("peer-b", prepare("g.example.app")).await;
+        let response = transport
+            .forward("peer-b", prepare("g.example.app"), 0)
+            .await;
 
         assert_eq!(
             response,
             PacketResponse::Fulfill(Fulfill {
-                fulfillment: [0u8; 32],
+                fulfillment: FULFILLMENT,
                 data: b"delivered by the peer".to_vec(),
             })
         );
@@ -301,7 +350,9 @@ mod tests {
     async fn returns_peer_unreachable_for_an_unregistered_peer_id() {
         let transport = NetworkPeerTransport::new();
 
-        let response = transport.forward("nowhere", prepare("g.example.app")).await;
+        let response = transport
+            .forward("nowhere", prepare("g.example.app"), 0)
+            .await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -318,7 +369,9 @@ mod tests {
         // Port 0 never accepts a connection, so dialing fails fast.
         transport.add_peer("peer-b", "127.0.0.1:0".parse().unwrap());
 
-        let response = transport.forward("peer-b", prepare("g.example.app")).await;
+        let response = transport
+            .forward("peer-b", prepare("g.example.app"), 0)
+            .await;
 
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
@@ -341,7 +394,7 @@ mod tests {
         transport.add_peer("peer-b", server.local_addr());
 
         let response = transport
-            .forward("peer-b", prepare("g.nowhere-on-peer-b"))
+            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0)
             .await;
 
         match response {
@@ -365,6 +418,7 @@ mod tests {
             route.handler_url(),
             AppOutcome::Delivered {
                 data: b"first".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let peer = Arc::new(Connector::new(
@@ -382,18 +436,22 @@ mod tests {
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", addr);
 
-        let first = transport.forward("peer-b", prepare("g.example.app")).await;
+        let first = transport
+            .forward("peer-b", prepare("g.example.app"), 0)
+            .await;
         assert_eq!(
             first,
             PacketResponse::Fulfill(Fulfill {
-                fulfillment: [0u8; 32],
+                fulfillment: FULFILLMENT,
                 data: b"first".to_vec(),
             })
         );
 
         server.shutdown().await;
 
-        let while_down = transport.forward("peer-b", prepare("g.example.app")).await;
+        let while_down = transport
+            .forward("peer-b", prepare("g.example.app"), 0)
+            .await;
         match while_down {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
             other => panic!("expected a reject while the peer is down, got {other:?}"),
@@ -403,15 +461,18 @@ mod tests {
             route.handler_url(),
             AppOutcome::Delivered {
                 data: b"second".to_vec(),
+                fulfillment: Some(FULFILLMENT),
             },
         );
         let _server_again = PeerWireServer::bind(addr, peer).await.unwrap();
 
-        let after_recovery = transport.forward("peer-b", prepare("g.example.app")).await;
+        let after_recovery = transport
+            .forward("peer-b", prepare("g.example.app"), 0)
+            .await;
         assert_eq!(
             after_recovery,
             PacketResponse::Fulfill(Fulfill {
-                fulfillment: [0u8; 32],
+                fulfillment: FULFILLMENT,
                 data: b"second".to_vec(),
             })
         );
