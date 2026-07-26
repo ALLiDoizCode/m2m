@@ -473,6 +473,15 @@ impl Connector {
         views
     }
 
+    /// The configured settlement backend, or
+    /// [`ChannelOperationError::NoSettlementBackend`] on a node that hasn't
+    /// set one -- every channel operation below checks this first.
+    fn settlement(&self) -> Result<&Arc<dyn SettlementBackend>, ChannelOperationError> {
+        self.settlement
+            .as_ref()
+            .ok_or(ChannelOperationError::NoSettlementBackend)
+    }
+
     /// Open a new channel to `counterparty` (issue #459), remembering its
     /// id so a future [`Connector::channels`] call reports on it. The
     /// counterparty and settlement-timeout semantics are exactly the
@@ -483,10 +492,7 @@ impl Connector {
         counterparty: Vec<u8>,
         settlement_timeout: Duration,
     ) -> Result<ChannelView, ChannelOperationError> {
-        let settlement = self
-            .settlement
-            .as_ref()
-            .ok_or(ChannelOperationError::NoSettlementBackend)?;
+        let settlement = self.settlement()?;
         let id = settlement.open(counterparty, settlement_timeout).await?;
         self.known_channels
             .write()
@@ -502,11 +508,8 @@ impl Connector {
         channel_id: &str,
         amount: u128,
     ) -> Result<ChannelView, ChannelOperationError> {
-        let settlement = self
-            .settlement
-            .as_ref()
-            .ok_or(ChannelOperationError::NoSettlementBackend)?;
-        let state = settlement
+        let state = self
+            .settlement()?
             .fund(&ChannelId(channel_id.to_string()), amount)
             .await?;
         Ok(ChannelView::from(state))
@@ -518,11 +521,8 @@ impl Connector {
         channel_id: &str,
         claim: Claim,
     ) -> Result<ChannelView, ChannelOperationError> {
-        let settlement = self
-            .settlement
-            .as_ref()
-            .ok_or(ChannelOperationError::NoSettlementBackend)?;
-        let state = settlement
+        let state = self
+            .settlement()?
             .redeem(&ChannelId(channel_id.to_string()), claim)
             .await?;
         Ok(ChannelView::from(state))
@@ -534,11 +534,10 @@ impl Connector {
         &self,
         channel_id: &str,
     ) -> Result<ChannelView, ChannelOperationError> {
-        let settlement = self
-            .settlement
-            .as_ref()
-            .ok_or(ChannelOperationError::NoSettlementBackend)?;
-        let state = settlement.close(&ChannelId(channel_id.to_string())).await?;
+        let state = self
+            .settlement()?
+            .close(&ChannelId(channel_id.to_string()))
+            .await?;
         Ok(ChannelView::from(state))
     }
 

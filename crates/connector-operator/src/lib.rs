@@ -123,6 +123,32 @@ pub fn router(
     reads.merge(writes).with_state(state)
 }
 
+/// Authenticate a write request against `state`'s [`WriteAuth`], returning
+/// the `401 Unauthorized` status and body to send back immediately on
+/// failure (kept as a plain `(StatusCode, String)` here rather than a
+/// pre-built [`Response`] so this stays a small `Result::Err`, matching
+/// [`write_auth::authenticate_write`]'s own reasoning for returning a plain
+/// [`write_auth::WriteAuthError`] instead). Every write handler below calls
+/// this first, before touching the body for anything else -- see the
+/// module docs.
+fn require_write_auth(
+    state: &OperatorState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(), (StatusCode, String)> {
+    authenticate_write(
+        &state.write_auth,
+        method.as_str(),
+        uri.path(),
+        headers,
+        body,
+    )
+    .map(|_| ())
+    .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))
+}
+
 async fn require_bearer_token<B>(
     State(state): State<OperatorState>,
     request: Request<B>,
@@ -196,14 +222,8 @@ async fn originate_packet(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     let prepare = match Prepare::decode(&body) {
@@ -264,14 +284,8 @@ async fn create_leased_route(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     let request: CreateLeasedRouteRequest = match serde_json::from_slice(&body) {
@@ -359,14 +373,8 @@ async fn open_channel(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     let request: OpenChannelRequest = match serde_json::from_slice(&body) {
@@ -401,14 +409,8 @@ async fn fund_channel(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     let request: FundChannelRequest = match serde_json::from_slice(&body) {
@@ -434,14 +436,8 @@ async fn redeem_channel(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     let request: RedeemChannelRequest = match serde_json::from_slice(&body) {
@@ -477,14 +473,8 @@ async fn close_channel(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(error) = authenticate_write(
-        &state.write_auth,
-        method.as_str(),
-        uri.path(),
-        &headers,
-        &body,
-    ) {
-        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
     }
 
     channel_operation_response(state.connector.close_channel(&channel_id).await)

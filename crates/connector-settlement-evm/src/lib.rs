@@ -139,6 +139,24 @@ impl EvmSettlementBackend {
             redeemed: redeemed.as_u128(),
         })
     }
+
+    /// Resolve `channel` to its on-chain id and current state, rejecting
+    /// with [`SettlementError::ChannelClosed`] if it has already been
+    /// closed -- the one precondition [`fund`](SettlementBackend::fund),
+    /// [`redeem`](SettlementBackend::redeem) and
+    /// [`close`](SettlementBackend::close) all share before doing their
+    /// own, method-specific checks.
+    async fn open_channel(
+        &self,
+        channel: &ChannelId,
+    ) -> Result<(U256, ChannelState), SettlementError> {
+        let id = self.existing_channel_id(channel).await?;
+        let state = self.read_state(channel, id).await?;
+        if state.status == ChannelStatus::Closed {
+            return Err(SettlementError::ChannelClosed(channel.clone()));
+        }
+        Ok((id, state))
+    }
 }
 
 async fn build_client(rpc_url: &str, private_key: &str) -> Result<EvmClient, SettlementError> {
@@ -227,11 +245,7 @@ impl SettlementBackend for EvmSettlementBackend {
         channel: &ChannelId,
         amount: u128,
     ) -> Result<ChannelState, SettlementError> {
-        let id = self.existing_channel_id(channel).await?;
-        let state = self.read_state(channel, id).await?;
-        if state.status == ChannelStatus::Closed {
-            return Err(SettlementError::ChannelClosed(channel.clone()));
-        }
+        let (id, _state) = self.open_channel(channel).await?;
 
         let call = self.contract.fund(id).value(U256::from(amount));
         let pending = call.send().await.map_err(backend_error)?;
@@ -245,11 +259,7 @@ impl SettlementBackend for EvmSettlementBackend {
         channel: &ChannelId,
         claim: Claim,
     ) -> Result<ChannelState, SettlementError> {
-        let id = self.existing_channel_id(channel).await?;
-        let state = self.read_state(channel, id).await?;
-        if state.status == ChannelStatus::Closed {
-            return Err(SettlementError::ChannelClosed(channel.clone()));
-        }
+        let (id, state) = self.open_channel(channel).await?;
         if claim.cumulative_amount <= state.redeemed {
             return Err(SettlementError::StaleClaim {
                 claimed: claim.cumulative_amount,
@@ -275,11 +285,7 @@ impl SettlementBackend for EvmSettlementBackend {
     }
 
     async fn close(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
-        let id = self.existing_channel_id(channel).await?;
-        let state = self.read_state(channel, id).await?;
-        if state.status == ChannelStatus::Closed {
-            return Err(SettlementError::ChannelClosed(channel.clone()));
-        }
+        let (id, _state) = self.open_channel(channel).await?;
 
         let call = self.contract.close(id);
         let pending = call.send().await.map_err(backend_error)?;
