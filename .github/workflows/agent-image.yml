@@ -44,4 +44,61 @@ jobs:
             g++ --version | head -1
             test "$(whoami)" = "agent"
             test -x /home/agent/.local/bin/claude
+            # The #409 rewrite is Rust, and per ADR 0007 its integration tier
+            # spawns a disposable local chain, so the agent needs both.
+            # NOTE the `-lc` above is a LOGIN shell on purpose: it sources
+            # /etc/profile and rebuilds PATH from scratch, dropping anything set
+            # only via `ENV PATH`. That is the strictest of the two modes this
+            # container sees, and the one where foundry was missing until it was
+            # also exported from ~/.profile.
+            rustc --version
+            cargo --version
+            cargo clippy --version
+            cargo fmt --version
+            anvil --version | head -1
+            cast --version | head -1
           '
+
+      # Proving the binaries EXIST is not the same as proving a chain RUNS. The
+      # agent spawns anvil as a child process inside this container, itself
+      # inside a GitHub runner. If that nesting does not work, every settlement
+      # ticket is unbuildable by an agent and we would only discover it from a
+      # failed run. Assert a real JSON-RPC answer, not a --version string.
+      - name: Verify anvil actually serves RPC inside the image
+        run: |
+          docker run --rm --entrypoint bash sandcastle:connector -lc '
+            set -euo pipefail
+            anvil --host 127.0.0.1 --port 18545 --chain-id 31337 --accounts 2 \
+              >/tmp/anvil.log 2>&1 &
+            for i in $(seq 50); do
+              if cast chain-id --rpc-url http://127.0.0.1:18545 >/dev/null 2>&1; then break; fi
+              sleep 0.2
+            done
+            id=$(cast chain-id --rpc-url http://127.0.0.1:18545)
+            echo "anvil answered eth_chainId with: $id"
+            test "$id" = "31337"
+            echo "block number: $(cast block-number --rpc-url http://127.0.0.1:18545)"
+          '
+
+      # The end-to-end claim: an agent in this container can build and run the
+      # crate it will be asked to work on, chain and all. This is what the epic
+      # was missing — fifteen merged Rust PRs were written by agents that could
+      # not run `cargo test` (hence #441/#444/#446/#449/#454, all compile-or-
+      # conflict remediations). The assertion is NON-ZERO test durations: a
+      # 0.00s chain test is the #471 failure mode, where a missing binary makes
+      # the guard skip and report `passed`.
+      - name: Verify the agent can build and test the Rust settlement crate
+        run: |
+          docker run --rm \
+            -v "$PWD":/home/agent/workspace -w /home/agent/workspace \
+            --entrypoint bash sandcastle:connector -lc '
+              set -euo pipefail
+              cargo test -p connector-settlement-evm 2>&1 | tee /tmp/test.log
+              grep -q "test result: ok" /tmp/test.log
+              if grep -q "Running tests/contract_suite.rs" /tmp/test.log \
+                 && grep -A2 "Running tests/contract_suite.rs" /tmp/test.log \
+                    | grep -q "finished in 0\.00s"; then
+                echo "::error::contract_suite reported 0.00s — it skipped rather than ran"
+                exit 1
+              fi
+            '
