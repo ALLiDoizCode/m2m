@@ -12,11 +12,11 @@ mod route;
 
 pub use app_client::{AppClient, AppOutcome, Delivery, FakeAppClient, HttpAppClient};
 pub use clock::{Clock, SystemClock, TestClock};
-pub use connector::{Connector, LeaseRouteError};
+pub use connector::{ChannelOperationError, Connector, LeaseRouteError};
 pub use metrics::Metrics;
 pub use network_peer_transport::{NetworkPeerTransport, PeerWireServer};
 pub use operator_view::{
-    ChannelView, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
+    ChannelView, ChannelViewStatus, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
 };
 pub use peer_transport::{InProcessPeerTransport, PeerTransport};
 pub use route::{LeasedRoute, PeerRoute};

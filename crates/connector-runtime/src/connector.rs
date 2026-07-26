@@ -9,6 +9,7 @@ use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
     is_valid_ilp_address, select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
+use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use thiserror::Error;
 use tracing::Instrument;
 
@@ -26,6 +27,25 @@ use crate::route::{LeasedRoute, PeerRoute};
 pub enum LeaseRouteError {
     #[error("invalid ILP address: '{0}'")]
     InvalidPrefix(String),
+}
+
+/// What can go wrong driving a payment channel's lifecycle through
+/// [`Connector::open_channel`]/[`Connector::fund_channel`]/
+/// [`Connector::close_channel`] (issue #459). [`Settlement`] carries
+/// through whatever the configured [`SettlementBackend`] itself reported;
+/// [`NoSettlementBackend`] is this crate's own -- a channel operation
+/// reaching a node with none configured (ADR 0009: a node that never names
+/// one in its config simply never gets a working channel surface, rather
+/// than a panic).
+///
+/// [`Settlement`]: ChannelOperationError::Settlement
+/// [`NoSettlementBackend`]: ChannelOperationError::NoSettlementBackend
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ChannelOperationError {
+    #[error("no settlement backend is configured for this node")]
+    NoSettlementBackend,
+    #[error(transparent)]
+    Settlement(#[from] SettlementError),
 }
 
 /// Which kind of routing-table entry matched a packet's destination, and
@@ -92,6 +112,18 @@ pub struct Connector {
     peer_transport: Arc<dyn PeerTransport>,
     clock: Arc<dyn Clock>,
     metrics: Arc<Metrics>,
+    /// A real chain's settlement backend (issue #459), or `None` on a node
+    /// that hasn't configured one -- channel operations fail with
+    /// [`ChannelOperationError::NoSettlementBackend`] rather than being
+    /// unreachable, matching how `leased_routes` degrades to "just empty"
+    /// rather than a distinct construction path.
+    settlement: Option<Arc<dyn SettlementBackend>>,
+    /// Every channel id this node has itself opened, in the order opened.
+    /// `SettlementBackend` has no "list every channel" method (a real
+    /// chain has no such index either) -- this is the one thing
+    /// `Connector` itself has to remember so `channels()` knows which ids
+    /// to ask the backend to report on.
+    known_channels: RwLock<Vec<ChannelId>>,
 }
 
 impl Connector {
@@ -110,7 +142,20 @@ impl Connector {
             peer_transport,
             clock,
             metrics: Arc::new(Metrics::new()),
+            settlement: None,
+            known_channels: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Configure the settlement backend a node's channel-lifecycle writes
+    /// (issue #459) are driven against. A builder rather than a
+    /// [`Connector::new`] parameter deliberately -- most of this crate's
+    /// own tests, and every other crate constructing a bare `Connector`
+    /// today, have no settlement backend at all and shouldn't need to
+    /// thread one through just to keep compiling.
+    pub fn with_settlement(mut self, settlement: Arc<dyn SettlementBackend>) -> Self {
+        self.settlement = Some(settlement);
+        self
     }
 
     /// Create or renew a leased route (ADR 0006, issue #427): a controller
@@ -405,10 +450,96 @@ impl Connector {
         Vec::new()
     }
 
-    /// This node's payment channels. Always empty: no settlement backend
-    /// tracks channel state yet (#422).
-    pub fn channels(&self) -> Vec<ChannelView> {
-        Vec::new()
+    /// This node's payment channels (issue #459) -- every channel this
+    /// node has itself opened, each reported fresh from the configured
+    /// settlement backend. Empty on a node with no settlement backend
+    /// configured, or with no channels opened yet, exactly like every
+    /// other still-unpopulated operator view above.
+    pub async fn channels(&self) -> Vec<ChannelView> {
+        let Some(settlement) = &self.settlement else {
+            return Vec::new();
+        };
+        let ids = self
+            .known_channels
+            .read()
+            .expect("known channels lock poisoned")
+            .clone();
+        let mut views = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Ok(state) = settlement.channel_state(&id).await {
+                views.push(ChannelView::from(state));
+            }
+        }
+        views
+    }
+
+    /// Open a new channel to `counterparty` (issue #459), remembering its
+    /// id so a future [`Connector::channels`] call reports on it. The
+    /// counterparty and settlement-timeout semantics are exactly the
+    /// configured [`SettlementBackend`]'s own -- this method adds nothing
+    /// beyond bookkeeping.
+    pub async fn open_channel(
+        &self,
+        counterparty: Vec<u8>,
+        settlement_timeout: Duration,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let settlement = self
+            .settlement
+            .as_ref()
+            .ok_or(ChannelOperationError::NoSettlementBackend)?;
+        let id = settlement.open(counterparty, settlement_timeout).await?;
+        self.known_channels
+            .write()
+            .expect("known channels lock poisoned")
+            .push(id.clone());
+        let state = settlement.channel_state(&id).await?;
+        Ok(ChannelView::from(state))
+    }
+
+    /// Deposit `amount` into `channel_id` (issue #459).
+    pub async fn fund_channel(
+        &self,
+        channel_id: &str,
+        amount: u128,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let settlement = self
+            .settlement
+            .as_ref()
+            .ok_or(ChannelOperationError::NoSettlementBackend)?;
+        let state = settlement
+            .fund(&ChannelId(channel_id.to_string()), amount)
+            .await?;
+        Ok(ChannelView::from(state))
+    }
+
+    /// Redeem `claim` against `channel_id` (issue #459).
+    pub async fn redeem_channel(
+        &self,
+        channel_id: &str,
+        claim: Claim,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let settlement = self
+            .settlement
+            .as_ref()
+            .ok_or(ChannelOperationError::NoSettlementBackend)?;
+        let state = settlement
+            .redeem(&ChannelId(channel_id.to_string()), claim)
+            .await?;
+        Ok(ChannelView::from(state))
+    }
+
+    /// Close `channel_id` (issue #459): no further funding or redemption is
+    /// possible against it afterward.
+    pub async fn close_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let settlement = self
+            .settlement
+            .as_ref()
+            .ok_or(ChannelOperationError::NoSettlementBackend)?;
+        let state = settlement.close(&ChannelId(channel_id.to_string())).await?;
+        Ok(ChannelView::from(state))
     }
 
     /// Claims exchanged with peers. Always empty: no claim exchange exists
@@ -1360,14 +1491,15 @@ mod tests {
         assert!(connector.leased_routes().is_empty());
     }
 
-    #[test]
-    fn peers_channels_claims_and_exposure_are_empty_until_their_tickets_land() {
+    #[tokio::test]
+    async fn peers_claims_and_exposure_are_empty_until_their_tickets_land_and_channels_are_empty_with_no_settlement_backend(
+    ) {
         let app_client = Arc::new(FakeAppClient::new());
         let clock = test_clock();
         let connector = connector_with(vec![], app_client, clock);
 
         assert!(connector.peers().is_empty());
-        assert!(connector.channels().is_empty());
+        assert!(connector.channels().await.is_empty());
         assert!(connector.claims().is_empty());
         assert!(connector.exposure().is_empty());
     }

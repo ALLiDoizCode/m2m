@@ -50,10 +50,16 @@ pub struct Claim {
     pub signature: Vec<u8>,
 }
 
-/// Errors a [`SettlementBackend`] implementation reports. Every variant is
-/// something the port itself defines the meaning of -- not a chain-specific
-/// failure (a reverted transaction, an RPC timeout) that only a concrete
-/// implementation like `connector-settlement-evm` would ever produce.
+/// Errors a [`SettlementBackend`] implementation reports. The first four
+/// variants are ones the port itself defines the meaning of. [`Backend`]
+/// is the one variant a real, chain-backed implementation like
+/// `connector-settlement-evm` (issue #459) needs and the in-memory stand-in
+/// does not: an I/O-level failure (a reverted transaction the backend's own
+/// pre-flight checks did not anticipate, an RPC timeout, a dropped
+/// transaction) that is specific to *how* a backend talks to its chain
+/// rather than to the port's own channel-lifecycle rules above.
+///
+/// [`Backend`]: SettlementError::Backend
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SettlementError {
     #[error("channel '{0}' not found")]
@@ -72,6 +78,9 @@ pub enum SettlementError {
         claimed: u128,
         already_redeemed: u128,
     },
+
+    #[error("settlement backend error: {0}")]
+    Backend(String),
 }
 
 /// The settlement backend port (ADR 0002, ADR 0006): what opening, funding,
