@@ -41,8 +41,48 @@ USER ${AGENT_UID}:${AGENT_GID}
 # Install Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Add Claude to PATH
-ENV PATH="/home/agent/.local/bin:$PATH"
+# ── Rust + Foundry ──────────────────────────────────────────────────────────
+# WHY: the #409 rewrite is Rust, and without these the implementer cannot run
+# `cargo check`, `cargo test` or `cargo clippy` on the code it is writing — it
+# commits, and CI is the first thing that ever compiles it. That is not a
+# hypothetical cost: #441, #444, #446, #449 and #454 are all remediation tickets
+# for agent PRs that did not compile or conflicted, discovered only after the
+# expensive work was done.
+#
+# The C toolchain cargo needs to LINK is already here — see the header note: the
+# full node:22-bookworm is built on buildpack-deps:bookworm, which bundles
+# build-essential. A `-slim` base would need it added explicitly.
+#
+# VERSIONS ARE PINNED TO THE GATE. ci.yml's Rust Workspace Gate uses
+# `dtolnay/rust-toolchain@stable` with clippy+rustfmt, and
+# `foundry-rs/foundry-toolchain@v1` at v1.7.1. Matching them here is the entire
+# point: an agent that passes locally on a different toolchain than the gate runs
+# has learned nothing. If you bump one, bump the other.
+#
+# `--profile minimal` keeps this to the toolchain plus the two components the
+# gate actually invokes, rather than pulling docs and every default extra.
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+  | sh -s -- -y --profile minimal --default-toolchain stable --component clippy,rustfmt
+
+# Foundry provides `anvil` (and `cast`, which the chain tests use to poll it).
+# Per ADR 0007 the integration tier spawns its own disposable local chain, so the
+# agent needs the binary present — there is no shared chain to point at, by
+# design. Pinned to the same v1.7.1 the gate installs.
+RUN curl -fsSL https://foundry.paradigm.xyz | bash \
+  && /home/agent/.foundry/bin/foundryup --install v1.7.1
+
+# Add Claude, cargo and foundry to PATH
+ENV PATH="/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.foundry/bin:$PATH"
+
+# ENV PATH covers the engine, which execs non-login shells. But claude-code
+# spawns its own shells for the agent's own commands, and a LOGIN shell sources
+# /etc/profile, which rebuilds PATH from scratch and drops anything set only via
+# ENV. rustup already appends itself to ~/.profile (which is why cargo survives
+# `bash -lc` and foundry would not), so do the same for foundry rather than
+# leaving a difference that shows up as "anvil: command not found" in exactly one
+# shell mode. Verified against both `bash -c` and `bash -lc`.
+RUN printf '\n# Foundry (anvil/cast) — see .sandcastle/Dockerfile\nexport PATH="$HOME/.foundry/bin:$PATH"\n' \
+  | tee -a /home/agent/.profile >> /home/agent/.bashrc
 
 WORKDIR /home/agent
 
