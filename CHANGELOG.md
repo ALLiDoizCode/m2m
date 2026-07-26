@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.41.8](https://github.com/toon-protocol/connector/compare/v3.41.7...v3.41.8) (2026-07-26)
+
+### Bug Fixes
+
+- rebase PR [#453](https://github.com/toon-protocol/connector/issues/453) onto main — connector-runtime conflicts after [#451](https://github.com/toon-protocol/connector/issues/451) ([#429](https://github.com/toon-protocol/connector/issues/429)) ([#455](https://github.com/toon-protocol/connector/issues/455)) ([0e5cd6b](https://github.com/toon-protocol/connector/commit/0e5cd6b065ea0d4c38d6f8e35d6e32d73654ab05)), closes [#416](https://github.com/toon-protocol/connector/issues/416) [#421](https://github.com/toon-protocol/connector/issues/421) [422-#424](https://github.com/toon-protocol/422-/issues/424) [#454](https://github.com/toon-protocol/connector/issues/454) [#427](https://github.com/toon-protocol/connector/issues/427) [#N](https://github.com/toon-protocol/connector/issues/N)
+
 ## [3.41.7](https://github.com/toon-protocol/connector/compare/v3.41.6...v3.41.7) (2026-07-26)
 
 ### Bug Fixes
