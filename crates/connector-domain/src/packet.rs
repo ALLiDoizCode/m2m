@@ -31,9 +31,11 @@ fn decode_type_byte(buf: &[u8], expected: u8) -> Result<usize, PacketError> {
 /// An ILP PREPARE packet (RFC-0027 Section 3.1): a conditional payment
 /// addressed to `destination`, carrying an opaque application payload.
 ///
-/// `execution_condition` is all-zero when the sender attached none --
+/// `execution_condition` is all-zero exactly when the sender attached none --
 /// RFC-0027's wire format has no separate "absent" representation, so zero
-/// is the absent value on the wire and in this struct alike.
+/// is the only way "no condition" can be expressed on the wire. That state
+/// is invalid, not a legacy auto-fulfill path: see
+/// [`crate::condition_is_present`] and issue #417.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepare {
     pub amount: u64,
@@ -142,7 +144,15 @@ impl RejectCode {
         RejectCode("F02".to_string())
     }
 
-    /// F99: Application Error -- the terminating app declined the delivery.
+    /// F01: Invalid Packet -- malformed, or (per issue #417) a missing or
+    /// all-zero execution condition.
+    pub fn f01_invalid_packet() -> RejectCode {
+        RejectCode("F01".to_string())
+    }
+
+    /// F99: Application Error -- the terminating app declined the delivery,
+    /// or (per issue #417) supplied no fulfilment matching the execution
+    /// condition it was handed.
     pub fn f99_application_error() -> RejectCode {
         RejectCode("F99".to_string())
     }
@@ -150,6 +160,11 @@ impl RejectCode {
     /// T01: Peer Unreachable -- the app could not be reached over HTTP.
     pub fn t01_peer_unreachable() -> RejectCode {
         RejectCode("T01".to_string())
+    }
+
+    /// R00: Transfer Timed Out -- the packet's expiry has already passed.
+    pub fn r00_transfer_timed_out() -> RejectCode {
+        RejectCode("R00".to_string())
     }
 
     pub fn as_str(&self) -> &str {
@@ -339,5 +354,7 @@ mod tests {
         assert_eq!(RejectCode::f99_application_error().as_str(), "F99");
         assert_eq!(RejectCode::t01_peer_unreachable().as_str(), "T01");
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
+        assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
+        assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
     }
 }

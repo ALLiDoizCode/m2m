@@ -14,12 +14,38 @@ use connector_domain::Prepare;
 /// What delivering a [`Prepare`] to an app produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppOutcome {
-    /// The app accepted the delivery (an HTTP 2xx response).
-    Delivered { data: Vec<u8> },
+    /// The app accepted the delivery (an HTTP 2xx response). `fulfillment`
+    /// is the app's claimed preimage for the packet's execution condition --
+    /// present only when the app supplied one (the `TOON-Fulfillment`
+    /// response header, RFC-0022) -- and is `None` on a 2xx response that
+    /// carries no such header. Either way this is only ever the app's claim:
+    /// [`crate::Connector`] verifies it against the condition (issue #417)
+    /// before treating the packet as fulfilled, so an app cannot forge a
+    /// fulfilment and neither can this connector on its behalf.
+    Delivered {
+        data: Vec<u8>,
+        fulfillment: Option<[u8; 32]>,
+    },
     /// The app declined the delivery (a non-2xx HTTP response).
     Declined { status: u16, body: Vec<u8> },
     /// The app could not be reached at all (connection failure, timeout).
     Unreachable { message: String },
+}
+
+const FULFILLMENT_HEADER: &str = "TOON-Fulfillment";
+
+/// Decode a lowercase-or-uppercase 64-character hex string into 32 bytes.
+/// Any malformed value (wrong length, non-hex characters) is treated the
+/// same as an absent header -- both leave `fulfillment` as `None`.
+fn decode_fulfillment_header(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(value.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Delivers a [`Prepare`] to the app behind a terminated route over HTTP.
@@ -35,8 +61,9 @@ pub trait AppClient: Send + Sync {
 
 /// The production [`AppClient`]: a reverse proxy over plain HTTP. The
 /// packet's opaque `data` becomes the request body; the app's status code
-/// alone decides [`AppOutcome`] -- any 2xx is delivered, anything else is
-/// declined.
+/// decides [`AppOutcome`] -- any 2xx is delivered, anything else is
+/// declined -- and a 2xx response's `TOON-Fulfillment` header (issue #417),
+/// if present and well-formed, becomes the delivery's claimed fulfillment.
 pub struct HttpAppClient {
     client: reqwest::Client,
 }
@@ -74,13 +101,21 @@ impl AppClient for HttpAppClient {
         match response {
             Ok(response) => {
                 let status = response.status();
+                let fulfillment = response
+                    .headers()
+                    .get(FULFILLMENT_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(decode_fulfillment_header);
                 let body = response
                     .bytes()
                     .await
                     .map(|bytes| bytes.to_vec())
                     .unwrap_or_default();
                 if status.is_success() {
-                    AppOutcome::Delivered { data: body }
+                    AppOutcome::Delivered {
+                        data: body,
+                        fulfillment,
+                    }
                 } else {
                     AppOutcome::Declined {
                         status: status.as_u16(),
@@ -183,6 +218,7 @@ mod tests {
             &handler_url,
             AppOutcome::Delivered {
                 data: b"ok".to_vec(),
+                fulfillment: Some([7u8; 32]),
             },
         );
 
@@ -198,7 +234,8 @@ mod tests {
         assert_eq!(
             outcome,
             AppOutcome::Delivered {
-                data: b"ok".to_vec()
+                data: b"ok".to_vec(),
+                fulfillment: Some([7u8; 32]),
             }
         );
     }
@@ -252,14 +289,21 @@ mod tests {
         use std::net::SocketAddr;
 
         async fn spawn_test_app(status: u16, body: &'static [u8]) -> Url {
+            spawn_test_app_with_header(status, body, None).await
+        }
+
+        async fn spawn_test_app_with_header(
+            status: u16,
+            body: &'static [u8],
+            fulfillment_header: Option<&'static str>,
+        ) -> Url {
             let make_svc = make_service_fn(move |_conn| async move {
                 Ok::<_, Infallible>(service_fn(move |_req: Request<Body>| async move {
-                    Ok::<_, Infallible>(
-                        Response::builder()
-                            .status(status)
-                            .body(Body::from(body))
-                            .unwrap(),
-                    )
+                    let mut response = Response::builder().status(status);
+                    if let Some(header_value) = fulfillment_header {
+                        response = response.header(FULFILLMENT_HEADER, header_value);
+                    }
+                    Ok::<_, Infallible>(response.body(Body::from(body)).unwrap())
                 }))
             });
 
@@ -286,7 +330,8 @@ mod tests {
             assert_eq!(
                 accepted,
                 AppOutcome::Delivered {
-                    data: b"accepted".to_vec()
+                    data: b"accepted".to_vec(),
+                    fulfillment: None,
                 }
             );
 
@@ -320,6 +365,7 @@ mod tests {
                 &accepting,
                 AppOutcome::Delivered {
                     data: b"accepted".to_vec(),
+                    fulfillment: None,
                 },
             );
             fake.respond(
@@ -341,7 +387,8 @@ mod tests {
             assert_eq!(
                 accepted,
                 AppOutcome::Delivered {
-                    data: b"accepted".to_vec()
+                    data: b"accepted".to_vec(),
+                    fulfillment: None,
                 }
             );
             let declined = fake
@@ -375,6 +422,61 @@ mod tests {
                 .await;
 
             assert!(matches!(outcome, AppOutcome::Unreachable { .. }));
+        }
+
+        /// The app's participation in fulfilling a packet (issue #417): a
+        /// `TOON-Fulfillment` response header round-trips into
+        /// `AppOutcome::Delivered::fulfillment` so `Connector` can verify it
+        /// against the packet's execution condition.
+        #[tokio::test]
+        async fn http_app_client_parses_a_well_formed_fulfillment_header() {
+            let accepting = spawn_test_app_with_header(
+                200,
+                b"accepted",
+                Some("0707070707070707070707070707070707070707070707070707070707070707"),
+            )
+            .await;
+            let received_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+
+            let outcome = HttpAppClient::new()
+                .deliver(
+                    &accepting,
+                    &prepare("g.example.app", b"payload"),
+                    received_at,
+                )
+                .await;
+
+            assert_eq!(
+                outcome,
+                AppOutcome::Delivered {
+                    data: b"accepted".to_vec(),
+                    fulfillment: Some([7u8; 32]),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn http_app_client_treats_a_malformed_fulfillment_header_as_absent() {
+            let accepting =
+                spawn_test_app_with_header(200, b"accepted", Some("not-hex-and-wrong-length"))
+                    .await;
+            let received_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+
+            let outcome = HttpAppClient::new()
+                .deliver(
+                    &accepting,
+                    &prepare("g.example.app", b"payload"),
+                    received_at,
+                )
+                .await;
+
+            assert_eq!(
+                outcome,
+                AppOutcome::Delivered {
+                    data: b"accepted".to_vec(),
+                    fulfillment: None,
+                }
+            );
         }
     }
 }
