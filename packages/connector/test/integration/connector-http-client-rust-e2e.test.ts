@@ -89,7 +89,7 @@ handler_url = "${appUrl}"
 
   return new Promise((resolve, reject) => {
     let buffered = '';
-    const onData = (chunk: Buffer) => {
+    const onData = (chunk: Buffer): void => {
       buffered += chunk.toString();
       const lines = buffered.split('\n');
       for (const line of lines) {
