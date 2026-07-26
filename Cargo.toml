@@ -4,6 +4,7 @@ members = [
     "packages/solana-program",
     "crates/connector-domain",
     "crates/connector-runtime",
+    "crates/connector-settlement",
     "crates/connector-settlement-evm",
     "crates/connector-settlement-solana",
     "crates/connector-signer",

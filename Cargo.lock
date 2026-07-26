@@ -950,6 +950,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-settlement"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "connector-settlement-evm"
 version = "0.1.0"
 
