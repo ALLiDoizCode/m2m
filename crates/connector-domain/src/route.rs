@@ -7,7 +7,10 @@
 /// exactly `p`, or starts with `p` followed by a dot (RFC-0015 addresses
 /// are dot-separated labels, so `g.example` must not match `g.exampleX`).
 fn matches(prefix: &str, destination: &str) -> bool {
-    destination == prefix || destination.starts_with(&format!("{prefix}."))
+    match destination.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('.'),
+        None => false,
+    }
 }
 
 /// Select the most specific (longest-prefix) route governing `destination`,

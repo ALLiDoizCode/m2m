@@ -10,13 +10,23 @@ use chrono::{DateTime, Utc};
 use crate::address::is_valid_ilp_address;
 use crate::error::PacketError;
 use crate::oer::{
-    decode_fixed_octet_string, decode_generalized_time, decode_var_octet_string,
-    encode_generalized_time, encode_var_octet_string,
+    decode_fixed_octet_string, decode_generalized_time, decode_var_octet_string, decode_var_uint,
+    encode_generalized_time, encode_var_octet_string, encode_var_uint,
 };
 
 const TYPE_PREPARE: u8 = 12;
 const TYPE_FULFILL: u8 = 13;
 const TYPE_REJECT: u8 = 14;
+
+/// Check the packet type byte against `expected`, returning the number of
+/// bytes consumed (always 1) so callers can fold it into their `offset`.
+fn decode_type_byte(buf: &[u8], expected: u8) -> Result<usize, PacketError> {
+    let type_byte = *buf.first().ok_or(PacketError::BufferUnderflow)?;
+    if type_byte != expected {
+        return Err(PacketError::InvalidType);
+    }
+    Ok(1)
+}
 
 /// An ILP PREPARE packet (RFC-0027 Section 3.1): a conditional payment
 /// addressed to `destination`, carrying an opaque application payload.
@@ -37,7 +47,7 @@ impl Prepare {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TYPE_PREPARE);
-        out.extend(crate::oer::encode_var_uint(self.amount));
+        out.extend(encode_var_uint(self.amount));
         out.extend(encode_generalized_time(self.expires_at));
         out.extend_from_slice(&self.execution_condition);
         out.extend(encode_var_octet_string(self.destination.as_bytes()));
@@ -46,14 +56,9 @@ impl Prepare {
     }
 
     pub fn decode(buf: &[u8]) -> Result<Prepare, PacketError> {
-        let mut offset = 0;
-        let type_byte = *buf.first().ok_or(PacketError::BufferUnderflow)?;
-        if type_byte != TYPE_PREPARE {
-            return Err(PacketError::InvalidType);
-        }
-        offset += 1;
+        let mut offset = decode_type_byte(buf, TYPE_PREPARE)?;
 
-        let (amount, n) = crate::oer::decode_var_uint(buf, offset)?;
+        let (amount, n) = decode_var_uint(buf, offset)?;
         offset += n;
 
         let (expires_at, n) = decode_generalized_time(buf, offset)?;
@@ -105,12 +110,7 @@ impl Fulfill {
     }
 
     pub fn decode(buf: &[u8]) -> Result<Fulfill, PacketError> {
-        let mut offset = 0;
-        let type_byte = *buf.first().ok_or(PacketError::BufferUnderflow)?;
-        if type_byte != TYPE_FULFILL {
-            return Err(PacketError::InvalidType);
-        }
-        offset += 1;
+        let mut offset = decode_type_byte(buf, TYPE_FULFILL)?;
 
         let (fulfillment, n) = decode_fixed_octet_string(buf, offset, 32)?;
         offset += n;
@@ -188,12 +188,7 @@ impl Reject {
     }
 
     pub fn decode(buf: &[u8]) -> Result<Reject, PacketError> {
-        let mut offset = 0;
-        let type_byte = *buf.first().ok_or(PacketError::BufferUnderflow)?;
-        if type_byte != TYPE_REJECT {
-            return Err(PacketError::InvalidType);
-        }
-        offset += 1;
+        let mut offset = decode_type_byte(buf, TYPE_REJECT)?;
 
         let code_end = offset + 3;
         if code_end > buf.len() {
