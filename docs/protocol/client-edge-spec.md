@@ -259,10 +259,11 @@ A client and this connector agree on which version is in use by the path the cli
 address: `POST /ilp` (or `/ilp/v1`) is a version-1 exchange end to end; `POST /ilp/v2` is a
 version-2 exchange end to end. There is no per-request negotiation or content-type haggling — the
 path is the entire agreement, which keeps the client edge as small as the two-repository
-implementation cost in [ADR 0001](../adr/0001-rust-workspace-library-first.md) demands (implemented
-once in Rust, once in TypeScript for `toon-client`, and complexity here is paid twice on those
-grounds alone). A connector that does not implement a version a client requests returns `404` on
-that version's path, distinguishable from every in-spec response defined above.
+implementation cost in [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md)
+demands (implemented once in Rust, once in TypeScript for `toon-client`, and complexity here is
+paid twice on those grounds alone). A connector that does not implement a version a client
+requests returns `404` on that version's path, distinguishable from every in-spec response
+defined above.
 
 ### 3.4 Retirement
 

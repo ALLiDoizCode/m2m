@@ -83,8 +83,8 @@ defined in §3 (claims) and §4–§5 (fee, minimum delivery, accumulated fee).
 
 ### 3.1 Execution condition is mandatory and real
 
-Per [ADR 0004](../adr/0004-value-moves-on-fulfilment.md) (Trust model), every PREPARE on the
-peer wire MUST carry a non-zero, 32-byte `executionCondition` chosen by the original sender. A
+Per [ADR 0004](../adr/0004-value-moves-on-fulfilment.md) ("Why the reversal"), every PREPARE on
+the peer wire MUST carry a non-zero, 32-byte `executionCondition` chosen by the original sender. A
 connector receiving a PREPARE with an absent or all-zero condition MUST reject it with
 `F01_INVALID_PACKET`. There is no derived-preimage (HKDF) fallback on the peer wire — that path
 is deleted, leaving one security model: a hop is paid only against a preimage it cannot forge.
@@ -164,12 +164,12 @@ merely over its limit).
 
 A claim is chain-specific (`CONTEXT.md` "Claim", "Nonce", "Watermark"):
 
-| Field              | evm                                         | solana                                     | mina (deferred, see [ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)) |
-| ------------------ | ------------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------- |
-| Channel identifier | `channelId` (bytes32)                       | `channelAccount` (program-derived address) | n/a — Mina is out of scope for the Rust peer wire                                 |
-| Nonce              | `uint64`                                    | `uint64`                                   | n/a                                                                               |
-| Cumulative amount  | `uint64`                                    | `uint64`                                   | n/a                                                                               |
-| Signature          | ECDSA over the EIP-712 balance-proof digest | Ed25519 over the balance-proof digest      | n/a                                                                               |
+| Field              | evm                                         | solana                                     | mina (dropped, see [ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)) |
+| ------------------ | ------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------- |
+| Channel identifier | `channelId` (bytes32)                       | `channelAccount` (program-derived address) | n/a — Mina is out of scope for the Rust peer wire                                |
+| Nonce              | `uint64`                                    | `uint64`                                   | n/a                                                                              |
+| Cumulative amount  | `uint64`                                    | `uint64`                                   | n/a                                                                              |
+| Signature          | ECDSA over the EIP-712 balance-proof digest | Ed25519 over the balance-proof digest      | n/a                                                                              |
 
 `lockedAmount` and `locksRoot` are removed from the claim and from the on-chain balance proof
 (they were always zero — [ADR 0004](../adr/0004-value-moves-on-fulfilment.md)); in-flight exposure
@@ -281,10 +281,9 @@ since the condition clears once the payer's pending claim is acknowledged (`CONT
 
 ## 6. Consistency
 
-This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, handler, packet,
-route, controller, packet plane, operator surface, peer wire, client edge, payment channel,
-claim, nonce, watermark, exposure, ceiling, flush, in flight, projection, settlement, fee, price,
-minimum delivery, probe, settlement backend) and implements
+This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
+peer wire, client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection,
+settlement, fee, minimum delivery, probe) and implements
 [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md),
 [ADR 0004](../adr/0004-value-moves-on-fulfilment.md),
 [ADR 0005](../adr/0005-claims-are-truth-balances-are-a-projection.md),
