@@ -43,9 +43,9 @@ function git(args) {
 
 function safeGit(args, label) {
   try {
-    return git(args);
+    return { ok: true, text: git(args) };
   } catch (err) {
-    return `(${label} failed: \`git ${args.join(' ')}\`: ${err.message})\n`;
+    return { ok: false, text: `(${label} failed: \`git ${args.join(' ')}\`: ${err.message})\n` };
   }
 }
 
@@ -76,18 +76,20 @@ function main() {
 
   const range = `${targetBranch}...${branch}`;
 
-  const stat = safeGit(['diff', '--stat', range], 'diff --stat').trimEnd();
+  const stat = safeGit(['diff', '--stat', range], 'diff --stat').text.trimEnd();
 
-  const nameStatusRaw = safeGit(['diff', '--name-status', range], 'diff --name-status');
-  const entries = nameStatusRaw
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .map((line) => {
-      const parts = line.split('\t');
-      const status = parts[0][0];
-      const path = parts[parts.length - 1];
-      return { status, path };
-    });
+  const nameStatusResult = safeGit(['diff', '--name-status', range], 'diff --name-status');
+  const entries = nameStatusResult.ok
+    ? nameStatusResult.text
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => {
+          const parts = line.split('\t');
+          const status = parts[0][0];
+          const path = parts[parts.length - 1];
+          return { status, path };
+        })
+    : [];
 
   const deleted = entries.filter((e) => e.status === 'D');
   const contentEligible = entries.filter((e) => e.status !== 'D');
@@ -97,7 +99,7 @@ function main() {
   const omitted = [];
 
   for (const entry of contentEligible) {
-    const fileDiff = safeGit(['diff', range, '--', entry.path], `diff for ${entry.path}`);
+    const fileDiff = safeGit(['diff', range, '--', entry.path], `diff for ${entry.path}`).text;
     if (usedChars + fileDiff.length > DIFF_CHAR_BUDGET) {
       omitted.push(entry);
       continue;
@@ -109,6 +111,10 @@ function main() {
   const sections = [];
 
   sections.push(`## Diff stat\n\n\`\`\`\n${stat}\n\`\`\``);
+
+  if (!nameStatusResult.ok) {
+    sections.push(`## NOTE: unable to list changed files\n\n${nameStatusResult.text.trimEnd()}`);
+  }
 
   if (included.length > 0) {
     sections.push(
