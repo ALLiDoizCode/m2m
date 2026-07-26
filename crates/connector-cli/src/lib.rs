@@ -1,18 +1,27 @@
 //! CLI argument parsing and commands. See ADR 0001.
 
+mod runtime;
+
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::Path;
 
+use axum::Router;
 use connector_config::{Config, ConfigError};
 
-/// Everything that can stop the connector from producing a validated
-/// [`Config`] to start with.
+pub use runtime::{build, router, RuntimeError};
+
+/// Everything that can stop the connector from producing a validated,
+/// running node.
 #[derive(Debug)]
 pub enum CliError {
     /// Argument parsing failed -- e.g. no config path was given.
     Usage(String),
     /// The config file itself failed to load or validate.
     Config(ConfigError),
+    /// The config loaded but the runtime it describes could not be built
+    /// (e.g. an unreadable or malformed signer key).
+    Runtime(RuntimeError),
 }
 
 impl fmt::Display for CliError {
@@ -20,6 +29,7 @@ impl fmt::Display for CliError {
         match self {
             CliError::Usage(message) => write!(f, "{message}"),
             CliError::Config(source) => write!(f, "{source}"),
+            CliError::Runtime(source) => write!(f, "{source}"),
         }
     }
 }
@@ -29,6 +39,12 @@ impl std::error::Error for CliError {}
 impl From<ConfigError> for CliError {
     fn from(source: ConfigError) -> Self {
         CliError::Config(source)
+    }
+}
+
+impl From<RuntimeError> for CliError {
+    fn from(source: RuntimeError) -> Self {
+        CliError::Runtime(source)
     }
 }
 
@@ -44,6 +60,17 @@ pub fn load_config<S: AsRef<str>>(args: &[S]) -> Result<Config, CliError> {
         .get(1)
         .ok_or_else(|| CliError::Usage("usage: connector <config-file>".to_string()))?;
     Config::load(Path::new(path.as_ref())).map_err(CliError::from)
+}
+
+/// Everything between process arguments and a servable [`Router`]: load
+/// the config, build the runtime it describes, and merge its routers.
+/// The one function `connector-bin` calls before binding a socket -- per
+/// ADR 0001 the binary itself makes no decision beyond "did this fail".
+pub fn run<S: AsRef<str>>(args: &[S]) -> Result<(Router, SocketAddr), CliError> {
+    let config = load_config(args)?;
+    let (connector, signer) = build(&config)?;
+    let addr = config.client_edge_addr();
+    Ok((router(connector, signer, &config), addr))
 }
 
 #[cfg(test)]

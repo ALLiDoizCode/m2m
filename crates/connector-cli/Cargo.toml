@@ -6,3 +6,13 @@ license.workspace = true
 
 [dependencies]
 connector-config = { path = "../connector-config" }
+connector-client-edge = { path = "../connector-client-edge" }
+connector-operator = { path = "../connector-operator" }
+connector-runtime = { path = "../connector-runtime" }
+connector-signer = { path = "../connector-signer" }
+axum = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.4", features = ["util"] }
