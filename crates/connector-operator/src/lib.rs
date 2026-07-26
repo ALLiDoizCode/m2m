@@ -24,8 +24,10 @@
 //! value.
 //!
 //! Per ADR 0001, each read handler below deserializes nothing beyond the
-//! bearer token (a GET request has no body), calls exactly one
-//! [`Connector`] method, and serializes the result as JSON.
+//! bearer token (a GET request has no body) and calls exactly one
+//! [`Connector`] method. Every read serializes its result as JSON except
+//! `GET /metrics`, which is Prometheus text exposition format (ADR 0014)
+//! -- the one format Prometheus itself can scrape.
 
 mod rfc9421;
 mod write_auth;

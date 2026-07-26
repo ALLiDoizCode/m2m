@@ -52,9 +52,9 @@ impl From<RuntimeError> for CliError {
 /// arguments (as `std::env::args()` yields them: `args[0]` is the program
 /// name, `args[1]` is the path to the one typed configuration file).
 ///
-/// Per ADR 0009, this is the only startup work that can fail before the
-/// node is fully up: an `Err` here means the caller must exit non-zero
-/// without having started anything else.
+/// Per ADR 0009, an `Err` here means the caller must exit non-zero
+/// without having started anything else. [`build`] can also fail this
+/// way once the config is loaded -- see [`RuntimeError`].
 pub fn load_config<S: AsRef<str>>(args: &[S]) -> Result<Config, CliError> {
     let path = args
         .get(1)
