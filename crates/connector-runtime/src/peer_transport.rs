@@ -72,7 +72,7 @@ impl PeerLink {
         PeerLink { sender }
     }
 
-    async fn forward(&self, prepare: Prepare, peer_id: &str) -> PacketResponse {
+    async fn forward(&self, peer_id: &str, prepare: Prepare) -> PacketResponse {
         let (respond_to, receiver) = oneshot::channel();
         if self
             .sender
@@ -116,7 +116,7 @@ impl InProcessPeerTransport {
 impl PeerTransport for InProcessPeerTransport {
     async fn forward(&self, peer_id: &str, prepare: Prepare) -> PacketResponse {
         match self.peers.get(peer_id) {
-            Some(link) => link.forward(prepare, peer_id).await,
+            Some(link) => link.forward(peer_id, prepare).await,
             None => peer_unreachable(peer_id),
         }
     }

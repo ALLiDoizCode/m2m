@@ -49,15 +49,14 @@ impl Connector {
     /// forward it to the matching peer -- and translate whatever comes back
     /// into the ILP-level response a client receives.
     pub async fn handle_prepare(&self, prepare: Prepare) -> PacketResponse {
-        let terminate_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
-        let forward_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
-        let all_prefixes: Vec<&str> = terminate_prefixes
+        let prefixes: Vec<&str> = self
+            .routes
             .iter()
-            .copied()
-            .chain(forward_prefixes.iter().copied())
+            .map(StaticRoute::prefix)
+            .chain(self.peer_routes.iter().map(PeerRoute::prefix))
             .collect();
 
-        let Some(index) = select_route(&prepare.destination, &all_prefixes) else {
+        let Some(index) = select_route(&prepare.destination, &prefixes) else {
             return PacketResponse::Reject(Reject {
                 code: RejectCode::f02_unreachable(),
                 triggered_by: String::new(),
@@ -122,6 +121,12 @@ mod tests {
         }
     }
 
+    fn test_clock() -> Arc<TestClock> {
+        Arc::new(TestClock::new(
+            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        ))
+    }
+
     fn connector_with(
         routes: Vec<StaticRoute>,
         app_client: Arc<FakeAppClient>,
@@ -146,9 +151,7 @@ mod tests {
                 data: b"app said yes".to_vec(),
             },
         );
-        let clock = Arc::new(TestClock::new(
-            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-        ));
+        let clock = test_clock();
         let connector = connector_with(vec![route], app_client.clone(), clock);
 
         let response = connector
@@ -171,9 +174,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_packet_with_no_matching_route() {
         let app_client = Arc::new(FakeAppClient::new());
-        let clock = Arc::new(TestClock::new(
-            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-        ));
+        let clock = test_clock();
         let connector = connector_with(vec![], app_client.clone(), clock);
 
         let response = connector
@@ -201,9 +202,7 @@ mod tests {
                 body: b"insufficient funds".to_vec(),
             },
         );
-        let clock = Arc::new(TestClock::new(
-            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-        ));
+        let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
 
         let response = connector
@@ -224,9 +223,7 @@ mod tests {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         // No FakeAppClient::respond call: the fake defaults to Unreachable.
         let app_client = Arc::new(FakeAppClient::new());
-        let clock = Arc::new(TestClock::new(
-            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-        ));
+        let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
 
         let response = connector
@@ -265,9 +262,7 @@ mod tests {
             specific.handler_url(),
             AppOutcome::Delivered { data: vec![] },
         );
-        let clock = Arc::new(TestClock::new(
-            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-        ));
+        let clock = test_clock();
         let connector = connector_with(vec![general, specific.clone()], app_client.clone(), clock);
 
         let response = connector
@@ -296,9 +291,7 @@ mod tests {
             vec![],
             second_hop_app_client.clone(),
             Arc::new(InProcessPeerTransport::new()),
-            Arc::new(TestClock::new(
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            test_clock(),
         ));
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
@@ -307,9 +300,7 @@ mod tests {
             vec![PeerRoute::new("g.example.app", "second-hop")],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
-            Arc::new(TestClock::new(
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            test_clock(),
         );
 
         let response = first_hop
@@ -333,9 +324,7 @@ mod tests {
             vec![],
             Arc::new(FakeAppClient::new()),
             Arc::new(InProcessPeerTransport::new()),
-            Arc::new(TestClock::new(
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            test_clock(),
         ));
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
@@ -344,9 +333,7 @@ mod tests {
             vec![PeerRoute::new("g.example.app", "second-hop")],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
-            Arc::new(TestClock::new(
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            test_clock(),
         );
 
         let response = first_hop
@@ -378,9 +365,7 @@ mod tests {
             vec![peer_route],
             app_client,
             Arc::new(InProcessPeerTransport::new()),
-            Arc::new(TestClock::new(
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            test_clock(),
         );
 
         let response = connector
@@ -413,9 +398,7 @@ mod tests {
             vec![],
             second_hop_app_client.clone(),
             Arc::new(InProcessPeerTransport::new()),
-            Arc::new(TestClock::new(
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            test_clock(),
         ));
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
@@ -424,9 +407,7 @@ mod tests {
             vec![PeerRoute::new("g.example.app", "second-hop")],
             app_client,
             Arc::new(peer_transport),
-            Arc::new(TestClock::new(
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            test_clock(),
         );
 
         let response = first_hop
