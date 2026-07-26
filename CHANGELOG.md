@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.44.1](https://github.com/toon-protocol/connector/compare/v3.44.0...v3.44.1) (2026-07-26)
+
+### Bug Fixes
+
+- **factory:** the agent could not read the issue body at all ([#478](https://github.com/toon-protocol/connector/issues/478)) ([1c4f257](https://github.com/toon-protocol/connector/commit/1c4f25721bb6e8c2124c4296af6c4a82b2c36889)), closes [#423](https://github.com/toon-protocol/connector/issues/423) [#428](https://github.com/toon-protocol/connector/issues/428)
+
 ## [3.44.0](https://github.com/toon-protocol/connector/compare/v3.43.0...v3.44.0) (2026-07-26)
 
 ### Features
