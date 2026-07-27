@@ -71,14 +71,21 @@ impl PeerConnection {
         correlation_id
     }
 
-    /// Send `frame` and read back whatever frame answers it, dialing
-    /// lazily and redialing once more on any failure -- the "at most
-    /// twice" retry both [`PeerConnection::forward`] and
-    /// [`PeerConnection::flush`] need, factored out so the two frame kinds
-    /// share exactly one reconnection policy. Interpreting the response
-    /// frame is left to the caller, since a PREPARE's answer and a FLUSH's
-    /// answer decode differently.
-    async fn send_frame_and_read_response(&self, frame: &Frame) -> Option<Frame> {
+    /// Send `frame`, read back whatever frame answers it, and hand it to
+    /// `decode` -- dialing lazily and redialing once more if the write,
+    /// the read, or `decode` itself fails, the "at most twice" retry both
+    /// [`PeerConnection::forward`] and [`PeerConnection::flush`] need,
+    /// factored out so the two frame kinds share exactly one reconnection
+    /// policy. `decode` is where each caller checks whatever makes a
+    /// response its own -- a PREPARE answer's correlation id, a FLUSH
+    /// answer's frame type -- since a response that fails that check is
+    /// exactly as unusable as one the socket never delivered at all, and
+    /// must retry the same way.
+    async fn send_frame_and_decode<T>(
+        &self,
+        frame: &Frame,
+        decode: impl Fn(&Frame) -> Option<T>,
+    ) -> Option<T> {
         let mut guard = self.stream.lock().await;
         for _ in 0..2 {
             if guard.is_none() {
@@ -90,7 +97,9 @@ impl PeerConnection {
             let stream = guard.as_mut().expect("connected above");
             if write_frame(stream, frame).await.is_ok() {
                 if let Ok(response) = read_frame(stream).await {
-                    return Some(response);
+                    if let Some(decoded) = decode(&response) {
+                        return Some(decoded);
+                    }
                 }
             }
             *guard = None;
@@ -109,13 +118,15 @@ impl PeerConnection {
             correlation_id: self.next_correlation_id(),
             payload: encode_prepare_frame_payload(&prepare, minimum_delivery, claim.as_ref()),
         };
-        let unreachable = || (peer_unreachable(&self.peer_id), ClaimAckOutcome::NotSent);
-        match self.send_frame_and_read_response(&frame).await {
-            Some(response) if response.correlation_id == frame.correlation_id => {
-                decode_response(&response).unwrap_or_else(unreachable)
-            }
-            _ => unreachable(),
-        }
+        let correlation_id = frame.correlation_id;
+        let response = self
+            .send_frame_and_decode(&frame, |response| {
+                (response.correlation_id == correlation_id)
+                    .then(|| decode_response(response))
+                    .flatten()
+            })
+            .await;
+        response.unwrap_or_else(|| (peer_unreachable(&self.peer_id), ClaimAckOutcome::NotSent))
     }
 
     async fn flush(&self, claim: WireClaim) -> ClaimAckOutcome {
@@ -126,12 +137,14 @@ impl PeerConnection {
             correlation_id: [0u8; CORRELATION_ID_LEN],
             payload: claim.encode(),
         };
-        match self.send_frame_and_read_response(&frame).await {
-            Some(response) if response.frame_type == FRAME_TYPE_CLAIM_ACK => {
-                ClaimAckOutcome::decode(&response.payload).unwrap_or(ClaimAckOutcome::NotSent)
-            }
-            _ => ClaimAckOutcome::NotSent,
-        }
+        let ack = self
+            .send_frame_and_decode(&frame, |response| {
+                (response.frame_type == FRAME_TYPE_CLAIM_ACK)
+                    .then(|| ClaimAckOutcome::decode(&response.payload))
+                    .flatten()
+            })
+            .await;
+        ack.unwrap_or(ClaimAckOutcome::NotSent)
     }
 }
 
@@ -223,8 +236,8 @@ fn decode_response_frame_payload(payload: &[u8]) -> Option<(Vec<u8>, ClaimAckOut
 
 /// Interpret a FULFILL/REJECT frame answering a forwarded PREPARE. Pure
 /// decoding, split out from the I/O in
-/// [`PeerConnection::send_frame_and_read_response`] so retrying a failed
-/// send never has to re-decode anything.
+/// [`PeerConnection::send_frame_and_decode`] so its retry loop and
+/// [`PeerConnection::forward`] share one implementation.
 fn decode_response(response: &Frame) -> Option<(PacketResponse, ClaimAckOutcome)> {
     let (packet_bytes, ack) = decode_response_frame_payload(&response.payload)?;
     match response.frame_type {
@@ -721,5 +734,71 @@ mod tests {
                 data: b"second".to_vec(),
             })
         );
+    }
+
+    /// A response frame that does not answer this request at all -- a
+    /// stale reply left over from some earlier, abandoned exchange, still
+    /// sitting in the stream -- must be treated exactly like the socket
+    /// failing outright: reconnect and retry, not surface it as the
+    /// answer.
+    #[tokio::test]
+    async fn a_response_with_the_wrong_correlation_id_triggers_a_reconnect_and_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_frame(&mut first).await.unwrap();
+            let stale_bytes = Fulfill {
+                fulfillment: FULFILLMENT,
+                data: b"stale".to_vec(),
+            }
+            .encode();
+            write_frame(
+                &mut first,
+                &Frame {
+                    frame_type: FRAME_TYPE_FULFILL,
+                    correlation_id: [0xffu8; CORRELATION_ID_LEN],
+                    payload: encode_response_frame_payload(stale_bytes, ClaimAckOutcome::NotSent),
+                },
+            )
+            .await
+            .unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().await.unwrap();
+            let request = read_frame(&mut second).await.unwrap();
+            let fresh_bytes = Fulfill {
+                fulfillment: FULFILLMENT,
+                data: b"fresh".to_vec(),
+            }
+            .encode();
+            write_frame(
+                &mut second,
+                &Frame {
+                    frame_type: FRAME_TYPE_FULFILL,
+                    correlation_id: request.correlation_id,
+                    payload: encode_response_frame_payload(fresh_bytes, ClaimAckOutcome::NotSent),
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut transport = NetworkPeerTransport::new();
+        transport.add_peer("peer-b", addr);
+
+        let (response, ack) = transport
+            .forward("peer-b", prepare("g.example.app"), 0, None)
+            .await;
+
+        assert_eq!(
+            response,
+            PacketResponse::Fulfill(Fulfill {
+                fulfillment: FULFILLMENT,
+                data: b"fresh".to_vec(),
+            })
+        );
+        assert_eq!(ack, ClaimAckOutcome::NotSent);
     }
 }
