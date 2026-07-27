@@ -2,9 +2,11 @@
 //! 0003, and `docs/protocol/client-edge-spec.md` -- this implements §1.1
 //! (transport and framing: `POST /ilp`, OER-encoded PREPARE in, OER-encoded
 //! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome). Identity
-//! (§1.2), payment claims (§1.3) and the x402 greeting (§1.4) are
-//! unimplemented until claim validation lands (issue #423) -- every request
-//! today is treated as an unauthenticated, unpriced delivery attempt.
+//! (§1.2) and payment claims (§1.3) are unimplemented until claim validation
+//! lands (issue #423) -- every request today is treated as an
+//! unauthenticated, unpriced delivery attempt. §1.4's x402 greeting is not a
+//! gap to close: it is permanently removed (ADR 0006, ADR 0011) and MUST NOT
+//! be implemented here.
 //!
 //! Per ADR 0001, this handler deserializes, calls exactly one method on
 //! [`Connector`], and serializes; the `match` below is that serialization

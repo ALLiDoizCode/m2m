@@ -2,6 +2,8 @@
 
 **Status:** Normative. Version 1 documents current, shipped behavior; §3 defines how a future
 version is introduced per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
+Where this document and an ADR disagree, the ADR wins — this document is reconciled to match, not
+the other way around.
 **Consumers:** `toon-client` and any other app that pays this connector directly — installed on
 machines this repository's operators do not control.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). The key words MUST, MUST NOT, SHOULD and MAY
@@ -16,23 +18,26 @@ an HTTP router).
 
 ## Scoping note
 
-Today's TypeScript connector accepts client traffic over two transports: the duplex,
-session-stateful BTP WebSocket (RFC-0023) that also carries peer-to-peer traffic, and the
-one-shot ILP-over-HTTP binding (RFC-0035) at `POST /ilp`, which the code documents as "the edge
-transport for one-shot, stateless purchases — a buyer, a NAT'd client, a browser, or an agent
-that only consumes" (`packages/connector/src/http/ilp-http-adapter.ts`). That BTP does double
-duty is exactly the conflation [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md)
-retires: the peer wire (`docs/protocol/peer-wire-spec.md`) is redesigned freely because both its
-ends are operator-controlled, which is never true of a client. This document therefore specifies
-the client edge as **ILP-over-HTTP** — `POST /ilp` — since that is the transport whose far end is
+The TypeScript connector's now-removed embedded node (gone as of v4.0.0, [issue
+#465](https://github.com/toon-protocol/connector/issues/465)) accepted client traffic over two
+transports: the duplex, session-stateful BTP WebSocket (RFC-0023) that also carries peer-to-peer
+traffic, and the one-shot ILP-over-HTTP binding (RFC-0035) at `POST /ilp` — its own documentation
+described this as the edge transport for one-shot, stateless purchases: a buyer, a NAT'd client, a
+browser, or an agent that only consumes. That source no longer exists in this repository but is
+recoverable from git history prior to #465. That BTP did double duty is exactly the conflation
+[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md) retires: the peer wire
+(`docs/protocol/peer-wire-spec.md`) is redesigned freely because both its ends are
+operator-controlled, which is never true of a client. This document therefore specifies the
+client edge as **ILP-over-HTTP** — `POST /ilp` — since that is the transport whose far end is
 genuinely uncontrolled and whose shape carries forward as "version 1" of the versioned scheme. A
-client that today reaches this connector over BTP is, for the purposes of this spec, using the
-peer wire's current (pre-rewrite) transport as a transitional convenience, not the client edge;
-it is out of scope here and is not preserved by the redesigned peer wire.
+client that reached the old embedded node over BTP was, for the purposes of this spec, using the
+peer wire's pre-rewrite transport as a transitional convenience, not the client edge; it is out of
+scope here and is not preserved by the redesigned peer wire.
 
-`POST /admin/ilp/send` (`packages/connector/src/http/ilp-send-handler.ts`) is a distinct,
-operator-surface-adjacent interface an app behind this connector uses to ask its _own_ connector
-to originate a packet outward. It is not the client edge either — the caller there is the
+`POST /admin/ilp/send` was a distinct, operator-surface-adjacent interface the same removed
+embedded node exposed so an app behind this connector could ask its _own_ connector to originate a
+packet outward — also recoverable from git history prior to #465, not present in this repository.
+It was not the client edge either — the caller there is the
 connector's own app, not an unaffiliated payer — and is out of scope for this document.
 
 ## 1. Version 1 (current)
@@ -50,10 +55,14 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
   | ------ | ------------------------------------------------------------------------------- |
   | `400`  | Malformed request: not a PREPARE, undecodable OER, oversized body.              |
   | `401`  | An `ILP-Peer-Id` was presented but authentication failed.                       |
-  | `402`  | x402 v2 payment-required greeting (§1.4) — a JSON body, not OER.                |
   | `413`  | Request body exceeds the configured maximum (default 5 MiB).                    |
   | `500`  | Reserved by this spec for transport failure only; an unexpected                 |
   |        | internal error during routing is surfaced as a `200` + `T00` REJECT, not a 500. |
+
+  `402` is not part of this version: an earlier draft used it for an x402 v2 payment-required
+  greeting, removed with discovery ([ADR 0006](../adr/0006-the-connector-is-mechanism-not-policy.md))
+  and not reinstated ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)).
+  See §1.4.
 
 ### 1.2 Identity
 
@@ -73,9 +82,11 @@ A request identifies its sender in one of two ways:
 
 ### 1.3 Payment claim
 
-A request pays with a claim header, in the same JSON shape and version (`version: '1.0'`,
-discriminated by `blockchain: 'evm' | 'solana' | 'mina'`) the peer wire's predecessor (BTP)
-protocol carried, defined in `packages/connector/src/btp/btp-claim-types.ts`:
+A request pays with a claim header. The claim is a JSON object, `version: '1.0'`, discriminated
+by `blockchain: 'evm' | 'solana'` — the shape below is this document's own definition, not a
+pointer to source; the peer wire's predecessor (BTP protocol) carried the same shape, but that
+code no longer exists in this repository. `blockchain: 'mina'` is a distinct, invalid value here:
+see the note at the end of this section.
 
 | Header                              | Content                                                      |
 | ----------------------------------- | ------------------------------------------------------------ |
@@ -93,84 +104,55 @@ Required fields on every claim, regardless of chain: `version` (`'1.0'`), `block
   `tokenAddress` for dynamic on-chain verification of an unregistered channel.
 - **solana**: `programId`, `channelAccount` (both base58), `nonce`, `transferredAmount` (lamports,
   decimal string), `signature` (base64 Ed25519), `signerPublicKey` (base58); optional `cluster`.
-- **mina**: `zkAppAddress` (B62), `tokenId`, `balanceCommitment` (Poseidon hash), `nonce`, `proof`
-  (base64 zk-SNARK), `salt`; optional dual-party fields `transferredAmount`, `balanceB`,
-  `signatureB`, and self-describing `signerPublicKey`, `network`.
 
 A present claim is validated by the same gate the peer wire uses (the inbound claim validator)
 before the PREPARE is routed, in this order — deliberately freshness-and-value before
-cryptography, so a replay or an underpayment never pays the cost of a signature or zk-SNARK
-verification and never reaches the terminating app:
+cryptography, so a replay or an underpayment never pays the cost of a signature verification and
+never reaches the terminating app:
 
 1. **Structural validation** — required/optional fields per chain, formats (hex length, base58
-   alphabet, B62 prefix) as enumerated above; a structurally invalid claim is rejected.
+   alphabet) as enumerated above; a structurally invalid claim is rejected. `blockchain: 'mina'`
+   fails here unconditionally — see the note below.
 2. **Freshness** — the claim's nonce MUST strictly advance this connector's last-verified
    watermark for the (peer, blockchain, channel) tuple; a non-advancing nonce is rejected without
    spending a cryptographic verification on it.
 3. **Value binding** (for a locally-terminated, priced route) — the claim's cumulative amount
    MUST advance by at least the route's configured flat price, so a minimal fresh claim cannot pay
-   for an expensive route. For EVM and Solana this compares the claim's plaintext
-   `transferredAmount` directly. For Mina, whose commitment is opaque, this check opens the
-   Poseidon commitment against a plaintext preimage carried alongside it (`transferredAmount`,
-   `balanceB`, `salt`) when present, rejecting a claim whose preimage does not open its own signed
-   commitment; a claim with no preimage skips value binding unless the connector's
-   `minaValueBindingStrict` setting requires one, in which case an absent preimage is also
-   rejected. This is a migration allowance for pre-preimage Mina clients, not a permanent
-   EVM/Solana-only carve-out.
-4. **Cryptographic verification** — signature (EVM/Solana) or zk-SNARK proof (Mina) recovers to
-   the channel's counterparty.
+   for an expensive route. This compares the claim's plaintext `transferredAmount` directly.
+4. **Cryptographic verification** — the signature (EIP-712 for EVM, Ed25519 for Solana) recovers
+   to the channel's counterparty.
 
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
 
-### 1.4 x402 v2 greeting
+**Mina is not a supported chain.** [ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)
+drops Mina from the Rust connector: a Mina claim's on-chain lifecycle (open, deposit, close,
+settle) has no Rust implementation and none is planned, so a connector that accepted a Mina claim
+would be accepting value it can never settle. `blockchain: 'mina'` is therefore refused as a
+structural validation failure (step 1 above) rather than parsed or cryptographically checked — the
+zkApp-specific fields the peer wire's predecessor once carried for it (`zkAppAddress`, `tokenId`,
+`balanceCommitment`, `proof`, `salt`, and the dual-party `balanceB`/`signatureB` extension) are not
+part of this connector's claim shape and are not documented here. A Mina client's claim is rejected
+clearly and immediately; it is not owed a code path, only an unambiguous refusal.
 
-An **unpaid** request (no claim header of either kind, and no `PAYMENT-SIGNATURE` header) to a
-destination this connector terminates locally (a `RouteTermination`, i.e. the connector acting as
-a paid reverse proxy in front of an app) receives an early `402 Payment Required` before any
-claim validation runs:
+### 1.4 x402 v2 greeting (removed)
 
-- **Response headers:** `Content-Type: application/json`; `PAYMENT-REQUIRED:
-base64(JSON.stringify(body))`.
-- **Body** (`X402PaymentRequired`, x402 v2 §5.1.1/§5.1.2):
-  ```json
-  {
-    "x402Version": 2,
-    "resource": { "url": "<the terminated route's ILP address>" },
-    "accepts": [
-      {
-        "scheme": "exact",
-        "network": "<CAIP-2, e.g. eip155:8453>",
-        "amount": "<price>",
-        "asset": "<token address>",
-        "payTo": "<settlement address>",
-        "maxTimeoutSeconds": 60
-      },
-      {
-        "scheme": "toon-channel",
-        "network": "<ilp address>",
-        "amount": "<price>",
-        "payTo": "<ilp address>",
-        "maxTimeoutSeconds": 60,
-        "httpEndpoint": "https://.../ilp",
-        "extra": {
-          "ilpAddress": "...",
-          "endpoint": "/ilp",
-          "price": "...",
-          "chains": ["evm", "solana", "mina"],
-          "settlementAddresses": { "evm": "0x...", "solana": "...", "mina": "..." }
-        }
-      }
-    ]
-  }
-  ```
-  One `exact` entry is emitted per chain the route accepts that x402 can name (EVM → `eip155:*`,
-  Solana → `solana:*`) and for which a settlement address is configured; Mina has no x402 network
-  id and is offered only inside the `toon-channel` entry's `extra`, which always carries the full
-  multi-chain payload so a TOON-aware client can open a channel on any supported chain, including
-  ones a vanilla x402 v2 client cannot name.
-- A present claim header OR a `PAYMENT-SIGNATURE` header suppresses the greeting; the request then
-  flows through §1.3's validation unchanged. The greeting itself performs no claim validation.
+Earlier drafts of this document specified an x402 v2 payment-required greeting: an unpaid request
+to a locally-terminated route received a `402` carrying a JSON body naming the route's price and
+accepted payment schemes, so an unaffiliated client could learn what to pay without an
+out-of-band channel. That behavior is removed, not merely undocumented.
+
+[ADR 0006](../adr/0006-the-connector-is-mechanism-not-policy.md) removed discovery from the
+connector entirely — the connector forwards and settles what it is told to, and does not announce
+itself. A greeting that states a route's price is discovery: it lets a client learn something from
+the connector that the connector was not explicitly configured to hand out. [ADR
+0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md) confirms the gap is closed
+by probing (§1.6) instead, and that the greeting is not reinstated. Price discovery, in every
+form, lives outside the connector; the Rust connector MUST NOT grow this or any equivalent, and
+the deployed TypeScript fleet's greeting is a permanent, intentional divergence from this
+specification rather than a target to converge on (see the comparison harness's expected-divergence
+baseline). An unpaid request to a locally-terminated route is refused, not met with a priced
+offer; the exact reject code is §1.3's concern, not this section's.
 
 ### 1.5 Request-request binding (RFC 9421)
 
@@ -242,7 +224,8 @@ of any lower-numbered path.
 
 ### 3.2 Discovering what a connector supports
 
-`GET /ilp/versions` is unauthenticated (client-edge-facing, like the greeting in §1.4) and returns:
+`GET /ilp/versions` is unauthenticated (client-edge-facing, requiring no identity or claim) and
+returns:
 
 ```json
 { "supported": [1, 2], "default": 1 }
