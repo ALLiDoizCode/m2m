@@ -97,6 +97,12 @@ pub enum ConfigError {
     RoutePeerIdEmpty { prefix: String },
 
     #[error(
+        "route '{prefix}' terminates locally (sets 'handler_url') but has no 'price': set a \
+         flat price this route charges, or 'price = 0' if it is deliberately free"
+    )]
+    RouteMissingPrice { prefix: String },
+
+    #[error(
         "route '{prefix}' forwards to peer_id '{peer_id}', which no '[[peers]]' entry configures"
     )]
     UnknownPeerId { prefix: String, peer_id: String },

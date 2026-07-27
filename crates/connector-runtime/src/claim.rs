@@ -594,6 +594,13 @@ impl ClaimBook {
             Err(ClaimError::AmountNotAdvancing { .. }) => {
                 ClaimAckOutcome::Rejected(ClaimRejectReason::AmountNotAdvancing)
             }
+            Err(ClaimError::Underpayment { .. }) => {
+                unreachable!(
+                    "validate_claim never returns Underpayment -- only validate_price \
+                     (issue #507, client-edge value binding) does, and this peer-wire \
+                     accept_inbound path never calls it"
+                )
+            }
         }
     }
 

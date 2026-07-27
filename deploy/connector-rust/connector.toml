@@ -40,9 +40,19 @@ key_file = "/app/data/signer.key"
 # `prefix` are delivered to the payment-oblivious app at `handler_url`.
 # Replace with your own app's ILP address and handler URL, or remove this
 # block entirely if this node only forwards to peers.
+#
+# `price` (issue #507) is what this route charges a claim for the app's
+# work -- distinct from a peer route's `fee`, which buys carriage. It is
+# required for any route that sets `handler_url`: this file refuses to load
+# without it (ConfigError::RouteMissingPrice), so a route is never silently
+# free. Same integer units as a claim's `cumulative_amount`.
+# CHANGE ME: 0 below is a placeholder, not a recommendation -- set the flat
+# price this route should actually charge, or leave it at 0 if this route
+# is deliberately free.
 [[routes]]
 prefix = "g.example.connector.app"
 handler_url = "http://app:3100"
+price = 0
 
 # ── Operator surface (ADR 0008) ─────────────────────────────────────────
 # Reads (peers, routes, channels, claims, exposure, identity, the write

@@ -150,6 +150,16 @@ impl RejectCode {
         RejectCode("F02".to_string())
     }
 
+    /// F03: Invalid Amount -- a claim's value does not cover what it is
+    /// paying for: a locally-terminated route's configured price (issue
+    /// #507, `client-edge-spec.md` §1.3 step 3) or, later, a
+    /// request-request-bound route's price (§1.5). Distinct from F01: the
+    /// claim is structurally and cryptographically fine, it is simply not
+    /// enough value.
+    pub fn f03_invalid_amount() -> RejectCode {
+        RejectCode("F03".to_string())
+    }
+
     /// F99: Application Error -- the terminating app declined the delivery,
     /// or (per issue #417) supplied no fulfilment matching the execution
     /// condition it was handed.
@@ -410,5 +420,6 @@ mod tests {
         assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
         assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
+        assert_eq!(RejectCode::f03_invalid_amount().as_str(), "F03");
     }
 }

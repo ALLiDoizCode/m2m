@@ -29,9 +29,12 @@ peer_wire_addr = "0.0.0.0:4001"
 # infra/linode-node/connector-rust.toml's own [signer] comment.
 key_file = "/app/data/signer.key"
 
+# price = 0 is deliberate, not silent -- see infra/linode-node/
+# connector-rust.toml's own [[routes]] comment (issue #507).
 [[routes]]
 prefix = "g.rust.store"
 handler_url = "http://store:3300"
+price = 0
 
 # ── Operator surface (optional) ─────────────────────────────────────────
 # See infra/linode-node/connector-rust.toml's own note — omitted for the

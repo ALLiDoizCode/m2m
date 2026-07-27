@@ -73,6 +73,7 @@ key_file = "{}"
 [[routes]]
 prefix = "g.example.app"
 handler_url = "http://localhost:4000"
+price = 0
 "#,
         key_file.path().display()
     ));

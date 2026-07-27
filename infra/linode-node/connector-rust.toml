@@ -60,9 +60,15 @@ key_file = "/app/data/signer.key"
 id = "store"
 addr = "203.0.113.20:4001"
 
+# price = 0 is deliberate, not silent (issue #507, ConfigError::
+# RouteMissingPrice refuses to load a terminated route with no price at
+# all): this devnet fleet is proving parity with the unpriced TypeScript
+# comparison in #491/#509, not exercising pricing itself yet. Revisit once
+# an operator decision sets a real flat price here.
 [[routes]]
 prefix = "g.rust.relay"
 handler_url = "http://relay:3100"
+price = 0
 
 [[routes]]
 prefix = "g.rust.store"

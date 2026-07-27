@@ -28,7 +28,9 @@ fn is_valid_ilp_address(address: &str) -> bool {
 /// A `[[routes]]` entry as written in the config file: forwards to the app
 /// at `handler_url`, or to the peer named `peer_id` -- exactly one of the
 /// two must be set. `fee` is only meaningful alongside `peer_id` (ADR
-/// 0010); it defaults to zero and is otherwise ignored.
+/// 0010); it defaults to zero and is otherwise ignored. `price` is only
+/// meaningful alongside `handler_url` (issue #507) and is required there --
+/// see [`ConfigError::RouteMissingPrice`].
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawRoute {
     prefix: String,
@@ -38,20 +40,30 @@ pub(crate) struct RawRoute {
     peer_id: Option<String>,
     #[serde(default)]
     fee: u64,
+    #[serde(default)]
+    price: Option<u64>,
 }
 
 /// A `[[children]]` entry: a convenience form that desugars into a
 /// [`RawRoute`] at `<apex>.<name>` once the file is loaded (mirroring the
 /// existing TypeScript `child-expander`), so the runtime never sees anything
-/// but ordinary routes.
+/// but ordinary routes. Always terminates locally, so `price` is required
+/// exactly like an explicit `[[routes]]` entry with a `handler_url`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawChild {
     name: String,
     handler_url: String,
+    #[serde(default)]
+    price: Option<u64>,
 }
 
 /// A static route that terminates at this connector: packets matching
-/// `prefix` are delivered to the app at `handler_url`.
+/// `prefix` are delivered to the app at `handler_url`, which charges
+/// `price` for the work the app does -- distinct from a peer route's `fee`,
+/// which buys carriage rather than the terminating app's work (issue
+/// #507). A route is never silently free: [`resolve_routes`] refuses to
+/// return one with no configured price, so `price == 0` always means the
+/// operator wrote it deliberately.
 ///
 /// Constructed only by [`resolve_routes`], so a value that exists has
 /// already had its prefix and URL validated -- downstream code never
@@ -60,6 +72,7 @@ pub(crate) struct RawChild {
 pub struct StaticRoute {
     prefix: String,
     handler_url: Url,
+    price: u64,
 }
 
 impl StaticRoute {
@@ -67,11 +80,25 @@ impl StaticRoute {
     /// same validation [`resolve_routes`] applies, exposed for a caller that
     /// already has a prefix and handler URL in hand (tests, and any future
     /// operator-surface route creation) rather than a whole config file.
+    /// Defaults `price` to `0` (free) purely for this constructor's own
+    /// callers' convenience -- unlike the config-file path, there is no
+    /// load-time gate here to make that silent, so a caller that cares
+    /// about pricing should use [`StaticRoute::new_priced`] instead.
     pub fn new(
         prefix: impl Into<String>,
         handler_url: impl Into<String>,
     ) -> Result<StaticRoute, ConfigError> {
-        build_route(prefix.into(), handler_url.into())
+        build_route(prefix.into(), handler_url.into(), Some(0))
+    }
+
+    /// Construct and fully validate a single static route with an explicit
+    /// price, for tests exercising value binding (issue #507).
+    pub fn new_priced(
+        prefix: impl Into<String>,
+        handler_url: impl Into<String>,
+        price: u64,
+    ) -> Result<StaticRoute, ConfigError> {
+        build_route(prefix.into(), handler_url.into(), Some(price))
     }
 
     /// The destination prefix this route terminates.
@@ -82,6 +109,14 @@ impl StaticRoute {
     /// The app handler this route's traffic is delivered to.
     pub fn handler_url(&self) -> &Url {
         &self.handler_url
+    }
+
+    /// The flat price a claim must advance by to pay for this route (issue
+    /// #507). Never emitted to a client -- ADR 0006 keeps this connector
+    /// mechanism, not a discovery source; a claim is checked against this
+    /// value, nothing more.
+    pub fn price(&self) -> u64 {
+        self.price
     }
 }
 
@@ -129,7 +164,11 @@ fn validate_prefix(prefix: String) -> Result<String, ConfigError> {
     Ok(prefix)
 }
 
-fn build_route(prefix: String, handler_url: String) -> Result<StaticRoute, ConfigError> {
+fn build_route(
+    prefix: String,
+    handler_url: String,
+    price: Option<u64>,
+) -> Result<StaticRoute, ConfigError> {
     let prefix = validate_prefix(prefix)?;
     let url = Url::parse(&handler_url).map_err(|source| ConfigError::InvalidHandlerUrl {
         prefix: prefix.clone(),
@@ -142,9 +181,13 @@ fn build_route(prefix: String, handler_url: String) -> Result<StaticRoute, Confi
             value: handler_url,
         });
     }
+    let price = price.ok_or_else(|| ConfigError::RouteMissingPrice {
+        prefix: prefix.clone(),
+    })?;
     Ok(StaticRoute {
         prefix,
         handler_url: url,
+        price,
     })
 }
 
@@ -190,7 +233,7 @@ pub(crate) fn resolve_routes(
     for raw in raw_routes {
         match (raw.handler_url, raw.peer_id) {
             (Some(handler_url), None) => {
-                let route = build_route(raw.prefix, handler_url)?;
+                let route = build_route(raw.prefix, handler_url, raw.price)?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 routes.push(route);
             }
@@ -225,7 +268,7 @@ pub(crate) fn resolve_routes(
             return Err(ConfigError::InvalidChildName { name: child.name });
         }
         let prefix = format!("{apex}.{}", child.name);
-        let route = build_route(prefix, child.handler_url)?;
+        let route = build_route(prefix, child.handler_url, child.price)?;
         insert_unique_prefix(&mut seen, route.prefix())?;
         routes.push(route);
     }
@@ -238,11 +281,16 @@ mod tests {
     use super::*;
 
     fn route(prefix: &str, handler_url: &str) -> RawRoute {
+        priced_route(prefix, handler_url, 0)
+    }
+
+    fn priced_route(prefix: &str, handler_url: &str, price: u64) -> RawRoute {
         RawRoute {
             prefix: prefix.to_string(),
             handler_url: Some(handler_url.to_string()),
             peer_id: None,
             fee: 0,
+            price: Some(price),
         }
     }
 
@@ -252,6 +300,7 @@ mod tests {
             handler_url: None,
             peer_id: Some(peer_id.to_string()),
             fee,
+            price: None,
         }
     }
 
@@ -259,6 +308,7 @@ mod tests {
         RawChild {
             name: name.to_string(),
             handler_url: handler_url.to_string(),
+            price: Some(0),
         }
     }
 
@@ -266,16 +316,24 @@ mod tests {
     fn static_route_new_validates_like_resolve_routes() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").expect("new");
         assert_eq!(route.prefix(), "g.example.app");
+        assert_eq!(route.price(), 0);
 
         let result = StaticRoute::new("g..app", "http://localhost:4000");
         assert!(matches!(result, Err(ConfigError::InvalidAddress { .. })));
     }
 
     #[test]
+    fn static_route_new_priced_carries_the_given_price() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 42)
+            .expect("new_priced");
+        assert_eq!(route.price(), 42);
+    }
+
+    #[test]
     fn resolves_explicit_routes() {
         let (routes, peer_routes) = resolve_routes(
             None,
-            vec![route("g.example.app", "http://localhost:4000")],
+            vec![priced_route("g.example.app", "http://localhost:4000", 25)],
             vec![],
         )
         .expect("resolve");
@@ -283,7 +341,43 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix(), "g.example.app");
         assert_eq!(routes[0].handler_url().as_str(), "http://localhost:4000/");
+        assert_eq!(routes[0].price(), 25);
         assert!(peer_routes.is_empty());
+    }
+
+    #[test]
+    fn a_terminated_route_with_no_price_is_rejected_at_load() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.app".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: 0,
+                price: None,
+            }],
+            vec![],
+        );
+        assert!(matches!(result, Err(ConfigError::RouteMissingPrice { .. })));
+    }
+
+    #[test]
+    fn a_terminated_route_with_price_zero_is_deliberately_free_not_rejected() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![priced_route("g.example.app", "http://localhost:4000", 0)],
+            vec![],
+        )
+        .expect("resolve");
+        assert_eq!(routes[0].price(), 0);
+    }
+
+    #[test]
+    fn a_peer_route_needs_no_price() {
+        let (_, peer_routes) =
+            resolve_routes(None, vec![peer_route("g.peer-b", "peer-b", 5)], vec![])
+                .expect("resolve");
+        assert_eq!(peer_routes[0].fee(), 5);
     }
 
     #[test]
@@ -308,6 +402,7 @@ mod tests {
                 handler_url: None,
                 peer_id: None,
                 fee: 0,
+                price: None,
             }],
             vec![],
         );
@@ -326,6 +421,7 @@ mod tests {
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: Some("peer-b".to_string()),
                 fee: 0,
+                price: None,
             }],
             vec![],
         );
@@ -403,7 +499,22 @@ mod tests {
 
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix(), "g.example.connector.billing");
+        assert_eq!(routes[0].price(), 0);
         assert!(peer_routes.is_empty());
+    }
+
+    #[test]
+    fn a_child_with_no_price_is_rejected_at_load() {
+        let result = resolve_routes(
+            Some("g.example.connector"),
+            vec![],
+            vec![RawChild {
+                name: "billing".to_string(),
+                handler_url: "http://localhost:4001".to_string(),
+                price: None,
+            }],
+        );
+        assert!(matches!(result, Err(ConfigError::RouteMissingPrice { .. })));
     }
 
     #[test]

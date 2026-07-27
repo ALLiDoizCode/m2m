@@ -85,6 +85,10 @@ directory reads it automatically.
 `connector.toml`'s `[[routes]]` block points at an example app
 (`http://app:3100`). Replace `prefix` and `handler_url` with your own app's
 ILP address and handler URL, or delete the block if this node only peers.
+Every route that sets `handler_url` also requires `price` (issue #507) --
+the flat amount a claim must pay to use it, distinct from a peer route's
+`fee`; the file refuses to load without one, so `price = 0` is always an
+explicit, documented choice rather than a silent default.
 
 ## 5. Build the image
 
