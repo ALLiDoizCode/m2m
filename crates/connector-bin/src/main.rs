@@ -15,15 +15,23 @@ async fn main() {
     init_tracing();
 
     let args: Vec<String> = std::env::args().collect();
-    let (app, addr) = match connector_cli::run(&args) {
-        Ok(built) => built,
+    let node = match connector_cli::run(&args).await {
+        Ok(node) => node,
         Err(err) => {
             eprintln!("{err}");
             std::process::exit(1);
         }
     };
 
-    let server = axum::Server::bind(&addr).serve(app.into_make_service());
+    if let Some(addr) = node.peer_wire_addr {
+        tracing::info!(addr = %addr, "peer wire listening");
+    }
+    // Held for the process lifetime: this is the accepting side of the
+    // peer wire, if configured. Nothing here touches it beyond keeping it
+    // alive -- connector-cli already bound and started it.
+    let _peer_wire_server = node.peer_wire_server;
+
+    let server = axum::Server::bind(&node.client_edge_addr).serve(node.router.into_make_service());
     tracing::info!(addr = %server.local_addr(), "connector listening");
     if let Err(err) = server.await {
         eprintln!("{err}");

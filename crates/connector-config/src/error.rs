@@ -82,4 +82,43 @@ pub enum ConfigError {
          (a 32-byte ed25519 public key)"
     )]
     OperatorInvalidWriteKey { value: String },
+
+    #[error(
+        "route '{prefix}' must set exactly one of 'handler_url' or 'peer_id', but neither is set"
+    )]
+    RouteMissingTarget { prefix: String },
+
+    #[error(
+        "route '{prefix}' must set exactly one of 'handler_url' or 'peer_id', but both are set"
+    )]
+    RouteTargetAmbiguous { prefix: String },
+
+    #[error("route '{prefix}' has an empty 'peer_id'")]
+    RoutePeerIdEmpty { prefix: String },
+
+    #[error(
+        "route '{prefix}' forwards to peer_id '{peer_id}', which no '[[peers]]' entry configures"
+    )]
+    UnknownPeerId { prefix: String, peer_id: String },
+
+    #[error("peer entry has an empty 'id'")]
+    PeerIdEmpty,
+
+    #[error("duplicate peer id '{id}'")]
+    DuplicatePeerId { id: String },
+
+    #[error("invalid addr '{value}' for peer '{id}': {source}")]
+    InvalidPeerAddr {
+        id: String,
+        value: String,
+        #[source]
+        source: AddrParseError,
+    },
+
+    #[error("invalid peer_wire_addr '{value}': {source}")]
+    InvalidPeerWireAddr {
+        value: String,
+        #[source]
+        source: AddrParseError,
+    },
 }

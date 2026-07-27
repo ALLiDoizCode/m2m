@@ -8,6 +8,7 @@ use std::path::Path;
 
 use axum::Router;
 use connector_config::{Config, ConfigError};
+use connector_runtime::PeerWireServer;
 
 pub use runtime::{build, router, RuntimeError};
 
@@ -22,6 +23,9 @@ pub enum CliError {
     /// The config loaded but the runtime it describes could not be built
     /// (e.g. an unreadable or malformed signer key).
     Runtime(RuntimeError),
+    /// `peer_wire_addr` was configured but the socket could not be bound
+    /// (e.g. the port is already in use).
+    PeerWireBind(std::io::Error),
 }
 
 impl fmt::Display for CliError {
@@ -30,6 +34,9 @@ impl fmt::Display for CliError {
             CliError::Usage(message) => write!(f, "{message}"),
             CliError::Config(source) => write!(f, "{source}"),
             CliError::Runtime(source) => write!(f, "{source}"),
+            CliError::PeerWireBind(source) => {
+                write!(f, "failed to bind peer_wire_addr: {source}")
+            }
         }
     }
 }
@@ -62,20 +69,57 @@ pub fn load_config<S: AsRef<str>>(args: &[S]) -> Result<Config, CliError> {
     Config::load(Path::new(path.as_ref())).map_err(CliError::from)
 }
 
-/// Everything between process arguments and a servable [`Router`]: load
-/// the config, build the runtime it describes, and merge its routers.
-/// The one function `connector-bin` calls before binding a socket -- per
-/// ADR 0001 the binary itself makes no decision beyond "did this fail".
-pub fn run<S: AsRef<str>>(args: &[S]) -> Result<(Router, SocketAddr), CliError> {
+/// Everything a running node needs beyond a bound client-edge socket:
+/// [`connector_cli::run`] already binds the peer wire (if configured), so
+/// `connector-bin` only has to hold [`RunningNode::peer_wire_server`] alive
+/// for the process lifetime -- it never touches the connector or the peer
+/// wire directly.
+pub struct RunningNode {
+    /// The merged client-edge (and, if configured, operator) router.
+    pub router: Router,
+    /// The socket address the client edge binds.
+    pub client_edge_addr: SocketAddr,
+    /// The peer wire's bound address, if `peer_wire_addr` was configured.
+    pub peer_wire_addr: Option<SocketAddr>,
+    /// The peer wire's accepting server, if `peer_wire_addr` was
+    /// configured -- kept alive for as long as this value is held, and
+    /// otherwise unused by the caller.
+    pub peer_wire_server: Option<PeerWireServer>,
+}
+
+/// Everything between process arguments and a running node: load the
+/// config, build the runtime it describes, merge its routers, and bind the
+/// peer wire if `peer_wire_addr` is configured. The one function
+/// `connector-bin` calls before binding the client-edge socket -- per ADR
+/// 0001 the binary itself makes no decision beyond "did this fail".
+pub async fn run<S: AsRef<str>>(args: &[S]) -> Result<RunningNode, CliError> {
     let config = load_config(args)?;
     let (connector, signer) = build(&config)?;
-    let addr = config.client_edge_addr();
-    Ok((router(connector, signer, &config), addr))
+    let client_edge_addr = config.client_edge_addr();
+    let router = router(connector.clone(), signer, &config);
+
+    let peer_wire_server = match config.peer_wire_addr() {
+        Some(addr) => Some(
+            PeerWireServer::bind(addr, connector)
+                .await
+                .map_err(CliError::PeerWireBind)?,
+        ),
+        None => None,
+    };
+    let peer_wire_addr = peer_wire_server.as_ref().map(PeerWireServer::local_addr);
+
+    Ok(RunningNode {
+        router,
+        client_edge_addr,
+        peer_wire_addr,
+        peer_wire_server,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn missing_path_argument_is_a_usage_error() {
@@ -93,5 +137,70 @@ mod tests {
             result,
             Err(CliError::Config(ConfigError::Io { .. }))
         ));
+    }
+
+    fn write_config(text: &str) -> tempfile::NamedTempFile {
+        let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+        write!(config_file, "{text}").expect("write config file");
+        config_file
+    }
+
+    fn write_raw_key_file() -> tempfile::NamedTempFile {
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(&[7u8; 32])
+            .expect("write raw 32-byte key");
+        key_file
+    }
+
+    #[tokio::test]
+    async fn run_with_no_peer_wire_addr_binds_no_peer_wire_server() {
+        let key_file = write_raw_key_file();
+        let config_file = write_config(&format!(
+            r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        ));
+
+        let node = run(&[
+            "connector".to_string(),
+            config_file.path().display().to_string(),
+        ])
+        .await
+        .expect("run");
+
+        assert!(node.peer_wire_addr.is_none());
+        assert!(node.peer_wire_server.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_with_a_peer_wire_addr_binds_a_real_listener() {
+        let key_file = write_raw_key_file();
+        let config_file = write_config(&format!(
+            r#"
+client_edge_addr = "127.0.0.1:0"
+peer_wire_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        ));
+
+        let node = run(&[
+            "connector".to_string(),
+            config_file.path().display().to_string(),
+        ])
+        .await
+        .expect("run");
+
+        let addr = node.peer_wire_addr.expect("peer wire addr");
+        assert!(node.peer_wire_server.is_some());
+        // Port 0 was requested; the OS assigned a real one.
+        assert_ne!(addr.port(), 0);
     }
 }
