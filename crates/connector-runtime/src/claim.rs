@@ -341,6 +341,7 @@ impl ClaimBook {
                     channel_id,
                     nonce,
                     cumulative_amount,
+                    ..
                 } => {
                     inbound_watermarks.insert(
                         channel_id.clone(),
@@ -400,6 +401,23 @@ impl ClaimBook {
             .read()
             .expect("projection lock poisoned")
             .exposure(channel_id)
+    }
+
+    /// The latest claim this connector has ever accepted on `channel_id`
+    /// (issue #425), ready to submit to a `SettlementBackend::redeem` --
+    /// never a superseded one, since the projection this reads from only
+    /// ever retains the highest-nonce claim (peer-wire-spec.md §3.4).
+    /// `None` if no claim has ever been accepted on this channel.
+    pub fn latest_inbound_claim(&self, channel_id: &str) -> Option<connector_settlement::Claim> {
+        let (cumulative_amount, signature) = self
+            .projection
+            .read()
+            .expect("projection lock poisoned")
+            .latest_inbound_claim(channel_id)?;
+        Some(connector_settlement::Claim {
+            cumulative_amount: cumulative_amount as u128,
+            signature,
+        })
     }
 
     /// Whether `channel_id`'s exposure exceeds its configured ceiling. A
@@ -556,6 +574,7 @@ impl ClaimBook {
                     channel_id: claim.channel_id.clone(),
                     nonce: claim.nonce,
                     cumulative_amount: claim.cumulative_amount,
+                    signature: claim.signature.to_bytes().to_vec(),
                 });
                 ClaimAckOutcome::Accepted
             }
@@ -903,6 +922,42 @@ mod tests {
             book.accept_inbound(&sign(6, 500)),
             ClaimAckOutcome::Accepted
         );
+    }
+
+    mod redemption {
+        use super::*;
+
+        #[test]
+        fn no_claim_is_redeemable_before_one_is_accepted() {
+            let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            assert_eq!(book.latest_inbound_claim("channel-a"), None);
+        }
+
+        #[test]
+        fn the_latest_accepted_claim_is_redeemable_and_carries_its_signature() {
+            let peer_signer = LocalSigner::generate("peer-key");
+            let key = peer_signer.public_key().unwrap();
+            let book = book_with_peer("peer-b", "channel-a", key);
+            let sign = |nonce: u64, amount: u64| WireClaim {
+                channel_id: "channel-a".to_string(),
+                nonce,
+                cumulative_amount: amount,
+                signature: peer_signer
+                    .sign(&claim_digest("channel-a", nonce, amount))
+                    .unwrap(),
+            };
+            let first = sign(1, 100);
+            assert_eq!(book.accept_inbound(&first), ClaimAckOutcome::Accepted);
+            let second = sign(2, 150);
+            assert_eq!(book.accept_inbound(&second), ClaimAckOutcome::Accepted);
+
+            // Only the higher-nonce claim is redeemable -- the superseded
+            // first claim is never returned (peer-wire-spec.md §3.4: claims
+            // supersede rather than accumulate).
+            let redeemable = book.latest_inbound_claim("channel-a").unwrap();
+            assert_eq!(redeemable.cumulative_amount, 150);
+            assert_eq!(redeemable.signature, second.signature.to_bytes().to_vec());
+        }
     }
 
     mod exposure_and_ceiling {

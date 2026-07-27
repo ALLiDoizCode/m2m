@@ -13,6 +13,40 @@ pub struct Signature {
     pub recovery_id: u8,
 }
 
+impl Signature {
+    /// `r || s || recovery_id`, 65 bytes -- the one encoding this crate's
+    /// callers use whenever a signature needs to travel as opaque bytes
+    /// (the peer wire's `WireClaim`, and a claim journaled for later
+    /// on-chain redemption, issue #425). Neither `connector-settlement`
+    /// backend verifies this signature on chain (it is logged only as an
+    /// audit trail), so the same raw encoding round-trips to either chain
+    /// unchanged.
+    pub fn to_bytes(&self) -> [u8; 65] {
+        let mut bytes = [0u8; 65];
+        bytes[..32].copy_from_slice(&self.r);
+        bytes[32..64].copy_from_slice(&self.s);
+        bytes[64] = self.recovery_id;
+        bytes
+    }
+
+    /// The inverse of [`Signature::to_bytes`]. `None` if `bytes` is not
+    /// exactly 65 bytes long.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Signature> {
+        if bytes.len() != 65 {
+            return None;
+        }
+        let mut r = [0u8; 32];
+        let mut s = [0u8; 32];
+        r.copy_from_slice(&bytes[..32]);
+        s.copy_from_slice(&bytes[32..64]);
+        Some(Signature {
+            r,
+            s,
+            recovery_id: bytes[64],
+        })
+    }
+}
+
 /// The signer port (ADR 0012): the single interface anything that needs to
 /// sign a claim or a settlement transaction depends on. There are exactly
 /// two implementations in this crate — [`crate::LocalSigner`], which holds
@@ -54,6 +88,23 @@ pub fn verify(public_key: &PublicKeyBytes, digest: &[u8; 32], signature: &Signat
 mod tests {
     use super::*;
     use crate::LocalSigner;
+
+    #[test]
+    fn a_signature_round_trips_through_to_bytes_and_from_bytes() {
+        let signer = LocalSigner::generate("claim-key");
+        let signature = signer.sign(&[7u8; 32]).expect("sign");
+
+        let bytes = signature.to_bytes();
+        assert_eq!(bytes.len(), 65);
+        assert_eq!(Signature::from_bytes(&bytes), Some(signature));
+    }
+
+    #[test]
+    fn from_bytes_rejects_anything_other_than_sixty_five_bytes() {
+        assert_eq!(Signature::from_bytes(&[0u8; 64]), None);
+        assert_eq!(Signature::from_bytes(&[0u8; 66]), None);
+        assert_eq!(Signature::from_bytes(&[]), None);
+    }
 
     #[test]
     fn a_genuine_signature_verifies_against_its_signers_public_key() {

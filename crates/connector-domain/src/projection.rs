@@ -35,11 +35,17 @@ pub enum JournalEntry {
     },
     /// A signed claim on `channel_id` was verified and accepted, advancing
     /// that channel's watermark to `nonce`/`cumulative_amount`
-    /// (`ClaimBook::accept_inbound`, peer-wire-spec.md §3.4).
+    /// (`ClaimBook::accept_inbound`, peer-wire-spec.md §3.4). `signature` is
+    /// carried through opaque (chain- and scheme-specific verification
+    /// already happened before this entry is ever appended) and durably
+    /// retained rather than discarded once accepted: on-chain redemption
+    /// (issue #425) needs the actual claim, not just its watermark, and per
+    /// ADR 0005 what is signed is exactly what this journal exists to keep.
     InboundClaimAccepted {
         channel_id: String,
         nonce: u64,
         cumulative_amount: u64,
+        signature: Vec<u8>,
     },
     /// A packet arriving on `channel_id` fulfilled for `amount`, extending
     /// this connector's exposure to that channel's counterparty until a
@@ -80,6 +86,11 @@ pub struct Projection {
     /// `channel_id` -> the cumulative amount of the highest accepted claim
     /// on that channel.
     inbound_claimed: BTreeMap<String, u64>,
+    /// `channel_id` -> the signature of that same highest accepted claim,
+    /// kept alongside `inbound_claimed` rather than as a separate source of
+    /// truth -- both fields are written from, and only from, the same
+    /// `InboundClaimAccepted` entry (issue #425: what a redemption submits).
+    inbound_claim_signature: BTreeMap<String, Vec<u8>>,
     /// `channel_id` -> the running total this connector has itself recorded
     /// fulfilling on that channel.
     inbound_fulfilled: BTreeMap<String, u64>,
@@ -100,10 +111,13 @@ impl Projection {
             JournalEntry::InboundClaimAccepted {
                 channel_id,
                 cumulative_amount,
+                signature,
                 ..
             } => {
                 self.inbound_claimed
                     .insert(channel_id.clone(), *cumulative_amount);
+                self.inbound_claim_signature
+                    .insert(channel_id.clone(), signature.clone());
             }
             JournalEntry::InboundFulfillmentRecorded { channel_id, amount } => {
                 let total = self
@@ -165,6 +179,18 @@ impl Projection {
             .collect()
     }
 
+    /// The highest-nonce claim ever accepted on `channel_id`, as
+    /// `(cumulative_amount, signature)` -- exactly what an on-chain
+    /// redemption submits (issue #425), and never a superseded one: this
+    /// projection only ever retains the latest, so there is nothing else it
+    /// could return. `None` before any claim has been accepted on this
+    /// channel.
+    pub fn latest_inbound_claim(&self, channel_id: &str) -> Option<(u64, Vec<u8>)> {
+        let cumulative_amount = *self.inbound_claimed.get(channel_id)?;
+        let signature = self.inbound_claim_signature.get(channel_id)?.clone();
+        Some((cumulative_amount, signature))
+    }
+
     /// Check this projection against the claims it derives from (issue
     /// #424's acceptance criteria), reporting every channel where an
     /// accepted claim asserts more than this connector ever recorded
@@ -201,10 +227,20 @@ mod tests {
     }
 
     fn accepted(channel_id: &str, nonce: u64, cumulative_amount: u64) -> JournalEntry {
+        accepted_with_signature(channel_id, nonce, cumulative_amount, &[])
+    }
+
+    fn accepted_with_signature(
+        channel_id: &str,
+        nonce: u64,
+        cumulative_amount: u64,
+        signature: &[u8],
+    ) -> JournalEntry {
         JournalEntry::InboundClaimAccepted {
             channel_id: channel_id.to_string(),
             nonce,
             cumulative_amount,
+            signature: signature.to_vec(),
         }
     }
 
@@ -341,6 +377,24 @@ mod tests {
         assert!(projection.divergences().is_empty());
     }
 
+    #[test]
+    fn latest_inbound_claim_is_none_before_any_claim_is_accepted() {
+        let projection = Projection::from_entries(&[fulfilled("channel-a", 100)]);
+        assert_eq!(projection.latest_inbound_claim("channel-a"), None);
+    }
+
+    #[test]
+    fn latest_inbound_claim_reports_the_highest_nonce_claims_amount_and_signature() {
+        let projection = Projection::from_entries(&[
+            accepted_with_signature("channel-a", 1, 100, &[1, 2, 3]),
+            accepted_with_signature("channel-a", 2, 150, &[4, 5, 6]),
+        ]);
+        assert_eq!(
+            projection.latest_inbound_claim("channel-a"),
+            Some((150, vec![4, 5, 6]))
+        );
+    }
+
     fn arbitrary_entry() -> impl Strategy<Value = JournalEntry> {
         prop_oneof![
             (any::<u64>(), any::<u64>()).prop_map(|(nonce, amount)| signed(
@@ -349,11 +403,17 @@ mod tests {
                 nonce,
                 amount
             )),
-            (any::<u64>(), any::<u64>()).prop_map(|(nonce, amount)| accepted(
-                "channel-a",
-                nonce,
-                amount
-            )),
+            (
+                any::<u64>(),
+                any::<u64>(),
+                proptest::collection::vec(any::<u8>(), 0..4)
+            )
+                .prop_map(|(nonce, amount, signature)| accepted_with_signature(
+                    "channel-a",
+                    nonce,
+                    amount,
+                    &signature
+                )),
             any::<u64>().prop_map(|amount| fulfilled("channel-a", amount)),
         ]
     }

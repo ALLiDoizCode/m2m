@@ -15,9 +15,12 @@
 //!
 //! `POST /packets` -- originating a packet outward -- `POST /routes/leased`
 //! -- creating or renewing a leased route (issue #427) -- and
-//! `POST /channels`, `POST /channels/:id/fund`, `POST /channels/:id/redeem`
-//! and `POST /channels/:id/close` -- channel lifecycle, ADR 0008's third
-//! write (issue #459) -- are this crate's write endpoints. Every one calls
+//! `POST /channels`, `POST /channels/:id/fund`, `POST /channels/:id/redeem`,
+//! `POST /channels/:id/close` (channel lifecycle, ADR 0008's third write,
+//! issue #459), `POST /channels/:id/redeem-latest` and
+//! `POST /channels/:id/cooperative-close` (on-chain redemption and
+//! cooperative close of whatever claim this node already holds, issue #425)
+//! -- are this crate's write endpoints. Every one calls
 //! [`write_auth::authenticate_write`] first and nothing else in this
 //! crate accepts a body, so a write cannot reach [`Connector`] without a
 //! valid, allowlisted, unexpired, non-replayed signature. Bearer tokens
@@ -118,7 +121,9 @@ pub fn router(
         .route("/channels", post(open_channel))
         .route("/channels/:id/fund", post(fund_channel))
         .route("/channels/:id/redeem", post(redeem_channel))
-        .route("/channels/:id/close", post(close_channel));
+        .route("/channels/:id/redeem-latest", post(redeem_latest_claim))
+        .route("/channels/:id/close", post(close_channel))
+        .route("/channels/:id/cooperative-close", post(cooperative_close));
 
     reads.merge(writes).with_state(state)
 }
@@ -343,6 +348,9 @@ fn channel_operation_response(result: Result<ChannelView, ChannelOperationError>
             ChannelOperationError::NoSettlementBackend.to_string(),
         )
             .into_response(),
+        Err(error @ ChannelOperationError::NoClaimToRedeem) => {
+            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
         Err(error @ ChannelOperationError::Settlement(_)) => {
             (StatusCode::BAD_REQUEST, error.to_string()).into_response()
         }
@@ -478,6 +486,45 @@ async fn close_channel(
     }
 
     channel_operation_response(state.connector.close_channel(&channel_id).await)
+}
+
+/// `POST /channels/:id/redeem-latest`: redeem the latest claim this node
+/// has itself verified and accepted on the channel named by the path
+/// (issue #425) -- unlike `POST /channels/:id/redeem`, the caller supplies
+/// no claim; the connector submits whichever one it already holds. No
+/// request body.
+async fn redeem_latest_claim(
+    State(state): State<OperatorState>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    channel_operation_response(state.connector.redeem_latest_claim(&channel_id).await)
+}
+
+/// `POST /channels/:id/cooperative-close`: redeem whatever claim this node
+/// last accepted on the channel named by the path, then close it -- one
+/// write instead of two, and no dispute window to wait out (issue #425,
+/// story 37). No request body.
+async fn cooperative_close(
+    State(state): State<OperatorState>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    channel_operation_response(state.connector.cooperative_close(&channel_id).await)
 }
 
 async fn identity(State(state): State<OperatorState>) -> Response {
@@ -1261,7 +1308,8 @@ mod tests {
     mod channel_lifecycle {
         use super::*;
         use crate::rfc9421::sign_request;
-        use connector_runtime::ChannelViewStatus;
+        use connector_domain::claim_digest;
+        use connector_runtime::{ChannelViewStatus, WireClaim};
         use connector_settlement_evm::EvmSettlementBackend;
         use ed25519_dalek::Keypair;
         use rand::rngs::OsRng;
@@ -1285,9 +1333,22 @@ mod tests {
             rpc_url: String,
         }
 
+        /// Distinguishes concurrently spawned `Anvil` instances *within this
+        /// same test binary* -- `std::process::id()` alone is constant for
+        /// every test in it, so two anvil-spawning tests (this module now
+        /// has two, issue #425) running concurrently would otherwise both
+        /// compute the identical port and race to bind it. Mirrors
+        /// `connector-settlement-evm/tests/support/mod.rs`'s own
+        /// `NEXT_PORT_OFFSET`.
+        static NEXT_PORT_OFFSET: std::sync::atomic::AtomicU16 =
+            std::sync::atomic::AtomicU16::new(0);
+
         impl Anvil {
             async fn spawn() -> Self {
-                let port = 18_900u16.wrapping_add((std::process::id() as u16) % 1_000);
+                let offset = NEXT_PORT_OFFSET.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let port = 18_900u16
+                    .wrapping_add((std::process::id() as u16) % 1_000)
+                    .wrapping_add(offset);
                 let rpc_url = format!("http://127.0.0.1:{port}");
                 let child = Command::new("anvil")
                     .args(["--host", "127.0.0.1", "--port"])
@@ -1440,6 +1501,144 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        /// AC (issue #425): "the latest received claim can be redeemed on
+        /// chain through the operator surface" and "a cooperative close
+        /// path settles without waiting out a dispute window" -- both
+        /// driven entirely through this crate's actual `router()` against a
+        /// real, disposable `anvil` chain, exactly like the lifecycle test
+        /// above. The claim itself is fed in via
+        /// `Connector::handle_peer_claim` directly rather than a real peer
+        /// wire connection -- the peer wire (#416) is a separate concern
+        /// from this ticket's settlement-side one, and `handle_peer_claim`
+        /// is the same entry point a real inbound PREPARE's piggybacked
+        /// claim reaches.
+        #[tokio::test]
+        async fn redeeming_the_latest_claim_and_closing_cooperatively_reach_a_real_chain() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn().await;
+            let settlement = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+                .await
+                .expect("deploy SettlementChannel");
+
+            // The first channel a freshly deployed `SettlementChannel`
+            // opens is always id "0" -- configuring the claim
+            // verification key against that id ahead of time, rather than
+            // after opening, means this Connector can accept an inbound
+            // claim for it the moment it exists.
+            let peer_signer = LocalSigner::generate("peer-claim-key");
+            let app_client = Arc::new(FakeAppClient::new());
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let connector = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    clock,
+                )
+                .with_settlement(Arc::new(settlement))
+                .with_channel_verification_key("0", peer_signer.public_key().unwrap()),
+            );
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            let keypair = keypair();
+            let app = router(
+                connector.clone(),
+                signer,
+                "correct-token".to_string(),
+                vec![keypair.public.to_bytes()],
+            );
+
+            // Open and fund, exactly like the lifecycle test above.
+            let open_body = serde_json::to_vec(&serde_json::json!({
+                "counterparty_hex": "0x000000000000000000000000000000000000aa",
+                "settlement_timeout_seconds": 3600,
+            }))
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(signed_post(&keypair, "/channels", open_body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let opened: ChannelView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(opened.id, "0");
+
+            let fund_body = serde_json::to_vec(&serde_json::json!({ "amount": 1_000 })).unwrap();
+            let fund_path = format!("/channels/{}/fund", opened.id);
+            let response = app
+                .clone()
+                .oneshot(signed_post(&keypair, &fund_path, fund_body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // A genuine claim from the channel's counterparty, accepted
+            // exactly as an inbound PREPARE's piggybacked claim would be.
+            let sign_claim = |nonce: u64, amount: u64| WireClaim {
+                channel_id: opened.id.clone(),
+                nonce,
+                cumulative_amount: amount,
+                signature: peer_signer
+                    .sign(&claim_digest(&opened.id, nonce, amount))
+                    .unwrap(),
+            };
+            assert_eq!(
+                connector.handle_peer_claim(sign_claim(1, 400)),
+                connector_runtime::ClaimAckOutcome::Accepted
+            );
+
+            // Redeem the latest claim through the operator surface -- no
+            // claim in the request body, unlike `POST /channels/:id/redeem`.
+            let redeem_latest_path = format!("/channels/{}/redeem-latest", opened.id);
+            let response = app
+                .clone()
+                .oneshot(signed_post(&keypair, &redeem_latest_path, Vec::new()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let redeemed: ChannelView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(redeemed.redeemed, 400);
+
+            // A fresher claim arrives, then a single cooperative-close
+            // write redeems it and closes in one step -- no separate
+            // dispute window to wait out.
+            assert_eq!(
+                connector.handle_peer_claim(sign_claim(2, 900)),
+                connector_runtime::ClaimAckOutcome::Accepted
+            );
+            let cooperative_close_path = format!("/channels/{}/cooperative-close", opened.id);
+            let response = app
+                .clone()
+                .oneshot(signed_post(&keypair, &cooperative_close_path, Vec::new()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let closed: ChannelView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(closed.redeemed, 900);
+            assert_eq!(closed.status, ChannelViewStatus::Closed);
+
+            // Redeeming a channel this node never received a claim on is
+            // refused rather than reaching the settlement backend at all.
+            let no_claim_response = app
+                .oneshot(signed_post(
+                    &keypair,
+                    "/channels/no-such-channel/redeem-latest",
+                    Vec::new(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(no_claim_response.status(), StatusCode::BAD_REQUEST);
         }
     }
 }
