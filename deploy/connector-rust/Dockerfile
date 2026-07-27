@@ -6,8 +6,15 @@
 # both networks live at once — so the Rust binary must not be published under the
 # TypeScript node's name and tag series. `connector:3.44.0` means "TS node, YAML/
 # CONFIG_FILE"; this takes a TOML path as argv. Swapping what a tag means in
-# place is the one shape that cutover design rules out. Whether and how this gets
-# published to GHCR belongs to #431.
+# place is the one shape that cutover design rules out.
+#
+# Published to GHCR as ghcr.io/toon-protocol/connector-rust by
+# .github/workflows/publish-connector-rust-image.yml (issue #487), tagged by
+# content (`sha-<short-sha>`) rather than by version — no crate under crates/
+# has a release process yet (every Cargo.toml is still 0.1.0), so a semver tag
+# here would assert a stability contract this binary hasn't earned. `latest`
+# on `ghcr.io/toon-protocol/connector` is untouched and stays frozen on the
+# last TypeScript build.
 #
 # The base is rust:1.90 (matching CI's stable toolchain), NOT the 1.82 this file
 # originally pinned: 1.82 cannot build the locked graph at all — idna_adapter

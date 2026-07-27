@@ -1,0 +1,140 @@
+name: Publish connector-rust image
+
+# Publishes the Rust connector (crates/connector-bin, built via
+# deploy/connector-rust/Dockerfile) to GHCR under its OWN name -- issue #487,
+# ADR 0013's parallel-fleet cutover. Nothing published this image before:
+# #429 added the Dockerfile, #465 explicitly left "whether and how this gets
+# published to GHCR" to this ticket.
+#
+# `ghcr.io/toon-protocol/connector:X.Y.Z` means "the TypeScript node,
+# YAML/CONFIG_FILE"; this binary takes a TOML path as argv and has no semver
+# release process of its own (every crate under crates/ is still 0.1.0). So
+# this ships as ghcr.io/toon-protocol/connector-rust, tagged by content
+# (sha-<short-sha>) rather than by an invented version -- exactly what a
+# deployment pinning an exact build needs (#490), without asserting a
+# stability contract this binary hasn't earned. See the Dockerfile header
+# and deploy/connector-rust/README.md for the full reasoning.
+#
+# ghcr.io/toon-protocol/connector is untouched by this workflow: no new
+# tags, no change to what :latest points at.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'crates/**'
+      - 'packages/solana-program/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deploy/connector-rust/Dockerfile'
+      - '.github/workflows/publish-connector-rust-image.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: publish-connector-rust-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/connector-rust
+
+jobs:
+  build-and-push:
+    name: Build and push connector-rust image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA tag
+        id: sha
+        run: echo "short=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=sha-${{ steps.sha.outputs.short }}
+            type=raw,value=main,enable={{is_default_branch}}
+
+      - name: Build and push connector-rust image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/connector-rust/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      # Make the package public so a deployment (e.g. #490's devnet overlay)
+      # can `docker pull` without authenticating to GHCR -- GHCR defaults a
+      # new container package to PRIVATE regardless of the linked repo's
+      # visibility. Idempotent; mirrors the equivalent step the old
+      # `connector` image's docker-build-push job used to run before it was
+      # removed in #465 along with the rest of that job.
+      - name: Set container package visibility to public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            "/orgs/${{ github.repository_owner }}/packages/container/connector-rust" \
+            -f visibility=public \
+            && echo "✓ Package visibility set to public" \
+            || echo "::warning::Could not set package visibility — may need manual fix in GHCR UI"
+
+      # Post-publish, not an assertion: pulls the tag just pushed and shows
+      # its actual stdout/stderr. ADR 0009 says the connector either runs
+      # with a valid config or refuses to start and says why -- this proves
+      # the second half against the real published artifact, the same way
+      # deploy/connector-rust/README.md's own step 7 proves the first half
+      # locally.
+      - name: Verify image refuses to start without a valid config (ADR 0009)
+        run: |
+          set +e
+          OUTPUT=$(docker run --rm "${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}" 2>&1)
+          STATUS=$?
+          set -e
+          echo "----- container output -----"
+          echo "$OUTPUT"
+          echo "----- exit code: $STATUS -----"
+          if [ "$STATUS" -eq 0 ]; then
+            echo "::error::connector-rust started with no config mounted — expected a refusal per ADR 0009"
+            exit 1
+          fi
+          echo "✓ Refused to start without a config, as ADR 0009 requires"
+
+      - name: Publish summary
+        run: |
+          {
+            echo "## connector-rust image published"
+            echo ""
+            echo "**Image:** \`${{ env.IMAGE }}\`"
+            echo ""
+            echo "**Tags:**"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
