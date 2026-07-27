@@ -7,6 +7,38 @@ and an authenticated `GET /metrics`.
 
 All commands below run from the repository root.
 
+## Pulling the published image
+
+`.github/workflows/publish-connector-rust-image.yml` publishes this image to
+`ghcr.io/toon-protocol/connector-rust` on every push to `main` that touches
+`crates/**`, `Cargo.toml`/`Cargo.lock`, `packages/solana-program/**`, or this
+Dockerfile (also runnable manually via `workflow_dispatch`). It is a
+**separate image from `ghcr.io/toon-protocol/connector`** — see the Dockerfile
+header for why — and the package is public, so no registry login is required
+to pull it.
+
+Tags:
+
+| Tag               | Meaning                                                                                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay). |
+| `main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                 |
+
+There is no semver tag series here: no crate under `crates/` has a release
+process yet, and inventing one for the image alone would claim a stability
+contract the binary hasn't earned. Compare
+[`CONNECTOR_RELEASE_CONTRACT.md`](../../CONNECTOR_RELEASE_CONTRACT.md), which
+describes the semver/cosign contract the old TypeScript image had — that
+image is no longer published (4.0.0), and this one does not (yet) carry an
+equivalent contract.
+
+```bash
+docker pull ghcr.io/toon-protocol/connector-rust:sha-<short-sha>
+```
+
+Skip to [step 6](#6-run-it) to run it — the config/key setup in steps 1-4
+below is identical whether you built the image locally or pulled it.
+
 ## 1. Generate a signer key
 
 The connector signs claims and settlement transactions with this key
