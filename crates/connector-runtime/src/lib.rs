@@ -15,7 +15,7 @@ mod route;
 pub use app_client::{AppClient, AppOutcome, Delivery, FakeAppClient, HttpAppClient};
 pub use claim::{ClaimAckOutcome, ClaimBook, ClaimRejectReason, WireClaim};
 pub use clock::{Clock, SystemClock, TestClock};
-pub use connector::{ChannelOperationError, Connector, LeaseRouteError};
+pub use connector::{ChannelOperationError, Connector, LeaseRouteError, ProbeDenied};
 pub use journal::{FileJournal, InMemoryJournal, Journal, JournalError};
 pub use metrics::Metrics;
 pub use network_peer_transport::{NetworkPeerTransport, PeerWireServer};

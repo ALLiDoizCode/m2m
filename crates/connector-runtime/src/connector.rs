@@ -1,9 +1,9 @@
 //! `pub struct Connector` -- the packet plane. See ADR 0001.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use connector_config::StaticRoute;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
@@ -57,6 +57,73 @@ pub enum ChannelOperationError {
     NoClaimToRedeem,
     #[error(transparent)]
     Settlement(#[from] SettlementError),
+}
+
+/// Why [`Connector::handle_probe`] declined to route a packet at all,
+/// before ever calling [`Connector::handle_prepare`] (issue #426, ADR
+/// 0011's consequence: "a probe traverses the network and pays nothing").
+/// Neither variant is a [`PacketResponse`] -- a denial here means this
+/// packet was never treated as an ILP-level exchange to begin with,
+/// matching how the client edge is specified to answer it with a bare
+/// `403` rather than an OER REJECT body (`docs/protocol/client-edge-spec.md`
+/// §1.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeDenied {
+    /// `channel_id` holds no payment channel this connector recognizes.
+    NoOpenChannel,
+    /// `channel_id` has exceeded its configured probe rate limit.
+    RateLimited,
+}
+
+/// A fixed-window rate limiter for probe traffic, keyed by sender identity
+/// (issue #426, ADR 0011's consequence: "a probe traverses the network and
+/// pays nothing ... so it is ... rate-limited per that identity"). Counted
+/// against this connector's own injected [`Clock`] rather than wall time, so
+/// tests control it deterministically instead of racing real elapsed time.
+struct ProbeRateLimiter {
+    max_per_window: u32,
+    window: Duration,
+    /// A plain [`Mutex`] rather than [`RwLock`] like `leased_routes`/
+    /// `known_channels` below -- every access here mutates (recording an
+    /// attempt), so there is no read-only path to give a reader/writer
+    /// lock any advantage over mutual exclusion.
+    windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
+}
+
+impl ProbeRateLimiter {
+    fn new(max_per_window: u32, window: Duration) -> ProbeRateLimiter {
+        ProbeRateLimiter {
+            max_per_window,
+            window,
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record one probe attempt from `identity` at `now`, returning whether
+    /// it is allowed. A window starts on an identity's first attempt (or
+    /// its first attempt after its previous window elapsed) and admits up
+    /// to `max_per_window` attempts before refusing the rest until the next
+    /// window starts.
+    fn allow(&self, identity: &str, now: DateTime<Utc>) -> bool {
+        let mut windows = self
+            .windows
+            .lock()
+            .expect("probe rate limiter lock poisoned");
+        match windows.get_mut(identity) {
+            Some((started_at, count)) if now < *started_at + self.window => {
+                if *count >= self.max_per_window {
+                    false
+                } else {
+                    *count += 1;
+                    true
+                }
+            }
+            _ => {
+                windows.insert(identity.to_string(), (now, 1));
+                true
+            }
+        }
+    }
 }
 
 /// Which kind of routing-table entry matched a packet's destination, and
@@ -144,6 +211,26 @@ pub struct Connector {
     /// those simply never emits or accepts a claim, matching how
     /// `settlement` degrades to `None`.
     claims: ClaimBook,
+    /// Gates [`Connector::handle_probe`] (issue #426, ADR 0011): a fixed
+    /// window of probe attempts admitted per sender identity. Defaults to
+    /// [`DEFAULT_PROBE_LIMIT`] per [`default_probe_window`], overridable via
+    /// [`Connector::with_probe_rate_limit`] -- unlike `settlement`/`claims`
+    /// above, this fails *closed* rather than open: probing pays nothing,
+    /// so a node that never configures a limit still gets one rather than
+    /// unbounded free traversal.
+    probe_rate_limiter: ProbeRateLimiter,
+}
+
+/// [`Connector`]'s default probe rate limit absent
+/// [`Connector::with_probe_rate_limit`] -- a deliberately conservative
+/// figure (issue #426): probing costs a sender nothing, so the safe default
+/// is a small allowance rather than none at all.
+const DEFAULT_PROBE_LIMIT: u32 = 60;
+
+/// [`Connector`]'s default probe rate limit window, paired with
+/// [`DEFAULT_PROBE_LIMIT`].
+fn default_probe_window() -> Duration {
+    Duration::seconds(60)
 }
 
 impl Connector {
@@ -165,7 +252,16 @@ impl Connector {
             settlement: None,
             known_channels: RwLock::new(Vec::new()),
             claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
+            probe_rate_limiter: ProbeRateLimiter::new(DEFAULT_PROBE_LIMIT, default_probe_window()),
         }
+    }
+
+    /// Override the default probe rate limit (issue #426, ADR 0011): up to
+    /// `max_per_window` probe attempts per sender identity within `window`,
+    /// checked against this connector's own injected clock.
+    pub fn with_probe_rate_limit(mut self, max_per_window: u32, window: Duration) -> Self {
+        self.probe_rate_limiter = ProbeRateLimiter::new(max_per_window, window);
+        self
     }
 
     /// Configure this node's own signer (issue #423), used to sign every
@@ -321,6 +417,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: "prepare carries no execution condition".to_string(),
                 data: Vec::new(),
+                accumulated_fee: 0,
             });
         }
         if is_expired(prepare.expires_at, self.clock.now()) {
@@ -329,6 +426,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: "prepare has expired".to_string(),
                 data: Vec::new(),
+                accumulated_fee: 0,
             });
         }
         None
@@ -394,6 +492,7 @@ impl Connector {
                     triggered_by: String::new(),
                     message: format!("exposure ceiling exceeded for channel '{channel_id}'"),
                     data: Vec::new(),
+                    accumulated_fee: 0,
                 });
                 return (self.finish(reject), ack);
             }
@@ -405,6 +504,40 @@ impl Connector {
             self.claims.record_inbound_delivery(channel_id, amount);
         }
         (response, ack)
+    }
+
+    /// Entry point for a probe -- an ordinary packet a sender expects to be
+    /// rejected, sent purely to learn a path's cost via the
+    /// `accumulated_fee` every [`connector_domain::Reject`] now carries
+    /// (issue #426, ADR 0011). Probes are not a distinct packet type and
+    /// fee accumulation is not a special mode for them (ADR 0011): once
+    /// past the two gates below, this is nothing but [`Connector::handle_prepare`]
+    /// -- any outcome, fulfilled or rejected, is reported exactly as it
+    /// would be for traffic that never called this method at all.
+    ///
+    /// Unlike [`Connector::handle_prepare`]/[`Connector::handle_peer_prepare`],
+    /// a probe is gated *before* routing is attempted: probing traverses
+    /// this connector's network for free, so it is accepted only from
+    /// `channel_id` identifying a payment channel this connector already
+    /// recognizes (`ProbeDenied::NoOpenChannel` otherwise), and even then
+    /// only within a rate limit per that identity
+    /// (`ProbeDenied::RateLimited` otherwise) -- peer-wire-spec.md §5.2's
+    /// consequences, `docs/protocol/client-edge-spec.md` §1.6. Neither
+    /// denial reaches [`Connector::handle_prepare`]: the packet is never
+    /// forwarded.
+    pub async fn handle_probe(
+        &self,
+        channel_id: &str,
+        prepare: Prepare,
+        minimum_delivery: u64,
+    ) -> Result<PacketResponse, ProbeDenied> {
+        if !self.claims.has_verification_key(channel_id) {
+            return Err(ProbeDenied::NoOpenChannel);
+        }
+        if !self.probe_rate_limiter.allow(channel_id, self.clock.now()) {
+            return Err(ProbeDenied::RateLimited);
+        }
+        Ok(self.handle_prepare(prepare, minimum_delivery).await)
     }
 
     /// Verify and, if valid, accept a claim received over the peer wire --
@@ -473,6 +606,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: format!("no route to destination '{}'", prepare.destination),
                 data: Vec::new(),
+                accumulated_fee: 0,
             }));
         };
 
@@ -537,6 +671,7 @@ impl Connector {
                     peer_route.peer_id()
                 ),
                 data: Vec::new(),
+                accumulated_fee: 0,
             });
         };
 
@@ -546,7 +681,7 @@ impl Connector {
         };
         let peer_id = peer_route.peer_id();
         let pending_claim = self.claims.pending_claim(peer_id);
-        let (response, ack) = self
+        let (response, ack, reached_peer) = self
             .peer_transport
             .forward(peer_id, outgoing, minimum_delivery, pending_claim.clone())
             .await;
@@ -563,7 +698,17 @@ impl Connector {
                 }
                 outcome
             }
-            reject @ PacketResponse::Reject(_) => reject,
+            // ADR 0011, peer-wire-spec.md §5.2: this hop's own fee is added
+            // only once it has genuinely reached `peer_id` and relays a
+            // reject that peer itself decided on -- never on a reject this
+            // transport synthesized locally (`reached_peer` false) because
+            // the packet never actually traversed this hop in that case.
+            PacketResponse::Reject(mut reject) => {
+                if reached_peer {
+                    reject.accumulated_fee += peer_route.fee();
+                }
+                PacketResponse::Reject(reject)
+            }
         }
     }
 
@@ -585,12 +730,14 @@ impl Connector {
                 triggered_by: String::new(),
                 message: format!("app declined the delivery with HTTP {status}"),
                 data: body,
+                accumulated_fee: 0,
             }),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),
                 triggered_by: String::new(),
                 message,
                 data: Vec::new(),
+                accumulated_fee: 0,
             }),
         }
     }
@@ -787,6 +934,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: "fulfillment does not match execution condition".to_string(),
                 data: Vec::new(),
+                accumulated_fee: 0,
             }),
         }
     }
@@ -1741,8 +1889,8 @@ mod tests {
             _prepare: Prepare,
             _minimum_delivery: u64,
             _claim: Option<WireClaim>,
-        ) -> (PacketResponse, ClaimAckOutcome) {
-            (self.0.clone(), ClaimAckOutcome::NotSent)
+        ) -> (PacketResponse, ClaimAckOutcome, bool) {
+            (self.0.clone(), ClaimAckOutcome::NotSent, true)
         }
 
         async fn flush(&self, _peer_id: &str, _claim: WireClaim) -> ClaimAckOutcome {
@@ -2435,6 +2583,174 @@ mod tests {
             );
             let state = settlement.channel_state(&channel_id).await.unwrap();
             assert_eq!(state.status, ChannelStatus::Open);
+        }
+    }
+
+    /// Issue #426, ADR 0011: every REJECT carries the running total of the
+    /// fees of the hops it actually passed through, whatever reason it was
+    /// rejected for.
+    mod fee_accumulation {
+        use super::*;
+
+        /// Builds a chain hop_0 -> hop_1 -> ... -> hop_{fees.len()}, where
+        /// hop_{fees.len()} has no route at all (rejects `F02`) and
+        /// `fees[i]` is what hop_i charges forwarding to hop_{i+1}. Returns
+        /// hop_0, the entry point, already wired to the rest of the chain
+        /// via in-process peer transports.
+        fn chain_of(fees: &[u64]) -> Connector {
+            let terminal = Arc::new(Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+
+            let mut downstream = terminal;
+            for &fee in fees.iter().skip(1).rev() {
+                let mut transport = InProcessPeerTransport::new();
+                transport.add_peer("next", downstream);
+                downstream = Arc::new(Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.app", "next", fee)],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(transport),
+                    test_clock(),
+                ));
+            }
+
+            let mut entry_transport = InProcessPeerTransport::new();
+            entry_transport.add_peer("next", downstream);
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "next", fees[0])],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(entry_transport),
+                test_clock(),
+            )
+        }
+
+        #[tokio::test]
+        async fn a_self_originated_reject_carries_zero_accumulated_fee() {
+            let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
+
+            let response = connector
+                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F02");
+                    assert_eq!(reject.accumulated_fee, 0);
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_relayed_reject_gains_the_relaying_hops_fee() {
+            let entry = chain_of(&[7]);
+
+            let response = entry
+                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F02");
+                    assert_eq!(reject.accumulated_fee, 7);
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn accumulated_fee_sums_across_every_successfully_forwarding_hop() {
+            let entry = chain_of(&[7, 3, 11]);
+
+            let response = entry
+                .handle_prepare(prepare_with_amount("g.example.app", 1_000), 0)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F02");
+                    assert_eq!(reject.accumulated_fee, 21);
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        /// The hop that cannot reach its own next hop never actually
+        /// forwarded the packet, so its own fee is never added -- only the
+        /// hops before it, which genuinely reached their peer, add theirs
+        /// (peer-wire-spec.md §5.2: fee is added only when relaying a
+        /// REJECT "received from its own next hop").
+        #[tokio::test]
+        async fn a_hop_that_cannot_reach_its_peer_does_not_add_its_own_fee() {
+            // hop-0 (fee 7) -> hop-1 (fee 3), but hop-1's own peer route
+            // names a peer its transport never registered -- hop-1 cannot
+            // reach it at all.
+            let hop1 = Arc::new(Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "unregistered", 3)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let mut hop0_transport = InProcessPeerTransport::new();
+            hop0_transport.add_peer("hop-1", hop1);
+            let hop0 = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "hop-1", 7)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(hop0_transport),
+                test_clock(),
+            );
+
+            let response = hop0
+                .handle_prepare(prepare_with_amount("g.example.app", 1_000), 0)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "T01");
+                    // hop-0 reached hop-1 (adds its fee, 7); hop-1 never
+                    // reached "unregistered" (adds nothing).
+                    assert_eq!(reject.accumulated_fee, 7);
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        proptest::proptest! {
+            /// Issue #426's own acceptance criterion: for any chain of hops
+            /// that all successfully forward before the packet is finally
+            /// rejected (no route at the far end), the accumulated fee
+            /// reported to the original sender equals the sum of the fees
+            /// of the hops actually traversed.
+            #[test]
+            fn accumulated_fee_equals_the_sum_of_the_fees_of_the_hops_traversed(
+                fees in proptest::collection::vec(0u64..1_000, 1..6)
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let entry = chain_of(&fees);
+
+                    let response = entry
+                        .handle_prepare(prepare_with_amount("g.example.app", 1_000_000), 0)
+                        .await;
+
+                    match response {
+                        PacketResponse::Reject(reject) => {
+                            proptest::prop_assert_eq!(reject.code.as_str(), "F02");
+                            proptest::prop_assert_eq!(reject.accumulated_fee, fees.iter().sum::<u64>());
+                        }
+                        other => return Err(proptest::test_runner::TestCaseError::fail(format!("expected a reject, got {other:?}"))),
+                    }
+                    Ok(())
+                })?;
+            }
         }
     }
 }

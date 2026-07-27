@@ -198,15 +198,29 @@ impl RejectCode {
 }
 
 /// An ILP REJECT packet (RFC-0027 Section 3.3): a PREPARE was not honored.
+///
+/// `accumulated_fee` is the running total of the fees of the hops this
+/// packet actually passed through before it was rejected (ADR 0011,
+/// `peer-wire-spec.md` §5.2) -- `0` when this connector originated the
+/// reject itself, since no fee applies to a hop the packet never used.
+/// Deliberately **not** part of this struct's OER wire encoding below: this
+/// type is ported byte-for-byte from RFC-0027 so an existing ILPv4-over-HTTP
+/// client can address this connector's client edge, and RFC-0027 has no such
+/// field. `accumulated_fee` instead rides beside the packet -- at the peer
+/// wire's frame level, or the client edge's `TOON-Accumulated-Fee` response
+/// header (`docs/protocol/client-edge-spec.md` §1.6) -- never inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reject {
     pub code: RejectCode,
     pub triggered_by: String,
     pub message: String,
     pub data: Vec<u8>,
+    pub accumulated_fee: u64,
 }
 
 impl Reject {
+    /// Encodes exactly RFC-0027's REJECT fields -- `accumulated_fee` is
+    /// deliberately absent, see the struct's own doc.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TYPE_REJECT);
@@ -251,6 +265,7 @@ impl Reject {
             triggered_by,
             message,
             data,
+            accumulated_fee: 0,
         })
     }
 }
@@ -345,6 +360,7 @@ mod tests {
             triggered_by: "g.connector".to_string(),
             message: "no route".to_string(),
             data: vec![],
+            accumulated_fee: 0,
         };
         let encoded = reject.encode();
         assert_eq!(encoded[0], TYPE_REJECT);
@@ -358,9 +374,30 @@ mod tests {
             triggered_by: String::new(),
             message: "declined".to_string(),
             data: vec![],
+            accumulated_fee: 0,
         };
         let encoded = reject.encode();
         assert_eq!(Reject::decode(&encoded).expect("decode"), reject);
+    }
+
+    /// ADR 0011 / peer-wire-spec.md §5.2: `accumulated_fee` rides beside the
+    /// packet (frame level / response header), never inside RFC-0027's own
+    /// REJECT encoding -- so a nonzero value never survives an encode/decode
+    /// round trip through this struct's wire format alone.
+    #[test]
+    fn accumulated_fee_does_not_ride_the_oer_wire_encoding() {
+        let reject = Reject {
+            code: RejectCode::f02_unreachable(),
+            triggered_by: String::new(),
+            message: "no route".to_string(),
+            data: vec![],
+            accumulated_fee: 42,
+        };
+        let encoded = reject.encode();
+        let decoded = Reject::decode(&encoded).expect("decode");
+        assert_eq!(decoded.accumulated_fee, 0);
+        assert_eq!(decoded.code, reject.code);
+        assert_eq!(decoded.message, reject.message);
     }
 
     #[test]
