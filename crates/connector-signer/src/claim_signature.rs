@@ -224,6 +224,7 @@ pub fn verify_solana_balance_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer as Ed25519Signer;
     use libsecp256k1::{PublicKey, SecretKey};
     use rand::rngs::OsRng;
 
@@ -367,8 +368,6 @@ mod tests {
 
     #[test]
     fn a_genuine_solana_signature_verifies_against_its_signers_key() {
-        use ed25519_dalek::Signer as Ed25519Signer;
-
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
         let message = solana_balance_proof_message(&channel_account, 7, 500);
@@ -385,8 +384,6 @@ mod tests {
 
     #[test]
     fn a_solana_signature_does_not_verify_against_a_different_partys_key() {
-        use ed25519_dalek::Signer as Ed25519Signer;
-
         let keypair = generate_solana_keypair();
         let other_keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
@@ -404,8 +401,6 @@ mod tests {
 
     #[test]
     fn a_truncated_solana_signature_fails_to_verify_rather_than_panicking() {
-        use ed25519_dalek::Signer as Ed25519Signer;
-
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
         let message = solana_balance_proof_message(&channel_account, 7, 500);
@@ -423,8 +418,6 @@ mod tests {
 
     #[test]
     fn a_corrupted_solana_signature_fails_to_verify_rather_than_panicking() {
-        use ed25519_dalek::Signer as Ed25519Signer;
-
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
         let message = solana_balance_proof_message(&channel_account, 7, 500);
@@ -443,8 +436,6 @@ mod tests {
 
     #[test]
     fn a_malformed_solana_public_key_fails_to_verify_rather_than_panicking() {
-        use ed25519_dalek::Signer as Ed25519Signer;
-
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
         let message = solana_balance_proof_message(&channel_account, 7, 500);
@@ -463,8 +454,6 @@ mod tests {
 
     #[test]
     fn changing_any_solana_field_invalidates_a_prior_signature() {
-        use ed25519_dalek::Signer as Ed25519Signer;
-
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
         let message = solana_balance_proof_message(&channel_account, 7, 500);
