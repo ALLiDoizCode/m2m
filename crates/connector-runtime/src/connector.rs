@@ -1,7 +1,7 @@
 //! `pub struct Connector` -- the packet plane. See ADR 0001.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
 use connector_config::StaticRoute;
@@ -83,7 +83,11 @@ pub enum ProbeDenied {
 struct ProbeRateLimiter {
     max_per_window: u32,
     window: Duration,
-    windows: RwLock<HashMap<String, (DateTime<Utc>, u32)>>,
+    /// A plain [`Mutex`] rather than [`RwLock`] like `leased_routes`/
+    /// `known_channels` below -- every access here mutates (recording an
+    /// attempt), so there is no read-only path to give a reader/writer
+    /// lock any advantage over mutual exclusion.
+    windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
 impl ProbeRateLimiter {
@@ -91,7 +95,7 @@ impl ProbeRateLimiter {
         ProbeRateLimiter {
             max_per_window,
             window,
-            windows: RwLock::new(HashMap::new()),
+            windows: Mutex::new(HashMap::new()),
         }
     }
 
@@ -103,7 +107,7 @@ impl ProbeRateLimiter {
     fn allow(&self, identity: &str, now: DateTime<Utc>) -> bool {
         let mut windows = self
             .windows
-            .write()
+            .lock()
             .expect("probe rate limiter lock poisoned");
         match windows.get_mut(identity) {
             Some((started_at, count)) if now < *started_at + self.window => {
@@ -209,7 +213,7 @@ pub struct Connector {
     claims: ClaimBook,
     /// Gates [`Connector::handle_probe`] (issue #426, ADR 0011): a fixed
     /// window of probe attempts admitted per sender identity. Defaults to
-    /// [`DEFAULT_PROBE_LIMIT`] per [`DEFAULT_PROBE_WINDOW`], overridable via
+    /// [`DEFAULT_PROBE_LIMIT`] per [`default_probe_window`], overridable via
     /// [`Connector::with_probe_rate_limit`] -- unlike `settlement`/`claims`
     /// above, this fails *closed* rather than open: probing pays nothing,
     /// so a node that never configures a limit still gets one rather than
