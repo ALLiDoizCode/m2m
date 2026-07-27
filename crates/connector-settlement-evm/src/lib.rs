@@ -197,15 +197,35 @@ fn backend_error<E: std::fmt::Display>(error: E) -> SettlementError {
     SettlementError::Backend(error.to_string())
 }
 
+/// Wait for `pending` to mine and confirm it actually succeeded (issue
+/// #425: "confirmation ... handled explicitly rather than assumed",
+/// "a failed or reverted settlement transaction leaves recoverable
+/// state"). A transaction that reverts on chain is still mined -- it
+/// consumes gas and produces a receipt exactly like a successful one, with
+/// only `status` distinguishing the two -- so a caller that stopped at
+/// "did a receipt come back" would treat a reverted `redeem` or `close` as
+/// success and report whatever state happened to be there already as if
+/// the operation had taken effect. Checking `status` here, in the one
+/// place every channel operation confirms through, means every one of
+/// them fails loudly instead: nothing is ever recorded beyond what the
+/// chain itself did, so a reverted transaction leaves nothing to recover
+/// from beyond retrying with a fresh read of the real state.
 async fn confirm<P: JsonRpcClient>(
     pending: PendingTransaction<'_, P>,
 ) -> Result<TransactionReceipt, SettlementError> {
-    pending
+    let receipt = pending
         .await
         .map_err(|error: ProviderError| backend_error(error))?
         .ok_or_else(|| {
             SettlementError::Backend("transaction was dropped before mining".to_string())
-        })
+        })?;
+    if receipt.status == Some(ethers::types::U64::zero()) {
+        return Err(SettlementError::Backend(format!(
+            "transaction {:#x} reverted on chain",
+            receipt.transaction_hash
+        )));
+    }
+    Ok(receipt)
 }
 
 #[async_trait]

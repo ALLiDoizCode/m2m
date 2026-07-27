@@ -70,6 +70,23 @@ impl Journal for InMemoryJournal {
     }
 }
 
+/// Lowercase hex, no `0x` prefix -- the journal line's own encoding for a
+/// signature, which (unlike `channel_id`/`peer_id`) is arbitrary bytes that
+/// could otherwise contain a tab or newline.
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
+}
+
 /// One line of the journal's on-disk encoding: a type tag followed by its
 /// fields, tab-separated -- deliberately not `serde_json` or a binary
 /// format: every field here is a `String` or `u64`, none can themselves
@@ -93,7 +110,11 @@ fn encode_line(entry: &JournalEntry) -> String {
             channel_id,
             nonce,
             cumulative_amount,
-        } => format!("inbound_claim_accepted\t{channel_id}\t{nonce}\t{cumulative_amount}"),
+            signature,
+        } => format!(
+            "inbound_claim_accepted\t{channel_id}\t{nonce}\t{cumulative_amount}\t{}",
+            encode_hex(signature)
+        ),
         JournalEntry::InboundFulfillmentRecorded { channel_id, amount } => {
             format!("inbound_fulfillment_recorded\t{channel_id}\t{amount}")
         }
@@ -113,11 +134,12 @@ fn decode_line(line: &str) -> Result<JournalEntry, JournalError> {
                 cumulative_amount: parse_u64(cumulative_amount)?,
             })
         }
-        ["inbound_claim_accepted", channel_id, nonce, cumulative_amount] => {
+        ["inbound_claim_accepted", channel_id, nonce, cumulative_amount, signature] => {
             Ok(JournalEntry::InboundClaimAccepted {
                 channel_id: channel_id.to_string(),
                 nonce: parse_u64(nonce)?,
                 cumulative_amount: parse_u64(cumulative_amount)?,
+                signature: decode_hex(signature).ok_or_else(corrupt)?,
             })
         }
         ["inbound_fulfillment_recorded", channel_id, amount] => {
@@ -190,6 +212,7 @@ mod tests {
                 channel_id: "channel-c".to_string(),
                 nonce: 3,
                 cumulative_amount: 250,
+                signature: vec![0xde, 0xad, 0xbe, 0xef],
             },
             JournalEntry::InboundFulfillmentRecorded {
                 channel_id: "channel-c".to_string(),
