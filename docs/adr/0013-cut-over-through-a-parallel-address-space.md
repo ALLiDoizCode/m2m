@@ -34,3 +34,8 @@ others have moved.
 Two address spaces exist for as long as the migration lasts, and the temporary prefix is
 disposable by design — it exists to be deleted, and nothing durable should be published against
 it.
+
+The conditions for recognizing that moment — what must be observably true of traffic, clients
+and channels before the old prefix is deleted, and what is irreversible if they are wrong — are
+written down in
+[`docs/operators/prefix-retirement-checklist.md`](../operators/prefix-retirement-checklist.md).
