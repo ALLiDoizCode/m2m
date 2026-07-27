@@ -4,17 +4,19 @@
 //! [`crate::PeerWireServer`] (the accepting side) so both read and write
 //! exactly the same bytes on the wire.
 //!
-//! Claims, fees, minimum delivery, FLUSH and CLAIM_ACK (§3-§5) are not
-//! implemented here -- nothing in `connector-domain`'s packet types carries
-//! those fields yet (they land with issues #417/#418), so this framing only
-//! ever carries a bare PREPARE/FULFILL/REJECT, matching what the packet
-//! plane can actually produce today.
+//! Fee and minimum-delivery fields (§4) ride the PREPARE payload as raw
+//! bytes rather than through this envelope (see
+//! `network_peer_transport.rs`'s `encode_prepare_frame_payload`); a claim
+//! (§3.2) rides the same way, and FLUSH/CLAIM_ACK (§3.3-§3.4, issue #423)
+//! are frame types defined here alongside PREPARE/FULFILL/REJECT.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const FRAME_TYPE_PREPARE: u8 = 0x01;
 pub const FRAME_TYPE_FULFILL: u8 = 0x02;
 pub const FRAME_TYPE_REJECT: u8 = 0x03;
+pub const FRAME_TYPE_FLUSH: u8 = 0x04;
+pub const FRAME_TYPE_CLAIM_ACK: u8 = 0x05;
 
 pub(crate) const CORRELATION_ID_LEN: usize = 16;
 

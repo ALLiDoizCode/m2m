@@ -24,7 +24,7 @@ pub use address::{derive_evm_address, to_hex, Address};
 pub use error::{SignerError, TreasuryError};
 pub use kms::{InMemoryKmsBackend, KmsBackend, KmsSigner};
 pub use local::LocalSigner;
-pub use signer::{PublicKeyBytes, Signature, Signer};
+pub use signer::{verify, PublicKeyBytes, Signature, Signer};
 pub use treasury::{ChainClient, FundingReceipt, SignedTransfer, Treasury, TxHash};
 
 #[cfg(test)]

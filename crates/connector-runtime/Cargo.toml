@@ -8,6 +8,7 @@ license.workspace = true
 connector-domain = { path = "../connector-domain" }
 connector-config = { path = "../connector-config" }
 connector-settlement = { path = "../connector-settlement" }
+connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 prometheus = "0.13"

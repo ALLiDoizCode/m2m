@@ -1,6 +1,8 @@
 //! The peer transport port: forwards a [`Prepare`] to another connector for
-//! the next hop. See `docs/protocol/peer-wire-spec.md` §1.1 -- production
-//! peering is one persistent duplex stream per relation; [`InProcessPeerTransport`]
+//! the next hop, optionally carrying a claim (issue #423), and flushes a
+//! claim on its own when nothing else is going out (peer-wire-spec.md
+//! §3.3). See `docs/protocol/peer-wire-spec.md` §1.1 -- production peering
+//! is one persistent duplex stream per relation; [`InProcessPeerTransport`]
 //! here is the in-process stand-in that spec calls out for composing
 //! multi-connector tests without a socket. [`crate::NetworkPeerTransport`]
 //! (issue #416) is the network implementation of the same port; both are
@@ -14,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 
+use crate::claim::{ClaimAckOutcome, WireClaim};
 use crate::connector::Connector;
 
 /// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
@@ -22,7 +25,10 @@ use crate::connector::Connector;
 /// it. `minimum_delivery` is the amount the original sender declared must
 /// reach the destination (ADR 0010) -- carried alongside `prepare` rather
 /// than inside it, and passed to the peer unchanged so every hop enforces
-/// it against the same figure.
+/// it against the same figure. `claim` piggybacks whatever this connector
+/// currently owes `peer_id` (peer-wire-spec.md §3.2); the returned
+/// [`ClaimAckOutcome`] is [`ClaimAckOutcome::NotSent`] when `claim` was
+/// `None`, or when the peer could not be reached to answer at all.
 #[async_trait]
 pub trait PeerTransport: Send + Sync {
     async fn forward(
@@ -30,7 +36,14 @@ pub trait PeerTransport: Send + Sync {
         peer_id: &str,
         prepare: Prepare,
         minimum_delivery: u64,
-    ) -> PacketResponse;
+        claim: Option<WireClaim>,
+    ) -> (PacketResponse, ClaimAckOutcome);
+
+    /// Send `claim` with no packet to ride -- the flush mechanism
+    /// (peer-wire-spec.md §3.3) that covers the case traffic to `peer_id`
+    /// has stopped. Returns [`ClaimAckOutcome::NotSent`] if `peer_id`
+    /// could not be reached.
+    async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome;
 }
 
 pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
@@ -42,12 +55,22 @@ pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
     })
 }
 
-/// One forwarded [`Prepare`] handed to a peer's owning task, paired with
-/// where to send the answer.
-struct PeerRequest {
-    prepare: Prepare,
-    minimum_delivery: u64,
-    respond_to: oneshot::Sender<PacketResponse>,
+/// One message handed to a peer's owning task: either a [`Prepare`] to
+/// forward (optionally carrying a claim), or a claim to flush on its own.
+/// Both travel the same channel so the two ways a frame reaches a peer stay
+/// ordered relative to each other, exactly as they would interleaved on one
+/// real duplex stream.
+enum PeerMessage {
+    Prepare {
+        prepare: Prepare,
+        minimum_delivery: u64,
+        claim: Option<WireClaim>,
+        respond_to: oneshot::Sender<(PacketResponse, ClaimAckOutcome)>,
+    },
+    Flush {
+        claim: WireClaim,
+        respond_to: oneshot::Sender<ClaimAckOutcome>,
+    },
 }
 
 /// A handle to a peer [`Connector`], reachable only by message -- the
@@ -57,26 +80,37 @@ struct PeerRequest {
 /// directly, so there is no lock on this path, on either side of it.
 #[derive(Clone)]
 struct PeerLink {
-    sender: mpsc::Sender<PeerRequest>,
+    sender: mpsc::Sender<PeerMessage>,
 }
 
 impl PeerLink {
     /// Spawn the task that owns `connector` for the lifetime of this link,
     /// answering every forwarded [`Prepare`] by calling
-    /// [`Connector::handle_prepare`] -- the same method a direct client
-    /// request reaches, so a peer's packet is routed and delivered exactly
-    /// like one that arrived over its own client edge.
+    /// [`Connector::handle_peer_prepare`] and every flush by calling
+    /// [`Connector::handle_peer_claim`] -- the same claim-acceptance path a
+    /// claim piggybacked on a PREPARE reaches, so a flushed claim is judged
+    /// identically.
     fn connect(connector: Arc<Connector>) -> PeerLink {
-        let (sender, mut receiver) = mpsc::channel::<PeerRequest>(64);
+        let (sender, mut receiver) = mpsc::channel::<PeerMessage>(64);
         tokio::spawn(async move {
-            while let Some(PeerRequest {
-                prepare,
-                minimum_delivery,
-                respond_to,
-            }) = receiver.recv().await
-            {
-                let response = connector.handle_prepare(prepare, minimum_delivery).await;
-                let _ = respond_to.send(response);
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    PeerMessage::Prepare {
+                        prepare,
+                        minimum_delivery,
+                        claim,
+                        respond_to,
+                    } => {
+                        let result = connector
+                            .handle_peer_prepare(prepare, minimum_delivery, claim)
+                            .await;
+                        let _ = respond_to.send(result);
+                    }
+                    PeerMessage::Flush { claim, respond_to } => {
+                        let ack = connector.handle_peer_claim(claim);
+                        let _ = respond_to.send(ack);
+                    }
+                }
             }
         });
         PeerLink { sender }
@@ -87,21 +121,38 @@ impl PeerLink {
         peer_id: &str,
         prepare: Prepare,
         minimum_delivery: u64,
-    ) -> PacketResponse {
+        claim: Option<WireClaim>,
+    ) -> (PacketResponse, ClaimAckOutcome) {
         let (respond_to, receiver) = oneshot::channel();
         if self
             .sender
-            .send(PeerRequest {
+            .send(PeerMessage::Prepare {
                 prepare,
                 minimum_delivery,
+                claim,
                 respond_to,
             })
             .await
             .is_err()
         {
-            return peer_unreachable(peer_id);
+            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent);
         }
-        receiver.await.unwrap_or_else(|_| peer_unreachable(peer_id))
+        receiver
+            .await
+            .unwrap_or_else(|_| (peer_unreachable(peer_id), ClaimAckOutcome::NotSent))
+    }
+
+    async fn flush(&self, claim: WireClaim) -> ClaimAckOutcome {
+        let (respond_to, receiver) = oneshot::channel();
+        if self
+            .sender
+            .send(PeerMessage::Flush { claim, respond_to })
+            .await
+            .is_err()
+        {
+            return ClaimAckOutcome::NotSent;
+        }
+        receiver.await.unwrap_or(ClaimAckOutcome::NotSent)
     }
 }
 
@@ -135,10 +186,21 @@ impl PeerTransport for InProcessPeerTransport {
         peer_id: &str,
         prepare: Prepare,
         minimum_delivery: u64,
-    ) -> PacketResponse {
+        claim: Option<WireClaim>,
+    ) -> (PacketResponse, ClaimAckOutcome) {
         match self.peers.get(peer_id) {
-            Some(link) => link.forward(peer_id, prepare, minimum_delivery).await,
-            None => peer_unreachable(peer_id),
+            Some(link) => {
+                link.forward(peer_id, prepare, minimum_delivery, claim)
+                    .await
+            }
+            None => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent),
+        }
+    }
+
+    async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome {
+        match self.peers.get(peer_id) {
+            Some(link) => link.flush(claim).await,
+            None => ClaimAckOutcome::NotSent,
         }
     }
 }
@@ -150,7 +212,8 @@ mod tests {
     use crate::clock::TestClock;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::derive_condition;
+    use connector_domain::{claim_digest, derive_condition};
+    use connector_signer::{LocalSigner, Signer};
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
 
@@ -192,8 +255,8 @@ mod tests {
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
 
-        let response = transport
-            .forward("peer-b", prepare("g.example.app"), 0)
+        let (response, ack) = transport
+            .forward("peer-b", prepare("g.example.app"), 0, None)
             .await;
 
         assert_eq!(
@@ -203,14 +266,15 @@ mod tests {
                 data: b"delivered by the peer".to_vec(),
             })
         );
+        assert_eq!(ack, ClaimAckOutcome::NotSent);
     }
 
     #[tokio::test]
     async fn returns_peer_unreachable_for_an_unregistered_peer_id() {
         let transport = InProcessPeerTransport::new();
 
-        let response = transport
-            .forward("nowhere", prepare("g.example.app"), 0)
+        let (response, ack) = transport
+            .forward("nowhere", prepare("g.example.app"), 0, None)
             .await;
 
         match response {
@@ -220,6 +284,7 @@ mod tests {
             }
             other => panic!("expected a reject, got {other:?}"),
         }
+        assert_eq!(ack, ClaimAckOutcome::NotSent);
     }
 
     #[tokio::test]
@@ -234,8 +299,8 @@ mod tests {
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
 
-        let response = transport
-            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0)
+        let (response, _ack) = transport
+            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0, None)
             .await;
 
         match response {
@@ -245,6 +310,63 @@ mod tests {
             }
             other => panic!("expected a reject, got {other:?}"),
         }
+    }
+
+    /// Issue #423: a claim piggybacked on a forwarded PREPARE is verified
+    /// by the accepting peer independently of the packet itself.
+    #[tokio::test]
+    async fn a_piggybacked_claim_is_verified_and_acknowledged() {
+        let signer = LocalSigner::generate("claim-key");
+        let peer = Arc::new(
+            Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_channel_verification_key("channel-a", signer.public_key().unwrap()),
+        );
+        let mut transport = InProcessPeerTransport::new();
+        transport.add_peer("peer-b", peer);
+        let digest = claim_digest("channel-a", 1, 50);
+        let claim = WireClaim {
+            channel_id: "channel-a".to_string(),
+            nonce: 1,
+            cumulative_amount: 50,
+            signature: signer.sign(&digest).unwrap(),
+        };
+
+        let (response, ack) = transport
+            .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))
+            .await;
+
+        // The claim is judged independently of the packet: no route exists
+        // for this PREPARE, but the claim it carried is still accepted.
+        match response {
+            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F02"),
+            other => panic!("expected a reject, got {other:?}"),
+        }
+        assert_eq!(ack, ClaimAckOutcome::Accepted);
+    }
+
+    #[tokio::test]
+    async fn flushing_a_claim_to_an_unregistered_peer_reports_not_sent() {
+        let transport = InProcessPeerTransport::new();
+        let claim = WireClaim {
+            channel_id: "channel-a".to_string(),
+            nonce: 1,
+            cumulative_amount: 50,
+            signature: connector_signer::Signature {
+                r: [0u8; 32],
+                s: [0u8; 32],
+                recovery_id: 0,
+            },
+        };
+
+        let ack = transport.flush("nowhere", claim).await;
+
+        assert_eq!(ack, ClaimAckOutcome::NotSent);
     }
 
     /// Establishes that a peer link is owned by exactly one spawned task
@@ -278,13 +400,13 @@ mod tests {
             let transport = transport.clone();
             handles.push(tokio::spawn(async move {
                 transport
-                    .forward("peer-b", prepare("g.example.app"), 0)
+                    .forward("peer-b", prepare("g.example.app"), 0, None)
                     .await
             }));
         }
 
         for handle in handles {
-            let response = handle.await.expect("task");
+            let (response, _ack) = handle.await.expect("task");
             assert!(matches!(response, PacketResponse::Fulfill(_)));
         }
     }
@@ -337,8 +459,8 @@ mod tests {
 
             let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
 
-            let response = transport
-                .forward("peer-b", prepare("g.example.app"), 0)
+            let (response, _ack) = transport
+                .forward("peer-b", prepare("g.example.app"), 0, None)
                 .await;
             assert_eq!(
                 response,
@@ -348,8 +470,8 @@ mod tests {
                 })
             );
 
-            let response = transport
-                .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0)
+            let (response, _ack) = transport
+                .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0, None)
                 .await;
             match response {
                 PacketResponse::Reject(reject) => {
@@ -359,8 +481,8 @@ mod tests {
                 other => panic!("expected a reject, got {other:?}"),
             }
 
-            let response = transport
-                .forward("nowhere", prepare("g.example.app"), 0)
+            let (response, _ack) = transport
+                .forward("nowhere", prepare("g.example.app"), 0, None)
                 .await;
             match response {
                 PacketResponse::Reject(reject) => {

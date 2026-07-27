@@ -10,9 +10,11 @@
 //! [`NetworkPeerTransport`] is the dialing side: one persistent TCP
 //! connection per configured peer, redialed lazily. [`PeerWireServer`] is
 //! the accepting side: it answers every inbound PREPARE frame by calling
-//! [`Connector::handle_prepare`], the same method a direct client request or
-//! an in-process peer link reaches -- the packet plane itself never
-//! constructs or touches a socket.
+//! [`Connector::handle_peer_prepare`] and every FLUSH frame by calling
+//! [`Connector::handle_peer_claim`] (issue #423) -- the same methods a
+//! direct client request or an in-process peer link reaches, so a peer's
+//! frame is judged exactly like one arriving any other way; the packet
+//! plane itself never constructs or touches a socket.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,11 +28,12 @@ use tokio::task::JoinHandle;
 
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject};
 
+use crate::claim::{ClaimAckOutcome, WireClaim};
 use crate::connector::Connector;
 use crate::peer_transport::{peer_unreachable, PeerTransport};
 use crate::peer_wire::{
-    read_frame, write_frame, Frame, CORRELATION_ID_LEN, FRAME_TYPE_FULFILL, FRAME_TYPE_PREPARE,
-    FRAME_TYPE_REJECT,
+    read_frame, write_frame, Frame, CORRELATION_ID_LEN, FRAME_TYPE_CLAIM_ACK, FRAME_TYPE_FLUSH,
+    FRAME_TYPE_FULFILL, FRAME_TYPE_PREPARE, FRAME_TYPE_REJECT,
 };
 
 /// A dialed connection to one peer, redialed lazily on first use and again
@@ -61,77 +64,176 @@ impl PeerConnection {
         }
     }
 
-    fn next_frame(&self, prepare: &Prepare, minimum_delivery: u64) -> Frame {
+    fn next_correlation_id(&self) -> [u8; CORRELATION_ID_LEN] {
         let counter = self.next_correlation_id.fetch_add(1, Ordering::Relaxed);
         let mut correlation_id = [0u8; CORRELATION_ID_LEN];
         correlation_id[8..].copy_from_slice(&counter.to_be_bytes());
-        Frame {
-            frame_type: FRAME_TYPE_PREPARE,
-            correlation_id,
-            payload: encode_prepare_frame_payload(prepare, minimum_delivery),
-        }
+        correlation_id
     }
 
-    async fn forward(&self, prepare: Prepare, minimum_delivery: u64) -> PacketResponse {
-        let frame = self.next_frame(&prepare, minimum_delivery);
+    /// Send `frame` and read back whatever frame answers it, dialing
+    /// lazily and redialing once more on any failure -- the "at most
+    /// twice" retry both [`PeerConnection::forward`] and
+    /// [`PeerConnection::flush`] need, factored out so the two frame kinds
+    /// share exactly one reconnection policy. Interpreting the response
+    /// frame is left to the caller, since a PREPARE's answer and a FLUSH's
+    /// answer decode differently.
+    async fn send_frame_and_read_response(&self, frame: &Frame) -> Option<Frame> {
         let mut guard = self.stream.lock().await;
-
-        // Attempt at most twice: once against whatever connection is
-        // already held (possibly none), and once more against a freshly
-        // dialed connection if the first attempt failed for any reason.
         for _ in 0..2 {
             if guard.is_none() {
                 match TcpStream::connect(self.addr).await {
                     Ok(stream) => *guard = Some(stream),
-                    Err(_) => return peer_unreachable(&self.peer_id),
+                    Err(_) => return None,
                 }
             }
-
             let stream = guard.as_mut().expect("connected above");
-            if let Some(response) = send_and_receive(stream, &frame).await {
-                return response;
+            if write_frame(stream, frame).await.is_ok() {
+                if let Ok(response) = read_frame(stream).await {
+                    return Some(response);
+                }
             }
             *guard = None;
         }
+        None
+    }
 
-        peer_unreachable(&self.peer_id)
+    async fn forward(
+        &self,
+        prepare: Prepare,
+        minimum_delivery: u64,
+        claim: Option<WireClaim>,
+    ) -> (PacketResponse, ClaimAckOutcome) {
+        let frame = Frame {
+            frame_type: FRAME_TYPE_PREPARE,
+            correlation_id: self.next_correlation_id(),
+            payload: encode_prepare_frame_payload(&prepare, minimum_delivery, claim.as_ref()),
+        };
+        let unreachable = || (peer_unreachable(&self.peer_id), ClaimAckOutcome::NotSent);
+        match self.send_frame_and_read_response(&frame).await {
+            Some(response) if response.correlation_id == frame.correlation_id => {
+                decode_response(&response).unwrap_or_else(unreachable)
+            }
+            _ => unreachable(),
+        }
+    }
+
+    async fn flush(&self, claim: WireClaim) -> ClaimAckOutcome {
+        let frame = Frame {
+            frame_type: FRAME_TYPE_FLUSH,
+            // No correlationId meaning: absent (all-zero) on a frame not
+            // answering a specific PREPARE (peer-wire-spec.md §1.2).
+            correlation_id: [0u8; CORRELATION_ID_LEN],
+            payload: claim.encode(),
+        };
+        match self.send_frame_and_read_response(&frame).await {
+            Some(response) if response.frame_type == FRAME_TYPE_CLAIM_ACK => {
+                ClaimAckOutcome::decode(&response.payload).unwrap_or(ClaimAckOutcome::NotSent)
+            }
+            _ => ClaimAckOutcome::NotSent,
+        }
     }
 }
 
 /// `minimumDelivery` (peer-wire-spec.md §4) is a PREPARE-frame field
 /// declared once by the original sender and passed unchanged hop to hop --
 /// not a `Prepare` field itself, since `connector-domain` (RFC-0027) has no
-/// such concept, so it rides alongside the encoded packet as a fixed 8-byte
-/// big-endian suffix rather than inside `Prepare::encode`'s OER bytes.
-const MINIMUM_DELIVERY_LEN: usize = 8;
-
-fn encode_prepare_frame_payload(prepare: &Prepare, minimum_delivery: u64) -> Vec<u8> {
-    let mut payload = prepare.encode();
+/// such concept. A claim (§3.2, issue #423) rides the same way. Both the
+/// encoded `Prepare` and, if present, the trailing claim are length-framed:
+/// `Prepare::decode`/`WireClaim::decode` reject trailing bytes, so a fixed
+/// suffix cannot follow either without saying how long it is first.
+fn encode_prepare_frame_payload(
+    prepare: &Prepare,
+    minimum_delivery: u64,
+    claim: Option<&WireClaim>,
+) -> Vec<u8> {
+    let prepare_bytes = prepare.encode();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(prepare_bytes.len() as u32).to_be_bytes());
+    payload.extend_from_slice(&prepare_bytes);
     payload.extend_from_slice(&minimum_delivery.to_be_bytes());
+    match claim {
+        Some(claim) => {
+            payload.push(1);
+            payload.extend_from_slice(&claim.encode());
+        }
+        None => payload.push(0),
+    }
     payload
 }
 
-fn decode_prepare_frame_payload(payload: &[u8]) -> Option<(Prepare, u64)> {
-    let split_at = payload.len().checked_sub(MINIMUM_DELIVERY_LEN)?;
-    let (packet_bytes, minimum_delivery_bytes) = payload.split_at(split_at);
-    let prepare = Prepare::decode(packet_bytes).ok()?;
-    let minimum_delivery = u64::from_be_bytes(minimum_delivery_bytes.try_into().ok()?);
-    Some((prepare, minimum_delivery))
-}
+fn decode_prepare_frame_payload(payload: &[u8]) -> Option<(Prepare, u64, Option<WireClaim>)> {
+    let prepare_len = u32::from_be_bytes(payload.get(0..4)?.try_into().ok()?) as usize;
+    let mut offset = 4;
+    let prepare = Prepare::decode(payload.get(offset..offset + prepare_len)?).ok()?;
+    offset += prepare_len;
 
-async fn send_and_receive(stream: &mut TcpStream, frame: &Frame) -> Option<PacketResponse> {
-    write_frame(stream, frame).await.ok()?;
-    let response = read_frame(stream).await.ok()?;
-    if response.correlation_id != frame.correlation_id {
+    let minimum_delivery = u64::from_be_bytes(payload.get(offset..offset + 8)?.try_into().ok()?);
+    offset += 8;
+
+    let has_claim = *payload.get(offset)?;
+    offset += 1;
+    let claim = if has_claim == 1 {
+        let (claim, consumed) = WireClaim::decode(payload.get(offset..)?)?;
+        offset += consumed;
+        Some(claim)
+    } else {
+        None
+    };
+
+    if offset != payload.len() {
         return None;
     }
+    Some((prepare, minimum_delivery, claim))
+}
+
+/// A FULFILL/REJECT response frame's payload: the length-framed packet
+/// followed by whatever [`ClaimAckOutcome`] answers the claim the PREPARE
+/// it responds to was carrying, if any.
+fn encode_response_frame_payload(packet_bytes: Vec<u8>, ack: ClaimAckOutcome) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(packet_bytes.len() as u32).to_be_bytes());
+    payload.extend_from_slice(&packet_bytes);
+    match ack {
+        ClaimAckOutcome::NotSent => payload.push(0),
+        acknowledged => {
+            payload.push(1);
+            payload.extend_from_slice(&acknowledged.encode());
+        }
+    }
+    payload
+}
+
+fn decode_response_frame_payload(payload: &[u8]) -> Option<(Vec<u8>, ClaimAckOutcome)> {
+    let packet_len = u32::from_be_bytes(payload.get(0..4)?.try_into().ok()?) as usize;
+    let mut offset = 4;
+    let packet_bytes = payload.get(offset..offset + packet_len)?.to_vec();
+    offset += packet_len;
+
+    let has_ack = *payload.get(offset)?;
+    offset += 1;
+    let ack = if has_ack == 1 {
+        ClaimAckOutcome::decode(payload.get(offset..)?)?
+    } else {
+        ClaimAckOutcome::NotSent
+    };
+
+    Some((packet_bytes, ack))
+}
+
+/// Interpret a FULFILL/REJECT frame answering a forwarded PREPARE. Pure
+/// decoding, split out from the I/O in
+/// [`PeerConnection::send_frame_and_read_response`] so retrying a failed
+/// send never has to re-decode anything.
+fn decode_response(response: &Frame) -> Option<(PacketResponse, ClaimAckOutcome)> {
+    let (packet_bytes, ack) = decode_response_frame_payload(&response.payload)?;
     match response.frame_type {
-        FRAME_TYPE_FULFILL => Fulfill::decode(&response.payload)
+        FRAME_TYPE_FULFILL => Fulfill::decode(&packet_bytes)
             .ok()
-            .map(PacketResponse::Fulfill),
-        FRAME_TYPE_REJECT => Reject::decode(&response.payload)
+            .map(|fulfill| (PacketResponse::Fulfill(fulfill), ack)),
+        FRAME_TYPE_REJECT => Reject::decode(&packet_bytes)
             .ok()
-            .map(PacketResponse::Reject),
+            .map(|reject| (PacketResponse::Reject(reject), ack)),
         _ => None,
     }
 }
@@ -164,18 +266,27 @@ impl PeerTransport for NetworkPeerTransport {
         peer_id: &str,
         prepare: Prepare,
         minimum_delivery: u64,
-    ) -> PacketResponse {
+        claim: Option<WireClaim>,
+    ) -> (PacketResponse, ClaimAckOutcome) {
         match self.peers.get(peer_id) {
-            Some(connection) => connection.forward(prepare, minimum_delivery).await,
-            None => peer_unreachable(peer_id),
+            Some(connection) => connection.forward(prepare, minimum_delivery, claim).await,
+            None => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent),
+        }
+    }
+
+    async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome {
+        match self.peers.get(peer_id) {
+            Some(connection) => connection.flush(claim).await,
+            None => ClaimAckOutcome::NotSent,
         }
     }
 }
 
 /// The accepting side of the peer wire: binds a TCP listener and answers
-/// every inbound PREPARE frame, on any connection, by routing it through
-/// `connector` -- the same [`Connector::handle_prepare`] a client's own
-/// request reaches.
+/// every inbound PREPARE or FLUSH frame, on any connection, by routing it
+/// through `connector` -- the same [`Connector::handle_peer_prepare`] /
+/// [`Connector::handle_peer_claim`] a client's own request or an in-process
+/// peer link reaches.
 pub struct PeerWireServer {
     local_addr: SocketAddr,
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -232,31 +343,49 @@ async fn serve_connection(mut stream: TcpStream, connector: Arc<Connector>) {
             Err(_) => return,
         };
 
-        // An unrecognized frame type is a version mismatch, not a packet to
-        // route around (§1.3) -- close the stream rather than guess.
-        if frame.frame_type != FRAME_TYPE_PREPARE {
-            return;
-        }
+        match frame.frame_type {
+            FRAME_TYPE_PREPARE => {
+                let Some((prepare, minimum_delivery, claim)) =
+                    decode_prepare_frame_payload(&frame.payload)
+                else {
+                    return;
+                };
 
-        let Some((prepare, minimum_delivery)) = decode_prepare_frame_payload(&frame.payload) else {
-            return;
-        };
+                let (response, ack) = connector
+                    .handle_peer_prepare(prepare, minimum_delivery, claim)
+                    .await;
+                let (packet_bytes, response_frame_type) = match response {
+                    PacketResponse::Fulfill(fulfill) => (fulfill.encode(), FRAME_TYPE_FULFILL),
+                    PacketResponse::Reject(reject) => (reject.encode(), FRAME_TYPE_REJECT),
+                };
+                let response_frame = Frame {
+                    frame_type: response_frame_type,
+                    correlation_id: frame.correlation_id,
+                    payload: encode_response_frame_payload(packet_bytes, ack),
+                };
 
-        let response_frame = match connector.handle_prepare(prepare, minimum_delivery).await {
-            PacketResponse::Fulfill(fulfill) => Frame {
-                frame_type: FRAME_TYPE_FULFILL,
-                correlation_id: frame.correlation_id,
-                payload: fulfill.encode(),
-            },
-            PacketResponse::Reject(reject) => Frame {
-                frame_type: FRAME_TYPE_REJECT,
-                correlation_id: frame.correlation_id,
-                payload: reject.encode(),
-            },
-        };
-
-        if write_frame(&mut stream, &response_frame).await.is_err() {
-            return;
+                if write_frame(&mut stream, &response_frame).await.is_err() {
+                    return;
+                }
+            }
+            FRAME_TYPE_FLUSH => {
+                let Some((claim, _)) = WireClaim::decode(&frame.payload) else {
+                    return;
+                };
+                let ack = connector.handle_peer_claim(claim);
+                let response_frame = Frame {
+                    frame_type: FRAME_TYPE_CLAIM_ACK,
+                    correlation_id: frame.correlation_id,
+                    payload: ack.encode(),
+                };
+                if write_frame(&mut stream, &response_frame).await.is_err() {
+                    return;
+                }
+            }
+            // An unrecognized frame type is a version mismatch, not a
+            // packet to route around (§1.3) -- close the stream rather
+            // than guess.
+            _ => return,
         }
     }
 }
@@ -270,6 +399,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
     use connector_domain::derive_condition;
+    use connector_signer::{LocalSigner, Signer};
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
 
@@ -294,20 +424,65 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    #[test]
-    fn a_prepare_frame_payload_round_trips_with_its_minimum_delivery() {
-        let original = prepare("g.example.app");
-
-        let payload = encode_prepare_frame_payload(&original, 42);
-        let (decoded, minimum_delivery) = decode_prepare_frame_payload(&payload).unwrap();
-
-        assert_eq!(decoded, original);
-        assert_eq!(minimum_delivery, 42);
+    fn sample_claim() -> WireClaim {
+        let signer = LocalSigner::generate("k");
+        let digest = connector_domain::claim_digest("channel-a", 3, 300);
+        WireClaim {
+            channel_id: "channel-a".to_string(),
+            nonce: 3,
+            cumulative_amount: 300,
+            signature: signer.sign(&digest).unwrap(),
+        }
     }
 
     #[test]
-    fn decoding_a_payload_shorter_than_the_minimum_delivery_suffix_fails() {
-        assert!(decode_prepare_frame_payload(&[0u8; MINIMUM_DELIVERY_LEN - 1]).is_none());
+    fn a_prepare_frame_payload_round_trips_with_no_claim() {
+        let original = prepare("g.example.app");
+
+        let payload = encode_prepare_frame_payload(&original, 42, None);
+        let (decoded, minimum_delivery, claim) = decode_prepare_frame_payload(&payload).unwrap();
+
+        assert_eq!(decoded, original);
+        assert_eq!(minimum_delivery, 42);
+        assert_eq!(claim, None);
+    }
+
+    #[test]
+    fn a_prepare_frame_payload_round_trips_with_a_piggybacked_claim() {
+        let original = prepare("g.example.app");
+        let claim = sample_claim();
+
+        let payload = encode_prepare_frame_payload(&original, 42, Some(&claim));
+        let (decoded, minimum_delivery, decoded_claim) =
+            decode_prepare_frame_payload(&payload).unwrap();
+
+        assert_eq!(decoded, original);
+        assert_eq!(minimum_delivery, 42);
+        assert_eq!(decoded_claim, Some(claim));
+    }
+
+    #[test]
+    fn decoding_a_truncated_prepare_frame_payload_fails() {
+        assert!(decode_prepare_frame_payload(&[0u8; 3]).is_none());
+    }
+
+    #[test]
+    fn a_response_frame_payload_round_trips_with_every_ack_outcome() {
+        for ack in [
+            ClaimAckOutcome::NotSent,
+            ClaimAckOutcome::Accepted,
+            ClaimAckOutcome::Rejected(crate::claim::ClaimRejectReason::SignatureInvalid),
+        ] {
+            let packet_bytes = Fulfill {
+                fulfillment: FULFILLMENT,
+                data: b"hi".to_vec(),
+            }
+            .encode();
+            let payload = encode_response_frame_payload(packet_bytes.clone(), ack);
+            let (decoded_bytes, decoded_ack) = decode_response_frame_payload(&payload).unwrap();
+            assert_eq!(decoded_bytes, packet_bytes);
+            assert_eq!(decoded_ack, ack);
+        }
     }
 
     #[tokio::test]
@@ -333,8 +508,8 @@ mod tests {
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", server.local_addr());
 
-        let response = transport
-            .forward("peer-b", prepare("g.example.app"), 0)
+        let (response, ack) = transport
+            .forward("peer-b", prepare("g.example.app"), 0, None)
             .await;
 
         assert_eq!(
@@ -344,14 +519,83 @@ mod tests {
                 data: b"delivered by the peer".to_vec(),
             })
         );
+        assert_eq!(ack, ClaimAckOutcome::NotSent);
+    }
+
+    #[tokio::test]
+    async fn a_piggybacked_claim_is_verified_by_the_accepting_peer_over_tcp() {
+        let signer = LocalSigner::generate("claim-key");
+        let peer = Arc::new(
+            Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_channel_verification_key("channel-a", signer.public_key().unwrap()),
+        );
+        let server = PeerWireServer::bind(localhost(), peer).await.unwrap();
+
+        let mut transport = NetworkPeerTransport::new();
+        transport.add_peer("peer-b", server.local_addr());
+
+        let digest = connector_domain::claim_digest("channel-a", 1, 50);
+        let claim = WireClaim {
+            channel_id: "channel-a".to_string(),
+            nonce: 1,
+            cumulative_amount: 50,
+            signature: signer.sign(&digest).unwrap(),
+        };
+
+        let (response, ack) = transport
+            .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))
+            .await;
+
+        // The claim is judged independently of the packet: this PREPARE
+        // has no route and is rejected, but the claim it carried is still
+        // accepted.
+        assert!(matches!(response, PacketResponse::Reject(_)));
+        assert_eq!(ack, ClaimAckOutcome::Accepted);
+    }
+
+    #[tokio::test]
+    async fn a_flush_carries_a_claim_alone_and_gets_a_claim_ack_back() {
+        let signer = LocalSigner::generate("claim-key");
+        let peer = Arc::new(
+            Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_channel_verification_key("channel-a", signer.public_key().unwrap()),
+        );
+        let server = PeerWireServer::bind(localhost(), peer).await.unwrap();
+
+        let mut transport = NetworkPeerTransport::new();
+        transport.add_peer("peer-b", server.local_addr());
+
+        let digest = connector_domain::claim_digest("channel-a", 1, 50);
+        let claim = WireClaim {
+            channel_id: "channel-a".to_string(),
+            nonce: 1,
+            cumulative_amount: 50,
+            signature: signer.sign(&digest).unwrap(),
+        };
+
+        let ack = transport.flush("peer-b", claim).await;
+
+        assert_eq!(ack, ClaimAckOutcome::Accepted);
     }
 
     #[tokio::test]
     async fn returns_peer_unreachable_for_an_unregistered_peer_id() {
         let transport = NetworkPeerTransport::new();
 
-        let response = transport
-            .forward("nowhere", prepare("g.example.app"), 0)
+        let (response, ack) = transport
+            .forward("nowhere", prepare("g.example.app"), 0, None)
             .await;
 
         match response {
@@ -361,6 +605,7 @@ mod tests {
             }
             other => panic!("expected a reject, got {other:?}"),
         }
+        assert_eq!(ack, ClaimAckOutcome::NotSent);
     }
 
     #[tokio::test]
@@ -369,8 +614,8 @@ mod tests {
         // Port 0 never accepts a connection, so dialing fails fast.
         transport.add_peer("peer-b", "127.0.0.1:0".parse().unwrap());
 
-        let response = transport
-            .forward("peer-b", prepare("g.example.app"), 0)
+        let (response, _ack) = transport
+            .forward("peer-b", prepare("g.example.app"), 0, None)
             .await;
 
         match response {
@@ -393,8 +638,8 @@ mod tests {
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", server.local_addr());
 
-        let response = transport
-            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0)
+        let (response, _ack) = transport
+            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0, None)
             .await;
 
         match response {
@@ -436,8 +681,8 @@ mod tests {
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", addr);
 
-        let first = transport
-            .forward("peer-b", prepare("g.example.app"), 0)
+        let (first, _) = transport
+            .forward("peer-b", prepare("g.example.app"), 0, None)
             .await;
         assert_eq!(
             first,
@@ -449,8 +694,8 @@ mod tests {
 
         server.shutdown().await;
 
-        let while_down = transport
-            .forward("peer-b", prepare("g.example.app"), 0)
+        let (while_down, _) = transport
+            .forward("peer-b", prepare("g.example.app"), 0, None)
             .await;
         match while_down {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
@@ -466,8 +711,8 @@ mod tests {
         );
         let _server_again = PeerWireServer::bind(addr, peer).await.unwrap();
 
-        let after_recovery = transport
-            .forward("peer-b", prepare("g.example.app"), 0)
+        let (after_recovery, _) = transport
+            .forward("peer-b", prepare("g.example.app"), 0, None)
             .await;
         assert_eq!(
             after_recovery,
