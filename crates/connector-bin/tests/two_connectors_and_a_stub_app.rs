@@ -13,6 +13,8 @@
 //! port the OS actually gave it, so nothing here leaks a fixed port or
 //! collides between runs.
 
+use std::process::Command;
+
 use chrono::{Duration as ChronoDuration, Utc};
 use connector_domain::{derive_condition, Fulfill, Prepare, Reject};
 
@@ -152,7 +154,7 @@ peer_id = "peer-b"
         key_file.path().display()
     ));
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_connector"))
+    let output = Command::new(env!("CARGO_BIN_EXE_connector"))
         .arg(config_file.path())
         .output()
         .expect("run connector binary");
