@@ -19,7 +19,7 @@ use connector_domain::{
 };
 use connector_signer::{verify, PublicKeyBytes, Signature, Signer};
 
-use crate::journal::{InMemoryJournal, Journal};
+use crate::journal::{InMemoryJournal, Journal, JournalError};
 use crate::operator_view::{ClaimView, ExposureView};
 
 /// A claim as it travels the wire (peer-wire-spec.md §3.5): a channel
@@ -281,7 +281,7 @@ impl ClaimBook {
     pub fn set_journal(
         &mut self,
         journal: Arc<dyn Journal>,
-    ) -> Result<Vec<ProjectionDivergence>, crate::journal::JournalError> {
+    ) -> Result<Vec<ProjectionDivergence>, JournalError> {
         let entries = journal.read_all()?;
         let (outbound, inbound_watermarks, projection) =
             Self::rebuild_from(&entries, self.signer.as_ref());
@@ -626,10 +626,10 @@ impl ClaimBook {
                 let ceiling = self.ceilings.get(&channel_id).copied();
                 let exposure = projection.exposure(&channel_id);
                 ExposureView {
-                    over_ceiling: ceiling.is_some_and(|ceiling| exposure > ceiling),
                     channel_id,
                     exposure,
                     ceiling,
+                    over_ceiling: ceiling.is_some_and(|ceiling| exposure > ceiling),
                 }
             })
             .collect()
