@@ -323,36 +323,6 @@ jobs:
         with:
           sarif_file: snyk.sarif
 
-  # Container security scanning with Trivy
-  container-scan:
-    name: Container Security Scan
-    runs-on: ubuntu-latest
-    needs: [docker-build-push]
-    # Only run after Docker image is pushed (main branch only)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      security-events: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: 'ghcr.io/${{ github.repository_owner }}/connector:${{ github.sha }}'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
-
   type-check:
     name: TypeScript Type Check
     runs-on: ubuntu-latest
@@ -625,91 +595,6 @@ jobs:
             sleep 5
           done
 
-  # Build and push Docker image to GitHub Container Registry
-  docker-build-push:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    needs: [lint-and-format, test, build]
-    # Only build and push on push to main (not on PRs)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/connector
-          tags: |
-            # `latest` is deliberately NOT published here (#457). This image is
-            # now built from ./Dockerfile, which builds the RUST connector —
-            # the TypeScript node that answered the YAML/CONFIG_FILE contract
-            # was deleted. Moving `latest` would silently swap the runtime
-            # under every `:latest` consumer before #431 cuts the deploys over,
-            # so `latest` stays on the last TypeScript image (3.44.0), which is
-            # what the in-repo compose stacks now pin. Restore
-            # `type=raw,value=latest` as part of #431.
-            type=sha,prefix=
-            # Full 40-char commit SHA: the Container Security Scan job scans
-            # connector:${{ github.sha }} (full SHA), which the default
-            # type=sha (short SHA) tag does not satisfy -> MANIFEST_UNKNOWN.
-            type=sha,prefix=,format=long
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-      - name: Verify image pushed
-        run: |
-          echo "✓ Docker image pushed to GHCR"
-          echo "  Tags: ${{ steps.meta.outputs.tags }}"
-
-      # Make the package public so operators can `docker pull` the image
-      # referenced in docker-compose.prod.yml without authenticating to GHCR.
-      # GHCR defaults new container packages to PRIVATE regardless of the
-      # linked repository's visibility, so this PATCH is required on first
-      # publish. Idempotent on subsequent runs.
-      #
-      # Fails soft (continue-on-error) — if the visibility patch fails (e.g.
-      # first run creating the package races with the API), the image is
-      # still published and the next run will set it. Surfacing the failure
-      # as a non-blocking warning avoids holding up the CI pipeline.
-      - name: Set container package visibility to public
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method PATCH \
-            "/orgs/${{ github.repository_owner }}/packages/container/connector" \
-            -f visibility=public \
-            && echo "✓ Package visibility set to public" \
-            || echo "::warning::Could not set package visibility — may need manual fix in GHCR UI"
-
   # Summary job to provide clear CI status
   ci-status:
     name: CI Status Summary
@@ -725,8 +610,6 @@ jobs:
         security,
         rfc-links,
         solana-program,
-        docker-build-push,
-        container-scan,
       ]
     if: always()
 
@@ -748,8 +631,6 @@ jobs:
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Security: ${{ needs.security.result }}"
           echo "  RFC Links: ${{ needs.rfc-links.result }}"
-          echo "  Docker Build: ${{ needs.docker-build-push.result }}"
-          echo "  Container Scan: ${{ needs.container-scan.result }}"
           echo ""
 
           # Check if any required job failed

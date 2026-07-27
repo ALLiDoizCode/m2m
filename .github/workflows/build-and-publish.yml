@@ -8,21 +8,11 @@ on:
         description: 'Version tag for Docker image (e.g., v2.6.0) - leave empty for latest'
         required: false
         type: string
-      publish_docker:
-        description: 'Build and push Docker image to GHCR'
-        required: false
-        default: 'true'
-        type: boolean
       publish_npm:
         description: 'Publish npm package to npmjs.com'
         required: false
         default: 'true'
         type: boolean
-      docker_tags:
-        description: 'Additional Docker tags (comma-separated)'
-        required: false
-        type: string
-
   # Automatic builds on version tags
   push:
     tags:
@@ -112,143 +102,6 @@ jobs:
             packages/connector/package.json
           retention-days: 1
 
-  # Build and publish Docker image
-  docker:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-    needs: [build]
-    if: github.event.inputs.publish_docker != 'false'
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: packages/connector
-
-      # Register an up-to-date QEMU/binfmt for the emulated linux/arm64 build.
-      # Without this, arm64 `npm install` runs under the runner's stale QEMU and
-      # intermittently crashes with SIGILL (exit 132). Mirrors ci.yml.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ needs.build.outputs.version }}
-            type=semver,pattern={{version}},value=${{ needs.build.outputs.version }}
-            type=sha,prefix=
-            type=ref,event=branch
-
-      - name: Add additional tags
-        if: github.event.inputs.docker_tags
-        run: |
-          ADDITIONAL_TAGS='${{ github.event.inputs.docker_tags }}'
-          for tag in $(echo $ADDITIONAL_TAGS | tr ',' '\n'); do
-            echo $tag >> tags.txt
-          done
-
-      # Build the image into the local Docker daemon first so the smoke test
-      # can exercise it before we publish.
-      #
-      # The two Node smoke tests that used to live here (issue #54's libsql
-      # native-binding gate and the Mina require(esm) gate) are gone with the
-      # embedded TypeScript node (#457): ./Dockerfile now builds the Rust
-      # connector, which has no Node runtime, no libsql and no o1js. The
-      # replacement gate below is the same shape — run the shipped binary and
-      # fail the release if the image cannot execute it.
-      - name: Build Docker image (load locally)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          load: true
-          push: false
-          tags: connector:smoke-test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64 # load: true requires single-platform; smoke-test arch is amd64 only
-
-      # The binary must run and must refuse to start without a config file
-      # (ADR 0009: validate-or-refuse, no environment-variable override layer).
-      # A non-zero exit with a diagnostic on stderr is the CORRECT behaviour
-      # here; an exit code of 0, or a failure to exec at all (bad arch, missing
-      # loader, missing binary), fails the release.
-      - name: Smoke-test the shipped binary in built image
-        run: |
-          set +e
-          OUTPUT=$(docker run --rm connector:smoke-test /nonexistent/connector.toml 2>&1)
-          STATUS=$?
-          set -e
-          echo "$OUTPUT"
-          if [ "$STATUS" -eq 0 ]; then
-            echo "ERROR: connector started with a nonexistent config file" >&2
-            exit 1
-          fi
-          if [ "$STATUS" -ge 126 ]; then
-            echo "ERROR: image could not execute the connector binary (exit $STATUS)" >&2
-            exit 1
-          fi
-          echo "✓ connector binary executes and refuses to start without a valid config"
-
-      - name: Push Docker image
-        id: push-connector
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: |
-            org.opencontainers.image.title=Connector
-            org.opencontainers.image.description=Multi-chain ILP connector
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.build.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-      - name: Sign connector image with cosign (keyless OIDC)
-        env:
-          DIGEST: ${{ steps.push-connector.outputs.digest }}
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
-
-      - name: Docker build summary
-        run: |
-          echo '## Docker Build Summary' >> $GITHUB_STEP_SUMMARY
-          echo '' >> $GITHUB_STEP_SUMMARY
-          echo '**Image:** `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}`' >> $GITHUB_STEP_SUMMARY
-          echo '' >> $GITHUB_STEP_SUMMARY
-          echo '**Tags:**' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.meta.outputs.tags }}' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo '' >> $GITHUB_STEP_SUMMARY
-          echo '**Registry:** GHCR' >> $GITHUB_STEP_SUMMARY
-
   # Publish npm package to npmjs.com
   npm:
     name: Publish npm Package
@@ -307,7 +160,7 @@ jobs:
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, docker, npm]
+    needs: [build, npm]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -342,7 +195,6 @@ jobs:
 
             Pull the latest image:
             ```
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
             ```
 
             ## npm Package
@@ -358,7 +210,7 @@ jobs:
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [docker, npm, release]
+    needs: [npm, release]
     if: always()
 
     steps:
@@ -368,7 +220,6 @@ jobs:
           echo '' >> $GITHUB_STEP_SUMMARY
           echo '| Job | Status |' >> $GITHUB_STEP_SUMMARY
           echo '|-----|--------|' >> $GITHUB_STEP_SUMMARY
-          echo '| Docker Image | ${{ needs.docker.result }} |' >> $GITHUB_STEP_SUMMARY
           echo '| npm Package | ${{ needs.npm.result }} |' >> $GITHUB_STEP_SUMMARY
           echo '| GitHub Release | ${{ needs.release.result }} |' >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
@@ -376,5 +227,4 @@ jobs:
           echo '' >> $GITHUB_STEP_SUMMARY
           echo '### Docker Usage' >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }} >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
