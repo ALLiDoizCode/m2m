@@ -13,10 +13,14 @@ use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
 
-use connector_domain::{advance_watermark, claim_digest, validate_claim, ClaimError, Watermark};
+use connector_domain::{
+    advance_watermark, claim_digest, validate_claim, ClaimError, JournalEntry, Projection,
+    ProjectionDivergence, Watermark,
+};
 use connector_signer::{verify, PublicKeyBytes, Signature, Signer};
 
-use crate::operator_view::ClaimView;
+use crate::journal::{InMemoryJournal, Journal};
+use crate::operator_view::{ClaimView, ExposureView};
 
 /// A claim as it travels the wire (peer-wire-spec.md §3.5): a channel
 /// identifier, a nonce, a cumulative amount, and a signature over
@@ -186,9 +190,26 @@ pub struct ClaimBook {
     /// `channel_id` -> the public key whose signature this connector
     /// accepts on a claim for that channel.
     verification_keys: HashMap<String, PublicKeyBytes>,
+    /// `channel_id` -> the exposure ceiling this connector tolerates before
+    /// it stops forwarding for that channel's counterparty (ADR 0005,
+    /// peer-wire-spec.md §5.3, issue #424). A channel with none configured
+    /// is never over ceiling -- matching how a node with no signer never
+    /// emits a claim rather than panicking.
+    ceilings: HashMap<String, u64>,
     outbound: RwLock<HashMap<String, OutboundLedger>>,
     /// `channel_id` -> the highest nonce/amount accepted on it so far.
     inbound_watermarks: RwLock<HashMap<String, Watermark>>,
+    /// Durable record of every claim signed, every claim accepted, and
+    /// every inbound fulfilment not yet covered by one (ADR 0005, issue
+    /// #424). Defaults to [`InMemoryJournal`] -- a node that never
+    /// configures a real one keeps working exactly as it did before this
+    /// issue, just without surviving a restart, matching how `settlement`
+    /// degrades to `None`.
+    journal: Arc<dyn Journal>,
+    /// Balances and exposure, derived from `journal`'s own entries rather
+    /// than stored independently (ADR 0005). Updated alongside every
+    /// journal append so a live read never has to replay the journal.
+    projection: RwLock<Projection>,
 }
 
 impl ClaimBook {
@@ -201,8 +222,11 @@ impl ClaimBook {
             signer,
             outbound_channels,
             verification_keys,
+            ceilings: HashMap::new(),
             outbound: RwLock::new(HashMap::new()),
             inbound_watermarks: RwLock::new(HashMap::new()),
+            journal: Arc::new(InMemoryJournal::new()),
+            projection: RwLock::new(Projection::default()),
         }
     }
 
@@ -235,6 +259,173 @@ impl ClaimBook {
     /// an inbound claim for `channel_id`.
     pub fn set_verification_key(&mut self, channel_id: impl Into<String>, key: PublicKeyBytes) {
         self.verification_keys.insert(channel_id.into(), key);
+    }
+
+    /// Configure `channel_id`'s exposure ceiling (issue #424,
+    /// peer-wire-spec.md §5.3).
+    pub fn set_ceiling(&mut self, channel_id: impl Into<String>, ceiling: u64) {
+        self.ceilings.insert(channel_id.into(), ceiling);
+    }
+
+    /// Configure the durable journal claim and exposure state is persisted
+    /// to, replaying every entry already in it to rebuild this book's
+    /// in-memory state (ADR 0005, issue #424: "rebuilt from the journal on
+    /// start"). Call this *after* [`ClaimBook::set_signer`] -- rebuild
+    /// re-signs a fresh claim for any peer left with unacknowledged
+    /// exposure (see [`ClaimBook::rebuild_from`]'s own doc), which needs a
+    /// signer already in place to do; without one, that peer's cumulative
+    /// state still recovers correctly, it just cannot re-arm a claim to
+    /// send until a fulfilment next changes it. Takes `&mut self` for the
+    /// same reason `set_signer` does -- called only while a `Connector` is
+    /// still being built.
+    pub fn set_journal(
+        &mut self,
+        journal: Arc<dyn Journal>,
+    ) -> Result<Vec<ProjectionDivergence>, crate::journal::JournalError> {
+        let entries = journal.read_all()?;
+        let (outbound, inbound_watermarks, projection) =
+            Self::rebuild_from(&entries, self.signer.as_ref());
+        let divergences = projection.divergences();
+        for divergence in &divergences {
+            tracing::error!(%divergence, "journal rebuild found a projection divergence");
+        }
+        self.journal = journal;
+        self.outbound = RwLock::new(outbound);
+        self.inbound_watermarks = RwLock::new(inbound_watermarks);
+        self.projection = RwLock::new(projection);
+        Ok(divergences)
+    }
+
+    /// Fold `entries` into fresh outbound/inbound state and a
+    /// [`Projection`] -- the pure replay [`ClaimBook::set_journal`] drives.
+    /// A peer left with `pending` unacknowledged is *always* re-armed with
+    /// a freshly signed claim of the same nonce/cumulative amount when
+    /// `signer` is available: resending an already-acknowledged claim
+    /// costs nothing (the peer's own `accept_inbound` simply rejects a
+    /// nonce that does not advance its watermark), so recovery needs no
+    /// separate "was this acknowledged" record -- treating every rebuilt
+    /// claim as pending is always safe, matching the acceptance criteria's
+    /// "no manual repair".
+    fn rebuild_from(
+        entries: &[JournalEntry],
+        signer: Option<&Arc<dyn Signer>>,
+    ) -> (
+        HashMap<String, OutboundLedger>,
+        HashMap<String, Watermark>,
+        Projection,
+    ) {
+        let mut outbound: HashMap<String, OutboundLedger> = HashMap::new();
+        let mut inbound_watermarks: HashMap<String, Watermark> = HashMap::new();
+        let mut projection = Projection::default();
+        for entry in entries {
+            projection.apply(entry);
+            match entry {
+                JournalEntry::OutboundClaimSigned {
+                    peer_id,
+                    channel_id,
+                    nonce,
+                    cumulative_amount,
+                } => {
+                    outbound.insert(
+                        peer_id.clone(),
+                        OutboundLedger {
+                            channel_id: channel_id.clone(),
+                            pending: None,
+                            pending_since: None,
+                            nonce: *nonce,
+                            cumulative_amount: *cumulative_amount,
+                        },
+                    );
+                }
+                JournalEntry::InboundClaimAccepted {
+                    channel_id,
+                    nonce,
+                    cumulative_amount,
+                } => {
+                    inbound_watermarks.insert(
+                        channel_id.clone(),
+                        advance_watermark(*nonce, *cumulative_amount),
+                    );
+                }
+                JournalEntry::InboundFulfillmentRecorded { .. } => {}
+            }
+        }
+        if let Some(signer) = signer {
+            for ledger in outbound.values_mut() {
+                let digest =
+                    claim_digest(&ledger.channel_id, ledger.nonce, ledger.cumulative_amount);
+                if let Ok(signature) = signer.sign(&digest) {
+                    ledger.pending = Some(WireClaim {
+                        channel_id: ledger.channel_id.clone(),
+                        nonce: ledger.nonce,
+                        cumulative_amount: ledger.cumulative_amount,
+                        signature,
+                    });
+                }
+            }
+        }
+        (outbound, inbound_watermarks, projection)
+    }
+
+    /// Append `entry` to the durable journal and fold it into the live
+    /// projection. A failed durable write is logged rather than losing the
+    /// in-memory update entirely -- this connector's own session-lifetime
+    /// bookkeeping (and, in particular, ceiling enforcement) stays correct
+    /// even in that case; only surviving a restart is at risk, exactly the
+    /// same degradation a node with no journal configured lives with for
+    /// its entire lifetime.
+    fn append_and_project(&self, entry: JournalEntry) {
+        if let Err(err) = self.journal.append(&entry) {
+            tracing::error!(%err, "failed to durably append a journal entry");
+        }
+        self.projection
+            .write()
+            .expect("projection lock poisoned")
+            .apply(&entry);
+    }
+
+    /// The channel this connector claims against when it owes `peer_id`,
+    /// if one is configured (issue #424: identifies which channel an
+    /// outgoing frame to `peer_id` is claimed against, independent of
+    /// whether a claim happens to be pending right now).
+    pub fn outbound_channel_id(&self, peer_id: &str) -> Option<String> {
+        self.outbound_channels.get(peer_id).cloned()
+    }
+
+    /// `channel_id`'s current exposure: value this connector has delivered
+    /// on that channel's counterparty's behalf but does not yet hold a
+    /// covering claim for (peer-wire-spec.md §5.3).
+    pub fn exposure(&self, channel_id: &str) -> u64 {
+        self.projection
+            .read()
+            .expect("projection lock poisoned")
+            .exposure(channel_id)
+    }
+
+    /// Whether `channel_id`'s exposure exceeds its configured ceiling. A
+    /// channel with no ceiling configured is never over one -- matching how
+    /// a peer with no configured channel never gets a claim emitted.
+    pub fn is_over_ceiling(&self, channel_id: &str) -> bool {
+        match self.ceilings.get(channel_id) {
+            Some(&ceiling) => self
+                .projection
+                .read()
+                .expect("projection lock poisoned")
+                .is_over_ceiling(channel_id, ceiling),
+            None => false,
+        }
+    }
+
+    /// Record that a packet arriving on `channel_id` fulfilled for `amount`,
+    /// extending this connector's exposure to that channel's counterparty
+    /// until a covering claim is accepted (peer-wire-spec.md §5.3, issue
+    /// #424). Durable: journaled before the in-memory projection reflects
+    /// it, matching [`ClaimBook::record_fulfillment`]'s own ordering.
+    pub fn record_inbound_delivery(&self, channel_id: &str, amount: u64) {
+        self.append_and_project(JournalEntry::InboundFulfillmentRecorded {
+            channel_id: channel_id.to_string(),
+            amount,
+        });
     }
 
     /// Record that a packet forwarded to `peer_id` fulfilled, owing it
@@ -272,6 +463,12 @@ impl ClaimBook {
         };
         ledger.pending = Some(claim.clone());
         ledger.pending_since = Some(now);
+        self.append_and_project(JournalEntry::OutboundClaimSigned {
+            peer_id: peer_id.to_string(),
+            channel_id: claim.channel_id.clone(),
+            nonce: claim.nonce,
+            cumulative_amount: claim.cumulative_amount,
+        });
         Some(claim)
     }
 
@@ -354,6 +551,12 @@ impl ClaimBook {
                     claim.channel_id.clone(),
                     advance_watermark(claim.nonce, claim.cumulative_amount),
                 );
+                drop(watermarks);
+                self.append_and_project(JournalEntry::InboundClaimAccepted {
+                    channel_id: claim.channel_id.clone(),
+                    nonce: claim.nonce,
+                    cumulative_amount: claim.cumulative_amount,
+                });
                 ClaimAckOutcome::Accepted
             }
             Err(ClaimError::NonceNotAdvancing { .. }) => {
@@ -400,6 +603,36 @@ impl ClaimBook {
                 }),
         );
         views
+    }
+
+    /// Every channel with known exposure, for the operator surface's
+    /// read-only inspection interface (issue #424): every channel a
+    /// ceiling is configured for, union every channel the projection has
+    /// ever recorded a fulfilment or an accepted claim on -- so a channel
+    /// shows up here even before its first claim, and a configured ceiling
+    /// is visible even on a channel with zero exposure so far.
+    pub fn exposure_views(&self) -> Vec<ExposureView> {
+        let projection = self.projection.read().expect("projection lock poisoned");
+        let mut channel_ids: Vec<String> = self.ceilings.keys().cloned().collect();
+        for channel_id in projection.known_channels() {
+            if !channel_ids.contains(&channel_id) {
+                channel_ids.push(channel_id);
+            }
+        }
+        channel_ids.sort();
+        channel_ids
+            .into_iter()
+            .map(|channel_id| {
+                let ceiling = self.ceilings.get(&channel_id).copied();
+                let exposure = projection.exposure(&channel_id);
+                ExposureView {
+                    over_ceiling: ceiling.is_some_and(|ceiling| exposure > ceiling),
+                    channel_id,
+                    exposure,
+                    ceiling,
+                }
+            })
+            .collect()
     }
 }
 
@@ -670,5 +903,197 @@ mod tests {
             book.accept_inbound(&sign(6, 500)),
             ClaimAckOutcome::Accepted
         );
+    }
+
+    mod exposure_and_ceiling {
+        use super::*;
+
+        #[test]
+        fn a_channel_with_no_ceiling_configured_is_never_over_one() {
+            let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            book.record_inbound_delivery("channel-a", u64::MAX);
+
+            assert!(!book.is_over_ceiling("channel-a"));
+        }
+
+        #[test]
+        fn recorded_deliveries_below_the_ceiling_do_not_trip_it() {
+            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            book.set_ceiling("channel-a", 100);
+            book.record_inbound_delivery("channel-a", 60);
+
+            assert_eq!(book.exposure("channel-a"), 60);
+            assert!(!book.is_over_ceiling("channel-a"));
+        }
+
+        #[test]
+        fn recorded_deliveries_exceeding_the_ceiling_trip_it() {
+            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            book.set_ceiling("channel-a", 100);
+            book.record_inbound_delivery("channel-a", 60);
+            book.record_inbound_delivery("channel-a", 50);
+
+            assert_eq!(book.exposure("channel-a"), 110);
+            assert!(book.is_over_ceiling("channel-a"));
+        }
+
+        #[test]
+        fn an_accepted_inbound_claim_covers_exposure_and_clears_the_ceiling() {
+            let peer_signer = LocalSigner::generate("peer-key");
+            let key = peer_signer.public_key().unwrap();
+            let mut book = book_with_peer("peer-b", "channel-a", key);
+            book.set_ceiling("channel-a", 100);
+            book.record_inbound_delivery("channel-a", 60);
+            book.record_inbound_delivery("channel-a", 50);
+            assert!(book.is_over_ceiling("channel-a"));
+
+            let claim = WireClaim {
+                channel_id: "channel-a".to_string(),
+                nonce: 1,
+                cumulative_amount: 110,
+                signature: peer_signer
+                    .sign(&claim_digest("channel-a", 1, 110))
+                    .unwrap(),
+            };
+            assert_eq!(book.accept_inbound(&claim), ClaimAckOutcome::Accepted);
+
+            assert_eq!(book.exposure("channel-a"), 0);
+            assert!(!book.is_over_ceiling("channel-a"));
+        }
+
+        #[test]
+        fn outbound_channel_id_reports_the_configured_channel_for_a_peer() {
+            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            book.set_outbound_channel("peer-b", "channel-a");
+
+            assert_eq!(
+                book.outbound_channel_id("peer-b"),
+                Some("channel-a".to_string())
+            );
+            assert_eq!(book.outbound_channel_id("peer-nowhere"), None);
+        }
+    }
+
+    mod journal_recovery {
+        use super::*;
+        use crate::journal::{FileJournal, InMemoryJournal};
+
+        #[test]
+        fn a_freshly_configured_journal_has_nothing_to_replay() {
+            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            let divergences = book.set_journal(Arc::new(InMemoryJournal::new())).unwrap();
+
+            assert!(divergences.is_empty());
+            assert_eq!(book.exposure("channel-a"), 0);
+        }
+
+        /// The acceptance criteria's own scenario: a node killed mid-traffic
+        /// recovers its money state by replay, with no manual repair. This
+        /// rebuilds a *fresh* `ClaimBook` from the same durable journal a
+        /// prior instance wrote to, standing in for a restart, and asserts
+        /// every side of its money state -- what it owes downstream, what a
+        /// channel has claimed, and what remains exposed -- comes back
+        /// exactly as it was.
+        #[test]
+        fn a_node_restarted_against_the_same_journal_recovers_its_money_state() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.log");
+            let signer = Arc::new(LocalSigner::generate("claim-key"));
+            let peer_key = LocalSigner::generate("peer-key");
+
+            {
+                let mut book = ClaimBook::new(
+                    Some(signer.clone() as Arc<dyn Signer>),
+                    HashMap::new(),
+                    HashMap::new(),
+                );
+                book.set_outbound_channel("peer-b", "channel-out");
+                book.set_verification_key("channel-in", peer_key.public_key().unwrap());
+                book.set_ceiling("channel-in", 1_000);
+                book.set_journal(Arc::new(FileJournal::open(&path).unwrap()))
+                    .unwrap();
+
+                // What we owe peer-b: two fulfilments, superseding into one
+                // pending claim.
+                book.record_fulfillment("peer-b", 100, now());
+                book.record_fulfillment("peer-b", 50, now());
+
+                // What channel-in owes us: delivered but uncovered so far.
+                book.record_inbound_delivery("channel-in", 40);
+                book.record_inbound_delivery("channel-in", 30);
+
+                // A claim channel-in did send us, partially covering it.
+                let claim = WireClaim {
+                    channel_id: "channel-in".to_string(),
+                    nonce: 1,
+                    cumulative_amount: 40,
+                    signature: peer_key.sign(&claim_digest("channel-in", 1, 40)).unwrap(),
+                };
+                assert_eq!(book.accept_inbound(&claim), ClaimAckOutcome::Accepted);
+            }
+
+            // A fresh book, backed by the same journal file, standing in for
+            // a restarted process -- nothing here was told about the prior
+            // instance's in-memory state directly.
+            let mut restarted = ClaimBook::new(
+                Some(signer as Arc<dyn Signer>),
+                HashMap::new(),
+                HashMap::new(),
+            );
+            let divergences = restarted
+                .set_journal(Arc::new(FileJournal::open(&path).unwrap()))
+                .unwrap();
+
+            assert!(divergences.is_empty());
+            // The outbound debt to peer-b survived, re-armed with a fresh
+            // signature over the same nonce/cumulative amount -- resendable
+            // with no manual repair.
+            let pending = restarted.pending_claim("peer-b").expect("still pending");
+            assert_eq!(pending.nonce, 2);
+            assert_eq!(pending.cumulative_amount, 150);
+            // The inbound watermark and remaining exposure on channel-in
+            // survived too: 70 delivered, 40 claimed, 30 still exposed.
+            assert_eq!(restarted.exposure("channel-in"), 30);
+        }
+
+        #[test]
+        fn a_claim_accepted_beyond_what_was_ever_recorded_delivered_is_a_reported_divergence() {
+            let peer_signer = LocalSigner::generate("peer-key");
+            let mut book = ClaimBook::new(
+                None,
+                HashMap::new(),
+                HashMap::from([("channel-a".to_string(), peer_signer.public_key().unwrap())]),
+            );
+            book.set_journal(Arc::new(InMemoryJournal::new())).unwrap();
+            book.record_inbound_delivery("channel-a", 10);
+            let claim = WireClaim {
+                channel_id: "channel-a".to_string(),
+                nonce: 1,
+                cumulative_amount: 999,
+                signature: peer_signer
+                    .sign(&claim_digest("channel-a", 1, 999))
+                    .unwrap(),
+            };
+            assert_eq!(book.accept_inbound(&claim), ClaimAckOutcome::Accepted);
+            let entries = book.journal.read_all().unwrap();
+
+            // Rebuilding a fresh book from that same (divergent) journal
+            // reports it rather than absorbing it silently.
+            let mut rebuilt = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            let journal = InMemoryJournal::new();
+            for entry in entries {
+                journal.append(&entry).unwrap();
+            }
+            let divergences = rebuilt.set_journal(Arc::new(journal)).unwrap();
+
+            assert_eq!(
+                divergences,
+                vec![ProjectionDivergence::ClaimedExceedsFulfilled {
+                    channel_id: "channel-a".to_string(),
+                    claimed: 999,
+                    fulfilled: 10,
+                }]
+            );
+        }
     }
 }

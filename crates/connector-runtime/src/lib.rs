@@ -4,6 +4,7 @@ mod app_client;
 mod claim;
 mod clock;
 mod connector;
+mod journal;
 mod metrics;
 mod network_peer_transport;
 mod operator_view;
@@ -15,6 +16,7 @@ pub use app_client::{AppClient, AppOutcome, Delivery, FakeAppClient, HttpAppClie
 pub use claim::{ClaimAckOutcome, ClaimBook, ClaimRejectReason, WireClaim};
 pub use clock::{Clock, SystemClock, TestClock};
 pub use connector::{ChannelOperationError, Connector, LeaseRouteError};
+pub use journal::{FileJournal, InMemoryJournal, Journal, JournalError};
 pub use metrics::Metrics;
 pub use network_peer_transport::{NetworkPeerTransport, PeerWireServer};
 pub use operator_view::{

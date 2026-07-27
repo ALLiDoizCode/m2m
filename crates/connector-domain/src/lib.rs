@@ -13,6 +13,7 @@ mod error;
 mod fee;
 mod oer;
 mod packet;
+mod projection;
 mod route;
 
 pub use address::is_valid_ilp_address;
@@ -23,4 +24,5 @@ pub use condition::{
 pub use error::PacketError;
 pub use fee::amount_after_fee;
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+pub use projection::{JournalEntry, Projection, ProjectionDivergence};
 pub use route::select_route;

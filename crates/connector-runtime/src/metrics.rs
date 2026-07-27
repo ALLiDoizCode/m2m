@@ -4,11 +4,15 @@
 //! (`GET /metrics`, bearer-token gated per ADR 0008 -- metrics are a read
 //! like peers or routes, not a separate unauthenticated port).
 //!
-//! `exposure` and `settlement` are declared now but always report zero:
-//! nothing in the runtime tracks either yet (issues #422-#424), matching the
-//! precedent [`crate::operator_view`]'s empty `ExposureView`/`ChannelView`
-//! already set -- the shape is complete so those tickets only need to start
-//! populating it.
+//! `exposure` and `settlement` are declared now but always report zero.
+//! `settlement`: nothing in the runtime tracks on-chain redemption yet
+//! (issue #425). `exposure`: the projection itself exists as of issue #424
+//! (see `crate::claim::ClaimBook::exposure_views`, the operator surface's
+//! `GET /exposure`) but this single unlabeled gauge has no sensible
+//! per-channel value to report as one number; a future ticket wanting it in
+//! Prometheus should shape it as a labeled gauge over `ClaimBook`'s own
+//! channels, the same read model `/exposure` already exposes, rather than
+//! force multiple channels' exposure into a single scalar.
 
 use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder};
 
@@ -49,7 +53,7 @@ impl Metrics {
         .expect("valid metric");
         let exposure = IntGauge::new(
             "toon_exposure",
-            "Unclaimed exposure to peers. Always 0 until the claim/exposure projection lands (issues #423, #424).",
+            "Unclaimed exposure to peers. Always 0: this single unlabeled gauge has no producer -- see `crate::claim::ClaimBook::exposure_views` and `GET /exposure` for the real, per-channel figures issue #424 added.",
         )
         .expect("valid metric");
         let settlement_total = IntCounter::new(
@@ -67,10 +71,10 @@ impl Metrics {
         registry
             .register(Box::new(fees_earned_total.clone()))
             .expect("register metric");
-        // `exposure` and `settlement_total` have no producer yet (issues
-        // #422-#424): registered so the metric is present at its decided
-        // name and stays at 0, with no field kept for a value nothing
-        // updates.
+        // `exposure` and `settlement_total` have no producer (see their own
+        // help text above): registered so the metric is present at its
+        // decided name and stays at 0, with no field kept for a value
+        // nothing updates.
         registry
             .register(Box::new(exposure))
             .expect("register metric");
@@ -147,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn exposure_and_settlement_report_zero_until_their_tickets_land() {
+    fn exposure_and_settlement_gauges_have_no_producer_and_report_zero() {
         let metrics = Metrics::new();
         let text = metrics.encode();
         assert!(text.contains("toon_exposure 0"));
