@@ -1,0 +1,41 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector overlay (issue #490, ADR 0013's parallel fleet)
+# ═══════════════════════════════════════════════════════════════════════════
+# ADDITIVE: adds the Rust connector alongside docker-compose.node.yml's
+# existing TypeScript fleet on this SAME box, WITHOUT editing that file.
+# Compose merges multiple `-f` files into one project, so this service joins
+# the SAME default network as `relay` (and the TypeScript `connector`) —
+# `handler_url = "http://relay:3100"` in ./connector-rust.toml resolves by
+# the same container-name DNS the TypeScript node already relies on. Neither
+# `relay` nor any other existing service is touched here.
+#
+# Run alongside the existing stack (never on its own — it has no relay
+# service of its own to front):
+#   docker compose -f infra/linode-node/docker-compose.node.yml \
+#                   -f infra/linode-node/docker-compose.node.rust.yml up -d
+#
+# Distinct from the TypeScript node in every way ADR 0013 requires:
+#   - image:  connector-rust (issue #487), pinned to an exact sha- tag, never
+#             `connector` or a floating tag
+#   - ports:  4000 (client edge + operator + /metrics — one port, unlike the
+#             TypeScript node's three) and 4001 (peer wire) — neither
+#             collides with the TypeScript node's 3000/8080/8081
+#   - data:   ./signer-rust.key, a path distinct from the TypeScript node's
+#             `connector_data` volume; this service gets no named volume at
+#             all (connector-runtime holds no state beyond the signer key)
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  connector-rust:
+    # Pinned per the issue's own AC ("not a moving one") to the exact commit
+    # this overlay was authored against — see
+    # deploy/connector-rust/README.md's tag table for what sha- means.
+    # Re-pin this alongside any future update to connector-rust.toml.
+    image: ghcr.io/toon-protocol/connector-rust:sha-0e45cef
+    volumes:
+      - ./connector-rust.toml:/app/config/connector.toml:ro
+      - ./signer-rust.key:/app/data/signer.key:ro
+    ports:
+      - '4000:4000'
+      - '4001:4001'
+    restart: unless-stopped

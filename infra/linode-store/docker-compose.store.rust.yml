@@ -1,0 +1,32 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector overlay, store side (issue #490, ADR 0013's
+# parallel fleet)
+# ═══════════════════════════════════════════════════════════════════════════
+# Mirrors infra/linode-node/docker-compose.node.rust.yml's own header.
+# ADDITIVE: adds the Rust connector alongside docker-compose.store.yml's
+# existing TypeScript fleet on this SAME box, WITHOUT editing that file.
+# Joins the same default network as `store`, so
+# `handler_url = "http://store:3300"` in ./connector-rust.toml resolves by
+# the same container-name DNS the TypeScript node already relies on. Neither
+# `store` nor any other existing service is touched here.
+#
+# Run alongside the existing stack (never on its own — it has no store
+# service of its own to front):
+#   docker compose -f infra/linode-store/docker-compose.store.yml \
+#                   -f infra/linode-store/docker-compose.store.rust.yml up -d
+#
+# Same distinctions as the node-side overlay: its own pinned image tag, its
+# own ports (4000/4001, not the TypeScript node's 3000/8080/8081), its own
+# data path (./signer-rust.key, no named volume).
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  connector-rust:
+    image: ghcr.io/toon-protocol/connector-rust:sha-0e45cef
+    volumes:
+      - ./connector-rust.toml:/app/config/connector.toml:ro
+      - ./signer-rust.key:/app/data/signer.key:ro
+    ports:
+      - '4000:4000'
+      - '4001:4001'
+    restart: unless-stopped
