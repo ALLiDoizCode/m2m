@@ -8,6 +8,8 @@ license.workspace = true
 connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }
 axum = "0.6"
+base64 = "0.22"
+tracing = "0.1"
 
 [dev-dependencies]
 connector-config = { path = "../connector-config" }

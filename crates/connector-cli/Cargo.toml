@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 connector-config = { path = "../connector-config" }
 connector-client-edge = { path = "../connector-client-edge" }
+connector-domain = { path = "../connector-domain" }
 connector-operator = { path = "../connector-operator" }
 connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }

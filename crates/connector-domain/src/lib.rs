@@ -4,13 +4,16 @@
 //! ILP address validation (RFC-0015), longest-prefix route selection,
 //! flat per-packet fee / minimum-delivery arithmetic (ADR 0010),
 //! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),
-//! and claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423).
+//! claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423), and
+//! client-edge sender identity resolution (`docs/protocol/client-edge-spec.md`
+//! §1.2, issue #502).
 
 mod address;
 mod claim;
 mod condition;
 mod error;
 mod fee;
+mod identity;
 mod oer;
 mod packet;
 mod projection;
@@ -23,6 +26,7 @@ pub use condition::{
 };
 pub use error::PacketError;
 pub use fee::amount_after_fee;
+pub use identity::{resolve_identity, ConfiguredIdentity, SenderIdentity, UnauthorizedIdentity};
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 pub use projection::{JournalEntry, Projection, ProjectionDivergence};
 pub use route::select_route;

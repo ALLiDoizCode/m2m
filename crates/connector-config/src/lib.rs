@@ -10,6 +10,7 @@
 
 mod config;
 mod error;
+mod identity;
 mod operator;
 mod peer;
 mod route;
@@ -17,6 +18,7 @@ mod secret;
 
 pub use config::Config;
 pub use error::ConfigError;
+pub use identity::ClientIdentityConfig;
 pub use operator::OperatorConfig;
 pub use peer::PeerConfig;
 pub use route::{PeerRouteConfig, StaticRoute};

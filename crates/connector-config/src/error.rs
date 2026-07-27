@@ -121,4 +121,10 @@ pub enum ConfigError {
         #[source]
         source: AddrParseError,
     },
+
+    #[error("client identity entry has an empty 'id'")]
+    ClientIdentityIdEmpty,
+
+    #[error("duplicate client identity id '{id}'")]
+    DuplicateClientIdentityId { id: String },
 }

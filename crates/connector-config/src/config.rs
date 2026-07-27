@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::ConfigError;
+use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClientIdentity};
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{resolve_peers, PeerConfig, RawPeer};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
@@ -33,6 +34,11 @@ struct RawConfig {
     /// ticket actually needed it end to end; this is that ticket.
     #[serde(default)]
     peers: Vec<RawPeer>,
+    /// Client-edge identities this node authenticates over HTTP (issue
+    /// #502, `docs/protocol/client-edge-spec.md` §1.2) -- distinct from
+    /// `peers` above, which addresses peer-wire dial targets.
+    #[serde(default)]
+    client_identities: Vec<RawClientIdentity>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -52,6 +58,7 @@ pub struct Config {
     peers: Vec<PeerConfig>,
     peer_wire_addr: Option<SocketAddr>,
     operator: Option<OperatorConfig>,
+    client_identities: Vec<ClientIdentityConfig>,
 }
 
 impl Config {
@@ -103,6 +110,7 @@ impl Config {
             })
             .transpose()?;
         let operator = resolve_operator(raw.operator)?;
+        let client_identities = resolve_client_identities(raw.client_identities)?;
 
         Ok(Config {
             client_edge_addr,
@@ -112,6 +120,7 @@ impl Config {
             peers,
             peer_wire_addr,
             operator,
+            client_identities,
         })
     }
 
@@ -159,6 +168,14 @@ impl Config {
     /// a bearer token or a write-key allowlist.
     pub fn operator(&self) -> Option<&OperatorConfig> {
         self.operator.as_ref()
+    }
+
+    /// The client-edge identities this node authenticates over HTTP
+    /// (`docs/protocol/client-edge-spec.md` §1.2). A request naming none of
+    /// these via `ILP-Peer-Id` is anonymous, not rejected -- anonymity is a
+    /// first-class path, not the absence of one.
+    pub fn client_identities(&self) -> &[ClientIdentityConfig] {
+        &self.client_identities
     }
 }
 
@@ -502,6 +519,81 @@ write_keys = ["{key}"]
         assert!(matches!(
             result,
             Err(ConfigError::OperatorMissingBearerToken)
+        ));
+    }
+
+    #[test]
+    fn a_config_with_no_client_identities_section_has_an_empty_list() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert!(config.client_identities().is_empty());
+    }
+
+    #[test]
+    fn loads_client_identities() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "buyer-a"
+secret = "s3cr3t"
+
+[[client_identities]]
+id = "buyer-b"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.client_identities().len(), 2);
+        assert_eq!(config.client_identities()[0].id(), "buyer-a");
+        assert_eq!(config.client_identities()[0].secret(), "s3cr3t");
+        assert_eq!(config.client_identities()[1].id(), "buyer-b");
+        assert_eq!(config.client_identities()[1].secret(), "");
+    }
+
+    #[test]
+    fn rejects_a_duplicate_client_identity_id() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "buyer-a"
+secret = "one"
+
+[[client_identities]]
+id = "buyer-a"
+secret = "two"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::DuplicateClientIdentityId { .. })
         ));
     }
 }
