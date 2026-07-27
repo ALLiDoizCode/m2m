@@ -176,7 +176,8 @@ base64(JSON.stringify(body))`.
 
 For a locally-terminated route configured with `requireRequestBinding: true`, the connector binds
 the _inner_ HTTP request it will proxy to the app (the literal HTTP envelope carried verbatim in
-the PREPARE's `data` field) to the claim that pays for it, using an RFC 9421 HTTP Message
+the PREPARE's `data` field, whose wire format §1.7 defines) to the claim that pays for it, using
+an RFC 9421 HTTP Message
 Signature over that inner request with an RFC 9530 `Content-Digest`, plus a `TOON-Price` header
 compared byte-exact against the route's configured price:
 
@@ -217,6 +218,96 @@ rate-limits probes per that identity. A sender with no channel, or one over its 
 is rejected at ingress with `403` (a status this subsection adds to §1.1's table, distinct from
 `401`: the peer authenticated successfully, but is not authorized to probe) without being
 forwarded.
+
+### 1.7 The envelope
+
+For a locally-terminated route (a `RouteTermination`, per `CONTEXT.md`), the PREPARE's `data`
+field carries a literal HTTP/1.1 request — method, target, headers, body — that this connector
+extracts and makes to the app; the app's HTTP response travels back the same way, carried in the
+FULFILL's `data` field. This subsection is the wire format for both directions, stated normatively
+and self-contained: it is recovered from a hand-rolled parser (issue #216) whose TypeScript source
+no longer exists in this repository (deleted by #465), not derived from it by reference. It is
+deliberately not a conventional HTTP/1.1 message parser — every quirk in §1.7.2 is a place an
+RFC 7230-conformant parser would disagree with this connector, and each has a reason.
+
+#### 1.7.1 Wire format
+
+A request envelope is:
+
+```
+request-line CRLF
+*( header-field CRLF )
+CRLF
+body
+```
+
+where `request-line = method SP target SP http-version` (e.g. `POST /greet HTTP/1.1`) and
+`header-field = field-name ":" OWS field-value` (e.g. `Content-Type: application/json`). A
+response envelope is the same shape with a status-line in place of the request-line:
+`http-version SP status-code SP reason-phrase` (e.g. `HTTP/1.1 200 OK`).
+
+`CRLF` is exactly the two bytes `0x0D 0x0A`, `SP` is exactly `0x20`. The grammar above is
+otherwise exactly what is written to the wire — this is a serialization, not an abstraction over
+one.
+
+#### 1.7.2 Quirks
+
+Each of these is a place a conventional HTTP/1.1 parser diverges from this connector; recovering
+them is this subsection's reason to exist.
+
+- **The head is decoded as Latin-1** (ISO-8859-1), not UTF-8 or US-ASCII. Latin-1 maps every byte
+  `0x00`-`0xFF` to its own code point one-to-one, so decoding then re-encoding is lossless for any
+  byte sequence — including one that is not valid UTF-8 — because the head is never assumed to be
+  text in a particular charset, only octets that happen to fit the request/status-line and
+  header-field grammar above.
+- **The body is everything after the first blank line, with no length or transfer-encoding
+  interpretation whatsoever.** There is no `Content-Length` or `Transfer-Encoding` framing in this
+  format — those exist in HTTP/1.1 so one connection can carry more than one message end-to-end,
+  and an envelope never does; it is exactly one request or one response. The body is simply "the
+  rest of the buffer": binary-safe, and exactly as long as what remains once the head is removed.
+- **A payload with no blank line is all head and an empty body.** The blank-line search can find
+  nothing (a request with a request-line and headers but no trailing blank line); rather than
+  treat that as malformed, the whole payload is treated as the head and the body is empty. This
+  tolerates a minimal, bodyless envelope (e.g. a `GET`) that omits the final blank line.
+- **Header name casing is preserved, not normalized.** A conventional HTTP stack lower-cases or
+  title-cases header names on the way in, because HTTP header names are case-insensitive; this
+  format keeps the bytes the sender wrote. This matters because §1.5's request-request binding
+  signs the envelope as sent — normalizing a name before verifying a signature computed over the
+  original casing would make every signed request fail to verify.
+- **Duplicate headers are preserved as an ordered list, not folded.** A map keyed by header name
+  can hold only one value per name, silently dropping or concatenating repeats; this format keeps
+  every header field as its own entry, in wire order, so a caller that sent two headers of the
+  same name gets both back, and a signature computed over the repeated field is preserved intact.
+- **Only leading optional whitespace after the colon is stripped; internal spacing is kept.** RFC
+  7230's `OWS` production allows (but does not require) whitespace immediately after a
+  field-name's colon; this format strips exactly that and nothing else — a value's internal or
+  trailing whitespace is significant to whatever reads it next (e.g. a signature base string) and
+  is never trimmed.
+
+#### 1.7.3 Reject codes
+
+Decoding the request envelope, or reaching the app to deliver it, can fail before the PREPARE is
+ever fulfilled; each failure is a distinct, fixed reject code:
+
+| Condition                                                                                  | Reject code              | Reason                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data` is malformed — a missing or malformed request-line, or a header field with no colon | `F01_INVALID_PACKET`     | The envelope cannot be parsed at all; this is the same code the client edge already uses for any other malformed PREPARE.                                              |
+| `data` is empty (zero bytes)                                                               | `F06_UNEXPECTED_PAYMENT` | There is no request to make on the app's behalf — this connector was paid for a delivery it has nothing to deliver.                                                    |
+| The app could not be reached at all (the connection could not be established)              | `T01_PEER_UNREACHABLE`   | Retryable: nothing about the request itself was rejected, the app simply could not be reached.                                                                         |
+| The request to the app timed out awaiting a response                                       | `T00_INTERNAL_ERROR`     | Retryable, distinct from `T01`: the app was reachable but did not respond in time, which is this connector's own timeout expiring, not a confirmed connection failure. |
+
+A malformed request-line and a header field with no colon are both `F01_INVALID_PACKET` at the
+protocol level, but are distinguishable failures in the codec itself (distinct error values, each
+carrying the offending line) — an operator debugging a client's envelope needs to know which half
+of the head was wrong, even though a client only ever sees the one reject code either way.
+
+#### 1.7.4 Codec
+
+`connector_domain::envelope` implements this subsection: `decode_request`/`encode_request` for the
+request direction, and `encode_response` for the response direction. The request codec is
+byte-faithful and round-trips: `encode_request(decode_request(bytes)?) == bytes` for every
+well-formed `bytes`, including one carrying a binary body. There is no `decode_response`, because
+this connector only ever produces a response envelope; it never decodes one.
 
 ## 2. What version 1 does not do
 

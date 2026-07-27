@@ -150,6 +150,13 @@ impl RejectCode {
         RejectCode("F02".to_string())
     }
 
+    /// F06: Unexpected Payment -- there was nothing to fulfil: the envelope
+    /// carried in the PREPARE `data` was empty
+    /// (`docs/protocol/client-edge-spec.md` §1.7.3).
+    pub fn f06_unexpected_payment() -> RejectCode {
+        RejectCode("F06".to_string())
+    }
+
     /// F99: Application Error -- the terminating app declined the delivery,
     /// or (per issue #417) supplied no fulfilment matching the execution
     /// condition it was handed.
@@ -167,6 +174,15 @@ impl RejectCode {
     /// (ADR 0010, peer-wire-spec.md §4-5.1).
     pub fn r01_insufficient_source_amount() -> RejectCode {
         RejectCode("R01".to_string())
+    }
+
+    /// T00: Internal Error -- generic temporary failure. Used for a request
+    /// to the app that timed out awaiting a response
+    /// (`docs/protocol/client-edge-spec.md` §1.7.3), distinct from T01: the
+    /// app was reachable but did not answer in time, rather than never
+    /// reachable at all.
+    pub fn t00_internal_error() -> RejectCode {
+        RejectCode("T00".to_string())
     }
 
     /// T01: Peer Unreachable -- the app could not be reached over HTTP.
@@ -410,5 +426,7 @@ mod tests {
         assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
         assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
+        assert_eq!(RejectCode::f06_unexpected_payment().as_str(), "F06");
+        assert_eq!(RejectCode::t00_internal_error().as_str(), "T00");
     }
 }
