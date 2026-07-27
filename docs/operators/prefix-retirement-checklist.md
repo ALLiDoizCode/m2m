@@ -54,11 +54,14 @@ zero traffic would show that.
 
 ## Condition 3 — every channel opened against the old apex is resolved
 
-**What to look at:** on the TypeScript fleet's `AdminServer` (port 8081, `X-Api-Key`):
+**What to look at:**
 
-- `GET /admin/channels` — every returned `AdminChannelStatus` is closed.
-- `GET /admin/balances/:peerId` and `GET /admin/settlement/states` — no channel reports a
-  nonzero `pendingClaims`/`pendingAmount`.
+- On the TypeScript fleet's `AdminServer` (port 8081, `X-Api-Key`):
+  - `GET /admin/channels` — every returned `AdminChannelStatus` is closed.
+  - `GET /admin/settlement/states` — no peer reports a nonzero `pendingClaims`.
+- On the TypeScript fleet's settlement API, mounted on `HealthServer` (port 8080,
+  unauthenticated):
+  - `GET /settlement/status/:peerId` — no peer reports a nonzero `pendingAmount`.
 
 A channel with a nonzero pending claim or a status other than closed is not resolved: redeem it
 or cooperatively close it (`POST /admin/channels/:channelId/close`, or the settlement API) while
