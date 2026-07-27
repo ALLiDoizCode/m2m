@@ -13,125 +13,19 @@
 //! port the OS actually gave it, so nothing here leaks a fixed port or
 //! collides between runs.
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use connector_domain::{derive_condition, Fulfill, Prepare, Reject};
+
+mod support;
+use support::{spawn_connector, spawn_stub_app, write_config, write_raw_key_file};
 
 const FULFILLMENT: [u8; 32] = [7u8; 32];
 
 /// Must match `stub_app.rs`'s own `DECLINE_BODY` -- the two are separate
 /// binaries, so there is no shared constant to import.
 const DECLINE_BODY: &[u8] = b"please decline this one";
-
-/// A spawned child process, killed and reaped on drop -- so a test that
-/// panics midway still leaves no orphaned process behind.
-struct Process {
-    child: Child,
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn write_config(text: &str) -> tempfile::NamedTempFile {
-    let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
-    write!(config_file, "{text}").expect("write config file");
-    config_file
-}
-
-fn write_raw_key_file(seed: u8) -> tempfile::NamedTempFile {
-    let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
-    key_file
-        .write_all(&[seed; 32])
-        .expect("write raw 32-byte key");
-    key_file
-}
-
-/// Parse the `addr` field out of one of the connector binary's structured
-/// JSON tracing log lines (mirrors `refuses_to_start.rs`'s own helper).
-fn parse_json_log_addr(line: &str) -> String {
-    let parsed: serde_json::Value = serde_json::from_str(line).expect("JSON log line");
-    parsed["fields"]["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_string()
-}
-
-struct StubApp {
-    _process: Process,
-    addr: String,
-}
-
-fn spawn_stub_app() -> StubApp {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_stub-app"))
-        .arg("127.0.0.1:0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn stub-app");
-    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-    let process = Process { child };
-
-    let mut line = String::new();
-    let addr = loop {
-        line.clear();
-        let read = stdout.read_line(&mut line).expect("read stdout");
-        assert!(read > 0, "stub-app exited before printing its address");
-        if let Some(addr) = line.trim().strip_prefix("stub-app listening ") {
-            break addr.to_string();
-        }
-    };
-
-    StubApp {
-        addr,
-        _process: process,
-    }
-}
-
-struct ConnectorProcess {
-    _process: Process,
-    client_edge_addr: String,
-    peer_wire_addr: Option<String>,
-}
-
-fn spawn_connector(config_path: &std::path::Path) -> ConnectorProcess {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_connector"))
-        .arg(config_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn connector");
-    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-    let process = Process { child };
-
-    // A node with no `peer_wire_addr` never logs "peer wire listening", so
-    // this can't wait for both lines in a fixed order -- read until
-    // "connector listening" is seen, remembering "peer wire listening"
-    // along the way if it comes first.
-    let mut peer_wire_addr = None;
-    let mut line = String::new();
-    let client_edge_addr = loop {
-        line.clear();
-        let read = stdout.read_line(&mut line).expect("read stdout");
-        assert!(read > 0, "connector exited before logging a listen address");
-        if line.contains("peer wire listening") {
-            peer_wire_addr = Some(parse_json_log_addr(&line));
-        } else if line.contains("connector listening") {
-            break parse_json_log_addr(&line);
-        }
-    };
-
-    ConnectorProcess {
-        _process: process,
-        client_edge_addr,
-        peer_wire_addr,
-    }
-}
 
 fn sample_prepare(destination: &str, data: &[u8]) -> Prepare {
     Prepare {
