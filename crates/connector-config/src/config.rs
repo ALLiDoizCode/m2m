@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 use crate::error::ConfigError;
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
-use crate::route::{resolve_routes, RawChild, RawRoute, StaticRoute};
+use crate::peer::{resolve_peers, PeerConfig, RawPeer};
+use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
 
 /// The config file's shape exactly as written -- convenience forms
@@ -22,6 +23,16 @@ struct RawConfig {
     children: Vec<RawChild>,
     #[serde(default)]
     operator: Option<RawOperatorConfig>,
+    /// Bind address for the accepting side of the peer wire (issue #488).
+    /// Absent means this node never accepts an inbound peer connection --
+    /// same "not started at all" degradation as an absent `[operator]`.
+    #[serde(default)]
+    peer_wire_addr: Option<String>,
+    /// Peers this node dials out to (issue #488). Peer addressing was
+    /// deferred at #416 ("still constructed directly in tests") until a
+    /// ticket actually needed it end to end; this is that ticket.
+    #[serde(default)]
+    peers: Vec<RawPeer>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -37,6 +48,9 @@ pub struct Config {
     client_edge_addr: SocketAddr,
     signer_key: SecretLocation,
     routes: Vec<StaticRoute>,
+    peer_routes: Vec<PeerRouteConfig>,
+    peers: Vec<PeerConfig>,
+    peer_wire_addr: Option<SocketAddr>,
     operator: Option<OperatorConfig>,
 }
 
@@ -70,13 +84,33 @@ impl Config {
             })?;
 
         let signer_key = SecretLocation::resolve(raw.signer)?;
-        let routes = resolve_routes(raw.apex.as_deref(), raw.routes, raw.children)?;
+        let (routes, peer_routes) = resolve_routes(raw.apex.as_deref(), raw.routes, raw.children)?;
+        let peers = resolve_peers(raw.peers)?;
+        for peer_route in &peer_routes {
+            if !peers.iter().any(|peer| peer.id() == peer_route.peer_id()) {
+                return Err(ConfigError::UnknownPeerId {
+                    prefix: peer_route.prefix().to_string(),
+                    peer_id: peer_route.peer_id().to_string(),
+                });
+            }
+        }
+        let peer_wire_addr = raw
+            .peer_wire_addr
+            .map(|value| {
+                value
+                    .parse::<SocketAddr>()
+                    .map_err(|source| ConfigError::InvalidPeerWireAddr { value, source })
+            })
+            .transpose()?;
         let operator = resolve_operator(raw.operator)?;
 
         Ok(Config {
             client_edge_addr,
             signer_key,
             routes,
+            peer_routes,
+            peers,
+            peer_wire_addr,
             operator,
         })
     }
@@ -95,6 +129,27 @@ impl Config {
     /// `[[children]]` entry already expanded under `apex`.
     pub fn routes(&self) -> &[StaticRoute] {
         &self.routes
+    }
+
+    /// The node's peer routes -- every `[[routes]]` entry that names a
+    /// `peer_id` instead of a `handler_url`. Each one's `peer_id` is
+    /// guaranteed to name an entry in [`Config::peers`] (`Config::load`
+    /// refuses to return a value where it doesn't).
+    pub fn peer_routes(&self) -> &[PeerRouteConfig] {
+        &self.peer_routes
+    }
+
+    /// The peers this node dials out to.
+    pub fn peers(&self) -> &[PeerConfig] {
+        &self.peers
+    }
+
+    /// The bind address for the accepting side of the peer wire, if this
+    /// node accepts inbound peer connections at all. `None` means the peer
+    /// wire server is not started -- same "not started at all" degradation
+    /// as an absent `[operator]` section.
+    pub fn peer_wire_addr(&self) -> Option<SocketAddr> {
+        self.peer_wire_addr
     }
 
     /// The operator surface's authentication, if the surface is enabled.
@@ -173,6 +228,131 @@ handler_url = "http://localhost:4000"
             prefixes,
             vec!["g.example.other", "g.example.connector.billing"]
         );
+    }
+
+    #[test]
+    fn loads_peers_and_peer_routes() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+peer_wire_addr = "127.0.0.1:4001"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "peer-b"
+addr = "127.0.0.1:5000"
+
+[[routes]]
+prefix = "g.peer-b"
+peer_id = "peer-b"
+fee = 3
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(
+            config.peer_wire_addr(),
+            Some("127.0.0.1:4001".parse().unwrap())
+        );
+        assert_eq!(config.peers().len(), 1);
+        assert_eq!(config.peers()[0].id(), "peer-b");
+        assert_eq!(config.peers()[0].addr(), "127.0.0.1:5000".parse().unwrap());
+        assert_eq!(config.peer_routes().len(), 1);
+        assert_eq!(config.peer_routes()[0].prefix(), "g.peer-b");
+        assert_eq!(config.peer_routes()[0].peer_id(), "peer-b");
+        assert_eq!(config.peer_routes()[0].fee(), 3);
+    }
+
+    #[test]
+    fn a_config_with_no_peer_wire_addr_or_peers_has_none_and_empty() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.peer_wire_addr(), None);
+        assert!(config.peers().is_empty());
+        assert!(config.peer_routes().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_peer_route_naming_an_unconfigured_peer_id() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.peer-b"
+peer_id = "peer-b"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::UnknownPeerId { .. })));
+    }
+
+    #[test]
+    fn rejects_an_invalid_peer_wire_addr() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+peer_wire_addr = "not-an-address"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidPeerWireAddr { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_duplicate_peer_id() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "peer-b"
+addr = "127.0.0.1:5000"
+
+[[peers]]
+id = "peer-b"
+addr = "127.0.0.1:5001"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::DuplicatePeerId { .. })));
     }
 
     #[test]

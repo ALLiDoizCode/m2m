@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::Router;
 
 use connector_config::{Config, SecretLocation};
-use connector_runtime::{Connector, HttpAppClient, NetworkPeerTransport, SystemClock};
+use connector_runtime::{Connector, HttpAppClient, NetworkPeerTransport, PeerRoute, SystemClock};
 use connector_signer::{LocalSigner, Signer, SignerError};
 
 /// Everything that can stop a validated [`Config`] from producing a live
@@ -115,17 +115,27 @@ fn build_signer(location: &SecretLocation) -> Result<Arc<dyn Signer>, RuntimeErr
 }
 
 /// Construct the live [`Connector`] and [`Signer`] a validated [`Config`]
-/// describes. The connector's peer transport starts with no peers dialed:
-/// peer network addressing has no config-file representation yet (issue
-/// #416's blocker, still open), so every route this ticket can configure
-/// is a terminated [`connector_config::StaticRoute`].
+/// describes. Every configured `[[peers]]` entry is dialed lazily through a
+/// [`NetworkPeerTransport`] (issue #488 -- peer addressing finally has a
+/// config-file representation, closing the gap #416 deferred), and every
+/// `peer_id`-targeted `[[routes]]` entry becomes a [`PeerRoute`] alongside
+/// the terminated [`connector_config::StaticRoute`]s.
 pub fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>), RuntimeError> {
     let signer = build_signer(config.signer_key())?;
+    let mut peer_transport = NetworkPeerTransport::new();
+    for peer in config.peers() {
+        peer_transport.add_peer(peer.id().to_string(), peer.addr());
+    }
+    let peer_routes = config
+        .peer_routes()
+        .iter()
+        .map(|route| PeerRoute::new(route.prefix(), route.peer_id(), route.fee()))
+        .collect();
     let connector = Arc::new(Connector::new(
         config.routes().to_vec(),
-        Vec::new(),
+        peer_routes,
         Arc::new(HttpAppClient::new()),
-        Arc::new(NetworkPeerTransport::new()),
+        Arc::new(peer_transport),
         Arc::new(SystemClock),
     ));
     Ok((connector, signer))

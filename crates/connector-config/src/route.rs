@@ -25,11 +25,19 @@ fn is_valid_ilp_address(address: &str) -> bool {
         && address.split('.').all(is_valid_label)
 }
 
-/// A `[[routes]]` entry as written in the config file.
+/// A `[[routes]]` entry as written in the config file: forwards to the app
+/// at `handler_url`, or to the peer named `peer_id` -- exactly one of the
+/// two must be set. `fee` is only meaningful alongside `peer_id` (ADR
+/// 0010); it defaults to zero and is otherwise ignored.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawRoute {
     prefix: String,
-    handler_url: String,
+    #[serde(default)]
+    handler_url: Option<String>,
+    #[serde(default)]
+    peer_id: Option<String>,
+    #[serde(default)]
+    fee: u64,
 }
 
 /// A `[[children]]` entry: a convenience form that desugars into a
@@ -77,6 +85,37 @@ impl StaticRoute {
     }
 }
 
+/// A route whose traffic this connector forwards to a peer rather than
+/// terminating at an app of its own. This is the config-file counterpart of
+/// `connector_runtime::PeerRoute` -- kept as its own type here (rather than
+/// depending on `connector-runtime`, which itself depends on this crate) --
+/// `connector-cli` converts one into the other when it builds the runtime
+/// `Connector`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRouteConfig {
+    prefix: String,
+    peer_id: String,
+    fee: u64,
+}
+
+impl PeerRouteConfig {
+    /// The destination prefix this route forwards.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The peer this route's traffic is forwarded to, by id -- matched
+    /// against a `[[peers]]` entry's own `id`.
+    pub fn peer_id(&self) -> &str {
+        &self.peer_id
+    }
+
+    /// This peering relation's flat per-packet fee (ADR 0010).
+    pub fn fee(&self) -> u64 {
+        self.fee
+    }
+}
+
 fn build_route(prefix: String, handler_url: String) -> Result<StaticRoute, ConfigError> {
     if !is_valid_ilp_address(&prefix) {
         return Err(ConfigError::InvalidAddress {
@@ -101,37 +140,73 @@ fn build_route(prefix: String, handler_url: String) -> Result<StaticRoute, Confi
     })
 }
 
-fn insert_unique(
-    seen: &mut HashSet<String>,
-    routes: &mut Vec<StaticRoute>,
-    route: StaticRoute,
-) -> Result<(), ConfigError> {
-    if !seen.insert(route.prefix.clone()) {
-        return Err(ConfigError::DuplicatePrefix {
-            prefix: route.prefix,
+fn build_peer_route(
+    prefix: String,
+    peer_id: String,
+    fee: u64,
+) -> Result<PeerRouteConfig, ConfigError> {
+    if !is_valid_ilp_address(&prefix) {
+        return Err(ConfigError::InvalidAddress {
+            field: "prefix",
+            value: prefix,
         });
     }
-    routes.push(route);
+    if peer_id.trim().is_empty() {
+        return Err(ConfigError::RoutePeerIdEmpty { prefix });
+    }
+    Ok(PeerRouteConfig {
+        prefix,
+        peer_id,
+        fee,
+    })
+}
+
+fn insert_unique_prefix(seen: &mut HashSet<String>, prefix: &str) -> Result<(), ConfigError> {
+    if !seen.insert(prefix.to_string()) {
+        return Err(ConfigError::DuplicatePrefix {
+            prefix: prefix.to_string(),
+        });
+    }
     Ok(())
 }
 
-/// Resolve `routes` and desugar `children` (under `apex`) into a single,
-/// fully validated, deduplicated list of [`StaticRoute`]s.
+/// Resolve `routes` and desugar `children` (under `apex`) into fully
+/// validated, deduplicated route tables -- app routes and peer routes,
+/// sharing one prefix namespace (a peer route and an app route can never
+/// claim the same prefix). `children` always desugars into app routes,
+/// matching its role as a convenience form for this node's own apps.
 pub(crate) fn resolve_routes(
     apex: Option<&str>,
     raw_routes: Vec<RawRoute>,
     raw_children: Vec<RawChild>,
-) -> Result<Vec<StaticRoute>, ConfigError> {
+) -> Result<(Vec<StaticRoute>, Vec<PeerRouteConfig>), ConfigError> {
     let mut seen = HashSet::with_capacity(raw_routes.len() + raw_children.len());
-    let mut routes = Vec::with_capacity(raw_routes.len() + raw_children.len());
+    let mut routes = Vec::with_capacity(raw_routes.len());
+    let mut peer_routes = Vec::new();
 
     for raw in raw_routes {
-        let route = build_route(raw.prefix, raw.handler_url)?;
-        insert_unique(&mut seen, &mut routes, route)?;
+        match (raw.handler_url, raw.peer_id) {
+            (Some(handler_url), None) => {
+                let route = build_route(raw.prefix, handler_url)?;
+                insert_unique_prefix(&mut seen, route.prefix())?;
+                routes.push(route);
+            }
+            (None, Some(peer_id)) => {
+                let route = build_peer_route(raw.prefix, peer_id, raw.fee)?;
+                insert_unique_prefix(&mut seen, route.prefix())?;
+                peer_routes.push(route);
+            }
+            (None, None) => {
+                return Err(ConfigError::RouteMissingTarget { prefix: raw.prefix });
+            }
+            (Some(_), Some(_)) => {
+                return Err(ConfigError::RouteTargetAmbiguous { prefix: raw.prefix });
+            }
+        }
     }
 
     if raw_children.is_empty() {
-        return Ok(routes);
+        return Ok((routes, peer_routes));
     }
 
     let apex = apex.ok_or(ConfigError::MissingApex)?;
@@ -148,10 +223,11 @@ pub(crate) fn resolve_routes(
         }
         let prefix = format!("{apex}.{}", child.name);
         let route = build_route(prefix, child.handler_url)?;
-        insert_unique(&mut seen, &mut routes, route)?;
+        insert_unique_prefix(&mut seen, route.prefix())?;
+        routes.push(route);
     }
 
-    Ok(routes)
+    Ok((routes, peer_routes))
 }
 
 #[cfg(test)]
@@ -161,7 +237,18 @@ mod tests {
     fn route(prefix: &str, handler_url: &str) -> RawRoute {
         RawRoute {
             prefix: prefix.to_string(),
-            handler_url: handler_url.to_string(),
+            handler_url: Some(handler_url.to_string()),
+            peer_id: None,
+            fee: 0,
+        }
+    }
+
+    fn peer_route(prefix: &str, peer_id: &str, fee: u64) -> RawRoute {
+        RawRoute {
+            prefix: prefix.to_string(),
+            handler_url: None,
+            peer_id: Some(peer_id.to_string()),
+            fee,
         }
     }
 
@@ -183,7 +270,7 @@ mod tests {
 
     #[test]
     fn resolves_explicit_routes() {
-        let routes = resolve_routes(
+        let (routes, peer_routes) = resolve_routes(
             None,
             vec![route("g.example.app", "http://localhost:4000")],
             vec![],
@@ -193,6 +280,75 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix(), "g.example.app");
         assert_eq!(routes[0].handler_url().as_str(), "http://localhost:4000/");
+        assert!(peer_routes.is_empty());
+    }
+
+    #[test]
+    fn resolves_explicit_peer_routes() {
+        let (routes, peer_routes) =
+            resolve_routes(None, vec![peer_route("g.peer-b", "peer-b", 5)], vec![])
+                .expect("resolve");
+
+        assert!(routes.is_empty());
+        assert_eq!(peer_routes.len(), 1);
+        assert_eq!(peer_routes[0].prefix(), "g.peer-b");
+        assert_eq!(peer_routes[0].peer_id(), "peer-b");
+        assert_eq!(peer_routes[0].fee(), 5);
+    }
+
+    #[test]
+    fn rejects_a_route_with_neither_handler_url_nor_peer_id() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.app".to_string(),
+                handler_url: None,
+                peer_id: None,
+                fee: 0,
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::RouteMissingTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_route_with_both_handler_url_and_peer_id() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.app".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: Some("peer-b".to_string()),
+                fee: 0,
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::RouteTargetAmbiguous { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_peer_route_with_an_empty_peer_id() {
+        let result = resolve_routes(None, vec![peer_route("g.peer-b", "   ", 0)], vec![]);
+        assert!(matches!(result, Err(ConfigError::RoutePeerIdEmpty { .. })));
+    }
+
+    #[test]
+    fn a_peer_route_colliding_with_an_app_route_is_a_duplicate() {
+        let result = resolve_routes(
+            None,
+            vec![
+                route("g.example.app", "http://localhost:4000"),
+                peer_route("g.example.app", "peer-b", 0),
+            ],
+            vec![],
+        );
+        assert!(matches!(result, Err(ConfigError::DuplicatePrefix { .. })));
     }
 
     #[test]
@@ -235,7 +391,7 @@ mod tests {
 
     #[test]
     fn expands_children_under_the_apex() {
-        let routes = resolve_routes(
+        let (routes, peer_routes) = resolve_routes(
             Some("g.example.connector"),
             vec![],
             vec![child("billing", "http://localhost:4001")],
@@ -244,6 +400,7 @@ mod tests {
 
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix(), "g.example.connector.billing");
+        assert!(peer_routes.is_empty());
     }
 
     #[test]

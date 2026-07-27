@@ -11,11 +11,13 @@
 mod config;
 mod error;
 mod operator;
+mod peer;
 mod route;
 mod secret;
 
 pub use config::Config;
 pub use error::ConfigError;
 pub use operator::OperatorConfig;
-pub use route::StaticRoute;
+pub use peer::PeerConfig;
+pub use route::{PeerRouteConfig, StaticRoute};
 pub use secret::SecretLocation;
