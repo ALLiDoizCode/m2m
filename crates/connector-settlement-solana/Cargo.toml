@@ -3,3 +3,21 @@ name = "connector-settlement-solana"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+connector-settlement = { path = "../connector-settlement" }
+connector-settlement-solana-program = { path = "../connector-settlement-solana-program", default-features = false, features = [
+    "no-entrypoint",
+] }
+async-trait = "0.1"
+chrono = "0.4"
+thiserror = "2"
+sha2 = "0.10"
+solana-client = "=2.1.0"
+solana-sdk = "=2.1.0"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+[dev-dependencies]
+connector-settlement = { path = "../connector-settlement", features = ["test-util"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tempfile = "3"
