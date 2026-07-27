@@ -1,6 +1,0 @@
-# Invalid config - healthCheckPort out of valid range
-nodeId: test-connector
-btpServerPort: 3000
-healthCheckPort: 99999
-peers: []
-routes: []

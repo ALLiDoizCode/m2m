@@ -1,4 +1,0 @@
-# Invalid: missing nodeId field
-btpServerPort: 3000
-peers: []
-routes: []

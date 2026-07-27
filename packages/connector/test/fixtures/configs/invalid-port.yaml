@@ -1,5 +1,0 @@
-# Invalid: port out of range
-nodeId: test-connector
-btpServerPort: 99999
-peers: []
-routes: []

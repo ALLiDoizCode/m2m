@@ -41,25 +41,21 @@ payer ──POST /ilp (3000)──▶ connector ──proxies the paid HTTP requ
    `X-TOON-Chain` request headers so your app _can_ do per-payer logic if it
    wants, but never has to.
 
-4. **Make a paid call** (proves the round-trip end-to-end). From the connector
-   repo root:
+4. **Make a paid call.** There is currently **no in-repo prover.**
+   `prove-roundtrip.ts` used to live here: it funded a wallet, opened an on-chain
+   USDC channel, signed a per-packet claim, then asserted a FULFILL for the paid
+   request and a 402 rejection for the unpaid one. It was built on the TypeScript
+   connector's in-process settlement code (`PerPacketClaimService`, the
+   claim-sender DB schema, the integration harness's `PaidRoundTripClient`), all
+   of which #457 deleted with the embedded `ConnectorNode`. Nothing under
+   `deploy/` is covered by a tsconfig, so it kept compiling against those imports
+   in silence and would not have run.
 
-   ```bash
-   NODE_TLS_REJECT_UNAUTHORIZED=0 \
-   CONNECTOR_ILP_URL=http://127.0.0.1:3000/ilp \
-   EVM_RPC_URL=https://sepolia.base.org \
-   FAUCET_URL=https://faucet.devnet.toonprotocol.dev \
-   npx ts-node --project packages/connector/tsconfig.json \
-     deploy/pay-edge/prove-roundtrip.ts
-   ```
-
-   (If the devnet box ever moves and public DNS lags, preload the `dns-pin.js`
-   helper: `... ts-node --require ./deploy/pay-edge/dns-pin.js ...` with
-   `DEVNET_IP=<new-ip>`. Not needed while DNS is correct.)
-
-   The prover funds a fresh wallet from the devnet faucet, opens an on-chain
-   USDC channel toward the connector, signs a per-packet claim, and asserts:
-   paid `POST /ilp` → FULFILL carrying the backend echo, and unpaid → 402 REJECT.
+   Until an equivalent lands against the Rust connector (#431), pay this edge
+   with the toon-client **`h402Fetch`** shim, which speaks the same
+   ILP-over-HTTP + claim-header protocol. The deleted script is recoverable from
+   git history (`git log -- deploy/pay-edge/prove-roundtrip.ts`) if it is worth
+   porting.
 
 ## Client endpoints — what a payer points to
 
@@ -73,7 +69,8 @@ A client/agent paying this edge needs **three** URLs (live values for this deplo
 
 - **Payers speak ILP-over-HTTP, not plain HTTP.** A paid call serializes an ILP PREPARE
   (the HTTP request in `data`) + a channel-claim header and POSTs it to `/ilp`. Use the
-  toon-client **`h402Fetch`** shim or `prove-roundtrip.ts` — there is no `curl` one-liner yet.
+  toon-client **`h402Fetch`** shim — there is no in-repo prover (see step 4) and no
+  `curl` one-liner yet.
 - **No relay endpoint here.** pay-edge fronts a _generic_ HTTP backend, so there is **no
   `relay-ws`** to point at. (`relay-ws.devnet.toonprotocol.dev` belongs to the separate
   chains-box `with_connector_edge` deploy — its free-read Nostr WS — not to pay-edge.)
@@ -88,8 +85,6 @@ A client/agent paying this edge needs **three** URLs (live values for this deplo
 | `docker-compose.yml` | connector (payment proxy) + generic echo app; optional `local-devnet` profile        |
 | `connector.yaml`     | connector config (route `g.connector.echo` → `http://app:8080`), devnet RPC baked in |
 | `.env.example`       | copy to `.env`; primary knob `TOON_MNEMONIC` + devnet URLs                           |
-| `prove-roundtrip.ts` | end-to-end paid round-trip proof against a generic backend                           |
-| `dns-pin.js`         | optional Node preload pinning the devnet hostname to the live IP                     |
 
 ## How close to "nginx-grade" is this?
 
@@ -106,8 +101,8 @@ Where it falls short of literal nginx:
 
 - **Clients aren't plain HTTP.** A payer must speak ILP-over-HTTP: serialize an
   ILP PREPARE whose `data` is the literal HTTP request, attach a payment-channel
-  claim header, and POST it to `/ilp`. `prove-roundtrip.ts` (and the toon-client
-  `h402Fetch`) do this; a curl-grade one-liner does not exist yet.
+  claim header, and POST it to `/ilp`. The toon-client `h402Fetch` shim does this;
+  a curl-grade one-liner does not exist yet.
 - **`${...}` is not interpolated in `connector.yaml`.** Every value is literal;
   only `TOON_MNEMONIC` (env) flows in dynamically. Changing the RPC means editing
   the YAML, not just `.env`.
@@ -115,7 +110,7 @@ Where it falls short of literal nginx:
   Devnet-only.
 - **DNS** for `devnet.toonprotocol.dev` points at the live box (`*.devnet` A
   record → 50.116.58.45). If the box moves, repoint that Porkbun record;
-  `dns-pin.js` / docker `extra_hosts` are a stopgap if DNS lags.
+  docker `extra_hosts` is a stopgap if DNS lags.
 
 ## Local proof (no devnet)
 
@@ -126,6 +121,7 @@ auto-deploy the registry + USDC):
 # from the connector repo root
 docker compose --profile app up -d --wait anvil faucet
 # point connector.yaml rpcUrl → http://anvil:8545, run connector+app on the
-# connector_default network, then run prove-roundtrip.ts with
-# EVM_RPC_URL=http://127.0.0.1:8545 FAUCET_URL=http://127.0.0.1:3500
+# connector_default network, then drive a paid call with the toon-client
+# h402Fetch shim against EVM_RPC_URL=http://127.0.0.1:8545
+# FAUCET_URL=http://127.0.0.1:3500
 ```

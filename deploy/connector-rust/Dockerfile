@@ -1,6 +1,19 @@
 # =============================================================================
 # connector-rust — container image for the Rust connector (issue #429)
 #
+# DELIBERATELY A SEPARATE IMAGE from the published `connector` one. Per ADR 0013
+# the cutover runs the Rust fleet in PARALLEL under its own address prefix, with
+# both networks live at once — so the Rust binary must not be published under the
+# TypeScript node's name and tag series. `connector:3.44.0` means "TS node, YAML/
+# CONFIG_FILE"; this takes a TOML path as argv. Swapping what a tag means in
+# place is the one shape that cutover design rules out. Whether and how this gets
+# published to GHCR belongs to #431.
+#
+# The base is rust:1.90 (matching CI's stable toolchain), NOT the 1.82 this file
+# originally pinned: 1.82 cannot build the locked graph at all — idna_adapter
+# 1.2.2 requires the edition2024 Cargo feature. Nothing in CI ever built this
+# file, so that was undetected until #465.
+#
 # One static binary, one config file, no JavaScript runtime anywhere in the
 # final image -- contrast the TypeScript connector's root ./Dockerfile, whose
 # Node >= 22.12 pin exists solely for Mina/o1js's ESM packaging (a dependency
@@ -22,7 +35,7 @@
 # ============================================
 # Stage 1: builder
 # ============================================
-FROM rust:1.82-alpine3.20 AS builder
+FROM rust:1.90-alpine3.22 AS builder
 
 RUN apk add --no-cache musl-dev
 
@@ -43,7 +56,7 @@ RUN cargo build --release --locked -p connector
 # ============================================
 # Stage 2: runtime -- no JavaScript runtime, no build toolchain
 # ============================================
-FROM alpine:3.20 AS runtime
+FROM alpine:3.22 AS runtime
 
 # ca-certificates: the connector's HTTP app client (reqwest, rustls-tls)
 # verifies TLS against the system root store when an app's handler_url is

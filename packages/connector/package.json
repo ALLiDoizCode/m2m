@@ -1,7 +1,7 @@
 {
   "name": "@toon-protocol/connector",
   "version": "3.44.2",
-  "description": "Multi-chain ILP connector with EVM, Solana, and Mina settlement",
+  "description": "TypeScript client for the ILP connector's client edge",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
   "exports": {
@@ -10,9 +10,6 @@
       "import": "./dist/lib.js",
       "require": "./dist/lib.js"
     }
-  },
-  "bin": {
-    "connector": "./dist/cli/index.js"
   },
   "files": [
     "dist",
@@ -36,9 +33,7 @@
     "interledger",
     "ilp",
     "connector",
-    "payment",
-    "settlement",
-    "btp"
+    "client"
   ],
   "homepage": "https://github.com/ALLiDoizCode/connector/tree/main/packages/connector#readme",
   "bugs": {
@@ -48,120 +43,24 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "build:publish": "npm run build",
-    "start": "node dist/main.js",
     "test": "jest",
     "test:coverage": "jest --coverage",
     "test:watch": "jest --watch",
     "test:rfc-links": "jest test/unit/rfc-links.test.ts",
-    "test:acceptance": "jest --config jest.acceptance.config.js --testPathPattern=acceptance",
-    "test:load": "jest --config jest.load.config.js --testPathPattern=load-test",
-    "test:security": "jest --testPathPattern=security --testTimeout=60000",
-    "test:domain": "node scripts/run-tests.js --domain",
-    "test:epic": "node scripts/run-tests.js --epic",
-    "test:list": "node scripts/run-tests.js --list-domains",
-    "test:list-epics": "node scripts/run-tests.js --list-epics",
-    "test:unit": "jest --testPathIgnorePatterns='test/integration|test/acceptance'",
-    "test:performance": "jest --config jest.performance.config.js",
+    "test:unit": "jest --testPathIgnorePatterns='test/integration'",
     "test:integration": "jest --testPathPattern=test/integration",
-    "test:tigerbeetle": "jest --testPathPattern='tigerbeetle|account-manager|packet-forwarding-with-accounting'",
-    "test:settlement": "jest --testPathPattern='settlement-|claim-'",
-    "test:btp": "jest --testPathPattern='btp-'",
-    "test:evm": "jest --testPathPattern='embedded-evm-settlement|per-packet-claims-e2e'",
-    "test:embedded": "jest --testPathPattern='test/integration' --testPathIgnorePatterns='docker-|deployment|mesh-topology|full-stack'",
-    "test:standalone": "jest --testPathPattern='standalone-(smoke|settlement)-e2e' --forceExit",
-    "test:cli": "jest --testPathPattern='cli-e2e' --forceExit",
-    "test:standalone-docker": "jest --testPathPattern='standalone-container-e2e' --forceExit",
-    "test:standalone-allowlist": "jest --testPathPattern='standalone-admin-allowlist-e2e' --forceExit",
-    "probe:connector-public": "ts-node --project tsconfig.probe.json ../../scripts/app/ci-acceptance-probe.ts",
-    "probe:store": "ts-node --project tsconfig.probe.json ../../scripts/app/ci-acceptance-probe-store.ts",
-    "probe:discovery": "ts-node --project tsconfig.probe.json ../../scripts/app/ci-discovery-probe.ts",
-    "test:admin-surface": "STANDALONE_DOCKER=true jest --testPathPattern='admin-api-surface-e2e' --forceExit",
-    "test:cross-surface": "STANDALONE_DOCKER=true jest --testPathPattern='cross-surface-invariants' --forceExit",
-    "test:packet-flow": "STANDALONE_DOCKER=true jest --testPathPattern='packet-flow-invariants' --forceExit",
-    "test:per-peer-transport-e2e": "STANDALONE_DOCKER=true jest --testPathPattern=per-peer-transport-cross-surface-e2e --forceExit --testTimeout=300000",
-    "test:relay-e2e": "jest --testPathPattern='relay-comprehensive-e2e'",
-    "lint": "eslint src --ext .ts && npm run lint:inventory",
-    "lint:inventory": "ts-node scripts/check-admin-api-inventory.ts",
+    "lint": "eslint src --ext .ts",
     "dev": "tsc --watch",
-    "benchmark": "ts-node scripts/benchmark.ts",
-    "benchmark:toon": "tsx src/agent/toon-codec.benchmark.ts",
     "prepublishOnly": "npm run build:publish && npm test"
   },
   "dependencies": {
-    "@noble/ciphers": "^1.3.0",
-    "@noble/curves": "^1.9.0",
-    "@noble/hashes": "^1.8.0",
-    "@scure/bip32": "^1.7.0",
-    "@scure/bip39": "^1.6.0",
-    "@solana-program/token": "^0.6.0",
-    "@solana/kit": "^3.0.3",
-    "@toon-protocol/mina-zkapp": "^0.1.0",
-    "@toon-protocol/settlement-digest": "^1.0.0",
     "@toon-protocol/shared": "^1.3.0",
-    "cors": "^2.8.6",
-    "ethers": "^6.16.0",
-    "express": "4.18.x",
-    "js-yaml": "^4.1.0",
-    "netmask": "^2.0.2",
-    "nostr-tools": "^2.20.0",
-    "pino": "^8.21.0",
-    "prom-client": "^15.1.3",
-    "tslib": "^2.8.1",
-    "ws": "^8.16.0",
-    "zod": "^3.25.76"
-  },
-  "peerDependencies": {
-    "mina-fungible-token": "^1.1.0",
-    "o1js": "^2.2.0",
-    "tigerbeetle-node": "0.16.68"
-  },
-  "peerDependenciesMeta": {
-    "mina-fungible-token": {
-      "optional": true
-    },
-    "o1js": {
-      "optional": true
-    },
-    "tigerbeetle-node": {
-      "optional": true
-    }
-  },
-  "optionalDependencies": {
-    "@ai-sdk/anthropic": "^1.2.12",
-    "@ai-sdk/openai": "^1.3.24",
-    "@aws-sdk/client-kms": "^3.500.0",
-    "@azure/identity": "^4.0.0",
-    "@azure/keyvault-keys": "^4.8.0",
-    "@google-cloud/kms": "^3.2.0",
-    "@libsql/client": "0.14.0",
-    "ai": "^4.3.19",
-    "bip39": "^3.1.0",
-    "commander": "^12.1.0",
-    "inquirer": "^8.2.7",
-    "libsql": "^0.4.7",
-    "qrcode": "^1.5.4",
-    "sharp": "^0.33.5"
+    "tslib": "^2.8.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/inquirer": "^8.2.12",
     "@types/jest": "^29.5.12",
-    "@types/js-yaml": "^4.0.9",
-    "@types/netmask": "^2.0.5",
     "@types/node": "^20.11.19",
-    "@types/qrcode": "^1.5.6",
-    "@types/supertest": "^6.0.3",
-    "@types/ws": "^8.18.1",
-    "ethereum-cryptography": "^3.2.0",
-    "got": "^11.8.6",
     "jest": "^29.7.0",
-    "solana-bankrun": "^0.4.0",
-    "supertest": "^7.1.4",
-    "tigerbeetle-node": "0.16.68",
-    "ts-jest": "^29.1.2",
-    "ts-node": "^10.9.2",
-    "tsx": "^4.21.0"
+    "ts-jest": "^29.1.2"
   }
 }

@@ -61,10 +61,6 @@ make mina-up       # Start Mina container only
 
 # Run tests against live containers
 npm run test:integration --workspace=packages/connector
-npm run test:admin-surface --workspace=packages/connector
-npm run test:cross-surface --workspace=packages/connector
-npm run test:packet-flow --workspace=packages/connector
-npm run test:standalone-docker --workspace=packages/connector
 
 make infra-down    # Stop all containers
 ```
@@ -83,39 +79,18 @@ Use Playwright MCP tools (`mcp__playwright__browser_*`) after UI changes. Prefer
 
 ## Development Workflow Rules
 
-### Stop-the-Line Policy (AG3)
+### Stop-the-Line Policy (AG3) — RETIRED with the embedded node (#457)
 
-From Epic 37 retrospective: **Nightly HTTP-surface E2E red = stop-the-line.**
+Epic 37's stop-the-line policy hung off the nightly HTTP-surface suite
+(`.github/workflows/nightly-http-surface.yml`, plus the `test:admin-surface`,
+`test:cross-surface` and `test:packet-flow` scripts). All of it exercised the
+TypeScript connector's in-process admin/BTP/packet-flow surfaces, which #457
+deleted along with `ConnectorNode`; the workflow and the scripts are gone.
 
-**Policy:**
-
-1. **Triage must begin within 24 hours** of a failed nightly workflow run
-2. **No merges to main while nightly is red** — PR merges are blocked until the nightly suite passes
-3. **Escalation path:**
-   - Hour 0-4: Engineer on-call investigates, checks compose logs in Artifacts
-   - Hour 4-8: If root cause not identified, escalate to team lead
-   - Hour 8-24: If not resolved, emergency team sync + consider rollback
-
-**Workflow:**
-
-- Nightly workflow: `.github/workflows/nightly-http-surface.yml`
-- Scheduled: 04:00 UTC daily
-- Manual trigger: `workflow_dispatch` via Actions UI
-- Failure notifications: GitHub UI (red X), job summary with escalation steps
-
-**Reproduction commands:**
-
-```bash
-# Run the full HTTP-surface suite locally
-make infra-up
-npm run test:admin-surface --workspace=packages/connector
-npm run test:cross-surface --workspace=packages/connector
-npm run test:packet-flow --workspace=packages/connector
-make infra-down
-```
-
-**Why this matters:**
-The `/metrics` endpoint returned 404 in every deployed image since inception — undetected until Town's integration test caught it. This policy ensures parallel-surface drift cannot ship undetected.
+The policy's point still stands — parallel-surface drift must not ship
+undetected (`/metrics` returned 404 in every deployed image since inception,
+caught only by Town's integration test). Re-establishing an equivalent nightly
+against the **Rust** connector belongs with #431's cutover.
 
 ---
 

@@ -1,8 +1,0 @@
-# Invalid: peer URL doesn't start with ws:// or wss://
-nodeId: test-connector
-btpServerPort: 3000
-peers:
-  - id: peer-a
-    url: http://peer-a:3001
-    authToken: secret-a
-routes: []

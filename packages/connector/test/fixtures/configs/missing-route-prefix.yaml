@@ -1,9 +1,0 @@
-# Invalid config - route missing prefix field
-nodeId: test-connector
-btpServerPort: 3000
-peers:
-  - id: peer-a
-    url: ws://peer:3001
-    authToken: secret
-routes:
-  - nextHop: peer-a

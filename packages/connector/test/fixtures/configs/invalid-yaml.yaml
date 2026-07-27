@@ -1,6 +1,0 @@
-nodeId: test
-btpServerPort: 3000
-peers: [
-  - id: peer-a
-    url: ws://invalid
-routes: []

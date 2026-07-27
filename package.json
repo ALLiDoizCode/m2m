@@ -19,7 +19,6 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
     "send-packet": "npm run --workspace=tools/send-packet start",
-    "benchmark": "npm run --workspace=packages/connector benchmark",
     "sandcastle": "npx tsx .sandcastle/main.ts",
     "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
     "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",

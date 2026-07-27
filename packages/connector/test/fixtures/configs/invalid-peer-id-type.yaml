@@ -1,8 +1,0 @@
-# Invalid config - peer id is number instead of string
-nodeId: test-connector
-btpServerPort: 3000
-peers:
-  - id: 123
-    url: ws://peer:3001
-    authToken: secret
-routes: []
