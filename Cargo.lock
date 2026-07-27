@@ -1188,6 +1188,7 @@ dependencies = [
 name = "connector-signer"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "libsecp256k1",
  "rand 0.7.3",
  "sha3",
