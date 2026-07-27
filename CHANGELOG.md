@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0](https://github.com/toon-protocol/connector/compare/v3.44.2...v4.0.0) (2026-07-27)
+
+### ⚠ BREAKING CHANGES
+
+- **connector:** @toon-protocol/connector no longer ships the embedded
+  ConnectorNode. The package is now an HTTP client for the Rust connector's client
+  edge: src/lib.ts exports ConnectorHttpClient plus three shared types, where it
+  previously exported roughly fifty symbols including ConnectorNode,
+  ConnectorAdminClient, createLogger, the discovery/bootstrap surface, the
+  payment-proxy envelope codec and the x402 helpers. There is no drop-in
+  replacement — a consumer that ran a node in-process must now run the Rust
+  connector as a separate process and talk to it over HTTP. Known caret consumer:
+  toon-protocol/swap declares "@toon-protocol/connector": "^3.30.0" and imports
+  ConnectorNode and createLogger in packages/swap/src/swap-node.ts, so this must
+  publish as 4.0.0 or that caret will resolve straight onto the gutted package.
+
+The published container image changes with it: ghcr.io/toon-protocol/connector
+is now built from the Rust connector (one static binary, a TOML config file
+passed as argv, no Node runtime) rather than the TypeScript node (YAML config
+via CONFIG_FILE). The floating :latest tag is left on the last TypeScript image
+
+- **connector:** `@toon-protocol/connector` no longer ships an embedded
+  ConnectorNode, and the `ghcr.io/toon-protocol/connector` image is no longer
+  published. Consumers become HTTP clients; deployments should pin 3.44.0, the last
+  image built from the TypeScript node.
+
+### Features
+
+- **connector:** TypeScript client shim — remove the embedded ConnectorNode ([#465](https://github.com/toon-protocol/connector/issues/465)) ([c4a4ad1](https://github.com/toon-protocol/connector/commit/c4a4ad10eaa410235dce57d3519e3aa2983a0c97)), closes [#457](https://github.com/toon-protocol/connector/issues/457) [#456](https://github.com/toon-protocol/connector/issues/456) [#409](https://github.com/toon-protocol/connector/issues/409) [#430](https://github.com/toon-protocol/connector/issues/430) [#431](https://github.com/toon-protocol/connector/issues/431) [#431](https://github.com/toon-protocol/connector/issues/431) [#429](https://github.com/toon-protocol/connector/issues/429) [#431](https://github.com/toon-protocol/connector/issues/431)
+
 ## [3.44.2](https://github.com/toon-protocol/connector/compare/v3.44.1...v3.44.2) (2026-07-27)
 
 ### Performance Improvements
