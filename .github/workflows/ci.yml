@@ -485,6 +485,27 @@ jobs:
           # auto-provisioned GITHUB_TOKEN bumps the limit from 60 -> 5000 req/hr.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # solana-test-validator (and solana-keygen, used to resolve the checked-in program
+      # keypair's pubkey) on PATH for connector-settlement-solana's tests (issue #428), the
+      # Solana twin of the Foundry install above. Without this, a solana-test-validator-gated
+      # test would silently skip and report `passed` -- exactly the defect #471 closed for
+      # anvil, see crates/connector-settlement-solana/tests/support/mod.rs.
+      #
+      # Pinned to v2.1.21, not the newer v3.x line the pre-existing `solana-integration` job
+      # below installs: v3's solana-test-validator hard-requires io_uring, which is unavailable
+      # under this repo's agent-sandbox container's seccomp profile (verified: it panics with
+      # `assertion failed: io_uring_supported()` there). v2.1.21 needs no io_uring and matches
+      # the `=2.1.0` solana-program/solana-client/solana-sdk pin in
+      # crates/connector-settlement-solana{,-program}/Cargo.toml, so the CLI that deploys and
+      # drives the program is the same release line the program itself is built against.
+      # `.sandcastle/Dockerfile` installs this exact version for the same reason Foundry is
+      # pinned identically in both places: an agent that passes locally on a different
+      # toolchain than the gate has learned nothing.
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -492,10 +513,12 @@ jobs:
         run: cargo build --workspace
 
       - name: Run tests
-        # CI=true is already set by GitHub Actions for every job; anvil-gated tests key off it
-        # (rather than a bespoke REQUIRE_ANVIL nobody remembers to set) to hard-fail here instead
-        # of silently skipping when anvil isn't on PATH -- see
-        # crates/connector-settlement-evm/tests/support/mod.rs.
+        # CI=true is already set by GitHub Actions for every job; anvil-gated and
+        # solana-test-validator-gated tests both key off it (rather than a bespoke
+        # REQUIRE_ANVIL/REQUIRE_SOLANA_TEST_VALIDATOR nobody remembers to set) to hard-fail here
+        # instead of silently skipping when the chain binary isn't on PATH -- see
+        # crates/connector-settlement-evm/tests/support/mod.rs and
+        # crates/connector-settlement-solana/tests/support/mod.rs.
         run: cargo test --workspace --exclude payment-channel 2>&1 | tee /tmp/cargo-test.log
 
       - name: Assert no integration-test harness executed zero tests

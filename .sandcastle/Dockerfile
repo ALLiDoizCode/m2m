@@ -71,17 +71,36 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /home/agent/.foundry/bin/foundryup --install v1.7.1
 
-# Add Claude, cargo and foundry to PATH
-ENV PATH="/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.foundry/bin:$PATH"
+# Solana CLI provides `solana-test-validator` (and `solana-keygen`, used to resolve the
+# checked-in program keypair's pubkey) for connector-settlement-solana's tests (issue #428) —
+# the same role Foundry plays above, needed for the same reason: without it the implementer
+# cannot run this crate's tests locally and only finds out they're broken once CI does.
+#
+# Pinned to v2.1.21, NOT the newer v3.x line ci.yml's pre-existing `solana-integration` job
+# installs: v3's solana-test-validator hard-requires io_uring, which this container's sandbox
+# runtime does not permit (verified directly here — it panics with
+# `assertion failed: io_uring_supported()` even though the kernel itself supports io_uring).
+# v2.1.21 needs no io_uring and also matches the `=2.1.0` solana-program/solana-client/
+# solana-sdk pin in crates/connector-settlement-solana{,-program}/Cargo.toml, so the CLI
+# deploying and driving the program is the same release line the program is built against.
+# `.github/workflows/ci.yml`'s `rust-gate` job installs this exact version for the same reason
+# its Foundry install matches this image's.
+RUN curl -sSfL https://release.anza.xyz/v2.1.21/install | sh
+
+# Add Claude, cargo, foundry and the Solana CLI to PATH
+ENV PATH="/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.foundry/bin:/home/agent/.local/share/solana/install/active_release/bin:$PATH"
 
 # ENV PATH covers the engine, which execs non-login shells. But claude-code
 # spawns its own shells for the agent's own commands, and a LOGIN shell sources
 # /etc/profile, which rebuilds PATH from scratch and drops anything set only via
 # ENV. rustup already appends itself to ~/.profile (which is why cargo survives
-# `bash -lc` and foundry would not), so do the same for foundry rather than
-# leaving a difference that shows up as "anvil: command not found" in exactly one
-# shell mode. Verified against both `bash -c` and `bash -lc`.
+# `bash -lc` and foundry would not), and the Solana installer does the same for itself — but
+# neither touches ~/.bashrc, so do that explicitly for both rather than leaving a difference
+# that shows up as "anvil: command not found" (or "solana-test-validator: command not found")
+# in exactly one shell mode. Verified against both `bash -c` and `bash -lc`.
 RUN printf '\n# Foundry (anvil/cast) — see .sandcastle/Dockerfile\nexport PATH="$HOME/.foundry/bin:$PATH"\n' \
+  | tee -a /home/agent/.profile >> /home/agent/.bashrc \
+  && printf '\n# Solana CLI (solana-test-validator/solana-keygen) — see .sandcastle/Dockerfile\nexport PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"\n' \
   | tee -a /home/agent/.profile >> /home/agent/.bashrc
 
 WORKDIR /home/agent

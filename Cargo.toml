@@ -7,6 +7,7 @@ members = [
     "crates/connector-settlement",
     "crates/connector-settlement-evm",
     "crates/connector-settlement-solana",
+    "crates/connector-settlement-solana-program",
     "crates/connector-signer",
     "crates/connector-config",
     "crates/connector-client-edge",
