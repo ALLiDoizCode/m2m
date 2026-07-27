@@ -116,13 +116,21 @@ impl PeerRouteConfig {
     }
 }
 
-fn build_route(prefix: String, handler_url: String) -> Result<StaticRoute, ConfigError> {
+/// Validate a route's `prefix` field, shared by [`build_route`] and
+/// [`build_peer_route`] since both kinds of route are keyed by the same
+/// ILP address rules.
+fn validate_prefix(prefix: String) -> Result<String, ConfigError> {
     if !is_valid_ilp_address(&prefix) {
         return Err(ConfigError::InvalidAddress {
             field: "prefix",
             value: prefix,
         });
     }
+    Ok(prefix)
+}
+
+fn build_route(prefix: String, handler_url: String) -> Result<StaticRoute, ConfigError> {
+    let prefix = validate_prefix(prefix)?;
     let url = Url::parse(&handler_url).map_err(|source| ConfigError::InvalidHandlerUrl {
         prefix: prefix.clone(),
         value: handler_url.clone(),
@@ -145,12 +153,7 @@ fn build_peer_route(
     peer_id: String,
     fee: u64,
 ) -> Result<PeerRouteConfig, ConfigError> {
-    if !is_valid_ilp_address(&prefix) {
-        return Err(ConfigError::InvalidAddress {
-            field: "prefix",
-            value: prefix,
-        });
-    }
+    let prefix = validate_prefix(prefix)?;
     if peer_id.trim().is_empty() {
         return Err(ConfigError::RoutePeerIdEmpty { prefix });
     }
