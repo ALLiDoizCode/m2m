@@ -162,19 +162,28 @@ pub fn decode_request(data: &[u8]) -> Result<HttpRequestEnvelope, EnvelopeError>
     })
 }
 
-/// Encode a request envelope, the inverse of [`decode_request`].
-pub fn encode_request(envelope: &HttpRequestEnvelope) -> Vec<u8> {
-    let mut head_lines = vec![format!(
-        "{} {} {}",
-        envelope.method, envelope.target, envelope.http_version
-    )];
-    for (name, value) in &envelope.headers {
+/// Encode an envelope's start-line, headers, and body into the wire format
+/// shared by requests and responses (§1.7.1): `start_line CRLF *(header CRLF)
+/// CRLF body`. Shared by [`encode_request`] and [`encode_response`], which
+/// differ only in how they build `start_line`.
+fn encode_envelope(start_line: &str, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
+    let mut head_lines = vec![start_line.to_string()];
+    for (name, value) in headers {
         head_lines.push(format!("{name}: {value}"));
     }
     let head_text = head_lines.join(CRLF) + CRLF + CRLF;
     let mut out = latin1_encode(&head_text);
-    out.extend_from_slice(&envelope.body);
+    out.extend_from_slice(body);
     out
+}
+
+/// Encode a request envelope, the inverse of [`decode_request`].
+pub fn encode_request(envelope: &HttpRequestEnvelope) -> Vec<u8> {
+    let request_line = format!(
+        "{} {} {}",
+        envelope.method, envelope.target, envelope.http_version
+    );
+    encode_envelope(&request_line, &envelope.headers, &envelope.body)
 }
 
 /// Encode a response envelope for a FULFILL's `data` field
@@ -187,14 +196,7 @@ pub fn encode_response(envelope: &HttpResponseEnvelope) -> Vec<u8> {
     )
     .trim_end()
     .to_string();
-    let mut head_lines = vec![status_line];
-    for (name, value) in &envelope.headers {
-        head_lines.push(format!("{name}: {value}"));
-    }
-    let head_text = head_lines.join(CRLF) + CRLF + CRLF;
-    let mut out = latin1_encode(&head_text);
-    out.extend_from_slice(&envelope.body);
-    out
+    encode_envelope(&status_line, &envelope.headers, &envelope.body)
 }
 
 #[cfg(test)]
