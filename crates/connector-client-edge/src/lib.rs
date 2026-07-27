@@ -3,7 +3,8 @@
 //! (transport and framing: `POST /ilp`, OER-encoded PREPARE in, OER-encoded
 //! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome). Identity
 //! (§1.2), payment claims (§1.3) and the x402 greeting (§1.4) are
-//! unimplemented until claim validation lands (issue #423) -- every request
+//! unimplemented (issue #498; the #423 this line used to cite is closed and
+//! concerned the peer wire's claim path, not the client edge) -- every request
 //! today is treated as an unauthenticated, unpriced delivery attempt.
 //!
 //! Per ADR 0001, this handler deserializes, calls exactly one method on

@@ -12,13 +12,17 @@ its `handler_url`; it returns success or failure and knows nothing about channel
 settlement. A Rust connector can therefore be placed in front of an already-running relay or
 store app without touching it, and the app cannot tell which connector is in front of it.
 
-> **The first deployment falsified that last clause** (#492). The two connectors do not deliver
-> alike — the TypeScript one reads an HTTP envelope out of `prepare.data` and sends
-> `X-TOON-Payer`/`X-TOON-Amount`/`X-TOON-Chain`; the Rust one treats `prepare.data` as an opaque
-> body and sends none of them. The relay and store both read those headers, so an app _can_ tell,
-> and loses payer attribution behind the Rust fleet.
-> [`docs/operators/parallel-fleet-comparison.md`](../operators/parallel-fleet-comparison.md) has
-> the evidence. The rest of this ADR stands; this premise needs closing before a client migrates.
+> **That last clause is conditional on a conformance this ADR never named** (#492). It is true of
+> two connectors that both implement client edge version 1. The Rust connector does not yet: it
+> implements §1.1 only, so it reads no envelope, derives no request target, injects none of the
+> `X-TOON-Payer`/`X-TOON-Amount`/`X-TOON-Chain` headers both apps read, and charges nothing. Until
+> #498 lands, an app _can_ tell, and a migrating client would be moving onto a free, anonymous
+> network.
+>
+> The mechanism below is unaffected — a parallel prefix, both fleets live, migration by repointing
+> — and was demonstrated working. Evidence in
+> [`docs/operators/parallel-fleet-comparison.md`](../operators/parallel-fleet-comparison.md); the
+> reasoning in [ADR 0016](0016-payload-opacity-is-a-property-of-carriage.md).
 
 This removes the flag day that ADR 0003 accepted as the cost of a clean-room peer wire. The two
 peer wires never have to interoperate, because the two networks never have to be one network.

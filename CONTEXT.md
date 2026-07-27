@@ -9,7 +9,9 @@ live in `docs/adr/`.
 
 **Connector**:
 A node that accepts a packet, decides where it goes, exchanges value for carrying it, and
-hands it on. Never interprets the payload.
+hands it on. Never interprets the payload of a packet it forwards — opacity is a property of
+carriage, not of the node. At a route termination the same node does interpret it, because
+that is what terminating means.
 _Avoid_: terminator, connector-as-terminator, gateway
 
 **App**:
@@ -20,8 +22,8 @@ _Avoid_: BLS, Business Logic Server, agent runtime, backend
 The app's receiving endpoint.
 
 **Packet**:
-The unit of forwarding: a destination, an amount, an expiry, and an opaque payload. Every
-packet terminates in either fulfilment or rejection.
+The unit of forwarding: a destination, an amount, an expiry, and a payload that is opaque to
+every hop that carries it. Every packet terminates in either fulfilment or rejection.
 
 **Route**:
 A mapping from a destination prefix to the next hop that should carry it.
@@ -41,7 +43,14 @@ definition — the connector never learns, announces, or discovers.
 
 **Route termination**:
 The property of a route that ends at this connector, where a packet becomes a delivery to
-an app.
+an app. The point at which a payload stops being opaque: the terminating connector reads the
+packet's envelope to know what request to make.
+
+**Envelope**:
+The HTTP request carried in a packet's payload — a method, a target, headers and a body — that
+a terminating connector makes to the app. Read only at a route termination; a forwarding hop
+carries it without looking inside.
+_Avoid_: inner request, proxied request, HTTP envelope (when the layer is already clear)
 
 **Packet plane**:
 The part of a connector on the path of every packet — routing, claim handling, forwarding.
