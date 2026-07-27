@@ -159,22 +159,23 @@ fn decode_claim_header(
 }
 
 /// Extract and fully validate whatever claim header `headers` carries, per
-/// client-edge-spec.md §1.3. `Ok(None)` means no claim header was present
-/// at all -- out of this ticket's scope (the x402 greeting/value binding
-/// that would refuse an unpaid request), so the request proceeds unchanged,
-/// exactly as it always has. A plaintext header takes precedence when both
-/// are present, since a client presenting both is presenting the same claim
-/// twice, not two different ones.
+/// client-edge-spec.md §1.3. `Ok(())` covers both "no claim header was
+/// present at all" -- out of this ticket's scope (the x402 greeting/value
+/// binding that would refuse an unpaid request), so the request proceeds
+/// unchanged, exactly as it always has -- and "a present claim validated
+/// cleanly"; the caller doesn't need to tell those apart. A plaintext
+/// header takes precedence when both are present, since a client presenting
+/// both is presenting the same claim twice, not two different ones.
 fn extract_and_validate_claim(
     headers: &HeaderMap,
     state: &ClientEdgeState,
-) -> Result<Option<()>, ClaimIngestRejection> {
+) -> Result<(), ClaimIngestRejection> {
     let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
         (value, false)
     } else if let Some(value) = headers.get(CLAIM_WRAPPED_HEADER) {
         (value, true)
     } else {
-        return Ok(None);
+        return Ok(());
     };
 
     let claim_json = decode_claim_header(
@@ -183,7 +184,7 @@ fn extract_and_validate_claim(
         state.wrap_receiver_secret.as_ref(),
     )?;
     state.claim_gate.ingest(&claim_json)?;
-    Ok(Some(()))
+    Ok(())
 }
 
 fn claim_rejected_response(rejection: ClaimIngestRejection) -> Response {
@@ -215,9 +216,8 @@ async fn handle_ilp(
     // A claim header's validation failure rejects the packet before it is
     // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
     // do work that was never validly paid for.
-    match extract_and_validate_claim(&headers, &state) {
-        Ok(_) => {}
-        Err(rejection) => return claim_rejected_response(rejection),
+    if let Err(rejection) = extract_and_validate_claim(&headers, &state) {
+        return claim_rejected_response(rejection);
     }
 
     // client-edge-spec.md v1 carries no minimum-delivery field (§4 of

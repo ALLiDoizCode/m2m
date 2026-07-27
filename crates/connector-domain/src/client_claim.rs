@@ -174,7 +174,7 @@ fn required_decimal_amount(
     field: &str,
 ) -> Result<u64, ClientClaimError> {
     let raw = required_str(obj, field)?;
-    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
         return Err(malformed(format!(
             "'{field}' must be a non-negative integer string"
         )));
