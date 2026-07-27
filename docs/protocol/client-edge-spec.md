@@ -150,9 +150,9 @@ the connector that the connector was not explicitly configured to hand out. [ADR
 by probing (§1.6) instead, and that the greeting is not reinstated. Price discovery, in every
 form, lives outside the connector; the Rust connector MUST NOT grow this or any equivalent, and
 the deployed TypeScript fleet's greeting is a permanent, intentional divergence from this
-specification rather than a target to converge on (see the comparison harness's expected-divergence
-baseline). An unpaid request to a locally-terminated route is refused, not met with a priced
-offer; the exact reject code is §1.3's concern, not this section's.
+specification rather than a target to converge on. An unpaid request to a locally-terminated
+route is refused, not met with a priced offer; the exact reject code is §1.3's concern, not this
+section's.
 
 ### 1.5 Request-request binding (RFC 9421)
 
