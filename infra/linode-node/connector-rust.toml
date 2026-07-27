@@ -1,0 +1,77 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector, apex/relay side (issue #490, ADR 0013's
+# parallel fleet)
+# ═══════════════════════════════════════════════════════════════════════════
+# Runs ALONGSIDE ./connector.yaml's TypeScript node on this SAME box, under
+# its own prefix and its own ports/paths — see docker-compose.node.rust.yml,
+# an ADDITIVE overlay that never edits docker-compose.node.yml. Neither the
+# relay app nor the store app is modified anywhere in this change: both are
+# payment-oblivious (ADR 0013) and are fronted here exactly as they already
+# are by the TypeScript node.
+#
+# ── Why `g.rust` ─────────────────────────────────────────────────────────
+# The live TypeScript apex is `g.toon` — see ./connector.yaml's own `routes`
+# (`g.toon.relay`, `g.toon.ario`) — NOT `g.proxy`. `g.proxy` is a name this
+# fleet used to carry: it survives only in stale comments (devnet-manage.sh's
+# header/route-guard, infra/linode-store/bootstrap.sh's echo line) that were
+# never updated when the deployed route table moved to `g.toon`. `g.rust`
+# shares no segment with either name, so no typo or stale-doc distance of one
+# character turns one into the other — unambiguous in a log line at 3am,
+# which is what the issue asked for.
+#
+# Children mirror the TypeScript fleet's own two-app shape without importing
+# its Arweave-specific `.ario` naming:
+#   g.rust.relay  — terminates locally at the SAME running relay app
+#                   (relay:3100) this box's TypeScript connector already
+#                   fronts.
+#   g.rust.store  — forwarded to the store-side Rust connector (peer
+#                   "store", below), which terminates it at the SAME running
+#                   store app (store:3300) on the store box.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Distinct from the TypeScript node's 3000/8080/8081 (see
+# docker-compose.node.rust.yml) — each connector runs in its own container
+# network namespace, but the HOST ports both publish must not collide. One
+# port serves everything here (client edge, /metrics, the operator surface),
+# unlike the TypeScript node's three.
+client_edge_addr = "0.0.0.0:4000"
+
+[signer]
+# Real key material, generated per-box exactly like
+# deploy/connector-rust/README.md's own step 1 (openssl rand -hex 32) —
+# never committed (see .gitignore). Mounted read-only by
+# docker-compose.node.rust.yml from ./signer-rust.key, a path distinct from
+# the TypeScript node's `connector_data` volume.
+key_file = "/app/data/signer.key"
+
+# ── Peering with the store-side Rust connector ─────────────────────────────
+# This apex only DIALS OUT to the store connector below — it never accepts
+# an inbound peer connection itself, so no peer_wire_addr is set in this
+# file.
+#
+# REPLACE 203.0.113.20 with the store box's real public IP once
+# devnet-manage.sh has provisioned it (`./devnet-manage.sh ips`) — it is a
+# documentation-only placeholder (RFC 5737 TEST-NET-3), chosen so this file
+# is already a syntactically valid TOML file with a real SocketAddr (ADR
+# 0009: a malformed peer addr is a refuse-to-start error), not so it is
+# reachable. Port 4001 matches the store box's own connector-rust.toml
+# peer_wire_addr.
+[[peers]]
+id = "store"
+addr = "203.0.113.20:4001"
+
+[[routes]]
+prefix = "g.rust.relay"
+handler_url = "http://relay:3100"
+
+[[routes]]
+prefix = "g.rust.store"
+peer_id = "store"
+fee = 0
+
+# ── Operator surface (optional) ─────────────────────────────────────────
+# Omitted here deliberately: enabling it means committing (or securely
+# injecting) a real bearer_token + write_keys, which this devnet overlay
+# does not attempt to solve. Add an [operator] section per
+# deploy/connector-rust/README.md steps 2-3 before relying on GET /metrics
+# or the write surface on this node.

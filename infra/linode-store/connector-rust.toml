@@ -1,0 +1,38 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector, store side (issue #490, ADR 0013's parallel
+# fleet)
+# ═══════════════════════════════════════════════════════════════════════════
+# Mirrors infra/linode-node/connector-rust.toml's own header for the prefix
+# reasoning (`g.rust`, chosen there — NOT `g.proxy`, which is stale-comment
+# drift; the live TypeScript apex is `g.toon`). Runs ALONGSIDE
+# ./connector.yaml's TypeScript node on this box — see
+# docker-compose.store.rust.yml, an ADDITIVE overlay that never edits
+# docker-compose.store.yml.
+#
+# Terminates `g.rust.store` at the SAME running store (Arweave DVM) app this
+# box's TypeScript connector already fronts (store:3300) — payment-
+# oblivious per ADR 0013, and NOT modified by this file. Accepts the
+# node-side Rust connector's peer-wire connection (peer_wire_addr below); it
+# never dials out itself, so there is no [[peers]] section here.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Distinct from the TypeScript node's 3000/8080/8081, matching the node-side
+# connector-rust.toml's own port choice.
+client_edge_addr = "0.0.0.0:4000"
+
+# The accepting side of the peer wire — the node-side apex dials this. Port
+# matches that apex's [[peers]] entry for id = "store".
+peer_wire_addr = "0.0.0.0:4001"
+
+[signer]
+# Real key material, generated per-box, never committed — see
+# infra/linode-node/connector-rust.toml's own [signer] comment.
+key_file = "/app/data/signer.key"
+
+[[routes]]
+prefix = "g.rust.store"
+handler_url = "http://store:3300"
+
+# ── Operator surface (optional) ─────────────────────────────────────────
+# See infra/linode-node/connector-rust.toml's own note — omitted for the
+# same reason.

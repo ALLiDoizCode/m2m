@@ -91,3 +91,8 @@ infra/linode-node/mina-lightnet.json
 # deploy/connector-rust/README.md's own steps, never committed
 deploy/connector-rust/signer.key
 deploy/connector-rust/operator.pem
+
+# Rust connector devnet overlay (issue #490) — real per-box key material,
+# never committed; mirrors deploy/connector-rust/signer.key above.
+infra/linode-node/signer-rust.key
+infra/linode-store/signer-rust.key
