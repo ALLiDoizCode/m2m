@@ -53,9 +53,7 @@ impl PeerRoute {
 /// restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeasedRoute {
-    prefix: String,
-    peer_id: String,
-    fee: u64,
+    route: PeerRoute,
     expires_at: DateTime<Utc>,
 }
 
@@ -67,29 +65,36 @@ impl LeasedRoute {
         expires_at: DateTime<Utc>,
     ) -> LeasedRoute {
         LeasedRoute {
-            prefix: prefix.into(),
-            peer_id: peer_id.into(),
-            fee,
+            route: PeerRoute::new(prefix, peer_id, fee),
             expires_at,
         }
     }
 
     pub fn prefix(&self) -> &str {
-        &self.prefix
+        self.route.prefix()
     }
 
     pub fn peer_id(&self) -> &str {
-        &self.peer_id
+        self.route.peer_id()
     }
 
     pub fn fee(&self) -> u64 {
-        self.fee
+        self.route.fee()
     }
 
     /// The instant, as this connector's injected clock reports it, past
     /// which this lease has lapsed.
     pub fn expires_at(&self) -> DateTime<Utc> {
         self.expires_at
+    }
+
+    /// This lease's route, borrowed as a plain [`PeerRoute`] (issue #452):
+    /// once a lease has been selected for a packet it forwards exactly like
+    /// a peer route from configuration, and this hands that shared
+    /// forwarding behaviour a reference into the snapshot already being
+    /// held rather than a fresh clone.
+    pub fn as_peer_route(&self) -> &PeerRoute {
+        &self.route
     }
 }
 

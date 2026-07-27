@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
 use connector_config::StaticRoute;
 use connector_domain::{
@@ -83,10 +84,10 @@ pub enum ProbeDenied {
 struct ProbeRateLimiter {
     max_per_window: u32,
     window: Duration,
-    /// A plain [`Mutex`] rather than [`RwLock`] like `leased_routes`/
-    /// `known_channels` below -- every access here mutates (recording an
-    /// attempt), so there is no read-only path to give a reader/writer
-    /// lock any advantage over mutual exclusion.
+    /// A plain [`Mutex`] rather than [`RwLock`] like `known_channels`
+    /// below -- every access here mutates (recording an attempt), so
+    /// there is no read-only path to give a reader/writer lock any
+    /// advantage over mutual exclusion.
     windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
@@ -134,9 +135,9 @@ impl ProbeRateLimiter {
 enum RouteTarget {
     App(usize),
     Peer(usize),
-    /// Indexes into the caller's snapshot of currently-active leased
-    /// routes, not `Connector::leased_routes` directly -- see
-    /// [`Connector::active_leased_peer_routes`].
+    /// Indexes into the caller's own filtered `Vec` of currently-active
+    /// leased routes, not `Connector::leased_routes` directly -- see
+    /// [`Connector::leased_routes_snapshot`].
     Leased(usize),
 }
 
@@ -185,7 +186,16 @@ pub struct Connector {
     /// prefix again renews it rather than adding a duplicate entry. Lives
     /// only in memory: unlike `routes` and `peer_routes`, nothing here is
     /// loaded from configuration, so none of it survives a restart.
-    leased_routes: RwLock<HashMap<String, LeasedRoute>>,
+    ///
+    /// Held as an atomically-swapped immutable snapshot rather than a
+    /// `RwLock<HashMap<..>>` (issue #452): the packet path reads
+    /// the current map with a single lock-free `Arc` clone, never a lock
+    /// and never a copy of every leased route, so hot-path cost does not
+    /// scale with how many leases happen to be active. A write (lease
+    /// creation or renewal) publishes a whole new map rather than mutating
+    /// this one in place -- the rare, administrative side is where the
+    /// O(n) copy belongs, not the per-packet side.
+    leased_routes: ArcSwap<HashMap<String, LeasedRoute>>,
     app_client: Arc<dyn AppClient>,
     peer_transport: Arc<dyn PeerTransport>,
     clock: Arc<dyn Clock>,
@@ -244,7 +254,7 @@ impl Connector {
         Connector {
             routes,
             peer_routes,
-            leased_routes: RwLock::new(HashMap::new()),
+            leased_routes: ArcSwap::from_pointee(HashMap::new()),
             app_client,
             peer_transport,
             clock,
@@ -357,45 +367,35 @@ impl Connector {
         let expires_at = self.clock.now() + ttl;
         let route = LeasedRoute::new(prefix.clone(), peer_id.into(), fee, expires_at);
         let view = leased_route_view(&route);
-        self.leased_routes
-            .write()
-            .expect("leased routes lock poisoned")
-            .insert(prefix, route);
+        self.leased_routes.rcu(|current| {
+            let mut next = (**current).clone();
+            next.insert(prefix.clone(), route.clone());
+            next
+        });
         Ok(view)
     }
 
-    /// Leased routes not yet lapsed as of the injected clock. A lapsed
-    /// route is filtered out here immediately -- it disappears from this
-    /// list the moment it disappears from routing, with no sweep delay in
-    /// between (issue #427).
-    fn active_leased_routes(&self) -> Vec<LeasedRoute> {
-        let now = self.clock.now();
-        self.leased_routes
-            .read()
-            .expect("leased routes lock poisoned")
-            .values()
-            .filter(|route| !is_expired(route.expires_at(), now))
-            .cloned()
-            .collect()
+    /// The current leased-route map, snapshotted as of this call (issue
+    /// #452): `ArcSwap::load_full` is a single atomic `Arc`
+    /// clone -- no lock and no copy of the routes themselves -- and a
+    /// concurrent `upsert_leased_route` publishes an entirely new map
+    /// rather than mutating the one this snapshot points at, so the
+    /// snapshot stays valid for as long as its caller holds it.
+    fn leased_routes_snapshot(&self) -> Arc<HashMap<String, LeasedRoute>> {
+        self.leased_routes.load_full()
     }
 
     /// Leased routes not yet lapsed as of the injected clock, for the
-    /// operator surface's read-only inspection interface.
+    /// operator surface's read-only inspection interface. Expiry is
+    /// filtered fresh on every call -- a lapsed route disappears from this
+    /// list the moment it disappears from routing, with no sweep delay in
+    /// between (issue #427).
     pub fn leased_routes(&self) -> Vec<LeasedRouteView> {
-        self.active_leased_routes()
-            .iter()
+        let now = self.clock.now();
+        self.leased_routes_snapshot()
+            .values()
+            .filter(|route| !is_expired(route.expires_at(), now))
             .map(leased_route_view)
-            .collect()
-    }
-
-    /// A snapshot of currently-active leased routes (issue #427),
-    /// converted to [`PeerRoute`] so routing and forwarding can treat them
-    /// exactly like a peer route from configuration once expiry has
-    /// already been decided.
-    fn active_leased_peer_routes(&self) -> Vec<PeerRoute> {
-        self.active_leased_routes()
-            .iter()
-            .map(|route| PeerRoute::new(route.prefix(), route.peer_id(), route.fee()))
             .collect()
     }
 
@@ -575,11 +575,22 @@ impl Connector {
             return self.finish(PacketResponse::Reject(reject));
         }
 
-        let leased_routes = self.active_leased_peer_routes();
+        // Issue #452: `leased_routes_snapshot` is one lock-free `Arc`
+        // clone. Every active route below is a reference borrowed
+        // straight out of that snapshot -- expiry is still checked fresh
+        // against the clock so a lapsed lease stops being selected
+        // immediately, matching #427's guarantee, but nothing here
+        // allocates a copy of the routes themselves.
+        let leased_routes = self.leased_routes_snapshot();
+        let now = self.clock.now();
+        let active_leased: Vec<&LeasedRoute> = leased_routes
+            .values()
+            .filter(|route| !is_expired(route.expires_at(), now))
+            .collect();
 
         let app_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
         let peer_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
-        let leased_prefixes: Vec<&str> = leased_routes.iter().map(PeerRoute::prefix).collect();
+        let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
 
         let app_match = select_route(&prepare.destination, &app_prefixes)
             .map(|index| (self.routes[index].prefix().len(), RouteTarget::App(index)));
@@ -591,7 +602,7 @@ impl Connector {
         });
         let leased_match = select_route(&prepare.destination, &leased_prefixes).map(|index| {
             (
-                leased_routes[index].prefix().len(),
+                active_leased[index].prefix().len(),
                 RouteTarget::Leased(index),
             )
         });
@@ -617,7 +628,7 @@ impl Connector {
                 return self.finish(response);
             }
             RouteTarget::Peer(index) => &self.peer_routes[index],
-            RouteTarget::Leased(index) => &leased_routes[index],
+            RouteTarget::Leased(index) => active_leased[index].as_peer_route(),
         };
         tracing::info!(peer_id = %peer_route.peer_id(), "routed to peer");
         let response = self
@@ -2750,6 +2761,89 @@ mod tests {
                     }
                     Ok(())
                 })?;
+            }
+        }
+    }
+
+    /// Issue #452: before/after evidence for the leased-route lookup on
+    /// the hot path. Not run by the normal gate -- `#[ignore]`d and meant
+    /// to be run by hand, in release mode, so timing reflects real
+    /// optimized-build cost rather than debug-build noise:
+    ///
+    /// ```text
+    /// cargo test --release -p connector-runtime -- --ignored --nocapture bench_leased_route_lookup
+    /// ```
+    mod perf {
+        use super::*;
+        use std::time::Instant;
+
+        /// A `Connector` whose leased-route table has `active_lease_count`
+        /// active leases plus one that actually matches the packet this
+        /// benchmark sends -- exercising exactly the per-packet cost this
+        /// issue is about (`handle_prepare` walking every active leased
+        /// route) regardless of how many of them happen to be irrelevant to
+        /// the packet being routed.
+        fn connector_with_leased_routes(active_lease_count: usize) -> Connector {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"delivered".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let connector = Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+            for i in 0..active_lease_count {
+                connector
+                    .upsert_leased_route(
+                        format!("g.other-{i}.app"),
+                        "unused-peer",
+                        0,
+                        Duration::seconds(60),
+                    )
+                    .unwrap();
+            }
+            connector
+        }
+
+        /// Not a correctness assertion -- prints per-packet latency for a
+        /// growing number of concurrently-active leased routes so a
+        /// before/after comparison (checked out against this commit's
+        /// parent, then against this commit) shows whether the fix removed
+        /// the per-packet scaling this issue describes: the pre-fix path
+        /// clones every active leased route (plus a second clone into
+        /// `PeerRoute`) into a freshly allocated `Vec` on every single
+        /// call, so its cost grows with the lease count; the post-fix path
+        /// loads an `Arc`-swapped snapshot with no lock and no clone of the
+        /// route data, so it should stay flat.
+        #[test]
+        #[ignore = "run manually for a before/after measurement, see module doc"]
+        fn bench_leased_route_lookup() {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            const ITERATIONS: usize = 20_000;
+            for &active_lease_count in &[0usize, 100, 1_000, 10_000] {
+                let connector = connector_with_leased_routes(active_lease_count);
+                let started = Instant::now();
+                rt.block_on(async {
+                    for _ in 0..ITERATIONS {
+                        let response = connector
+                            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+                            .await;
+                        assert!(matches!(response, PacketResponse::Fulfill(_)));
+                    }
+                });
+                let elapsed = started.elapsed();
+                println!(
+                    "active_lease_count={active_lease_count:>6}  total={elapsed:?}  per_packet={:?}",
+                    elapsed / ITERATIONS as u32
+                );
             }
         }
     }
