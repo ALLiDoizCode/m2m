@@ -29,6 +29,15 @@ use crate::connector::Connector;
 /// currently owes `peer_id` (peer-wire-spec.md §3.2); the returned
 /// [`ClaimAckOutcome`] is [`ClaimAckOutcome::NotSent`] when `claim` was
 /// `None`, or when the peer could not be reached to answer at all.
+///
+/// The trailing `bool` is whether this peer was actually reached -- `true`
+/// for any real answer (fulfil or reject) the peer itself decided on,
+/// `false` when this transport could not deliver the PREPARE at all, in
+/// which case the accompanying [`PacketResponse`] is this transport's own
+/// synthesized `T01` (see [`peer_unreachable`]). The caller (issue #426,
+/// ADR 0011) needs this to decide whether its own fee belongs on an
+/// outgoing REJECT: only a hop that actually forwarded earns one
+/// (peer-wire-spec.md §5.2).
 #[async_trait]
 pub trait PeerTransport: Send + Sync {
     async fn forward(
@@ -37,7 +46,7 @@ pub trait PeerTransport: Send + Sync {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome);
+    ) -> (PacketResponse, ClaimAckOutcome, bool);
 
     /// Send `claim` with no packet to ride -- the flush mechanism
     /// (peer-wire-spec.md §3.3) that covers the case traffic to `peer_id`
@@ -52,6 +61,7 @@ pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
         triggered_by: String::new(),
         message: format!("peer '{peer_id}' unreachable"),
         data: Vec::new(),
+        accumulated_fee: 0,
     })
 }
 
@@ -160,7 +170,7 @@ impl PeerLink {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome) {
+    ) -> (PacketResponse, ClaimAckOutcome, bool) {
         let (respond_to, receiver) = oneshot::channel();
         if self
             .sender
@@ -173,11 +183,12 @@ impl PeerLink {
             .await
             .is_err()
         {
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent);
+            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
         }
-        receiver
-            .await
-            .unwrap_or_else(|_| (peer_unreachable(peer_id), ClaimAckOutcome::NotSent))
+        match receiver.await {
+            Ok((response, ack)) => (response, ack, true),
+            Err(_) => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false),
+        }
     }
 
     async fn flush(&self, claim: WireClaim) -> ClaimAckOutcome {
@@ -240,13 +251,13 @@ impl PeerTransport for InProcessPeerTransport {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome) {
+    ) -> (PacketResponse, ClaimAckOutcome, bool) {
         match self.peers.get(peer_id) {
             Some(link) => {
                 link.forward(peer_id, prepare, minimum_delivery, claim)
                     .await
             }
-            None => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent),
+            None => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false),
         }
     }
 
@@ -308,7 +319,7 @@ mod tests {
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
 
-        let (response, ack) = transport
+        let (response, ack, reached) = transport
             .forward("peer-b", prepare("g.example.app"), 0, None)
             .await;
 
@@ -320,13 +331,14 @@ mod tests {
             })
         );
         assert_eq!(ack, ClaimAckOutcome::NotSent);
+        assert!(reached);
     }
 
     #[tokio::test]
     async fn returns_peer_unreachable_for_an_unregistered_peer_id() {
         let transport = InProcessPeerTransport::new();
 
-        let (response, ack) = transport
+        let (response, ack, reached) = transport
             .forward("nowhere", prepare("g.example.app"), 0, None)
             .await;
 
@@ -338,6 +350,9 @@ mod tests {
             other => panic!("expected a reject, got {other:?}"),
         }
         assert_eq!(ack, ClaimAckOutcome::NotSent);
+        // Never reached: nothing forwarded, so no fee ever belongs to this
+        // hop (ADR 0011, peer-wire-spec.md §5.2).
+        assert!(!reached);
     }
 
     #[tokio::test]
@@ -352,7 +367,7 @@ mod tests {
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
 
-        let (response, _ack) = transport
+        let (response, _ack, reached) = transport
             .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0, None)
             .await;
 
@@ -363,6 +378,8 @@ mod tests {
             }
             other => panic!("expected a reject, got {other:?}"),
         }
+        // The peer *was* reached -- it answered with its own reject.
+        assert!(reached);
     }
 
     /// Issue #423: a claim piggybacked on a forwarded PREPARE is verified
@@ -390,7 +407,7 @@ mod tests {
             signature: signer.sign(&digest).unwrap(),
         };
 
-        let (response, ack) = transport
+        let (response, ack, _reached) = transport
             .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))
             .await;
 
@@ -459,7 +476,7 @@ mod tests {
         }
 
         for handle in handles {
-            let (response, _ack) = handle.await.expect("task");
+            let (response, _ack, _reached) = handle.await.expect("task");
             assert!(matches!(response, PacketResponse::Fulfill(_)));
         }
     }
@@ -469,7 +486,9 @@ mod tests {
     /// [`PeerTransport`] port -- a registered peer's response comes back
     /// unchanged (fulfill or reject), and an unregistered peer id produces a
     /// `T01` reject -- so nothing above this port can tell which
-    /// implementation is in use.
+    /// implementation is in use. Issue #426: both also agree on the
+    /// `reached` signal -- `true` for any registered peer's own answer,
+    /// `false` only when this transport never delivered the PREPARE at all.
     mod contract {
         use super::*;
         use crate::network_peer_transport::{NetworkPeerTransport, PeerWireServer};
@@ -512,7 +531,7 @@ mod tests {
 
             let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
 
-            let (response, _ack) = transport
+            let (response, _ack, reached) = transport
                 .forward("peer-b", prepare("g.example.app"), 0, None)
                 .await;
             assert_eq!(
@@ -522,8 +541,9 @@ mod tests {
                     data: b"delivered by the peer".to_vec(),
                 })
             );
+            assert!(reached);
 
-            let (response, _ack) = transport
+            let (response, _ack, reached) = transport
                 .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0, None)
                 .await;
             match response {
@@ -533,8 +553,9 @@ mod tests {
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
+            assert!(reached);
 
-            let (response, _ack) = transport
+            let (response, _ack, reached) = transport
                 .forward("nowhere", prepare("g.example.app"), 0, None)
                 .await;
             match response {
@@ -544,6 +565,7 @@ mod tests {
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
+            assert!(!reached);
         }
 
         #[tokio::test]

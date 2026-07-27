@@ -1116,6 +1116,7 @@ dependencies = [
  "connector-signer",
  "hyper",
  "prometheus",
+ "proptest",
  "reqwest",
  "serde",
  "tempfile",

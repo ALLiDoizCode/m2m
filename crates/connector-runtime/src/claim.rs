@@ -261,6 +261,16 @@ impl ClaimBook {
         self.verification_keys.insert(channel_id.into(), key);
     }
 
+    /// Whether `channel_id` is one this connector recognizes -- a
+    /// verification key has been configured for it, this connector's own
+    /// record of an established payment channel absent a full peer-wire
+    /// identity handshake (#416). Used by probe gating (issue #426, ADR
+    /// 0011): a sender with no recognized channel gets no free traversal of
+    /// this connector's network.
+    pub fn has_verification_key(&self, channel_id: &str) -> bool {
+        self.verification_keys.contains_key(channel_id)
+    }
+
     /// Configure `channel_id`'s exposure ceiling (issue #424,
     /// peer-wire-spec.md §5.3).
     pub fn set_ceiling(&mut self, channel_id: impl Into<String>, ceiling: u64) {
