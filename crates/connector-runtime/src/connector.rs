@@ -188,7 +188,7 @@ pub struct Connector {
     /// loaded from configuration, so none of it survives a restart.
     ///
     /// Held as an atomically-swapped immutable snapshot rather than a
-    /// `RwLock<HashMap<..>>` (issue #452): the packet path reads
+    /// `RwLock<HashMap<..>>` (ADR 0015, issue #452): the packet path reads
     /// the current map with a single lock-free `Arc` clone, never a lock
     /// and never a copy of every leased route, so hot-path cost does not
     /// scale with how many leases happen to be active. A write (lease
