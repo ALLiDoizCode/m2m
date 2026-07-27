@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.44.2](https://github.com/toon-protocol/connector/compare/v3.44.1...v3.44.2) (2026-07-27)
+
+### Performance Improvements
+
+- leased-route lookup clones the whole active set on every packet (ADR 0001 snapshot) ([#484](https://github.com/toon-protocol/connector/issues/484)) ([cf7d102](https://github.com/toon-protocol/connector/commit/cf7d1020047d9ef84efeb5cecf30d335a29d80ae)), closes [#452](https://github.com/toon-protocol/connector/issues/452) [#427](https://github.com/toon-protocol/connector/issues/427) [#427](https://github.com/toon-protocol/connector/issues/427) [#452](https://github.com/toon-protocol/connector/issues/452)
+
 ## [3.44.1](https://github.com/toon-protocol/connector/compare/v3.44.0...v3.44.1) (2026-07-26)
 
 ### Bug Fixes
