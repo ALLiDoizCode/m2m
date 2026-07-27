@@ -9,6 +9,7 @@ connector-domain = { path = "../connector-domain" }
 connector-config = { path = "../connector-config" }
 connector-settlement = { path = "../connector-settlement" }
 connector-signer = { path = "../connector-signer" }
+arc-swap = "1.9.2"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 prometheus = "0.13"
