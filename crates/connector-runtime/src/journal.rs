@@ -70,15 +70,6 @@ impl Journal for InMemoryJournal {
     }
 }
 
-/// One line of the journal's on-disk encoding: a type tag followed by its
-/// fields, tab-separated -- deliberately not `serde_json` or a binary
-/// format: every field here is a `String` or `u64`, none can themselves
-/// contain a tab or newline (`channel_id`/`peer_id` are connector-assigned
-/// identifiers, not untrusted wire input), so this is the simplest format
-/// that round-trips exactly, human-readable in place, matching the
-/// wire-level manual-encoding style already used throughout this crate
-/// (`WireClaim::encode`, `Frame`) rather than pulling in a new dependency
-/// for it.
 /// Lowercase hex, no `0x` prefix -- the journal line's own encoding for a
 /// signature, which (unlike `channel_id`/`peer_id`) is arbitrary bytes that
 /// could otherwise contain a tab or newline.
@@ -96,6 +87,15 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// One line of the journal's on-disk encoding: a type tag followed by its
+/// fields, tab-separated -- deliberately not `serde_json` or a binary
+/// format: every field here is a `String` or `u64`, none can themselves
+/// contain a tab or newline (`channel_id`/`peer_id` are connector-assigned
+/// identifiers, not untrusted wire input), so this is the simplest format
+/// that round-trips exactly, human-readable in place, matching the
+/// wire-level manual-encoding style already used throughout this crate
+/// (`WireClaim::encode`, `Frame`) rather than pulling in a new dependency
+/// for it.
 fn encode_line(entry: &JournalEntry) -> String {
     match entry {
         JournalEntry::OutboundClaimSigned {

@@ -348,12 +348,9 @@ fn channel_operation_response(result: Result<ChannelView, ChannelOperationError>
             ChannelOperationError::NoSettlementBackend.to_string(),
         )
             .into_response(),
-        Err(error @ ChannelOperationError::NoClaimToRedeem) => {
-            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
-        }
-        Err(error @ ChannelOperationError::Settlement(_)) => {
-            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
-        }
+        Err(
+            error @ (ChannelOperationError::NoClaimToRedeem | ChannelOperationError::Settlement(_)),
+        ) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }
 
