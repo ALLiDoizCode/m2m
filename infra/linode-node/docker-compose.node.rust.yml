@@ -26,6 +26,10 @@
 #   - data:   ./signer-rust.key, a path distinct from the TypeScript node's
 #             `connector_data` volume; this service gets no named volume at
 #             all (connector-runtime holds no state beyond the signer key)
+#
+# Generate ./signer-rust.key per deploy/connector-rust/README.md step 1 --
+# including its `chown 10001:10001`, without which this service restart-loops
+# on "failed to read signer key_file ... Permission denied" (#492).
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
