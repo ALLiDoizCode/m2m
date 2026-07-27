@@ -84,10 +84,10 @@ pub enum ProbeDenied {
 struct ProbeRateLimiter {
     max_per_window: u32,
     window: Duration,
-    /// A plain [`Mutex`] rather than [`RwLock`] like `leased_routes`/
-    /// `known_channels` below -- every access here mutates (recording an
-    /// attempt), so there is no read-only path to give a reader/writer
-    /// lock any advantage over mutual exclusion.
+    /// A plain [`Mutex`] rather than [`RwLock`] like `known_channels`
+    /// below -- every access here mutates (recording an attempt), so
+    /// there is no read-only path to give a reader/writer lock any
+    /// advantage over mutual exclusion.
     windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
@@ -188,7 +188,7 @@ pub struct Connector {
     /// loaded from configuration, so none of it survives a restart.
     ///
     /// Held as an atomically-swapped immutable snapshot rather than a
-    /// `RwLock<HashMap<..>>` (issue #452, ADR 0001): the packet path reads
+    /// `RwLock<HashMap<..>>` (issue #452): the packet path reads
     /// the current map with a single lock-free `Arc` clone, never a lock
     /// and never a copy of every leased route, so hot-path cost does not
     /// scale with how many leases happen to be active. A write (lease
@@ -376,7 +376,7 @@ impl Connector {
     }
 
     /// The current leased-route map, snapshotted as of this call (issue
-    /// #452, ADR 0001): `ArcSwap::load_full` is a single atomic `Arc`
+    /// #452): `ArcSwap::load_full` is a single atomic `Arc`
     /// clone -- no lock and no copy of the routes themselves -- and a
     /// concurrent `upsert_leased_route` publishes an entirely new map
     /// rather than mutating the one this snapshot points at, so the
@@ -575,8 +575,8 @@ impl Connector {
             return self.finish(PacketResponse::Reject(reject));
         }
 
-        // Issue #452, ADR 0001: `leased_routes_snapshot` is one lock-free
-        // `Arc` clone. Every active route below is a reference borrowed
+        // Issue #452: `leased_routes_snapshot` is one lock-free `Arc`
+        // clone. Every active route below is a reference borrowed
         // straight out of that snapshot -- expiry is still checked fresh
         // against the clock so a lapsed lease stops being selected
         // immediately, matching #427's guarantee, but nothing here
