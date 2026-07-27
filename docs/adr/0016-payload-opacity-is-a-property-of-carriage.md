@@ -69,8 +69,11 @@ A connector at a route termination is a paid reverse proxy, and the codebase sho
 rather than treat envelope handling as an embarrassment. The envelope becomes a modelled concept
 with a name, not an implementation detail of one HTTP client.
 
-The Rust connector has real work to do before the cutover: identity, claims, the x402 greeting and
-request binding are all unimplemented (#498). Until that lands, its client edge must not be exposed
+The Rust connector has real work to do before the cutover: identity, claims and request binding
+are all unimplemented (#498). Not the x402 greeting -- ADR 0011 removed it and does not reinstate
+it, and `client-edge-spec.md` §1.4 is stale in still describing it; nor Mina claims, dropped by
+ADR 0002. The conformance target is version 1 **as amended by these ADRs**, not the specification
+document as it currently reads. Until that lands, its client edge must not be exposed
 — an unpriced connector in front of an app whose payment enforcement is entirely upstream is a free
 gateway to that app, which is what #492 discovered.
 
