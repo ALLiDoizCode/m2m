@@ -56,15 +56,20 @@ ILP address and handler URL, or delete the block if this node only peers.
 
 ## 5. Build the image
 
+The image build lives at the repository root (`./Dockerfile`). It used to
+build the TypeScript connector; issue #457 deleted that runtime, so the root
+Dockerfile now builds this binary and the duplicate that lived in this
+directory is gone.
+
 ```bash
-docker build -f deploy/connector-rust/Dockerfile -t connector-rust:local .
+docker build -t connector-rust:local .
 ```
 
 For both target platforms:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/connector-rust/Dockerfile -t connector-rust:local .
+  -t connector-rust:local .
 ```
 
 ## 6. Run it

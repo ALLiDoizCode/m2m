@@ -108,8 +108,10 @@ channel claim, over ILP-over-HTTP (`POST /ilp`). Use a real client:
 - **`rig`** (git-native CLI): `npm i -g @toon-protocol/rig`, then follow the
   [rig README](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md)
   (identity → fund → push), pointing it at `http://127.0.0.1:3000/ilp`.
-- **The in-repo prover:** `scripts/standalone-e2e` / `deploy/pay-edge/prove-roundtrip.ts` is the
-  reference payer used by the paid round-trip harness.
+- **No in-repo prover.** `deploy/pay-edge/prove-roundtrip.ts` was the reference payer; it was
+  deleted with the embedded `ConnectorNode` (#457) because it was built on that node's in-process
+  settlement code. Use `rig` (or the toon-client `h402Fetch` shim) until an equivalent lands
+  against the Rust connector (#431).
 
 ## 6. Put your own app behind TOON (proxy path)
 

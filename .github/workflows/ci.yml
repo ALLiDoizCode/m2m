@@ -567,68 +567,12 @@ jobs:
           npm run test:rfc-links
           echo "✓ RFC links verified"
 
-  # Container-based standalone E2E — builds the connector image and runs two
-  # connector containers + two app containers, asserting the admin API + BTP +
-  # local delivery HTTP work across real container boundaries.
-  standalone-container-e2e:
-    name: Standalone Container E2E (Docker)
-    runs-on: ubuntu-latest
-    needs: [test, build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.12.0'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Build shared package
-        run: npm run build --workspace=packages/shared
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build connector image for standalone-e2e profile
-        run: docker compose --profile standalone-e2e build
-
-      - name: Smoke test /metrics endpoint in Docker image (AG3 stop-the-line)
-        run: |
-          docker compose --profile standalone-e2e up -d --wait
-          sleep 5
-          curl -sf http://127.0.0.1:18080/metrics | grep -q 'toon_packets_forwarded_total' || (echo "ERROR: /metrics missing toon_packets_forwarded_total" && exit 1)
-          curl -sf http://127.0.0.1:18080/metrics | grep -q '# HELP' || (echo "ERROR: /metrics missing HELP lines" && exit 1)
-          echo "✓ /metrics endpoint returns valid Prometheus data"
-          docker compose --profile standalone-e2e down --volumes
-
-      - name: Run container-based standalone E2E
-        run: npm run test:standalone-docker --workspace=packages/connector
-        env:
-          CI: true
-          NODE_ENV: test
-          STANDALONE_DOCKER: 'true'
-
-      - name: Capture container logs on failure
-        if: failure()
-        run: |
-          docker compose --profile standalone-e2e logs --no-color || true
-
-      - name: Tear down standalone-e2e stack
-        if: always()
-        run: docker compose --profile standalone-e2e down --volumes || true
-
-      - name: Report results
-        if: always()
-        run: |
-          echo "Standalone container E2E completed"
-          echo "Exercised: Dockerfile build, YAML config, compose DNS, admin API + BTP + local delivery HTTP across containers"
+  # The container-based standalone E2E job that lived here was removed with the
+  # embedded ConnectorNode (#457). It built the TypeScript connector image and
+  # ran `npm run test:standalone-docker --workspace=packages/connector`; the
+  # runtime, the admin API and BTP surfaces it asserted, and that npm script all
+  # no longer exist. The Rust connector's own container coverage belongs with
+  # #431's cutover, not here.
 
   # Solana program tests (Rust/BPF)
   solana-program:
@@ -715,7 +659,14 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/connector
           tags: |
-            type=raw,value=latest
+            # `latest` is deliberately NOT published here (#457). This image is
+            # now built from ./Dockerfile, which builds the RUST connector —
+            # the TypeScript node that answered the YAML/CONFIG_FILE contract
+            # was deleted. Moving `latest` would silently swap the runtime
+            # under every `:latest` consumer before #431 cuts the deploys over,
+            # so `latest` stays on the last TypeScript image (3.44.0), which is
+            # what the in-repo compose stacks now pin. Restore
+            # `type=raw,value=latest` as part of #431.
             type=sha,prefix=
             # Full 40-char commit SHA: the Container Security Scan job scans
             # connector:${{ github.sha }} (full SHA), which the default
@@ -774,7 +725,6 @@ jobs:
         security,
         rfc-links,
         solana-program,
-        standalone-container-e2e,
         docker-build-push,
         container-scan,
       ]
@@ -796,7 +746,6 @@ jobs:
           echo "  Rust Workspace Gate: ${{ needs.rust-gate.result }}"
           echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
-          echo "  Standalone Container E2E: ${{ needs.standalone-container-e2e.result }}"
           echo "  Security: ${{ needs.security.result }}"
           echo "  RFC Links: ${{ needs.rfc-links.result }}"
           echo "  Docker Build: ${{ needs.docker-build-push.result }}"

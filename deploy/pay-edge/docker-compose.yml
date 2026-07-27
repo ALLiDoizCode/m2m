@@ -23,7 +23,12 @@ services:
   # Image: the published connector. Override with CONNECTOR_IMAGE to pin a tag or
   # use a locally-built `connector:standalone-e2e`.
   connector:
-    image: ${CONNECTOR_IMAGE:-ghcr.io/toon-protocol/connector:latest}
+    # NOTE (#457): this YAML config is the TypeScript connector's contract, and
+    # that runtime was deleted from this repo. Pinned to the last image built from
+    # it (3.44.0) instead of the floating `:latest`, which #431 will repoint at the
+    # Rust connector (TOML config, ADR 0001). Do not un-pin before #431 rewires
+    # this stack.
+    image: ${CONNECTOR_IMAGE:-ghcr.io/toon-protocol/connector:3.44.0}
     environment:
       CONFIG_FILE: /app/config/connector.yaml
       LOG_LEVEL: ${LOG_LEVEL:-info}

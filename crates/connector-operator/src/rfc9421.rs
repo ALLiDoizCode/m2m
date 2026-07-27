@@ -7,7 +7,8 @@
 //! checks one presented by an operator's own tooling.
 //!
 //! Deliberately narrow, matching the MVP subset this repository already
-//! established for RFC 9421 (`packages/connector/src/auth/rfc9421`):
+//! established for RFC 9421 (`packages/connector/src/auth/rfc9421`, deleted
+//! with the embedded TypeScript node in #457 -- see git history):
 //!
 //!   - Exactly one covered-component set: `@method`, `@path`,
 //!     `content-digest` (RFC 9530, §2.1) -- no `;sf`/`;bs`/`;tr` component
