@@ -10,10 +10,12 @@ use connector_domain::{
     is_valid_ilp_address, select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
+use connector_signer::{PublicKeyBytes, Signer};
 use thiserror::Error;
 use tracing::Instrument;
 
 use crate::app_client::{AppClient, AppOutcome};
+use crate::claim::{ClaimAckOutcome, ClaimBook, WireClaim};
 use crate::clock::Clock;
 use crate::metrics::Metrics;
 use crate::operator_view::{
@@ -124,6 +126,15 @@ pub struct Connector {
     /// `Connector` itself has to remember so `channels()` knows which ids
     /// to ask the backend to report on.
     known_channels: RwLock<Vec<ChannelId>>,
+    /// Claims owed to and received from every peering relation (ADR 0004,
+    /// ADR 0005, issue #423): signing an outbound claim on fulfilment,
+    /// verifying and watermarking an inbound one. Empty and signer-less
+    /// until configured via [`Connector::with_signer`],
+    /// [`Connector::with_peer_claim_channel`] and
+    /// [`Connector::with_channel_verification_key`] -- a node with none of
+    /// those simply never emits or accepts a claim, matching how
+    /// `settlement` degrades to `None`.
+    claims: ClaimBook,
 }
 
 impl Connector {
@@ -144,7 +155,42 @@ impl Connector {
             metrics: Arc::new(Metrics::new()),
             settlement: None,
             known_channels: RwLock::new(Vec::new()),
+            claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
         }
+    }
+
+    /// Configure this node's own signer (issue #423), used to sign every
+    /// outbound claim. Without one configured, a fulfilled packet still
+    /// forwards and fulfils normally -- it simply never emits a claim,
+    /// matching how a node with no settlement backend never gets a working
+    /// channel surface.
+    pub fn with_signer(mut self, signer: Arc<dyn Signer>) -> Self {
+        self.claims.set_signer(signer);
+        self
+    }
+
+    /// Configure the channel this node claims against when it owes
+    /// `peer_id` for value it forwarded and `peer_id` fulfilled (issue
+    /// #423, peer-wire-spec.md §3.5).
+    pub fn with_peer_claim_channel(
+        mut self,
+        peer_id: impl Into<String>,
+        channel_id: impl Into<String>,
+    ) -> Self {
+        self.claims.set_outbound_channel(peer_id, channel_id);
+        self
+    }
+
+    /// Configure the public key whose signature this node accepts on an
+    /// inbound claim for `channel_id` (issue #423, peer-wire-spec.md §1.1's
+    /// "a configured peer id and verification key").
+    pub fn with_channel_verification_key(
+        mut self,
+        channel_id: impl Into<String>,
+        key: PublicKeyBytes,
+    ) -> Self {
+        self.claims.set_verification_key(channel_id, key);
+        self
     }
 
     /// Configure the settlement backend a node's channel-lifecycle writes
@@ -276,6 +322,49 @@ impl Connector {
             .await
     }
 
+    /// The peer wire's entry point (issue #423): accepts an inbound PREPARE
+    /// exactly like [`Connector::handle_prepare`], but also verifies and
+    /// watermarks whatever claim it carries (peer-wire-spec.md §3.2). The
+    /// two outcomes are independent -- a rejected claim does not reject the
+    /// PREPARE it rode in on (§3.4), and this method decides neither from
+    /// the other.
+    pub async fn handle_peer_prepare(
+        &self,
+        prepare: Prepare,
+        minimum_delivery: u64,
+        claim: Option<WireClaim>,
+    ) -> (PacketResponse, ClaimAckOutcome) {
+        let ack = claim.map_or(ClaimAckOutcome::NotSent, |claim| {
+            self.handle_peer_claim(claim)
+        });
+        let response = self.handle_prepare(prepare, minimum_delivery).await;
+        (response, ack)
+    }
+
+    /// Verify and, if valid, accept a claim received over the peer wire --
+    /// whether it rode a PREPARE or a FLUSH -- advancing its channel's
+    /// watermark (issue #423, peer-wire-spec.md §3.4).
+    pub fn handle_peer_claim(&self, claim: WireClaim) -> ClaimAckOutcome {
+        self.claims.accept_inbound(&claim)
+    }
+
+    /// Send a FLUSH frame (peer-wire-spec.md §3.3) for every peer whose
+    /// claim has waited at least `flush_interval` since it armed, as of
+    /// this connector's injected clock -- the mechanism that bounds
+    /// trailing exposure once traffic to a peer stops rather than leaving a
+    /// claim to ride a PREPARE that may never come. Checked fresh against
+    /// the clock on every call, like leased-route expiry, rather than
+    /// driven by its own timer: a caller (production: a periodic task;
+    /// tests: a direct call after advancing the clock) decides when to
+    /// sweep.
+    pub async fn sweep_flush(&self, flush_interval: Duration) {
+        for (peer_id, claim) in self.claims.due_for_flush(self.clock.now(), flush_interval) {
+            let nonce = claim.nonce;
+            let ack = self.peer_transport.flush(&peer_id, claim).await;
+            self.claims.acknowledge_outbound(&peer_id, nonce, ack);
+        }
+    }
+
     async fn handle_prepare_traced(
         &self,
         prepare: Prepare,
@@ -358,6 +447,12 @@ impl Connector {
         response
     }
 
+    /// Forward `prepare` to `peer_route`'s peer, piggybacking whatever
+    /// claim this connector currently owes it (issue #423, peer-wire-spec.md
+    /// §3.2), and -- only once the answer is a genuine fulfilment, verified
+    /// against `prepare`'s own execution condition -- record a fresh claim
+    /// for the value now owed (ADR 0004: value moves on fulfilment, never
+    /// on a forward that merely returned a fulfillment-shaped answer).
     async fn forward_via_peer_route(
         &self,
         peer_route: &PeerRoute,
@@ -365,23 +460,6 @@ impl Connector {
         minimum_delivery: u64,
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
-        match self
-            .forward_to_peer(peer_route, prepare, minimum_delivery)
-            .await
-        {
-            PacketResponse::Fulfill(fulfill) => {
-                Self::accept_if_fulfilled(&condition, Some(fulfill))
-            }
-            reject @ PacketResponse::Reject(_) => reject,
-        }
-    }
-
-    async fn forward_to_peer(
-        &self,
-        peer_route: &PeerRoute,
-        prepare: Prepare,
-        minimum_delivery: u64,
-    ) -> PacketResponse {
         let Some(forwarded_amount) =
             amount_after_fee(prepare.amount, peer_route.fee(), minimum_delivery)
         else {
@@ -400,9 +478,27 @@ impl Connector {
             amount: forwarded_amount,
             ..prepare
         };
-        self.peer_transport
-            .forward(peer_route.peer_id(), outgoing, minimum_delivery)
-            .await
+        let peer_id = peer_route.peer_id();
+        let pending_claim = self.claims.pending_claim(peer_id);
+        let (response, ack) = self
+            .peer_transport
+            .forward(peer_id, outgoing, minimum_delivery, pending_claim.clone())
+            .await;
+        if let Some(claim) = pending_claim {
+            self.claims.acknowledge_outbound(peer_id, claim.nonce, ack);
+        }
+
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                let outcome = Self::accept_if_fulfilled(&condition, Some(fulfill));
+                if matches!(outcome, PacketResponse::Fulfill(_)) {
+                    self.claims
+                        .record_fulfillment(peer_id, forwarded_amount, self.clock.now());
+                }
+                outcome
+            }
+            reject @ PacketResponse::Reject(_) => reject,
+        }
     }
 
     async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
@@ -541,10 +637,10 @@ impl Connector {
         Ok(ChannelView::from(state))
     }
 
-    /// Claims exchanged with peers. Always empty: no claim exchange exists
-    /// yet (#423).
+    /// Claims exchanged with peers (issue #423), for the operator surface's
+    /// read-only inspection interface.
     pub fn claims(&self) -> Vec<ClaimView> {
-        Vec::new()
+        self.claims.views()
     }
 
     /// Per-peer exposure. Always empty: no exposure projection exists yet
@@ -1491,7 +1587,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peers_claims_and_exposure_are_empty_until_their_tickets_land_and_channels_are_empty_with_no_settlement_backend(
+    async fn peers_and_exposure_are_empty_until_their_tickets_land_and_channels_and_claims_are_empty_with_nothing_configured(
     ) {
         let app_client = Arc::new(FakeAppClient::new());
         let clock = test_clock();
@@ -1499,6 +1595,9 @@ mod tests {
 
         assert!(connector.peers().is_empty());
         assert!(connector.channels().await.is_empty());
+        // No signer or peer claim channel configured, and no traffic sent:
+        // nothing to report. `claims()` reporting real state once claims
+        // exist is covered by the `emits_...`/`records_...` tests below.
         assert!(connector.claims().is_empty());
         assert!(connector.exposure().is_empty());
     }
@@ -1517,8 +1616,13 @@ mod tests {
             _peer_id: &str,
             _prepare: Prepare,
             _minimum_delivery: u64,
-        ) -> PacketResponse {
-            self.0.clone()
+            _claim: Option<WireClaim>,
+        ) -> (PacketResponse, ClaimAckOutcome) {
+            (self.0.clone(), ClaimAckOutcome::NotSent)
+        }
+
+        async fn flush(&self, _peer_id: &str, _claim: WireClaim) -> ClaimAckOutcome {
+            ClaimAckOutcome::NotSent
         }
     }
 
@@ -1544,6 +1648,169 @@ mod tests {
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F99"),
             other => panic!("expected a reject, got {other:?}"),
+        }
+    }
+
+    /// Issue #423's acceptance criteria, exercised end to end through
+    /// `handle_prepare` over an in-process peer transport rather than at
+    /// the `ClaimBook` unit level: a fulfilled forward arms a claim; it
+    /// rides the *next* packet to that peer, where it is verified and
+    /// advances the watermark; and each fulfilment produces its own claim
+    /// rather than a batch.
+    mod claim_exchange {
+        use super::*;
+        use crate::operator_view::ClaimDirection;
+        use connector_signer::{LocalSigner, Signer};
+
+        fn two_hop_setup() -> (Connector, Arc<Connector>, Arc<FakeAppClient>, url::Url) {
+            let second_hop_route =
+                StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let handler_url = second_hop_route.handler_url().clone();
+            let second_hop_app_client = Arc::new(FakeAppClient::new());
+            second_hop_app_client.respond(
+                &handler_url,
+                AppOutcome::Delivered {
+                    data: vec![],
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let payer_signer = LocalSigner::generate("payer-claim-key");
+            let second_hop = Arc::new(
+                Connector::new(
+                    vec![second_hop_route],
+                    vec![],
+                    second_hop_app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap()),
+            );
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer("second-hop", second_hop.clone());
+            let first_hop = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            )
+            .with_signer(Arc::new(payer_signer))
+            .with_peer_claim_channel("second-hop", "channel-a");
+            (first_hop, second_hop, second_hop_app_client, handler_url)
+        }
+
+        #[tokio::test]
+        async fn a_fulfilled_forward_arms_a_claim_and_the_next_fulfilled_forward_carries_it_to_the_peer(
+        ) {
+            let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
+
+            let first = first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .await;
+            assert!(matches!(first, PacketResponse::Fulfill(_)));
+
+            // Armed by the first fulfilment, but not yet sent anywhere --
+            // nothing has gone out to the peer since it armed.
+            let claims = first_hop.claims();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].peer_id, Some("second-hop".to_string()));
+            assert_eq!(claims[0].direction, ClaimDirection::Outbound);
+            assert_eq!(claims[0].nonce, 1);
+            assert_eq!(claims[0].cumulative_amount, 100);
+            assert!(claims[0].pending);
+            assert!(second_hop.claims().is_empty());
+
+            let second = first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 50), 0)
+                .await;
+            assert!(matches!(second, PacketResponse::Fulfill(_)));
+
+            // The second forward carried the first claim to the peer, who
+            // verified it and advanced its watermark -- and the second
+            // fulfilment armed its own fresh claim behind it.
+            let peer_claims = second_hop.claims();
+            assert_eq!(peer_claims.len(), 1);
+            assert_eq!(peer_claims[0].peer_id, None);
+            assert_eq!(peer_claims[0].direction, ClaimDirection::Inbound);
+            assert_eq!(peer_claims[0].channel_id, "channel-a");
+            assert_eq!(peer_claims[0].nonce, 1);
+            assert_eq!(peer_claims[0].cumulative_amount, 100);
+
+            let claims = first_hop.claims();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].nonce, 2);
+            assert_eq!(claims[0].cumulative_amount, 150);
+            assert!(claims[0].pending);
+        }
+
+        #[tokio::test]
+        async fn no_claim_is_emitted_for_a_rejected_packet() {
+            let (first_hop, _second_hop, app_client, handler_url) = two_hop_setup();
+            app_client.respond(
+                &handler_url,
+                AppOutcome::Declined {
+                    status: 402,
+                    body: vec![],
+                },
+            );
+
+            let response = first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .await;
+
+            assert!(matches!(response, PacketResponse::Reject(_)));
+            assert!(first_hop.claims().is_empty());
+        }
+
+        #[tokio::test]
+        async fn no_claim_is_emitted_for_an_already_expired_packet() {
+            let (first_hop, _second_hop, _app, _handler_url) = two_hop_setup();
+            let already_expired = prepare_expiring_at(
+                "g.example.app",
+                b"hello",
+                Utc.with_ymd_and_hms(2029, 1, 1, 0, 0, 0).unwrap(),
+            );
+
+            let response = first_hop.handle_prepare(already_expired, 0).await;
+
+            match response {
+                PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
+                other => panic!("expected a reject, got {other:?}"),
+            }
+            assert!(first_hop.claims().is_empty());
+        }
+
+        /// Peer-wire-spec.md §3.3: a flush sends a claim that would
+        /// otherwise have waited to ride the next packet -- the mechanism
+        /// that covers traffic stopping.
+        #[tokio::test]
+        async fn sweep_flush_sends_a_claim_that_has_no_packet_to_ride() {
+            let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
+            first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .await;
+            assert!(first_hop.claims()[0].pending);
+            assert!(second_hop.claims().is_empty());
+
+            first_hop.sweep_flush(Duration::seconds(0)).await;
+
+            assert!(second_hop.claims()[0].nonce == 1);
+            assert_eq!(second_hop.claims()[0].cumulative_amount, 100);
+            // Acknowledged by the flush: no longer pending.
+            assert!(!first_hop.claims()[0].pending);
+        }
+
+        #[tokio::test]
+        async fn sweep_flush_does_nothing_before_the_flush_interval_elapses() {
+            let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
+            first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .await;
+
+            first_hop.sweep_flush(Duration::seconds(60)).await;
+
+            assert!(second_hop.claims().is_empty());
+            assert!(first_hop.claims()[0].pending);
         }
     }
 }

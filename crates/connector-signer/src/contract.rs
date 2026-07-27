@@ -9,31 +9,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use libsecp256k1::{Message, PublicKey, RecoveryId, Signature as RawSignature};
-
 use crate::kms::{InMemoryKmsBackend, KmsSigner};
 use crate::local::LocalSigner;
-use crate::signer::Signer;
+use crate::signer::{verify, Signer};
 
 fn recovers_to_own_public_key(signer: &dyn Signer, digest: &[u8; 32]) {
     let public_key = signer.public_key().expect("public key");
     let signature = signer.sign(digest).expect("sign");
 
-    let mut serialized = [0u8; 64];
-    serialized[..32].copy_from_slice(&signature.r);
-    serialized[32..].copy_from_slice(&signature.s);
-    let raw_signature = RawSignature::parse_standard(&serialized).expect("valid signature shape");
-    let recovery_id = RecoveryId::parse(signature.recovery_id).expect("valid recovery id");
-    let message = Message::parse(digest);
-
-    let recovered = libsecp256k1::recover(&message, &raw_signature, &recovery_id)
-        .expect("signature recovers a public key");
-    let expected = PublicKey::parse(&public_key).expect("valid public key");
-    assert_eq!(
-        recovered, expected,
-        "signature must recover to the signer's own public key"
+    assert!(
+        verify(&public_key, digest, &signature),
+        "signature must verify against the signer's own public key"
     );
-    assert!(libsecp256k1::verify(&message, &raw_signature, &expected));
 }
 
 fn run_signer_contract(make_signer: impl FnOnce() -> Arc<dyn Signer>) {

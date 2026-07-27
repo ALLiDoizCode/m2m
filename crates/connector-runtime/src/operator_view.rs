@@ -2,14 +2,15 @@
 //! here is exactly what [`crate::Connector`] hands back to a read handler --
 //! no method beyond what the handler serializes as-is.
 //!
-//! [`PeerView`], [`ClaimView`] and [`ExposureView`] have no fields yet
-//! because nothing in the runtime tracks that state yet: the peer wire
-//! (#416), claim exchange (#423) and the exposure projection (#424) haven't
-//! landed. [`ChannelView`] gained real fields in #459, once a settlement
-//! backend existed for [`Connector`] to project channel state from.
-//! [`Connector`]'s accessors for the still-empty views return an empty list
-//! until each lands; the operator surface is already complete as an
-//! interface; the tickets above only need to start populating it.
+//! [`PeerView`] and [`ExposureView`] have no fields yet because nothing in
+//! the runtime tracks that state yet: the peer wire (#416) and the exposure
+//! projection (#424) haven't landed. [`ChannelView`] gained real fields in
+//! #459, once a settlement backend existed for [`Connector`] to project
+//! channel state from. [`ClaimView`] gained real fields in #423, once
+//! `crate::claim::ClaimBook` existed to report on. [`Connector`]'s
+//! accessors for the still-empty views return an empty list until each
+//! lands; the operator surface is already complete as an interface; the
+//! tickets above only need to start populating it.
 
 use chrono::{DateTime, Utc};
 use connector_settlement::{ChannelState, ChannelStatus};
@@ -89,10 +90,34 @@ fn encode_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// A claim as seen by the operator surface. See the module docs: always
-/// empty until #423 (claim exchange) lands.
+/// A claim as seen by the operator surface (issue #423): one entry per
+/// direction per peering relation with a claim ever exchanged -- what this
+/// connector has claimed to the peer ([`ClaimDirection::Outbound`]) and
+/// what the peer has claimed to this connector
+/// ([`ClaimDirection::Inbound`], i.e. this connector's own watermark on
+/// that channel). `peer_id` is `None` on an inbound entry: the peer wire
+/// has no identity handshake yet, so an inbound claim is known only by the
+/// channel it names, not by which configured peer sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimView {}
+pub struct ClaimView {
+    pub peer_id: Option<String>,
+    pub channel_id: String,
+    pub direction: ClaimDirection,
+    pub nonce: u64,
+    pub cumulative_amount: u64,
+    /// `true` for an outbound claim not yet acknowledged by the peer --
+    /// always `false` for an inbound claim, which is accepted or rejected
+    /// the instant it is received, never left pending.
+    pub pending: bool,
+}
+
+/// Which side of a peering relation a [`ClaimView`] reports on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaimDirection {
+    Outbound,
+    Inbound,
+}
 
 /// A peering relation's exposure as seen by the operator surface. See the
 /// module docs: always empty until #424 (the exposure projection) lands.
