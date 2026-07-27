@@ -17,7 +17,37 @@
 #
 # Same distinctions as the node-side overlay: its own pinned image tag, its
 # own ports (4000/4001, not the TypeScript node's 3000/8080/8081), its own
-# data path (./signer-rust.key, no named volume).
+# data path (./signer-rust.key, no named volume) -- including that overlay's
+# note on `chown 10001:10001 signer-rust.key`, which applies identically
+# here.
+#
+# ── The peer wire is never published on the public interface (#492) ────────
+# The peer-wire hop carries signed balance proofs: ADR 0004 moves value on
+# fulfilment and #423 makes a claim follow the fulfilment, so a claim rides
+# this socket. The wire is plaintext and unauthenticated (ADR 0003 — the
+# clean-room wire has no transport security of its own), which is fine on a
+# private segment and is not fine on the open internet, where an
+# unauthenticated listener is reachable by anyone who scans for it.
+#
+# So `4001` is bound to STORE_PEER_WIRE_BIND — the store box's *private*
+# address — rather than published on every interface. The container still
+# listens on `0.0.0.0:4001` inside its own network namespace (see
+# ./connector-rust.toml's `peer_wire_addr`); it is this host-side publish
+# that decides which interface the port is reachable on, so both halves are
+# needed and neither alone is sufficient.
+#
+# STORE_PEER_WIRE_BIND MUST be a Linode **VPC** address, not a legacy
+# 192.168.x.x "private IP". Legacy private addressing is shared across every
+# account in the datacenter, so binding there would swap "reachable by
+# anyone on the internet" for "reachable by anyone with a Linode in us-east"
+# — narrower, but still not a private segment. Set it in this directory's
+# `.env` alongside the other bootstrap values:
+#
+#   STORE_PEER_WIRE_BIND=10.x.y.z   # this box's VPC interface address
+#
+# Compose fails the `up` if it is unset rather than defaulting, because
+# every plausible default (`0.0.0.0`, empty) publishes the port on the
+# public interface — the exact outcome this is here to prevent.
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
@@ -28,5 +58,5 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
     ports:
       - '4000:4000'
-      - '4001:4001'
+      - '${STORE_PEER_WIRE_BIND:?set STORE_PEER_WIRE_BIND to this box VPC address; see header}:4001:4001'
     restart: unless-stopped

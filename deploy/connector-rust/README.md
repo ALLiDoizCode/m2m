@@ -46,6 +46,34 @@ The connector signs claims and settlement transactions with this key
 
 ```bash
 openssl rand -hex 32 > deploy/connector-rust/signer.key
+chmod 600 deploy/connector-rust/signer.key
+chown 10001:10001 deploy/connector-rust/signer.key   # see below
+```
+
+The image runs as `connector` (uid/gid **10001**, set by the Dockerfile's
+`adduser -D -u 10001` / `USER connector`), and a bind-mounted file keeps its
+_host_ ownership inside the container -- a `:ro` mount does not make it
+readable. So a key written by root at the natural `0600` is unreadable to the
+process that needs it, and the container restart-loops on:
+
+```text
+failed to read signer key_file at /app/data/signer.key: Permission denied (os error 13)
+```
+
+which is what happened deploying the devnet apex in #492. `chown 10001:10001`
+fixes it without widening the mode. Do not reach for `chmod 644` instead:
+this is the key the connector signs claims and settlement transactions with
+(ADR 0012), and it should stay readable by exactly one uid.
+
+This applies to the key file wherever it lives, under whatever name. The
+devnet overlays under `infra/linode-node/` and `infra/linode-store/` mount
+`./signer-rust.key` rather than this directory's `signer.key` -- same
+generation, same `chmod`, same `chown`, different path:
+
+```bash
+openssl rand -hex 32 > infra/linode-node/signer-rust.key
+chmod 600 infra/linode-node/signer-rust.key
+chown 10001:10001 infra/linode-node/signer-rust.key
 ```
 
 ## 2. Generate an operator bearer token

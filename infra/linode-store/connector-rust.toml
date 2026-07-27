@@ -22,6 +22,15 @@ client_edge_addr = "0.0.0.0:4000"
 
 # The accepting side of the peer wire — the node-side apex dials this. Port
 # matches that apex's [[peers]] entry for id = "store".
+#
+# `0.0.0.0` here is every interface *inside this container's own network
+# namespace*, which is not the same thing as every interface on the box. The
+# question of which host interface the port is reachable on is settled one
+# layer up, by docker-compose.store.rust.yml's `${STORE_PEER_WIRE_BIND}:4001`
+# publish — see that file's header for why the answer must be a VPC address
+# and never the public one (#492). Binding narrower than `0.0.0.0` here would
+# not help: the container cannot see the host's VPC interface, so the only
+# address it could bind is its own, which is what this already is.
 peer_wire_addr = "0.0.0.0:4001"
 
 [signer]
@@ -31,7 +40,17 @@ key_file = "/app/data/signer.key"
 
 [[routes]]
 prefix = "g.rust.store"
-handler_url = "http://store:3300"
+# `/store`, not the bare origin — the same defect the node-side
+# connector-rust.toml's `g.rust.relay` route carried, for the same reason:
+# `HttpAppClient::deliver` POSTs to this URL exactly and takes no path from
+# the packet, and the store app serves only `POST /store` and `GET /health`.
+#
+# UNVERIFIED against a running box. #492 deployed the apex only — the store
+# box did not exist at the time — so the relay side of this pair was proven
+# live (404 → 400 once the path was added) and this side was corrected by
+# reading the store app's routes, not by driving a packet at it. Confirm it
+# when the store box comes back.
+handler_url = "http://store:3300/store"
 
 # ── Operator surface (optional) ─────────────────────────────────────────
 # See infra/linode-node/connector-rust.toml's own note — omitted for the

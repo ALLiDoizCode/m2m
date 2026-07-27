@@ -49,20 +49,37 @@ key_file = "/app/data/signer.key"
 # an inbound peer connection itself, so no peer_wire_addr is set in this
 # file.
 #
-# REPLACE 203.0.113.20 with the store box's real public IP once
-# devnet-manage.sh has provisioned it (`./devnet-manage.sh ips`) — it is a
-# documentation-only placeholder (RFC 5737 TEST-NET-3), chosen so this file
-# is already a syntactically valid TOML file with a real SocketAddr (ADR
-# 0009: a malformed peer addr is a refuse-to-start error), not so it is
-# reachable. Port 4001 matches the store box's own connector-rust.toml
-# peer_wire_addr.
+# REPLACE 203.0.113.20 with the store box's **VPC** address once
+# devnet-manage.sh has provisioned it — NOT its public IP. The peer wire is
+# plaintext and unauthenticated (ADR 0003) and carries signed balance proofs
+# (ADR 0004, #423), so #492 settled that it runs on a private segment only;
+# docker-compose.store.rust.yml's header has the full reasoning and the
+# store box publishes 4001 on that address alone. Dialing the store's public
+# IP from here would work and would defeat the point.
+#
+# It is a documentation-only placeholder (RFC 5737 TEST-NET-3), chosen so
+# this file is already a syntactically valid TOML file with a real
+# SocketAddr (ADR 0009: a malformed peer addr is a refuse-to-start error),
+# not so it is reachable. An unreachable peer is not a startup error —
+# `NetworkPeerTransport` dials lazily on the first packet — so the apex
+# serves `g.rust.relay` with this placeholder still in place, which is how
+# it was deployed apex-first in #492. Port 4001 matches the store box's own
+# connector-rust.toml peer_wire_addr.
 [[peers]]
 id = "store"
 addr = "203.0.113.20:4001"
 
 [[routes]]
 prefix = "g.rust.relay"
-handler_url = "http://relay:3100"
+# `/write`, not the bare origin: `HttpAppClient::deliver` POSTs to this URL
+# exactly as written — it takes no path from the packet — and the relay app
+# serves only `POST /write` and `GET /health`. A bare `http://relay:3100`
+# comes back F99 "app declined the delivery with HTTP 404", which is what
+# this route did when first deployed (#492).
+#
+# The path is only the half of the app-delivery gap that config can close.
+# docs/operators/parallel-fleet-comparison.md has the rest.
+handler_url = "http://relay:3100/write"
 
 [[routes]]
 prefix = "g.rust.store"

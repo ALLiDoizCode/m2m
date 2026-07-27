@@ -12,6 +12,14 @@ its `handler_url`; it returns success or failure and knows nothing about channel
 settlement. A Rust connector can therefore be placed in front of an already-running relay or
 store app without touching it, and the app cannot tell which connector is in front of it.
 
+> **The first deployment falsified that last clause** (#492). The two connectors do not deliver
+> alike — the TypeScript one reads an HTTP envelope out of `prepare.data` and sends
+> `X-TOON-Payer`/`X-TOON-Amount`/`X-TOON-Chain`; the Rust one treats `prepare.data` as an opaque
+> body and sends none of them. The relay and store both read those headers, so an app _can_ tell,
+> and loses payer attribution behind the Rust fleet.
+> [`docs/operators/parallel-fleet-comparison.md`](../operators/parallel-fleet-comparison.md) has
+> the evidence. The rest of this ADR stands; this premise needs closing before a client migrates.
+
 This removes the flag day that ADR 0003 accepted as the cost of a clean-room peer wire. The two
 peer wires never have to interoperate, because the two networks never have to be one network.
 Nothing speaks the old protocol except the old fleet, which continues to work until it is
