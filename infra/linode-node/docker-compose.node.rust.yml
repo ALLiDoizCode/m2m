@@ -17,9 +17,12 @@
 # Distinct from the TypeScript node in every way ADR 0013 requires:
 #   - image:  connector-rust (issue #487), pinned to an exact sha- tag, never
 #             `connector` or a floating tag
-#   - ports:  4000 (client edge + operator + /metrics — one port, unlike the
-#             TypeScript node's three) and 4001 (peer wire) — neither
-#             collides with the TypeScript node's 3000/8080/8081
+#   - ports:  4000 only (client edge + operator + /metrics — one port, unlike
+#             the TypeScript node's three), no collision with the TypeScript
+#             node's 3000/8080/8081. No 4001 published: ./connector-rust.toml
+#             sets no peer_wire_addr on this box (the apex only dials out to
+#             the store side; a container needs no published port to make an
+#             outbound connection) — see that file's own [[peers]] comment.
 #   - data:   ./signer-rust.key, a path distinct from the TypeScript node's
 #             `connector_data` volume; this service gets no named volume at
 #             all (connector-runtime holds no state beyond the signer key)
@@ -37,5 +40,4 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
     ports:
       - '4000:4000'
-      - '4001:4001'
     restart: unless-stopped
