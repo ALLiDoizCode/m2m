@@ -174,6 +174,14 @@ impl RejectCode {
         RejectCode("T01".to_string())
     }
 
+    /// T04: Insufficient Liquidity -- this connector's exposure ceiling for
+    /// the inbound peering relation is exceeded (issue #424,
+    /// peer-wire-spec.md §5.1/§5.3). Retryable: the condition clears once
+    /// the peer's pending claim is acknowledged.
+    pub fn t04_insufficient_liquidity() -> RejectCode {
+        RejectCode("T04".to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -360,6 +368,7 @@ mod tests {
         assert_eq!(RejectCode::f02_unreachable().as_str(), "F02");
         assert_eq!(RejectCode::f99_application_error().as_str(), "F99");
         assert_eq!(RejectCode::t01_peer_unreachable().as_str(), "T01");
+        assert_eq!(RejectCode::t04_insufficient_liquidity().as_str(), "T04");
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
         assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");

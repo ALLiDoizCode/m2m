@@ -2,15 +2,16 @@
 //! here is exactly what [`crate::Connector`] hands back to a read handler --
 //! no method beyond what the handler serializes as-is.
 //!
-//! [`PeerView`] and [`ExposureView`] have no fields yet because nothing in
-//! the runtime tracks that state yet: the peer wire (#416) and the exposure
-//! projection (#424) haven't landed. [`ChannelView`] gained real fields in
-//! #459, once a settlement backend existed for [`Connector`] to project
-//! channel state from. [`ClaimView`] gained real fields in #423, once
-//! `crate::claim::ClaimBook` existed to report on. [`Connector`]'s
-//! accessors for the still-empty views return an empty list until each
-//! lands; the operator surface is already complete as an interface; the
-//! tickets above only need to start populating it.
+//! [`PeerView`] has no fields yet because nothing in the runtime tracks
+//! that state yet: the peer wire (#416) hasn't landed. [`ChannelView`]
+//! gained real fields in #459, once a settlement backend existed for
+//! [`Connector`] to project channel state from. [`ClaimView`] gained real
+//! fields in #423, once `crate::claim::ClaimBook` existed to report on.
+//! [`ExposureView`] gained real fields in #424, once the exposure
+//! projection existed. [`Connector`]'s accessor for the still-empty
+//! [`PeerView`] returns an empty list until #416 lands; the operator
+//! surface is already complete as an interface; that ticket only needs to
+//! start populating it.
 
 use chrono::{DateTime, Utc};
 use connector_settlement::{ChannelState, ChannelStatus};
@@ -119,7 +120,15 @@ pub enum ClaimDirection {
     Inbound,
 }
 
-/// A peering relation's exposure as seen by the operator surface. See the
-/// module docs: always empty until #424 (the exposure projection) lands.
+/// A channel's exposure as seen by the operator surface (issue #424): value
+/// this connector has delivered on that channel's counterparty's behalf but
+/// does not yet hold a covering claim for. `ceiling` is `None` for a
+/// channel with no configured ceiling -- reported (never forwarding stops
+/// for it), but never `over_ceiling`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExposureView {}
+pub struct ExposureView {
+    pub channel_id: String,
+    pub exposure: u64,
+    pub ceiling: Option<u64>,
+    pub over_ceiling: bool,
+}

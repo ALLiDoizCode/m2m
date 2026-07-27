@@ -7,7 +7,8 @@ use chrono::Duration;
 use connector_config::StaticRoute;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
-    is_valid_ilp_address, select_route, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
+    is_valid_ilp_address, select_route, Fulfill, PacketResponse, Prepare, ProjectionDivergence,
+    Reject, RejectCode,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use connector_signer::{PublicKeyBytes, Signer};
@@ -17,6 +18,7 @@ use tracing::Instrument;
 use crate::app_client::{AppClient, AppOutcome};
 use crate::claim::{ClaimAckOutcome, ClaimBook, WireClaim};
 use crate::clock::Clock;
+use crate::journal::{Journal, JournalError};
 use crate::metrics::Metrics;
 use crate::operator_view::{
     ChannelView, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
@@ -204,6 +206,34 @@ impl Connector {
         self
     }
 
+    /// Configure `channel_id`'s exposure ceiling (ADR 0005,
+    /// peer-wire-spec.md §5.3, issue #424): a PREPARE arriving over that
+    /// channel is rejected (`T04_INSUFFICIENT_LIQUIDITY`) once this
+    /// connector's exposure to it exceeds `ceiling`, until a covering claim
+    /// is accepted.
+    pub fn with_channel_ceiling(mut self, channel_id: impl Into<String>, ceiling: u64) -> Self {
+        self.claims.set_ceiling(channel_id, ceiling);
+        self
+    }
+
+    /// Configure the durable journal this node's claim and exposure state
+    /// is persisted to and rebuilt from (ADR 0005, issue #424). Call this
+    /// *last* in the builder chain -- rebuild uses whatever signer is
+    /// already configured to re-arm any outbound claim left unacknowledged
+    /// (see `ClaimBook::rebuild_from`'s own doc for why that is always
+    /// safe). Returns whatever divergences the rebuild found between the
+    /// projection and the claims it derives from (issue #424's own
+    /// acceptance criteria: "reports divergence rather than absorbing
+    /// it") -- already logged via `tracing::error!` regardless of whether
+    /// a caller inspects the return value.
+    pub fn with_journal(
+        mut self,
+        journal: Arc<dyn Journal>,
+    ) -> Result<(Self, Vec<ProjectionDivergence>), JournalError> {
+        let divergences = self.claims.set_journal(journal)?;
+        Ok((self, divergences))
+    }
+
     /// Create or renew a leased route (ADR 0006, issue #427): a controller
     /// outside this connector pushes a route to a peer with a time limit,
     /// keyed by `prefix`. Calling this again for a prefix already leased
@@ -324,20 +354,49 @@ impl Connector {
 
     /// The peer wire's entry point (issue #423): accepts an inbound PREPARE
     /// exactly like [`Connector::handle_prepare`], but also verifies and
-    /// watermarks whatever claim it carries (peer-wire-spec.md §3.2). The
-    /// two outcomes are independent -- a rejected claim does not reject the
-    /// PREPARE it rode in on (§3.4), and this method decides neither from
-    /// the other.
+    /// watermarks whatever claim it carries (peer-wire-spec.md §3.2), and
+    /// enforces this channel's exposure ceiling (§5.3, issue #424) before
+    /// forwarding.
+    ///
+    /// The claim outcome and the PREPARE outcome are independent -- a
+    /// rejected claim does not reject the PREPARE it rode in on (§3.4), and
+    /// this method decides neither from the other. `channel_id` identifies
+    /// which inbound peering relation this PREPARE belongs to -- the peer
+    /// wire has no identity handshake yet (#416), so a caller supplies
+    /// whatever channel it last learned for this connection (typically from
+    /// an accompanying claim, cached across calls that carry none); `None`
+    /// when no channel has been established yet, in which case no ceiling
+    /// can be checked and no exposure is recorded for this call, matching
+    /// how a peer with no configured channel never gets a claim emitted
+    /// either.
     pub async fn handle_peer_prepare(
         &self,
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
+        channel_id: Option<String>,
     ) -> (PacketResponse, ClaimAckOutcome) {
         let ack = claim.map_or(ClaimAckOutcome::NotSent, |claim| {
             self.handle_peer_claim(claim)
         });
+
+        if let Some(channel_id) = channel_id.as_deref() {
+            if self.claims.is_over_ceiling(channel_id) {
+                let reject = PacketResponse::Reject(Reject {
+                    code: RejectCode::t04_insufficient_liquidity(),
+                    triggered_by: String::new(),
+                    message: format!("exposure ceiling exceeded for channel '{channel_id}'"),
+                    data: Vec::new(),
+                });
+                return (self.finish(reject), ack);
+            }
+        }
+
+        let amount = prepare.amount;
         let response = self.handle_prepare(prepare, minimum_delivery).await;
+        if let (PacketResponse::Fulfill(_), Some(channel_id)) = (&response, channel_id.as_deref()) {
+            self.claims.record_inbound_delivery(channel_id, amount);
+        }
         (response, ack)
     }
 
@@ -643,10 +702,10 @@ impl Connector {
         self.claims.views()
     }
 
-    /// Per-peer exposure. Always empty: no exposure projection exists yet
-    /// (#424).
+    /// Per-channel exposure (issue #424), for the operator surface's
+    /// read-only inspection interface.
     pub fn exposure(&self) -> Vec<ExposureView> {
-        Vec::new()
+        self.claims.exposure_views()
     }
 
     /// Accept `candidate` as a genuine [`Fulfill`] only if its fulfillment
@@ -1587,17 +1646,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peers_and_exposure_are_empty_until_their_tickets_land_and_channels_and_claims_are_empty_with_nothing_configured(
+    async fn peers_are_empty_until_416_lands_and_channels_claims_and_exposure_are_empty_with_nothing_configured(
     ) {
         let app_client = Arc::new(FakeAppClient::new());
         let clock = test_clock();
         let connector = connector_with(vec![], app_client, clock);
 
+        // `peers()` is always empty: the peer wire has no identity
+        // handshake yet (#416).
         assert!(connector.peers().is_empty());
         assert!(connector.channels().await.is_empty());
-        // No signer or peer claim channel configured, and no traffic sent:
-        // nothing to report. `claims()` reporting real state once claims
-        // exist is covered by the `emits_...`/`records_...` tests below.
+        // No signer, peer claim channel or ceiling configured, and no
+        // traffic sent: nothing to report. `claims()`/`exposure()`
+        // reporting real state once claims/exposure exist is covered by
+        // the `emits_...`/`records_...`/`exposure`-suffixed tests below.
         assert!(connector.claims().is_empty());
         assert!(connector.exposure().is_empty());
     }
@@ -1687,6 +1749,11 @@ mod tests {
             );
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("second-hop", second_hop.clone());
+            // Standing in for the identity a real peer-wire handshake would
+            // establish (#416, not yet built): without this, the link only
+            // learns "channel-a" once a claim first rides a frame, so the
+            // very first delivery would go unrecorded (issue #424).
+            peer_transport.set_peer_channel("second-hop", "channel-a");
             let first_hop = Connector::new(
                 vec![],
                 vec![PeerRoute::new("g.example.app", "second-hop", 0)],
@@ -1811,6 +1878,298 @@ mod tests {
 
             assert!(second_hop.claims().is_empty());
             assert!(first_hop.claims()[0].pending);
+        }
+    }
+
+    /// Issue #424, peer-wire-spec.md §5.3: a peer whose exposure exceeds
+    /// its configured ceiling stops being forwarded for.
+    mod exposure_and_ceiling {
+        use super::*;
+        use connector_signer::LocalSigner;
+
+        /// Exactly `claim_exchange::two_hop_setup`, but `second_hop`
+        /// enforces a ceiling of `ceiling` on `channel-a` -- the channel
+        /// `first_hop` claims against when it owes `second_hop` -- so
+        /// `second_hop`'s own exposure to `first_hop` is what gets bounded.
+        /// Also returns the payer's own signer, so a test can sign a claim
+        /// on `channel-a` directly without going through `first_hop`.
+        fn two_hop_setup_with_ceiling(
+            ceiling: u64,
+        ) -> (
+            Connector,
+            Arc<Connector>,
+            Arc<FakeAppClient>,
+            Arc<LocalSigner>,
+        ) {
+            let second_hop_route =
+                StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let handler_url = second_hop_route.handler_url().clone();
+            let second_hop_app_client = Arc::new(FakeAppClient::new());
+            second_hop_app_client.respond(
+                &handler_url,
+                AppOutcome::Delivered {
+                    data: vec![],
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let payer_signer = Arc::new(LocalSigner::generate("payer-claim-key"));
+            let second_hop = Arc::new(
+                Connector::new(
+                    vec![second_hop_route],
+                    vec![],
+                    second_hop_app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
+                .with_channel_ceiling("channel-a", ceiling),
+            );
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer("second-hop", second_hop.clone());
+            peer_transport.set_peer_channel("second-hop", "channel-a");
+            let first_hop = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            )
+            .with_signer(payer_signer.clone())
+            .with_peer_claim_channel("second-hop", "channel-a");
+            (first_hop, second_hop, second_hop_app_client, payer_signer)
+        }
+
+        #[tokio::test]
+        async fn deliveries_within_the_ceiling_are_forwarded_and_recorded_as_exposure() {
+            let (first_hop, second_hop, _app, _payer_signer) = two_hop_setup_with_ceiling(100);
+
+            let response = first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 60), 0)
+                .await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            let exposure = second_hop.exposure();
+            assert_eq!(exposure.len(), 1);
+            assert_eq!(exposure[0].channel_id, "channel-a");
+            assert_eq!(exposure[0].exposure, 60);
+            assert_eq!(exposure[0].ceiling, Some(100));
+            assert!(!exposure[0].over_ceiling);
+        }
+
+        /// The full two-hop path naturally piggybacks each fulfilment's own
+        /// claim on the very next PREPARE (peer-wire-spec.md §3.2), which
+        /// keeps steady-state exposure at roughly one packet -- exactly
+        /// `CONTEXT.md`'s "Exposure" definition, and exactly why the
+        /// ceiling matters only once a payer "has fulfilled packets and
+        /// stopped claiming". These two tests drive `second_hop` directly
+        /// through [`Connector::handle_peer_prepare`], simulating that
+        /// exact scenario -- fulfilments with no claim ever riding -- which
+        /// the full piggyback path in `two_hop_setup_with_ceiling` cannot
+        /// produce on its own.
+        #[tokio::test]
+        async fn a_peer_whose_exposure_exceeds_its_ceiling_stops_being_forwarded_for() {
+            let (_first_hop, second_hop, app, _payer_signer) = two_hop_setup_with_ceiling(100);
+
+            let first = second_hop
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 60),
+                    0,
+                    None,
+                    Some("channel-a".to_string()),
+                )
+                .await
+                .0;
+            assert!(matches!(first, PacketResponse::Fulfill(_)));
+
+            let second = second_hop
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 60),
+                    0,
+                    None,
+                    Some("channel-a".to_string()),
+                )
+                .await
+                .0;
+            assert!(matches!(second, PacketResponse::Fulfill(_)));
+            // Exposure is now 120, over the configured ceiling of 100 --
+            // neither delivery carried a claim to cover the other.
+            assert!(second_hop.exposure()[0].over_ceiling);
+            assert_eq!(second_hop.exposure()[0].exposure, 120);
+
+            // A third PREPARE over the same channel is refused before it
+            // ever reaches second_hop's own app -- not merely answered
+            // with a reject after being routed.
+            let third = second_hop
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 1),
+                    0,
+                    None,
+                    Some("channel-a".to_string()),
+                )
+                .await
+                .0;
+            match third {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "T04");
+                }
+                other => panic!("expected a T04 reject, got {other:?}"),
+            }
+            assert_eq!(app.deliveries().len(), 2);
+            // The ceiling reject did not itself change exposure.
+            assert_eq!(second_hop.exposure()[0].exposure, 120);
+        }
+
+        #[tokio::test]
+        async fn an_accepted_claim_covering_the_exposure_lets_forwarding_resume() {
+            let (_first_hop, second_hop, app, payer_signer) = two_hop_setup_with_ceiling(100);
+            for amount in [60u64, 60u64] {
+                let response = second_hop
+                    .handle_peer_prepare(
+                        prepare_with_amount("g.example.app", amount),
+                        0,
+                        None,
+                        Some("channel-a".to_string()),
+                    )
+                    .await
+                    .0;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+            }
+            let blocked = second_hop
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 1),
+                    0,
+                    None,
+                    Some("channel-a".to_string()),
+                )
+                .await
+                .0;
+            assert!(matches!(blocked, PacketResponse::Reject(_)));
+
+            // A claim covering the full 120 delivered so far, signed by the
+            // channel's own registered key, is accepted and lifts the
+            // ceiling.
+            let claim = WireClaim {
+                channel_id: "channel-a".to_string(),
+                nonce: 1,
+                cumulative_amount: 120,
+                signature: payer_signer
+                    .sign(&connector_domain::claim_digest("channel-a", 1, 120))
+                    .unwrap(),
+            };
+            let ack = second_hop.handle_peer_claim(claim);
+            assert_eq!(ack, ClaimAckOutcome::Accepted);
+            assert!(!second_hop.exposure()[0].over_ceiling);
+
+            let resumed = second_hop
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 1),
+                    0,
+                    None,
+                    Some("channel-a".to_string()),
+                )
+                .await
+                .0;
+
+            assert!(matches!(resumed, PacketResponse::Fulfill(_)));
+            assert_eq!(app.deliveries().len(), 3);
+        }
+    }
+
+    /// Issue #424's own acceptance criterion: a node killed mid-traffic
+    /// recovers its money state by replay, with no manual repair --
+    /// exercised through `Connector::with_journal`, the public entry point
+    /// a real binary would use, rather than `ClaimBook` directly (already
+    /// covered in depth by `claim::tests::journal_recovery`).
+    mod journal_recovery {
+        use super::*;
+        use crate::journal::FileJournal;
+        use connector_signer::LocalSigner;
+
+        #[tokio::test]
+        async fn a_connector_rebuilt_against_the_same_journal_keeps_its_exposure_and_ceiling() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.log");
+            let payer_signer = Arc::new(LocalSigner::generate("payer-claim-key"));
+
+            let build = |path: &std::path::Path| {
+                let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+                let app_client = Arc::new(FakeAppClient::new());
+                app_client.respond(
+                    route.handler_url(),
+                    AppOutcome::Delivered {
+                        data: vec![],
+                        fulfillment: Some(FULFILLMENT),
+                    },
+                );
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
+                .with_channel_ceiling("channel-a", 100)
+                .with_journal(Arc::new(FileJournal::open(path).unwrap()))
+                .unwrap()
+            };
+
+            {
+                let (connector, divergences) = build(&path);
+                assert!(divergences.is_empty());
+                let response = connector
+                    .handle_peer_prepare(
+                        prepare_with_amount("g.example.app", 60),
+                        0,
+                        None,
+                        Some("channel-a".to_string()),
+                    )
+                    .await
+                    .0;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+            }
+
+            // A fresh `Connector`, built the same way against the same
+            // journal path -- standing in for this node restarting. The
+            // recovered exposure (60) is the very thing that would have
+            // been lost -- with no journal, a restarted node would start
+            // back at zero and let this same peer run up its debt all
+            // over again before ever tripping the ceiling.
+            let (restarted, divergences) = build(&path);
+            assert!(divergences.is_empty());
+            assert_eq!(restarted.exposure()[0].exposure, 60);
+            assert!(!restarted.exposure()[0].over_ceiling);
+
+            // 60 (recovered) + 45 = 105, still under the ceiling at the
+            // moment this PREPARE is checked, so it is forwarded --
+            // pushing exposure over 100.
+            let pushes_over = restarted
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 45),
+                    0,
+                    None,
+                    Some("channel-a".to_string()),
+                )
+                .await
+                .0;
+            assert!(matches!(pushes_over, PacketResponse::Fulfill(_)));
+            assert!(restarted.exposure()[0].over_ceiling);
+
+            // The next PREPARE is checked against the now-over-ceiling
+            // exposure and refused.
+            let over = restarted
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 1),
+                    0,
+                    None,
+                    Some("channel-a".to_string()),
+                )
+                .await
+                .0;
+            match over {
+                PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T04"),
+                other => panic!("expected a T04 reject, got {other:?}"),
+            }
         }
     }
 }

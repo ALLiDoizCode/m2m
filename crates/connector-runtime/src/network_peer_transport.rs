@@ -310,6 +310,24 @@ impl PeerWireServer {
         addr: SocketAddr,
         connector: Arc<Connector>,
     ) -> std::io::Result<PeerWireServer> {
+        Self::bind_with_channel(addr, connector, None).await
+    }
+
+    /// Bind exactly like [`PeerWireServer::bind`], but with `channel_id`
+    /// pre-configured as every connection's known channel from its first
+    /// frame on (issue #424, peer-wire-spec.md §5.3) -- standing in for
+    /// the identity a real peer-wire handshake would establish (#416, not
+    /// yet built). Without this, a connection only learns its
+    /// counterparty's channel once a claim happens to ride a frame over it
+    /// (`serve_connection`'s own doc), so the very first delivery cannot be
+    /// checked against a ceiling or recorded as exposure. Appropriate when
+    /// this listener serves exactly one peering relation, matching how
+    /// every caller in this workspace uses it today.
+    pub async fn bind_with_channel(
+        addr: SocketAddr,
+        connector: Arc<Connector>,
+        channel_id: Option<String>,
+    ) -> std::io::Result<PeerWireServer> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
 
@@ -322,7 +340,8 @@ impl PeerWireServer {
                     Err(_) => return,
                 };
                 let connector = connector.clone();
-                let handle = tokio::spawn(serve_connection(stream, connector));
+                let channel_id = channel_id.clone();
+                let handle = tokio::spawn(serve_connection(stream, connector, channel_id));
                 handles_for_accept_loop.lock().await.push(handle);
             }
         });
@@ -349,7 +368,18 @@ impl PeerWireServer {
     }
 }
 
-async fn serve_connection(mut stream: TcpStream, connector: Arc<Connector>) {
+async fn serve_connection(
+    mut stream: TcpStream,
+    connector: Arc<Connector>,
+    mut known_channel_id: Option<String>,
+) {
+    // `known_channel_id` starts however `PeerWireServer::bind_with_channel`
+    // configured it (issue #424) and otherwise updates as this connection's
+    // counterparty identifies itself, exactly like `PeerLink::connect`'s
+    // identical cache in `peer_transport.rs`: the peer wire has no identity
+    // handshake yet (#416), so once a claim on this connection names a
+    // channel, every later PREPARE over it is charged against that same
+    // channel, even ones carrying no claim of their own.
     loop {
         let frame = match read_frame(&mut stream).await {
             Ok(frame) => frame,
@@ -364,8 +394,11 @@ async fn serve_connection(mut stream: TcpStream, connector: Arc<Connector>) {
                     return;
                 };
 
+                if let Some(claim) = claim.as_ref() {
+                    known_channel_id = Some(claim.channel_id.clone());
+                }
                 let (response, ack) = connector
-                    .handle_peer_prepare(prepare, minimum_delivery, claim)
+                    .handle_peer_prepare(prepare, minimum_delivery, claim, known_channel_id.clone())
                     .await;
                 let (packet_bytes, response_frame_type) = match response {
                     PacketResponse::Fulfill(fulfill) => (fulfill.encode(), FRAME_TYPE_FULFILL),
@@ -385,6 +418,7 @@ async fn serve_connection(mut stream: TcpStream, connector: Arc<Connector>) {
                 let Some((claim, _)) = WireClaim::decode(&frame.payload) else {
                     return;
                 };
+                known_channel_id = Some(claim.channel_id.clone());
                 let ack = connector.handle_peer_claim(claim);
                 let response_frame = Frame {
                     frame_type: FRAME_TYPE_CLAIM_ACK,
