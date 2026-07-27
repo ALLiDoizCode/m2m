@@ -135,10 +135,33 @@ live host". They are, and not in the reassuring direction.
 `infra/linode-node/firewall.sh` allows 22, 80 and 443 only, and `ufw status` on the live box
 confirms exactly those rules active. `POST http://<apex-public-ip>:4000/ilp` from off-box still
 answers `400`. Docker inserts its own `DOCKER` chain ahead of ufw's, so a `ports:` publish is
-reachable from the internet regardless of what ufw says. **The Rust client edge is currently
-serving the public internet over plain HTTP**, unlike the TypeScript node, which is reached
-through nginx on 443. That is a consequence of running the overlay at all, not of anything
-specific to this comparison, and it wants a decision before the prefix carries anything real.
+reachable from the internet regardless of what ufw says.
+
+### That combination was a free-write gateway, and it is now closed
+
+Three facts compose into one that none of them states alone:
+
+1. This client edge implements **only §1.1** of `docs/protocol/client-edge-spec.md`. Its own
+   module doc: identity (§1.2), payment claims (§1.3) and the x402 greeting (§1.4) are
+   unimplemented, so "every request today is treated as an unauthenticated, unpriced delivery
+   attempt". §1.5 request-request binding is absent from `crates/` entirely.
+2. The relay's `POST /write` "trusts the injected `X-TOON-Payer`/`-Amount`/`-Chain` headers
+   WITHOUT re-validating payment" and stores any signature-valid event whether or not they are
+   present. It enforces no payment itself — by design, because the connector upstream is supposed
+   to have done it.
+3. `:4000` was published on `0.0.0.0`, past ufw.
+
+So an anonymous PREPARE addressed to `g.rust.relay`, carrying a valid NIP-01 event, would have
+been stored in the devnet relay for free, from anywhere on the internet — the whole pay-to-write
+premise bypassed. Note the `handler_url` fix earlier in this document is what _armed_ it: while
+the route 404'd, the delivery could not land.
+
+Closed by binding the publish to `127.0.0.1` (verified: refused externally, still serving on the
+box). **This is not a firewall problem and a ufw rule would not have fixed it.** Widen it again
+only once §1.2–§1.5 are implemented and the fleet charges for a write.
+
+Not demonstrated end-to-end: doing so means publishing a permanent event, so the last link is
+read out of the relay's handler rather than executed.
 
 It also settles how the peer wire had to be protected. A ufw rule would not have contained it —
 only refusing to publish it on the public interface does, which is why
