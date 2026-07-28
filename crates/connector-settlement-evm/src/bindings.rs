@@ -46,9 +46,13 @@ abigen!(
 // Each lives in its own private module rather than at this module's top
 // level like `SettlementChannel`/`MockErc20`/`Erc20` above: `abigen!` also
 // generates an event-filter type per event name, flattened into whatever
-// module it's invoked in, and `TokenNetwork.sol` and
-// `SettlementChannel.sol` both declare a `ChannelOpened` event -- sharing
-// this module would make `ChannelOpenedFilter` ambiguous.
+// module it's invoked in. `TokenNetwork.sol` and `SettlementChannel.sol`
+// both declare a `ChannelOpened` event, so `token_network` can't join the
+// top-level module without making `ChannelOpenedFilter` ambiguous; and
+// `TokenNetwork.sol`/`TokenNetworkRegistry.sol` both inherit OpenZeppelin's
+// `Ownable`/`Pausable`, so `token_network` and `token_network_registry`
+// can't share a module with each other either, or `OwnershipTransferredFilter`/
+// `PausedFilter`/`UnpausedFilter` become ambiguous between the two.
 //
 // The artifacts are NOT hand-committed the way SettlementChannel.json/
 // MockERC20.json above are -- they are extracted verbatim from a real

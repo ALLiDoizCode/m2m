@@ -9,13 +9,18 @@
 // allow is required here rather than optional.
 #![allow(dead_code)]
 
-/// True if `anvil --version` runs successfully.
-pub fn anvil_available() -> bool {
-    Command::new("anvil")
+/// True if `<cmd> --version` runs successfully.
+fn command_version_check(cmd: &str) -> bool {
+    Command::new(cmd)
         .arg("--version")
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+/// True if `anvil --version` runs successfully.
+pub fn anvil_available() -> bool {
+    command_version_check("anvil")
 }
 
 /// The one place every anvil-gated test asks "do I have a chain to talk to, and if not, is
@@ -52,11 +57,7 @@ pub fn require_anvil() -> bool {
 
 /// True if `forge --version` runs successfully.
 pub fn forge_available() -> bool {
-    Command::new("forge")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    command_version_check("forge")
 }
 
 /// The `forge` twin of [`require_anvil`], for tests that build
