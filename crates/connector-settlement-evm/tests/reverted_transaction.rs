@@ -17,30 +17,11 @@ use chrono::Duration;
 use connector_settlement::{Claim, SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
 use connector_signer::{derive_evm_address, evm_balance_proof_digest, EvmBalanceProof};
-use libsecp256k1::{Message, PublicKey, SecretKey};
+use libsecp256k1::{PublicKey, SecretKey};
 
-use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
-
-const ANVIL_CHAIN_ID: u64 = 31_337;
-
-fn channel_id_bytes(id: &str) -> [u8; 32] {
-    let hex_digits = id.trim_start_matches("0x");
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
-            .expect("channel id is 0x-prefixed 64-hex");
-    }
-    out
-}
-
-fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
-    let message = Message::parse(digest);
-    let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
-    let mut bytes = signature.serialize().to_vec();
-    let recovery_byte: u8 = recovery_id.into();
-    bytes.push(recovery_byte + 27);
-    bytes
-}
+use support::{
+    channel_id_bytes, require_anvil, sign_evm, Anvil, ANVIL_CHAIN_ID, DEPLOYER_PRIVATE_KEY,
+};
 
 /// Two concurrent `redeem` calls against the same channel, submitting the
 /// *same* claim: both read the channel's pre-redemption state (redeemed =

@@ -1,12 +1,15 @@
-//! On-chain channel errors -- the Solana-side twin of
-//! `SettlementChannel.sol`'s custom errors, carried as `ProgramError::Custom`
-//! codes since Solana instructions have no revert-reason string. The client
-//! (`connector-settlement-solana`) pre-flights every one of these
-//! client-side before submitting a transaction (mirroring
-//! `connector-settlement-evm`'s "pre-flight, then submit" pattern), so in
-//! practice these only fire if the chain's state moved between the client's
-//! read and its submission -- but the program enforces them independently
-//! either way, the same as the Solidity contract does.
+//! On-chain channel errors, carried as `ProgramError::Custom` codes since
+//! Solana instructions have no revert-reason string. The first six were
+//! originally the Solana-side twin of `SettlementChannel.sol`'s own custom
+//! errors, before issue #576 deleted that (now-gone) contract; the last
+//! two (`ChannelAlreadySettled`, `SettlementNotYetDue`) have no twin there
+//! -- they exist for `Settle` (issue #574), which `SettlementChannel.sol`
+//! never had either. The client (`connector-settlement-solana`) pre-flights
+//! every one of these client-side before submitting a transaction
+//! (mirroring `connector-settlement-evm`'s "pre-flight, then submit"
+//! pattern), so in practice these only fire if the chain's state moved
+//! between the client's read and its submission -- but the program
+//! enforces them independently either way.
 
 use solana_program::program_error::ProgramError;
 

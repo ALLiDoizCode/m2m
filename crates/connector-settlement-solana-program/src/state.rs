@@ -50,10 +50,12 @@ pub enum ChannelStatus {
     Settled = 2,
 }
 
-/// A channel's on-chain state -- the Solana-side twin of
-/// `connector-settlement-evm`'s `SettlementChannel.Channel` struct, laid out
-/// as the same fields for the same reason (ADR 0004: no `lockedAmount`/
-/// `locksRoot`).
+/// A channel's on-chain state -- originally laid out to match
+/// `connector-settlement-evm`'s (now-deleted, issue #576) `SettlementChannel.sol`
+/// `Channel` struct field for field (ADR 0004: no `lockedAmount`/
+/// `locksRoot`). Since diverged from it: `closed_at` (below) exists for the
+/// closed-channel challenge period `Settle` measures against (issue #574),
+/// which that struct never had.
 pub struct Channel {
     pub payer: Pubkey,
     pub counterparty: Vec<u8>,

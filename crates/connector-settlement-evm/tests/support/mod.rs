@@ -91,6 +91,37 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use ethers::providers::{Http, Middleware, Provider};
+use libsecp256k1::{Message, SecretKey};
+
+/// `Anvil::spawn`'s own default chain id (`--chain-id 31337` above), and so
+/// the EIP-712 domain a claim against its deployed `TokenNetwork` must be
+/// signed under.
+pub const ANVIL_CHAIN_ID: u64 = 31_337;
+
+/// The inverse of `EvmSettlementBackend`'s own `format_channel_id` --
+/// `TokenNetwork`'s channel id as the `[u8; 32]` an `EvmBalanceProof` signs
+/// over.
+pub fn channel_id_bytes(id: &str) -> [u8; 32] {
+    let hex_digits = id.trim_start_matches("0x");
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+            .expect("channel id is 0x-prefixed 64-hex");
+    }
+    out
+}
+
+/// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
+/// `r || s || v` signature, `v` in the conventional `{27, 28}` range) --
+/// what `TokenNetwork.claimFromChannel`'s `ECDSA.recover` requires.
+pub fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
+    let message = Message::parse(digest);
+    let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
+    let mut bytes = signature.serialize().to_vec();
+    let recovery_byte: u8 = recovery_id.into();
+    bytes.push(recovery_byte + 27);
+    bytes
+}
 
 /// Anvil's first well-known dev account -- the same one
 /// `packages/contracts/script/DeployLocal.s.sol` already uses as its

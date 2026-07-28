@@ -1,9 +1,12 @@
-//! Instruction handlers -- the Solana-side twin of
-//! `SettlementChannel.sol`'s five functions. Like the Solidity contract,
-//! this program enforces exactly what the `SettlementBackend` port's
-//! contract suite requires (monotonic redemption, bounded by what was
-//! deposited, redeemable through a closed channel's challenge period and
-//! terminal only once settled -- issue #574) and does not verify a claim's
+//! Instruction handlers -- originally the Solana-side twin of
+//! `SettlementChannel.sol`'s four functions (issue #459). That contract is
+//! gone now (issue #576 deleted it), and `Settle` (below) never had a twin
+//! there to begin with -- it exists because `TokenNetwork.sol`'s own
+//! `settleChannel` does (issue #574). Like the Solidity contracts, this
+//! program enforces exactly what the `SettlementBackend` port's contract
+//! suite requires (monotonic redemption, bounded by what was deposited,
+//! redeemable through a closed channel's challenge period and terminal
+//! only once settled -- issue #574) and does not verify a claim's
 //! signature -- that is a peer-wire concern the port itself declines to
 //! specify (`connector-settlement/src/port.rs`). The signature is logged as
 //! an opaque audit trail, the Solana analogue of the Solidity contract's
