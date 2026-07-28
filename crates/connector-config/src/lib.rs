@@ -14,6 +14,7 @@ mod operator;
 mod peer;
 mod route;
 mod secret;
+mod settlement;
 
 pub use config::Config;
 pub use error::ConfigError;
@@ -21,3 +22,4 @@ pub use operator::OperatorConfig;
 pub use peer::PeerConfig;
 pub use route::{PeerRouteConfig, StaticRoute};
 pub use secret::SecretLocation;
+pub use settlement::{SettlementChain, SettlementConfig};

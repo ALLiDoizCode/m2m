@@ -38,6 +38,20 @@
 mod rfc9421;
 mod write_auth;
 
+/// Signing helpers for constructing a validly-signed operator write from
+/// outside this crate -- gated behind the `test-util` feature (rather than
+/// `#[cfg(test)]` alone) for the same reason `connector-settlement`'s own
+/// `contract` module is: a downstream crate's *own* tests (here,
+/// `connector-cli`'s real-chain settlement lifecycle test, issue #542,
+/// which needs a genuinely signed write against the operator surface
+/// `connector-cli::runtime::router` mounts) cannot see anything behind
+/// `#[cfg(test)]`, since that cfg is only active while this crate compiles
+/// its own test binary.
+#[cfg(feature = "test-util")]
+pub mod test_support {
+    pub use crate::rfc9421::{compute_content_digest, keyid_hex, sign_request};
+}
+
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -1417,9 +1431,17 @@ mod tests {
             }
 
             let anvil = Anvil::spawn().await;
-            let settlement = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
-                .await
-                .expect("deploy SettlementChannel");
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy SettlementChannel");
 
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
@@ -1522,9 +1544,17 @@ mod tests {
             }
 
             let anvil = Anvil::spawn().await;
-            let settlement = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
-                .await
-                .expect("deploy SettlementChannel");
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy SettlementChannel");
 
             // The first channel a freshly deployed `SettlementChannel`
             // opens is always id "0" -- configuring the claim
