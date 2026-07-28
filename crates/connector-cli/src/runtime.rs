@@ -147,7 +147,7 @@ pub fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>), Runti
 /// surface is not started at all, exactly as it means for
 /// [`connector_operator::router`] itself.
 pub fn router(connector: Arc<Connector>, signer: Arc<dyn Signer>, config: &Config) -> Router {
-    let app = connector_client_edge::router(connector.clone());
+    let app = connector_client_edge::router(connector.clone(), signer.clone());
     match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
             connector,

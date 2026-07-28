@@ -29,6 +29,7 @@ use connector_domain::{derive_condition, Fulfill, Prepare, Reject};
 use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_signer::{LocalSigner, Signer};
 
 use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 
@@ -97,8 +98,12 @@ fn deliverable_connector(route: StaticRoute, app_client: Arc<FakeAppClient>) -> 
     ))
 }
 
+fn test_signer() -> Arc<dyn Signer> {
+    Arc::new(LocalSigner::generate("test-signer"))
+}
+
 async fn post_claim(connector: Arc<Connector>, claim_json: &str) -> (StatusCode, Bytes) {
-    let app = router(connector);
+    let app = router(connector, test_signer());
     let request = Request::builder()
         .method("POST")
         .uri("/ilp")
