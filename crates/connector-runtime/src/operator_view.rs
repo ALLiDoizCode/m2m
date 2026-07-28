@@ -66,7 +66,11 @@ pub struct ChannelView {
 #[serde(rename_all = "lowercase")]
 pub enum ChannelViewStatus {
     Open,
+    /// Closed: its challenge period is running (or has elapsed but not yet
+    /// been settled) -- `redeem` still works against it (issue #574).
     Closed,
+    /// Settled: terminal, no further `fund` or `redeem` is possible.
+    Settled,
 }
 
 impl From<ChannelState> for ChannelView {
@@ -77,6 +81,7 @@ impl From<ChannelState> for ChannelView {
             status: match state.status {
                 ChannelStatus::Open => ChannelViewStatus::Open,
                 ChannelStatus::Closed => ChannelViewStatus::Closed,
+                ChannelStatus::Settled => ChannelViewStatus::Settled,
             },
             deposited: state.deposited,
             redeemed: state.redeemed,

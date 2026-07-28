@@ -10,6 +10,8 @@ use std::sync::Arc;
 use connector_settlement::contract::assert_upholds_the_contract;
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
+use ethers::core::rand::thread_rng;
+use ethers::signers::{LocalWallet, Signer};
 
 use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 
@@ -30,7 +32,23 @@ async fn evm_settlement_backend_upholds_the_contract() {
         let backend = EvmSettlementBackend::deploy(&rpc_url, DEPLOYER_PRIVATE_KEY, token)
             .await
             .expect("deploy SettlementChannel");
-        Arc::new(backend) as Arc<dyn SettlementBackend>
+        // Real 20-byte EVM addresses (issue #574): `redeem`'s payout is a
+        // real address on this chain, not a plain ASCII peer name, so the
+        // suite is handed identities this backend can actually redeem
+        // against rather than a name it would have to hash down to one.
+        let counterparty = LocalWallet::new(&mut thread_rng())
+            .address()
+            .as_bytes()
+            .to_vec();
+        let other_counterparty = LocalWallet::new(&mut thread_rng())
+            .address()
+            .as_bytes()
+            .to_vec();
+        (
+            Arc::new(backend) as Arc<dyn SettlementBackend>,
+            counterparty,
+            other_counterparty,
+        )
     })
     .await;
 }

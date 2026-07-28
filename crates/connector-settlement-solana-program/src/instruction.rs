@@ -23,6 +23,10 @@ pub enum ChannelInstruction {
     },
     /// Accounts: `[caller (signer), channel (writable)]`.
     Close,
+    /// Settle a channel once its challenge period has elapsed,
+    /// permissionless (issue #574). Accounts:
+    /// `[caller (signer), channel (writable), payer (writable, refunded the remainder)]`.
+    Settle,
 }
 
 fn read_u32(data: &[u8], offset: usize) -> Result<u32, ProgramError> {
@@ -92,6 +96,7 @@ impl ChannelInstruction {
                 })
             }
             3 => Ok(Self::Close),
+            4 => Ok(Self::Settle),
             _ => Err(ProgramError::InvalidInstructionData),
         }
     }
@@ -133,5 +138,9 @@ pub mod pack {
 
     pub fn close() -> Vec<u8> {
         vec![3]
+    }
+
+    pub fn settle() -> Vec<u8> {
+        vec![4]
     }
 }
