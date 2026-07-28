@@ -14,6 +14,7 @@ members = [
     "crates/connector-operator",
     "crates/connector-cli",
     "crates/connector-bin",
+    "crates/connector-vectors",
 ]
 
 [workspace.package]

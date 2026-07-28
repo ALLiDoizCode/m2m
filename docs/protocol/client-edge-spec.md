@@ -1,15 +1,16 @@
 # Client edge specification
 
 **Status:** Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
-Rust implementation (`crates/connector-client-edge`) the definition of this wire, and a committed
-set of vectors — generated from property tests over its invariants, not yet landed (issue #527) —
-the cross-repo contract `toon-client`, `rig` and `swap` are actually held to. This document remains
-prose describing that wire for a human reader: useful as orientation, evidence of intent, and a
-map of what's shipped versus what isn't, but it is not itself something to conform to, and a
-disagreement between this text and the code is a bug in this text. Where this document and an ADR
-disagree, the ADR wins — this document is reconciled to match, not the other way around. Version 1
-below is organized by section number so `crates/connector-client-edge`'s own doc comments can cite
-it; §3 sketches how a future version would be introduced, per
+Rust implementation (`crates/connector-client-edge`) the definition of this wire, and the committed
+vector set (`vectors/wire-vectors.json`, issue #527) — generated from property tests over its
+invariants, listed in [`docs/protocol/wire-vectors.md`](wire-vectors.md) — the cross-repo contract
+`toon-client`, `rig` and `swap` are actually held to. This document remains prose describing that
+wire for a human reader: useful as orientation, evidence of intent, and a map of what's shipped
+versus what isn't, but it is not itself something to conform to, and a disagreement between this
+text and the code is a bug in this text. Where this document and an ADR disagree, the ADR wins —
+this document is reconciled to match, not the other way around. Version 1 below is organized by
+section number so `crates/connector-client-edge`'s own doc comments can cite it; §3 sketches how a
+future version would be introduced, per
 [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
 **Consumers:** `toon-client` and any other app that pays this connector directly — installed on
 machines this repository's operators do not control.
@@ -300,7 +301,10 @@ terminating connector seals its answer back with that same shared secret — no 
 both `Fulfill.data` and a `Reject.data` raised at the termination; a reject raised short of the
 termination (no route, expiry, a ceiling) shares no secret with the sender and stays plaintext with
 empty `data`, which is how a sender tells the two apart. `accumulated_cost` is unaffected: it never
-rode inside `data` to begin with (§1.6), so nothing here changes how it travels.
+rode inside `data` to begin with (§1.6), so nothing here changes how it travels. The fulfilment a
+terminating connector derives from that shared secret (ADR 0019) is likewise part of this wire.
+`vectors/wire-vectors.json`'s `envelope`, `giftwrap` and `fulfilment` sections are the reproducible
+bytes for all of the above — this paragraph is orientation, not the thing to conform to.
 
 ## 2. What version 1 does not do
 
