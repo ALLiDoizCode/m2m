@@ -80,10 +80,17 @@ prefix = "g.rust.relay"
 # The path is only the half of the app-delivery gap that config can close.
 # docs/operators/parallel-fleet-comparison.md has the rest.
 handler_url = "http://relay:3100/write"
-# Deliberately free (issue #520: a route is never SILENTLY free, so this is
-# explicit) -- this devnet fleet exists to compare against the TypeScript
-# fleet's own behaviour on the same prefix, not to make a pricing decision.
-price = 0
+# Priced at parity with the TypeScript fleet's own g.toon.relay route on
+# this same box (infra/linode-node/connector.yaml -- `price: '1000'`):
+# both fleets settle claims in base units of 6-decimal USDC (ADR 0010;
+# docs/usdc-cross-chain-settlement.md's "6 decimals everywhere" is the
+# canonical unit across EVM/Solana/Mina, not a TypeScript-only asset
+# config), so `1000` here is the identical real-world charge -- 0.001
+# USDC -- as the TypeScript node already makes for the same relay write.
+# #552 wired the x402 greeting behind this figure being non-zero; a
+# devnet box started from this file was still a free gateway until this
+# was set (issue #557).
+price = 1000
 
 [[routes]]
 prefix = "g.rust.store"
