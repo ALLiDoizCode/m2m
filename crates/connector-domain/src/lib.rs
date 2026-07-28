@@ -8,6 +8,7 @@
 
 mod address;
 mod claim;
+pub mod client_claim;
 mod condition;
 mod error;
 mod fee;

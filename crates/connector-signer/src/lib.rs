@@ -23,6 +23,7 @@ mod crypto;
 mod error;
 mod kms;
 mod local;
+pub mod nip59;
 mod signer;
 mod treasury;
 
@@ -34,6 +35,7 @@ pub use claim_signature::{
 pub use error::{SignerError, TreasuryError};
 pub use kms::{InMemoryKmsBackend, KmsBackend, KmsSigner};
 pub use local::LocalSigner;
+pub use nip59::{unwrap_claim, wrap_claim, Nip59Error, WrappedClaim};
 pub use signer::{verify, PublicKeyBytes, Signature, Signer};
 pub use treasury::{ChainClient, FundingReceipt, SignedTransfer, Treasury, TxHash};
 

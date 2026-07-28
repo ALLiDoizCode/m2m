@@ -1,10 +1,15 @@
 //! Client-edge router, mountable rather than a server. See ADR 0001, ADR
 //! 0003, and `docs/protocol/client-edge-spec.md` -- this implements §1.1
 //! (transport and framing: `POST /ilp`, OER-encoded PREPARE in, OER-encoded
-//! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome). Identity
-//! (§1.2), payment claims (§1.3) and the x402 greeting (§1.4) are
-//! unimplemented until claim validation lands (issue #423) -- every request
-//! today is treated as an unauthenticated, unpriced delivery attempt.
+//! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome) and, as of
+//! issue #504, the front half of §1.3 (payment claims): a present claim is
+//! parsed, structurally validated and checked for freshness/watermark
+//! before the packet is routed, deliberately before any cryptographic claim
+//! signature verification (issue #506) or value binding against a route's
+//! price (issue #507) -- neither of those exist at this ingress yet.
+//! Identity (§1.2) and the x402 greeting (§1.4) remain unimplemented; a
+//! request presenting no claim header at all still passes through
+//! unchanged, exactly as it always has.
 //!
 //! Per ADR 0001, this handler deserializes, calls exactly one method on
 //! [`Connector`], and serializes; the `match` below is that serialization
@@ -15,35 +20,211 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use serde::Deserialize;
 
-use connector_domain::{PacketResponse, Prepare};
+use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 use connector_runtime::Connector;
+use connector_signer::nip59::{unwrap_claim, WrappedClaim};
+use connector_signer::PublicKeyBytes;
+
+mod claim_gate;
+pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 
 const OCTET_STREAM: &str = "application/octet-stream";
+const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
+const CLAIM_WRAPPED_HEADER: &str = "ilp-payment-channel-claim-wrapped";
 
-/// Mount the client edge at `connector`: `POST /ilp` per
-/// `docs/protocol/client-edge-spec.md` §1.1.
-pub fn router(connector: Arc<Connector>) -> Router {
-    Router::new()
-        .route("/ilp", post(handle_ilp))
-        .with_state(connector)
+struct ClientEdgeState {
+    connector: Arc<Connector>,
+    claim_gate: ClientClaimGate,
+    /// This connector's own NIP-59 receiver key, used to unwrap a
+    /// privacy-wrapped claim (client-edge-spec.md §1.3). `None` means this
+    /// instance is not configured to receive wrapped claims -- one is
+    /// refused with [`ClaimIngestRejection::WrapUnsupported`] rather than
+    /// silently accepted unwrapped or left to panic.
+    wrap_receiver_secret: Option<[u8; 32]>,
 }
 
-async fn handle_ilp(State(connector): State<Arc<Connector>>, body: Bytes) -> Response {
+/// Mount the client edge at `connector`: `POST /ilp` per
+/// `docs/protocol/client-edge-spec.md` §1.1, with no configured NIP-59
+/// receiver key -- a privacy-wrapped claim is refused rather than accepted.
+/// Use [`router_with_wrap_key`] to accept wrapped claims.
+pub fn router(connector: Arc<Connector>) -> Router {
+    router_with_wrap_key(connector, None)
+}
+
+/// As [`router`], but able to unwrap a privacy-wrapped claim
+/// (client-edge-spec.md §1.3) using `wrap_receiver_secret` as this
+/// connector's own NIP-59 receiver key.
+pub fn router_with_wrap_key(
+    connector: Arc<Connector>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+) -> Router {
+    let state = Arc::new(ClientEdgeState {
+        connector,
+        claim_gate: ClientClaimGate::new(),
+        wrap_receiver_secret,
+    });
+    Router::new()
+        .route("/ilp", post(handle_ilp))
+        .with_state(state)
+}
+
+/// The `ILP-Payment-Channel-Claim-Wrapped` header's JSON shape
+/// (client-edge-spec.md §1.3): `base64(NIP-59-wrapped claim)`. `version` and
+/// `timestamp` ride the wire but are not this ticket's concern -- carried
+/// only so the shape round-trips; wrap/unwrap cares about the other two
+/// fields alone.
+#[derive(Deserialize)]
+struct WrappedClaimEnvelope {
+    #[serde(rename = "ephemeralPublicKey")]
+    ephemeral_public_key: String,
+    #[serde(rename = "encryptedPayload")]
+    encrypted_payload: String,
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Decode a claim header's raw (still base64-encoded) bytes into the
+/// plaintext claim JSON, unwrapping first if `wrapped` is true.
+fn decode_claim_header(
+    header_value: &[u8],
+    wrapped: bool,
+    wrap_receiver_secret: Option<&[u8; 32]>,
+) -> Result<String, ClaimIngestRejection> {
+    let decoded = BASE64.decode(header_value).map_err(|error| {
+        ClaimIngestRejection::Malformed(format!("claim header is not valid base64: {error}"))
+    })?;
+
+    if !wrapped {
+        return String::from_utf8(decoded).map_err(|error| {
+            ClaimIngestRejection::Malformed(format!("claim header is not valid UTF-8: {error}"))
+        });
+    }
+
+    let Some(receiver_secret) = wrap_receiver_secret else {
+        return Err(ClaimIngestRejection::WrapUnsupported);
+    };
+
+    let envelope: WrappedClaimEnvelope = serde_json::from_slice(&decoded).map_err(|error| {
+        ClaimIngestRejection::Malformed(format!(
+            "wrapped claim envelope is not valid JSON: {error}"
+        ))
+    })?;
+    let ephemeral_public_key_bytes =
+        hex_decode(&envelope.ephemeral_public_key).ok_or_else(|| {
+            ClaimIngestRejection::Malformed(
+                "wrapped claim's ephemeralPublicKey is not valid hex".to_string(),
+            )
+        })?;
+    let ephemeral_public_key: PublicKeyBytes = ephemeral_public_key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| {
+            ClaimIngestRejection::Malformed(
+                "wrapped claim's ephemeralPublicKey is not 65 bytes uncompressed".to_string(),
+            )
+        })?;
+    let encrypted_payload = BASE64
+        .decode(&envelope.encrypted_payload)
+        .map_err(|error| {
+            ClaimIngestRejection::Malformed(format!(
+                "wrapped claim's encryptedPayload is not valid base64: {error}"
+            ))
+        })?;
+
+    let wrapped_claim = WrappedClaim {
+        ephemeral_public_key,
+        encrypted_payload,
+    };
+    let rumor = unwrap_claim(&wrapped_claim, receiver_secret)
+        .map_err(|error| ClaimIngestRejection::WrapFailed(error.to_string()))?;
+    String::from_utf8(rumor).map_err(|error| {
+        ClaimIngestRejection::Malformed(format!("unwrapped claim is not valid UTF-8: {error}"))
+    })
+}
+
+/// Extract and fully validate whatever claim header `headers` carries, per
+/// client-edge-spec.md §1.3. `Ok(())` covers both "no claim header was
+/// present at all" -- out of this ticket's scope (the x402 greeting/value
+/// binding that would refuse an unpaid request), so the request proceeds
+/// unchanged, exactly as it always has -- and "a present claim validated
+/// cleanly"; the caller doesn't need to tell those apart. A plaintext
+/// header takes precedence when both are present, since a client presenting
+/// both is presenting the same claim twice, not two different ones.
+fn extract_and_validate_claim(
+    headers: &HeaderMap,
+    state: &ClientEdgeState,
+) -> Result<(), ClaimIngestRejection> {
+    let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
+        (value, false)
+    } else if let Some(value) = headers.get(CLAIM_WRAPPED_HEADER) {
+        (value, true)
+    } else {
+        return Ok(());
+    };
+
+    let claim_json = decode_claim_header(
+        header_value.as_bytes(),
+        wrapped,
+        state.wrap_receiver_secret.as_ref(),
+    )?;
+    state.claim_gate.ingest(&claim_json)?;
+    Ok(())
+}
+
+fn claim_rejected_response(rejection: ClaimIngestRejection) -> Response {
+    let reject = Reject {
+        code: RejectCode::f01_invalid_packet(),
+        triggered_by: String::new(),
+        message: rejection.message(),
+        data: Vec::new(),
+        accumulated_fee: 0,
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, OCTET_STREAM)],
+        reject.encode(),
+    )
+        .into_response()
+}
+
+async fn handle_ilp(
+    State(state): State<Arc<ClientEdgeState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let prepare = match Prepare::decode(&body) {
         Ok(prepare) => prepare,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
+    // A claim header's validation failure rejects the packet before it is
+    // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
+    // do work that was never validly paid for.
+    if let Err(rejection) = extract_and_validate_claim(&headers, &state) {
+        return claim_rejected_response(rejection);
+    }
+
     // client-edge-spec.md v1 carries no minimum-delivery field (§4 of
     // peer-wire-spec.md scopes it to the peer wire) -- a client-originated
     // packet declares no guarantee yet, so this hop enforces none, exactly
     // matching today's actual (unguaranteed) behavior.
-    let encoded = match connector.handle_prepare(prepare, 0).await {
+    let encoded = match state.connector.handle_prepare(prepare, 0).await {
         PacketResponse::Fulfill(fulfill) => fulfill.encode(),
         PacketResponse::Reject(reject) => reject.encode(),
     };
@@ -405,5 +586,287 @@ mod tests {
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
         assert_eq!(fulfill.data, b"delivered over the network transport");
+    }
+
+    /// End-to-end claim ingest (issue #504): a claim presented in
+    /// `ILP-Payment-Channel-Claim`(`-Wrapped`) is parsed, structurally
+    /// validated and checked for freshness/watermark before the packet is
+    /// routed, exercised at this crate's real HTTP seam rather than against
+    /// `ClientClaimGate` directly.
+    mod claim_headers {
+        use super::*;
+        use libsecp256k1::{PublicKey, SecretKey};
+
+        fn evm_claim_json(nonce: u64, transferred_amount: u64) -> String {
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "evm",
+                    "messageId": "msg-{nonce}",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "channelId": "0x{channel}",
+                    "nonce": {nonce},
+                    "transferredAmount": "{transferred_amount}",
+                    "lockedAmount": "0",
+                    "locksRoot": "0x{zeros}",
+                    "signature": "0xabcdef",
+                    "signerAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
+                }}"#,
+                channel = "ab".repeat(32),
+                zeros = "0".repeat(64),
+            )
+        }
+
+        fn mina_claim_json() -> &'static str {
+            r#"{
+                "version": "1.0",
+                "blockchain": "mina",
+                "messageId": "claim-1",
+                "timestamp": "2026-02-02T12:00:00.000Z",
+                "senderId": "peer-dave",
+                "zkAppAddress": "irrelevant",
+                "tokenId": "1",
+                "balanceCommitment": "abc",
+                "nonce": 1,
+                "proof": "AAAA",
+                "salt": "salt"
+            }"#
+        }
+
+        fn request_with_claim_header(
+            prepare: &Prepare,
+            header_name: &str,
+            claim_json: &str,
+        ) -> Request<Body> {
+            let encoded = BASE64.encode(claim_json.as_bytes());
+            Request::builder()
+                .method("POST")
+                .uri("/ilp")
+                .header(header_name, encoded)
+                .body(Body::from(prepare.encode()))
+                .unwrap()
+        }
+
+        fn hex_encode(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        #[tokio::test]
+        async fn a_fresh_plaintext_claim_lets_the_packet_reach_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"ok".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, 100),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("decode fulfill");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_replayed_claim_nonce_rejects_before_reaching_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"ok".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let first = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(5, 500),
+            );
+            let response = app.clone().oneshot(first).await.unwrap();
+            Fulfill::decode(&hyper::body::to_bytes(response.into_body()).await.unwrap())
+                .expect("first claim accepted");
+
+            let replay = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(5, 999),
+            );
+            let response = app.oneshot(replay).await.unwrap();
+            // An ILP-level outcome, even a reject, is always HTTP 200.
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+
+            // The replay never reached the app: still exactly one delivery.
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_malformed_claim_header_rejects_with_f01_before_reaching_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"ok".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                r#"{"version":"1.0","blockchain":"evm"}"#,
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(reject.message.contains("structurally invalid"));
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_mina_claim_is_rejected_with_a_reason_distinguishable_from_malformed() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                mina_claim_json(),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(reject.message.contains("ADR 0002"));
+            assert!(!reject.message.contains("structurally invalid"));
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_wrapped_claim_is_unwrapped_and_lets_the_packet_reach_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"ok".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+
+            let sender_secret = SecretKey::parse(&[1u8; 32]).unwrap();
+            let receiver_secret_bytes = [2u8; 32];
+            let receiver_secret = SecretKey::parse(&receiver_secret_bytes).unwrap();
+            let receiver_public = PublicKey::from_secret_key(&receiver_secret);
+
+            let claim_json = evm_claim_json(1, 100);
+            let wrapped = connector_signer::wrap_claim(
+                claim_json.as_bytes(),
+                &sender_secret,
+                &receiver_public.serialize(),
+            )
+            .expect("wrap");
+            let envelope_json = format!(
+                r#"{{"ephemeralPublicKey":"{}","encryptedPayload":"{}","timestamp":0,"version":"1.0"}}"#,
+                hex_encode(&wrapped.ephemeral_public_key),
+                BASE64.encode(&wrapped.encrypted_payload),
+            );
+
+            let app = router_with_wrap_key(connector, Some(receiver_secret_bytes));
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_WRAPPED_HEADER,
+                &envelope_json,
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("decode fulfill");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_wrapped_claim_with_no_configured_receiver_key_is_refused() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            // `router`, not `router_with_wrap_key`: no receiver key configured.
+            let app = router(connector);
+
+            let envelope_json = r#"{"ephemeralPublicKey":"04","encryptedPayload":"AAAA","timestamp":0,"version":"1.0"}"#;
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_WRAPPED_HEADER,
+                envelope_json,
+            );
+            let response = app.oneshot(request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(reject.message.contains("not configured to unwrap"));
+            assert!(app_client.deliveries().is_empty());
+        }
     }
 }
