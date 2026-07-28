@@ -1,0 +1,38 @@
+[
+  {
+    "label": "relay-amount-zero",
+    "destination": "relay",
+    "amount": 0,
+    "execution_condition_hex": "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+    "data": "fleet-compare probe: not a NIP-01 event"
+  },
+  {
+    "label": "relay-amount-matches-ts-price",
+    "destination": "relay",
+    "amount": 1000,
+    "execution_condition_hex": "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+    "data": "fleet-compare probe: not a NIP-01 event"
+  },
+  {
+    "label": "relay-child-longest-prefix",
+    "destination": "relay.probe.deeper",
+    "amount": 0,
+    "execution_condition_hex": "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+    "data": "fleet-compare probe: not a NIP-01 event"
+  },
+  {
+    "label": "no-such-route",
+    "destination": "definitely-not-a-route",
+    "amount": 0,
+    "execution_condition_hex": "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+    "data": ""
+  },
+  {
+    "label": "already-expired",
+    "destination": "relay",
+    "amount": 0,
+    "expires_in_seconds": -60,
+    "execution_condition_hex": "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+    "data": ""
+  }
+]

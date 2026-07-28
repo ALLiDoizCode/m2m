@@ -17,7 +17,9 @@
 #
 # Same distinctions as the node-side overlay: its own pinned image tag, its
 # own ports (4000/4001, not the TypeScript node's 3000/8080/8081), its own
-# data path (./signer-rust.key, no named volume).
+# data path (./signer-rust.key, no named volume) -- including that overlay's
+# note on `chown 10001:10001 signer-rust.key`, which applies identically
+# here.
 #
 # ── Why 4000 is bound to loopback (issue #517) ────────────────────────────
 # This client edge implements only §1.1 of docs/protocol/client-edge-spec.md.
@@ -30,21 +32,41 @@
 # is a free-write gateway, and a Docker `ports:` publish is reachable from
 # the internet regardless of what ufw says -- Docker's iptables chain runs
 # ahead of it. Issue #492 made the identical call for the apex overlay's
-# client edge, for exactly this reason -- but that fix lives on a branch not
-# yet merged to main, so infra/linode-node/docker-compose.node.rust.yml still
-# publishes 4000:4000 unbound today. This store-side overlay was never
-# covered by it either, and the day a store box actually exists it would
-# open the identical hole. Binding the publish to 127.0.0.1 closes it here:
+# client edge, for exactly this reason, and that fix lands alongside this
+# one -- infra/linode-node/docker-compose.node.rust.yml is bound in the same
+# commit. This store-side overlay was never covered by it either, and the
+# day a store box actually exists it would open the identical hole.
+# Binding the publish to 127.0.0.1 closes it here:
 # reach it with an SSH tunnel or from the box. Widen this ONLY once
 # §1.2-§1.5 are implemented and the fleet charges for a write.
 #
-# 4001 (the peer wire) is untouched by this ticket -- it must accept the
-# node-side apex's inbound connection from off-box, so a loopback bind is not
-# an option for it the way it is for the client edge. Per the decision that
-# the peer wire never goes on a public interface, its binding belongs on the
-# box's private VPC address once that network exists; getting it there is
-# out of scope here (issue #517 is the client edge only) and is tracked
-# separately.
+# ── The peer wire is never published on the public interface (#492) ────────
+# The peer-wire hop carries signed balance proofs: ADR 0004 moves value on
+# fulfilment and #423 makes a claim follow the fulfilment, so a claim rides
+# this socket. The wire is plaintext and unauthenticated (ADR 0003 — the
+# clean-room wire has no transport security of its own), which is fine on a
+# private segment and is not fine on the open internet, where an
+# unauthenticated listener is reachable by anyone who scans for it.
+#
+# So `4001` is bound to STORE_PEER_WIRE_BIND — the store box's *private*
+# address — rather than published on every interface. The container still
+# listens on `0.0.0.0:4001` inside its own network namespace (see
+# ./connector-rust.toml's `peer_wire_addr`); it is this host-side publish
+# that decides which interface the port is reachable on, so both halves are
+# needed and neither alone is sufficient.
+#
+# STORE_PEER_WIRE_BIND MUST be a Linode **VPC** address, not a legacy
+# 192.168.x.x "private IP". Legacy private addressing is shared across every
+# account in the datacenter, so binding there would swap "reachable by
+# anyone on the internet" for "reachable by anyone with a Linode in us-east"
+# — narrower, but still not a private segment. Set it in this directory's
+# `.env` alongside the other bootstrap values:
+#
+#   STORE_PEER_WIRE_BIND=10.x.y.z   # this box's VPC interface address
+#
+# Compose fails the `up` if it is unset rather than defaulting, because
+# every plausible default (`0.0.0.0`, empty) publishes the port on the
+# public interface — the exact outcome this is here to prevent.
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
@@ -56,5 +78,5 @@ services:
     ports:
       # Loopback-only, deliberately — see the header. Not '4000:4000'.
       - '127.0.0.1:4000:4000'
-      - '4001:4001'
+      - '${STORE_PEER_WIRE_BIND:?set STORE_PEER_WIRE_BIND to this box VPC address; see header}:4001:4001'
     restart: unless-stopped
