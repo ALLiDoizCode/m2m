@@ -9,14 +9,18 @@
 //! it, which is how it acquired leniencies nobody chose -- a missing
 //! header/body separator silently yielding an empty body, blank header
 //! lines skipped, spaces tolerated inside the target. A structured encoding
-//! has exactly one representation per message and nothing to smuggle
-//! (issue #519).
+//! has exactly one representation per message and nothing to smuggle --
+//! true of every field here because `oer.rs`'s length determinants are
+//! themselves canonical (ADR 0023): a non-minimal, zero-length-alias or
+//! over-wide determinant is rejected rather than accepted as a synonym for
+//! some other encoding of the same value.
 //!
 //! Pure: no I/O, no keys, no clock. This is the module the seal (ADR
 //! 0018's gift wrap) goes around later, and the one whose properties
 //! generate the cross-repo vectors (ADR 0021) -- which is why its
 //! invariants are proptest properties, not only worked examples.
 
+use crate::error::PacketError;
 use crate::oer::{
     decode_var_octet_string, decode_var_uint, encode_var_octet_string, encode_var_uint,
 };
@@ -33,6 +37,12 @@ pub enum EnvelopeError {
     #[error("buffer underflow: envelope is truncated")]
     BufferUnderflow,
 
+    #[error("non-canonical OER length determinant: not the minimal encoding of its value")]
+    NonCanonicalLength,
+
+    #[error("OER length determinant wider than 8 bytes")]
+    LengthDeterminantOverflow,
+
     #[error("invalid envelope type byte: expected 1 (REQUEST) or 2 (RESPONSE)")]
     InvalidType,
 
@@ -41,6 +51,21 @@ pub enum EnvelopeError {
 
     #[error("trailing bytes after a fully decoded envelope")]
     TrailingBytes,
+}
+
+/// `oer.rs`'s var-uint/var-octet-string decoders only ever return
+/// [`PacketError::BufferUnderflow`], [`PacketError::NonCanonicalLength`] or
+/// [`PacketError::LengthDeterminantOverflow`] -- this maps those three onto
+/// their envelope-level counterparts so a non-canonical or over-wide length
+/// determinant stays distinguishable from a merely-truncated buffer here
+/// too, rather than collapsing into one error as it did before issue #546.
+fn from_oer_error(err: PacketError) -> EnvelopeError {
+    match err {
+        PacketError::BufferUnderflow => EnvelopeError::BufferUnderflow,
+        PacketError::NonCanonicalLength => EnvelopeError::NonCanonicalLength,
+        PacketError::LengthDeterminantOverflow => EnvelopeError::LengthDeterminantOverflow,
+        other => unreachable!("oer var-uint/var-octet-string decoding cannot produce {other:?}"),
+    }
 }
 
 /// Check the envelope type byte against `expected`, returning the number of
@@ -64,8 +89,7 @@ fn decode_string_field(
     offset: usize,
     field: &'static str,
 ) -> Result<(String, usize), EnvelopeError> {
-    let (bytes, n) =
-        decode_var_octet_string(buf, offset).map_err(|_| EnvelopeError::BufferUnderflow)?;
+    let (bytes, n) = decode_var_octet_string(buf, offset).map_err(from_oer_error)?;
     Ok((decode_utf8_field(bytes, field)?, n))
 }
 
@@ -85,7 +109,7 @@ fn decode_headers(
     buf: &[u8],
     offset: usize,
 ) -> Result<(Vec<(String, String)>, usize), EnvelopeError> {
-    let (count, n) = decode_var_uint(buf, offset).map_err(|_| EnvelopeError::BufferUnderflow)?;
+    let (count, n) = decode_var_uint(buf, offset).map_err(from_oer_error)?;
     let mut total = n;
     let mut headers = Vec::new();
     for _ in 0..count {
@@ -133,8 +157,7 @@ impl EnvelopeRequest {
         let (headers, n) = decode_headers(buf, offset)?;
         offset += n;
 
-        let (body, n) =
-            decode_var_octet_string(buf, offset).map_err(|_| EnvelopeError::BufferUnderflow)?;
+        let (body, n) = decode_var_octet_string(buf, offset).map_err(from_oer_error)?;
         offset += n;
 
         if offset != buf.len() {
@@ -181,8 +204,7 @@ impl EnvelopeResponse {
         let (headers, n) = decode_headers(buf, offset)?;
         offset += n;
 
-        let (body, n) =
-            decode_var_octet_string(buf, offset).map_err(|_| EnvelopeError::BufferUnderflow)?;
+        let (body, n) = decode_var_octet_string(buf, offset).map_err(from_oer_error)?;
         offset += n;
 
         if offset != buf.len() {
@@ -333,6 +355,64 @@ mod tests {
         ));
     }
 
+    /// The three byte sequences issue #546 reports as decoding to the same
+    /// plausible-but-wrong envelope: `GET / HTTP` with no headers or body.
+    fn canonical_get_root() -> Vec<u8> {
+        vec![
+            TYPE_ENVELOPE_REQUEST,
+            0x03,
+            b'G',
+            b'E',
+            b'T',
+            0x01,
+            b'/',
+            0x00,
+            0x00,
+        ]
+    }
+
+    #[test]
+    fn request_decode_accepts_the_canonical_encoding() {
+        let decoded = EnvelopeRequest::decode(&canonical_get_root()).expect("decode");
+        assert_eq!(decoded.method, "GET");
+        assert_eq!(decoded.target, "/");
+    }
+
+    #[test]
+    fn request_decode_rejects_a_non_minimal_length_determinant() {
+        // 0x81 0x03 is a long-form length of 3, canonically just 0x03.
+        let mut encoded = canonical_get_root();
+        encoded.splice(1..2, [0x81, 0x03]);
+        assert!(matches!(
+            EnvelopeRequest::decode(&encoded),
+            Err(EnvelopeError::NonCanonicalLength)
+        ));
+    }
+
+    #[test]
+    fn request_decode_rejects_a_zero_length_long_form_alias() {
+        // 0x80 declares a zero-byte determinant -- the same value 0x00
+        // already encodes -- so this must not decode to an empty method.
+        let encoded = vec![TYPE_ENVELOPE_REQUEST, 0x80, 0x01, b'/', 0x00, 0x00];
+        assert!(matches!(
+            EnvelopeRequest::decode(&encoded),
+            Err(EnvelopeError::NonCanonicalLength)
+        ));
+    }
+
+    #[test]
+    fn request_decode_rejects_an_over_long_determinant_instead_of_truncating() {
+        // 0x89 declares a 9-byte length determinant -- one byte more than a
+        // u64 can hold -- ending in the bytes that would truncate to 3.
+        let mut encoded = vec![TYPE_ENVELOPE_REQUEST, 0x89];
+        encoded.extend([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]);
+        encoded.extend([b'G', b'E', b'T', 0x01, b'/', 0x00, 0x00]);
+        assert!(matches!(
+            EnvelopeRequest::decode(&encoded),
+            Err(EnvelopeError::LengthDeterminantOverflow)
+        ));
+    }
+
     #[test]
     fn empty_body_and_no_headers_round_trip() {
         let request = EnvelopeRequest {
@@ -418,6 +498,29 @@ mod tests {
         ) {
             let _ = EnvelopeRequest::decode(&bytes);
             let _ = EnvelopeResponse::decode(&bytes);
+        }
+
+        /// Issue #546's missing property, the other direction from the
+        /// encode-then-decode ones above: every byte sequence `decode`
+        /// accepts must re-encode to exactly itself, so no other byte
+        /// sequence can also decode to the same envelope.
+        #[test]
+        fn request_decode_accepts_only_bytes_that_reencode_to_themselves(
+            bytes in proptest::collection::vec(any::<u8>(), 0..256)
+        ) {
+            if let Ok(decoded) = EnvelopeRequest::decode(&bytes) {
+                prop_assert_eq!(decoded.encode(), bytes);
+            }
+        }
+
+        /// Same property, response direction.
+        #[test]
+        fn response_decode_accepts_only_bytes_that_reencode_to_themselves(
+            bytes in proptest::collection::vec(any::<u8>(), 0..256)
+        ) {
+            if let Ok(decoded) = EnvelopeResponse::decode(&bytes) {
+                prop_assert_eq!(decoded.encode(), bytes);
+            }
         }
     }
 }
