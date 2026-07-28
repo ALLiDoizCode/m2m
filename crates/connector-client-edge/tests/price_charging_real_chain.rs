@@ -23,6 +23,8 @@ use base64::Engine;
 use chrono::{Duration, TimeZone, Utc};
 use tower::ServiceExt;
 
+use libsecp256k1::{Message, PublicKey, SecretKey};
+
 use connector_client_edge::router;
 use connector_config::StaticRoute;
 use connector_domain::{
@@ -31,13 +33,17 @@ use connector_domain::{
 use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
-use connector_signer::{LocalSigner, Signer};
+use connector_signer::{
+    derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof, LocalSigner, Signer,
+};
 
 use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 
 const FULFILLMENT: [u8; 32] = [7u8; 32];
 const HANDLER_URL: &str = "http://localhost:4000";
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
+const CHAIN_ID: u64 = 8453;
+const TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
 
 fn test_clock() -> Arc<TestClock> {
     Arc::new(TestClock::new(
@@ -71,7 +77,44 @@ fn channel_id_hex(id: &str) -> String {
     format!("0x{n:064x}")
 }
 
+/// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
+/// `r || s || v` signature, `v` in the conventional `{27, 28}` range).
+fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
+    let message = Message::parse(digest);
+    let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
+    let mut bytes = signature.serialize().to_vec();
+    let recovery_byte: u8 = recovery_id.into();
+    bytes.push(recovery_byte + 27);
+    bytes
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An EVM claim JSON with a genuine EIP-712 signature over its own fields
+/// (issue #506/#544) -- a forged or unsigned claim would be refused before
+/// ever reaching the price check this file exists to prove.
 fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) -> String {
+    let secret = SecretKey::parse(&[9u8; 32]).unwrap();
+    let public = PublicKey::from_secret_key(&secret);
+    let address = derive_evm_address(&public.serialize());
+
+    let mut channel_id = [0u8; 32];
+    channel_id.copy_from_slice(
+        &hex::decode(channel_id_hex.trim_start_matches("0x")).expect("valid hex channel id"),
+    );
+    let proof = EvmBalanceProof {
+        channel_id,
+        nonce,
+        transferred_amount,
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: CHAIN_ID,
+        token_network_address: TOKEN_NETWORK_ADDRESS,
+    };
+    let signature = sign_evm(&secret, &evm_balance_proof_digest(&proof));
+
     format!(
         r#"{{
             "version": "1.0",
@@ -84,10 +127,15 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
             "transferredAmount": "{transferred_amount}",
             "lockedAmount": "0",
             "locksRoot": "0x{zeros}",
-            "signature": "0xabcdef",
-            "signerAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
+            "signature": "0x{signature}",
+            "signerAddress": "{address}",
+            "chainId": {CHAIN_ID},
+            "tokenNetworkAddress": "{token_network_address}"
         }}"#,
         zeros = "0".repeat(64),
+        signature = hex_encode(&signature),
+        address = to_hex(&address),
+        token_network_address = to_hex(&TOKEN_NETWORK_ADDRESS),
     )
 }
 
@@ -142,13 +190,17 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     }
 
     let anvil = Anvil::spawn().await;
-    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
         .await
         .expect("deploy SettlementChannel");
 
-    // A channel genuinely opened and funded with real (anvil-minted test)
-    // ETH -- `deposited` below is read back from the chain's own receipt,
-    // never a number this test invents.
+    // A channel genuinely opened and funded with real (anvil-minted mock
+    // USDC) value -- `deposited` below is read back from the chain's own
+    // receipt, never a number this test invents.
     let counterparty = b"pay-to-write-counterparty".to_vec();
     let paid_channel = backend
         .open(counterparty.clone(), Duration::hours(1))
@@ -157,7 +209,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let paid_state = backend
         .fund(&paid_channel, 1_000)
         .await
-        .expect("fund the channel with real ETH");
+        .expect("fund the channel with real ERC-20 value");
     assert_eq!(
         paid_state.deposited, 1_000,
         "a real transaction genuinely moved this value on chain"
@@ -170,7 +222,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let underpaid_state = backend
         .fund(&underpaid_channel, 40)
         .await
-        .expect("fund the second channel with real ETH, less than the route's price");
+        .expect("fund the second channel with real ERC-20 value, less than the route's price");
     assert_eq!(underpaid_state.deposited, 40);
 
     let route = StaticRoute::new_priced("g.example.app", HANDLER_URL, 100).unwrap();

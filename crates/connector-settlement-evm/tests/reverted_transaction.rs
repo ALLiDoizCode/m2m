@@ -36,8 +36,12 @@ async fn a_racing_redeem_that_reverts_on_chain_is_reported_as_an_explicit_error(
     }
 
     let anvil = Anvil::spawn().await;
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
     let backend = Arc::new(
-        EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+        EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
             .await
             .expect("deploy SettlementChannel"),
     );

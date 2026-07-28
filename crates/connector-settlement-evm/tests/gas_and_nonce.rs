@@ -29,7 +29,11 @@ async fn every_channel_operation_estimates_its_own_gas_and_succeeds() {
     }
 
     let anvil = Anvil::spawn().await;
-    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
         .await
         .expect("deploy SettlementChannel");
 
@@ -74,8 +78,12 @@ async fn concurrent_calls_from_the_same_signer_do_not_conflict_on_nonce() {
     }
 
     let anvil = Anvil::spawn().await;
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
     let backend = Arc::new(
-        EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+        EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
             .await
             .expect("deploy SettlementChannel"),
     );

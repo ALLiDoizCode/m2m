@@ -167,9 +167,9 @@ This project uses **Conventional Commits** for clear and structured commit histo
 
 The scope specifies which package or component is affected:
 
-- `connector` - Changes to @toon-protocol/connector package
-- `shared` - Changes to @toon-protocol/shared package
-- `explorer` - Changes to the built-in Explorer UI
+- `connector` - Changes to the Rust connector crates (`crates/*`)
+- `contracts` - Changes to the EVM payment channel contracts
+- `faucet` - Changes to the devnet faucet and its Mina zkApp
 - `monorepo` - Changes affecting the entire monorepo
 - `btp` - BTP protocol implementation
 - `routing` - Routing logic
@@ -306,12 +306,11 @@ Closes #123
 
 All pull requests must pass:
 
-- ✅ ESLint checks (no errors)
-- ✅ Prettier formatting checks
-- ✅ TypeScript compilation (all packages)
-- ✅ Jest tests with coverage thresholds:
-  - `@toon-protocol/shared`: ≥90% coverage
-  - `@toon-protocol/connector`: ≥80% coverage
+- ✅ `cargo fmt --all -- --check`
+- ✅ `cargo build --workspace`
+- ✅ `cargo test --workspace --exclude payment-channel`
+- ✅ `cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings`
+- ✅ ESLint + Prettier over the remaining npm workspaces (devnet tooling)
 
 ## Code Review Guidelines
 
@@ -331,16 +330,12 @@ All pull requests must pass:
 
 ## Testing Requirements
 
-### Test Coverage Thresholds
-
-- **@toon-protocol/shared**: Minimum 90% line coverage (critical protocol logic)
-- **@toon-protocol/connector**: Minimum 80% line coverage
-
 ### Test Organization
 
-- **Unit tests**: Co-located with source (`*.test.ts` next to `*.ts`)
-- **Integration tests**: In `packages/*/test/integration/`
-- **Mocks**: Shared mocks in `__mocks__/` directories
+The connector's tests are Rust: unit tests in-module (`#[cfg(test)]`), integration
+tests in each crate's `tests/`. See ADR 0007 for the testing doctrine (fakes yes,
+mocks no) — chain-touching tests run against a real `anvil` /
+`solana-test-validator` and hard-fail rather than skip under `CI`.
 
 ### Test Writing Guidelines
 

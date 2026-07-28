@@ -8,10 +8,16 @@ use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{resolve_peers, PeerConfig, RawPeer};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
+use crate::settlement::{resolve_settlement, RawSettlementConfig, SettlementConfig};
 
 /// The config file's shape exactly as written -- convenience forms
-/// (`children`) intact, nothing yet validated.
+/// (`children`) intact, nothing yet validated. `deny_unknown_fields`
+/// (issue #542): an unrecognized top-level key -- a typo, or a section
+/// this connector doesn't understand -- fails config load loudly instead
+/// of being parsed, silently dropped, and the node starting as if it had
+/// never been written.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     client_edge_addr: String,
     signer: RawSignerConfig,
@@ -33,6 +39,12 @@ struct RawConfig {
     /// ticket actually needed it end to end; this is that ticket.
     #[serde(default)]
     peers: Vec<RawPeer>,
+    /// A real settlement backend to construct at startup (issue #542).
+    /// Absent means channel operations keep degrading to
+    /// `ChannelOperationError::NoSettlementBackend`, same as before this
+    /// section existed.
+    #[serde(default)]
+    settlement: Option<RawSettlementConfig>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -52,6 +64,7 @@ pub struct Config {
     peers: Vec<PeerConfig>,
     peer_wire_addr: Option<SocketAddr>,
     operator: Option<OperatorConfig>,
+    settlement: Option<SettlementConfig>,
 }
 
 impl Config {
@@ -103,6 +116,7 @@ impl Config {
             })
             .transpose()?;
         let operator = resolve_operator(raw.operator)?;
+        let settlement = resolve_settlement(raw.settlement)?;
 
         Ok(Config {
             client_edge_addr,
@@ -112,6 +126,7 @@ impl Config {
             peers,
             peer_wire_addr,
             operator,
+            settlement,
         })
     }
 
@@ -159,6 +174,16 @@ impl Config {
     /// a bearer token or a write-key allowlist.
     pub fn operator(&self) -> Option<&OperatorConfig> {
         self.operator.as_ref()
+    }
+
+    /// A configured settlement backend, if the `[settlement]` section is
+    /// present (issue #542). `None` means no backend is constructed at
+    /// startup and every channel operation answers
+    /// `ChannelOperationError::NoSettlementBackend` -- the same "not
+    /// started at all" degradation an absent `[operator]` section already
+    /// has.
+    pub fn settlement(&self) -> Option<&SettlementConfig> {
+        self.settlement.as_ref()
     }
 }
 
@@ -528,5 +553,104 @@ write_keys = ["{key}"]
             result,
             Err(ConfigError::OperatorMissingBearerToken)
         ));
+    }
+
+    #[test]
+    fn a_config_with_no_settlement_section_has_no_settlement_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.settlement(), None);
+    }
+
+    #[test]
+    fn a_fully_configured_settlement_section_loads() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[settlement]
+chain = "evm"
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.key]
+key_file = "{}"
+"#,
+                key_path.display(),
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        let settlement = config.settlement().expect("settlement config");
+        assert_eq!(settlement.chain(), crate::SettlementChain::Evm);
+        assert_eq!(settlement.rpc_url(), "http://127.0.0.1:8545");
+        assert_eq!(settlement.decimals(), 6);
+    }
+
+    #[test]
+    fn a_settlement_section_that_cannot_be_satisfied_refuses_to_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[settlement]
+chain = "made-up-chain"
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.key]
+key_file = "{}"
+"#,
+                key_path.display(),
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::SettlementUnknownChain { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_top_level_key_is_rejected_rather_than_silently_ignored() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+made_up_top_level_field = "oops"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 }
