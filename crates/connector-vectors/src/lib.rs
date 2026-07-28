@@ -10,7 +10,7 @@
 //! this module cannot silently commit a vector its own implementation would
 //! reject or fail to reproduce.
 //!
-//! Fixtures (`IDENTITY_SECRET`, `EPHEMERAL_SECRET`, ...) are literal,
+//! Fixtures (`identity_secret`, `ephemeral_secret`, ...) are literal,
 //! non-secret bytes chosen only so this crate compiles to the same output
 //! every time it runs -- never a real operator's key.
 
@@ -335,13 +335,13 @@ fn check_invalid(
 }
 
 fn generate_giftwrap_vectors() -> (GiftwrapVectors, [u8; 32]) {
-    const IDENTITY_SECRET: [u8; 32] = seq_bytes_const::<32>(0x01);
+    let identity_secret = seq_bytes::<32>(0x01);
     let ephemeral_secret = seq_bytes::<32>(0x21);
     let shared_secret = seq_bytes::<32>(0x41);
     let request_nonce = seq_bytes::<12>(0x61);
     let response_nonce = seq_bytes::<12>(0x6d);
 
-    let receiver = LocalSigner::from_secret_bytes("vector-fixture-identity", IDENTITY_SECRET)
+    let receiver = LocalSigner::from_secret_bytes("vector-fixture-identity", identity_secret)
         .expect("fixture identity secret is a valid secp256k1 scalar");
     let receiver_public = receiver
         .public_key()
@@ -406,7 +406,7 @@ fn generate_giftwrap_vectors() -> (GiftwrapVectors, [u8; 32]) {
 
     (
         GiftwrapVectors {
-            receiver_identity_secret_hex: hex_of(&IDENTITY_SECRET),
+            receiver_identity_secret_hex: hex_of(&identity_secret),
             receiver_identity_public_hex: hex_of(&receiver_public),
             cases: vec![case],
         },
@@ -447,21 +447,6 @@ fn generate_fulfilment_vectors(giftwrap_shared_secret: [u8; 32]) -> FulfilmentVe
             },
         ],
     }
-}
-
-/// A `const fn` twin of [`seq_bytes`], needed only because
-/// [`LocalSigner::from_secret_bytes`]'s fixture must be a `const` (an
-/// associated `const` in scope for the whole function, not a value computed
-/// after other fixtures) -- both produce the identical byte sequence for the
-/// same `start`.
-const fn seq_bytes_const<const N: usize>(start: u8) -> [u8; N] {
-    let mut out = [0u8; N];
-    let mut i = 0;
-    while i < N {
-        out[i] = start.wrapping_add(i as u8);
-        i += 1;
-    }
-    out
 }
 
 /// Build the full committed vector set. See the module docs for what
