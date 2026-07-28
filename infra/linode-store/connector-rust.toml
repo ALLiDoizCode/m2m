@@ -51,10 +51,15 @@ prefix = "g.rust.store"
 # reading the store app's routes, not by driving a packet at it. Confirm it
 # when the store box comes back.
 handler_url = "http://store:3300/store"
-# Deliberately free -- see infra/linode-node/connector-rust.toml's own
-# comment on `price` (issue #520): this devnet fleet is for behavioural
-# comparison, not a pricing decision.
-price = 0
+# Priced at parity with the TypeScript fleet's own g.toon.ario/
+# g.toon.relay.ario routes to this same store (infra/linode-node/
+# connector.yaml -- `price: '1000'`): see infra/linode-node/
+# connector-rust.toml's own comment on `price` (issue #557) for why the
+# same integer is the same real-world charge -- both fleets settle in
+# base units of 6-decimal USDC (ADR 0010). This route was still a free
+# gateway with #552's x402 greeting landed but nothing here priced above
+# zero to trigger it (issue #557).
+price = 1000
 
 # ── Operator surface (optional) ─────────────────────────────────────────
 # See infra/linode-node/connector-rust.toml's own note — omitted for the
