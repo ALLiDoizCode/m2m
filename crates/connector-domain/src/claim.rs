@@ -1,19 +1,20 @@
 //! Claim validation: nonce, watermark and value-binding rules (ADR 0004, ADR
 //! 0005, `docs/protocol/peer-wire-spec.md` §3.2-§3.5,
 //! `docs/protocol/client-edge-spec.md` §1.3, issues #423, #522). Pure, no
-//! I/O -- a claim's signature is chain-specific (peer-wire-spec.md §3.5) and
-//! is verified elsewhere (`connector-signer`), against the digest
-//! [`claim_digest`] computes here so both the signer and every verifier
-//! hash exactly the same bytes. What this module owns is the rules every
-//! claim must satisfy regardless of chain or signature scheme: its nonce
-//! must strictly advance the payee's watermark, its cumulative amount must
-//! never decrease (`CONTEXT.md` "Nonce", "Watermark"), and -- for a
-//! locally-terminated, priced route -- it must advance value by at least
-//! that route's price ([`validate_price`]). Deliberately cheaper than
-//! cryptographic verification and run before it, so a replay or an
-//! underpayment never spends a signature check.
+//! I/O -- a claim's signature is chain-specific (peer-wire-spec.md §3.5,
+//! ADR 0024) and is both produced and verified in `connector-signer`
+//! (`evm_balance_proof_digest`), which this crate deliberately has no
+//! dependency on (ADR 0001): a digest computed over on-chain data belongs
+//! next to the chain-specific code that produces and checks it, not here.
+//! What this module owns is the rules every claim must satisfy regardless
+//! of chain or signature scheme: its nonce must strictly advance the
+//! payee's watermark, its cumulative amount must never decrease
+//! (`CONTEXT.md` "Nonce", "Watermark"), and -- for a locally-terminated,
+//! priced route -- it must advance value by at least that route's price
+//! ([`validate_price`]). Deliberately cheaper than cryptographic
+//! verification and run before it, so a replay or an underpayment never
+//! spends a signature check.
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// The highest nonce and cumulative amount a payee has accepted on a
@@ -103,21 +104,6 @@ pub fn advance_watermark(nonce: u64, cumulative_amount: u64) -> Watermark {
         nonce,
         cumulative_amount,
     }
-}
-
-/// The digest a claim's signature covers: `channel_id`, `nonce` and
-/// `cumulative_amount`, big-endian, length-prefixed on `channel_id` so no
-/// two distinct tuples can ever collide on the same byte string. Signing
-/// and verifying a claim (`connector-signer`) both hash through this one
-/// function, so neither can drift from the other's idea of what a claim
-/// "says".
-pub fn claim_digest(channel_id: &str, nonce: u64, cumulative_amount: u64) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update((channel_id.len() as u32).to_be_bytes());
-    hasher.update(channel_id.as_bytes());
-    hasher.update(nonce.to_be_bytes());
-    hasher.update(cumulative_amount.to_be_bytes());
-    hasher.finalize().into()
 }
 
 #[cfg(test)]
@@ -264,22 +250,6 @@ mod tests {
                 nonce: 7,
                 cumulative_amount: 250
             }
-        );
-    }
-
-    #[test]
-    fn the_digest_changes_with_any_field() {
-        let base = claim_digest("channel-a", 1, 100);
-        assert_ne!(base, claim_digest("channel-b", 1, 100));
-        assert_ne!(base, claim_digest("channel-a", 2, 100));
-        assert_ne!(base, claim_digest("channel-a", 1, 101));
-    }
-
-    #[test]
-    fn the_digest_is_deterministic() {
-        assert_eq!(
-            claim_digest("channel-a", 1, 100),
-            claim_digest("channel-a", 1, 100)
         );
     }
 
