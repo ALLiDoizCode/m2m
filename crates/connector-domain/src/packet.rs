@@ -317,6 +317,24 @@ mod tests {
         assert_eq!(decoded, prepare);
     }
 
+    /// Issue #546 tightens canonicality in the shared `oer.rs` primitives
+    /// rather than only in the envelope's own decode path (see that issue's
+    /// resolution note and `oer.rs::decode_var_uint`'s doc comment for why),
+    /// so a PREPARE's `amount` -- a VarUInt, like everything #546 describes --
+    /// is covered by the same fix without any change to this file.
+    #[test]
+    fn prepare_decode_rejects_a_non_canonical_amount_determinant() {
+        let mut encoded = sample_prepare().encode();
+        // `amount: 100` canonically encodes as the single byte 0x64
+        // (100 <= 127). Splice in the long-form alias 0x81 0x64 instead.
+        assert_eq!(encoded[1], 0x64);
+        encoded.splice(1..2, [0x81, 0x64]);
+        assert!(matches!(
+            Prepare::decode(&encoded),
+            Err(PacketError::NonCanonicalLength)
+        ));
+    }
+
     #[test]
     fn prepare_decode_rejects_wrong_type_byte() {
         let mut encoded = sample_prepare().encode();
