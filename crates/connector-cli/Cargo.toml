@@ -17,6 +17,7 @@ ethers = { version = "2", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 connector-operator = { path = "../connector-operator", features = ["test-util"] }
+connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 chrono = "0.4"
 ed25519-dalek = "1"
 hyper = { version = "0.14", features = ["full"] }

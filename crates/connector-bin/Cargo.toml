@@ -22,7 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 [dev-dependencies]
 tempfile = "3"
 connector-domain = { path = "../connector-domain" }
-connector-settlement-evm = { path = "../connector-settlement-evm" }
+connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 chrono = "0.4"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }

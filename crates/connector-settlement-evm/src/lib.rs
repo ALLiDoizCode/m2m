@@ -22,6 +22,8 @@
 //! names.
 
 mod bindings;
+#[cfg(feature = "test-util")]
+pub mod test_support;
 
 use std::sync::Arc;
 

@@ -435,64 +435,17 @@ write_keys = ["{key}"]
     mod settlement_construction {
         use super::*;
         use chrono::Duration;
-        use std::process::{Child, Command, Stdio};
+        use connector_settlement_evm::test_support::{
+            anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
+        };
 
-        const DEPLOYER_PRIVATE_KEY: &str =
-            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
-        fn anvil_available() -> bool {
-            Command::new("anvil")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        }
-
-        struct Anvil {
-            child: Child,
-            rpc_url: String,
-        }
-
-        impl Anvil {
-            async fn spawn() -> Self {
-                let port = 18_700u16.wrapping_add((std::process::id() as u16) % 1_000);
-                let rpc_url = format!("http://127.0.0.1:{port}");
-                let child = Command::new("anvil")
-                    .args(["--host", "127.0.0.1", "--port"])
-                    .arg(port.to_string())
-                    .args([
-                        "--chain-id",
-                        "31337",
-                        "--accounts",
-                        "1",
-                        "--balance",
-                        "10000",
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .expect("spawn anvil");
-
-                use ethers::providers::{Http, Middleware, Provider};
-                let provider = Provider::<Http>::try_from(rpc_url.as_str()).expect("provider");
-                for _ in 0..200 {
-                    if provider.get_chainid().await.is_ok() {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                Self { child, rpc_url }
-            }
-        }
-
-        impl Drop for Anvil {
-            fn drop(&mut self) {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-            }
-        }
+        /// This test binary's own base port for [`Anvil::spawn`] -- distinct
+        /// from other test binaries' bases (`connector-settlement-evm`'s own
+        /// tests use 18_600; `connector-bin`'s use 18_500;
+        /// `connector-cli`'s own `settlement_lifecycle` integration test
+        /// uses 18_800) so that binaries running concurrently under `cargo
+        /// test --workspace` don't contend for the same port range.
+        const ANVIL_BASE_PORT: u16 = 18_700;
 
         fn key_file_with(contents: &str) -> tempfile::TempPath {
             let mut file = tempfile::NamedTempFile::new().expect("temp key file");
@@ -516,7 +469,7 @@ write_keys = ["{key}"]
                 return;
             }
 
-            let anvil = Anvil::spawn().await;
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
             let token = EvmSettlementBackend::deploy_mock_token(
                 &anvil.rpc_url,
                 DEPLOYER_PRIVATE_KEY,
