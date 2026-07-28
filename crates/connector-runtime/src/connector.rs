@@ -12,7 +12,7 @@ use connector_domain::{
     ProjectionDivergence, Reject, RejectCode,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
-use connector_signer::giftwrap::{open_request, seal_response};
+use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
 use connector_signer::{PublicKeyBytes, Signer};
 use thiserror::Error;
 use tracing::Instrument;
@@ -27,40 +27,6 @@ use crate::operator_view::{
 };
 use crate::peer_transport::PeerTransport;
 use crate::route::{LeasedRoute, PeerRoute};
-
-/// Issue #417's legacy signal, kept until #525 has a route termination
-/// derive its fulfilment from a sealed secret instead: an app claims a
-/// preimage for the packet's execution condition by answering with this
-/// response header. Extracted here, above the [`AppClient`] boundary --
-/// the port itself sees this as just another header, per issue #521 -- and
-/// removed from the response envelope handed back to the client, since it
-/// is a private signal between the connector and its app rather than
-/// content the client asked for.
-pub(crate) const FULFILLMENT_HEADER: &str = "TOON-Fulfillment";
-
-/// Decode a lowercase-or-uppercase 64-character hex string into 32 bytes.
-/// Any malformed value (wrong length, non-hex characters) is treated the
-/// same as an absent header.
-fn decode_fulfillment_header(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(value.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
-}
-
-/// Find, remove and decode [`FULFILLMENT_HEADER`] from a response
-/// envelope's headers, if present -- whether or not it decodes.
-fn extract_fulfillment_header(headers: &mut Vec<(String, String)>) -> Option<[u8; 32]> {
-    let index = headers
-        .iter()
-        .position(|(name, _)| name.eq_ignore_ascii_case(FULFILLMENT_HEADER))?;
-    let (_, value) = headers.remove(index);
-    decode_fulfillment_header(&value)
-}
 
 /// A reject this connector originates before a gift wrap's shared secret
 /// could be recovered -- no identity key configured, or the wrap itself
@@ -775,7 +741,7 @@ impl Connector {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                let outcome = Self::accept_if_fulfilled(&condition, Some(fulfill));
+                let outcome = Self::accept_if_fulfilled(&condition, fulfill);
                 if matches!(outcome, PacketResponse::Fulfill(_)) {
                     self.claims
                         .record_fulfillment(peer_id, forwarded_amount, self.clock.now());
@@ -839,7 +805,7 @@ impl Connector {
             };
 
         let inner = self
-            .deliver_opened_envelope(route, &condition, &envelope_bytes)
+            .deliver_opened_envelope(route, &condition, &shared_secret, &envelope_bytes)
             .await;
         Self::seal_termination_response(inner, &shared_secret)
     }
@@ -853,6 +819,7 @@ impl Connector {
         &self,
         route: &StaticRoute,
         condition: &[u8; 32],
+        shared_secret: &[u8; 32],
         envelope_bytes: &[u8],
     ) -> PacketResponse {
         let request = match EnvelopeRequest::decode(envelope_bytes) {
@@ -871,21 +838,20 @@ impl Connector {
         match self.app_client.deliver(route.handler_url(), &request).await {
             // ADR 0020: an HTTP status is envelope content, never a packet
             // outcome, so any complete answer -- whatever its status --
-            // rides home as a response envelope on a FULFILL. Issue #417's
-            // rule stands until #525 derives the fulfilment from a sealed
-            // secret instead: an app that supplies no verifying
-            // `TOON-Fulfillment` header still cannot make this connector
-            // manufacture a fulfilment on its behalf.
-            AppOutcome::Answered { mut response } => {
-                let fulfillment = extract_fulfillment_header(&mut response.headers);
-                Self::accept_if_fulfilled(
-                    condition,
-                    fulfillment.map(|fulfillment| Fulfill {
-                        fulfillment,
-                        data: response.encode(),
-                    }),
-                )
-            }
+            // rides home as a response envelope on a FULFILL. ADR
+            // 0019/issue #525: the app supplies nothing toward the
+            // fulfilment itself -- it is derived from this request's own
+            // shared secret, the same secret every other return path here
+            // seals its response with, so only a sender who sealed to this
+            // connector's identity can ever have minted a condition it
+            // matches.
+            AppOutcome::Answered { response } => Self::accept_if_fulfilled(
+                condition,
+                Fulfill {
+                    fulfillment: derive_fulfillment(shared_secret),
+                    data: response.encode(),
+                },
+            ),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),
                 triggered_by: String::new(),
@@ -1079,8 +1045,9 @@ impl Connector {
     /// instant it is called (`connector_settlement::SettlementBackend::close`'s
     /// own docs). A channel with no claim ever accepted closes directly,
     /// exactly like [`Connector::close_channel`]. A claim already fully
-    /// redeemed (`SettlementError::StaleClaim`) is not a reason to refuse
-    /// closing -- there is nothing left to collect -- but any other
+    /// redeemed (`SettlementError::StaleClaim`, or `StaleNonce` -- issue
+    /// #573 -- for the same already-redeemed claim) is not a reason to
+    /// refuse closing -- there is nothing left to collect -- but any other
     /// redemption failure stops here without closing, so a reverted or
     /// failed settlement transaction leaves the channel open and the claim
     /// still redeemable rather than closing over an unclaimed balance.
@@ -1092,7 +1059,9 @@ impl Connector {
         let id = ChannelId(channel_id.to_string());
         if let Some(claim) = self.claims.latest_inbound_claim(channel_id) {
             match settlement.redeem(&id, claim).await {
-                Ok(_) | Err(SettlementError::StaleClaim { .. }) => {}
+                Ok(_)
+                | Err(SettlementError::StaleClaim { .. })
+                | Err(SettlementError::StaleNonce { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -1117,20 +1086,19 @@ impl Connector {
     /// prevents an intermediate hop (relaying a peer's answer) or a
     /// terminating one (relaying an app's) from producing a valid
     /// fulfilment without the destination's actual participation (issue
-    /// #417). Anything else -- no candidate, or one that fails to verify --
-    /// is a REJECT, never a fulfilment this connector invents itself.
-    fn accept_if_fulfilled(condition: &[u8; 32], candidate: Option<Fulfill>) -> PacketResponse {
-        match candidate {
-            Some(fulfill) if fulfillment_matches_condition(condition, &fulfill.fulfillment) => {
-                PacketResponse::Fulfill(fulfill)
-            }
-            _ => PacketResponse::Reject(Reject {
+    /// #417). A candidate that fails to verify is a REJECT, never a
+    /// fulfilment this connector invents itself.
+    fn accept_if_fulfilled(condition: &[u8; 32], candidate: Fulfill) -> PacketResponse {
+        if fulfillment_matches_condition(condition, &candidate.fulfillment) {
+            PacketResponse::Fulfill(candidate)
+        } else {
+            PacketResponse::Reject(Reject {
                 code: RejectCode::f99_application_error(),
                 triggered_by: String::new(),
                 message: "fulfillment does not match execution condition".to_string(),
                 data: Vec::new(),
                 accumulated_cost: 0,
-            }),
+            })
         }
     }
 }
@@ -1151,24 +1119,20 @@ mod tests {
     use crate::clock::TestClock;
     use crate::peer_transport::{InProcessPeerTransport, PeerTransport};
     use crate::test_support::{
-        answered, answered_with_status, envelope_request_data, fulfill_envelope,
-        fulfill_envelope_with_status, identity_signer, open_sealed_envelope,
+        answered, answered_with_status, expected_fulfillment, fulfill_envelope,
+        fulfill_envelope_with_status, identity_signer, matching_condition, open_sealed_envelope,
         sealed_envelope_request_data,
     };
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
-    use connector_domain::derive_condition;
 
-    /// A fixed, non-zero preimage and the condition it derives -- used
-    /// throughout so an `Answered` outcome's claimed fulfillment genuinely
-    /// verifies against the packet's execution condition rather than the
-    /// old hardcoded-zero stand-in (issue #417).
-    const FULFILLMENT: [u8; 32] = [7u8; 32];
-
-    fn condition() -> [u8; 32] {
-        derive_condition(&FULFILLMENT)
-    }
-
+    /// Seals `data` and sets `execution_condition` to match the fulfilment
+    /// its own (discarded) shared secret derives (ADR 0019, issue #525) --
+    /// what a genuine sender does before ever transmitting a packet, so a
+    /// plain `prepare()` call is, by construction, one that fulfils if it
+    /// reaches an app that answers at all. A test that also needs the
+    /// secret back (to open the sealed response, or assert the exact
+    /// fulfilment) uses [`sealed_prepare`] instead.
     fn prepare(destination: &str, data: &[u8]) -> Prepare {
         // Comfortably after `test_clock()`'s instant, so tests that don't
         // care about expiry aren't incidentally right at the boundary.
@@ -1184,12 +1148,13 @@ mod tests {
         data: &[u8],
         expires_at: chrono::DateTime<Utc>,
     ) -> Prepare {
+        let (data, shared_secret) = sealed_envelope_request_data(data);
         Prepare {
             amount: 0,
             expires_at,
-            execution_condition: condition(),
+            execution_condition: matching_condition(&shared_secret),
             destination: destination.to_string(),
-            data: envelope_request_data(data),
+            data,
         }
     }
 
@@ -1204,7 +1169,12 @@ mod tests {
     /// already-sealed `data` -- every termination test in this module
     /// addresses `"g.example.app"` and only cares that `data` itself is
     /// shaped correctly, since `prepare()`'s own plaintext `data` never
-    /// survives past this override.
+    /// survives past this override. Because the substituted `data` carries
+    /// its own, different shared secret than the one `prepare()` derived
+    /// its `execution_condition` from, this deliberately produces a
+    /// condition that does *not* match the fulfilment `data`'s own secret
+    /// derives -- the shape a test wants when it needs a packet that opens
+    /// and reaches the app, but should not fulfil (ADR 0019, issue #525).
     fn prepare_with_data(data: Vec<u8>) -> Prepare {
         Prepare {
             data,
@@ -1213,13 +1183,21 @@ mod tests {
     }
 
     /// A `Prepare` sealed to [`identity_signer`]'s identity and carrying
-    /// `body` (issue #524) -- the common case for a test that drives
-    /// `Connector::handle_prepare` directly rather than through the HTTP
-    /// router. Returns the shared secret alongside, to open the sealed
-    /// `Fulfill`/termination-`Reject` this produces.
+    /// `body` (issue #524), with `execution_condition` set to match the
+    /// fulfilment this same sealed secret derives (ADR 0019, issue #525) --
+    /// the common case for a test that drives `Connector::handle_prepare`
+    /// directly rather than through the HTTP router and expects the packet
+    /// to genuinely fulfil. Returns the shared secret alongside, to open
+    /// the sealed `Fulfill`/termination-`Reject` this produces, or to
+    /// compute the expected fulfilment via `expected_fulfillment`.
     fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
         let (data, shared_secret) = sealed_envelope_request_data(body);
-        (prepare_with_data(data), shared_secret)
+        let prepare = Prepare {
+            data,
+            execution_condition: matching_condition(&shared_secret),
+            ..prepare("g.example.app", b"unused")
+        };
+        (prepare, shared_secret)
     }
 
     fn test_clock() -> Arc<TestClock> {
@@ -1247,10 +1225,7 @@ mod tests {
     async fn delivers_a_packet_matching_a_terminated_route() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            answered(b"app said yes", Some(FULFILLMENT)),
-        );
+        app_client.respond(route.handler_url(), answered(b"app said yes"));
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client.clone(), clock);
         let (sealed, shared_secret) = sealed_prepare(b"hello app");
@@ -1259,7 +1234,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope(b"app said yes")
@@ -1336,10 +1311,7 @@ mod tests {
     async fn a_packet_expires_only_once_the_injected_clock_advances_past_it() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            answered(b"still on time", Some(FULFILLMENT)),
-        );
+        app_client.respond(route.handler_url(), answered(b"still on time"));
         let start = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
         let clock = Arc::new(TestClock::new(start));
         let connector = connector_with(vec![route], app_client.clone(), clock.clone());
@@ -1366,17 +1338,25 @@ mod tests {
         }
     }
 
+    /// ADR 0019/issue #525: the app supplies nothing toward fulfilment --
+    /// the fulfilment is derived from the packet's own sealed secret, so
+    /// what decides a `Fulfill` vs a `Reject` is entirely whether the
+    /// sender minted `execution_condition` from that same secret.
+    /// `prepare_with_data` deliberately builds a genuinely-sealed, genuinely
+    /// deliverable packet whose condition was *not* derived from its own
+    /// secret (the mismatch [`Self::accept_if_fulfilled`] exists to catch),
+    /// checked the same way every hop checks a fulfilment.
     #[tokio::test]
-    async fn an_app_that_supplies_no_fulfillment_is_rejected_rather_than_fulfilled() {
+    async fn a_condition_not_derived_from_its_own_sealed_secret_is_rejected_even_though_the_app_answered(
+    ) {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(route.handler_url(), answered(b"app said yes", None));
+        app_client.respond(route.handler_url(), answered(b"app said yes"));
         let clock = test_clock();
-        let connector = connector_with(vec![route], app_client, clock);
+        let connector = connector_with(vec![route], app_client.clone(), clock);
+        let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-        let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
-            .await;
+        let response = connector.handle_prepare(prepare_with_data(data), 0).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -1385,27 +1365,9 @@ mod tests {
             }
             other => panic!("expected a reject, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn an_app_that_supplies_a_mismatching_fulfillment_is_rejected_rather_than_fulfilled() {
-        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
-        let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            answered(b"app said yes", Some([9u8; 32])), // does not hash to `condition()`
-        );
-        let clock = test_clock();
-        let connector = connector_with(vec![route], app_client, clock);
-
-        let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
-            .await;
-
-        match response {
-            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F99"),
-            other => panic!("expected a reject, got {other:?}"),
-        }
+        // The app was genuinely reached -- this is not a delivery failure,
+        // only a fulfilment one.
+        assert_eq!(app_client.deliveries().len(), 1);
     }
 
     /// Issue #521's central rule (ADR 0020): "you pay for an answer, not
@@ -1418,7 +1380,7 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
             route.handler_url(),
-            answered_with_status(402, b"insufficient funds", Some(FULFILLMENT)),
+            answered_with_status(402, b"insufficient funds"),
         );
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
@@ -1428,7 +1390,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope_with_status(402, b"insufficient funds")
@@ -1439,23 +1401,21 @@ mod tests {
     }
 
     /// The other half of the same rule stated negatively: a non-2xx
-    /// response is not itself what causes a reject. Issue #417's
-    /// unrelated rule -- no verifying fulfilment, no `Fulfill` -- is what
-    /// still does, exactly as it would for a 200.
+    /// response is not itself what causes a reject -- a mismatched
+    /// condition (issue #525) still does, exactly as it would for a 200.
     #[tokio::test]
-    async fn a_non_2xx_response_with_no_verifying_fulfillment_is_rejected_for_that_reason_only() {
+    async fn a_non_2xx_response_still_rejects_for_a_mismatched_condition() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
             route.handler_url(),
-            answered_with_status(402, b"insufficient funds", None),
+            answered_with_status(402, b"insufficient funds"),
         );
         let clock = test_clock();
-        let connector = connector_with(vec![route], app_client, clock);
+        let connector = connector_with(vec![route], app_client.clone(), clock);
+        let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-        let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
-            .await;
+        let response = connector.handle_prepare(prepare_with_data(data), 0).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -1464,6 +1424,7 @@ mod tests {
             }
             other => panic!("expected a reject, got {other:?}"),
         }
+        assert_eq!(app_client.deliveries().len(), 1);
     }
 
     #[tokio::test]
@@ -1498,7 +1459,7 @@ mod tests {
         let general = StaticRoute::new("g.example", "http://localhost:4000").unwrap();
         let specific = StaticRoute::new("g.example.app", "http://localhost:5000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(specific.handler_url(), answered(b"", Some(FULFILLMENT)));
+        app_client.respond(specific.handler_url(), answered(b""));
         let clock = test_clock();
         let connector = connector_with(vec![general, specific.clone()], app_client.clone(), clock);
 
@@ -1519,7 +1480,7 @@ mod tests {
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered by the second hop", Some(FULFILLMENT)),
+            answered(b"delivered by the second hop"),
         );
         let second_hop = Arc::new(
             Connector::new(
@@ -1546,7 +1507,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope(b"delivered by the second hop")
@@ -1565,7 +1526,7 @@ mod tests {
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered by the second hop", Some(FULFILLMENT)),
+            answered(b"delivered by the second hop"),
         );
         let payer_signer = LocalSigner::generate("payer-claim-key");
         let second_hop = Arc::new(
@@ -1610,7 +1571,7 @@ mod tests {
     {
         let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let second_hop_app_client = Arc::new(FakeAppClient::new());
-        second_hop_app_client.respond(second_hop_route.handler_url(), answered(b"", None));
+        second_hop_app_client.respond(second_hop_route.handler_url(), answered(b""));
         let second_hop = Arc::new(Connector::new(
             vec![second_hop_route],
             vec![],
@@ -1683,10 +1644,7 @@ mod tests {
         let peer_route = PeerRoute::new("g.example", "second-hop", 0);
         let terminated_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            terminated_route.handler_url(),
-            answered(b"handled locally", Some(FULFILLMENT)),
-        );
+        app_client.respond(terminated_route.handler_url(), answered(b"handled locally"));
         let connector = Connector::new(
             vec![terminated_route],
             vec![peer_route],
@@ -1701,7 +1659,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope(b"handled locally")
@@ -1719,7 +1677,7 @@ mod tests {
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"handled by the second hop", Some(FULFILLMENT)),
+            answered(b"handled by the second hop"),
         );
         let second_hop = Arc::new(
             Connector::new(
@@ -1746,7 +1704,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope(b"handled by the second hop")
@@ -1788,7 +1746,7 @@ mod tests {
     async fn handle_prepare_records_a_fulfill_in_metrics() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(route.handler_url(), answered(b"", Some(FULFILLMENT)));
+        app_client.respond(route.handler_url(), answered(b""));
         let connector = connector_with(vec![route], app_client, test_clock());
 
         connector
@@ -1817,10 +1775,7 @@ mod tests {
     async fn forwarding_to_a_peer_records_the_earned_fee_only_on_fulfilment() {
         let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let second_hop_app_client = Arc::new(FakeAppClient::new());
-        second_hop_app_client.respond(
-            second_hop_route.handler_url(),
-            answered(b"", Some(FULFILLMENT)),
-        );
+        second_hop_app_client.respond(second_hop_route.handler_url(), answered(b""));
         let second_hop = Arc::new(
             Connector::new(
                 vec![second_hop_route],
@@ -1858,7 +1813,7 @@ mod tests {
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered by the second hop", Some(FULFILLMENT)),
+            answered(b"delivered by the second hop"),
         );
         let second_hop = Arc::new(
             Connector::new(
@@ -1889,7 +1844,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope(b"delivered by the second hop")
@@ -1986,10 +1941,7 @@ mod tests {
     async fn a_static_route_always_outranks_a_leased_route_for_the_same_prefix() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            answered(b"handled locally", Some(FULFILLMENT)),
-        );
+        app_client.respond(route.handler_url(), answered(b"handled locally"));
         let clock = test_clock();
         let connector = Connector::new(
             vec![route],
@@ -2008,7 +1960,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope(b"handled locally")
@@ -2134,7 +2086,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_fulfillment_from_a_peer_that_does_not_match_the_execution_condition_is_rejected() {
-        let bogus_fulfillment = [9u8; 32]; // does not hash to `condition()`
+        let bogus_fulfillment = [9u8; 32]; // does not hash to `prepare()`'s own condition
         let peer_transport = FixedResponsePeerTransport(PacketResponse::Fulfill(Fulfill {
             fulfillment: bogus_fulfillment,
             data: b"claimed delivery".to_vec(),
@@ -2173,7 +2125,7 @@ mod tests {
                 StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let handler_url = second_hop_route.handler_url().clone();
             let second_hop_app_client = Arc::new(FakeAppClient::new());
-            second_hop_app_client.respond(&handler_url, answered(b"", Some(FULFILLMENT)));
+            second_hop_app_client.respond(&handler_url, answered(b""));
             let payer_signer = LocalSigner::generate("payer-claim-key");
             let second_hop = Arc::new(
                 Connector::new(
@@ -2252,14 +2204,17 @@ mod tests {
         #[tokio::test]
         async fn no_claim_is_emitted_for_a_rejected_packet() {
             let (first_hop, _second_hop, app_client, handler_url) = two_hop_setup();
-            // A non-2xx response with no verifying fulfillment still
-            // rejects, per issue #417's unrelated rule -- not because of
-            // the status.
-            app_client.respond(&handler_url, answered_with_status(402, b"", None));
+            // A non-2xx response still answers -- what actually rejects
+            // this packet is a condition that was not derived from its own
+            // sealed secret (issue #525), not the app's status.
+            app_client.respond(&handler_url, answered_with_status(402, b""));
+            let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
+            let mismatched = Prepare {
+                amount: 100,
+                ..prepare_with_data(data)
+            };
 
-            let response = first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
-                .await;
+            let response = first_hop.handle_prepare(mismatched, 0).await;
 
             assert!(matches!(response, PacketResponse::Reject(_)));
             assert!(first_hop.claims().is_empty());
@@ -2341,7 +2296,7 @@ mod tests {
                 StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let handler_url = second_hop_route.handler_url().clone();
             let second_hop_app_client = Arc::new(FakeAppClient::new());
-            second_hop_app_client.respond(&handler_url, answered(b"", Some(FULFILLMENT)));
+            second_hop_app_client.respond(&handler_url, answered(b""));
             let payer_signer = Arc::new(LocalSigner::generate("payer-claim-key"));
             let second_hop = Arc::new(
                 Connector::new(
@@ -2525,7 +2480,7 @@ mod tests {
             let build = |path: &std::path::Path| {
                 let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
                 let app_client = Arc::new(FakeAppClient::new());
-                app_client.respond(route.handler_url(), answered(b"", Some(FULFILLMENT)));
+                app_client.respond(route.handler_url(), answered(b""));
                 Connector::new(
                     vec![route],
                     vec![],
@@ -2990,10 +2945,7 @@ mod tests {
         ) {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(
-                route.handler_url(),
-                answered(b"should never be reached", Some(FULFILLMENT)),
-            );
+            app_client.respond(route.handler_url(), answered(b"should never be reached"));
             let wrong_identity = Arc::new(LocalSigner::generate("not-the-intended-recipient"));
             let connector = Connector::new(
                 vec![route],
@@ -3065,22 +3017,22 @@ mod tests {
         }
 
         /// AC2: not only a FULFILL, but a REJECT raised at the
-        /// termination -- here, the app supplied no verifying fulfilment --
-        /// is sealed back with the request's own shared secret: it opens
-        /// under that secret (proving only the intended sender, who holds
-        /// it, could ever read it) and fails to open under any other.
-        /// `reject.message` -- the human-readable reason -- rides
-        /// unencrypted alongside, same as every other reject in this file;
-        /// only `data` is sealed.
+        /// termination -- here, the condition was not derived from its own
+        /// sealed secret (issue #525) -- is sealed back with the request's
+        /// own shared secret: it opens under that secret (proving only the
+        /// intended sender, who holds it, could ever read it) and fails to
+        /// open under any other. `reject.message` -- the human-readable
+        /// reason -- rides unencrypted alongside, same as every other
+        /// reject in this file; only `data` is sealed.
         #[tokio::test]
         async fn a_reject_raised_at_the_termination_is_sealed_with_the_requests_shared_secret() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"app said yes", None));
+            app_client.respond(route.handler_url(), answered(b"app said yes"));
             let connector = connector_with(vec![route], app_client, test_clock());
-            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector.handle_prepare(sealed, 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -3133,12 +3085,11 @@ mod tests {
         async fn accumulated_cost_stays_outside_the_seal_on_a_termination_reject() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"", None));
+            app_client.respond(route.handler_url(), answered(b""));
             let connector = connector_with(vec![route], app_client, test_clock());
+            let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector
-                .handle_prepare(prepare("g.example.app", b"hello"), 0)
-                .await;
+            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -3176,10 +3127,7 @@ mod tests {
         fn connector_with_leased_routes(active_lease_count: usize) -> Connector {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(
-                route.handler_url(),
-                answered(b"delivered", Some(FULFILLMENT)),
-            );
+            app_client.respond(route.handler_url(), answered(b"delivered"));
             let connector = Connector::new(
                 vec![route],
                 vec![],
