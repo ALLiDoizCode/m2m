@@ -1,9 +1,9 @@
 # A price is flat, attaches to a handler, and buys an answer
 
 A price is flat per packet, as a fee is. Pricing granularity is handler granularity: one handler,
-one price, and an app that wants to charge differently exposes more handlers. A price accumulates
-into a reject's running total alongside fees. And value moves whenever the app answered — whatever
-it answered.
+one price, and an app that wants to charge differently exposes more handlers. The app is told
+nothing about the payment that bought its work. A price accumulates into a reject's running total
+alongside fees. And value moves whenever the app answered — whatever it answered.
 
 ## Context
 
@@ -28,6 +28,19 @@ handler. The distinction lives in the address space, not in the packet — which
 prices without ever interpreting what it carries. `Config::load` refuses two differently-priced
 routes pointing at one handler, since an app provably cannot tell them apart and the cheaper price
 would always win.
+
+**The app is told nothing about the payment that brought the packet to it** — not who paid, not
+how much, not on what chain, and not even which destination was addressed. Not the payer or the
+chain: ADR 0017 found both wrong by construction, not merely omittable — `X-TOON-Payer` names the
+immediate previous hop rather than the payer on any path longer than one hop, and `X-TOON-Chain`
+can carry a payer-supplied value that an app trusts as connector-asserted. Not the amount: that is
+this decision's own consequence rather than a separate one — an app that wants to charge
+differently for different work already gets that by exposing a different handler, so an amount
+header would tell it only what its own route's price already says. Not the destination: the ILP
+address routing consumed to reach this handler never travels with the delivery, which is distinct
+from the HTTP method and target inside the sealed envelope — exactly what the connector makes of
+the app (ADR 0018). Whatever arrives at a handler was paid for, at that handler's one price, and
+that is the only fact the app gets.
 
 **A price accumulates into a reject's running total**, alongside the fees of the hops that carried
 it, so a probe discovers what a path costs end to end (ADR 0011). Today only the forwarding path
@@ -77,3 +90,7 @@ watching its own error rate, not the protocol.
 
 Combined with ADR 0019, fabricating an error response is exactly as profitable to a dishonest
 terminating connector as fabricating a success. That consequence is recorded there.
+
+An app fronted by this connector cannot log, bill or rate-limit by payer from what a handler
+receives — nothing on that path names one. Anything that needs that attribution must get it from
+somewhere other than the packet path.

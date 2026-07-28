@@ -18,7 +18,7 @@ _Avoid_: terminator, connector-as-terminator, gateway
 The payment-oblivious service a connector delivers to at the end of a route. It is told nothing
 about the payment that brought the packet to it — not who paid, not how much, not even which
 destination was addressed. Whatever arrives at one of its handlers was paid for, at that
-handler's one price.
+handler's one price (ADR 0020).
 _Avoid_: BLS, Business Logic Server, agent runtime, backend
 
 **Handler**:

@@ -140,4 +140,50 @@ pub enum ConfigError {
         #[source]
         source: AddrParseError,
     },
+
+    #[error(
+        "the [settlement] section names chain '{value}', which this connector does not \
+         implement -- only 'evm' is recognized"
+    )]
+    SettlementUnknownChain { value: String },
+
+    #[error("the [settlement] section's rpc_url is empty")]
+    SettlementMissingRpcUrl,
+
+    #[error("invalid settlement rpc_url '{value}': {source}")]
+    SettlementInvalidRpcUrl {
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
+
+    #[error("settlement rpc_url '{value}' must be http or https")]
+    SettlementUnsupportedRpcScheme { value: String },
+
+    #[error(
+        "invalid settlement contract_address '{value}': must be 40 hex characters \
+         (a 20-byte EVM address), optionally '0x'-prefixed"
+    )]
+    SettlementInvalidContractAddress { value: String },
+
+    #[error(
+        "invalid settlement token_address '{value}': must be 40 hex characters \
+         (a 20-byte EVM address), optionally '0x'-prefixed"
+    )]
+    SettlementInvalidTokenAddress { value: String },
+
+    #[error("the [settlement] section's decimals must not be zero")]
+    SettlementZeroDecimals,
+
+    #[error(
+        "the [settlement] section's key must set exactly one of 'key_file' or 'kms_key_id', \
+         but {reason}"
+    )]
+    SettlementKeyLocationAmbiguous { reason: &'static str },
+
+    #[error("settlement key_file does not exist or is not a file: {0}")]
+    SettlementKeyFileNotFound(PathBuf),
+
+    #[error("settlement kms_key_id must not be empty")]
+    SettlementKmsIdEmpty,
 }

@@ -94,7 +94,7 @@ pub struct RunningNode {
 /// 0001 the binary itself makes no decision beyond "did this fail".
 pub async fn run<S: AsRef<str>>(args: &[S]) -> Result<RunningNode, CliError> {
     let config = load_config(args)?;
-    let (connector, signer) = build(&config)?;
+    let (connector, signer) = build(&config).await?;
     let client_edge_addr = config.client_edge_addr();
     let router = router(connector.clone(), signer, &config);
 
