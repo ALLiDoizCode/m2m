@@ -13,10 +13,11 @@ use std::sync::{Arc, OnceLock};
 
 use connector_domain::{EnvelopeRequest, EnvelopeResponse};
 use connector_signer::giftwrap::{open_response, seal_request};
-use connector_signer::{LocalSigner, Signer};
+use connector_signer::{evm_balance_proof_digest, Address, EvmBalanceProof, LocalSigner, Signer};
 
 use crate::app_client::AppOutcome;
-use crate::connector::FULFILLMENT_HEADER;
+use crate::claim::{ChannelDomain, WireClaim};
+use crate::connector::{Connector, FULFILLMENT_HEADER};
 
 /// This crate's one shared "this connector's own identity" fixture: every
 /// [`envelope_request_data`]/[`sealed_envelope_request_data`] call seals to
@@ -129,5 +130,69 @@ pub(crate) fn fulfill_envelope_with_status(status: u16, body: &[u8]) -> Envelope
         status,
         headers: vec![],
         body: body.to_vec(),
+    }
+}
+
+/// A fixed EIP-712 domain every peer-wire test channel in this crate's own
+/// test modules shares (issue #575/#566) -- an arbitrary but consistent
+/// chain id and `TokenNetwork` address; nothing in these tests depends on
+/// their real-world provenance, only that signing and verifying a claim use
+/// the same domain a channel was registered with.
+pub(crate) fn test_channel_domain() -> ChannelDomain {
+    ChannelDomain {
+        chain_id: 84_532,
+        token_network_address: [0x1E; 20],
+    }
+}
+
+/// A valid on-chain `bytes32` peer-wire channel id for tests -- `0x`
+/// followed by `n` left-padded to 64 hex characters (issue #575's AC4: a
+/// peer-wire claim's channel id must already be a real bytes32, never an
+/// arbitrary label like the `"channel-a"` placeholders this crate's tests
+/// used before this issue).
+pub(crate) fn test_channel_id(n: u8) -> String {
+    format!("0x{n:064x}")
+}
+
+/// Register `n`'s channel on `connector`: `counterparty`'s address as the
+/// key an inbound claim on it must recover to, and [`test_channel_domain`]
+/// as its EIP-712 signing domain -- the pairing [`ClaimBook::accept_inbound`]
+/// and [`ClaimBook::record_fulfillment`] both require before a channel can
+/// accept or produce a claim at all (issue #575's AC3).
+pub(crate) fn with_test_channel(connector: Connector, n: u8, counterparty: Address) -> Connector {
+    connector
+        .with_channel_verification_key(test_channel_id(n), counterparty)
+        .with_channel_domain(test_channel_id(n), test_channel_domain())
+        .expect("test_channel_id(n) is a valid on-chain channel id")
+}
+
+/// Sign a [`WireClaim`] for channel `n`'s `nonce`/`cumulative_amount` under
+/// [`test_channel_domain`] -- exactly the digest
+/// `ClaimBook::record_fulfillment` would compute for the same inputs.
+pub(crate) fn sign_wire_claim(
+    signer: &dyn Signer,
+    n: u8,
+    nonce: u64,
+    cumulative_amount: u64,
+) -> WireClaim {
+    let mut on_chain_id = [0u8; 32];
+    on_chain_id[31] = n;
+    let domain = test_channel_domain();
+    let proof = EvmBalanceProof {
+        channel_id: on_chain_id,
+        nonce,
+        transferred_amount: u128::from(cumulative_amount),
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: domain.chain_id,
+        token_network_address: domain.token_network_address,
+    };
+    WireClaim {
+        channel_id: test_channel_id(n),
+        nonce,
+        cumulative_amount,
+        signature: signer
+            .sign(&evm_balance_proof_digest(&proof))
+            .expect("sign"),
     }
 }

@@ -76,10 +76,12 @@ impl SettlementBackend for InMemorySettlementBackend {
         counterparty: Vec<u8>,
         _settlement_timeout: Duration,
     ) -> Result<ChannelId, SettlementError> {
-        let id = ChannelId(format!(
-            "in-memory-channel-{}",
-            self.next_id.fetch_add(1, Ordering::SeqCst)
-        ));
+        // A plain decimal counter, matching the shape `SettlementChannel.sol`'s
+        // own `uint256` channel counter takes on a real chain (issue #575) --
+        // this fake's channel id doubles as the peer-wire `ClaimBook`'s
+        // channel id in this workspace's own tests, which now requires a
+        // decimal or hex on-chain-`bytes32`-shaped string.
+        let id = ChannelId(self.next_id.fetch_add(1, Ordering::SeqCst).to_string());
         self.channels().insert(
             id.clone(),
             StoredChannel {

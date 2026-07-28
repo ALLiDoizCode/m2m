@@ -1320,9 +1320,9 @@ mod tests {
     mod channel_lifecycle {
         use super::*;
         use crate::rfc9421::sign_request;
-        use connector_domain::claim_digest;
-        use connector_runtime::{ChannelViewStatus, WireClaim};
+        use connector_runtime::{ChannelDomain, ChannelViewStatus, WireClaim};
         use connector_settlement_evm::EvmSettlementBackend;
+        use connector_signer::{derive_evm_address, evm_balance_proof_digest, EvmBalanceProof};
         use ed25519_dalek::Keypair;
         use rand::rngs::OsRng;
         use std::process::{Child, Command, Stdio};
@@ -1557,11 +1557,17 @@ mod tests {
                     .expect("deploy SettlementChannel");
 
             // The first channel a freshly deployed `SettlementChannel`
-            // opens is always id "0" -- configuring the claim
-            // verification key against that id ahead of time, rather than
-            // after opening, means this Connector can accept an inbound
-            // claim for it the moment it exists.
+            // opens is always id "0" -- a plain decimal `uint256` counter,
+            // which `connector_runtime::claim::parse_channel_id` accepts as
+            // that same on-chain value (issue #575). Configuring the claim
+            // verification key and domain against that id ahead of time,
+            // rather than after opening, means this Connector can accept an
+            // inbound claim for it the moment it exists.
             let peer_signer = LocalSigner::generate("peer-claim-key");
+            let peer_channel_domain = ChannelDomain {
+                chain_id: 84_532,
+                token_network_address: [0x1E; 20],
+            };
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
             let connector = Arc::new(
@@ -1573,7 +1579,12 @@ mod tests {
                     clock,
                 )
                 .with_settlement(Arc::new(settlement))
-                .with_channel_verification_key("0", peer_signer.public_key().unwrap()),
+                .with_channel_verification_key(
+                    "0",
+                    derive_evm_address(&peer_signer.public_key().unwrap()),
+                )
+                .with_channel_domain("0", peer_channel_domain)
+                .unwrap(),
             );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             let keypair = keypair();
@@ -1611,13 +1622,26 @@ mod tests {
 
             // A genuine claim from the channel's counterparty, accepted
             // exactly as an inbound PREPARE's piggybacked claim would be.
-            let sign_claim = |nonce: u64, amount: u64| WireClaim {
-                channel_id: opened.id.clone(),
-                nonce,
-                cumulative_amount: amount,
-                signature: peer_signer
-                    .sign(&claim_digest(&opened.id, nonce, amount))
-                    .unwrap(),
+            // `opened.id` ("0") embeds as the big-endian bytes of that same
+            // decimal integer -- the on-chain `bytes32` a real
+            // `TokenNetwork` claim of channel id 0 would sign over too.
+            let on_chain_id = [0u8; 32];
+            let sign_claim = |nonce: u64, amount: u64| {
+                let proof = EvmBalanceProof {
+                    channel_id: on_chain_id,
+                    nonce,
+                    transferred_amount: u128::from(amount),
+                    locked_amount: 0,
+                    locks_root: [0u8; 32],
+                    chain_id: peer_channel_domain.chain_id,
+                    token_network_address: peer_channel_domain.token_network_address,
+                };
+                WireClaim {
+                    channel_id: opened.id.clone(),
+                    nonce,
+                    cumulative_amount: amount,
+                    signature: peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap(),
+                }
             };
             assert_eq!(
                 connector.handle_peer_claim(sign_claim(1, 400)),

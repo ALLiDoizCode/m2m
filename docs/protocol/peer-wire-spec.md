@@ -173,7 +173,21 @@ A claim is chain-specific (`CONTEXT.md` "Claim", "Nonce", "Watermark"):
 
 `lockedAmount` and `locksRoot` are removed from the claim and from the on-chain balance proof
 (they were always zero — [ADR 0004](../adr/0004-value-moves-on-fulfilment.md)); in-flight exposure
-is bounded by packet expiry, not collateralised on-chain.
+is bounded by packet expiry, not collateralised on-chain. That removal describes the on-chain
+contract this design calls for, not the one currently deployed: the live `TokenNetwork.sol`'s
+`BalanceProof` typehash still declares both fields, so a digest that omits them does not match
+what that contract's `ecrecover` checks. Until a redeployment drops them, they are still hashed as
+zeros (see below).
+
+**Implementation note (issue #575, [ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)):**
+this table's `evm` row is normative and, as of this issue, matches what the code does — before it,
+`crates/connector-runtime/src/claim.rs` signed and verified a connector-internal SHA-256 hash of
+`channel_id ‖ nonce ‖ cumulative_amount` instead, a divergence from this section that was invisible
+because nothing had ever redeemed a peer-wire claim on chain. `ClaimBook` now signs and verifies
+through `connector_signer::evm_balance_proof_digest` — the same function the client edge already
+used (issue #506) — over exactly the fields the deployed `TokenNetwork.sol` typehash requires,
+`lockedAmount`/`locksRoot` included, hashed as zeros. The Solana row remains aspirational: the peer
+wire has no Ed25519 claim path yet.
 
 ### 3.6 Relationship to application-level claims (e.g. rolling-swap)
 

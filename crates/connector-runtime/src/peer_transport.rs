@@ -276,11 +276,11 @@ mod tests {
     use crate::clock::TestClock;
     use crate::test_support::{
         answered, envelope_request_data, fulfill_envelope, identity_signer, open_sealed_envelope,
-        sealed_envelope_request_data,
+        sealed_envelope_request_data, sign_wire_claim, with_test_channel,
     };
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::{claim_digest, derive_condition};
+    use connector_domain::derive_condition;
     use connector_signer::{LocalSigner, Signer};
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
@@ -408,25 +408,21 @@ mod tests {
     #[tokio::test]
     async fn a_piggybacked_claim_is_verified_and_acknowledged() {
         let signer = LocalSigner::generate("claim-key");
-        let peer = Arc::new(
+        let counterparty = connector_signer::derive_evm_address(&signer.public_key().unwrap());
+        let peer = Arc::new(with_test_channel(
             Connector::new(
                 vec![],
                 vec![],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
-            )
-            .with_channel_verification_key("channel-a", signer.public_key().unwrap()),
-        );
+            ),
+            1,
+            counterparty,
+        ));
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
-        let digest = claim_digest("channel-a", 1, 50);
-        let claim = WireClaim {
-            channel_id: "channel-a".to_string(),
-            nonce: 1,
-            cumulative_amount: 50,
-            signature: signer.sign(&digest).unwrap(),
-        };
+        let claim = sign_wire_claim(&signer, 1, 1, 50);
 
         let (response, ack, _reached) = transport
             .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))

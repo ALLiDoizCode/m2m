@@ -13,12 +13,12 @@ use connector_domain::{
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{open_request, seal_response};
-use connector_signer::{PublicKeyBytes, Signer};
+use connector_signer::{Address, Signer};
 use thiserror::Error;
 use tracing::Instrument;
 
 use crate::app_client::{AppClient, AppOutcome};
-use crate::claim::{ClaimAckOutcome, ClaimBook, WireClaim};
+use crate::claim::{ChannelDomain, ClaimAckOutcome, ClaimBook, InvalidChannelId, WireClaim};
 use crate::clock::Clock;
 use crate::journal::{Journal, JournalError};
 use crate::metrics::Metrics;
@@ -369,16 +369,39 @@ impl Connector {
         self
     }
 
-    /// Configure the public key whose signature this node accepts on an
+    /// Configure the EVM address whose signature this node accepts on an
     /// inbound claim for `channel_id` (issue #423, peer-wire-spec.md §1.1's
-    /// "a configured peer id and verification key").
+    /// "a configured peer id and verification key"; issue #575: this is now
+    /// the channel's counterparty *address*, recovered from an EIP-712
+    /// `BalanceProof` signature, not a raw public key checked against a
+    /// connector-internal digest). Pair with
+    /// [`Connector::with_channel_domain`] for the same `channel_id` -- a
+    /// claim naming a channel with no domain configured is refused
+    /// regardless of this.
     pub fn with_channel_verification_key(
         mut self,
         channel_id: impl Into<String>,
-        key: PublicKeyBytes,
+        counterparty: Address,
     ) -> Self {
-        self.claims.set_verification_key(channel_id, key);
+        self.claims.set_verification_key(channel_id, counterparty);
         self
+    }
+
+    /// Configure `channel_id`'s EIP-712 signing domain -- the chain it is
+    /// deployed on and the `TokenNetwork` contract that verifies a claim's
+    /// signature on redemption (issue #575/#566). Required, alongside
+    /// [`Connector::with_peer_claim_channel`] or
+    /// [`Connector::with_channel_verification_key`], before this channel
+    /// can sign or accept a claim -- see [`ClaimBook::set_channel_domain`].
+    /// `channel_id` must already be the channel's on-chain `bytes32`, refused
+    /// otherwise rather than hashed or truncated into shape.
+    pub fn with_channel_domain(
+        mut self,
+        channel_id: impl Into<String>,
+        domain: ChannelDomain,
+    ) -> Result<Self, InvalidChannelId> {
+        self.claims.set_channel_domain(channel_id, domain)?;
+        Ok(self)
     }
 
     /// Configure the settlement backend a node's channel-lifecycle writes
@@ -1153,11 +1176,13 @@ mod tests {
     use crate::test_support::{
         answered, answered_with_status, envelope_request_data, fulfill_envelope,
         fulfill_envelope_with_status, identity_signer, open_sealed_envelope,
-        sealed_envelope_request_data,
+        sealed_envelope_request_data, sign_wire_claim, test_channel_domain, test_channel_id,
+        with_test_channel,
     };
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
     use connector_domain::derive_condition;
+    use connector_signer::derive_evm_address;
 
     /// A fixed, non-zero preimage and the condition it derives -- used
     /// throughout so an `Answered` outcome's claimed fulfillment genuinely
@@ -1568,7 +1593,8 @@ mod tests {
             answered(b"delivered by the second hop", Some(FULFILLMENT)),
         );
         let payer_signer = LocalSigner::generate("payer-claim-key");
-        let second_hop = Arc::new(
+        let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
+        let second_hop = Arc::new(with_test_channel(
             Connector::new(
                 vec![second_hop_route],
                 vec![],
@@ -1576,12 +1602,13 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             )
-            .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
             .with_identity_signer(identity_signer()),
-        );
+            1,
+            payer_address,
+        ));
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        peer_transport.set_peer_channel("second-hop", "channel-a");
+        peer_transport.set_peer_channel("second-hop", test_channel_id(1));
         let first_hop = Connector::new(
             vec![],
             vec![PeerRoute::new("g.example.app", "second-hop", 7)],
@@ -1590,7 +1617,9 @@ mod tests {
             test_clock(),
         )
         .with_signer(Arc::new(payer_signer))
-        .with_peer_claim_channel("second-hop", "channel-a");
+        .with_peer_claim_channel("second-hop", test_channel_id(1))
+        .with_channel_domain(test_channel_id(1), test_channel_domain())
+        .unwrap();
 
         let response = first_hop
             .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
@@ -2175,7 +2204,8 @@ mod tests {
             let second_hop_app_client = Arc::new(FakeAppClient::new());
             second_hop_app_client.respond(&handler_url, answered(b"", Some(FULFILLMENT)));
             let payer_signer = LocalSigner::generate("payer-claim-key");
-            let second_hop = Arc::new(
+            let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
+            let second_hop = Arc::new(with_test_channel(
                 Connector::new(
                     vec![second_hop_route],
                     vec![],
@@ -2183,16 +2213,17 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     test_clock(),
                 )
-                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
                 .with_identity_signer(identity_signer()),
-            );
+                1,
+                payer_address,
+            ));
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("second-hop", second_hop.clone());
             // Standing in for the identity a real peer-wire handshake would
             // establish (#416, not yet built): without this, the link only
-            // learns "channel-a" once a claim first rides a frame, so the
+            // learns the channel once a claim first rides a frame, so the
             // very first delivery would go unrecorded (issue #424).
-            peer_transport.set_peer_channel("second-hop", "channel-a");
+            peer_transport.set_peer_channel("second-hop", test_channel_id(1));
             let first_hop = Connector::new(
                 vec![],
                 vec![PeerRoute::new("g.example.app", "second-hop", 0)],
@@ -2201,7 +2232,9 @@ mod tests {
                 test_clock(),
             )
             .with_signer(Arc::new(payer_signer))
-            .with_peer_claim_channel("second-hop", "channel-a");
+            .with_peer_claim_channel("second-hop", test_channel_id(1))
+            .with_channel_domain(test_channel_id(1), test_channel_domain())
+            .unwrap();
             (first_hop, second_hop, second_hop_app_client, handler_url)
         }
 
@@ -2238,7 +2271,7 @@ mod tests {
             assert_eq!(peer_claims.len(), 1);
             assert_eq!(peer_claims[0].peer_id, None);
             assert_eq!(peer_claims[0].direction, ClaimDirection::Inbound);
-            assert_eq!(peer_claims[0].channel_id, "channel-a");
+            assert_eq!(peer_claims[0].channel_id, test_channel_id(1));
             assert_eq!(peer_claims[0].nonce, 1);
             assert_eq!(peer_claims[0].cumulative_amount, 100);
 
@@ -2324,11 +2357,11 @@ mod tests {
         use connector_signer::LocalSigner;
 
         /// Exactly `claim_exchange::two_hop_setup`, but `second_hop`
-        /// enforces a ceiling of `ceiling` on `channel-a` -- the channel
-        /// `first_hop` claims against when it owes `second_hop` -- so
-        /// `second_hop`'s own exposure to `first_hop` is what gets bounded.
-        /// Also returns the payer's own signer, so a test can sign a claim
-        /// on `channel-a` directly without going through `first_hop`.
+        /// enforces a ceiling of `ceiling` on the channel `first_hop`
+        /// claims against when it owes `second_hop` -- so `second_hop`'s
+        /// own exposure to `first_hop` is what gets bounded. Also returns
+        /// the payer's own signer, so a test can sign a claim on that
+        /// channel directly without going through `first_hop`.
         fn two_hop_setup_with_ceiling(
             ceiling: u64,
         ) -> (
@@ -2343,7 +2376,8 @@ mod tests {
             let second_hop_app_client = Arc::new(FakeAppClient::new());
             second_hop_app_client.respond(&handler_url, answered(b"", Some(FULFILLMENT)));
             let payer_signer = Arc::new(LocalSigner::generate("payer-claim-key"));
-            let second_hop = Arc::new(
+            let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
+            let second_hop = Arc::new(with_test_channel(
                 Connector::new(
                     vec![second_hop_route],
                     vec![],
@@ -2351,13 +2385,14 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     test_clock(),
                 )
-                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
-                .with_channel_ceiling("channel-a", ceiling)
+                .with_channel_ceiling(test_channel_id(1), ceiling)
                 .with_identity_signer(identity_signer()),
-            );
+                1,
+                payer_address,
+            ));
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("second-hop", second_hop.clone());
-            peer_transport.set_peer_channel("second-hop", "channel-a");
+            peer_transport.set_peer_channel("second-hop", test_channel_id(1));
             let first_hop = Connector::new(
                 vec![],
                 vec![PeerRoute::new("g.example.app", "second-hop", 0)],
@@ -2366,7 +2401,9 @@ mod tests {
                 test_clock(),
             )
             .with_signer(payer_signer.clone())
-            .with_peer_claim_channel("second-hop", "channel-a");
+            .with_peer_claim_channel("second-hop", test_channel_id(1))
+            .with_channel_domain(test_channel_id(1), test_channel_domain())
+            .unwrap();
             (first_hop, second_hop, second_hop_app_client, payer_signer)
         }
 
@@ -2381,7 +2418,7 @@ mod tests {
             assert!(matches!(response, PacketResponse::Fulfill(_)));
             let exposure = second_hop.exposure();
             assert_eq!(exposure.len(), 1);
-            assert_eq!(exposure[0].channel_id, "channel-a");
+            assert_eq!(exposure[0].channel_id, test_channel_id(1));
             assert_eq!(exposure[0].exposure, 60);
             assert_eq!(exposure[0].ceiling, Some(100));
             assert!(!exposure[0].over_ceiling);
@@ -2406,7 +2443,7 @@ mod tests {
                     prepare_with_amount("g.example.app", 60),
                     0,
                     None,
-                    Some("channel-a".to_string()),
+                    Some(test_channel_id(1)),
                 )
                 .await
                 .0;
@@ -2417,7 +2454,7 @@ mod tests {
                     prepare_with_amount("g.example.app", 60),
                     0,
                     None,
-                    Some("channel-a".to_string()),
+                    Some(test_channel_id(1)),
                 )
                 .await
                 .0;
@@ -2435,7 +2472,7 @@ mod tests {
                     prepare_with_amount("g.example.app", 1),
                     0,
                     None,
-                    Some("channel-a".to_string()),
+                    Some(test_channel_id(1)),
                 )
                 .await
                 .0;
@@ -2459,7 +2496,7 @@ mod tests {
                         prepare_with_amount("g.example.app", amount),
                         0,
                         None,
-                        Some("channel-a".to_string()),
+                        Some(test_channel_id(1)),
                     )
                     .await
                     .0;
@@ -2470,7 +2507,7 @@ mod tests {
                     prepare_with_amount("g.example.app", 1),
                     0,
                     None,
-                    Some("channel-a".to_string()),
+                    Some(test_channel_id(1)),
                 )
                 .await
                 .0;
@@ -2479,14 +2516,7 @@ mod tests {
             // A claim covering the full 120 delivered so far, signed by the
             // channel's own registered key, is accepted and lifts the
             // ceiling.
-            let claim = WireClaim {
-                channel_id: "channel-a".to_string(),
-                nonce: 1,
-                cumulative_amount: 120,
-                signature: payer_signer
-                    .sign(&connector_domain::claim_digest("channel-a", 1, 120))
-                    .unwrap(),
-            };
+            let claim = sign_wire_claim(payer_signer.as_ref(), 1, 1, 120);
             let ack = second_hop.handle_peer_claim(claim);
             assert_eq!(ack, ClaimAckOutcome::Accepted);
             assert!(!second_hop.exposure()[0].over_ceiling);
@@ -2496,7 +2526,7 @@ mod tests {
                     prepare_with_amount("g.example.app", 1),
                     0,
                     None,
-                    Some("channel-a".to_string()),
+                    Some(test_channel_id(1)),
                 )
                 .await
                 .0;
@@ -2521,23 +2551,28 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("journal.log");
             let payer_signer = Arc::new(LocalSigner::generate("payer-claim-key"));
+            let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
 
             let build = |path: &std::path::Path| {
                 let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
                 let app_client = Arc::new(FakeAppClient::new());
                 app_client.respond(route.handler_url(), answered(b"", Some(FULFILLMENT)));
-                Connector::new(
-                    vec![route],
-                    vec![],
-                    app_client,
-                    Arc::new(InProcessPeerTransport::new()),
-                    test_clock(),
-                )
-                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
-                .with_channel_ceiling("channel-a", 100)
-                .with_identity_signer(identity_signer())
-                .with_journal(Arc::new(FileJournal::open(path).unwrap()))
-                .unwrap()
+                let connector = with_test_channel(
+                    Connector::new(
+                        vec![route],
+                        vec![],
+                        app_client,
+                        Arc::new(InProcessPeerTransport::new()),
+                        test_clock(),
+                    )
+                    .with_channel_ceiling(test_channel_id(1), 100)
+                    .with_identity_signer(identity_signer()),
+                    1,
+                    payer_address,
+                );
+                connector
+                    .with_journal(Arc::new(FileJournal::open(path).unwrap()))
+                    .unwrap()
             };
 
             {
@@ -2548,7 +2583,7 @@ mod tests {
                         prepare_with_amount("g.example.app", 60),
                         0,
                         None,
-                        Some("channel-a".to_string()),
+                        Some(test_channel_id(1)),
                     )
                     .await
                     .0;
@@ -2574,7 +2609,7 @@ mod tests {
                     prepare_with_amount("g.example.app", 45),
                     0,
                     None,
-                    Some("channel-a".to_string()),
+                    Some(test_channel_id(1)),
                 )
                 .await
                 .0;
@@ -2588,7 +2623,7 @@ mod tests {
                     prepare_with_amount("g.example.app", 1),
                     0,
                     None,
-                    Some("channel-a".to_string()),
+                    Some(test_channel_id(1)),
                 )
                 .await
                 .0;
@@ -2623,25 +2658,37 @@ mod tests {
                 test_clock(),
             )
             .with_settlement(settlement)
-            .with_channel_verification_key(channel_id, peer_signer.public_key().unwrap())
+            .with_channel_verification_key(
+                channel_id,
+                derive_evm_address(&peer_signer.public_key().unwrap()),
+            )
+            .with_channel_domain(channel_id, test_channel_domain())
+            .unwrap()
         }
 
+        /// `channel_id` here is `InMemorySettlementBackend::open`'s own
+        /// generated id -- a plain decimal counter (issue #575), which
+        /// `crate::claim::parse_channel_id` accepts as the same on-chain
+        /// value that decimal numeral names.
         fn sign_claim(
             signer: &LocalSigner,
             channel_id: &str,
             nonce: u64,
             cumulative_amount: u64,
         ) -> WireClaim {
+            let on_chain_id = crate::claim::parse_channel_id(channel_id).unwrap();
+            let proof = crate::claim::evm_proof(
+                on_chain_id,
+                test_channel_domain(),
+                nonce,
+                cumulative_amount,
+            );
             WireClaim {
                 channel_id: channel_id.to_string(),
                 nonce,
                 cumulative_amount,
                 signature: signer
-                    .sign(&connector_domain::claim_digest(
-                        channel_id,
-                        nonce,
-                        cumulative_amount,
-                    ))
+                    .sign(&connector_signer::evm_balance_proof_digest(&proof))
                     .unwrap(),
             }
         }
