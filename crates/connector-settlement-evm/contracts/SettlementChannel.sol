@@ -1,9 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @dev The subset of ERC-20 this contract needs to pull deposits in and
+/// pay redemptions out. Hand-rolled rather than pulled from a library
+/// dependency, matching this contract's own "minimal" charter and
+/// `packages/contracts/test/mocks/MockERC20.sol`'s precedent for this
+/// workspace.
+interface IERC20 {
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+    function transfer(address to, uint256 value) external returns (bool);
+}
+
 /// @title SettlementChannel
-/// @notice Minimal native-ETH payment channel backing the Rust connector's
-/// EVM `SettlementBackend` (issue #459, ADR 0002). Deliberately carries no
+/// @notice Minimal ERC-20 payment channel backing the Rust connector's EVM
+/// `SettlementBackend` (issue #459, ADR 0002; issue #542 moved this from
+/// native ETH to a configured ERC-20 so the Rust fleet settles the same
+/// 6-decimal USDC the TypeScript fleet does). Deliberately carries no
 /// `lockedAmount`/`locksRoot` fields (ADR 0004 -- both were always zero on
 /// the legacy TokenNetwork contract and are not reintroduced here).
 /// @dev Claim authenticity is a peer-wire concern the SettlementBackend
@@ -38,6 +50,12 @@ contract SettlementChannel {
         Status status;
     }
 
+    /// @notice The ERC-20 token every channel this contract manages is
+    /// denominated in -- one deployment, one asset, fixed at construction
+    /// (issue #542). A deployer wanting a different asset deploys another
+    /// instance rather than reconfiguring this one.
+    IERC20 public immutable token;
+
     uint256 public channelCounter;
     mapping(uint256 => Channel) private channels;
 
@@ -53,6 +71,11 @@ contract SettlementChannel {
     error StaleClaim(uint256 claimed, uint256 alreadyRedeemed);
     error InsufficientChannelBalance(uint256 requested, uint256 deposited);
     error SettlementTransferFailed(uint256 channelId);
+
+    /// @param _token The ERC-20 contract every channel here settles in.
+    constructor(address _token) {
+        token = IERC20(_token);
+    }
 
     /// @notice Open a new channel from the caller to `counterparty`
     /// (paid out to `payoutAddress` on redemption), open and unfunded.
@@ -77,12 +100,18 @@ contract SettlementChannel {
         emit ChannelOpened(channelId, msg.sender, payoutAddress, settlementTimeout);
     }
 
-    /// @notice Deposit `msg.value` into `channelId`, increasing its
-    /// cumulative deposited total.
-    function fund(uint256 channelId) external payable {
+    /// @notice Pull `amount` of `token` from the caller into `channelId`,
+    /// increasing its cumulative deposited total. The caller must have
+    /// approved this contract for at least `amount` beforehand -- this is
+    /// the ERC-20 approve-then-fund two-transaction sequence, replacing
+    /// what a single `payable` call did when this contract settled native
+    /// ETH (issue #542).
+    function fund(uint256 channelId, uint256 amount) external {
         Channel storage channel = _open(channelId);
-        channel.deposited += msg.value;
-        emit ChannelFunded(channelId, msg.value, channel.deposited);
+        bool ok = token.transferFrom(msg.sender, address(this), amount);
+        if (!ok) revert SettlementTransferFailed(channelId);
+        channel.deposited += amount;
+        emit ChannelFunded(channelId, amount, channel.deposited);
     }
 
     /// @notice Redeem a claim: the channel's honored total becomes
@@ -103,7 +132,7 @@ contract SettlementChannel {
         channel.redeemed = cumulativeAmount;
         emit ChannelRedeemed(channelId, cumulativeAmount, signature);
 
-        (bool ok,) = channel.payoutAddress.call{value: delta}("");
+        bool ok = token.transfer(channel.payoutAddress, delta);
         if (!ok) revert SettlementTransferFailed(channelId);
     }
 

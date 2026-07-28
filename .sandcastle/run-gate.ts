@@ -62,9 +62,10 @@ const RUST_STEPS: readonly GateStep[] = [
 ];
 
 /**
- * npm gate — what implement-prompt.md already described, now enforced. The
- * ordered build is load-bearing: `packages/connector` and `packages/shared`
- * tests need `shared` + `mina-zkapp` built first.
+ * npm gate — what implement-prompt.md already described, now enforced. Since
+ * ADR 0017 the npm surface is devnet tooling only (faucet, mina-zkapp, the
+ * faucet dApp, tools/fund-peers); the ordered build stays because the faucet
+ * dApp's typecheck depends on `mina-zkapp` being built first.
  */
 const NPM_STEPS: readonly GateStep[] = [
   { name: 'npm lint', command: 'npm run lint --workspaces --if-present' },

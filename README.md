@@ -1,8 +1,15 @@
 # Connector
 
-[![npm](https://img.shields.io/npm/v/@toon-protocol/connector)](https://www.npmjs.com/package/@toon-protocol/connector)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.3.3-blue.svg)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **This is a Rust repository.** The TypeScript connector was a prototype and has
+> been removed — see [ADR 0017](docs/adr/0017-the-typescript-connector-is-a-prototype.md).
+> The connector lives in `crates/`. `@toon-protocol/connector` remains published on
+> npm at its last release for existing clients, but its source is no longer here, and
+> the sections below that describe TypeScript configuration, the admin API, the
+> explorer UI and the `ConnectorNode` embedding API describe that retired prototype.
+> They are kept for now as a record of the deployed fleet's behaviour and will be
+> rewritten against the Rust connector separately.
 
 > **The payment infrastructure for agent networks.** Route micropayments between autonomous agents using proven protocols. Messages carry value. Routing earns fees. Settlement happens on-chain.
 
@@ -376,7 +383,7 @@ chainProviders:
 
 Each peer's `chain` field determines which provider handles settlement for that peer. You can run EVM, Solana, and Mina peers in the same network — the connector routes settlement to the right chain automatically. A **Solana-only or Mina-only** node (no EVM `chainProvider`) is fully supported: it boots the settlement stack and redeems claims on-chain. Non-EVM settlement is **claim-driven redemption** of channels opened out-of-band — the connector does not open Solana/Mina channels on demand. See [docs/solana-deployment.md](docs/solana-deployment.md) and [docs/mina-deployment.md](docs/mina-deployment.md).
 
-> **Migrating from `settlementInfra`?** The legacy `settlementInfra` config block was removed in v2.3.0. If your config still uses it, the connector will print a clear error message explaining how to move your settings into `chainProviders`. See the [connector package README](packages/connector/README.md) for the full migration guide.
+> **Migrating from `settlementInfra`?** The legacy `settlementInfra` config block was removed in v2.3.0. If your config still uses it, the connector will print a clear error message explaining how to move your settings into `chainProviders`.
 
 ### Payment Channels: How They Work
 
@@ -439,12 +446,14 @@ The connector supports two deployment modes via the `deploymentMode` configurati
 
 This repo is a monorepo with multiple packages:
 
-| Package                                          | Description                                                                                               |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| [`@toon-protocol/connector`](packages/connector) | Connector node — routing, accounting, settlement, CLI                                                     |
-| [`@toon-protocol/shared`](packages/shared)       | Shared types and OER codec utilities                                                                      |
-| [`@toon-protocol/contracts`](packages/contracts) | EVM payment channel smart contracts (Foundry/Solidity)                                                    |
-| [`@toon-protocol/faucet`](packages/faucet)       | Multi-chain devnet faucet (EVM ETH+USDC, Solana SOL+USDC, Mina MINA+USDC via treasury self-mint/transfer) |
+| Package                                                                | Description                                                                                               |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| [`crates/`](crates)                                                    | The connector itself (Rust): domain, runtime, client edge, operator, settlement, binary                   |
+| [`packages/contracts`](packages/contracts)                             | EVM payment channel smart contracts (Foundry/Solidity)                                                    |
+| [`packages/solana-program`](packages/solana-program)                   | Solana payment channel program (Rust/BPF, Cargo crate `payment-channel`)                                  |
+| [`@toon-protocol/faucet`](packages/faucet)                             | Multi-chain devnet faucet (EVM ETH+USDC, Solana SOL+USDC, Mina MINA+USDC via treasury self-mint/transfer) |
+| [`@toon-protocol/mina-zkapp`](packages/mina-zkapp)                     | Mina payment channel + USDC zkApp (o1js), used by the faucet                                              |
+| [`@toon-protocol/mina-usdc-faucet-web`](packages/mina-usdc-faucet-web) | Browser dApp for the Mina devnet mock-USDC faucet                                                         |
 
 ## Explorer UI
 
@@ -522,18 +531,18 @@ Perfect for development and debugging. Disable in production.
 
 ## Docker Deployment
 
-The simplest production-ready topology is a **standalone connector paired with your app**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships this pattern out of the box.
+The simplest production-ready topology is a **standalone connector paired with your app**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships the connector half of this pattern; add your own app service (see [Writing Your Own App](#writing-your-own-app)) on the same `app_net` network to complete it — there is no bundled sample app.
 
 Two compose files ship at the repo root:
 
-| Compose file              | Purpose                                                                                                                                                                                                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `docker-compose.prod.yml` | **Production deployment.** Connector + app, secure by default.                                                                                                                                                                                                           |
-| `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, the standalone-mode E2E test profiles (`standalone-e2e`, `standalone-allowlist`), and the `app` profile (see [Local "App behind the Connector"](#local-app-behind-the-connector-issue-221)). Not for production use. |
+| Compose file              | Purpose                                                                                                                                                                            |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker-compose.prod.yml` | **Production deployment.** Connector, ready to pair with your own app, secure by default.                                                                                          |
+| `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, the `app` profile (see [Local "App behind the Connector"](#local-app-behind-the-connector-issue-221)). Not for production use. |
 
 ### Production Deployment: Standalone Connector + App
 
-The production stack runs a single connector and your app on an isolated Docker bridge network. The admin API is reachable only from the app container — it is **not** published to the host interface.
+The production stack runs a single connector and your app on an isolated Docker bridge network. Once your app is added, the admin API is reachable only from the app container — it is **not** published to the host interface.
 
 **Step 1 — Pull the image** (or build locally)
 
@@ -572,7 +581,9 @@ peers: []
 routes: []
 ```
 
-**Step 3 — Start the stack**
+**Step 3 — Add your app, then start the stack**
+
+Add your app service to `docker-compose.prod.yml` first (see [Writing Your Own App](#writing-your-own-app) below), then:
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d
@@ -580,7 +591,8 @@ docker compose -f docker-compose.prod.yml up -d
 # Verify both containers are healthy:
 docker compose -f docker-compose.prod.yml ps
 
-# The app health endpoint is the only host-exposed port:
+# The app health endpoint is the only host-exposed port (once your app
+# publishes one, as the example below does on 3100):
 curl http://127.0.0.1:3100/health
 ```
 
@@ -609,7 +621,7 @@ docker compose -f docker-compose.prod.yml down --volumes  # wipes the data volum
 
 ### Writing Your Own App
 
-The compose file ships a minimal app (`scripts/standalone-e2e/app.js`) that fulfills every inbound packet — fine for smoke-testing, not for production. Your real app is a plain HTTP server that speaks two endpoints. Any language works: if it can serve HTTP + JSON, it can be an app.
+Your real app is a plain HTTP server that speaks two endpoints. Any language works: if it can serve HTTP + JSON, it can be an app.
 
 #### The HTTP contract
 
@@ -617,7 +629,7 @@ The compose file ships a minimal app (`scripts/standalone-e2e/app.js`) that fulf
 
 **`POST /handle-packet`** — the connector posts here for every inbound packet addressed to your agent.
 
-_Request body_ (simplified shape from [`packages/connector/src/core/payment-handler.ts`](packages/connector/src/core/payment-handler.ts)):
+_Request body_ (simplified shape, as served by the deployed TypeScript fleet):
 
 ```json
 {
@@ -666,7 +678,7 @@ Your business `code` is auto-mapped to an ILP error code by the connector:
 | `timeout`            | `T00` | operation timed out         |
 | _(anything else)_    | `F99` | fallback                    |
 
-#### Minimal Node.js App (drop-in replacement)
+#### Minimal Node.js App
 
 Create an `app/` directory alongside `docker-compose.prod.yml`:
 
@@ -793,7 +805,7 @@ CMD ["python", "app.py"]
 
 #### Wire it into `docker-compose.prod.yml`
 
-Replace the sample app block with your own:
+Add this service under `services:` in `docker-compose.prod.yml`:
 
 ```yaml
 services:
@@ -879,17 +891,9 @@ app; the app never sees ILP/payment/settlement). See:
 - **relay** — `relay/deploy/` (connector + relay; `ghcr.io/toon-protocol/relay-connector`)
 - **store** — `store/deploy/` (connector + store; `ghcr.io/toon-protocol/store-connector`)
 
-To verify an app edge end-to-end (paid round-trip + negatives), run the
-acceptance probes from this repo against the app repo's compose:
-
-```bash
-# relay edge:  scripts/app/ci-acceptance-probe.ts
-# store edge:  scripts/app/ci-acceptance-probe-store.ts
-CONNECTOR_ILP_URL=http://localhost:3000/ilp \
-EVM_RPC_URL=… FAUCET_URL=… \
-  npx ts-node --project packages/connector/tsconfig.probe.json \
-    scripts/app/ci-acceptance-probe.ts
-```
+The TypeScript acceptance probes that used to verify an app edge from this repo
+(`scripts/app/ci-acceptance-probe*.ts`) were removed with the TypeScript connector
+(ADR 0017). A Rust equivalent is not yet written.
 
 ## Development
 
@@ -947,14 +951,13 @@ Docker Compose targets (`make anvil-up`, `make solana-up`, `make mina-up`) work 
 
 ## Documentation
 
-| Guide                                             | Description                                                |
-| ------------------------------------------------- | ---------------------------------------------------------- |
-| [Configuration Examples](examples/README.md)      | YAML config schema and example files                       |
-| [Connector Package](packages/connector/README.md) | Implementation reference, API, and `chainProviders` config |
-| [Solana Deployment](docs/solana-deployment.md)    | Solana program deployment and devnet testing               |
-| [Mina Deployment](docs/mina-deployment.md)        | Mina zkApp deployment and lightnet testing                 |
-| [Changelog](CHANGELOG.md)                         | Version history and release notes                          |
-| [Contributing](CONTRIBUTING.md)                   | Contribution guidelines                                    |
+| Guide                                          | Description                                  |
+| ---------------------------------------------- | -------------------------------------------- |
+| [Configuration Examples](examples/README.md)   | YAML config schema and example files         |
+| [Solana Deployment](docs/solana-deployment.md) | Solana program deployment and devnet testing |
+| [Mina Deployment](docs/mina-deployment.md)     | Mina zkApp deployment and lightnet testing   |
+| [Changelog](CHANGELOG.md)                      | Version history and release notes            |
+| [Contributing](CONTRIBUTING.md)                | Contribution guidelines                      |
 
 ## Contributing
 

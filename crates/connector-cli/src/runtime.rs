@@ -10,8 +10,10 @@ use std::sync::Arc;
 
 use axum::Router;
 
-use connector_config::{Config, SecretLocation};
+use connector_config::{Config, SecretLocation, SettlementChain, SettlementConfig};
 use connector_runtime::{Connector, HttpAppClient, NetworkPeerTransport, PeerRoute, SystemClock};
+use connector_settlement::{SettlementBackend, SettlementError};
+use connector_settlement_evm::EvmSettlementBackend;
 use connector_signer::{LocalSigner, Signer, SignerError};
 
 /// Everything that can stop a validated [`Config`] from producing a live
@@ -39,6 +41,24 @@ pub enum RuntimeError {
     /// The signer implementation itself rejected the key material (e.g.
     /// an all-zero secret key).
     Signer(SignerError),
+    /// The `[settlement]` section's key file exists (config load already
+    /// checked that) but could not be read.
+    SettlementKeyFileUnreadable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// The `[settlement]` section's key file's contents are neither 32
+    /// raw bytes nor 64 hex characters encoding 32 bytes.
+    InvalidSettlementKeyMaterial { path: PathBuf },
+    /// `settlement.key.kms_key_id` was configured, but no key management
+    /// service backend is wired into this binary yet -- same gap as
+    /// `[signer]`'s own `kms_key_id`; use `settlement.key.key_file`
+    /// instead.
+    UnsupportedSettlementKeyLocation,
+    /// Constructing the configured settlement backend failed -- e.g. the
+    /// RPC endpoint was unreachable, or the contract address named in
+    /// config has no code at it.
+    Settlement(SettlementError),
 }
 
 impl fmt::Display for RuntimeError {
@@ -62,6 +82,29 @@ impl fmt::Display for RuntimeError {
                  signer.key_file"
             ),
             RuntimeError::Signer(source) => write!(f, "{source}"),
+            RuntimeError::SettlementKeyFileUnreadable { path, source } => write!(
+                f,
+                "failed to read settlement key_file at {}: {source}",
+                path.display()
+            ),
+            RuntimeError::InvalidSettlementKeyMaterial { path } => write!(
+                f,
+                "settlement key_file at {} must contain either 32 raw bytes or \
+                 64 hex characters encoding a 32-byte secret key",
+                path.display()
+            ),
+            RuntimeError::UnsupportedSettlementKeyLocation => write!(
+                f,
+                "settlement.key.kms_key_id is configured, but no key management \
+                 service backend is wired into this binary yet -- use \
+                 settlement.key.key_file"
+            ),
+            RuntimeError::Settlement(source) => {
+                write!(
+                    f,
+                    "failed to construct the configured settlement backend: {source}"
+                )
+            }
         }
     }
 }
@@ -71,6 +114,12 @@ impl std::error::Error for RuntimeError {}
 impl From<SignerError> for RuntimeError {
     fn from(source: SignerError) -> Self {
         RuntimeError::Signer(source)
+    }
+}
+
+impl From<SettlementError> for RuntimeError {
+    fn from(source: SettlementError) -> Self {
+        RuntimeError::Settlement(source)
     }
 }
 
@@ -114,13 +163,66 @@ fn build_signer(location: &SecretLocation) -> Result<Arc<dyn Signer>, RuntimeErr
     }
 }
 
+/// Encode 32 raw bytes as 64 lowercase hex characters -- what
+/// `ethers::signers::LocalWallet`'s `FromStr` impl expects,
+/// [`EvmSettlementBackend::connect`]'s `private_key` argument.
+fn hex_encode_32(bytes: [u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Resolve the `[settlement.key]` section to the hex-encoded secp256k1
+/// private key `EvmSettlementBackend` signs with -- the same "32 raw bytes
+/// or 64 hex characters" key-file shape [`build_signer`] already reads for
+/// `[signer]`, since both are just secret-key pointers.
+fn read_settlement_private_key(location: &SecretLocation) -> Result<String, RuntimeError> {
+    match location {
+        SecretLocation::File(path) => {
+            let bytes = std::fs::read(path).map_err(|source| {
+                RuntimeError::SettlementKeyFileUnreadable {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            let secret = decode_secret_key(&bytes)
+                .ok_or_else(|| RuntimeError::InvalidSettlementKeyMaterial { path: path.clone() })?;
+            Ok(hex_encode_32(secret))
+        }
+        SecretLocation::Kms { .. } => Err(RuntimeError::UnsupportedSettlementKeyLocation),
+    }
+}
+
+/// Construct the settlement backend a `[settlement]` section describes,
+/// connecting to the already-deployed contract it names rather than
+/// deploying a fresh one (issue #542) -- only [`SettlementChain::Evm`] is
+/// constructible today, matching the one chain `connector-config` accepts
+/// at load time.
+async fn build_settlement_backend(
+    settlement: &SettlementConfig,
+) -> Result<Arc<dyn SettlementBackend>, RuntimeError> {
+    match settlement.chain() {
+        SettlementChain::Evm => {
+            let private_key = read_settlement_private_key(settlement.key())?;
+            let contract_address = ethers::types::Address::from(settlement.contract_address());
+            let backend =
+                EvmSettlementBackend::connect(settlement.rpc_url(), &private_key, contract_address)
+                    .await?;
+            Ok(Arc::new(backend) as Arc<dyn SettlementBackend>)
+        }
+    }
+}
+
 /// Construct the live [`Connector`] and [`Signer`] a validated [`Config`]
 /// describes. Every configured `[[peers]]` entry is dialed lazily through a
 /// [`NetworkPeerTransport`] (issue #488 -- peer addressing finally has a
 /// config-file representation, closing the gap #416 deferred), and every
 /// `peer_id`-targeted `[[routes]]` entry becomes a [`PeerRoute`] alongside
-/// the terminated [`connector_config::StaticRoute`]s.
-pub fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>), RuntimeError> {
+/// the terminated [`connector_config::StaticRoute`]s. If `[settlement]` is
+/// configured, this connects a real chain-backed [`SettlementBackend`] and
+/// attaches it via [`Connector::with_settlement`] (issue #542) -- that
+/// connection is why this function is `async` at all; an unconfigured node
+/// still builds with no settlement backend, same as before this section
+/// existed.
+pub async fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>), RuntimeError> {
     let signer = build_signer(config.signer_key())?;
     let mut peer_transport = NetworkPeerTransport::new();
     for peer in config.peers() {
@@ -131,17 +233,18 @@ pub fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>), Runti
         .iter()
         .map(|route| PeerRoute::new(route.prefix(), route.peer_id(), route.fee()))
         .collect();
-    let connector = Arc::new(
-        Connector::new(
-            config.routes().to_vec(),
-            peer_routes,
-            Arc::new(HttpAppClient::new()),
-            Arc::new(peer_transport),
-            Arc::new(SystemClock),
-        )
-        .with_identity_signer(signer.clone()),
-    );
-    Ok((connector, signer))
+    let mut connector = Connector::new(
+        config.routes().to_vec(),
+        peer_routes,
+        Arc::new(HttpAppClient::new()),
+        Arc::new(peer_transport),
+        Arc::new(SystemClock),
+    )
+    .with_identity_signer(signer.clone());
+    if let Some(settlement) = config.settlement() {
+        connector = connector.with_settlement(build_settlement_backend(settlement).await?);
+    }
+    Ok((Arc::new(connector), signer))
 }
 
 /// Merge the client edge and (if `[operator]` is configured) the operator
@@ -193,8 +296,8 @@ mod tests {
         (config, key_path)
     }
 
-    #[test]
-    fn builds_a_connector_from_a_raw_32_byte_key_file() {
+    #[tokio::test]
+    async fn builds_a_connector_from_a_raw_32_byte_key_file() {
         let (config, _key_path) = config_with_raw_key_file(|key_path| {
             format!(
                 r#"
@@ -207,12 +310,12 @@ key_file = "{}"
             )
         });
 
-        let (connector, _signer) = build(&config).expect("build");
+        let (connector, _signer) = build(&config).await.expect("build");
         assert!(connector.routes().is_empty());
     }
 
-    #[test]
-    fn builds_a_signer_from_a_hex_encoded_key_file() {
+    #[tokio::test]
+    async fn builds_a_signer_from_a_hex_encoded_key_file() {
         let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
         key_file
             .write_all(b"0707070707070707070707070707070707070707070707070707070707070707")
@@ -227,12 +330,12 @@ key_file = "{}"
             key_file.path().display()
         ));
 
-        let result = build(&config);
+        let result = build(&config).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn rejects_key_material_that_is_neither_32_bytes_nor_64_hex_chars() {
+    #[tokio::test]
+    async fn rejects_key_material_that_is_neither_32_bytes_nor_64_hex_chars() {
         let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
         key_file
             .write_all(b"not real key material")
@@ -247,15 +350,15 @@ key_file = "{}"
             key_file.path().display()
         ));
 
-        let result = build(&config);
+        let result = build(&config).await;
         assert!(matches!(
             result,
             Err(RuntimeError::InvalidSignerKeyMaterial { .. })
         ));
     }
 
-    #[test]
-    fn a_kms_location_is_an_explicit_unsupported_error_not_a_panic() {
+    #[tokio::test]
+    async fn a_kms_location_is_an_explicit_unsupported_error_not_a_panic() {
         let config = load_config(
             r#"
 client_edge_addr = "127.0.0.1:0"
@@ -265,7 +368,7 @@ kms_key_id = "arn:aws:kms:us-east-1:123:key/abc"
 "#,
         );
 
-        let result = build(&config);
+        let result = build(&config).await;
         assert!(matches!(
             result,
             Err(RuntimeError::UnsupportedSignerLocation)
@@ -285,7 +388,7 @@ key_file = "{}"
                 key_path.display()
             )
         });
-        let (connector, signer) = build(&config).expect("build");
+        let (connector, signer) = build(&config).await.expect("build");
         let app = router(connector, signer, &config);
 
         // No `[operator]` section: `/routes` (an operator-surface path)
@@ -317,7 +420,7 @@ write_keys = ["{key}"]
                 key_path.display()
             )
         });
-        let (connector, signer) = build(&config).expect("build");
+        let (connector, signer) = build(&config).await.expect("build");
         let app = router(connector, signer, &config);
 
         // The operator surface is mounted: `/routes` is a real path now,
@@ -328,5 +431,121 @@ write_keys = ["{key}"]
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    mod settlement_construction {
+        use super::*;
+        use chrono::Duration;
+        use connector_settlement_evm::test_support::{
+            anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
+        };
+
+        /// This test binary's own base port for [`Anvil::spawn`] -- distinct
+        /// from other test binaries' bases (`connector-settlement-evm`'s own
+        /// tests use 18_600; `connector-bin`'s use 18_500;
+        /// `connector-cli`'s own `settlement_lifecycle` integration test
+        /// uses 18_800) so that binaries running concurrently under `cargo
+        /// test --workspace` don't contend for the same port range.
+        const ANVIL_BASE_PORT: u16 = 18_700;
+
+        fn key_file_with(contents: &str) -> tempfile::TempPath {
+            let mut file = tempfile::NamedTempFile::new().expect("temp key file");
+            file.write_all(contents.as_bytes()).expect("write key file");
+            file.into_temp_path()
+        }
+
+        /// AC: "`connector-cli::runtime::build` constructs the configured
+        /// backend and passes it to `Connector::with_settlement`, so a node
+        /// with settlement configured never answers `NoSettlementBackend`" --
+        /// driven against a real, disposable `anvil` chain end to end:
+        /// `build` reads the `[settlement]` section from a config file (no
+        /// backend injected directly), and the resulting `Connector` opens a
+        /// real channel against a real, freshly deployed `SettlementChannel`.
+        #[tokio::test]
+        async fn a_configured_settlement_section_is_constructed_and_attached() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement_backend =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy SettlementChannel");
+            let contract_address = settlement_backend.address();
+            drop(settlement_backend);
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement]
+chain = "evm"
+rpc_url = "{rpc_url}"
+contract_address = "{contract_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                rpc_url = anvil.rpc_url,
+                contract_address = contract_address,
+                token = token,
+            ));
+
+            let (connector, _signer) = build(&config).await.expect("build");
+            let opened = connector
+                .open_channel(
+                    b"settlement-construction-peer".to_vec(),
+                    Duration::seconds(3600),
+                )
+                .await
+                .expect("a settlement backend was constructed and attached");
+            assert_eq!(opened.deposited, 0);
+        }
+
+        /// AC: "a node with no settlement section still starts and still
+        /// serves, degrading exactly as an absent `[operator]` section
+        /// does" -- no anvil needed here, since nothing should even try to
+        /// connect to a chain.
+        #[tokio::test]
+        async fn no_settlement_section_still_builds_and_degrades_to_no_backend() {
+            let (config, _key_path) = config_with_raw_key_file(|key_path| {
+                format!(
+                    r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+                    key_path.display()
+                )
+            });
+
+            let (connector, _signer) = build(&config).await.expect("build");
+            let result = connector
+                .open_channel(b"no-settlement-peer".to_vec(), Duration::seconds(3600))
+                .await;
+            assert!(matches!(
+                result,
+                Err(connector_runtime::ChannelOperationError::NoSettlementBackend)
+            ));
+        }
     }
 }

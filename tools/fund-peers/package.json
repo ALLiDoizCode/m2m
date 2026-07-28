@@ -12,7 +12,6 @@
     "fund": "node dist/index.js"
   },
   "dependencies": {
-    "@toon-protocol/shared": "*",
     "commander": "^11.1.0",
     "dotenv": "^16.3.1",
     "ethers": "^6.9.0",

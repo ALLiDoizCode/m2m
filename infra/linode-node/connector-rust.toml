@@ -80,10 +80,17 @@ prefix = "g.rust.relay"
 # The path is only the half of the app-delivery gap that config can close.
 # docs/operators/parallel-fleet-comparison.md has the rest.
 handler_url = "http://relay:3100/write"
-# Deliberately free (issue #520: a route is never SILENTLY free, so this is
-# explicit) -- this devnet fleet exists to compare against the TypeScript
-# fleet's own behaviour on the same prefix, not to make a pricing decision.
-price = 0
+# Priced at parity with the TypeScript fleet's own g.toon.relay route on
+# this same box (infra/linode-node/connector.yaml -- `price: '1000'`):
+# both fleets settle claims in base units of 6-decimal USDC (ADR 0010;
+# docs/usdc-cross-chain-settlement.md's "6 decimals everywhere" is the
+# canonical unit across EVM/Solana/Mina, not a TypeScript-only asset
+# config), so `1000` here is the identical real-world charge -- 0.001
+# USDC -- as the TypeScript node already makes for the same relay write.
+# #552 wired the x402 greeting behind this figure being non-zero; a
+# devnet box started from this file was still a free gateway until this
+# was set (issue #557).
+price = 1000
 
 [[routes]]
 prefix = "g.rust.store"
@@ -96,3 +103,54 @@ fee = 0
 # does not attempt to solve. Add an [operator] section per
 # deploy/connector-rust/README.md steps 2-3 before relying on GET /metrics
 # or the write surface on this node.
+
+# ── Settlement (issue #542) — DELIBERATELY NOT CONFIGURED ───────────────
+# There is no `[settlement]` section in this file, and there must not be one
+# until a `SettlementChannel` contract is actually deployed to the chain
+# `rpc_url` names and its address is recorded below.
+#
+# The two states are not symmetric, and that asymmetry is by design:
+#
+#   * ABSENT is a supported, deliberate configuration. The node starts and
+#     serves; channel operations answer
+#     `ChannelOperationError::NoSettlementBackend`, exactly the "not started
+#     at all" shape an absent `[operator]` section already has. This devnet
+#     fleet forwards packets for behavioural comparison against the
+#     TypeScript fleet (see `price = 0` above); it settles nothing.
+#
+#   * PRESENT BUT WRONG is a hard startup failure, on purpose (ADR 0009,
+#     fail-closed). `connector-cli::runtime::build` calls
+#     `EvmSettlementBackend::connect`, which reads `token()` off the address
+#     it is given. Against the zero address that read comes back `0x`,
+#     `connect` errors, and the process exits 1 — it does NOT start with
+#     settlement quietly disabled. A placeholder address is therefore not a
+#     harmless "syntactically valid" filler here: it is the difference
+#     between a node that boots and a node that does not.
+#
+# `crates/connector-settlement-evm/contracts/SettlementChannel.sol` has never
+# been deployed anywhere outside a disposable `anvil` instance in this
+# workspace's own tests, so there is no address to write down yet.
+#
+# The block below is the exact shape an operator fills in once there is one:
+# uncomment it and replace `contract_address` with the real deployed address.
+# `token_address` is already the real mock USDC `./connector.yaml` names, and
+# `rpc_url` is that config's own known-good EVM RPC. That shape is not
+# decoration — `crates/connector-bin/tests/devnet_configs_load.rs` uncomments
+# this very block and boots it against a freshly deployed contract on a local
+# anvil, so it stays a template that actually works.
+#
+# --- BEGIN settlement template (uncomment when a contract is deployed) ---
+# [settlement]
+# chain = "evm"
+# rpc_url = "https://base-sepolia-rpc.publicnode.com"
+# # REPLACE the zero address with the deployed `SettlementChannel` address.
+# contract_address = "0x0000000000000000000000000000000000000000"
+# token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+# decimals = 6
+#
+# [settlement.key]
+# # Same key material as [signer] above -- this devnet overlay does not
+# # separate "connector identity" from "settlement signer" (a real
+# # deployment with different risk profiles for each might).
+# key_file = "/app/data/signer.key"
+# --- END settlement template ---
