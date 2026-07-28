@@ -164,5 +164,23 @@
         "matches": false
       }
     ]
+  },
+  "claim": {
+    "cases": [
+      {
+        "name": "evm_balance_proof_digest_and_signature",
+        "chain_id": 84532,
+        "token_network_address_hex": "c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4",
+        "channel_id_hex": "d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0",
+        "nonce": 7,
+        "transferred_amount": 1500000,
+        "locked_amount": 0,
+        "locks_root_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "digest_hex": "e544a70cbd8ff859ca06d87682da0b9670ba7891d1af96cb9970a272c4787d3a",
+        "signer_secret_hex": "a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0",
+        "signer_address_hex": "ccd6848f23db7a6326df7ac67b23d514cd54ba29",
+        "signature_hex": "e96e4a062f2cc5bf200e208899828b773239daf28140f02acdf083534d0e14601ae61ecc53a3fb19f87e632dd648a73668b096bb606fa3e8b56e1b999a4854b000"
+      }
+    ]
   }
 }

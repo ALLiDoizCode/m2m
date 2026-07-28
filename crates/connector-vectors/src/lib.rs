@@ -22,7 +22,10 @@ use connector_signer::giftwrap::{
     derive_fulfillment, open_request, open_response, seal_request_with_randomness,
     seal_response_with_randomness,
 };
-use connector_signer::{LocalSigner, Signer};
+use connector_signer::{
+    derive_evm_address, evm_balance_proof_digest, verify_evm_balance_proof, Address,
+    EvmBalanceProof, LocalSigner, Signer,
+};
 use serde::Serialize;
 
 /// The vector-set schema version. Bump when a field's meaning changes in a
@@ -48,6 +51,7 @@ pub struct WireVectors {
     pub envelope: EnvelopeVectors,
     pub giftwrap: GiftwrapVectors,
     pub fulfilment: FulfilmentVectors,
+    pub claim: ClaimVectors,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,6 +125,50 @@ pub struct FulfilmentCase {
     pub fulfilment_hex: String,
     pub condition_hex: String,
     pub matches: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClaimVectors {
+    pub cases: Vec<ClaimCase>,
+}
+
+/// A signed EIP-712 `BalanceProof` (ADR 0024, issue #575): the same struct
+/// and digest both a peer-wire claim (`ClaimBook::accept_inbound`) and a
+/// client-edge claim (`client-edge-spec.md` §1.3 step 4) are checked
+/// against -- `connector_signer::claim_signature` has exactly one such
+/// scheme, shared by both wires, so one vector section covers both.
+#[derive(Debug, Serialize)]
+pub struct ClaimCase {
+    pub name: &'static str,
+    /// The EIP-712 domain's `chainId` -- configured per channel
+    /// (`ClaimBook::set_channel_domain`), never a global default, since a
+    /// vector hardcoding one real chain would be unusable against another.
+    pub chain_id: u64,
+    /// The EIP-712 domain's `verifyingContract` -- the `TokenNetwork`
+    /// deployment this channel's claims are redeemed against.
+    pub token_network_address_hex: String,
+    /// The channel id in its on-chain `bytes32` form -- what the signed
+    /// struct actually hashes, not whatever string label a peering
+    /// relation happens to know the channel by.
+    pub channel_id_hex: String,
+    pub nonce: u64,
+    pub transferred_amount: u64,
+    /// Always zero on the wire (ADR 0004) but still part of the signed
+    /// struct -- omitting it computes a different digest than the one a
+    /// real signer signs.
+    pub locked_amount: u64,
+    /// Always zero on the wire (ADR 0004); same reason as `locked_amount`.
+    pub locks_root_hex: String,
+    /// `keccak256(0x1901 || domainSeparator || structHash)` -- the exact
+    /// bytes a real signer signs and `TokenNetwork.sol` recovers against on
+    /// redemption.
+    pub digest_hex: String,
+    pub signer_secret_hex: String,
+    pub signer_address_hex: String,
+    /// `r || s || recovery_id` (recovery_id `0`/`1`, not the `27`/`28` a
+    /// wallet's own signature carries) -- 65 bytes, recovering to
+    /// `signer_address_hex` over `digest_hex`.
+    pub signature_hex: String,
 }
 
 /// This module's own name for each [`EnvelopeError`] variant -- stable
@@ -255,14 +303,13 @@ fn generate_envelope_vectors() -> EnvelopeVectors {
     ));
 
     let truncated = canonical_get_root[..canonical_get_root.len() - 1].to_vec();
-    let truncated_err = EnvelopeRequest::decode(&truncated)
-        .expect_err("a truncated canonical request must not decode");
-    invalid.push(EnvelopeInvalidVector {
-        name: "request_decode_rejects_truncated_input",
-        direction: "request",
-        bytes_hex: hex_of(&truncated),
-        expected_error: error_tag(&truncated_err),
-    });
+    invalid.push(check_invalid(
+        "request_decode_rejects_truncated_input",
+        "request",
+        truncated,
+        EnvelopeError::BufferUnderflow,
+        |b| EnvelopeRequest::decode(b).err(),
+    ));
 
     let mut trailing = canonical_get_root.clone();
     trailing.push(0xff);
@@ -275,14 +322,13 @@ fn generate_envelope_vectors() -> EnvelopeVectors {
     ));
 
     let invalid_utf8 = vec![1u8, 0x01, 0x80];
-    let invalid_utf8_err = EnvelopeRequest::decode(&invalid_utf8)
-        .expect_err("an invalid UTF-8 method must not decode");
-    invalid.push(EnvelopeInvalidVector {
-        name: "request_decode_rejects_invalid_utf8_in_method",
-        direction: "request",
-        bytes_hex: hex_of(&invalid_utf8),
-        expected_error: error_tag(&invalid_utf8_err),
-    });
+    invalid.push(check_invalid(
+        "request_decode_rejects_invalid_utf8_in_method",
+        "request",
+        invalid_utf8,
+        EnvelopeError::InvalidUtf8("method"),
+        |b| EnvelopeRequest::decode(b).err(),
+    ));
 
     let mut non_minimal_length = canonical_get_root.clone();
     non_minimal_length.splice(1..2, [0x81, 0x03]);
@@ -449,6 +495,58 @@ fn generate_fulfilment_vectors(giftwrap_shared_secret: [u8; 32]) -> FulfilmentVe
     }
 }
 
+fn generate_claim_vectors() -> ClaimVectors {
+    let signer_secret = seq_bytes::<32>(0xa1);
+    let signer = LocalSigner::from_secret_bytes("vector-fixture-claim-key", signer_secret)
+        .expect("fixture claim secret is a valid secp256k1 scalar");
+    let signer_address = derive_evm_address(&signer.public_key().expect("fixture has a key"));
+
+    let chain_id: u64 = 84_532; // Base Sepolia -- an example domain, not the only one a channel can be configured with.
+    let token_network_address: Address = seq_bytes::<20>(0xc1);
+    let channel_id: [u8; 32] = seq_bytes::<32>(0xd1);
+    let nonce: u64 = 7;
+    let transferred_amount: u64 = 1_500_000;
+    let locked_amount: u64 = 0;
+    let locks_root = [0u8; 32];
+
+    let proof = EvmBalanceProof {
+        channel_id,
+        nonce,
+        transferred_amount: u128::from(transferred_amount),
+        locked_amount: u128::from(locked_amount),
+        locks_root,
+        chain_id,
+        token_network_address,
+    };
+    let digest = evm_balance_proof_digest(&proof);
+    let signature = signer
+        .sign(&digest)
+        .expect("fixture signer signs its own digest");
+    let signature_bytes = signature.to_bytes();
+
+    assert!(
+        verify_evm_balance_proof(&proof, &signature_bytes, &signer_address),
+        "the fixture signature must recover to the fixture signer's own address"
+    );
+
+    ClaimVectors {
+        cases: vec![ClaimCase {
+            name: "evm_balance_proof_digest_and_signature",
+            chain_id,
+            token_network_address_hex: hex_of(&token_network_address),
+            channel_id_hex: hex_of(&channel_id),
+            nonce,
+            transferred_amount,
+            locked_amount,
+            locks_root_hex: hex_of(&locks_root),
+            digest_hex: hex_of(&digest),
+            signer_secret_hex: hex_of(&signer_secret),
+            signer_address_hex: hex_of(&signer_address),
+            signature_hex: hex_of(&signature_bytes),
+        }],
+    }
+}
+
 /// Build the full committed vector set. See the module docs for what
 /// "generated from the properties" means here, and
 /// `docs/protocol/wire-vectors.md` for the invariant each section pins.
@@ -456,12 +554,14 @@ pub fn generate() -> WireVectors {
     let envelope = generate_envelope_vectors();
     let (giftwrap, shared_secret) = generate_giftwrap_vectors();
     let fulfilment = generate_fulfilment_vectors(shared_secret);
+    let claim = generate_claim_vectors();
 
     WireVectors {
         schema_version: SCHEMA_VERSION,
         envelope,
         giftwrap,
         fulfilment,
+        claim,
     }
 }
 

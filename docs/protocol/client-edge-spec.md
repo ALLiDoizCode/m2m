@@ -2,9 +2,11 @@
 
 **Status:** Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
 Rust implementation (`crates/connector-client-edge`) the definition of this wire, and the committed
-vector set (`vectors/wire-vectors.json`, issue #527) — generated from property tests over its
-invariants, listed in [`docs/protocol/wire-vectors.md`](wire-vectors.md) — the cross-repo contract
-`toon-client`, `rig` and `swap` are actually held to. This document remains prose describing that
+vector set (`vectors/wire-vectors.json`, issue #527) — fixed literal fixtures pushed through the
+real implementation and self-verified against the same functions the invariants listed in
+[`docs/protocol/wire-vectors.md`](wire-vectors.md) hold open, not values literally emitted by a
+property-test run — the cross-repo contract `toon-client`, `rig` and `swap` are actually held to.
+This document remains prose describing that
 wire for a human reader: useful as orientation, evidence of intent, and a map of what's shipped
 versus what isn't, but it is not itself something to conform to, and a disagreement between this
 text and the code is a bug in this text. Where this document and an ADR disagree, the ADR wins —

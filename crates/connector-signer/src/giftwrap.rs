@@ -126,7 +126,7 @@ pub fn seal_request(
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
 
-    let wrapped = seal_request_with_randomness(
+    let wrapped = seal_request_with_randomness_impl(
         plaintext,
         receiver_public,
         &ephemeral_secret_bytes,
@@ -139,13 +139,34 @@ pub fn seal_request(
 
 /// The deterministic core [`seal_request`] wraps, parameterized on the
 /// ephemeral key, shared secret and AEAD nonce it would otherwise draw from
-/// [`OsRng`]. Public so vector generation (issue #527) can reproduce exactly
-/// what this module's own sealing logic produces for a fixed fixture,
+/// [`OsRng`]. Gated behind the `test-util` feature (issue #587): reusing a
+/// (key, nonce) pair under ChaCha20-Poly1305 is catastrophic, so a caller-
+/// supplied nonce/shared-secret is a footgun this crate does not hand out on
+/// its ordinary public surface. `connector-vectors` (issue #527) is the
+/// sanctioned consumer -- it needs this module's own sealing logic to
+/// reproduce exactly what a genuine seal produces for a fixed fixture,
 /// instead of a second implementation of it that could drift from this one.
 /// `ephemeral_secret_bytes` must parse as a valid secp256k1 scalar --
 /// [`seal_request`] retries internally until it draws one; a caller that
 /// already controls its own fixture is expected to pick one that parses.
+#[cfg(any(test, feature = "test-util"))]
 pub fn seal_request_with_randomness(
+    plaintext: &[u8],
+    receiver_public: &PublicKeyBytes,
+    ephemeral_secret_bytes: &[u8; 32],
+    shared_secret: &[u8; SECRET_LEN],
+    nonce_bytes: &[u8; NONCE_LEN],
+) -> Result<Vec<u8>, GiftWrapError> {
+    seal_request_with_randomness_impl(
+        plaintext,
+        receiver_public,
+        ephemeral_secret_bytes,
+        shared_secret,
+        nonce_bytes,
+    )
+}
+
+fn seal_request_with_randomness_impl(
     plaintext: &[u8],
     receiver_public: &PublicKeyBytes,
     ephemeral_secret_bytes: &[u8; 32],
@@ -220,14 +241,25 @@ pub fn open_request(
 pub fn seal_response(shared_secret: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
-    seal_response_with_randomness(shared_secret, plaintext, &nonce_bytes)
+    seal_response_with_randomness_impl(shared_secret, plaintext, &nonce_bytes)
 }
 
 /// The deterministic core [`seal_response`] wraps, parameterized on the AEAD
 /// nonce it would otherwise draw from [`OsRng`] -- the response-direction
 /// counterpart to [`seal_request_with_randomness`], for the same reason
-/// (issue #527's vector generation).
+/// (issue #527's vector generation). Gated behind the `test-util` feature
+/// (issue #587) for the same footgun reason: see
+/// [`seal_request_with_randomness`]'s doc comment.
+#[cfg(any(test, feature = "test-util"))]
 pub fn seal_response_with_randomness(
+    shared_secret: &[u8; 32],
+    plaintext: &[u8],
+    nonce_bytes: &[u8; NONCE_LEN],
+) -> Vec<u8> {
+    seal_response_with_randomness_impl(shared_secret, plaintext, nonce_bytes)
+}
+
+fn seal_response_with_randomness_impl(
     shared_secret: &[u8; 32],
     plaintext: &[u8],
     nonce_bytes: &[u8; NONCE_LEN],
