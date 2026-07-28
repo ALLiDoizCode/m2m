@@ -150,6 +150,16 @@ impl RejectCode {
         RejectCode("F02".to_string())
     }
 
+    /// F03: Invalid Amount -- a claim's value does not cover what it is
+    /// paying for: a locally-terminated route's configured price (issue
+    /// #522, `client-edge-spec.md` §1.3 step 3) or, later, a
+    /// request-request-bound route's price (§1.5). Distinct from F01: the
+    /// claim is structurally and cryptographically fine, it is simply not
+    /// enough value.
+    pub fn f03_invalid_amount() -> RejectCode {
+        RejectCode("F03".to_string())
+    }
+
     /// F99: Application Error -- the terminating app declined the delivery,
     /// or (per issue #417) supplied no fulfilment matching the execution
     /// condition it was handed.
@@ -307,6 +317,24 @@ mod tests {
         assert_eq!(decoded, prepare);
     }
 
+    /// Issue #546 tightens canonicality in the shared `oer.rs` primitives
+    /// rather than only in the envelope's own decode path (see that issue's
+    /// resolution note and `oer.rs::decode_var_uint`'s doc comment for why),
+    /// so a PREPARE's `amount` -- a VarUInt, like everything #546 describes --
+    /// is covered by the same fix without any change to this file.
+    #[test]
+    fn prepare_decode_rejects_a_non_canonical_amount_determinant() {
+        let mut encoded = sample_prepare().encode();
+        // `amount: 100` canonically encodes as the single byte 0x64
+        // (100 <= 127). Splice in the long-form alias 0x81 0x64 instead.
+        assert_eq!(encoded[1], 0x64);
+        encoded.splice(1..2, [0x81, 0x64]);
+        assert!(matches!(
+            Prepare::decode(&encoded),
+            Err(PacketError::NonCanonicalLength)
+        ));
+    }
+
     #[test]
     fn prepare_decode_rejects_wrong_type_byte() {
         let mut encoded = sample_prepare().encode();
@@ -415,5 +443,6 @@ mod tests {
         assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
         assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
+        assert_eq!(RejectCode::f03_invalid_amount().as_str(), "F03");
     }
 }

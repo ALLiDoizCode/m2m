@@ -11,6 +11,8 @@ mod operator_view;
 mod peer_transport;
 mod peer_wire;
 mod route;
+#[cfg(test)]
+mod test_support;
 
 pub use app_client::{AppClient, AppOutcome, Delivery, FakeAppClient, HttpAppClient};
 pub use claim::{ClaimAckOutcome, ClaimBook, ClaimRejectReason, WireClaim};

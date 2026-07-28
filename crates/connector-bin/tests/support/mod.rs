@@ -1,8 +1,7 @@
-//! Shared process-spawning support for `connector-bin`'s black-box tests
-//! (issue #488's own note on #491: "build on #495 rather than beside it").
+//! Shared process-spawning support for `connector-bin`'s black-box tests.
 //! Originally written for `two_connectors_and_a_stub_app.rs`; factored out
-//! here so `fleet_compare_two_local_fleets.rs` drives the same real,
-//! compiled `connector`/`stub-app` binaries instead of reimplementing this.
+//! so other test binaries can drive the same real, compiled
+//! `connector`/`stub-app` binaries instead of reimplementing this.
 //!
 //! Not every consumer uses every helper (`refuses_to_start.rs` still has
 //! its own smaller variant for its narrower needs), so this module is

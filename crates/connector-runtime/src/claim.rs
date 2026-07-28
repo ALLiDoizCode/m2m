@@ -594,6 +594,14 @@ impl ClaimBook {
             Err(ClaimError::AmountNotAdvancing { .. }) => {
                 ClaimAckOutcome::Rejected(ClaimRejectReason::AmountNotAdvancing)
             }
+            // The peer wire never calls `validate_price` -- a route's price
+            // is charged at the client edge (issue #522), not against a
+            // peer's own claim -- so this arm is unreachable in practice;
+            // it exists only so this match stays exhaustive as
+            // `ClaimError` grows new variants.
+            Err(ClaimError::Underpayment { .. }) => unreachable!(
+                "accept_inbound never calls validate_price, so a peer claim cannot fail with Underpayment"
+            ),
         }
     }
 
