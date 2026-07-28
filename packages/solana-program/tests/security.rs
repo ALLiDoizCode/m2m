@@ -1238,3 +1238,503 @@ async fn test_claim_with_wrong_channel_pda() {
     assert_eq!(account.data[STATE_FIELD_OFFSET], STATE_OPENED);
     assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 0);
 }
+
+// ============================================================================
+// Settlement destination validation and the claim/deposit bound
+//
+// These cover the two things the account builder above never exercised: the
+// settlement payout destinations, which used to be passed straight through to
+// the vault-signed SPL transfers without any check on who they belong to, and
+// the upper bound on a claim's transferred_amount.
+// ============================================================================
+
+/// Associated Token Account program ID. Bundled into `solana-program-test`'s
+/// genesis, so ATAs can be created in-test exactly as a real client would.
+const ATA_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+fn derive_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), spl_token::id().as_ref(), mint.as_ref()],
+        &ATA_PROGRAM_ID,
+    )
+    .0
+}
+
+/// Create `owner`'s associated token account for `mint` — the destination shape
+/// the shipped TypeScript settlement client derives for each participant.
+async fn create_ata(context: &mut ProgramTestContext, owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    let ata = derive_ata(owner, mint);
+    let ix = Instruction {
+        program_id: ATA_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(context.payer.pubkey(), true),
+            AccountMeta::new(ata, false),
+            AccountMeta::new_readonly(*owner, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ],
+        // AssociatedTokenAccountInstruction::Create
+        data: vec![0],
+    };
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+    ata
+}
+
+async fn token_balance(context: &mut ProgramTestContext, account: &Pubkey) -> u64 {
+    let acct = context
+        .banks_client
+        .get_account(*account)
+        .await
+        .unwrap()
+        .expect("token account should exist");
+    spl_token::state::Account::unpack(&acct.data)
+        .unwrap()
+        .amount
+}
+
+/// Close the channel as `closer` and warp the clock to the settlement deadline.
+async fn close_and_expire_challenge(
+    context: &mut ProgramTestContext,
+    closer: &Keypair,
+    channel_pda: &Pubkey,
+) {
+    let close_ix = build_close_channel_instruction(&closer.pubkey(), channel_pda);
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[close_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, closer],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let channel_account = context
+        .banks_client
+        .get_account(*channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    let close_timestamp = i64::from_le_bytes(
+        channel_account.data[CLOSE_TIMESTAMP_OFFSET..CLOSE_TIMESTAMP_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+    set_clock_to_timestamp(context, close_timestamp + TEST_CHALLENGE_DURATION as i64).await;
+}
+
+// ============================================================================
+// A settlement destination owned by a third party is rejected
+//
+// SPL Token only requires that a transfer's source and destination share a
+// mint, so without an explicit check the vault would happily sign a payout into
+// an account belonging to whoever submitted the settle instruction.
+// ============================================================================
+
+#[tokio::test]
+async fn test_settle_destination_owned_by_third_party_rejected() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    close_and_expire_challenge(&mut context, &participant_a, &channel_pda).await;
+
+    // A token account holding the channel's mint but owned by someone who is not
+    // a participant.
+    let third_party = Keypair::new();
+    let third_party_token = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &third_party.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
+    let b_token = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &third_party_token, // stands in for participant A's account
+        &b_token,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    let result = context.banks_client.process_transaction(tx).await;
+    assert!(
+        result.is_err(),
+        "Settlement into a third party's token account must be rejected"
+    );
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("Custom(14)") || err_str.contains("InvalidSettlementDestination"),
+        "Expected InvalidSettlementDestination (Custom(14)), got: {}",
+        err_str
+    );
+
+    // Nothing moved and the channel remains settleable.
+    assert_eq!(
+        token_balance(&mut context, &third_party_token).await,
+        0,
+        "Third party must not have received anything"
+    );
+    assert_eq!(
+        token_balance(&mut context, &vault_pda).await,
+        20_000,
+        "Vault must still hold both deposits"
+    );
+    let channel_account = context.banks_client.get_account(channel_pda).await.unwrap();
+    assert!(
+        channel_account.is_some(),
+        "Channel must survive the rejected settlement"
+    );
+}
+
+// ============================================================================
+// A settlement destination holding a different mint is rejected
+// ============================================================================
+
+#[tokio::test]
+async fn test_settle_destination_with_wrong_mint_rejected() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    close_and_expire_challenge(&mut context, &participant_a, &channel_pda).await;
+
+    // Participant A owns this account, but it holds an unrelated mint.
+    let other_mint_authority = Keypair::new();
+    let other_mint = create_test_mint(&mut context, &other_mint_authority).await;
+    let a_token_wrong_mint = create_and_fund_token_account(
+        &mut context,
+        &other_mint,
+        &participant_a.pubkey(),
+        &other_mint_authority,
+        0,
+    )
+    .await;
+    let b_token = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &a_token_wrong_mint,
+        &b_token,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    let result = context.banks_client.process_transaction(tx).await;
+    assert!(
+        result.is_err(),
+        "Settlement into an account holding the wrong mint must be rejected"
+    );
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("Custom(15)") || err_str.contains("SettlementDestinationMintMismatch"),
+        "Expected SettlementDestinationMintMismatch (Custom(15)), got: {}",
+        err_str
+    );
+
+    assert_eq!(
+        token_balance(&mut context, &vault_pda).await,
+        20_000,
+        "Vault must still hold both deposits"
+    );
+}
+
+// ============================================================================
+// A claim above the participant's deposit is rejected at claim time
+//
+// Settlement computes `deposit - transferred_amount`; storing a transferred
+// amount above the deposit makes that subtraction underflow, so every later
+// SettleChannel / ForceCloseExpired would fail with ArithmeticOverflow and the
+// deposits would have no way out of the vault.
+// ============================================================================
+
+#[tokio::test]
+async fn test_claim_exceeding_deposit_rejected() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    // One over participant A's deposit.
+    let result = submit_claim(&mut context, &participant_a, &channel_pda, 1, 10_001).await;
+    assert!(
+        result.is_err(),
+        "A claim above the participant's deposit must be rejected"
+    );
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("Custom(13)") || err_str.contains("TransferredAmountExceedsDeposit"),
+        "Expected TransferredAmountExceedsDeposit (Custom(13)), got: {}",
+        err_str
+    );
+
+    // The rejected claim left no trace, so the nonce is still available.
+    let account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 0);
+    assert_eq!(read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET), 0);
+
+    // Exactly the deposit is still a legitimate claim.
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 10_000)
+        .await
+        .expect("A claim equal to the deposit must be accepted");
+
+    // And the channel is still settleable, which is the property the bound protects.
+    close_and_expire_challenge(&mut context, &participant_a, &channel_pda).await;
+    let a_token = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
+    let b_token = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_b.pubkey(),
+        &mint_authority,
+        0,
+    )
+    .await;
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &a_token,
+        &b_token,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("Channel must remain settleable after a maximal claim");
+
+    // A transferred everything: A gets 0, B gets its own deposit plus A's 10_000.
+    assert_eq!(token_balance(&mut context, &b_token).await, 20_000);
+}
+
+// ============================================================================
+// Positive control: an honest settle into participant ATAs still succeeds
+//
+// This is the destination shape the shipped TypeScript settlement client
+// derives, so it pins the compatibility claim as well as the happy path.
+// ============================================================================
+
+#[tokio::test]
+async fn test_settle_into_participant_atas_succeeds() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 3000)
+        .await
+        .unwrap();
+    submit_claim(&mut context, &participant_b, &channel_pda, 1, 1000)
+        .await
+        .unwrap();
+
+    close_and_expire_challenge(&mut context, &participant_a, &channel_pda).await;
+
+    let a_ata = create_ata(&mut context, &participant_a.pubkey(), &token_mint).await;
+    let b_ata = create_ata(&mut context, &participant_b.pubkey(), &token_mint).await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &a_ata,
+        &b_ata,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("Settlement into participant ATAs must succeed");
+
+    // A: 10_000 - 3000 + 1000, B: 10_000 - 1000 + 3000
+    assert_eq!(token_balance(&mut context, &a_ata).await, 8000);
+    assert_eq!(token_balance(&mut context, &b_ata).await, 12_000);
+    assert!(context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// ============================================================================
+// Positive control: settlement stays permissionless after the timeout
+//
+// Anyone may settle once the challenge period has elapsed — that is what stops
+// a counterparty stranding the vault by simply never acting. Pinning the payout
+// destinations must not turn into pinning the caller.
+// ============================================================================
+
+#[tokio::test]
+async fn test_post_timeout_settle_by_non_participant_succeeds() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 2500)
+        .await
+        .unwrap();
+
+    close_and_expire_challenge(&mut context, &participant_a, &channel_pda).await;
+
+    // A bystander with no relationship to the channel, funded only for fees.
+    let bystander = Keypair::new();
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let fund_tx = Transaction::new_signed_with_payer(
+        &[solana_sdk::system_instruction::transfer(
+            &context.payer.pubkey(),
+            &bystander.pubkey(),
+            1_000_000_000,
+        )],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context
+        .banks_client
+        .process_transaction(fund_tx)
+        .await
+        .unwrap();
+
+    let a_ata = create_ata(&mut context, &participant_a.pubkey(), &token_mint).await;
+    let b_ata = create_ata(&mut context, &participant_b.pubkey(), &token_mint).await;
+
+    let settle_ix = build_settle_channel_instruction(
+        &bystander.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &a_ata,
+        &b_ata,
+        &bystander.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&bystander.pubkey()),
+        &[&bystander],
+        recent,
+    );
+    context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("A non-participant must still be able to settle after the timeout");
+
+    // The bystander pays the fee and collects the rent, but the tokens go to the
+    // participants and only to the participants.
+    assert_eq!(token_balance(&mut context, &a_ata).await, 7500);
+    assert_eq!(token_balance(&mut context, &b_ata).await, 12_500);
+}

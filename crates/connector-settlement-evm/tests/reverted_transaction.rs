@@ -53,6 +53,7 @@ async fn a_racing_redeem_that_reverts_on_chain_is_reported_as_an_explicit_error(
     backend.fund(&channel, 1_000).await.expect("fund");
 
     let claim = || Claim {
+        nonce: 1,
         cumulative_amount: 400,
         signature: vec![9],
     };
@@ -97,6 +98,7 @@ async fn a_racing_redeem_that_reverts_on_chain_is_reported_as_an_explicit_error(
         .redeem(
             &channel,
             Claim {
+                nonce: 2,
                 cumulative_amount: 900,
                 signature: vec![9],
             },
