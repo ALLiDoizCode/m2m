@@ -26,6 +26,31 @@
 #   - data:   ./signer-rust.key, a path distinct from the TypeScript node's
 #             `connector_data` volume; this service gets no named volume at
 #             all (connector-runtime holds no state beyond the signer key)
+#
+# Generate ./signer-rust.key per deploy/connector-rust/README.md step 1 --
+# including its `chown 10001:10001`, without which this service restart-loops
+# on "failed to read signer key_file ... Permission denied" (#492).
+#
+# ── Why 4000 is bound to loopback (#492) ──────────────────────────────────
+# This client edge implements only §1.1 of docs/protocol/client-edge-spec.md.
+# Its own module doc says so: identity (§1.2), payment claims (§1.3) and the
+# x402 greeting (§1.4) are unimplemented, so "every request today is treated
+# as an unauthenticated, unpriced delivery attempt". §1.5 request-request
+# binding is absent entirely.
+#
+# An unpriced connector in front of the relay is a free-write gateway. The
+# relay's POST /write trusts the injected X-TOON-Payer/-Amount/-Chain headers
+# without re-validating them and stores any signature-valid event whether or
+# not they are present -- it enforces no payment itself, by design, because
+# the connector is supposed to have done it upstream. This one does not.
+#
+# Publishing on 0.0.0.0 therefore put an anonymous free write into the devnet
+# relay on the public internet, and a ufw rule would not have contained it
+# (Docker's iptables chain runs ahead of ufw -- see
+# docs/operators/parallel-fleet-comparison.md). Binding the publish to
+# 127.0.0.1 is what actually closes it: reach it with an SSH tunnel or from
+# the box. Widen this ONLY once §1.2-§1.5 are implemented and the fleet
+# charges for a write.
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
@@ -39,5 +64,6 @@ services:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
     ports:
-      - '4000:4000'
+      # Loopback-only, deliberately — see the header. Not '4000:4000'.
+      - '127.0.0.1:4000:4000'
     restart: unless-stopped
