@@ -761,6 +761,7 @@ impl Connector {
             .map(|route| RouteView {
                 prefix: route.prefix().to_string(),
                 handler_url: route.handler_url().to_string(),
+                price: route.price(),
             })
             .collect()
     }

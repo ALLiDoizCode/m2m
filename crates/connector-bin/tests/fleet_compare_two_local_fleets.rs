@@ -50,7 +50,9 @@ fn connector_config(
 ) -> String {
     let app_route = match app_addr {
         Some(addr) => {
-            format!("\n[[routes]]\nprefix = \"{prefix}.app\"\nhandler_url = \"http://{addr}\"\n")
+            format!(
+                "\n[[routes]]\nprefix = \"{prefix}.app\"\nhandler_url = \"http://{addr}\"\nprice = 0\n"
+            )
         }
         None => String::new(),
     };
@@ -64,6 +66,7 @@ key_file = "{key}"
 [[routes]]
 prefix = "{prefix}.down"
 handler_url = "http://{dead_addr}"
+price = 0
 "#,
         key = key_path.display(),
     )

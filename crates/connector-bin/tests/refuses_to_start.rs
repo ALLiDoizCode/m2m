@@ -73,6 +73,7 @@ key_file = "{}"
 [[routes]]
 prefix = "g.example.app"
 handler_url = "http://localhost:4000"
+price = 0
 "#,
         key_file.path().display()
     ));
@@ -274,5 +275,32 @@ kms_key_id = "arn:aws:kms:us-east-1:123:key/abc"
     assert!(
         stderr.contains("key management service"),
         "expected an actionable unsupported-signer-location error, got: {stderr}"
+    );
+}
+
+#[test]
+fn exits_non_zero_when_a_terminated_route_has_no_price() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://localhost:4000"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("price"),
+        "expected an actionable missing-price error, got: {stderr}"
     );
 }
