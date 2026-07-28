@@ -541,6 +541,22 @@ mod tests {
         }
     }
 
+    /// A fixed EIP-712 domain for this module's one peer-wire claim test
+    /// (issue #575/#566) -- an arbitrary but consistent chain id and
+    /// `TokenNetwork` address.
+    fn test_channel_domain() -> connector_runtime::ChannelDomain {
+        connector_runtime::ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x1E; 20],
+        }
+    }
+
+    /// A valid on-chain `bytes32` peer-wire channel id for tests (issue
+    /// #575's AC4).
+    fn channel_a() -> String {
+        format!("0x{:064x}", 1)
+    }
+
     fn test_signer() -> Arc<dyn Signer> {
         Arc::new(LocalSigner::generate("test-signer"))
     }
@@ -805,6 +821,8 @@ mod tests {
             answered(b"delivered by the second connector"),
         );
         let payer_signer = LocalSigner::generate("payer-claim-key");
+        let payer_address =
+            connector_signer::derive_evm_address(&payer_signer.public_key().unwrap());
         let second_hop_identity = test_signer();
         let second_hop = Arc::new(
             Connector::new(
@@ -814,12 +832,14 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             )
-            .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
+            .with_channel_verification_key(channel_a(), payer_address)
+            .with_channel_domain(channel_a(), test_channel_domain())
+            .unwrap()
             .with_identity_signer(second_hop_identity.clone()),
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        peer_transport.set_peer_channel("second-hop", "channel-a");
+        peer_transport.set_peer_channel("second-hop", channel_a());
         let first_hop = Arc::new(
             Connector::new(
                 vec![],
@@ -829,7 +849,9 @@ mod tests {
                 test_clock(),
             )
             .with_signer(Arc::new(payer_signer))
-            .with_peer_claim_channel("second-hop", "channel-a"),
+            .with_peer_claim_channel("second-hop", channel_a())
+            .with_channel_domain(channel_a(), test_channel_domain())
+            .unwrap(),
         );
         let (prepare, _shared_secret) = sealed_sample_prepare_with_amount(
             "g.example.app",

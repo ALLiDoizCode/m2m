@@ -5,12 +5,14 @@
 //! [`Treasury`] that spends through a `Signer`. No other crate in this
 //! workspace holds key material or performs a signing operation directly —
 //! anything that needs to sign a claim or a settlement transaction takes a
-//! `&dyn Signer`. It is also where a claim's signature is checked, whether
-//! that is this connector's own internal, chain-agnostic digest ([`verify`],
-//! peer wire) or a client edge claim's chain-native wallet signature
-//! ([`verify_evm_balance_proof`]/[`verify_solana_balance_proof`], issue
-//! #506) -- neither needs key material of its own, only the public key or
-//! address a channel's counterparty is already known by.
+//! `&dyn Signer`. It is also where a claim's signature is checked -- both a
+//! peer-wire claim (issue #575, ADR 0024) and a client edge claim's
+//! chain-native wallet signature (issue #506) go through
+//! [`verify_evm_balance_proof`]/[`verify_solana_balance_proof`], neither
+//! needing key material of its own, only the public key or address a
+//! channel's counterparty is already known by. [`verify`] is unrelated to
+//! either: it is the `Signer` contract suite's own "a signature recovers to
+//! its signer's own public key" check (`src/contract.rs`).
 //!
 //! Deliberately absent, per ADR 0012: mnemonic recovery, seed management,
 //! human wallet authentication, a wallet database, and any fraud or

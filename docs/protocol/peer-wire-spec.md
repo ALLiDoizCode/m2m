@@ -173,7 +173,21 @@ A claim is chain-specific (`CONTEXT.md` "Claim", "Nonce", "Watermark"):
 
 `lockedAmount` and `locksRoot` are removed from the claim and from the on-chain balance proof
 (they were always zero — [ADR 0004](../adr/0004-value-moves-on-fulfilment.md)); in-flight exposure
-is bounded by packet expiry, not collateralised on-chain.
+is bounded by packet expiry, not collateralised on-chain. That removal describes the on-chain
+contract this design calls for, not the one currently deployed: the live `TokenNetwork.sol`'s
+`BalanceProof` typehash still declares both fields, so a digest that omits them does not match
+what that contract's `ecrecover` checks. Until a redeployment drops them, they are still hashed as
+zeros (see below).
+
+**Implementation note (issue #575, [ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)):**
+this table's `evm` row is normative and, as of this issue, matches what the code does — before it,
+`crates/connector-runtime/src/claim.rs` signed and verified a connector-internal SHA-256 hash of
+`channel_id ‖ nonce ‖ cumulative_amount` instead, a divergence from this section that was invisible
+because nothing had ever redeemed a peer-wire claim on chain. `ClaimBook` now signs and verifies
+through `connector_signer::evm_balance_proof_digest` — the same function the client edge already
+used (issue #506) — over exactly the fields the deployed `TokenNetwork.sol` typehash requires,
+`lockedAmount`/`locksRoot` included, hashed as zeros. The Solana row remains aspirational: the peer
+wire has no Ed25519 claim path yet.
 
 ### 3.6 Relationship to application-level claims (e.g. rolling-swap)
 
@@ -255,9 +269,11 @@ and issue #523 -- the fees of the hops the packet actually passed through, plus 
 route that terminated it, if it reached one. The field starts at `0`:
 
 - When a connector **originates** a REJECT for a reason that added no value to the packet at all
-  (no route, expired, ceiling exceeded, cannot meet minimum delivery), it sets
-  `accumulatedCost = 0` on the REJECT it sends upstream — it never forwarded or terminated this
-  packet, so nothing applies to a hop it never used.
+  (no route, expired, ceiling exceeded, cannot meet minimum delivery, or the terminating app
+  itself unreachable), it sets `accumulatedCost = 0` on the REJECT it sends upstream — it never
+  forwarded or terminated this packet, so nothing applies to a hop it never used. An app that
+  could not be reached (`T01`) is the termination-side mirror of a forwarding hop that cannot
+  reach its own peer: no priced work was done, so no price is added.
 - When a connector **originates** a REJECT because the packet reached one of its own terminated
   routes and was rejected there (an application-level reject from the terminating app, or a
   fulfillment that didn't match the execution condition), it sets `accumulatedCost` to that
@@ -280,11 +296,10 @@ Never include a per-hop breakdown, and never split the total between fees and pr
 sum. `accumulatedCost` leaks total path cost, not topology or any individual hop's or route's
 pricing ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)).
 
-The second bullet above is forward-looking, matching `client-edge-spec.md` §1.6's own note: the
-Rust connector does not yet carry a price on a terminated route (blocked on issue #520, "A
-terminated route carries a price," itself still open), so a REJECT raised at a termination today
-always sets `accumulatedCost = 0`, exactly like the first bullet. Once #520 lands, a terminated
-route's REJECT path follows the second bullet.
+All three bullets describe the Rust connector as it stands: issue #520 landed the price on a
+terminated route and issue #545 wired it into the REJECT path, so a REJECT raised at a termination
+now carries that route's configured price rather than the `0` this section previously had to
+describe as forward-looking.
 
 ### 5.3 Ceiling enforcement
 
