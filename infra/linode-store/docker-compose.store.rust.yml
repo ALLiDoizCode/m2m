@@ -18,6 +18,31 @@
 # Same distinctions as the node-side overlay: its own pinned image tag, its
 # own ports (4000/4001, not the TypeScript node's 3000/8080/8081), its own
 # data path (./signer-rust.key, no named volume).
+#
+# ── Why 4000 is bound to loopback (issue #517) ────────────────────────────
+# This client edge implements only §1.1 of docs/protocol/client-edge-spec.md.
+# Its own module doc says so: identity (§1.2), payment claims (§1.3) and the
+# x402 greeting (§1.4) are unimplemented, so "every request today is treated
+# as an unauthenticated, unpriced delivery attempt". §1.5 request-request
+# binding is absent entirely.
+#
+# An unpriced connector in front of a payment-oblivious app (here, the store)
+# is a free-write gateway, and a Docker `ports:` publish is reachable from
+# the internet regardless of what ufw says -- Docker's iptables chain runs
+# ahead of it. The apex overlay's client edge was bound to loopback for
+# exactly this reason when its own free-write gateway was closed (#492); this
+# store-side overlay never received the same fix, and the day a store box
+# actually exists it would open the identical hole. Binding the publish to
+# 127.0.0.1 closes it: reach it with an SSH tunnel or from the box. Widen
+# this ONLY once §1.2-§1.5 are implemented and the fleet charges for a write.
+#
+# 4001 (the peer wire) is untouched by this ticket -- it must accept the
+# node-side apex's inbound connection from off-box, so a loopback bind is not
+# an option for it the way it is for the client edge. Per the decision that
+# the peer wire never goes on a public interface, its binding belongs on the
+# box's private VPC address once that network exists; getting it there is
+# out of scope here (issue #517 is the client edge only) and is tracked
+# separately.
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
@@ -27,6 +52,7 @@ services:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
     ports:
-      - '4000:4000'
+      # Loopback-only, deliberately — see the header. Not '4000:4000'.
+      - '127.0.0.1:4000:4000'
       - '4001:4001'
     restart: unless-stopped
