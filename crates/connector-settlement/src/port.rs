@@ -75,8 +75,8 @@ pub struct Claim {
     pub signature: Vec<u8>,
 }
 
-/// Errors a [`SettlementBackend`] implementation reports. The first four
-/// variants are ones the port itself defines the meaning of. [`Backend`]
+/// Errors a [`SettlementBackend`] implementation reports. Every variant but
+/// [`Backend`] is one the port itself defines the meaning of; [`Backend`]
 /// is the one variant a real, chain-backed implementation like
 /// `connector-settlement-evm` (issue #459) needs and the in-memory stand-in
 /// does not: an I/O-level failure (a reverted transaction the backend's own

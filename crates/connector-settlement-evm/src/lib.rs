@@ -171,17 +171,28 @@ impl EvmSettlementBackend {
         Ok(id)
     }
 
+    /// The one place this backend calls the contract's `channelState` --
+    /// both [`read_state`](Self::read_state) and
+    /// [`settle`](SettlementBackend::settle) need it, for different subsets
+    /// of the same eight-tuple.
+    async fn fetch_channel_state(
+        &self,
+        id: U256,
+    ) -> Result<(Address, Bytes, Address, U256, U256, U256, u8, U256), SettlementError> {
+        self.contract
+            .channel_state(id)
+            .call()
+            .await
+            .map_err(backend_error)
+    }
+
     async fn read_state(
         &self,
         channel: &ChannelId,
         id: U256,
     ) -> Result<ChannelState, SettlementError> {
         let (_payer, counterparty, _payout, _timeout, deposited, redeemed, status, _closed_at) =
-            self.contract
-                .channel_state(id)
-                .call()
-                .await
-                .map_err(backend_error)?;
+            self.fetch_channel_state(id).await?;
         Ok(ChannelState {
             id: channel.clone(),
             counterparty: counterparty.to_vec(),
@@ -431,11 +442,7 @@ impl SettlementBackend for EvmSettlementBackend {
     async fn settle(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         let (_payer, _counterparty, _payout, timeout, _deposited, _redeemed, status, closed_at) =
-            self.contract
-                .channel_state(id)
-                .call()
-                .await
-                .map_err(backend_error)?;
+            self.fetch_channel_state(id).await?;
 
         match status_from_u8(status) {
             ChannelStatus::Settled => return Err(SettlementError::ChannelSettled(channel.clone())),
