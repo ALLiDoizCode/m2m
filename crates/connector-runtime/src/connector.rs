@@ -417,7 +417,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: "prepare carries no execution condition".to_string(),
                 data: Vec::new(),
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             });
         }
         if is_expired(prepare.expires_at, self.clock.now()) {
@@ -426,7 +426,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: "prepare has expired".to_string(),
                 data: Vec::new(),
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             });
         }
         None
@@ -492,7 +492,7 @@ impl Connector {
                     triggered_by: String::new(),
                     message: format!("exposure ceiling exceeded for channel '{channel_id}'"),
                     data: Vec::new(),
-                    accumulated_fee: 0,
+                    accumulated_cost: 0,
                 });
                 return (self.finish(reject), ack);
             }
@@ -508,7 +508,7 @@ impl Connector {
 
     /// Entry point for a probe -- an ordinary packet a sender expects to be
     /// rejected, sent purely to learn a path's cost via the
-    /// `accumulated_fee` every [`connector_domain::Reject`] now carries
+    /// `accumulated_cost` every [`connector_domain::Reject`] now carries
     /// (issue #426, ADR 0011). Probes are not a distinct packet type and
     /// fee accumulation is not a special mode for them (ADR 0011): once
     /// past the two gates below, this is nothing but [`Connector::handle_prepare`]
@@ -617,7 +617,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: format!("no route to destination '{}'", prepare.destination),
                 data: Vec::new(),
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             }));
         };
 
@@ -682,7 +682,7 @@ impl Connector {
                     peer_route.peer_id()
                 ),
                 data: Vec::new(),
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             });
         };
 
@@ -716,13 +716,25 @@ impl Connector {
             // the packet never actually traversed this hop in that case.
             PacketResponse::Reject(mut reject) => {
                 if reached_peer {
-                    reject.accumulated_fee += peer_route.fee();
+                    reject.accumulated_cost += peer_route.fee();
                 }
                 PacketResponse::Reject(reject)
             }
         }
     }
 
+    /// Issue #523: a reject this connector originates because the packet
+    /// reached its termination and was declined -- an `AppOutcome::Declined`
+    /// below, or [`Self::accept_if_fulfilled`] rejecting a mismatched
+    /// fulfillment -- should set `accumulated_cost` to this route's price
+    /// rather than `0`, the same way [`Self::forward_via_peer_route`] adds a
+    /// forwarding hop's fee to a relayed reject. `AppOutcome::Unreachable`
+    /// should not: the app was never actually reached to do the priced
+    /// work, matching how a forwarding hop that cannot reach its own peer
+    /// adds nothing either. None of this is done below: every termination
+    /// reject still hardcodes `0`. Issue #520, "A terminated route carries a
+    /// price," has since landed, so `route.price()` is now available and this
+    /// is unblocked -- it is simply not yet wired up here.
     async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
         let received_at = self.clock.now();
         let condition = prepare.execution_condition;
@@ -741,14 +753,14 @@ impl Connector {
                 triggered_by: String::new(),
                 message: format!("app declined the delivery with HTTP {status}"),
                 data: body,
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             }),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),
                 triggered_by: String::new(),
                 message,
                 data: Vec::new(),
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             }),
         }
     }
@@ -946,7 +958,7 @@ impl Connector {
                 triggered_by: String::new(),
                 message: "fulfillment does not match execution condition".to_string(),
                 data: Vec::new(),
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             }),
         }
     }
@@ -2644,7 +2656,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_self_originated_reject_carries_zero_accumulated_fee() {
+        async fn a_self_originated_reject_carries_zero_accumulated_cost() {
             let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
 
             let response = connector
@@ -2654,7 +2666,7 @@ mod tests {
             match response {
                 PacketResponse::Reject(reject) => {
                     assert_eq!(reject.code.as_str(), "F02");
-                    assert_eq!(reject.accumulated_fee, 0);
+                    assert_eq!(reject.accumulated_cost, 0);
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
@@ -2671,14 +2683,14 @@ mod tests {
             match response {
                 PacketResponse::Reject(reject) => {
                     assert_eq!(reject.code.as_str(), "F02");
-                    assert_eq!(reject.accumulated_fee, 7);
+                    assert_eq!(reject.accumulated_cost, 7);
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
         }
 
         #[tokio::test]
-        async fn accumulated_fee_sums_across_every_successfully_forwarding_hop() {
+        async fn accumulated_cost_sums_across_every_successfully_forwarding_hop() {
             let entry = chain_of(&[7, 3, 11]);
 
             let response = entry
@@ -2688,7 +2700,7 @@ mod tests {
             match response {
                 PacketResponse::Reject(reject) => {
                     assert_eq!(reject.code.as_str(), "F02");
-                    assert_eq!(reject.accumulated_fee, 21);
+                    assert_eq!(reject.accumulated_cost, 21);
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
@@ -2730,7 +2742,7 @@ mod tests {
                     assert_eq!(reject.code.as_str(), "T01");
                     // hop-0 reached hop-1 (adds its fee, 7); hop-1 never
                     // reached "unregistered" (adds nothing).
-                    assert_eq!(reject.accumulated_fee, 7);
+                    assert_eq!(reject.accumulated_cost, 7);
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
@@ -2739,11 +2751,11 @@ mod tests {
         proptest::proptest! {
             /// Issue #426's own acceptance criterion: for any chain of hops
             /// that all successfully forward before the packet is finally
-            /// rejected (no route at the far end), the accumulated fee
+            /// rejected (no route at the far end), the accumulated cost
             /// reported to the original sender equals the sum of the fees
             /// of the hops actually traversed.
             #[test]
-            fn accumulated_fee_equals_the_sum_of_the_fees_of_the_hops_traversed(
+            fn accumulated_cost_equals_the_sum_of_the_fees_of_the_hops_traversed(
                 fees in proptest::collection::vec(0u64..1_000, 1..6)
             ) {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2757,7 +2769,7 @@ mod tests {
                     match response {
                         PacketResponse::Reject(reject) => {
                             proptest::prop_assert_eq!(reject.code.as_str(), "F02");
-                            proptest::prop_assert_eq!(reject.accumulated_fee, fees.iter().sum::<u64>());
+                            proptest::prop_assert_eq!(reject.accumulated_cost, fees.iter().sum::<u64>());
                         }
                         other => return Err(proptest::test_runner::TestCaseError::fail(format!("expected a reject, got {other:?}"))),
                     }
