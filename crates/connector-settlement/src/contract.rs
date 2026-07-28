@@ -60,6 +60,7 @@ where
         .redeem(
             &channel,
             Claim {
+                nonce: 1,
                 cumulative_amount: 60,
                 signature: vec![1],
             },
@@ -75,6 +76,7 @@ where
         .redeem(
             &channel,
             Claim {
+                nonce: 2,
                 cumulative_amount: 120,
                 signature: vec![2],
             },
@@ -85,11 +87,19 @@ where
 
     // A claim that does not supersede the highest one redeemed so far is
     // rejected outright (ADR 0005: only the highest-nonce claim is ever
-    // honored) rather than silently ignored or double-paid.
+    // honored) rather than silently ignored or double-paid. Same nonce as
+    // the claim just redeemed, matching the amount replay this asserts --
+    // `connector-settlement-evm`/`-solana` settle through contracts with no
+    // nonce field of their own yet (issue #566), so this exact replay is
+    // the one nonce/amount scenario this shared suite can hold every
+    // backend to identically; `InMemorySettlementBackend`'s own,
+    // additional nonce-ordering rule is exercised separately in
+    // `in_memory.rs`'s own tests.
     let err = backend
         .redeem(
             &channel,
             Claim {
+                nonce: 2,
                 cumulative_amount: 120,
                 signature: vec![3],
             },
@@ -110,6 +120,7 @@ where
         .redeem(
             &channel,
             Claim {
+                nonce: 3,
                 cumulative_amount: 1_000,
                 signature: vec![4],
             },
@@ -144,6 +155,7 @@ where
         .redeem(
             &channel,
             Claim {
+                nonce: 4,
                 cumulative_amount: 121,
                 signature: vec![5],
             },

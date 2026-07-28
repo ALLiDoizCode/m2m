@@ -346,10 +346,13 @@ struct FundChannelRequest {
 }
 
 /// A `POST /channels/:id/redeem` request body: redeem a claim of
-/// `cumulative_amount`, authorized by `signature_hex` (opaque, hex-encoded
-/// -- this port does not verify it; see `connector_settlement::Claim`).
+/// `cumulative_amount` at `nonce` (issue #573 -- without it, nothing this
+/// submits is redeemable on any real chain), authorized by `signature_hex`
+/// (opaque, hex-encoded -- this port does not verify it; see
+/// `connector_settlement::Claim`).
 #[derive(Debug, Deserialize)]
 struct RedeemChannelRequest {
+    nonce: u64,
     cumulative_amount: u128,
     signature_hex: String,
 }
@@ -474,6 +477,7 @@ async fn redeem_channel(
             .redeem_channel(
                 &channel_id,
                 Claim {
+                    nonce: request.nonce,
                     cumulative_amount: request.cumulative_amount,
                     signature,
                 },
