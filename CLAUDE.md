@@ -60,7 +60,7 @@ make solana-up     # Start Solana container only
 make mina-up       # Start Mina container only
 
 # Run tests against live containers
-npm run test:integration --workspace=packages/connector
+cargo test --workspace --exclude payment-channel
 
 make infra-down    # Stop all containers
 ```

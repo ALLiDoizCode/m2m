@@ -102,10 +102,9 @@ Two connector-specific gotchas when running the test gate:
 - The `mina-zkapp` (o1js) jest suite is WASM-heavy. Run it with more heap and in
   band or it OOMs:
   `NODE_OPTIONS='--max-old-space-size=8192' npm test --workspace=packages/mina-zkapp -- --runInBand`
-- `packages/connector` and `packages/shared` tests need `shared` + `mina-zkapp`
-  built first — `npm run build` (or the ordered build above) handles that. If a
-  libsql-backed test cannot find its native module (the lockfile was generated
-  on macOS), run `npm install @libsql/linux-x64-gnu --no-save`.
+- The npm workspaces that remain are devnet tooling only (the faucet, its Mina
+  zkApp, the faucet dApp, `tools/fund-peers`). The connector itself is Rust —
+  the Rust gate is the one that matters for connector changes.
 
 Do not commit until the gates that apply to what you changed all pass.
 

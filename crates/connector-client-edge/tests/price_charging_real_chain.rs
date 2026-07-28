@@ -23,18 +23,27 @@ use base64::Engine;
 use chrono::{Duration, TimeZone, Utc};
 use tower::ServiceExt;
 
+use libsecp256k1::{Message, PublicKey, SecretKey};
+
 use connector_client_edge::router;
 use connector_config::StaticRoute;
-use connector_domain::{derive_condition, Fulfill, Prepare, Reject};
+use connector_domain::{
+    derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
+};
 use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_signer::{
+    derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof, LocalSigner, Signer,
+};
 
 use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 
 const FULFILLMENT: [u8; 32] = [7u8; 32];
 const HANDLER_URL: &str = "http://localhost:4000";
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
+const CHAIN_ID: u64 = 8453;
+const TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
 
 fn test_clock() -> Arc<TestClock> {
     Arc::new(TestClock::new(
@@ -48,7 +57,15 @@ fn sample_prepare() -> Prepare {
         expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
         execution_condition: derive_condition(&FULFILLMENT),
         destination: "g.example.app".to_string(),
-        data: b"hello app".to_vec(),
+        // Per ADR 0018/issue #519 a `Prepare`'s `data` carries a structured
+        // envelope, decoded above the `AppClient` boundary (issue #521).
+        data: EnvelopeRequest {
+            method: "POST".to_string(),
+            target: "/".to_string(),
+            headers: vec![],
+            body: b"hello app".to_vec(),
+        }
+        .encode(),
     }
 }
 
@@ -60,7 +77,44 @@ fn channel_id_hex(id: &str) -> String {
     format!("0x{n:064x}")
 }
 
+/// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
+/// `r || s || v` signature, `v` in the conventional `{27, 28}` range).
+fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
+    let message = Message::parse(digest);
+    let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
+    let mut bytes = signature.serialize().to_vec();
+    let recovery_byte: u8 = recovery_id.into();
+    bytes.push(recovery_byte + 27);
+    bytes
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An EVM claim JSON with a genuine EIP-712 signature over its own fields
+/// (issue #506/#544) -- a forged or unsigned claim would be refused before
+/// ever reaching the price check this file exists to prove.
 fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) -> String {
+    let secret = SecretKey::parse(&[9u8; 32]).unwrap();
+    let public = PublicKey::from_secret_key(&secret);
+    let address = derive_evm_address(&public.serialize());
+
+    let mut channel_id = [0u8; 32];
+    channel_id.copy_from_slice(
+        &hex::decode(channel_id_hex.trim_start_matches("0x")).expect("valid hex channel id"),
+    );
+    let proof = EvmBalanceProof {
+        channel_id,
+        nonce,
+        transferred_amount,
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: CHAIN_ID,
+        token_network_address: TOKEN_NETWORK_ADDRESS,
+    };
+    let signature = sign_evm(&secret, &evm_balance_proof_digest(&proof));
+
     format!(
         r#"{{
             "version": "1.0",
@@ -73,19 +127,33 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
             "transferredAmount": "{transferred_amount}",
             "lockedAmount": "0",
             "locksRoot": "0x{zeros}",
-            "signature": "0xabcdef",
-            "signerAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
+            "signature": "0x{signature}",
+            "signerAddress": "{address}",
+            "chainId": {CHAIN_ID},
+            "tokenNetworkAddress": "{token_network_address}"
         }}"#,
         zeros = "0".repeat(64),
+        signature = hex_encode(&signature),
+        address = to_hex(&address),
+        token_network_address = to_hex(&TOKEN_NETWORK_ADDRESS),
     )
 }
 
 fn deliverable_connector(route: StaticRoute, app_client: Arc<FakeAppClient>) -> Arc<Connector> {
     app_client.respond(
         route.handler_url(),
-        AppOutcome::Delivered {
-            data: b"ok".to_vec(),
-            fulfillment: Some(FULFILLMENT),
+        AppOutcome::Answered {
+            response: EnvelopeResponse {
+                status: 200,
+                headers: vec![(
+                    "TOON-Fulfillment".to_string(),
+                    FULFILLMENT
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                )],
+                body: b"ok".to_vec(),
+            },
         },
     );
     Arc::new(Connector::new(
@@ -97,8 +165,12 @@ fn deliverable_connector(route: StaticRoute, app_client: Arc<FakeAppClient>) -> 
     ))
 }
 
+fn test_signer() -> Arc<dyn Signer> {
+    Arc::new(LocalSigner::generate("test-signer"))
+}
+
 async fn post_claim(connector: Arc<Connector>, claim_json: &str) -> (StatusCode, Bytes) {
-    let app = router(connector);
+    let app = router(connector, test_signer());
     let request = Request::builder()
         .method("POST")
         .uri("/ilp")
