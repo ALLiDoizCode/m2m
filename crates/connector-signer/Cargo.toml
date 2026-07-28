@@ -4,6 +4,17 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Exposes `giftwrap::seal_request_with_randomness`/`seal_response_with_randomness`
+# outside this crate's own tests -- both take the AEAD nonce and shared secret
+# as caller-supplied arguments, and reusing a (key, nonce) pair under
+# ChaCha20-Poly1305 is catastrophic, so they stay out of this crate's ordinary
+# public surface. `connector-vectors` (issue #527/#587) is the one real
+# consumer: vector generation needs the real sealing logic to reproduce
+# exactly what a genuine seal produces for a fixed fixture, not a second
+# implementation of it.
+test-util = []
+
 [dependencies]
 libsecp256k1 = "0.6"
 sha2 = "0.10"
@@ -16,3 +27,6 @@ hkdf = "0.12"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"

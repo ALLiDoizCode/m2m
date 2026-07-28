@@ -1245,12 +1245,24 @@ dependencies = [
  "ed25519-dalek",
  "hkdf",
  "libsecp256k1",
+ "proptest",
  "rand 0.7.3",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sha3",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "connector-vectors"
+version = "0.1.0"
+dependencies = [
+ "connector-domain",
+ "connector-signer",
+ "hex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -74,10 +74,13 @@ fn hkdf_key(shared_secret: &[u8; 32], info: &[u8]) -> [u8; 32] {
     okm
 }
 
-fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+/// Encrypt with an explicit AEAD nonce rather than drawing one from
+/// [`OsRng`] internally -- both [`seal_request_with_randomness`] and
+/// [`seal_response_with_randomness`] call this directly (their [`OsRng`]-
+/// drawing counterparts generate a nonce and delegate), so there is exactly
+/// one place this module turns a key and plaintext into a ciphertext.
+fn encrypt_with_nonce(key: &[u8; 32], plaintext: &[u8], nonce_bytes: [u8; NONCE_LEN]) -> Vec<u8> {
     let cipher = ChaCha20Poly1305::new(&Key::from(*key));
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
     let ciphertext = cipher
         .encrypt(&Nonce::from(nonce_bytes), plaintext)
         .expect("chacha20poly1305 encryption of a bounded packet payload cannot fail");
@@ -109,36 +112,88 @@ pub fn seal_request(
     plaintext: &[u8],
     receiver_public: &PublicKeyBytes,
 ) -> Result<(Vec<u8>, [u8; 32]), GiftWrapError> {
+    let mut ephemeral_secret_bytes = [0u8; 32];
+    loop {
+        OsRng.fill_bytes(&mut ephemeral_secret_bytes);
+        if SecretKey::parse(&ephemeral_secret_bytes).is_ok() {
+            break;
+        }
+    }
+
+    let mut shared_secret = [0u8; SECRET_LEN];
+    OsRng.fill_bytes(&mut shared_secret);
+
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+
+    let wrapped = seal_request_with_randomness_impl(
+        plaintext,
+        receiver_public,
+        &ephemeral_secret_bytes,
+        &shared_secret,
+        &nonce_bytes,
+    )?;
+
+    Ok((wrapped, shared_secret))
+}
+
+/// The deterministic core [`seal_request`] wraps, parameterized on the
+/// ephemeral key, shared secret and AEAD nonce it would otherwise draw from
+/// [`OsRng`]. Gated behind the `test-util` feature (issue #587): reusing a
+/// (key, nonce) pair under ChaCha20-Poly1305 is catastrophic, so a caller-
+/// supplied nonce/shared-secret is a footgun this crate does not hand out on
+/// its ordinary public surface. `connector-vectors` (issue #527) is the
+/// sanctioned consumer -- it needs this module's own sealing logic to
+/// reproduce exactly what a genuine seal produces for a fixed fixture,
+/// instead of a second implementation of it that could drift from this one.
+/// `ephemeral_secret_bytes` must parse as a valid secp256k1 scalar --
+/// [`seal_request`] retries internally until it draws one; a caller that
+/// already controls its own fixture is expected to pick one that parses.
+#[cfg(any(test, feature = "test-util"))]
+pub fn seal_request_with_randomness(
+    plaintext: &[u8],
+    receiver_public: &PublicKeyBytes,
+    ephemeral_secret_bytes: &[u8; 32],
+    shared_secret: &[u8; SECRET_LEN],
+    nonce_bytes: &[u8; NONCE_LEN],
+) -> Result<Vec<u8>, GiftWrapError> {
+    seal_request_with_randomness_impl(
+        plaintext,
+        receiver_public,
+        ephemeral_secret_bytes,
+        shared_secret,
+        nonce_bytes,
+    )
+}
+
+fn seal_request_with_randomness_impl(
+    plaintext: &[u8],
+    receiver_public: &PublicKeyBytes,
+    ephemeral_secret_bytes: &[u8; 32],
+    shared_secret: &[u8; SECRET_LEN],
+    nonce_bytes: &[u8; NONCE_LEN],
+) -> Result<Vec<u8>, GiftWrapError> {
     let receiver_public =
         PublicKey::parse(receiver_public).map_err(|_| GiftWrapError::InvalidKey)?;
-
-    let mut ephemeral_secret_bytes = [0u8; 32];
-    let ephemeral_secret = loop {
-        OsRng.fill_bytes(&mut ephemeral_secret_bytes);
-        if let Ok(key) = SecretKey::parse(&ephemeral_secret_bytes) {
-            break key;
-        }
-    };
+    let ephemeral_secret =
+        SecretKey::parse(ephemeral_secret_bytes).map_err(|_| GiftWrapError::InvalidKey)?;
     let ephemeral_public = PublicKey::from_secret_key(&ephemeral_secret);
 
     let ecdh_secret =
         ecdh_x_coordinate(&ephemeral_secret, &receiver_public).ok_or(GiftWrapError::InvalidKey)?;
     let aead_key = hkdf_key(&ecdh_secret, REQUEST_INFO);
 
-    let mut shared_secret = [0u8; SECRET_LEN];
-    OsRng.fill_bytes(&mut shared_secret);
-
     let mut inner = Vec::with_capacity(SECRET_LEN + plaintext.len());
-    inner.extend_from_slice(&shared_secret);
+    inner.extend_from_slice(shared_secret);
     inner.extend_from_slice(plaintext);
-    let ciphertext = encrypt(&aead_key, &inner);
+    let ciphertext = encrypt_with_nonce(&aead_key, &inner, *nonce_bytes);
 
     let mut out = Vec::with_capacity(1 + PUBLIC_KEY_LEN + ciphertext.len());
     out.push(TYPE_GIFTWRAP_REQUEST);
     out.extend_from_slice(&ephemeral_public.serialize());
     out.extend_from_slice(&ciphertext);
 
-    Ok((out, shared_secret))
+    Ok(out)
 }
 
 /// Open a sealed request addressed to `signer`'s active identity key,
@@ -184,8 +239,33 @@ pub fn open_request(
 /// exchange. Returns the wire bytes to carry as `Fulfill.data`, or as
 /// `Reject.data` for a reject raised at the termination.
 pub fn seal_response(shared_secret: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    seal_response_with_randomness_impl(shared_secret, plaintext, &nonce_bytes)
+}
+
+/// The deterministic core [`seal_response`] wraps, parameterized on the AEAD
+/// nonce it would otherwise draw from [`OsRng`] -- the response-direction
+/// counterpart to [`seal_request_with_randomness`], for the same reason
+/// (issue #527's vector generation). Gated behind the `test-util` feature
+/// (issue #587) for the same footgun reason: see
+/// [`seal_request_with_randomness`]'s doc comment.
+#[cfg(any(test, feature = "test-util"))]
+pub fn seal_response_with_randomness(
+    shared_secret: &[u8; 32],
+    plaintext: &[u8],
+    nonce_bytes: &[u8; NONCE_LEN],
+) -> Vec<u8> {
+    seal_response_with_randomness_impl(shared_secret, plaintext, nonce_bytes)
+}
+
+fn seal_response_with_randomness_impl(
+    shared_secret: &[u8; 32],
+    plaintext: &[u8],
+    nonce_bytes: &[u8; NONCE_LEN],
+) -> Vec<u8> {
     let aead_key = hkdf_key(shared_secret, RESPONSE_INFO);
-    let ciphertext = encrypt(&aead_key, plaintext);
+    let ciphertext = encrypt_with_nonce(&aead_key, plaintext, *nonce_bytes);
     let mut out = Vec::with_capacity(1 + ciphertext.len());
     out.push(TYPE_GIFTWRAP_RESPONSE);
     out.extend_from_slice(&ciphertext);
@@ -231,6 +311,7 @@ pub fn looks_like_sealed_response(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::local::LocalSigner;
+    use proptest::prelude::*;
 
     #[test]
     fn a_sealed_request_opens_with_the_receivers_signer() {
@@ -379,5 +460,38 @@ mod tests {
             derive_fulfillment(&sender_secret),
             derive_fulfillment(&recovered_secret)
         );
+    }
+
+    proptest! {
+        /// Issue #524's round-trip property, generalized past the fixed
+        /// byte strings the worked examples above use: sealing any
+        /// plaintext to a receiver's public key and opening it with that
+        /// receiver's own signer recovers exactly that plaintext, whatever
+        /// it is.
+        #[test]
+        fn any_plaintext_round_trips_through_seal_and_open_request(
+            plaintext in proptest::collection::vec(any::<u8>(), 0..256)
+        ) {
+            let receiver = LocalSigner::generate("receiver");
+            let (sealed, shared_secret) =
+                seal_request(&plaintext, &receiver.public_key().unwrap()).unwrap();
+            let (opened, opened_secret) = open_request(&sealed, &receiver).unwrap();
+
+            prop_assert_eq!(opened, plaintext);
+            prop_assert_eq!(opened_secret, shared_secret);
+        }
+
+        /// Same property, response direction: any plaintext sealed under a
+        /// shared secret opens with that same secret to exactly itself.
+        #[test]
+        fn any_plaintext_round_trips_through_seal_and_open_response(
+            secret in proptest::array::uniform32(any::<u8>()),
+            plaintext in proptest::collection::vec(any::<u8>(), 0..256)
+        ) {
+            let sealed = seal_response(&secret, &plaintext);
+            let opened = open_response(&secret, &sealed).unwrap();
+
+            prop_assert_eq!(opened, plaintext);
+        }
     }
 }
