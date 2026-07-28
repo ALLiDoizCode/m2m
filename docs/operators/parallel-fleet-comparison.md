@@ -1,5 +1,22 @@
 # What the two fleets actually did, side by side
 
+> **Closed record — there is no second run, and this is not an open defect.**
+>
+> [ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md) abandons the parallel-fleet
+> comparison: the TypeScript connector is a prototype rather than a reference implementation, so
+> there is nothing for the Rust fleet to be identical to, and a divergence count measures
+> convergence on a wire we have decided not to build. The harness that produced this, its binary
+> target and its integration test are deleted (#518), along with the `infra/fleet-compare-packets.json`
+> specs it read.
+>
+> The findings below are kept deliberately, because they are why several of the ADRs exist —
+> they are the evidence that the prototype's quirks are defects rather than contract. Read the
+> "next run" language throughout as describing a run that will not happen. ADR 0013's parallel
+> address space survives as a _migration_ mechanism; only its role as a measured-parity gate is
+> withdrawn. Under [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) the successor
+> artefact is a committed set of vectors generated from property tests, replayed by every client
+> SDK — a definition of done rather than a measurement.
+
 Recorded from the first deployment of the Rust fleet to devnet (#492, parent #431). ADR 0013
 keeps the TypeScript fleet running specifically so behaviour can be compared "under identical
 conditions rather than against memory"; this is that comparison's first result, and it did not
