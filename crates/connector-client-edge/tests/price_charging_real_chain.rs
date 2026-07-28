@@ -40,7 +40,6 @@ use connector_signer::{
 
 use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 
-const FULFILLMENT: [u8; 32] = [7u8; 32];
 const HANDLER_URL: &str = "http://localhost:4000";
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
 const CHAIN_ID: u64 = 8453;
@@ -54,7 +53,9 @@ fn test_clock() -> Arc<TestClock> {
 
 /// Per ADR 0018/issue #524, a `Prepare`'s `data` is a gift wrap sealed to
 /// the terminating connector's identity key, opened above the `AppClient`
-/// boundary (issue #521).
+/// boundary (issue #521). `execution_condition` is set to match the
+/// fulfilment this same sealed secret derives (ADR 0019, issue #525) --
+/// what a genuine sender does before ever transmitting a packet.
 fn sealed_sample_prepare(receiver_public: &connector_signer::PublicKeyBytes) -> Prepare {
     let plaintext = EnvelopeRequest {
         method: "POST".to_string(),
@@ -63,11 +64,13 @@ fn sealed_sample_prepare(receiver_public: &connector_signer::PublicKeyBytes) -> 
         body: b"hello app".to_vec(),
     }
     .encode();
-    let (data, _shared_secret) = seal_request(&plaintext, receiver_public).expect("seal");
+    let (data, shared_secret) = seal_request(&plaintext, receiver_public).expect("seal");
     Prepare {
         amount: 0,
         expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-        execution_condition: derive_condition(&FULFILLMENT),
+        execution_condition: derive_condition(&connector_signer::giftwrap::derive_fulfillment(
+            &shared_secret,
+        )),
         destination: "g.example.app".to_string(),
         data,
     }
@@ -153,13 +156,7 @@ fn deliverable_connector(
         AppOutcome::Answered {
             response: EnvelopeResponse {
                 status: 200,
-                headers: vec![(
-                    "TOON-Fulfillment".to_string(),
-                    FULFILLMENT
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                )],
+                headers: vec![],
                 body: b"ok".to_vec(),
             },
         },
