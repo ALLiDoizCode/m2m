@@ -4,12 +4,15 @@
 //! ILP address validation (RFC-0015), longest-prefix route selection,
 //! flat per-packet fee / minimum-delivery arithmetic (ADR 0010),
 //! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),
-//! and claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423).
+//! claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423), and the
+//! structured envelope a packet carries to and from the app behind a
+//! terminating connector (ADR 0018, issue #519).
 
 mod address;
 mod claim;
 pub mod client_claim;
 mod condition;
+mod envelope;
 mod error;
 mod fee;
 mod oer;
@@ -22,6 +25,7 @@ pub use claim::{advance_watermark, claim_digest, validate_claim, ClaimError, Wat
 pub use condition::{
     condition_is_present, derive_condition, fulfillment_matches_condition, is_expired,
 };
+pub use envelope::{EnvelopeError, EnvelopeRequest, EnvelopeResponse};
 pub use error::PacketError;
 pub use fee::amount_after_fee;
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
