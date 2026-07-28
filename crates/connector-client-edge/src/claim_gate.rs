@@ -221,12 +221,7 @@ fn verify_evm_claim_signature(claim: &EvmClientClaim) -> bool {
     let Some(expected_signer) = decode_hex_bytes::<20>(&claim.signer_address) else {
         return false;
     };
-    let Ok(signature) = hex::decode(
-        claim
-            .signature
-            .strip_prefix("0x")
-            .unwrap_or(&claim.signature),
-    ) else {
+    let Some(signature) = decode_hex_bytes::<65>(&claim.signature) else {
         return false;
     };
 
