@@ -35,7 +35,7 @@ use crate::route::{LeasedRoute, PeerRoute};
 /// removed from the response envelope handed back to the client, since it
 /// is a private signal between the connector and its app rather than
 /// content the client asked for.
-const FULFILLMENT_HEADER: &str = "TOON-Fulfillment";
+pub(crate) const FULFILLMENT_HEADER: &str = "TOON-Fulfillment";
 
 /// Decode a lowercase-or-uppercase 64-character hex string into 32 bytes.
 /// Any malformed value (wrong length, non-hex characters) is treated the
@@ -1033,85 +1033,19 @@ mod tests {
     use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
     use crate::peer_transport::{InProcessPeerTransport, PeerTransport};
+    use crate::test_support::{
+        answered, answered_with_status, envelope_request_data, fulfill_data,
+        fulfill_data_with_status,
+    };
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
-    use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse};
+    use connector_domain::derive_condition;
 
     /// A fixed, non-zero preimage and the condition it derives -- used
     /// throughout so an `Answered` outcome's claimed fulfillment genuinely
     /// verifies against the packet's execution condition rather than the
     /// old hardcoded-zero stand-in (issue #417).
     const FULFILLMENT: [u8; 32] = [7u8; 32];
-
-    /// What a `Prepare`'s `data` carries per ADR 0018/issue #519: a
-    /// structured envelope, still plaintext at this point (sealing is
-    /// issue #524). A minimal `POST /` envelope around `body`, used
-    /// throughout so tests that don't care about the envelope's own
-    /// method/target/headers still exercise a real decode rather than a
-    /// raw opaque payload the old pre-#521 delivery path used.
-    fn envelope_request_data(body: &[u8]) -> Vec<u8> {
-        EnvelopeRequest {
-            method: "POST".to_string(),
-            target: "/".to_string(),
-            headers: vec![],
-            body: body.to_vec(),
-        }
-        .encode()
-    }
-
-    /// Hex-encode `fulfillment` the way an app's `TOON-Fulfillment`
-    /// response header carries it (issue #417) -- the inverse of
-    /// `super::decode_fulfillment_header`.
-    fn encode_fulfillment_header(fulfillment: [u8; 32]) -> String {
-        fulfillment
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    }
-
-    /// The `AppOutcome` a `FakeAppClient` produces for an app that answers
-    /// `200` with `body`, optionally claiming `fulfillment` via the
-    /// `TOON-Fulfillment` response header (issue #417's still-standing
-    /// mechanism, until #525 derives a fulfilment from a sealed secret
-    /// instead).
-    fn answered(body: &[u8], fulfillment: Option<[u8; 32]>) -> AppOutcome {
-        answered_with_status(200, body, fulfillment)
-    }
-
-    fn answered_with_status(status: u16, body: &[u8], fulfillment: Option<[u8; 32]>) -> AppOutcome {
-        let headers = fulfillment
-            .map(|fulfillment| {
-                vec![(
-                    FULFILLMENT_HEADER.to_string(),
-                    encode_fulfillment_header(fulfillment),
-                )]
-            })
-            .unwrap_or_default();
-        AppOutcome::Answered {
-            response: EnvelopeResponse {
-                status,
-                headers,
-                body: body.to_vec(),
-            },
-        }
-    }
-
-    /// The exact `Fulfill.data` bytes `handle_prepare` produces for an app
-    /// answering `200` with `body` -- a response envelope, with
-    /// `TOON-Fulfillment` (if any) stripped before it reaches the client
-    /// (issue #521), so this never takes a fulfillment argument.
-    fn fulfill_data(body: &[u8]) -> Vec<u8> {
-        fulfill_data_with_status(200, body)
-    }
-
-    fn fulfill_data_with_status(status: u16, body: &[u8]) -> Vec<u8> {
-        EnvelopeResponse {
-            status,
-            headers: vec![],
-            body: body.to_vec(),
-        }
-        .encode()
-    }
 
     fn condition() -> [u8; 32] {
         derive_condition(&FULFILLMENT)

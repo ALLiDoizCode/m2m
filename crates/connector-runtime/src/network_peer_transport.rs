@@ -463,58 +463,16 @@ async fn serve_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_client::{AppOutcome, FakeAppClient};
+    use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
     use crate::peer_transport::InProcessPeerTransport;
+    use crate::test_support::{answered, envelope_request_data, fulfill_data};
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse};
+    use connector_domain::derive_condition;
     use connector_signer::{LocalSigner, Signer};
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
-
-    /// What a `Prepare`'s `data` carries per ADR 0018/issue #519 -- a
-    /// structured envelope, still plaintext at this point.
-    fn envelope_request_data(body: &[u8]) -> Vec<u8> {
-        EnvelopeRequest {
-            method: "POST".to_string(),
-            target: "/".to_string(),
-            headers: vec![],
-            body: body.to_vec(),
-        }
-        .encode()
-    }
-
-    /// The `AppOutcome` a `FakeAppClient` produces for an app that answers
-    /// `200` claiming `fulfillment` via the `TOON-Fulfillment` response
-    /// header (issue #417, until #525 derives it instead).
-    fn answered(body: &[u8], fulfillment: [u8; 32]) -> AppOutcome {
-        AppOutcome::Answered {
-            response: EnvelopeResponse {
-                status: 200,
-                headers: vec![(
-                    "TOON-Fulfillment".to_string(),
-                    fulfillment
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                )],
-                body: body.to_vec(),
-            },
-        }
-    }
-
-    /// The exact `Fulfill.data` bytes for the same inputs `answered` above
-    /// configures a `FakeAppClient` with -- a response envelope, with
-    /// `TOON-Fulfillment` stripped before it reaches the client.
-    fn fulfill_data(body: &[u8]) -> Vec<u8> {
-        EnvelopeResponse {
-            status: 200,
-            headers: vec![],
-            body: body.to_vec(),
-        }
-        .encode()
-    }
 
     fn prepare(destination: &str) -> Prepare {
         Prepare {
@@ -629,7 +587,7 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
             route.handler_url(),
-            answered(b"delivered by the peer", FULFILLMENT),
+            answered(b"delivered by the peer", Some(FULFILLMENT)),
         );
         let peer = Arc::new(Connector::new(
             vec![route],
@@ -798,7 +756,7 @@ mod tests {
     async fn reconnects_to_a_peer_that_becomes_reachable_again_without_operator_action() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(route.handler_url(), answered(b"first", FULFILLMENT));
+        app_client.respond(route.handler_url(), answered(b"first", Some(FULFILLMENT)));
         let peer = Arc::new(Connector::new(
             vec![route.clone()],
             vec![],
@@ -835,7 +793,7 @@ mod tests {
             other => panic!("expected a reject while the peer is down, got {other:?}"),
         }
 
-        app_client.respond(route.handler_url(), answered(b"second", FULFILLMENT));
+        app_client.respond(route.handler_url(), answered(b"second", Some(FULFILLMENT)));
         let _server_again = PeerWireServer::bind(addr, peer).await.unwrap();
 
         let (after_recovery, _, _) = transport
