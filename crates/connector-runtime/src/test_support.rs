@@ -13,10 +13,10 @@ use std::sync::{Arc, OnceLock};
 
 use connector_domain::{EnvelopeRequest, EnvelopeResponse};
 use connector_signer::giftwrap::{open_response, seal_request};
-use connector_signer::{evm_balance_proof_digest, Address, EvmBalanceProof, LocalSigner, Signer};
+use connector_signer::{evm_balance_proof_digest, Address, LocalSigner, Signer};
 
 use crate::app_client::AppOutcome;
-use crate::claim::{ChannelDomain, WireClaim};
+use crate::claim::{evm_proof, parse_channel_id, ChannelDomain, WireClaim};
 use crate::connector::{Connector, FULFILLMENT_HEADER};
 
 /// This crate's one shared "this connector's own identity" fixture: every
@@ -175,20 +175,11 @@ pub(crate) fn sign_wire_claim(
     nonce: u64,
     cumulative_amount: u64,
 ) -> WireClaim {
-    let mut on_chain_id = [0u8; 32];
-    on_chain_id[31] = n;
-    let domain = test_channel_domain();
-    let proof = EvmBalanceProof {
-        channel_id: on_chain_id,
-        nonce,
-        transferred_amount: u128::from(cumulative_amount),
-        locked_amount: 0,
-        locks_root: [0u8; 32],
-        chain_id: domain.chain_id,
-        token_network_address: domain.token_network_address,
-    };
+    let channel_id = test_channel_id(n);
+    let on_chain_id = parse_channel_id(&channel_id).expect("test_channel_id(n) is valid");
+    let proof = evm_proof(on_chain_id, test_channel_domain(), nonce, cumulative_amount);
     WireClaim {
-        channel_id: test_channel_id(n),
+        channel_id,
         nonce,
         cumulative_amount,
         signature: signer
