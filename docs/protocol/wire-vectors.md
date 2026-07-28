@@ -10,10 +10,15 @@ acceptance criterion. A disagreement between this text and the vectors is a bug 
 ## Scope
 
 This covers the **client edge** termination wire (issue #498): the structured envelope
-(`connector_domain::envelope`), the gift wrap sealing it (`connector_signer::giftwrap`), and the
-fulfilment a terminating connector derives from it (ADR 0019). It does not cover the **peer wire**
-(`docs/protocol/peer-wire-spec.md`) — that wire is operator-to-operator on both ends (ADR 0003),
-already normative prose for a different reason, and out of this issue's scope.
+(`connector_domain::envelope`), the gift wrap sealing it (`connector_signer::giftwrap`), the
+fulfilment a terminating connector derives from it (ADR 0019), and the EIP-712 `BalanceProof`
+claim-signing scheme (`connector_signer::claim_signature`, ADR 0024). The claim scheme is included
+even though it is also what the **peer wire**'s claim exchange uses (`docs/protocol/
+peer-wire-spec.md` §3.5) — `connector_signer::claim_signature` is one implementation shared by
+both wires, not two, and a client-edge claim (`client-edge-spec.md` §1.3 step 4) is checked against
+exactly the same digest. Nothing else about the peer wire is in scope here: it is
+operator-to-operator on both ends (ADR 0003), already normative prose for a different reason, and
+the rest of it is out of this issue's scope.
 
 ## Invariants
 
@@ -73,14 +78,31 @@ holds for any secret, and
 to a genuine `seal_request`/`open_request` pair rather than to a secret handed to both sides out
 of band.
 
+### 5. A claim's EIP-712 `BalanceProof` digest recovers to its signer, under its own domain
+
+`connector_signer::claim_signature::evm_balance_proof_digest` is deterministic for the same
+fields, and `verify_evm_balance_proof` accepts a signature over that digest only from the address
+that actually produced it — changing any one field (`channel_id`, `nonce`, `transferred_amount`,
+`chain_id`, or `token_network_address`) invalidates a prior signature rather than being silently
+tolerated. This is the scheme both the peer wire (`ClaimBook::accept_inbound`) and the client edge
+(`client-edge-spec.md` §1.3 step 4) check a claim's signature against, replacing a SHA-256 tuple
+(`connector_domain::claim_digest`, removed by #575/#583) that no chain ever verified.
+
+Held open by `connector-signer`'s `claim_signature::tests` module:
+`a_genuine_evm_signature_verifies_against_its_signers_address`,
+`an_evm_signature_does_not_verify_against_a_different_partys_address`,
+`changing_any_evm_proof_field_invalidates_a_prior_signature` (covers every field, including the
+domain's `chain_id`/`token_network_address`), and `the_evm_digest_is_deterministic`.
+
 ## Generation
 
 `crates/connector-vectors` builds the committed set from **fixed literal fixtures** — hardcoded
 keys, secrets, nonces and payloads, not values sampled anew each run — and self-verifies each
 entry against the same functions these invariants name (an envelope vector is decoded back and
 compared before being serialized; a giftwrap vector is opened back with the receiver's own signer;
-a fulfilment vector's condition is checked against `fulfillment_matches_condition`) before writing
-it out. Regenerating (`cargo run -p connector-vectors --bin generate-vectors`) against an
+a fulfilment vector's condition is checked against `fulfillment_matches_condition`; a claim
+vector's signature is checked against `verify_evm_balance_proof`) before writing it out.
+Regenerating (`cargo run -p connector-vectors --bin generate-vectors`) against an
 unchanged implementation is therefore a no-op — same fixtures through the same code always produce
 the same data — and `cargo test -p connector-vectors` is the gate: it regenerates the set in
 memory and fails if its _data_ (compared as parsed JSON, not raw bytes — this repo's pre-commit
