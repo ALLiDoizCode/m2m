@@ -296,6 +296,21 @@ mod tests {
         }
     }
 
+    /// A `Prepare` addressed to `"g.example.app"`, sealed to
+    /// [`identity_signer`]'s identity and carrying `body` (issue #524).
+    /// Returns the shared secret alongside, to open the sealed
+    /// `Fulfill`/termination-`Reject` this produces.
+    fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
+        let (data, shared_secret) = sealed_envelope_request_data(body);
+        (
+            Prepare {
+                data,
+                ..prepare("g.example.app")
+            },
+            shared_secret,
+        )
+    }
+
     fn test_clock() -> Arc<TestClock> {
         Arc::new(TestClock::new(
             Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
@@ -322,19 +337,9 @@ mod tests {
         );
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let (response, ack, reached) = transport
-            .forward(
-                "peer-b",
-                Prepare {
-                    data,
-                    ..prepare("g.example.app")
-                },
-                0,
-                None,
-            )
-            .await;
+        let (response, ack, reached) = transport.forward("peer-b", sealed, 0, None).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -543,19 +548,9 @@ mod tests {
             ));
 
             let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
-            let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let (response, _ack, reached) = transport
-                .forward(
-                    "peer-b",
-                    Prepare {
-                        data,
-                        ..prepare("g.example.app")
-                    },
-                    0,
-                    None,
-                )
-                .await;
+            let (response, _ack, reached) = transport.forward("peer-b", sealed, 0, None).await;
             match response {
                 PacketResponse::Fulfill(fulfill) => {
                     assert_eq!(fulfill.fulfillment, FULFILLMENT);

@@ -1200,6 +1200,28 @@ mod tests {
         }
     }
 
+    /// `prepare("g.example.app", ..)` with `data` overwritten by an
+    /// already-sealed `data` -- every termination test in this module
+    /// addresses `"g.example.app"` and only cares that `data` itself is
+    /// shaped correctly, since `prepare()`'s own plaintext `data` never
+    /// survives past this override.
+    fn prepare_with_data(data: Vec<u8>) -> Prepare {
+        Prepare {
+            data,
+            ..prepare("g.example.app", b"unused")
+        }
+    }
+
+    /// A `Prepare` sealed to [`identity_signer`]'s identity and carrying
+    /// `body` (issue #524) -- the common case for a test that drives
+    /// `Connector::handle_prepare` directly rather than through the HTTP
+    /// router. Returns the shared secret alongside, to open the sealed
+    /// `Fulfill`/termination-`Reject` this produces.
+    fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
+        let (data, shared_secret) = sealed_envelope_request_data(body);
+        (prepare_with_data(data), shared_secret)
+    }
+
     fn test_clock() -> Arc<TestClock> {
         Arc::new(TestClock::new(
             Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
@@ -1231,17 +1253,9 @@ mod tests {
         );
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client.clone(), clock);
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello app");
+        let (sealed, shared_secret) = sealed_prepare(b"hello app");
 
-        let response = connector
-            .handle_prepare(
-                Prepare {
-                    data,
-                    ..prepare("g.example.app", b"unused")
-                },
-                0,
-            )
-            .await;
+        let response = connector.handle_prepare(sealed, 0).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -1408,17 +1422,9 @@ mod tests {
         );
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector
-            .handle_prepare(
-                Prepare {
-                    data,
-                    ..prepare("g.example.app", b"unused")
-                },
-                0,
-            )
-            .await;
+        let response = connector.handle_prepare(sealed, 0).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -1534,17 +1540,9 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         );
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop
-            .handle_prepare(
-                Prepare {
-                    data,
-                    ..prepare("g.example.app", b"unused")
-                },
-                0,
-            )
-            .await;
+        let response = first_hop.handle_prepare(sealed, 0).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -1697,17 +1695,9 @@ mod tests {
             test_clock(),
         )
         .with_identity_signer(identity_signer());
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector
-            .handle_prepare(
-                Prepare {
-                    data,
-                    ..prepare("g.example.app", b"unused")
-                },
-                0,
-            )
-            .await;
+        let response = connector.handle_prepare(sealed, 0).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -1750,17 +1740,9 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         );
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop
-            .handle_prepare(
-                Prepare {
-                    data,
-                    ..prepare("g.example.app", b"unused")
-                },
-                0,
-            )
-            .await;
+        let response = first_hop.handle_prepare(sealed, 0).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -1901,17 +1883,9 @@ mod tests {
         first_hop
             .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
             .unwrap();
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop
-            .handle_prepare(
-                Prepare {
-                    data,
-                    ..prepare("g.example.app", b"unused")
-                },
-                0,
-            )
-            .await;
+        let response = first_hop.handle_prepare(sealed, 0).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -2028,17 +2002,9 @@ mod tests {
         connector
             .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
             .unwrap();
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector
-            .handle_prepare(
-                Prepare {
-                    data,
-                    ..prepare("g.example.app", b"unused")
-                },
-                0,
-            )
-            .await;
+        let response = connector.handle_prepare(sealed, 0).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -3038,17 +3004,9 @@ mod tests {
             )
             .with_identity_signer(wrong_identity);
             // Sealed to `identity_signer()`, not `wrong_identity` above.
-            let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
+            let (sealed, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector
-                .handle_prepare(
-                    Prepare {
-                        data,
-                        ..prepare("g.example.app", b"unused")
-                    },
-                    0,
-                )
-                .await;
+            let response = connector.handle_prepare(sealed, 0).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -3077,13 +3035,7 @@ mod tests {
             // Garbage bytes: not shaped like a gift wrap at all, so it never
             // opens.
             let unopenable = connector
-                .handle_prepare(
-                    Prepare {
-                        data: vec![0xff; 40],
-                        ..prepare("g.example.app", b"unused")
-                    },
-                    0,
-                )
+                .handle_prepare(prepare_with_data(vec![0xff; 40]), 0)
                 .await;
             match unopenable {
                 PacketResponse::Reject(reject) => {
@@ -3101,13 +3053,7 @@ mod tests {
             )
             .unwrap();
             let malformed = connector
-                .handle_prepare(
-                    Prepare {
-                        data: malformed_envelope,
-                        ..prepare("g.example.app", b"unused")
-                    },
-                    0,
-                )
+                .handle_prepare(prepare_with_data(malformed_envelope), 0)
                 .await;
             match malformed {
                 PacketResponse::Reject(reject) => {
@@ -3132,17 +3078,9 @@ mod tests {
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(route.handler_url(), answered(b"app said yes", None));
             let connector = connector_with(vec![route], app_client, test_clock());
-            let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector
-                .handle_prepare(
-                    Prepare {
-                        data,
-                        ..prepare("g.example.app", b"unused")
-                    },
-                    0,
-                )
-                .await;
+            let response = connector.handle_prepare(sealed, 0).await;
 
             match response {
                 PacketResponse::Reject(reject) => {

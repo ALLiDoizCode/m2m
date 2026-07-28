@@ -488,6 +488,21 @@ mod tests {
         }
     }
 
+    /// A `Prepare` addressed to `"g.example.app"`, sealed to
+    /// [`identity_signer`]'s identity and carrying `body` (issue #524).
+    /// Returns the shared secret alongside, to open the sealed
+    /// `Fulfill`/termination-`Reject` this produces.
+    fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
+        let (data, shared_secret) = sealed_envelope_request_data(body);
+        (
+            Prepare {
+                data,
+                ..prepare("g.example.app")
+            },
+            shared_secret,
+        )
+    }
+
     fn test_clock() -> Arc<TestClock> {
         Arc::new(TestClock::new(
             Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
@@ -606,19 +621,9 @@ mod tests {
 
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", server.local_addr());
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let (response, ack, reached) = transport
-            .forward(
-                "peer-b",
-                Prepare {
-                    data,
-                    ..prepare("g.example.app")
-                },
-                0,
-                None,
-            )
-            .await;
+        let (response, ack, reached) = transport.forward("peer-b", sealed, 0, None).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -792,19 +797,9 @@ mod tests {
 
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", addr);
-        let (first_data, first_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, first_secret) = sealed_prepare(b"hello");
 
-        let (first, _, _) = transport
-            .forward(
-                "peer-b",
-                Prepare {
-                    data: first_data,
-                    ..prepare("g.example.app")
-                },
-                0,
-                None,
-            )
-            .await;
+        let (first, _, _) = transport.forward("peer-b", sealed, 0, None).await;
         match first {
             PacketResponse::Fulfill(fulfill) => {
                 assert_eq!(fulfill.fulfillment, FULFILLMENT);
@@ -828,19 +823,9 @@ mod tests {
 
         app_client.respond(route.handler_url(), answered(b"second", Some(FULFILLMENT)));
         let _server_again = PeerWireServer::bind(addr, peer).await.unwrap();
-        let (second_data, second_secret) = sealed_envelope_request_data(b"hello");
+        let (sealed, second_secret) = sealed_prepare(b"hello");
 
-        let (after_recovery, _, _) = transport
-            .forward(
-                "peer-b",
-                Prepare {
-                    data: second_data,
-                    ..prepare("g.example.app")
-                },
-                0,
-                None,
-            )
-            .await;
+        let (after_recovery, _, _) = transport.forward("peer-b", sealed, 0, None).await;
         match after_recovery {
             PacketResponse::Fulfill(fulfill) => {
                 assert_eq!(fulfill.fulfillment, FULFILLMENT);
