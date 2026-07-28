@@ -21,6 +21,7 @@ mod address;
 mod claim_signature;
 mod crypto;
 mod error;
+pub mod giftwrap;
 mod kms;
 mod local;
 pub mod nip59;
@@ -33,6 +34,7 @@ pub use claim_signature::{
     verify_solana_balance_proof, EvmBalanceProof,
 };
 pub use error::{SignerError, TreasuryError};
+pub use giftwrap::GiftWrapError;
 pub use kms::{InMemoryKmsBackend, KmsBackend, KmsSigner};
 pub use local::LocalSigner;
 pub use nip59::{unwrap_claim, wrap_claim, Nip59Error, WrappedClaim};

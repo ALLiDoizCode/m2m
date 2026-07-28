@@ -3,6 +3,22 @@ use rand::rngs::OsRng;
 
 use crate::signer::{PublicKeyBytes, Signature};
 
+/// The raw ECDH X-coordinate of `secret * public` -- shared by every ECDH
+/// consumer in this crate ([`crate::nip59`]'s claim wrap, and
+/// [`crate::signer::Signer::ecdh`]'s key agreement) so both use the same
+/// scalar multiplication (`libsecp256k1::PublicKey::tweak_mul_assign`)
+/// rather than `libsecp256k1::SharedSecret`'s digest-mixing variant. `None`
+/// on a public key that fails to combine with `secret` (out-of-range or the
+/// point at infinity).
+pub(crate) fn ecdh_x_coordinate(secret: &SecretKey, public: &PublicKey) -> Option<[u8; 32]> {
+    let mut point = *public;
+    point.tweak_mul_assign(secret).ok()?;
+    let compressed = point.serialize_compressed();
+    let mut x = [0u8; 32];
+    x.copy_from_slice(&compressed[1..]);
+    Some(x)
+}
+
 /// Generate a fresh secp256k1 key pair, shared by every [`crate::Signer`]
 /// implementation that mints its own keys (local generation and the
 /// in-memory KMS fake alike).

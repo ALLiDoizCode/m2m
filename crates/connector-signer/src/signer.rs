@@ -71,6 +71,15 @@ pub trait Signer: Send + Sync {
     /// already holding a reference to this signer keep working: the next
     /// `sign` or `public_key` call simply observes the new key.
     fn rotate(&self) -> Result<String, SignerError>;
+
+    /// Derive the ECDH shared secret between this signer's active key and
+    /// `peer_public_key` (ADR 0018, issue #524): the operation a
+    /// terminating connector performs to open a gift wrap addressed to its
+    /// identity, and that a real key management service can perform without
+    /// the secret key ever leaving its boundary -- unlike [`Signer::sign`],
+    /// no digest is involved, so there is nothing here a caller supplies
+    /// beyond the peer's public key.
+    fn ecdh(&self, peer_public_key: &PublicKeyBytes) -> Result<[u8; 32], SignerError>;
 }
 
 /// Whether `signature` over `digest` was produced by the holder of

@@ -289,6 +289,19 @@ state, and is never pushed into a network unprompted.
   `404` when no locally-terminated route matches `destination` — this endpoint never fabricates a
   price for a route it does not serve.
 
+### 1.8 Sealing (issue #524)
+
+`Prepare.data` is a gift wrap (`connector_signer::giftwrap`), not a plaintext envelope: a sender
+seals a structured request envelope, plus a freshly generated shared secret, to the public key
+`GET /ilp/identity` (§1.7) reports — only the connector holding the matching private key can open
+it, so a forwarding hop sees opaque bytes rather than the method, target, headers or size of what
+crossed it ([ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)). The
+terminating connector seals its answer back with that same shared secret — no second exchange — on
+both `Fulfill.data` and a `Reject.data` raised at the termination; a reject raised short of the
+termination (no route, expiry, a ceiling) shares no secret with the sender and stays plaintext with
+empty `data`, which is how a sender tells the two apart. `accumulated_cost` is unaffected: it never
+rode inside `data` to begin with (§1.6), so nothing here changes how it travels.
+
 ## 2. What version 1 does not do
 
 Version 1 has no field or header identifying its own version. That is the gap §3 closes: version

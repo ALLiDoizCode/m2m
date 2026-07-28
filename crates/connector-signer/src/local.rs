@@ -3,7 +3,7 @@ use std::sync::RwLock;
 
 use libsecp256k1::{PublicKey, SecretKey};
 
-use crate::crypto::{generate_keypair, sign_digest};
+use crate::crypto::{ecdh_x_coordinate, generate_keypair, sign_digest};
 use crate::error::SignerError;
 use crate::signer::{PublicKeyBytes, Signature, Signer};
 
@@ -93,6 +93,12 @@ impl Signer for LocalSigner {
         guard.public = public;
         guard.key_id = new_id.clone();
         Ok(new_id)
+    }
+
+    fn ecdh(&self, peer_public_key: &PublicKeyBytes) -> Result<[u8; 32], SignerError> {
+        let peer_public = PublicKey::parse(peer_public_key).map_err(|_| SignerError::InvalidKey)?;
+        let guard = self.active.read().expect("LocalSigner lock poisoned");
+        ecdh_x_coordinate(&guard.secret, &peer_public).ok_or(SignerError::InvalidKey)
     }
 }
 

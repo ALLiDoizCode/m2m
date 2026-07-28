@@ -23,7 +23,7 @@ fn recovers_to_own_public_key(signer: &dyn Signer, digest: &[u8; 32]) {
     );
 }
 
-fn run_signer_contract(make_signer: impl FnOnce() -> Arc<dyn Signer>) {
+fn run_signer_contract(make_signer: impl Fn() -> Arc<dyn Signer>) {
     let signer = make_signer();
     let digest = [7u8; 32];
 
@@ -50,6 +50,24 @@ fn run_signer_contract(make_signer: impl FnOnce() -> Arc<dyn Signer>) {
     assert_eq!(signer.key_id(), new_key_id);
     assert_ne!(signer.public_key().expect("public key"), public_key_before);
     recovers_to_own_public_key(signer.as_ref(), &digest);
+
+    // Two independent signers derive the same shared secret from each
+    // other's public key (issue #524) -- ECDH's commutativity is the whole
+    // point of key agreement: neither side ever transmits the secret
+    // itself, only a public key.
+    let counterparty = make_signer();
+    let shared_from_signer = signer.ecdh(&counterparty.public_key().expect("public key"));
+    let shared_from_counterparty = counterparty.ecdh(&signer.public_key().expect("public key"));
+    assert_eq!(shared_from_signer, shared_from_counterparty);
+    let shared_from_signer = shared_from_signer.expect("ecdh");
+
+    // Rotation changes the derived secret too -- it depends on the active
+    // key, exactly like `sign`/`public_key` do.
+    signer.rotate().expect("rotate");
+    let shared_after_rotation = signer
+        .ecdh(&counterparty.public_key().expect("public key"))
+        .expect("ecdh");
+    assert_ne!(shared_from_signer, shared_after_rotation);
 
     // Rotation does not stop the node: a concurrent signer keeps signing
     // successfully across a rotation happening on another thread.
