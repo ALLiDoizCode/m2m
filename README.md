@@ -531,18 +531,18 @@ Perfect for development and debugging. Disable in production.
 
 ## Docker Deployment
 
-The simplest production-ready topology is a **standalone connector paired with your app**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships this pattern out of the box.
+The simplest production-ready topology is a **standalone connector paired with your app**, both running in Docker containers on a single host. `docker-compose.prod.yml` ships the connector half of this pattern; add your own app service (see [Writing Your Own App](#writing-your-own-app)) on the same `app_net` network to complete it — there is no bundled sample app.
 
 Two compose files ship at the repo root:
 
 | Compose file              | Purpose                                                                                                                                                                            |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `docker-compose.prod.yml` | **Production deployment.** Connector + app, secure by default.                                                                                                                     |
+| `docker-compose.prod.yml` | **Production deployment.** Connector, ready to pair with your own app, secure by default.                                                                                          |
 | `docker-compose.yml`      | **Development/test profiles.** Anvil, Solana, Mina, the `app` profile (see [Local "App behind the Connector"](#local-app-behind-the-connector-issue-221)). Not for production use. |
 
 ### Production Deployment: Standalone Connector + App
 
-The production stack runs a single connector and your app on an isolated Docker bridge network. The admin API is reachable only from the app container — it is **not** published to the host interface.
+The production stack runs a single connector and your app on an isolated Docker bridge network. Once your app is added, the admin API is reachable only from the app container — it is **not** published to the host interface.
 
 **Step 1 — Pull the image** (or build locally)
 
@@ -581,7 +581,9 @@ peers: []
 routes: []
 ```
 
-**Step 3 — Start the stack**
+**Step 3 — Add your app, then start the stack**
+
+Add your app service to `docker-compose.prod.yml` first (see [Writing Your Own App](#writing-your-own-app) below), then:
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d
@@ -589,7 +591,8 @@ docker compose -f docker-compose.prod.yml up -d
 # Verify both containers are healthy:
 docker compose -f docker-compose.prod.yml ps
 
-# The app health endpoint is the only host-exposed port:
+# The app health endpoint is the only host-exposed port (once your app
+# publishes one, as the example below does on 3100):
 curl http://127.0.0.1:3100/health
 ```
 
