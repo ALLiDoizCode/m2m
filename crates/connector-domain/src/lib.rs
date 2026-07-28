@@ -18,7 +18,9 @@ mod projection;
 mod route;
 
 pub use address::is_valid_ilp_address;
-pub use claim::{advance_watermark, claim_digest, validate_claim, ClaimError, Watermark};
+pub use claim::{
+    advance_watermark, claim_digest, validate_claim, validate_price, ClaimError, Watermark,
+};
 pub use condition::{
     condition_is_present, derive_condition, fulfillment_matches_condition, is_expired,
 };

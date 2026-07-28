@@ -2,14 +2,16 @@
 //! 0003, and `docs/protocol/client-edge-spec.md` -- this implements §1.1
 //! (transport and framing: `POST /ilp`, OER-encoded PREPARE in, OER-encoded
 //! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome) and, as of
-//! issue #504, the front half of §1.3 (payment claims): a present claim is
-//! parsed, structurally validated and checked for freshness/watermark
-//! before the packet is routed, deliberately before any cryptographic claim
-//! signature verification (issue #506) or value binding against a route's
-//! price (issue #507) -- neither of those exist at this ingress yet.
-//! Identity (§1.2) and the x402 greeting (§1.4) remain unimplemented; a
-//! request presenting no claim header at all still passes through
-//! unchanged, exactly as it always has.
+//! issues #504 and #522, most of §1.3 (payment claims): a present claim is
+//! parsed, structurally validated, checked for freshness/watermark, and
+//! checked to advance value by at least the destination's matched app
+//! route's price, before the packet is routed -- deliberately before any
+//! cryptographic claim signature verification (issue #506), which does not
+//! exist at this ingress yet. Identity (§1.2) and the x402 greeting (§1.4)
+//! remain unimplemented; a request presenting no claim header at all still
+//! passes through unchanged, exactly as it always has, and pay-to-write is
+//! absolute for one that is present -- there is no configuration, flag or
+//! build profile that disables the price check.
 //!
 //! Per ADR 0001, this handler deserializes, calls exactly one method on
 //! [`Connector`], and serializes; the `match` below is that serialization
@@ -168,6 +170,7 @@ fn decode_claim_header(
 /// both is presenting the same claim twice, not two different ones.
 fn extract_and_validate_claim(
     headers: &HeaderMap,
+    destination: &str,
     state: &ClientEdgeState,
 ) -> Result<(), ClaimIngestRejection> {
     let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
@@ -183,13 +186,24 @@ fn extract_and_validate_claim(
         wrapped,
         state.wrap_receiver_secret.as_ref(),
     )?;
-    state.claim_gate.ingest(&claim_json)?;
+    // No matching app route means nothing here is priced -- routing itself
+    // (not this gate) is what refuses an unroutable destination, with F02.
+    let price = state.connector.app_route_price(destination).unwrap_or(0);
+    state.claim_gate.ingest(&claim_json, price)?;
     Ok(())
 }
 
 fn claim_rejected_response(rejection: ClaimIngestRejection) -> Response {
+    // Underpayment is a distinct ILP error (F03: Invalid Amount, issue
+    // #522) from every other claim-ingest refusal above it (F01: Invalid
+    // Packet) -- the claim is structurally and cryptographically fine, it
+    // simply isn't enough value.
+    let code = match rejection {
+        ClaimIngestRejection::Underpayment { .. } => RejectCode::f03_invalid_amount(),
+        _ => RejectCode::f01_invalid_packet(),
+    };
     let reject = Reject {
-        code: RejectCode::f01_invalid_packet(),
+        code,
         triggered_by: String::new(),
         message: rejection.message(),
         data: Vec::new(),
@@ -216,7 +230,7 @@ async fn handle_ilp(
     // A claim header's validation failure rejects the packet before it is
     // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
     // do work that was never validly paid for.
-    if let Err(rejection) = extract_and_validate_claim(&headers, &state) {
+    if let Err(rejection) = extract_and_validate_claim(&headers, &prepare.destination, &state) {
         return claim_rejected_response(rejection);
     }
 
@@ -866,6 +880,120 @@ mod tests {
             let reject = Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code.as_str(), "F01");
             assert!(reject.message.contains("not configured to unwrap"));
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// A claim advancing by at least a priced route's price is
+        /// accepted and the packet is delivered (issue #522).
+        #[tokio::test]
+        async fn a_claim_covering_the_routes_price_is_accepted_and_delivered() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"ok".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, 100),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("decode fulfill");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// A claim advancing by less than a priced route's price is
+        /// refused as underpayment (F03), distinguishably from a stale,
+        /// malformed or unverifiable claim (all F01), and never reaches
+        /// the app (issue #522).
+        #[tokio::test]
+        async fn a_claim_underpaying_the_routes_price_is_refused_as_underpayment() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                AppOutcome::Delivered {
+                    data: b"ok".to_vec(),
+                    fulfillment: Some(FULFILLMENT),
+                },
+            );
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, 99),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            // An ILP-level outcome, even a reject, is always HTTP 200.
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F03");
+            assert_ne!(reject.code.as_str(), "F01");
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// A claim's value is checked before this ingress would ever spend
+        /// cryptographic work verifying its signature -- proven here by a
+        /// claim whose signature is garbage, yet still refused for
+        /// underpayment (F03) rather than any signature-shaped reason,
+        /// since no signature verification exists at this ingress yet
+        /// (issue #506) and the value check runs unconditionally first
+        /// (issue #522).
+        #[tokio::test]
+        async fn the_value_check_runs_before_any_cryptographic_work() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let garbage_signature_claim = evm_claim_json(1, 50).replace(
+                r#""signature": "0xabcdef""#,
+                r#""signature": "0xnotarealsignatureatall""#,
+            );
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &garbage_signature_claim,
+            );
+            let response = app.oneshot(request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F03");
             assert!(app_client.deliveries().is_empty());
         }
     }
