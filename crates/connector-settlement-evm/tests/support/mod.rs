@@ -50,6 +50,41 @@ pub fn require_anvil() -> bool {
     false
 }
 
+/// True if `forge --version` runs successfully.
+pub fn forge_available() -> bool {
+    Command::new("forge")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// The `forge` twin of [`require_anvil`], for tests that build
+/// `packages/contracts` rather than talk to a running chain (issue #572's
+/// ABI-provenance check). Same CI-vs-local policy: a fresh CI job installs
+/// Foundry (see `.github/workflows/ci.yml`'s `rust-gate` job) and must
+/// fail loudly rather than silently skip if that install regresses; a
+/// local run without Foundry just skips.
+pub fn require_forge() -> bool {
+    if forge_available() {
+        return true;
+    }
+
+    if std::env::var_os("CI").is_some() {
+        panic!(
+            "forge is not on PATH, but CI is set -- the Rust Workspace Gate must install \
+             Foundry (foundry-rs/foundry-toolchain) before this crate's tests run. Refusing to \
+             silently skip and report success here; see issue #471's precedent for anvil."
+        );
+    }
+
+    eprintln!(
+        "skipping: forge is not on PATH (install Foundry: https://getfoundry.sh) -- this test \
+         builds packages/contracts and only skips because this is not a CI run"
+    );
+    false
+}
+
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
