@@ -38,14 +38,23 @@ pub struct ChannelState {
 
 /// A cumulative, superseding claim to a channel's funds (ADR 0004, ADR
 /// 0005): `cumulative_amount` is the total ever owed to the redeemer as of
-/// this claim, not an increment over the last one. `signature` is whatever
-/// proof a backend's chain requires that the channel's counterparty
-/// actually signed it -- opaque bytes here since the signature scheme is
-/// chain-specific (recoverable ECDSA for EVM, ed25519 for Solana) and this
-/// port does not verify it; only the on-chain (or in-memory) settlement
-/// logic that a real backend enforces does.
+/// this claim, not an increment over the last one. `nonce` is the
+/// strictly-increasing counter inside the signed material every chain this
+/// port settles on hashes and enforces (`TokenNetwork.claimFromChannel`'s
+/// `balanceProof.nonce > counterpartyState.nonce`, the deployed Solana
+/// program's per-participant nonce ratchet, issue #573) -- carried through
+/// unchanged from `connector_runtime::WireClaim`, whose own `nonce` is also
+/// `u64` (a value signed at one width and hashed at another does not
+/// recover, so this port settles on the wire's own width rather than
+/// widening it the way `cumulative_amount` already widens to a chain's
+/// `uint256`). `signature` is whatever proof a backend's chain requires
+/// that the channel's counterparty actually signed it -- opaque bytes here
+/// since the signature scheme is chain-specific (recoverable ECDSA for EVM,
+/// ed25519 for Solana) and this port does not verify it; only the on-chain
+/// (or in-memory) settlement logic that a real backend enforces does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
+    pub nonce: u64,
     pub cumulative_amount: u128,
     pub signature: Vec<u8>,
 }
@@ -78,6 +87,25 @@ pub enum SettlementError {
         claimed: u128,
         already_redeemed: u128,
     },
+
+    /// A claim's `nonce` did not strictly exceed the highest one already
+    /// redeemed on this channel -- distinct from [`StaleClaim`], which is
+    /// about `cumulative_amount`, because the two can diverge: a claim can
+    /// name a higher amount than has ever been redeemed while still
+    /// carrying a nonce that does not advance (a stale or replayed claim
+    /// resent alongside a since-fabricated amount). Real chains enforce
+    /// nonce ordering directly (see [`Claim::nonce`]'s own doc); today only
+    /// [`crate::InMemorySettlementBackend`] enforces it here too --
+    /// `connector-settlement-evm` and `connector-settlement-solana` settle
+    /// through contracts with no nonce field of their own yet (issue #566's
+    /// retarget), so neither backend can enforce this rule client-side
+    /// until that lands.
+    ///
+    /// [`StaleClaim`]: SettlementError::StaleClaim
+    #[error(
+        "claim nonce {claimed} does not exceed the channel's already-redeemed nonce {already_redeemed}"
+    )]
+    StaleNonce { claimed: u64, already_redeemed: u64 },
 
     #[error("settlement backend error: {0}")]
     Backend(String),

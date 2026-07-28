@@ -38,6 +38,7 @@ async fn every_channel_operation_is_a_real_confirmed_transaction() {
         .redeem(
             &channel,
             Claim {
+                nonce: 1,
                 cumulative_amount: 400,
                 signature: vec![9],
             },

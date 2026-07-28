@@ -86,6 +86,13 @@ pub struct Projection {
     /// `channel_id` -> the cumulative amount of the highest accepted claim
     /// on that channel.
     inbound_claimed: BTreeMap<String, u64>,
+    /// `channel_id` -> the nonce of that same highest accepted claim, kept
+    /// alongside `inbound_claimed` for the same reason `inbound_claim_signature`
+    /// is: written from, and only from, the same `InboundClaimAccepted`
+    /// entry. A redemption submitted without it is not redeemable on any
+    /// real chain (issue #573) -- every chain this port settles on hashes
+    /// the nonce into the signed material and enforces it on chain.
+    inbound_claim_nonce: BTreeMap<String, u64>,
     /// `channel_id` -> the signature of that same highest accepted claim,
     /// kept alongside `inbound_claimed` rather than as a separate source of
     /// truth -- both fields are written from, and only from, the same
@@ -110,12 +117,13 @@ impl Projection {
             }
             JournalEntry::InboundClaimAccepted {
                 channel_id,
+                nonce,
                 cumulative_amount,
                 signature,
-                ..
             } => {
                 self.inbound_claimed
                     .insert(channel_id.clone(), *cumulative_amount);
+                self.inbound_claim_nonce.insert(channel_id.clone(), *nonce);
                 self.inbound_claim_signature
                     .insert(channel_id.clone(), signature.clone());
             }
@@ -180,15 +188,17 @@ impl Projection {
     }
 
     /// The highest-nonce claim ever accepted on `channel_id`, as
-    /// `(cumulative_amount, signature)` -- exactly what an on-chain
-    /// redemption submits (issue #425), and never a superseded one: this
-    /// projection only ever retains the latest, so there is nothing else it
-    /// could return. `None` before any claim has been accepted on this
-    /// channel.
-    pub fn latest_inbound_claim(&self, channel_id: &str) -> Option<(u64, Vec<u8>)> {
+    /// `(nonce, cumulative_amount, signature)` -- exactly what an on-chain
+    /// redemption submits (issue #425, widened by #573 to carry the nonce
+    /// the signature covers, without which no claim is redeemable on any
+    /// real chain), and never a superseded one: this projection only ever
+    /// retains the latest, so there is nothing else it could return. `None`
+    /// before any claim has been accepted on this channel.
+    pub fn latest_inbound_claim(&self, channel_id: &str) -> Option<(u64, u64, Vec<u8>)> {
+        let nonce = *self.inbound_claim_nonce.get(channel_id)?;
         let cumulative_amount = *self.inbound_claimed.get(channel_id)?;
         let signature = self.inbound_claim_signature.get(channel_id)?.clone();
-        Some((cumulative_amount, signature))
+        Some((nonce, cumulative_amount, signature))
     }
 
     /// Check this projection against the claims it derives from (issue
@@ -391,7 +401,7 @@ mod tests {
         ]);
         assert_eq!(
             projection.latest_inbound_claim("channel-a"),
-            Some((150, vec![4, 5, 6]))
+            Some((2, 150, vec![4, 5, 6]))
         );
     }
 

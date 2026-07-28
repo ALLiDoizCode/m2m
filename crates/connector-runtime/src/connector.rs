@@ -1079,8 +1079,9 @@ impl Connector {
     /// instant it is called (`connector_settlement::SettlementBackend::close`'s
     /// own docs). A channel with no claim ever accepted closes directly,
     /// exactly like [`Connector::close_channel`]. A claim already fully
-    /// redeemed (`SettlementError::StaleClaim`) is not a reason to refuse
-    /// closing -- there is nothing left to collect -- but any other
+    /// redeemed (`SettlementError::StaleClaim`, or `StaleNonce` -- issue
+    /// #573 -- for the same already-redeemed claim) is not a reason to
+    /// refuse closing -- there is nothing left to collect -- but any other
     /// redemption failure stops here without closing, so a reverted or
     /// failed settlement transaction leaves the channel open and the claim
     /// still redeemable rather than closing over an unclaimed balance.
@@ -1092,7 +1093,9 @@ impl Connector {
         let id = ChannelId(channel_id.to_string());
         if let Some(claim) = self.claims.latest_inbound_claim(channel_id) {
             match settlement.redeem(&id, claim).await {
-                Ok(_) | Err(SettlementError::StaleClaim { .. }) => {}
+                Ok(_)
+                | Err(SettlementError::StaleClaim { .. })
+                | Err(SettlementError::StaleNonce { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
         }

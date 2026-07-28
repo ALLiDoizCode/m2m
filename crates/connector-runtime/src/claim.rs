@@ -419,12 +419,13 @@ impl ClaimBook {
     /// ever retains the highest-nonce claim (peer-wire-spec.md §3.4).
     /// `None` if no claim has ever been accepted on this channel.
     pub fn latest_inbound_claim(&self, channel_id: &str) -> Option<connector_settlement::Claim> {
-        let (cumulative_amount, signature) = self
+        let (nonce, cumulative_amount, signature) = self
             .projection
             .read()
             .expect("projection lock poisoned")
             .latest_inbound_claim(channel_id)?;
         Some(connector_settlement::Claim {
+            nonce,
             cumulative_amount: cumulative_amount as u128,
             signature,
         })
@@ -973,8 +974,34 @@ mod tests {
             // first claim is never returned (peer-wire-spec.md §3.4: claims
             // supersede rather than accumulate).
             let redeemable = book.latest_inbound_claim("channel-a").unwrap();
+            assert_eq!(redeemable.nonce, 2);
             assert_eq!(redeemable.cumulative_amount, 150);
             assert_eq!(redeemable.signature, second.signature.to_bytes().to_vec());
+        }
+
+        /// Issue #573's own regression: `connector_settlement::Claim` must
+        /// carry the nonce its signature covers, or nothing it produces is
+        /// redeemable on any real chain -- a chain-side check this test
+        /// cannot exercise directly, so it pins the one thing that would
+        /// silently regress that guarantee: `latest_inbound_claim` reporting
+        /// the accepted claim's own nonce, not a default or dropped one.
+        #[test]
+        fn the_redeemable_claims_nonce_is_the_one_the_peer_actually_signed() {
+            let peer_signer = LocalSigner::generate("peer-key");
+            let key = peer_signer.public_key().unwrap();
+            let book = book_with_peer("peer-b", "channel-a", key);
+            let claim = WireClaim {
+                channel_id: "channel-a".to_string(),
+                nonce: 7,
+                cumulative_amount: 300,
+                signature: peer_signer
+                    .sign(&claim_digest("channel-a", 7, 300))
+                    .unwrap(),
+            };
+            assert_eq!(book.accept_inbound(&claim), ClaimAckOutcome::Accepted);
+
+            let redeemable = book.latest_inbound_claim("channel-a").unwrap();
+            assert_eq!(redeemable.nonce, 7);
         }
     }
 
