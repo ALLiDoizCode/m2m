@@ -36,6 +36,17 @@ pub enum PaymentChannelError {
     InvalidPDA = 11,
     /// Invalid vault PDA derivation.
     InvalidVaultPDA = 12,
+    /// A claimed `transferred_amount` exceeds the claiming participant's deposit.
+    ///
+    /// Settlement pays out `deposit - transferred_amount`, so accepting a claim
+    /// above the deposit would leave the channel permanently unsettleable.
+    TransferredAmountExceedsDeposit = 13,
+    /// A settlement destination token account is not owned by the participant it
+    /// is being paid out to (or is not an initialized SPL Token account at all).
+    InvalidSettlementDestination = 14,
+    /// A settlement destination token account holds a mint other than the
+    /// channel's `token_mint`.
+    SettlementDestinationMintMismatch = 15,
 }
 
 impl From<PaymentChannelError> for ProgramError {
