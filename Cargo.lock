@@ -1059,7 +1059,6 @@ dependencies = [
  "connector-cli",
  "connector-domain",
  "reqwest",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
