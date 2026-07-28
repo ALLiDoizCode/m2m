@@ -16,16 +16,12 @@
 use std::process::Command;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use connector_domain::{
-    derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
-};
-use connector_signer::giftwrap::{open_response, seal_request};
+use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare};
+use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
 use connector_signer::{LocalSigner, PublicKeyBytes, Signer};
 
 mod support;
 use support::{spawn_connector, spawn_stub_app, write_config, write_raw_key_file};
-
-const FULFILLMENT: [u8; 32] = [7u8; 32];
 
 /// Must match `stub_app.rs`'s own `DECLINE_BODY` -- the two are separate
 /// binaries, so there is no shared constant to import.
@@ -37,7 +33,8 @@ const DECLINE_BODY: &[u8] = b"please decline this one";
 /// (from the `[signer] key_file` raw bytes) -- around a minimal `POST /`
 /// envelope carrying `body`, matching `stub_app`'s one handler, mounted at
 /// `/`. Returns the wire bytes for `Prepare.data` and the shared secret the
-/// wrap carries, to open the sealed `Fulfill`/`Reject` this produces.
+/// wrap carries, to open the sealed `Fulfill`/`Reject` this produces or to
+/// compute the fulfilment ADR 0019/issue #525 derives from it.
 fn sealed_prepare_data(body: &[u8], receiver_public: &PublicKeyBytes) -> (Vec<u8>, [u8; 32]) {
     let plaintext = EnvelopeRequest {
         method: "POST".to_string(),
@@ -49,11 +46,15 @@ fn sealed_prepare_data(body: &[u8], receiver_public: &PublicKeyBytes) -> (Vec<u8
     seal_request(&plaintext, receiver_public).expect("seal")
 }
 
-fn sample_prepare(destination: &str, data: Vec<u8>) -> Prepare {
+/// A `Prepare` whose `execution_condition` matches the fulfilment
+/// `shared_secret` derives (ADR 0019, issue #525) -- what a genuine sender
+/// mints its condition from before ever transmitting a packet sealed with
+/// that same secret.
+fn sample_prepare(destination: &str, data: Vec<u8>, shared_secret: &[u8; 32]) -> Prepare {
     Prepare {
         amount: 0,
         expires_at: Utc::now() + ChronoDuration::minutes(5),
-        execution_condition: derive_condition(&FULFILLMENT),
+        execution_condition: derive_condition(&derive_fulfillment(shared_secret)),
         destination: destination.to_string(),
         data,
     }
@@ -138,7 +139,11 @@ fee = 0
     // peer wire this test wired up, not in-process.
     let (data, shared_secret) =
         sealed_prepare_data(b"hello from the client edge", &connector_b_identity);
-    let prepare = sample_prepare("g.b.app", data);
+    // Issue #525's own end-to-end shape: this sender mints its condition
+    // from the same secret it just sealed the request with, and connector
+    // B -- the terminating hop -- derives the matching preimage from the
+    // shared secret it recovers on opening, with no help from the stub app.
+    let prepare = sample_prepare("g.b.app", data, &shared_secret);
     let response = client
         .post(format!("http://{}/ilp", connector_a.client_edge_addr))
         .body(prepare.encode())
@@ -148,7 +153,7 @@ fee = 0
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body = response.bytes().await.expect("response body");
     let fulfill = Fulfill::decode(&body).expect("decode Fulfill");
-    assert_eq!(fulfill.fulfillment, FULFILLMENT);
+    assert_eq!(fulfill.fulfillment, derive_fulfillment(&shared_secret));
     // Real HTTP end to end, so the response envelope carries whatever
     // incidental headers axum added (`content-type`, `date`, ...) -- only
     // status and body are asserted, exactly as the shared `AppClient`
@@ -163,16 +168,16 @@ fee = 0
         b"delivered by stub app: hello from the client edge"
     );
 
-    // The stub app can also decline -- proving a real failure travels back
-    // through both hops too, not just the happy path (the stub app "returns
-    // success or failure", per the issue's own acceptance criteria). Per
-    // issue #521/ADR 0020, the app's 402 is itself just an answer, not a
-    // transport failure -- what actually rejects this is that the stub
-    // app's decline branch supplies no `TOON-Fulfillment` header (issue
-    // #417, until #525 derives a fulfilment instead of asking the app for
-    // one), the same rule a 200 with no header would also fail.
-    let (decline_data, _shared_secret) = sealed_prepare_data(DECLINE_BODY, &connector_b_identity);
-    let declining_prepare = sample_prepare("g.b.app", decline_data);
+    // The stub app can also decline -- proving a real non-2xx answer
+    // travels back through both hops too, not just the happy path (the
+    // stub app "returns success or failure", per the issue's own
+    // acceptance criteria). Per issue #521/ADR 0020, a 402 from the app is
+    // itself just an answer, not a transport failure -- and per issue
+    // #525, the app supplies nothing toward fulfilment either way, so this
+    // still fulfils: only the response envelope's status distinguishes it
+    // from the accepted case above.
+    let (decline_data, decline_secret) = sealed_prepare_data(DECLINE_BODY, &connector_b_identity);
+    let declining_prepare = sample_prepare("g.b.app", decline_data, &decline_secret);
     let response = client
         .post(format!("http://{}/ilp", connector_a.client_edge_addr))
         .body(declining_prepare.encode())
@@ -181,12 +186,12 @@ fee = 0
         .expect("POST /ilp to connector A (decline case)");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body = response.bytes().await.expect("response body");
-    let reject = Reject::decode(&body).expect("decode Reject");
-    assert!(
-        reject.message.contains("execution condition"),
-        "expected a reject for lack of a verifying fulfillment, got: {}",
-        reject.message
-    );
+    let fulfill = Fulfill::decode(&body).expect("decode Fulfill for the decline case");
+    assert_eq!(fulfill.fulfillment, derive_fulfillment(&decline_secret));
+    let opened = open_response(&decline_secret, &fulfill.data).expect("open sealed response");
+    let response_envelope = EnvelopeResponse::decode(&opened).expect("decode envelope");
+    assert_eq!(response_envelope.status, 402);
+    assert_eq!(response_envelope.body, b"declined by stub app");
 }
 
 /// ADR 0009's "refuse to start" contract, exercised against this ticket's

@@ -532,9 +532,10 @@ mod tests {
 
         /// The port does no special-casing of any particular header name --
         /// including one that used to carry a legacy fulfillment signal
-        /// (issue #417's `TOON-Fulfillment`, now extracted above this
-        /// boundary, per #521's own scope). It is just another header the
-        /// app happened to send.
+        /// (issue #417's `TOON-Fulfillment`, retired by #525: the
+        /// fulfilment is derived from the packet's own sealed secret now,
+        /// not read off any header). It is just another header the app
+        /// happened to send.
         #[tokio::test]
         async fn an_ordinary_response_header_is_relayed_verbatim() {
             let (url, _observed) = spawn_test_app(

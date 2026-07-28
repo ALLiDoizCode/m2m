@@ -40,6 +40,7 @@ const SECRET_LEN: usize = 32;
 const PUBLIC_KEY_LEN: usize = 65;
 const REQUEST_INFO: &[u8] = b"toon-giftwrap-request";
 const RESPONSE_INFO: &[u8] = b"toon-giftwrap-response";
+const FULFILLMENT_INFO: &[u8] = b"toon-giftwrap-fulfillment";
 const TYPE_GIFTWRAP_REQUEST: u8 = 1;
 const TYPE_GIFTWRAP_RESPONSE: u8 = 2;
 
@@ -204,6 +205,19 @@ pub fn open_response(shared_secret: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, 
     decrypt(&aead_key, &bytes[1..])
 }
 
+/// The fulfilment a terminating connector derives from a request's shared
+/// secret (ADR 0019, issue #525) -- `HKDF-SHA256(shared_secret,
+/// "toon-giftwrap-fulfillment")`. A sender mints its packet's execution
+/// condition as `derive_condition` of exactly this value before ever
+/// sealing the request, so recovering `shared_secret` (via [`open_request`])
+/// is sufficient to derive a fulfilment that verifies, with no app
+/// participation. Domain-separated from [`REQUEST_INFO`]/[`RESPONSE_INFO`]
+/// by its own HKDF `info` string, so it can never collide with either AEAD
+/// key the same secret also derives.
+pub fn derive_fulfillment(shared_secret: &[u8; 32]) -> [u8; 32] {
+    hkdf_key(shared_secret, FULFILLMENT_INFO)
+}
+
 /// Whether `bytes` is shaped like a sealed response (issue #524's fourth
 /// acceptance criterion: a sender can tell a sealed reject from an
 /// unsealed one without needing the shared secret to do so). An empty
@@ -326,6 +340,44 @@ mod tests {
         assert_eq!(
             open_response(&[9u8; 32], &[TYPE_GIFTWRAP_REQUEST, 0, 0]),
             Err(GiftWrapError::InvalidType(TYPE_GIFTWRAP_RESPONSE))
+        );
+    }
+
+    #[test]
+    fn derive_fulfillment_is_deterministic_for_the_same_secret() {
+        let secret = [5u8; 32];
+        assert_eq!(derive_fulfillment(&secret), derive_fulfillment(&secret));
+    }
+
+    #[test]
+    fn derive_fulfillment_differs_across_secrets() {
+        assert_ne!(
+            derive_fulfillment(&[1u8; 32]),
+            derive_fulfillment(&[2u8; 32])
+        );
+    }
+
+    #[test]
+    fn derive_fulfillment_is_domain_separated_from_the_aead_keys() {
+        let secret = [7u8; 32];
+        let fulfillment = derive_fulfillment(&secret);
+        assert_ne!(fulfillment, hkdf_key(&secret, REQUEST_INFO));
+        assert_ne!(fulfillment, hkdf_key(&secret, RESPONSE_INFO));
+    }
+
+    /// The premise ADR 0019/#525 relies on: `open_request` recovers exactly
+    /// the shared secret `seal_request` generated, so deriving a fulfilment
+    /// from either side's copy of that secret produces the same value.
+    #[test]
+    fn a_terminating_connector_derives_the_same_fulfillment_the_sender_would() {
+        let receiver = LocalSigner::generate("receiver");
+        let (sealed, sender_secret) =
+            seal_request(b"payload", &receiver.public_key().unwrap()).unwrap();
+        let (_opened, recovered_secret) = open_request(&sealed, &receiver).unwrap();
+
+        assert_eq!(
+            derive_fulfillment(&sender_secret),
+            derive_fulfillment(&recovered_secret)
         );
     }
 }
