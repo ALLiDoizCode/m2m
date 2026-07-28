@@ -1,6 +1,31 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// ⚠️ DO NOT DEPLOY ⚠️ (issue #568)
+///
+/// This contract must never be deployed against a chain that holds real
+/// value. Concretely:
+///
+///   - `redeem` never verifies the signature it is given. It accepts
+///     `bytes` of any shape, logs them on `ChannelRedeemed` as an opaque
+///     audit trail, and does nothing else with them -- there is no
+///     `ecrecover`/EIP-712 check anywhere in this file. Any address can
+///     call `redeem(channelId, <deposited>, "")` on a funded channel and
+///     send the whole balance to `payoutAddress`.
+///   - `close` has no access control. Any address can close any channel.
+///   - There is no refund path. `redeem` is the only exit `fund` pairs
+///     with; anything deposited and never redeemed is stranded forever.
+///
+/// This is not a latent bug -- the contract's own header below says claim
+/// authenticity is out of scope for it by design. It just means the
+/// contract must hold nothing. Issue #566 replaces it with a real,
+/// signature-verifying `TokenNetwork` and deletes this file entirely.
+///
+/// The constructor below reverts unless given `DEPLOYMENT_ACKNOWLEDGEMENT`
+/// exactly, so that deploying this contract without having read this
+/// warning fails the deployment itself rather than merely logging or
+/// commenting around the danger. See that constant's own doc comment.
+///
 /// @dev The subset of ERC-20 this contract needs to pull deposits in and
 /// pay redemptions out. Hand-rolled rather than pulled from a library
 /// dependency, matching this contract's own "minimal" charter and
@@ -18,6 +43,10 @@ interface IERC20 {
 /// 6-decimal USDC the TypeScript fleet does). Deliberately carries no
 /// `lockedAmount`/`locksRoot` fields (ADR 0004 -- both were always zero on
 /// the legacy TokenNetwork contract and are not reintroduced here).
+///
+/// DO NOT DEPLOY THIS CONTRACT -- see the file-level warning above. It
+/// redeems on an unverified signature, closes with no access control, and
+/// has no refund path; issue #566 deletes it once its replacement lands.
 /// @dev Claim authenticity is a peer-wire concern the SettlementBackend
 /// port itself declines to specify (crates/connector-settlement/src/port.rs
 /// -- "this port does not verify a claim"); this contract enforces exactly
@@ -59,6 +88,20 @@ contract SettlementChannel {
     uint256 public channelCounter;
     mapping(uint256 => Channel) private channels;
 
+    /// @notice The value the constructor's `acknowledgement` parameter
+    /// must equal, or deployment reverts with `NotForDeployment` -- see
+    /// the file-level DO NOT DEPLOY block above (issue #568). Not a
+    /// secret: it is the hash of a public string, derivable by anyone who
+    /// reads this source. Its only purpose is turning an accidental
+    /// deployment (a `forge create`, or any tooling that does not pass
+    /// this exact value on purpose) into a loud revert instead of a
+    /// silent success placing an unsafe contract on a live chain. This
+    /// crate's own tests and local `anvil` tooling are the only
+    /// legitimate callers, and pass it automatically
+    /// (`EvmSettlementBackend::deploy`).
+    bytes32 public constant DEPLOYMENT_ACKNOWLEDGEMENT =
+        keccak256("SettlementChannel is UNSAFE and test-only -- see issue #568 DO NOT DEPLOY");
+
     event ChannelOpened(
         uint256 indexed channelId, address indexed payer, address indexed payoutAddress, uint256 settlementTimeout
     );
@@ -71,9 +114,20 @@ contract SettlementChannel {
     error StaleClaim(uint256 claimed, uint256 alreadyRedeemed);
     error InsufficientChannelBalance(uint256 requested, uint256 deposited);
     error SettlementTransferFailed(uint256 channelId);
+    /// @notice Thrown by the constructor when `acknowledgement` does not
+    /// equal `DEPLOYMENT_ACKNOWLEDGEMENT` -- see the file-level DO NOT
+    /// DEPLOY block above (issue #568).
+    error NotForDeployment();
 
     /// @param _token The ERC-20 contract every channel here settles in.
-    constructor(address _token) {
+    /// @param acknowledgement Must equal `DEPLOYMENT_ACKNOWLEDGEMENT`
+    /// exactly, or this reverts with `NotForDeployment` -- see the
+    /// file-level DO NOT DEPLOY block above and that constant's own doc
+    /// comment.
+    constructor(address _token, bytes32 acknowledgement) {
+        if (acknowledgement != DEPLOYMENT_ACKNOWLEDGEMENT) {
+            revert NotForDeployment();
+        }
         token = IERC20(_token);
     }
 
