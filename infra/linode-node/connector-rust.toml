@@ -115,10 +115,9 @@ fee = 0
 # deposit that is never redeemed is stranded forever). Its constructor now
 # reverts unless given a test-only acknowledgement value, so a normal
 # deployment (e.g. a bare `forge create`) fails outright rather than
-# quietly placing an unsafe contract on chain — see the `DO NOT DEPLOY`
-# block at the top of
-# `crates/connector-settlement-evm/contracts/SettlementChannel.sol`. Issue
-# #566 replaces it with a real, signature-verifying `TokenNetwork` and
+# quietly placing an unsafe contract on chain — see the `DO NOT DEPLOY` block
+# at the top of `crates/connector-settlement-evm/contracts/SettlementChannel.sol`.
+# Issue #566 replaces it with a real, signature-verifying `TokenNetwork` and
 # deletes this file; only once that lands is there a contract an operator
 # should ever put a real address here for.
 #

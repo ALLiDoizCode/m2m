@@ -90,9 +90,8 @@ price = 1000
 # deployment. Same real USDC (`./connector.yaml`'s `tokenAddress`), same
 # known-good RPC, same key file reused for settlement signing. It is
 # uncommented and booted against a local anvil (the explicit test-only
-# escape hatch) by
-# `crates/connector-bin/tests/devnet_configs_load.rs`, so it stays a
-# template that actually works.
+# escape hatch) by `crates/connector-bin/tests/devnet_configs_load.rs`, so
+# it stays a template that actually works.
 #
 # --- BEGIN settlement template (uncomment when a contract is deployed) ---
 # [settlement]
