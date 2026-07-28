@@ -731,10 +731,10 @@ impl Connector {
     /// forwarding hop's fee to a relayed reject. `AppOutcome::Unreachable`
     /// should not: the app was never actually reached to do the priced
     /// work, matching how a forwarding hop that cannot reach its own peer
-    /// adds nothing either. None of this is done below: `StaticRoute`
-    /// carries no price yet -- blocked on issue #520, "A terminated route
-    /// carries a price," itself still open and unimplemented as of this
-    /// change.
+    /// adds nothing either. None of this is done below: every termination
+    /// reject still hardcodes `0`. Issue #520, "A terminated route carries a
+    /// price," has since landed, so `route.price()` is now available and this
+    /// is unblocked -- it is simply not yet wired up here.
     async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
         let received_at = self.clock.now();
         let condition = prepare.execution_condition;

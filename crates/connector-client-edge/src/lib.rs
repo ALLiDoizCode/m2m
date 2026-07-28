@@ -193,7 +193,7 @@ fn claim_rejected_response(rejection: ClaimIngestRejection) -> Response {
         triggered_by: String::new(),
         message: rejection.message(),
         data: Vec::new(),
-        accumulated_fee: 0,
+        accumulated_cost: 0,
     };
     (
         StatusCode::OK,
