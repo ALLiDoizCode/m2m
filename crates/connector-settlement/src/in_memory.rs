@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::port::{
     ChannelId, ChannelState, ChannelStatus, Claim, SettlementBackend, SettlementError,
@@ -15,6 +15,10 @@ struct StoredChannel {
     deposited: u128,
     redeemed: u128,
     redeemed_nonce: u64,
+    settlement_timeout: Duration,
+    /// When `close` ran, if it has -- the challenge period's start.
+    /// `settle` measures its own timeout from here (issue #574).
+    closed_at: Option<DateTime<Utc>>,
 }
 
 impl StoredChannel {
@@ -51,9 +55,10 @@ impl InMemorySettlementBackend {
             .expect("InMemorySettlementBackend lock poisoned")
     }
 
-    /// Look up `id`, refusing a closed channel to every write operation
-    /// (`f`) with the same [`SettlementError::ChannelClosed`] regardless of
-    /// which one called -- close is terminal, not a per-method concern.
+    /// Look up `id`, requiring the channel still be `Open` -- used by `fund`
+    /// and `close`, which both refuse a `Closed` or `Settled` channel alike
+    /// (issue #574: unlike `redeem`, neither has a reason to distinguish
+    /// the two).
     fn with_open_channel<T>(
         &self,
         id: &ChannelId,
@@ -63,8 +68,29 @@ impl InMemorySettlementBackend {
         let channel = channels
             .get_mut(id)
             .ok_or_else(|| SettlementError::ChannelNotFound(id.clone()))?;
-        if channel.status == ChannelStatus::Closed {
-            return Err(SettlementError::ChannelClosed(id.clone()));
+        match channel.status {
+            ChannelStatus::Open => {}
+            ChannelStatus::Closed => return Err(SettlementError::ChannelClosed(id.clone())),
+            ChannelStatus::Settled => return Err(SettlementError::ChannelSettled(id.clone())),
+        }
+        f(channel)
+    }
+
+    /// Look up `id`, refusing only a `Settled` channel -- used by `redeem`,
+    /// which succeeds against both `Open` and `Closed` (issue #574: a
+    /// channel's challenge period is exactly the window `redeem` must keep
+    /// working in).
+    fn with_redeemable_channel<T>(
+        &self,
+        id: &ChannelId,
+        f: impl FnOnce(&mut StoredChannel) -> Result<T, SettlementError>,
+    ) -> Result<T, SettlementError> {
+        let mut channels = self.channels();
+        let channel = channels
+            .get_mut(id)
+            .ok_or_else(|| SettlementError::ChannelNotFound(id.clone()))?;
+        if channel.status == ChannelStatus::Settled {
+            return Err(SettlementError::ChannelSettled(id.clone()));
         }
         f(channel)
     }
@@ -75,7 +101,7 @@ impl SettlementBackend for InMemorySettlementBackend {
     async fn open(
         &self,
         counterparty: Vec<u8>,
-        _settlement_timeout: Duration,
+        settlement_timeout: Duration,
     ) -> Result<ChannelId, SettlementError> {
         let id = ChannelId(format!(
             "in-memory-channel-{}",
@@ -89,6 +115,8 @@ impl SettlementBackend for InMemorySettlementBackend {
                 deposited: 0,
                 redeemed: 0,
                 redeemed_nonce: 0,
+                settlement_timeout,
+                closed_at: None,
             },
         );
         Ok(id)
@@ -110,7 +138,7 @@ impl SettlementBackend for InMemorySettlementBackend {
         channel: &ChannelId,
         claim: Claim,
     ) -> Result<ChannelState, SettlementError> {
-        self.with_open_channel(channel, |c| {
+        self.with_redeemable_channel(channel, |c| {
             if claim.cumulative_amount <= c.redeemed {
                 return Err(SettlementError::StaleClaim {
                     claimed: claim.cumulative_amount,
@@ -146,8 +174,36 @@ impl SettlementBackend for InMemorySettlementBackend {
     async fn close(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         self.with_open_channel(channel, |c| {
             c.status = ChannelStatus::Closed;
+            c.closed_at = Some(Utc::now());
             Ok(c.state(channel))
         })
+    }
+
+    async fn settle(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
+        let mut channels = self.channels();
+        let c = channels
+            .get_mut(channel)
+            .ok_or_else(|| SettlementError::ChannelNotFound(channel.clone()))?;
+        match c.status {
+            ChannelStatus::Settled => return Err(SettlementError::ChannelSettled(channel.clone())),
+            // An `Open` channel has no `closed_at` to measure a timeout
+            // from at all -- folded into `SettlementNotYetDue` rather than
+            // a separate variant, since "settlement is not yet permitted"
+            // covers both "still open" and "closed but not yet elapsed"
+            // (issue #574).
+            ChannelStatus::Open => {
+                return Err(SettlementError::SettlementNotYetDue(channel.clone()))
+            }
+            ChannelStatus::Closed => {}
+        }
+        let closed_at = c
+            .closed_at
+            .expect("a Closed channel always has closed_at set by `close`");
+        if Utc::now() < closed_at + c.settlement_timeout {
+            return Err(SettlementError::SettlementNotYetDue(channel.clone()));
+        }
+        c.status = ChannelStatus::Settled;
+        Ok(c.state(channel))
     }
 
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {

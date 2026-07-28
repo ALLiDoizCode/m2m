@@ -16,6 +16,7 @@
 //! reserving [`SettlementError::Backend`] for genuine I/O failure.
 
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use chrono::Duration;
@@ -123,18 +124,37 @@ impl SolanaSettlementBackend {
         Ok((pubkey, state))
     }
 
-    /// Resolve `channel` and reject with [`SettlementError::ChannelClosed`]
-    /// if it has already been closed -- the one precondition
-    /// [`fund`](SettlementBackend::fund), [`redeem`](SettlementBackend::redeem)
-    /// and [`close`](SettlementBackend::close) all share before their own,
-    /// method-specific checks (mirrors `EvmSettlementBackend::open_channel`).
+    /// Resolve `channel` and reject with
+    /// [`SettlementError::ChannelClosed`]/[`SettlementError::ChannelSettled`]
+    /// if it is not still `Open` -- the one precondition
+    /// [`fund`](SettlementBackend::fund) and [`close`](SettlementBackend::close)
+    /// share before their own, method-specific checks (mirrors
+    /// `EvmSettlementBackend::open_channel`).
+    /// [`redeem`](SettlementBackend::redeem) uses
+    /// [`redeemable_channel`](Self::redeemable_channel) instead, since it
+    /// still succeeds against a `Closed` channel (issue #574).
     async fn open_channel(
         &self,
         channel: &ChannelId,
     ) -> Result<(Pubkey, ProgramChannel), SettlementError> {
         let (pubkey, state) = self.read_channel(channel).await?;
-        if state.status == ProgramChannelStatus::Closed {
-            return Err(SettlementError::ChannelClosed(channel.clone()));
+        match state.status {
+            ProgramChannelStatus::Open => Ok((pubkey, state)),
+            ProgramChannelStatus::Closed => Err(SettlementError::ChannelClosed(channel.clone())),
+            ProgramChannelStatus::Settled => Err(SettlementError::ChannelSettled(channel.clone())),
+        }
+    }
+
+    /// Resolve `channel` and reject only a `Settled` channel (issue #574)
+    /// -- used by [`redeem`](SettlementBackend::redeem), which succeeds
+    /// against both `Open` and `Closed`.
+    async fn redeemable_channel(
+        &self,
+        channel: &ChannelId,
+    ) -> Result<(Pubkey, ProgramChannel), SettlementError> {
+        let (pubkey, state) = self.read_channel(channel).await?;
+        if state.status == ProgramChannelStatus::Settled {
+            return Err(SettlementError::ChannelSettled(channel.clone()));
         }
         Ok((pubkey, state))
     }
@@ -191,6 +211,7 @@ fn to_channel_state(id: &ChannelId, state: &ProgramChannel) -> ChannelState {
         status: match state.status {
             ProgramChannelStatus::Open => ChannelStatus::Open,
             ProgramChannelStatus::Closed => ChannelStatus::Closed,
+            ProgramChannelStatus::Settled => ChannelStatus::Settled,
         },
         deposited: from_lamports(state.deposited),
         redeemed: from_lamports(state.redeemed),
@@ -301,7 +322,7 @@ impl SettlementBackend for SolanaSettlementBackend {
         channel: &ChannelId,
         claim: Claim,
     ) -> Result<ChannelState, SettlementError> {
-        let (pubkey, state) = self.open_channel(channel).await?;
+        let (pubkey, state) = self.redeemable_channel(channel).await?;
         let cumulative_amount_lamports = to_lamports(claim.cumulative_amount)?;
         let already_redeemed = from_lamports(state.redeemed);
         let deposited = from_lamports(state.deposited);
@@ -342,6 +363,42 @@ impl SettlementBackend for SolanaSettlementBackend {
             vec![
                 AccountMeta::new(self.payer.pubkey(), true),
                 AccountMeta::new(pubkey, false),
+            ],
+        );
+        self.submit(instruction, &[]).await?;
+
+        let (_pubkey, state) = self.read_channel(channel).await?;
+        Ok(to_channel_state(channel, &state))
+    }
+
+    async fn settle(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
+        let (pubkey, state) = self.read_channel(channel).await?;
+        match state.status {
+            ProgramChannelStatus::Settled => {
+                return Err(SettlementError::ChannelSettled(channel.clone()))
+            }
+            // Never closed (still Open) has no deadline to have passed.
+            ProgramChannelStatus::Open => {
+                return Err(SettlementError::SettlementNotYetDue(channel.clone()))
+            }
+            ProgramChannelStatus::Closed => {}
+        }
+        let available_at = state.closed_at.saturating_add(state.settlement_timeout);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_secs() as i64;
+        if now < available_at {
+            return Err(SettlementError::SettlementNotYetDue(channel.clone()));
+        }
+
+        let instruction = Instruction::new_with_bytes(
+            self.program_id,
+            &pack::settle(),
+            vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new(pubkey, false),
+                AccountMeta::new(state.payer, false),
             ],
         );
         self.submit(instruction, &[]).await?;

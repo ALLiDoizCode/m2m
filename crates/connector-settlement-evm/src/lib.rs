@@ -31,6 +31,7 @@ mod bindings;
 pub mod test_support;
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use chrono::Duration;
@@ -175,49 +176,64 @@ impl EvmSettlementBackend {
         channel: &ChannelId,
         id: U256,
     ) -> Result<ChannelState, SettlementError> {
-        let (
-            _payer,
-            counterparty,
-            _payout_address,
-            _settlement_timeout,
-            deposited,
-            redeemed,
-            status,
-        ) = self
-            .contract
-            .channel_state(id)
-            .call()
-            .await
-            .map_err(backend_error)?;
+        let (_payer, counterparty, _payout, _timeout, deposited, redeemed, status, _closed_at) =
+            self.contract
+                .channel_state(id)
+                .call()
+                .await
+                .map_err(backend_error)?;
         Ok(ChannelState {
             id: channel.clone(),
             counterparty: counterparty.to_vec(),
-            status: if status == 0 {
-                ChannelStatus::Open
-            } else {
-                ChannelStatus::Closed
-            },
+            status: status_from_u8(status),
             deposited: deposited.as_u128(),
             redeemed: redeemed.as_u128(),
         })
     }
 
     /// Resolve `channel` to its on-chain id and current state, rejecting
-    /// with [`SettlementError::ChannelClosed`] if it has already been
-    /// closed -- the one precondition [`fund`](SettlementBackend::fund),
-    /// [`redeem`](SettlementBackend::redeem) and
-    /// [`close`](SettlementBackend::close) all share before doing their
-    /// own, method-specific checks.
+    /// with [`SettlementError::ChannelClosed`]/[`SettlementError::ChannelSettled`]
+    /// if it is not still `Open` -- the one precondition
+    /// [`fund`](SettlementBackend::fund) and
+    /// [`close`](SettlementBackend::close) share before doing their own,
+    /// method-specific checks. [`redeem`](SettlementBackend::redeem) uses
+    /// [`redeemable_channel`](Self::redeemable_channel) instead, since it
+    /// still succeeds against a `Closed` channel (issue #574).
     async fn open_channel(
         &self,
         channel: &ChannelId,
     ) -> Result<(U256, ChannelState), SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         let state = self.read_state(channel, id).await?;
-        if state.status == ChannelStatus::Closed {
-            return Err(SettlementError::ChannelClosed(channel.clone()));
+        match state.status {
+            ChannelStatus::Open => Ok((id, state)),
+            ChannelStatus::Closed => Err(SettlementError::ChannelClosed(channel.clone())),
+            ChannelStatus::Settled => Err(SettlementError::ChannelSettled(channel.clone())),
+        }
+    }
+
+    /// Resolve `channel` to its on-chain id and current state, rejecting
+    /// only a `Settled` channel (issue #574) -- used by
+    /// [`redeem`](SettlementBackend::redeem), which succeeds against both
+    /// `Open` and `Closed`.
+    async fn redeemable_channel(
+        &self,
+        channel: &ChannelId,
+    ) -> Result<(U256, ChannelState), SettlementError> {
+        let id = self.existing_channel_id(channel).await?;
+        let state = self.read_state(channel, id).await?;
+        if state.status == ChannelStatus::Settled {
+            return Err(SettlementError::ChannelSettled(channel.clone()));
         }
         Ok((id, state))
+    }
+}
+
+fn status_from_u8(status: u8) -> ChannelStatus {
+    match status {
+        0 => ChannelStatus::Open,
+        1 => ChannelStatus::Closed,
+        _ => ChannelStatus::Settled,
     }
 }
 
@@ -377,7 +393,7 @@ impl SettlementBackend for EvmSettlementBackend {
         channel: &ChannelId,
         claim: Claim,
     ) -> Result<ChannelState, SettlementError> {
-        let (id, state) = self.open_channel(channel).await?;
+        let (id, state) = self.redeemable_channel(channel).await?;
         if claim.cumulative_amount <= state.redeemed {
             return Err(SettlementError::StaleClaim {
                 claimed: claim.cumulative_amount,
@@ -406,6 +422,41 @@ impl SettlementBackend for EvmSettlementBackend {
         let (id, _state) = self.open_channel(channel).await?;
 
         let call = self.contract.close(id);
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+
+        self.read_state(channel, id).await
+    }
+
+    async fn settle(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
+        let id = self.existing_channel_id(channel).await?;
+        let (_payer, _counterparty, _payout, timeout, _deposited, _redeemed, status, closed_at) =
+            self.contract
+                .channel_state(id)
+                .call()
+                .await
+                .map_err(backend_error)?;
+
+        match status_from_u8(status) {
+            ChannelStatus::Settled => return Err(SettlementError::ChannelSettled(channel.clone())),
+            // Never closed (still Open) has no deadline to have passed.
+            ChannelStatus::Open => {
+                return Err(SettlementError::SettlementNotYetDue(channel.clone()))
+            }
+            ChannelStatus::Closed => {}
+        }
+        let available_at = closed_at + timeout;
+        let now = U256::from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is after the Unix epoch")
+                .as_secs(),
+        );
+        if now < available_at {
+            return Err(SettlementError::SettlementNotYetDue(channel.clone()));
+        }
+
+        let call = self.contract.settle(id);
         let pending = call.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 
