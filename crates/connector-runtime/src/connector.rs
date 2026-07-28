@@ -588,11 +588,11 @@ impl Connector {
             .filter(|route| !is_expired(route.expires_at(), now))
             .collect();
 
-        let app_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
         let peer_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
         let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
 
-        let app_match = select_route(&prepare.destination, &app_prefixes)
+        let app_match = self
+            .select_app_route(&prepare.destination)
             .map(|index| (self.routes[index].prefix().len(), RouteTarget::App(index)));
         let peer_match = select_route(&prepare.destination, &peer_prefixes).map(|index| {
             (
@@ -765,15 +765,21 @@ impl Connector {
         }
     }
 
-    /// The price of the app route `destination` would resolve to, or
-    /// `None` if no app route matches it -- the client edge's own claim
-    /// gate (issue #522) has no route table of its own, so it asks here
-    /// rather than re-implementing longest-prefix selection against a
-    /// second copy of `self.routes`. Mirrors exactly the app-route half of
-    /// [`Self::handle_prepare_traced`]'s own route selection.
-    pub fn app_route_price(&self, destination: &str) -> Option<u64> {
+    /// The index into `self.routes` that `destination` longest-prefix
+    /// matches against, if any -- the one place app-route selection lives,
+    /// shared by [`Self::handle_prepare_traced`] and [`Self::app_route_price`]
+    /// so the client edge's claim gate (issue #522) asks here rather than
+    /// keeping a second copy of this selection.
+    fn select_app_route(&self, destination: &str) -> Option<usize> {
         let app_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
-        select_route(destination, &app_prefixes).map(|index| self.routes[index].price())
+        select_route(destination, &app_prefixes)
+    }
+
+    /// The price of the app route `destination` would resolve to, or
+    /// `None` if no app route matches it.
+    pub fn app_route_price(&self, destination: &str) -> Option<u64> {
+        self.select_app_route(destination)
+            .map(|index| self.routes[index].price())
     }
 
     /// This node's static routes, for the operator surface's read-only

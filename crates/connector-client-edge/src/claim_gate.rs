@@ -117,10 +117,13 @@ impl ClientClaimGate {
                 }
             });
         }
-        if let Err(ClaimError::Underpayment { advanced, price }) =
-            validate_price(current, claim.transferred_amount(), price)
-        {
-            return Err(ClaimIngestRejection::Underpayment { advanced, price });
+        if let Err(error) = validate_price(current, claim.transferred_amount(), price) {
+            return Err(match error {
+                ClaimError::Underpayment { advanced, price } => {
+                    ClaimIngestRejection::Underpayment { advanced, price }
+                }
+                other => unreachable!("validate_price only ever returns Underpayment: {other:?}"),
+            });
         }
 
         watermarks.insert(
