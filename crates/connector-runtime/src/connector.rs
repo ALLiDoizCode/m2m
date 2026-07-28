@@ -3153,6 +3153,7 @@ mod tests {
         /// correctly encrypted to this connector's identity, i.e. the packet
         /// reached the termination -- but the plaintext inside is not a
         /// valid envelope. Still priced, unlike the wrap-couldn't-open case
+        /// in `a_wrap_that_cannot_be_opened_still_carries_zero_on_a_priced_route`
         /// below.
         #[tokio::test]
         async fn an_undecodable_envelope_reject_carries_the_routes_price() {
@@ -3175,6 +3176,33 @@ mod tests {
                     assert_eq!(reject.code.as_str(), "F01");
                     assert!(reject.message.contains("envelope did not decode"));
                     assert_eq!(reject.accumulated_cost, 25);
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        /// The wrap never opens at all -- unlike the case above, this never
+        /// proves the packet was even addressed to this connector, so the
+        /// packet never reaches the termination and the reject stays
+        /// unpriced, exactly like `AppOutcome::Unreachable` below.
+        #[tokio::test]
+        async fn a_wrap_that_cannot_be_opened_still_carries_zero_on_a_priced_route() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = connector_with(vec![route], app_client, test_clock());
+
+            // Garbage bytes: not shaped like a gift wrap at all, so it never
+            // opens.
+            let response = connector
+                .handle_prepare(prepare_with_data(vec![0xff; 40]), 0)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F01");
+                    assert!(reject.message.contains("gift wrap could not be opened"));
+                    assert_eq!(reject.accumulated_cost, 0);
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
