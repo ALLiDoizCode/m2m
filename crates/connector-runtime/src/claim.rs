@@ -194,14 +194,13 @@ pub struct ChannelDomain {
 /// (issue #575's AC: "an id that is not one is refused where channels are
 /// configured, never hashed or truncated into one"). Accepted shapes are
 /// `0x`-prefixed (or bare) 64-character hex -- `TokenNetwork.sol`'s own
-/// `channelId` -- and a plain decimal numeral, embedded as the big-endian
-/// bytes of that same integer -- the shape a `uint256` channel counter
-/// takes today on `SettlementChannel.sol` and in this workspace's own
-/// `InMemorySettlementBackend` (issue #566 tracks unifying the peer wire's
-/// channel id with the settlement backend's once it retargets onto
-/// `TokenNetwork`). Both are exact, lossless encodings of the on-chain
-/// value the string already names -- neither hashes nor truncates it;
-/// anything else is refused here rather than defaulted.
+/// `channelId`, and the shape `EvmSettlementBackend::open` itself returns
+/// since issue #576's retarget -- and a plain decimal numeral, embedded as
+/// the big-endian bytes of that same integer -- the shape this workspace's
+/// own `InMemorySettlementBackend` still uses. Both are exact, lossless
+/// encodings of the on-chain value the string already names -- neither
+/// hashes nor truncates it; anything else is refused here rather than
+/// defaulted.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error(
     "channel id {0:?} is not a 32-byte on-chain identifier (expected 0x-prefixed 64 hex characters or a decimal uint256)"

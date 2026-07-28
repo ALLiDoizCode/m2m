@@ -26,7 +26,7 @@ fn bindings_dir() -> PathBuf {
 /// The same trim `regenerate-token-network-abi.sh` applies: a full forge artifact carries
 /// `methodIdentifiers`/`rawMetadata`/`metadata`/`id` alongside `abi`/`bytecode`/
 /// `deployedBytecode`; only the latter three are the committed convention this crate already
-/// uses for `SettlementChannel.json`/`MockERC20.json`.
+/// uses for `MockERC20.json`.
 fn trim_artifact(full: &Value) -> Value {
     serde_json::json!({
         "abi": full["abi"],

@@ -192,20 +192,26 @@ fn read_settlement_private_key(location: &SecretLocation) -> Result<String, Runt
 }
 
 /// Construct the settlement backend a `[settlement]` section describes,
-/// connecting to the already-deployed contract it names rather than
-/// deploying a fresh one (issue #542) -- only [`SettlementChain::Evm`] is
-/// constructible today, matching the one chain `connector-config` accepts
-/// at load time.
+/// connecting to the already-deployed `TokenNetworkRegistry` it names
+/// (issue #576) -- `contract_address` -- and resolving the `TokenNetwork`
+/// it actually drives through `token_address`, rather than deploying a
+/// fresh one (issue #542) -- only [`SettlementChain::Evm`] is constructible
+/// today, matching the one chain `connector-config` accepts at load time.
 async fn build_settlement_backend(
     settlement: &SettlementConfig,
 ) -> Result<Arc<dyn SettlementBackend>, RuntimeError> {
     match settlement.chain() {
         SettlementChain::Evm => {
             let private_key = read_settlement_private_key(settlement.key())?;
-            let contract_address = ethers::types::Address::from(settlement.contract_address());
-            let backend =
-                EvmSettlementBackend::connect(settlement.rpc_url(), &private_key, contract_address)
-                    .await?;
+            let registry_address = ethers::types::Address::from(settlement.contract_address());
+            let token_address = ethers::types::Address::from(settlement.token_address());
+            let backend = EvmSettlementBackend::connect(
+                settlement.rpc_url(),
+                &private_key,
+                registry_address,
+                token_address,
+            )
+            .await?;
             Ok(Arc::new(backend) as Arc<dyn SettlementBackend>)
         }
     }
@@ -439,6 +445,7 @@ write_keys = ["{key}"]
         use connector_settlement_evm::test_support::{
             anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
         };
+        use ethers::signers::Signer as EvmSigner;
 
         /// This test binary's own base port for [`Anvil::spawn`] -- distinct
         /// from other test binaries' bases (`connector-settlement-evm`'s own
@@ -460,7 +467,8 @@ write_keys = ["{key}"]
         /// driven against a real, disposable `anvil` chain end to end:
         /// `build` reads the `[settlement]` section from a config file (no
         /// backend injected directly), and the resulting `Connector` opens a
-        /// real channel against a real, freshly deployed `SettlementChannel`.
+        /// real channel against a real, freshly deployed `TokenNetwork`,
+        /// resolved through a freshly deployed registry.
         #[tokio::test]
         async fn a_configured_settlement_section_is_constructed_and_attached() {
             if !anvil_available() {
@@ -481,8 +489,8 @@ write_keys = ["{key}"]
             let settlement_backend =
                 EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
                     .await
-                    .expect("deploy SettlementChannel");
-            let contract_address = settlement_backend.address();
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            let registry_address = settlement_backend.registry_address();
             drop(settlement_backend);
 
             let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
@@ -496,7 +504,7 @@ key_file = "{key_path}"
 [settlement]
 chain = "evm"
 rpc_url = "{rpc_url}"
-contract_address = "{contract_address:?}"
+contract_address = "{registry_address:?}"
 token_address = "{token:?}"
 decimals = 6
 
@@ -505,16 +513,21 @@ key_file = "{key_path}"
 "#,
                 key_path = key_path.display(),
                 rpc_url = anvil.rpc_url,
-                contract_address = contract_address,
+                registry_address = registry_address,
                 token = token,
             ));
 
             let (connector, _signer) = build(&config).await.expect("build");
+            // A real 20-byte EVM address (issue #576): `TokenNetwork`
+            // requires a counterparty able to sign balance proofs, not an
+            // arbitrary peer name.
+            let counterparty =
+                ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng())
+                    .address()
+                    .as_bytes()
+                    .to_vec();
             let opened = connector
-                .open_channel(
-                    b"settlement-construction-peer".to_vec(),
-                    Duration::seconds(3600),
-                )
+                .open_channel(counterparty, Duration::seconds(3600))
                 .await
                 .expect("a settlement backend was constructed and attached");
             assert_eq!(opened.deposited, 0);

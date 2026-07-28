@@ -1325,6 +1325,7 @@ mod tests {
         use super::*;
         use crate::rfc9421::sign_request;
         use connector_runtime::{ChannelDomain, ChannelViewStatus, WireClaim};
+        use connector_settlement::SettlementBackend;
         use connector_settlement_evm::EvmSettlementBackend;
         use connector_signer::{derive_evm_address, evm_balance_proof_digest, EvmBalanceProof};
         use ed25519_dalek::Keypair;
@@ -1422,7 +1423,7 @@ mod tests {
         /// channel against a real chain", "channel lifecycle is driven
         /// entirely through the operator surface". Every step below is a
         /// real, signed HTTP write against this crate's actual `router()`,
-        /// reaching a real `SettlementChannel` contract on a real (if
+        /// reaching a real `TokenNetwork` contract on a real (if
         /// disposable) chain -- nothing here is faked.
         #[tokio::test]
         async fn opening_funding_and_closing_a_channel_over_the_operator_surface_reaches_a_real_chain(
@@ -1445,7 +1446,7 @@ mod tests {
             let settlement =
                 EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
                     .await
-                    .expect("deploy SettlementChannel");
+                    .expect("deploy a TokenNetwork through a fresh registry");
 
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
@@ -1470,7 +1471,7 @@ mod tests {
 
             // Open.
             let open_body = serde_json::to_vec(&serde_json::json!({
-                "counterparty_hex": "0x000000000000000000000000000000000000aa",
+                "counterparty_hex": "0x00000000000000000000000000000000000000aa",
                 "settlement_timeout_seconds": 3600,
             }))
             .unwrap();
@@ -1558,20 +1559,31 @@ mod tests {
             let settlement =
                 EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
                     .await
-                    .expect("deploy SettlementChannel");
-
-            // The first channel a freshly deployed `SettlementChannel`
-            // opens is always id "0" -- a plain decimal `uint256` counter,
-            // which `connector_runtime::claim::parse_channel_id` accepts as
-            // that same on-chain value (issue #575). Configuring the claim
-            // verification key and domain against that id ahead of time,
-            // rather than after opening, means this Connector can accept an
-            // inbound claim for it the moment it exists.
-            let peer_signer = LocalSigner::generate("peer-claim-key");
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            // The real EIP-712 domain a claim against this backend's own
+            // `TokenNetwork` must be signed under (issue #576) -- `anvil`'s
+            // own default chain id, and the real deployed contract address,
+            // not a Base Sepolia placeholder nothing here actually talks to.
             let peer_channel_domain = ChannelDomain {
-                chain_id: 84_532,
-                token_network_address: [0x1E; 20],
+                chain_id: 31_337,
+                token_network_address: settlement.address().to_fixed_bytes(),
             };
+
+            // `TokenNetwork.claimFromChannel` verifies a real signature
+            // recovering to the channel's actual counterparty (issue #576),
+            // so that counterparty must be an address `peer_signer` holds
+            // the key for -- not an arbitrary placeholder. The channel is
+            // opened directly against the backend (rather than through this
+            // surface's own `/channels`, already covered by the lifecycle
+            // test above) so its real, keccak-derived id is known before
+            // configuring the claim verification key and domain against it.
+            let peer_signer = LocalSigner::generate("peer-claim-key");
+            let peer_address = derive_evm_address(&peer_signer.public_key().unwrap());
+            let channel_id = settlement
+                .open(peer_address.to_vec(), chrono::Duration::seconds(3600))
+                .await
+                .expect("open a real channel directly against the backend");
+
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
             let connector = Arc::new(
@@ -1583,11 +1595,8 @@ mod tests {
                     clock,
                 )
                 .with_settlement(Arc::new(settlement))
-                .with_channel_verification_key(
-                    "0",
-                    derive_evm_address(&peer_signer.public_key().unwrap()),
-                )
-                .with_channel_domain("0", peer_channel_domain)
+                .with_channel_verification_key(channel_id.0.clone(), peer_address)
+                .with_channel_domain(channel_id.0.clone(), peer_channel_domain)
                 .unwrap(),
             );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
@@ -1599,24 +1608,11 @@ mod tests {
                 vec![keypair.public.to_bytes()],
             );
 
-            // Open and fund, exactly like the lifecycle test above.
-            let open_body = serde_json::to_vec(&serde_json::json!({
-                "counterparty_hex": "0x000000000000000000000000000000000000aa",
-                "settlement_timeout_seconds": 3600,
-            }))
-            .unwrap();
-            let response = app
-                .clone()
-                .oneshot(signed_post(&keypair, "/channels", open_body))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
-            let opened: ChannelView = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(opened.id, "0");
-
+            // Fund, through the operator surface, exactly like the
+            // lifecycle test above -- the channel itself was already opened
+            // directly against the backend above.
             let fund_body = serde_json::to_vec(&serde_json::json!({ "amount": 1_000 })).unwrap();
-            let fund_path = format!("/channels/{}/fund", opened.id);
+            let fund_path = format!("/channels/{}/fund", channel_id.0);
             let response = app
                 .clone()
                 .oneshot(signed_post(&keypair, &fund_path, fund_body))
@@ -1626,10 +1622,12 @@ mod tests {
 
             // A genuine claim from the channel's counterparty, accepted
             // exactly as an inbound PREPARE's piggybacked claim would be.
-            // `opened.id` ("0") embeds as the big-endian bytes of that same
-            // decimal integer -- the on-chain `bytes32` a real
-            // `TokenNetwork` claim of channel id 0 would sign over too.
-            let on_chain_id = [0u8; 32];
+            let mut on_chain_id = [0u8; 32];
+            let hex_digits = channel_id.0.trim_start_matches("0x");
+            for (i, byte) in on_chain_id.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+                    .expect("channel id is 0x-prefixed 64-hex");
+            }
             let sign_claim = |nonce: u64, amount: u64| {
                 let proof = EvmBalanceProof {
                     channel_id: on_chain_id,
@@ -1640,11 +1638,24 @@ mod tests {
                     chain_id: peer_channel_domain.chain_id,
                     token_network_address: peer_channel_domain.token_network_address,
                 };
+                // `peer_signer.sign` produces a recovery id in
+                // `libsecp256k1`'s own `{0, 1}` convention
+                // (`connector_signer::crypto::sign_digest`); the wire
+                // accepts either that or the Ethereum-wallet `{27, 28}`
+                // convention when *verifying* (`recover_evm_signer`
+                // normalizes both), but `TokenNetwork`'s on-chain
+                // `ECDSA.recover` only accepts `{27, 28}` -- adjusted here
+                // so this claim genuinely redeems on the real chain below
+                // rather than merely passing this node's own internal
+                // check. Production signing the wire itself submits to a
+                // real chain is issue #577's job, not this ticket's.
+                let mut signature = peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap();
+                signature.recovery_id += 27;
                 WireClaim {
-                    channel_id: opened.id.clone(),
+                    channel_id: channel_id.0.clone(),
                     nonce,
                     cumulative_amount: amount,
-                    signature: peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap(),
+                    signature,
                 }
             };
             assert_eq!(
@@ -1654,7 +1665,7 @@ mod tests {
 
             // Redeem the latest claim through the operator surface -- no
             // claim in the request body, unlike `POST /channels/:id/redeem`.
-            let redeem_latest_path = format!("/channels/{}/redeem-latest", opened.id);
+            let redeem_latest_path = format!("/channels/{}/redeem-latest", channel_id.0);
             let response = app
                 .clone()
                 .oneshot(signed_post(&keypair, &redeem_latest_path, Vec::new()))
@@ -1672,7 +1683,7 @@ mod tests {
                 connector.handle_peer_claim(sign_claim(2, 900)),
                 connector_runtime::ClaimAckOutcome::Accepted
             );
-            let cooperative_close_path = format!("/channels/{}/cooperative-close", opened.id);
+            let cooperative_close_path = format!("/channels/{}/cooperative-close", channel_id.0);
             let response = app
                 .clone()
                 .oneshot(signed_post(&keypair, &cooperative_close_path, Vec::new()))

@@ -19,9 +19,10 @@
 //! provides, and the only case that catches a committed config which cannot
 //! start. Exactly that happened: a `[settlement]` section naming the zero
 //! address made both files exit 1 on startup, because
-//! `EvmSettlementBackend::connect` reads `token()` off the address it is
-//! given and there is no contract at that one (issue #542). Both files now
-//! ship that section commented out.
+//! `EvmSettlementBackend::connect` resolves a `TokenNetwork` through the
+//! configured `TokenNetworkRegistry` and there is no contract at that one
+//! (issue #542, issue #576). Both files now ship that section commented
+//! out.
 //!
 //! The verbatim case also drives one claimless request at each file's own
 //! terminating route and asserts it is answered with the x402 greeting
@@ -40,9 +41,9 @@
 //! keeps `runtime::build`'s settlement construction path covered end to end
 //! by the real binary. It is skipped when no `anvil` is on `PATH`.
 //!
-//! If a real `SettlementChannel` is ever deployed and its address recorded
-//! in these files, the verbatim case starts requiring a reachable chain in
-//! order to pass. That is a decision to revisit here deliberately, not an
+//! If a real `TokenNetworkRegistry` is ever deployed and its address
+//! recorded in these files, the verbatim case starts requiring a reachable
+//! chain in order to pass. That is a decision to revisit here deliberately, not an
 //! accident to paper over: a committed `[settlement]` section means the node
 //! cannot start without that chain, which is the fail-closed behaviour
 //! ADR 0009 asks for.
@@ -334,9 +335,9 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.rust.store").await;
 }
 
-/// Deploy a fresh `SettlementChannel` and its mock USDC on a disposable
-/// local chain. The returned [`Anvil`] must stay alive for as long as the
-/// addresses beside it are used.
+/// Deploy a fresh `TokenNetworkRegistry`, a `TokenNetwork` through it, and
+/// its mock USDC on a disposable local chain. The returned [`Anvil`] must
+/// stay alive for as long as the addresses beside it are used.
 async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers::types::Address) {
     let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
     let token =
@@ -345,10 +346,10 @@ async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers:
             .expect("deploy mock USDC");
     let settlement = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
         .await
-        .expect("deploy SettlementChannel");
-    let contract_address = settlement.address();
+        .expect("deploy a TokenNetwork through a fresh registry");
+    let registry_address = settlement.registry_address();
     drop(settlement);
-    (anvil, contract_address, token)
+    (anvil, registry_address, token)
 }
 
 #[tokio::test]

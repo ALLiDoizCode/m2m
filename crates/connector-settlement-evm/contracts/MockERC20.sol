@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 /// @title MockERC20
 /// @notice Minimal ERC-20 token this crate's own integration tests deploy
-/// to stand in for the real 6-decimal USDC `SettlementChannel` settles in
+/// to stand in for the real 6-decimal USDC `TokenNetwork` settles in
 /// production (issue #542) -- never deployed outside a test's disposable
 /// `anvil` instance. Mirrors `packages/contracts/test/mocks/MockERC20.sol`;
 /// duplicated here rather than shared so this crate's `contracts/` stays a

@@ -70,34 +70,33 @@ price = 1000
 # reasoning. In short: an ABSENT `[settlement]` section is the supported way
 # to run without settlement (channel operations answer
 # `NoSettlementBackend`, the node starts and serves), while a section that
-# is PRESENT but names an address with no contract at it is a hard startup
-# failure by design (ADR 0009, fail-closed) — `EvmSettlementBackend::connect`
-# reads `token()` off that address, gets `0x` back, and the process exits 1.
-# So the zero address is not a harmless placeholder here.
+# is PRESENT but names a registry with no `TokenNetwork` registered for the
+# configured token is a hard startup failure by design (ADR 0009,
+# fail-closed) — `EvmSettlementBackend::connect` resolves `token_address`
+# through `contract_address`'s `TokenNetworkRegistry.getTokenNetwork`, gets
+# the zero address back, and the process exits 1. So the zero address is
+# not a harmless placeholder here.
 #
-# ⚠️ DO NOT DEPLOY `SettlementChannel.sol` ⚠️ (issue #568) — this is not
-# only "no address yet". The contract itself is unsafe to deploy anywhere
-# real value could reach it: `redeem` never verifies its signature, `close`
-# has no access control, and there is no refund path. Its constructor now
-# reverts without a test-only acknowledgement, so a normal deployment fails
-# outright — see the `DO NOT DEPLOY` block at the top of
-# `crates/connector-settlement-evm/contracts/SettlementChannel.sol`. Issue
-# #566 replaces it with a real, signature-verifying `TokenNetwork`; only
-# that replacement is ever meant to be named by a real `contract_address`.
+# `EvmSettlementBackend` drives `packages/contracts/src/TokenNetwork.sol`,
+# reached through that registry (issue #566, issue #576) --
+# `contracts/SettlementChannel.sol`, this crate's own throwaway,
+# signature-unverified channel contract, is gone.
 #
-# The template below is the shape to fill in once issue #566's replacement
-# is deployed for real — do NOT uncomment it against a `SettlementChannel.sol`
-# deployment. Same real USDC (`./connector.yaml`'s `tokenAddress`), same
-# known-good RPC, same key file reused for settlement signing. It is
-# uncommented and booted against a local anvil (the explicit test-only
-# escape hatch) by `crates/connector-bin/tests/devnet_configs_load.rs`, so
-# it stays a template that actually works.
+# The template below is the shape to fill in once this box is meant to
+# settle for real: `contract_address` names the `TokenNetworkRegistry`, not
+# a channel contract directly. Same real USDC (`./connector.yaml`'s
+# `tokenAddress`), same known-good RPC, same key file reused for settlement
+# signing. It is uncommented and booted against a freshly deployed registry
+# and `TokenNetwork` on a local anvil (the explicit test-only escape hatch)
+# by `crates/connector-bin/tests/devnet_configs_load.rs`, so it stays a
+# template that actually works. #577 tracks actually shipping this section
+# filled in against the live Base Sepolia deployment.
 #
 # --- BEGIN settlement template (uncomment when a contract is deployed) ---
 # [settlement]
 # chain = "evm"
 # rpc_url = "https://base-sepolia-rpc.publicnode.com"
-# # REPLACE the zero address with the deployed `SettlementChannel` address.
+# # REPLACE the zero address with the deployed `TokenNetworkRegistry` address.
 # contract_address = "0x0000000000000000000000000000000000000000"
 # token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 # decimals = 6

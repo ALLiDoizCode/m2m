@@ -38,7 +38,7 @@ pub const PROGRAM_ID: &str = "9RMCe65sCb466R4vNgdGzQXDUbaepgCigyWgjvsctN6E";
 
 /// Absolute path to the checked-in, pre-built `.so` for this program --
 /// checked in the same way `connector-settlement-evm` checks in
-/// `SettlementChannel.json`'s compiled bytecode, so a test spawning a real
+/// `MockERC20.json`'s compiled bytecode, so a test spawning a real
 /// `solana-test-validator` does not need `cargo build-sbf` (and the Solana
 /// BPF SDK it requires) on `PATH` to deploy it.
 pub fn so_path() -> std::path::PathBuf {
