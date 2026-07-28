@@ -31,6 +31,7 @@ use connector_domain::{
 use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_signer::giftwrap::seal_request;
 use connector_signer::{LocalSigner, Signer};
 
 use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
@@ -45,21 +46,24 @@ fn test_clock() -> Arc<TestClock> {
     ))
 }
 
-fn sample_prepare() -> Prepare {
+/// Per ADR 0018/issue #524, a `Prepare`'s `data` is a gift wrap sealed to
+/// the terminating connector's identity key, opened above the `AppClient`
+/// boundary (issue #521).
+fn sealed_sample_prepare(receiver_public: &connector_signer::PublicKeyBytes) -> Prepare {
+    let plaintext = EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: b"hello app".to_vec(),
+    }
+    .encode();
+    let (data, _shared_secret) = seal_request(&plaintext, receiver_public).expect("seal");
     Prepare {
         amount: 0,
         expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
         execution_condition: derive_condition(&FULFILLMENT),
         destination: "g.example.app".to_string(),
-        // Per ADR 0018/issue #519 a `Prepare`'s `data` carries a structured
-        // envelope, decoded above the `AppClient` boundary (issue #521).
-        data: EnvelopeRequest {
-            method: "POST".to_string(),
-            target: "/".to_string(),
-            headers: vec![],
-            body: b"hello app".to_vec(),
-        }
-        .encode(),
+        data,
     }
 }
 
@@ -91,7 +95,11 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
     )
 }
 
-fn deliverable_connector(route: StaticRoute, app_client: Arc<FakeAppClient>) -> Arc<Connector> {
+fn deliverable_connector(
+    route: StaticRoute,
+    app_client: Arc<FakeAppClient>,
+    identity_signer: Arc<dyn Signer>,
+) -> Arc<Connector> {
     app_client.respond(
         route.handler_url(),
         AppOutcome::Answered {
@@ -108,26 +116,34 @@ fn deliverable_connector(route: StaticRoute, app_client: Arc<FakeAppClient>) -> 
             },
         },
     );
-    Arc::new(Connector::new(
-        vec![route],
-        vec![],
-        app_client,
-        Arc::new(InProcessPeerTransport::new()),
-        test_clock(),
-    ))
+    Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        )
+        .with_identity_signer(identity_signer),
+    )
 }
 
 fn test_signer() -> Arc<dyn Signer> {
     Arc::new(LocalSigner::generate("test-signer"))
 }
 
-async fn post_claim(connector: Arc<Connector>, claim_json: &str) -> (StatusCode, Bytes) {
-    let app = router(connector, test_signer());
+async fn post_claim(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    claim_json: &str,
+) -> (StatusCode, Bytes) {
+    let prepare = sealed_sample_prepare(&signer.public_key().unwrap());
+    let app = router(connector, signer);
     let request = Request::builder()
         .method("POST")
         .uri("/ilp")
         .header(CLAIM_HEADER, BASE64.encode(claim_json.as_bytes()))
-        .body(Body::from(sample_prepare().encode()))
+        .body(Body::from(prepare.encode()))
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     let status = response.status();
@@ -178,9 +194,11 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     // A claim advancing by the full, genuinely-deposited 1_000 covers this
     // route's price of 100 and the packet is delivered (AC1).
     let app_client = Arc::new(FakeAppClient::new());
-    let connector = deliverable_connector(route.clone(), app_client.clone());
+    let signer = test_signer();
+    let connector = deliverable_connector(route.clone(), app_client.clone(), signer.clone());
     let (status, bytes) = post_claim(
         connector,
+        signer,
         &evm_claim_json(&channel_id_hex(&paid_channel.0), 1, paid_state.deposited),
     )
     .await;
@@ -193,9 +211,11 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     // (F03), never reaching the app, with no flag or config to bypass it
     // (AC2, AC4).
     let app_client_two = Arc::new(FakeAppClient::new());
-    let connector_two = deliverable_connector(route, app_client_two.clone());
+    let signer_two = test_signer();
+    let connector_two = deliverable_connector(route, app_client_two.clone(), signer_two.clone());
     let (status_two, bytes_two) = post_claim(
         connector_two,
+        signer_two,
         &evm_claim_json(
             &channel_id_hex(&underpaid_channel.0),
             1,

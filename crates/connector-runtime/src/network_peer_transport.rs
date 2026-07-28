@@ -466,7 +466,10 @@ mod tests {
     use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
     use crate::peer_transport::InProcessPeerTransport;
-    use crate::test_support::{answered, envelope_request_data, fulfill_data};
+    use crate::test_support::{
+        answered, envelope_request_data, fulfill_envelope, identity_signer, open_sealed_envelope,
+        sealed_envelope_request_data,
+    };
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
     use connector_domain::derive_condition;
@@ -589,29 +592,44 @@ mod tests {
             route.handler_url(),
             answered(b"delivered by the peer", Some(FULFILLMENT)),
         );
-        let peer = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let peer = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let server = PeerWireServer::bind(localhost(), peer).await.unwrap();
 
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", server.local_addr());
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let (response, ack, reached) = transport
-            .forward("peer-b", prepare("g.example.app"), 0, None)
+            .forward(
+                "peer-b",
+                Prepare {
+                    data,
+                    ..prepare("g.example.app")
+                },
+                0,
+                None,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"delivered by the peer"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"delivered by the peer")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
         assert_eq!(ack, ClaimAckOutcome::NotSent);
         assert!(reached);
     }
@@ -757,13 +775,16 @@ mod tests {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(route.handler_url(), answered(b"first", Some(FULFILLMENT)));
-        let peer = Arc::new(Connector::new(
-            vec![route.clone()],
-            vec![],
-            app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let peer = Arc::new(
+            Connector::new(
+                vec![route.clone()],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let server = PeerWireServer::bind(localhost(), peer.clone())
             .await
             .unwrap();
@@ -771,17 +792,29 @@ mod tests {
 
         let mut transport = NetworkPeerTransport::new();
         transport.add_peer("peer-b", addr);
+        let (first_data, first_secret) = sealed_envelope_request_data(b"hello");
 
         let (first, _, _) = transport
-            .forward("peer-b", prepare("g.example.app"), 0, None)
+            .forward(
+                "peer-b",
+                Prepare {
+                    data: first_data,
+                    ..prepare("g.example.app")
+                },
+                0,
+                None,
+            )
             .await;
-        assert_eq!(
-            first,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"first"),
-            })
-        );
+        match first {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&first_secret, &fulfill.data),
+                    fulfill_envelope(b"first")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
 
         server.shutdown().await;
 
@@ -795,17 +828,29 @@ mod tests {
 
         app_client.respond(route.handler_url(), answered(b"second", Some(FULFILLMENT)));
         let _server_again = PeerWireServer::bind(addr, peer).await.unwrap();
+        let (second_data, second_secret) = sealed_envelope_request_data(b"hello");
 
         let (after_recovery, _, _) = transport
-            .forward("peer-b", prepare("g.example.app"), 0, None)
+            .forward(
+                "peer-b",
+                Prepare {
+                    data: second_data,
+                    ..prepare("g.example.app")
+                },
+                0,
+                None,
+            )
             .await;
-        assert_eq!(
-            after_recovery,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"second"),
-            })
-        );
+        match after_recovery {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&second_secret, &fulfill.data),
+                    fulfill_envelope(b"second")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
     }
 
     /// A response frame that does not answer this request at all -- a

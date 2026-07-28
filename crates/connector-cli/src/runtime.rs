@@ -131,13 +131,16 @@ pub fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>), Runti
         .iter()
         .map(|route| PeerRoute::new(route.prefix(), route.peer_id(), route.fee()))
         .collect();
-    let connector = Arc::new(Connector::new(
-        config.routes().to_vec(),
-        peer_routes,
-        Arc::new(HttpAppClient::new()),
-        Arc::new(peer_transport),
-        Arc::new(SystemClock),
-    ));
+    let connector = Arc::new(
+        Connector::new(
+            config.routes().to_vec(),
+            peer_routes,
+            Arc::new(HttpAppClient::new()),
+            Arc::new(peer_transport),
+            Arc::new(SystemClock),
+        )
+        .with_identity_signer(signer.clone()),
+    );
     Ok((connector, signer))
 }
 

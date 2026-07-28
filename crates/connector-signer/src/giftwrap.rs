@@ -1,0 +1,331 @@
+//! A packet payload sealed to the terminating connector's identity (ADR
+//! 0018, issue #524): what actually rides in `Prepare.data`,
+//! `Fulfill.data`, and a REJECT raised at the termination.
+//!
+//! **Request direction**: the sender ECDHs a fresh, per-packet ephemeral
+//! key against the terminating connector's identity public key, and seals
+//! the plaintext -- a fresh random shared secret followed by the encoded
+//! envelope -- under a key derived from that ECDH result. Only the holder
+//! of the matching identity secret key can recover the shared secret and
+//! open it; a forwarding hop, which never holds that key, sees only opaque
+//! bytes.
+//!
+//! **Response direction**: no second key exchange. The shared secret
+//! carried inside the request wrap seals the answer directly (a
+//! [`crate::signer::Signer`] is not needed to open a sealed response -- the
+//! caller already has the secret from opening the request). "No second
+//! exchange is needed; the secret is bidirectional by construction."
+//!
+//! A sealed request and a sealed response use distinct type bytes so
+//! neither can be fed to the other's `open_*` by mistake, and unopenable
+//! bytes ([`GiftWrapError`]) are a different Rust type entirely from a
+//! wrap that opens cleanly but decodes to a malformed envelope --
+//! `connector_domain::EnvelopeError` -- so the two failure modes stay
+//! distinguishable at every call site by construction, not by convention.
+
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use hkdf::Hkdf;
+use libsecp256k1::{PublicKey, SecretKey};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use sha2::Sha256;
+use thiserror::Error;
+
+use crate::crypto::ecdh_x_coordinate;
+use crate::signer::{PublicKeyBytes, Signer};
+
+const NONCE_LEN: usize = 12;
+const SECRET_LEN: usize = 32;
+const PUBLIC_KEY_LEN: usize = 65;
+const REQUEST_INFO: &[u8] = b"toon-giftwrap-request";
+const RESPONSE_INFO: &[u8] = b"toon-giftwrap-response";
+const TYPE_GIFTWRAP_REQUEST: u8 = 1;
+const TYPE_GIFTWRAP_RESPONSE: u8 = 2;
+
+/// Why a gift wrap could not be opened. Never carries decrypted plaintext.
+/// Distinct from a wrap that opens cleanly but whose recovered plaintext
+/// fails to decode as an envelope -- that is a
+/// `connector_domain::EnvelopeError`, a different type entirely, raised
+/// above this module rather than by it (issue #524's own acceptance
+/// criterion: a wrap that cannot be opened rejects distinguishably from one
+/// that opens to a malformed envelope).
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum GiftWrapError {
+    #[error("invalid gift wrap type byte: expected {0}")]
+    InvalidType(u8),
+
+    #[error("gift wrap is truncated")]
+    Truncated,
+
+    #[error("invalid ephemeral or peer public key")]
+    InvalidKey,
+
+    #[error("gift wrap failed to decrypt")]
+    OpenFailed,
+}
+
+fn hkdf_key(shared_secret: &[u8; 32], info: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, shared_secret);
+    let mut okm = [0u8; 32];
+    hk.expand(info, &mut okm)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    okm
+}
+
+fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = ChaCha20Poly1305::new(&Key::from(*key));
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(&Nonce::from(nonce_bytes), plaintext)
+        .expect("chacha20poly1305 encryption of a bounded packet payload cannot fail");
+    let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    out
+}
+
+fn decrypt(key: &[u8; 32], nonce_and_ciphertext: &[u8]) -> Result<Vec<u8>, GiftWrapError> {
+    if nonce_and_ciphertext.len() < NONCE_LEN {
+        return Err(GiftWrapError::Truncated);
+    }
+    let (nonce_bytes, ciphertext) = nonce_and_ciphertext.split_at(NONCE_LEN);
+    let nonce: [u8; NONCE_LEN] = nonce_bytes.try_into().expect("checked length above");
+    let cipher = ChaCha20Poly1305::new(&Key::from(*key));
+    cipher
+        .decrypt(&Nonce::from(nonce), ciphertext)
+        .map_err(|_| GiftWrapError::OpenFailed)
+}
+
+/// Seal `plaintext` (an encoded envelope) to `receiver_public` -- a fresh
+/// ephemeral key pair is generated for this call alone, so no two sealed
+/// requests, even to the same receiver, share an ephemeral key. Returns the
+/// wire bytes to carry as `Prepare.data`, and the freshly generated shared
+/// secret this packet's fulfilment derives from (ADR 0019/#525) and that
+/// [`seal_response`] uses to seal the answer.
+pub fn seal_request(
+    plaintext: &[u8],
+    receiver_public: &PublicKeyBytes,
+) -> Result<(Vec<u8>, [u8; 32]), GiftWrapError> {
+    let receiver_public =
+        PublicKey::parse(receiver_public).map_err(|_| GiftWrapError::InvalidKey)?;
+
+    let mut ephemeral_secret_bytes = [0u8; 32];
+    let ephemeral_secret = loop {
+        OsRng.fill_bytes(&mut ephemeral_secret_bytes);
+        if let Ok(key) = SecretKey::parse(&ephemeral_secret_bytes) {
+            break key;
+        }
+    };
+    let ephemeral_public = PublicKey::from_secret_key(&ephemeral_secret);
+
+    let ecdh_secret =
+        ecdh_x_coordinate(&ephemeral_secret, &receiver_public).ok_or(GiftWrapError::InvalidKey)?;
+    let aead_key = hkdf_key(&ecdh_secret, REQUEST_INFO);
+
+    let mut shared_secret = [0u8; SECRET_LEN];
+    OsRng.fill_bytes(&mut shared_secret);
+
+    let mut inner = Vec::with_capacity(SECRET_LEN + plaintext.len());
+    inner.extend_from_slice(&shared_secret);
+    inner.extend_from_slice(plaintext);
+    let ciphertext = encrypt(&aead_key, &inner);
+
+    let mut out = Vec::with_capacity(1 + PUBLIC_KEY_LEN + ciphertext.len());
+    out.push(TYPE_GIFTWRAP_REQUEST);
+    out.extend_from_slice(&ephemeral_public.serialize());
+    out.extend_from_slice(&ciphertext);
+
+    Ok((out, shared_secret))
+}
+
+/// Open a sealed request addressed to `signer`'s active identity key,
+/// recovering the plaintext envelope bytes and the shared secret carried
+/// alongside them. `signer.ecdh` never exposes secret key material -- a
+/// [`crate::KmsSigner`] backend can open a wrap without its private key
+/// ever leaving its own boundary.
+pub fn open_request(
+    bytes: &[u8],
+    signer: &dyn Signer,
+) -> Result<(Vec<u8>, [u8; 32]), GiftWrapError> {
+    if bytes.is_empty() {
+        return Err(GiftWrapError::Truncated);
+    }
+    if bytes[0] != TYPE_GIFTWRAP_REQUEST {
+        return Err(GiftWrapError::InvalidType(TYPE_GIFTWRAP_REQUEST));
+    }
+    if bytes.len() < 1 + PUBLIC_KEY_LEN {
+        return Err(GiftWrapError::Truncated);
+    }
+    let mut ephemeral_public_key = [0u8; PUBLIC_KEY_LEN];
+    ephemeral_public_key.copy_from_slice(&bytes[1..1 + PUBLIC_KEY_LEN]);
+    let ciphertext = &bytes[1 + PUBLIC_KEY_LEN..];
+
+    let ecdh_secret = signer
+        .ecdh(&ephemeral_public_key)
+        .map_err(|_| GiftWrapError::InvalidKey)?;
+    let aead_key = hkdf_key(&ecdh_secret, REQUEST_INFO);
+    let plaintext = decrypt(&aead_key, ciphertext)?;
+
+    if plaintext.len() < SECRET_LEN {
+        return Err(GiftWrapError::Truncated);
+    }
+    let (secret_bytes, envelope_bytes) = plaintext.split_at(SECRET_LEN);
+    let mut shared_secret = [0u8; SECRET_LEN];
+    shared_secret.copy_from_slice(secret_bytes);
+
+    Ok((envelope_bytes.to_vec(), shared_secret))
+}
+
+/// Seal `plaintext` (an encoded envelope, or a reject's diagnostic bytes)
+/// with `shared_secret` -- the request's own secret, no second key
+/// exchange. Returns the wire bytes to carry as `Fulfill.data`, or as
+/// `Reject.data` for a reject raised at the termination.
+pub fn seal_response(shared_secret: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let aead_key = hkdf_key(shared_secret, RESPONSE_INFO);
+    let ciphertext = encrypt(&aead_key, plaintext);
+    let mut out = Vec::with_capacity(1 + ciphertext.len());
+    out.push(TYPE_GIFTWRAP_RESPONSE);
+    out.extend_from_slice(&ciphertext);
+    out
+}
+
+/// Open a sealed response with the same shared secret [`seal_request`]
+/// returned for the request it answers.
+pub fn open_response(shared_secret: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, GiftWrapError> {
+    if bytes.is_empty() {
+        return Err(GiftWrapError::Truncated);
+    }
+    if bytes[0] != TYPE_GIFTWRAP_RESPONSE {
+        return Err(GiftWrapError::InvalidType(TYPE_GIFTWRAP_RESPONSE));
+    }
+    let aead_key = hkdf_key(shared_secret, RESPONSE_INFO);
+    decrypt(&aead_key, &bytes[1..])
+}
+
+/// Whether `bytes` is shaped like a sealed response (issue #524's fourth
+/// acceptance criterion: a sender can tell a sealed reject from an
+/// unsealed one without needing the shared secret to do so). An empty
+/// `Reject.data` -- what every reject raised short of a termination
+/// carries -- is never mistaken for one.
+pub fn looks_like_sealed_response(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&TYPE_GIFTWRAP_RESPONSE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local::LocalSigner;
+
+    #[test]
+    fn a_sealed_request_opens_with_the_receivers_signer() {
+        let receiver = LocalSigner::generate("receiver");
+        let plaintext = b"GET / envelope bytes";
+
+        let (sealed, shared_secret) =
+            seal_request(plaintext, &receiver.public_key().unwrap()).unwrap();
+        let (opened, opened_secret) = open_request(&sealed, &receiver).unwrap();
+
+        assert_eq!(opened, plaintext);
+        assert_eq!(opened_secret, shared_secret);
+    }
+
+    #[test]
+    fn a_sealed_request_does_not_open_under_a_different_identity() {
+        let receiver = LocalSigner::generate("receiver");
+        let forwarding_hop = LocalSigner::generate("forwarding-hop");
+        let (sealed, _secret) = seal_request(b"payload", &receiver.public_key().unwrap()).unwrap();
+
+        let result = open_request(&sealed, &forwarding_hop);
+
+        assert_eq!(result, Err(GiftWrapError::OpenFailed));
+    }
+
+    #[test]
+    fn each_seal_uses_a_fresh_ephemeral_key_and_shared_secret() {
+        let receiver = LocalSigner::generate("receiver");
+        let receiver_public = receiver.public_key().unwrap();
+
+        let (first, first_secret) = seal_request(b"payload", &receiver_public).unwrap();
+        let (second, second_secret) = seal_request(b"payload", &receiver_public).unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(first_secret, second_secret);
+    }
+
+    #[test]
+    fn a_tampered_ciphertext_fails_to_open() {
+        let receiver = LocalSigner::generate("receiver");
+        let (mut sealed, _secret) =
+            seal_request(b"payload", &receiver.public_key().unwrap()).unwrap();
+        let last = sealed.len() - 1;
+        sealed[last] ^= 0xff;
+
+        assert_eq!(
+            open_request(&sealed, &receiver),
+            Err(GiftWrapError::OpenFailed)
+        );
+    }
+
+    #[test]
+    fn open_request_rejects_the_wrong_type_byte() {
+        let receiver = LocalSigner::generate("receiver");
+        let (mut sealed, _secret) =
+            seal_request(b"payload", &receiver.public_key().unwrap()).unwrap();
+        sealed[0] = TYPE_GIFTWRAP_RESPONSE;
+
+        assert_eq!(
+            open_request(&sealed, &receiver),
+            Err(GiftWrapError::InvalidType(TYPE_GIFTWRAP_REQUEST))
+        );
+    }
+
+    #[test]
+    fn open_request_rejects_truncated_bytes() {
+        let receiver = LocalSigner::generate("receiver");
+        assert_eq!(
+            open_request(&[TYPE_GIFTWRAP_REQUEST], &receiver),
+            Err(GiftWrapError::Truncated)
+        );
+        assert_eq!(open_request(&[], &receiver), Err(GiftWrapError::Truncated));
+    }
+
+    #[test]
+    fn a_response_opens_with_the_shared_secret_from_its_request() {
+        let receiver = LocalSigner::generate("receiver");
+        let (sealed_request, shared_secret) =
+            seal_request(b"request", &receiver.public_key().unwrap()).unwrap();
+        let (_opened, secret_from_request) = open_request(&sealed_request, &receiver).unwrap();
+
+        let sealed_response = seal_response(&secret_from_request, b"response envelope bytes");
+        let opened_response = open_response(&shared_secret, &sealed_response).unwrap();
+
+        assert_eq!(opened_response, b"response envelope bytes");
+    }
+
+    #[test]
+    fn a_response_does_not_open_under_the_wrong_shared_secret() {
+        let sealed_response = seal_response(&[1u8; 32], b"response");
+
+        assert_eq!(
+            open_response(&[2u8; 32], &sealed_response),
+            Err(GiftWrapError::OpenFailed)
+        );
+    }
+
+    #[test]
+    fn a_sealed_response_is_distinguishable_from_an_unsealed_empty_reject() {
+        let sealed = seal_response(&[3u8; 32], b"");
+        assert!(looks_like_sealed_response(&sealed));
+        assert!(!looks_like_sealed_response(&[]));
+    }
+
+    #[test]
+    fn open_response_rejects_the_wrong_type_byte() {
+        assert_eq!(
+            open_response(&[9u8; 32], &[TYPE_GIFTWRAP_REQUEST, 0, 0]),
+            Err(GiftWrapError::InvalidType(TYPE_GIFTWRAP_RESPONSE))
+        );
+    }
+}

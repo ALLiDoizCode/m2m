@@ -465,9 +465,14 @@ mod tests {
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
 
-    /// What a `Prepare`'s `data` carries per ADR 0018/issue #519 -- a
-    /// structured envelope, still plaintext at this point (sealing is
-    /// issue #524).
+    /// A structured envelope's plain encoding (ADR 0018/issue #519) -- used
+    /// directly only by tests whose `Prepare` never reaches
+    /// `Connector::deliver_to_app` at all (a reject raised short of the
+    /// termination neither inspects nor requires a sealed `data`). Any test
+    /// that expects real app delivery must use [`sealed_envelope_request_data`]
+    /// instead, sealed to whichever identity the terminating `Connector` is
+    /// configured with -- per ADR 0018, `deliver_to_app` cannot open a
+    /// plaintext envelope at all now that sealing is mandatory (issue #524).
     fn envelope_request_data(body: &[u8]) -> Vec<u8> {
         EnvelopeRequest {
             method: "POST".to_string(),
@@ -476,6 +481,27 @@ mod tests {
             body: body.to_vec(),
         }
         .encode()
+    }
+
+    /// The gift wrap a real sender would produce (issue #524): seals a
+    /// minimal `POST /` envelope carrying `body` to `receiver_public`.
+    /// Returns the wire bytes for `Prepare.data` and the shared secret the
+    /// wrap carries, which a caller also needs to open the sealed
+    /// `Fulfill`/termination-`Reject` this `Prepare` produces.
+    fn sealed_envelope_request_data(
+        body: &[u8],
+        receiver_public: &PublicKeyBytes,
+    ) -> (Vec<u8>, [u8; 32]) {
+        connector_signer::giftwrap::seal_request(&envelope_request_data(body), receiver_public)
+            .expect("seal")
+    }
+
+    /// Open `data` (a `Fulfill.data`, or a termination `Reject.data`) with
+    /// `shared_secret` and decode it as a response envelope.
+    fn open_sealed_envelope(shared_secret: &[u8; 32], data: &[u8]) -> EnvelopeResponse {
+        let opened = connector_signer::giftwrap::open_response(shared_secret, data)
+            .expect("open sealed response");
+        EnvelopeResponse::decode(&opened).expect("decode response envelope")
     }
 
     /// The `AppOutcome` a `FakeAppClient` produces for an app that answers
@@ -507,21 +533,22 @@ mod tests {
         }
     }
 
-    /// The exact `Fulfill.data` bytes for the same inputs `answered` above
-    /// configures a `FakeAppClient` with -- a response envelope, with
-    /// `TOON-Fulfillment` stripped before it reaches the client (issue
-    /// #521).
-    fn fulfill_data(body: &[u8]) -> Vec<u8> {
-        fulfill_data_with_status(200, body)
+    /// The response envelope `Connector::deliver_to_app` seals into
+    /// `Fulfill.data` for the same inputs `answered` above configures a
+    /// `FakeAppClient` with -- `TOON-Fulfillment` stripped before it
+    /// reaches the client (issue #521). Compare against
+    /// [`open_sealed_envelope`]'s result, since sealing makes the raw wire
+    /// bytes non-deterministic per call.
+    fn fulfill_envelope(body: &[u8]) -> EnvelopeResponse {
+        fulfill_envelope_with_status(200, body)
     }
 
-    fn fulfill_data_with_status(status: u16, body: &[u8]) -> Vec<u8> {
+    fn fulfill_envelope_with_status(status: u16, body: &[u8]) -> EnvelopeResponse {
         EnvelopeResponse {
             status,
             headers: vec![],
             body: body.to_vec(),
         }
-        .encode()
     }
 
     fn test_signer() -> Arc<dyn Signer> {
@@ -539,11 +566,31 @@ mod tests {
         }
     }
 
-    fn sample_prepare_with_amount(destination: &str, amount: u64) -> Prepare {
-        Prepare {
-            amount,
-            ..sample_prepare(destination)
-        }
+    /// As [`sample_prepare`], but with `data` sealed to `receiver_public`
+    /// (issue #524) -- for a test whose `Prepare` genuinely reaches
+    /// `Connector::deliver_to_app`. Returns the shared secret alongside, to
+    /// open the sealed `Fulfill`/termination-`Reject` this produces.
+    fn sealed_sample_prepare(
+        destination: &str,
+        receiver_public: &PublicKeyBytes,
+    ) -> (Prepare, [u8; 32]) {
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello app", receiver_public);
+        (
+            Prepare {
+                data,
+                ..sample_prepare(destination)
+            },
+            shared_secret,
+        )
+    }
+
+    fn sealed_sample_prepare_with_amount(
+        destination: &str,
+        amount: u64,
+        receiver_public: &PublicKeyBytes,
+    ) -> (Prepare, [u8; 32]) {
+        let (prepare, shared_secret) = sealed_sample_prepare(destination, receiver_public);
+        (Prepare { amount, ..prepare }, shared_secret)
     }
 
     fn test_clock() -> Arc<TestClock> {
@@ -560,19 +607,25 @@ mod tests {
             route.handler_url(),
             answered(b"app said yes", Some(FULFILLMENT)),
         );
-        let connector = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
-        let app = router(connector, test_signer());
+        let signer = test_signer();
+        let connector = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(signer.clone()),
+        );
+        let (prepare, shared_secret) =
+            sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+        let app = router(connector, signer);
 
         let request = Request::builder()
             .method("POST")
             .uri("/ilp")
-            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .body(Body::from(prepare.encode()))
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
@@ -584,7 +637,10 @@ mod tests {
 
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
-        assert_eq!(fulfill.data, fulfill_data(b"app said yes"));
+        assert_eq!(
+            open_sealed_envelope(&shared_secret, &fulfill.data),
+            fulfill_envelope(b"app said yes")
+        );
     }
 
     #[tokio::test]
@@ -649,19 +705,25 @@ mod tests {
             route.handler_url(),
             answered_with_status(402, b"payment required", Some(FULFILLMENT)),
         );
-        let connector = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
-        let app = router(connector, test_signer());
+        let signer = test_signer();
+        let connector = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(signer.clone()),
+        );
+        let (prepare, shared_secret) =
+            sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+        let app = router(connector, signer);
 
         let request = Request::builder()
             .method("POST")
             .uri("/ilp")
-            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .body(Body::from(prepare.encode()))
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
@@ -670,8 +732,8 @@ mod tests {
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
         assert_eq!(
-            fulfill.data,
-            fulfill_data_with_status(402, b"payment required")
+            open_sealed_envelope(&shared_secret, &fulfill.data),
+            fulfill_envelope_with_status(402, b"payment required")
         );
     }
 
@@ -687,13 +749,17 @@ mod tests {
             second_hop_route.handler_url(),
             answered(b"delivered by the second connector", Some(FULFILLMENT)),
         );
-        let second_hop = Arc::new(Connector::new(
-            vec![second_hop_route],
-            vec![],
-            second_hop_app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let second_hop_identity = test_signer();
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(second_hop_identity.clone()),
+        );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Arc::new(Connector::new(
@@ -703,12 +769,17 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         ));
+        // Sealed to the *second* hop's identity -- the connector that
+        // actually terminates this route, not the one the client's router
+        // request happens to land on first.
+        let (prepare, shared_secret) =
+            sealed_sample_prepare("g.example.app", &second_hop_identity.public_key().unwrap());
         let app = router(first_hop, test_signer());
 
         let request = Request::builder()
             .method("POST")
             .uri("/ilp")
-            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .body(Body::from(prepare.encode()))
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
@@ -717,8 +788,8 @@ mod tests {
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
         assert_eq!(
-            fulfill.data,
-            fulfill_data(b"delivered by the second connector")
+            open_sealed_envelope(&shared_secret, &fulfill.data),
+            fulfill_envelope(b"delivered by the second connector")
         );
     }
 
@@ -737,6 +808,7 @@ mod tests {
             answered(b"delivered by the second connector", Some(FULFILLMENT)),
         );
         let payer_signer = LocalSigner::generate("payer-claim-key");
+        let second_hop_identity = test_signer();
         let second_hop = Arc::new(
             Connector::new(
                 vec![second_hop_route],
@@ -745,7 +817,8 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             )
-            .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap()),
+            .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
+            .with_identity_signer(second_hop_identity.clone()),
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
@@ -761,14 +834,17 @@ mod tests {
             .with_signer(Arc::new(payer_signer))
             .with_peer_claim_channel("second-hop", "channel-a"),
         );
+        let (prepare, _shared_secret) = sealed_sample_prepare_with_amount(
+            "g.example.app",
+            50,
+            &second_hop_identity.public_key().unwrap(),
+        );
         let app = router(first_hop.clone(), test_signer());
 
         let request = Request::builder()
             .method("POST")
             .uri("/ilp")
-            .body(Body::from(
-                sample_prepare_with_amount("g.example.app", 50).encode(),
-            ))
+            .body(Body::from(prepare.encode()))
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
@@ -836,13 +912,17 @@ mod tests {
             second_hop_route.handler_url(),
             answered(b"delivered over the network transport", Some(FULFILLMENT)),
         );
-        let second_hop = Arc::new(Connector::new(
-            vec![second_hop_route],
-            vec![],
-            second_hop_app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let second_hop_identity = test_signer();
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(second_hop_identity.clone()),
+        );
         let server = PeerWireServer::bind("127.0.0.1:0".parse().unwrap(), second_hop)
             .await
             .unwrap();
@@ -856,12 +936,14 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         ));
+        let (prepare, shared_secret) =
+            sealed_sample_prepare("g.example.app", &second_hop_identity.public_key().unwrap());
         let app = router(first_hop, test_signer());
 
         let request = Request::builder()
             .method("POST")
             .uri("/ilp")
-            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .body(Body::from(prepare.encode()))
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
@@ -870,8 +952,8 @@ mod tests {
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
         assert_eq!(
-            fulfill.data,
-            fulfill_data(b"delivered over the network transport")
+            open_sealed_envelope(&shared_secret, &fulfill.data),
+            fulfill_envelope(b"delivered over the network transport")
         );
     }
 
@@ -1024,14 +1106,20 @@ mod tests {
         let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
-        let connector = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
-        let app = router(connector, test_signer());
+        let signer = test_signer();
+        let connector = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(signer.clone()),
+        );
+        let (prepare, _shared_secret) =
+            sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+        let app = router(connector, signer);
 
         let claim_json = format!(
             r#"{{
@@ -1055,7 +1143,7 @@ mod tests {
             .method("POST")
             .uri("/ilp")
             .header(CLAIM_HEADER, BASE64.encode(claim_json.as_bytes()))
-            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .body(Body::from(prepare.encode()))
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1077,19 +1165,25 @@ mod tests {
             route.handler_url(),
             answered(b"free work", Some(FULFILLMENT)),
         );
-        let connector = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
-        let app = router(connector, test_signer());
+        let signer = test_signer();
+        let connector = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(signer.clone()),
+        );
+        let (prepare, _shared_secret) =
+            sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+        let app = router(connector, signer);
 
         let request = Request::builder()
             .method("POST")
             .uri("/ilp")
-            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .body(Body::from(prepare.encode()))
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1164,20 +1258,23 @@ mod tests {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
-            let connector = Arc::new(Connector::new(
-                vec![route],
-                vec![],
-                app_client.clone(),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            ));
-            let app = router(connector, test_signer());
-
-            let request = request_with_claim_header(
-                &sample_prepare("g.example.app"),
-                CLAIM_HEADER,
-                &evm_claim_json(1, 100),
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
             );
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router(connector, signer);
+
+            let request =
+                request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
 
@@ -1191,24 +1288,29 @@ mod tests {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
-            let connector = Arc::new(Connector::new(
-                vec![route],
-                vec![],
-                app_client.clone(),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            ));
-            let app = router(connector, test_signer());
-
-            let first = request_with_claim_header(
-                &sample_prepare("g.example.app"),
-                CLAIM_HEADER,
-                &evm_claim_json(5, 500),
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
             );
+            let app = router(connector, signer.clone());
+
+            let (first_prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let first =
+                request_with_claim_header(&first_prepare, CLAIM_HEADER, &evm_claim_json(5, 500));
             let response = app.clone().oneshot(first).await.unwrap();
             Fulfill::decode(&hyper::body::to_bytes(response.into_body()).await.unwrap())
                 .expect("first claim accepted");
 
+            // The replay is rejected on the claim nonce alone, before the
+            // envelope would ever need to open -- plaintext is fine here.
             let replay = request_with_claim_header(
                 &sample_prepare("g.example.app"),
                 CLAIM_HEADER,
@@ -1285,14 +1387,22 @@ mod tests {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
-            let connector = Arc::new(Connector::new(
-                vec![route],
-                vec![],
-                app_client.clone(),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            ));
+            let identity_signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer.clone()),
+            );
 
+            // The claim's own NIP-59 wrap/unwrap key -- unrelated to the
+            // connector's gift-wrap identity above (ADR 0018): this pair
+            // protects the *claim header's* privacy (issue #504's §1.3),
+            // not the packet payload.
             let sender_secret = SecretKey::parse(&[1u8; 32]).unwrap();
             let receiver_secret_bytes = [2u8; 32];
             let receiver_secret = SecretKey::parse(&receiver_secret_bytes).unwrap();
@@ -1311,12 +1421,10 @@ mod tests {
                 BASE64.encode(&wrapped.encrypted_payload),
             );
 
-            let app = router_with_wrap_key(connector, test_signer(), Some(receiver_secret_bytes));
-            let request = request_with_claim_header(
-                &sample_prepare("g.example.app"),
-                CLAIM_WRAPPED_HEADER,
-                &envelope_json,
-            );
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &identity_signer.public_key().unwrap());
+            let app = router_with_wrap_key(connector, identity_signer, Some(receiver_secret_bytes));
+            let request = request_with_claim_header(&prepare, CLAIM_WRAPPED_HEADER, &envelope_json);
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
@@ -1360,20 +1468,23 @@ mod tests {
                 StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
-            let connector = Arc::new(Connector::new(
-                vec![route],
-                vec![],
-                app_client.clone(),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            ));
-            let app = router(connector, test_signer());
-
-            let request = request_with_claim_header(
-                &sample_prepare("g.example.app"),
-                CLAIM_HEADER,
-                &evm_claim_json(1, 100),
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
             );
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router(connector, signer);
+
+            let request =
+                request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
 

@@ -12,6 +12,7 @@ use connector_domain::{
     ProjectionDivergence, Reject, RejectCode,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
+use connector_signer::giftwrap::{open_request, seal_response};
 use connector_signer::{PublicKeyBytes, Signer};
 use thiserror::Error;
 use tracing::Instrument;
@@ -59,6 +60,23 @@ fn extract_fulfillment_header(headers: &mut Vec<(String, String)>) -> Option<[u8
         .position(|(name, _)| name.eq_ignore_ascii_case(FULFILLMENT_HEADER))?;
     let (_, value) = headers.remove(index);
     decode_fulfillment_header(&value)
+}
+
+/// A reject this connector originates before a gift wrap's shared secret
+/// could be recovered -- no identity key configured, or the wrap itself
+/// could not be opened. Necessarily plaintext (ADR 0018: "a reject raised
+/// short of the termination is necessarily plaintext... shares no secret
+/// with the sender and cannot seal anything"), with empty `data` so a
+/// sender can tell it apart from a sealed one
+/// (`connector_signer::giftwrap::looks_like_sealed_response`).
+fn unsealed_termination_reject(message: &str) -> Reject {
+    Reject {
+        code: RejectCode::f01_invalid_packet(),
+        triggered_by: String::new(),
+        message: message.to_string(),
+        data: Vec::new(),
+        accumulated_cost: 0,
+    }
 }
 
 /// What can go wrong creating or renewing a leased route (issue #427).
@@ -255,6 +273,16 @@ pub struct Connector {
     /// those simply never emits or accepts a claim, matching how
     /// `settlement` degrades to `None`.
     claims: ClaimBook,
+    /// This connector's own identity key (ADR 0018, ADR 0022), used to open
+    /// a gift wrap sealed to it (issue #524) -- distinct from `claims`'s
+    /// signer, which signs outbound claims to a peer rather than performing
+    /// key agreement. `None` on a node that hasn't configured one, in which
+    /// case every packet routed to an app route is refused: per ADR 0018
+    /// every packet's `data` is a gift wrap, so a node that cannot open one
+    /// cannot terminate any app route at all, matching how `settlement`
+    /// degrades to "every channel operation refuses" rather than "channel
+    /// operations silently no-op".
+    identity_signer: Option<Arc<dyn Signer>>,
     /// Gates [`Connector::handle_probe`] (issue #426, ADR 0011): a fixed
     /// window of probe attempts admitted per sender identity. Defaults to
     /// [`DEFAULT_PROBE_LIMIT`] per [`default_probe_window`], overridable via
@@ -296,8 +324,19 @@ impl Connector {
             settlement: None,
             known_channels: RwLock::new(Vec::new()),
             claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
+            identity_signer: None,
             probe_rate_limiter: ProbeRateLimiter::new(DEFAULT_PROBE_LIMIT, default_probe_window()),
         }
+    }
+
+    /// Configure this node's own identity key (issue #524), used to open a
+    /// gift wrap sealed to it -- the same identity `connector-client-edge`
+    /// reports at `GET /ilp/identity` (ADR 0022). Without one configured, a
+    /// packet routed to an app route is refused rather than delivered,
+    /// since there is nothing to open it with.
+    pub fn with_identity_signer(mut self, signer: Arc<dyn Signer>) -> Self {
+        self.identity_signer = Some(signer);
+        self
     }
 
     /// Override the default probe rate limit (issue #426, ADR 0011): up to
@@ -771,14 +810,52 @@ impl Connector {
     /// landed, so `route.price()` is now available and this is unblocked --
     /// it is simply not yet wired up here (issue #522).
     ///
-    /// Per ADR 0018/issue #519, `prepare.data` carries a structured envelope
-    /// -- still plaintext at this point (sealing is issue #524) -- rather
-    /// than an opaque body, and it is decoded here, above the [`AppClient`]
-    /// boundary, so the port itself never sees a [`Prepare`] (issue #521).
+    /// Per ADR 0018/issue #524, `prepare.data` is a gift wrap sealed to this
+    /// connector's own identity key: opened here, above the [`AppClient`]
+    /// boundary, so the port itself never sees a [`Prepare`], a key, or a
+    /// secret (issue #521's boundary, extended by #524). Every return path
+    /// past a successful open carries the request's own shared secret back
+    /// through [`Self::seal_termination_response`] -- a FULFILL and a
+    /// REJECT raised at the termination are both sealed with it (ADR 0018);
+    /// only the three failures below, which happen before any secret is
+    /// recovered, stay plaintext.
     async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
         let condition = prepare.execution_condition;
 
-        let request = match EnvelopeRequest::decode(&prepare.data) {
+        let Some(identity_signer) = self.identity_signer.as_ref() else {
+            return PacketResponse::Reject(unsealed_termination_reject(
+                "no identity key configured to open a sealed payload",
+            ));
+        };
+
+        let (envelope_bytes, shared_secret) =
+            match open_request(&prepare.data, identity_signer.as_ref()) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    return PacketResponse::Reject(unsealed_termination_reject(&format!(
+                        "gift wrap could not be opened: {error}"
+                    )));
+                }
+            };
+
+        let inner = self
+            .deliver_opened_envelope(route, &condition, &envelope_bytes)
+            .await;
+        Self::seal_termination_response(inner, &shared_secret)
+    }
+
+    /// The part of [`Self::deliver_to_app`] that runs once the gift wrap has
+    /// been opened: decode the envelope it carried and, if that succeeds,
+    /// make the request it describes. Split out so the caller can seal
+    /// every return path uniformly with the one shared secret the wrap
+    /// carried, including this method's own envelope-decode failure.
+    async fn deliver_opened_envelope(
+        &self,
+        route: &StaticRoute,
+        condition: &[u8; 32],
+        envelope_bytes: &[u8],
+    ) -> PacketResponse {
+        let request = match EnvelopeRequest::decode(envelope_bytes) {
             Ok(request) => request,
             Err(error) => {
                 return PacketResponse::Reject(Reject {
@@ -802,7 +879,7 @@ impl Connector {
             AppOutcome::Answered { mut response } => {
                 let fulfillment = extract_fulfillment_header(&mut response.headers);
                 Self::accept_if_fulfilled(
-                    &condition,
+                    condition,
                     fulfillment.map(|fulfillment| Fulfill {
                         fulfillment,
                         data: response.encode(),
@@ -815,6 +892,29 @@ impl Connector {
                 message,
                 data: Vec::new(),
                 accumulated_cost: 0,
+            }),
+        }
+    }
+
+    /// Seal `response`'s `data` with `shared_secret` (ADR 0018: "a FULFILL,
+    /// and a REJECT raised at the termination, are sealed back with the
+    /// same shared secret"). Applied uniformly to every outcome
+    /// [`Self::deliver_opened_envelope`] can produce -- a genuine fulfilment,
+    /// a fulfilment that failed to verify, an unreachable app, or a
+    /// malformed envelope -- since all four happen at the termination, with
+    /// the secret already in hand.
+    fn seal_termination_response(
+        response: PacketResponse,
+        shared_secret: &[u8; 32],
+    ) -> PacketResponse {
+        match response {
+            PacketResponse::Fulfill(fulfill) => PacketResponse::Fulfill(Fulfill {
+                data: seal_response(shared_secret, &fulfill.data),
+                ..fulfill
+            }),
+            PacketResponse::Reject(reject) => PacketResponse::Reject(Reject {
+                data: seal_response(shared_secret, &reject.data),
+                ..reject
             }),
         }
     }
@@ -1051,8 +1151,9 @@ mod tests {
     use crate::clock::TestClock;
     use crate::peer_transport::{InProcessPeerTransport, PeerTransport};
     use crate::test_support::{
-        answered, answered_with_status, envelope_request_data, fulfill_data,
-        fulfill_data_with_status,
+        answered, answered_with_status, envelope_request_data, fulfill_envelope,
+        fulfill_envelope_with_status, identity_signer, open_sealed_envelope,
+        sealed_envelope_request_data,
     };
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
@@ -1117,6 +1218,7 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             clock,
         )
+        .with_identity_signer(identity_signer())
     }
 
     #[tokio::test]
@@ -1129,18 +1231,28 @@ mod tests {
         );
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client.clone(), clock);
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello app");
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello app"), 0)
+            .handle_prepare(
+                Prepare {
+                    data,
+                    ..prepare("g.example.app", b"unused")
+                },
+                0,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"app said yes"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"app said yes")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
 
         let deliveries = app_client.deliveries();
         assert_eq!(deliveries.len(), 1);
@@ -1296,18 +1408,28 @@ mod tests {
         );
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(
+                Prepare {
+                    data,
+                    ..prepare("g.example.app", b"unused")
+                },
+                0,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data_with_status(402, b"insufficient funds"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope_with_status(402, b"insufficient funds")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
     }
 
     /// The other half of the same rule stated negatively: a non-2xx
@@ -1393,13 +1515,16 @@ mod tests {
             second_hop_route.handler_url(),
             answered(b"delivered by the second hop", Some(FULFILLMENT)),
         );
-        let second_hop = Arc::new(Connector::new(
-            vec![second_hop_route],
-            vec![],
-            second_hop_app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
@@ -1409,18 +1534,28 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         );
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(
+                Prepare {
+                    data,
+                    ..prepare("g.example.app", b"unused")
+                },
+                0,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"delivered by the second hop"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"delivered by the second hop")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
         assert_eq!(second_hop_app_client.deliveries().len(), 1);
     }
 
@@ -1443,7 +1578,8 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             )
-            .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap()),
+            .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
+            .with_identity_signer(identity_signer()),
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
@@ -1559,19 +1695,30 @@ mod tests {
             app_client,
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
-        );
+        )
+        .with_identity_signer(identity_signer());
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(
+                Prepare {
+                    data,
+                    ..prepare("g.example.app", b"unused")
+                },
+                0,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"handled locally"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"handled locally")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1584,13 +1731,16 @@ mod tests {
             second_hop_route.handler_url(),
             answered(b"handled by the second hop", Some(FULFILLMENT)),
         );
-        let second_hop = Arc::new(Connector::new(
-            vec![second_hop_route],
-            vec![],
-            second_hop_app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
@@ -1600,18 +1750,28 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         );
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(
+                Prepare {
+                    data,
+                    ..prepare("g.example.app", b"unused")
+                },
+                0,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"handled by the second hop"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"handled by the second hop")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
         assert_eq!(second_hop_app_client.deliveries().len(), 1);
     }
 
@@ -1679,13 +1839,16 @@ mod tests {
             second_hop_route.handler_url(),
             answered(b"", Some(FULFILLMENT)),
         );
-        let second_hop = Arc::new(Connector::new(
-            vec![second_hop_route],
-            vec![],
-            second_hop_app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
@@ -1715,13 +1878,16 @@ mod tests {
             second_hop_route.handler_url(),
             answered(b"delivered by the second hop", Some(FULFILLMENT)),
         );
-        let second_hop = Arc::new(Connector::new(
-            vec![second_hop_route],
-            vec![],
-            second_hop_app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
         let clock = test_clock();
@@ -1735,18 +1901,28 @@ mod tests {
         first_hop
             .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
             .unwrap();
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(
+                Prepare {
+                    data,
+                    ..prepare("g.example.app", b"unused")
+                },
+                0,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"delivered by the second hop"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"delivered by the second hop")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
         assert_eq!(second_hop_app_client.deliveries().len(), 1);
     }
 
@@ -1847,22 +2023,33 @@ mod tests {
             app_client,
             Arc::new(InProcessPeerTransport::new()),
             clock,
-        );
+        )
+        .with_identity_signer(identity_signer());
         connector
             .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
             .unwrap();
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(
+                Prepare {
+                    data,
+                    ..prepare("g.example.app", b"unused")
+                },
+                0,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"handled locally"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"handled locally")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
     }
 
     /// AC: "Static routes survive a restart; leased routes do not" -- a
@@ -2030,7 +2217,8 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     test_clock(),
                 )
-                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap()),
+                .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
+                .with_identity_signer(identity_signer()),
             );
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("second-hop", second_hop.clone());
@@ -2198,7 +2386,8 @@ mod tests {
                     test_clock(),
                 )
                 .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
-                .with_channel_ceiling("channel-a", ceiling),
+                .with_channel_ceiling("channel-a", ceiling)
+                .with_identity_signer(identity_signer()),
             );
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("second-hop", second_hop.clone());
@@ -2380,6 +2569,7 @@ mod tests {
                 )
                 .with_channel_verification_key("channel-a", payer_signer.public_key().unwrap())
                 .with_channel_ceiling("channel-a", 100)
+                .with_identity_signer(identity_signer())
                 .with_journal(Arc::new(FileJournal::open(path).unwrap()))
                 .unwrap()
             };
@@ -2814,6 +3004,219 @@ mod tests {
         }
     }
 
+    /// Issue #524's own acceptance criteria, exercised end to end through
+    /// [`Connector::handle_prepare`] rather than only at
+    /// `connector_signer::giftwrap`'s own unit level -- "demonstrated, not
+    /// asserted" (the issue's own words for the forwarding-hop criterion).
+    mod sealing {
+        use super::*;
+        use connector_signer::giftwrap::{looks_like_sealed_response, seal_request};
+        use connector_signer::LocalSigner;
+
+        /// AC1/AC3: a sender seals to the terminating connector's identity,
+        /// and only that connector can open it -- a connector configured
+        /// with a *different* identity cannot terminate a wrap addressed
+        /// elsewhere, the same as any other hop that never held the right
+        /// key. Distinguishes this from a merely-malformed envelope: the
+        /// message names the wrap, not the envelope.
+        #[tokio::test]
+        async fn a_connector_with_a_different_identity_cannot_open_a_wrap_sealed_to_another_identity(
+        ) {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                answered(b"should never be reached", Some(FULFILLMENT)),
+            );
+            let wrong_identity = Arc::new(LocalSigner::generate("not-the-intended-recipient"));
+            let connector = Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(wrong_identity);
+            // Sealed to `identity_signer()`, not `wrong_identity` above.
+            let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
+
+            let response = connector
+                .handle_prepare(
+                    Prepare {
+                        data,
+                        ..prepare("g.example.app", b"unused")
+                    },
+                    0,
+                )
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F01");
+                    assert!(reject.message.contains("gift wrap could not be opened"));
+                    // Never reached: the wrap never opened, so there was
+                    // nothing to deliver.
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// AC7: a wrap that cannot be opened at all rejects with a
+        /// different message than one that opens cleanly but decodes to a
+        /// malformed envelope -- two different Rust error types
+        /// (`GiftWrapError` vs `EnvelopeError`) surfacing as two
+        /// distinguishable reasons, not the same generic failure.
+        #[tokio::test]
+        async fn an_unopenable_wrap_is_distinguishable_from_one_that_opens_to_a_malformed_envelope()
+        {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = connector_with(vec![route], app_client, test_clock());
+
+            // Garbage bytes: not shaped like a gift wrap at all, so it never
+            // opens.
+            let unopenable = connector
+                .handle_prepare(
+                    Prepare {
+                        data: vec![0xff; 40],
+                        ..prepare("g.example.app", b"unused")
+                    },
+                    0,
+                )
+                .await;
+            match unopenable {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F01");
+                    assert!(reject.message.contains("gift wrap could not be opened"));
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+
+            // A wrap that opens cleanly (sealed to the right identity) but
+            // whose plaintext, once decrypted, is not a valid envelope.
+            let (malformed_envelope, _shared_secret) = seal_request(
+                b"not a valid encoded envelope",
+                &identity_signer().public_key().unwrap(),
+            )
+            .unwrap();
+            let malformed = connector
+                .handle_prepare(
+                    Prepare {
+                        data: malformed_envelope,
+                        ..prepare("g.example.app", b"unused")
+                    },
+                    0,
+                )
+                .await;
+            match malformed {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F01");
+                    assert!(reject.message.contains("envelope did not decode"));
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        /// AC2: not only a FULFILL, but a REJECT raised at the
+        /// termination -- here, the app supplied no verifying fulfilment --
+        /// is sealed back with the request's own shared secret: it opens
+        /// under that secret (proving only the intended sender, who holds
+        /// it, could ever read it) and fails to open under any other.
+        /// `reject.message` -- the human-readable reason -- rides
+        /// unencrypted alongside, same as every other reject in this file;
+        /// only `data` is sealed.
+        #[tokio::test]
+        async fn a_reject_raised_at_the_termination_is_sealed_with_the_requests_shared_secret() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"app said yes", None));
+            let connector = connector_with(vec![route], app_client, test_clock());
+            let (data, shared_secret) = sealed_envelope_request_data(b"hello");
+
+            let response = connector
+                .handle_prepare(
+                    Prepare {
+                        data,
+                        ..prepare("g.example.app", b"unused")
+                    },
+                    0,
+                )
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F99");
+                    assert_eq!(
+                        reject.message,
+                        "fulfillment does not match execution condition"
+                    );
+                    assert!(looks_like_sealed_response(&reject.data));
+                    connector_signer::giftwrap::open_response(&shared_secret, &reject.data).expect(
+                        "a reject raised at the termination opens with the request's own secret",
+                    );
+                    assert!(
+                        connector_signer::giftwrap::open_response(&[0xffu8; 32], &reject.data)
+                            .is_err()
+                    );
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        /// AC4: a reject raised short of the termination -- here, no route
+        /// at all -- carries no secret to seal with and is necessarily
+        /// plaintext, and a sender can tell the two apart without needing
+        /// to already know whether a secret exists: an unsealed reject's
+        /// `data` is simply empty, never shaped like a sealed one.
+        #[tokio::test]
+        async fn a_reject_raised_short_of_the_termination_is_plaintext_and_distinguishable() {
+            let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
+
+            let response = connector
+                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F02");
+                    assert!(reject.data.is_empty());
+                    assert!(!looks_like_sealed_response(&reject.data));
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        /// AC5: `accumulated_cost` -- read directly off the struct, never
+        /// through `data` -- is untouched by sealing in either direction.
+        /// A termination reject (sealed `data`) and a hop reject (plaintext
+        /// `data`) both carry it the same way.
+        #[tokio::test]
+        async fn accumulated_cost_stays_outside_the_seal_on_a_termination_reject() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"", None));
+            let connector = connector_with(vec![route], app_client, test_clock());
+
+            let response = connector
+                .handle_prepare(prepare("g.example.app", b"hello"), 0)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F99");
+                    // Originated here, not forwarded, so no fee or price is
+                    // wired up on this route (issue #522's own scope) -- the
+                    // point is that this field is readable and meaningful
+                    // independent of whatever `data` carries.
+                    assert_eq!(reject.accumulated_cost, 0);
+                    assert!(looks_like_sealed_response(&reject.data));
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+    }
+
     /// Issue #452: before/after evidence for the leased-route lookup on
     /// the hot path. Not run by the normal gate -- `#[ignore]`d and meant
     /// to be run by hand, in release mode, so timing reflects real
@@ -2845,7 +3248,8 @@ mod tests {
                 app_client,
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
-            );
+            )
+            .with_identity_signer(identity_signer());
             for i in 0..active_lease_count {
                 connector
                     .upsert_leased_route(

@@ -274,7 +274,10 @@ mod tests {
     use super::*;
     use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
-    use crate::test_support::{answered, envelope_request_data, fulfill_data};
+    use crate::test_support::{
+        answered, envelope_request_data, fulfill_envelope, identity_signer, open_sealed_envelope,
+        sealed_envelope_request_data,
+    };
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
     use connector_domain::{claim_digest, derive_condition};
@@ -307,27 +310,42 @@ mod tests {
             route.handler_url(),
             answered(b"delivered by the peer", Some(FULFILLMENT)),
         );
-        let peer = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let peer = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
         let (response, ack, reached) = transport
-            .forward("peer-b", prepare("g.example.app"), 0, None)
+            .forward(
+                "peer-b",
+                Prepare {
+                    data,
+                    ..prepare("g.example.app")
+                },
+                0,
+                None,
+            )
             .await;
 
-        assert_eq!(
-            response,
-            PacketResponse::Fulfill(connector_domain::Fulfill {
-                fulfillment: FULFILLMENT,
-                data: fulfill_data(b"delivered by the peer"),
-            })
-        );
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"delivered by the peer")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
         assert_eq!(ack, ClaimAckOutcome::NotSent);
         assert!(reached);
     }
@@ -446,13 +464,16 @@ mod tests {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
-        let peer = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
+        let peer = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
         let transport = Arc::new(transport);
@@ -503,13 +524,16 @@ mod tests {
                 route.handler_url(),
                 answered(b"delivered by the peer", Some(FULFILLMENT)),
             );
-            let deliverer = Arc::new(Connector::new(
-                vec![route],
-                vec![],
-                app_client,
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            ));
+            let deliverer = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
+            );
             let rejecter = Arc::new(Connector::new(
                 vec![],
                 vec![],
@@ -519,17 +543,29 @@ mod tests {
             ));
 
             let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
+            let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
             let (response, _ack, reached) = transport
-                .forward("peer-b", prepare("g.example.app"), 0, None)
+                .forward(
+                    "peer-b",
+                    Prepare {
+                        data,
+                        ..prepare("g.example.app")
+                    },
+                    0,
+                    None,
+                )
                 .await;
-            assert_eq!(
-                response,
-                PacketResponse::Fulfill(connector_domain::Fulfill {
-                    fulfillment: FULFILLMENT,
-                    data: fulfill_data(b"delivered by the peer"),
-                })
-            );
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"delivered by the peer")
+                    );
+                }
+                other => panic!("expected a fulfill, got {other:?}"),
+            }
             assert!(reached);
 
             let (response, _ack, reached) = transport

@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::crypto::{sign_digest, verify_digest};
+use crate::crypto::{ecdh_x_coordinate as shared_ecdh_x_coordinate, sign_digest, verify_digest};
 use crate::signer::{PublicKeyBytes, Signature};
 
 const NONCE_LEN: usize = 12;
@@ -94,20 +94,12 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The raw ECDH X-coordinate of `secret * public` -- the deleted
-/// reference's `_computeSharedSecret` (`getSharedSecret(..., true).slice(1)`)
-/// -- via this crate's own scalar multiplication rather than
-/// `libsecp256k1::SharedSecret`'s digest-mixing variant, so the byte
-/// sequence handed to HKDF matches the ported algorithm exactly.
+/// The deleted reference's `_computeSharedSecret`
+/// (`getSharedSecret(..., true).slice(1)`) -- [`shared_ecdh_x_coordinate`]
+/// mapped onto this module's own error type, so the byte sequence handed to
+/// HKDF matches the ported algorithm exactly.
 fn ecdh_x_coordinate(secret: &SecretKey, public: &PublicKey) -> Result<[u8; 32], Nip59Error> {
-    let mut point = *public;
-    point
-        .tweak_mul_assign(secret)
-        .map_err(|_| Nip59Error::InvalidKey)?;
-    let compressed = point.serialize_compressed();
-    let mut x = [0u8; 32];
-    x.copy_from_slice(&compressed[1..]);
-    Ok(x)
+    shared_ecdh_x_coordinate(secret, public).ok_or(Nip59Error::InvalidKey)
 }
 
 fn hkdf_key(shared_secret: &[u8; 32], info: &[u8]) -> [u8; 32] {

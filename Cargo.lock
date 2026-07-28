@@ -1058,6 +1058,7 @@ dependencies = [
  "chrono",
  "connector-cli",
  "connector-domain",
+ "connector-signer",
  "reqwest",
  "serde_json",
  "tempfile",
