@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "envelope": {
+    "valid": [
+      {
+        "name": "minimal_get_request",
+        "encoded_hex": "0103474554012f0000",
+        "decoded": {
+          "direction": "request",
+          "method": "GET",
+          "target": "/",
+          "headers": [],
+          "body_hex": ""
+        }
+      },
+      {
+        "name": "post_with_headers_and_json_body",
+        "encoded_hex": "0104504f5354072f6f7264657273020c636f6e74656e742d74797065106170706c69636174696f6e2f6a736f6e0c782d726571756573742d69640b766563746f722d30303031117b226974656d223a22776964676574227d",
+        "decoded": {
+          "direction": "request",
+          "method": "POST",
+          "target": "/orders",
+          "headers": [
+            ["content-type", "application/json"],
+            ["x-request-id", "vector-0001"]
+          ],
+          "body_hex": "7b226974656d223a22776964676574227d"
+        }
+      },
+      {
+        "name": "get_with_duplicate_header_names",
+        "encoded_hex": "0103474554132f7365617263683f713d2545322539432539330203782d61013103782d61013200",
+        "decoded": {
+          "direction": "request",
+          "method": "GET",
+          "target": "/search?q=%E2%9C%93",
+          "headers": [
+            ["x-a", "1"],
+            ["x-a", "2"]
+          ],
+          "body_hex": ""
+        }
+      },
+      {
+        "name": "ok_json_response",
+        "encoded_hex": "0200c8010c636f6e74656e742d74797065106170706c69636174696f6e2f6a736f6e0b7b226f6b223a747275657d",
+        "decoded": {
+          "direction": "response",
+          "status": 200,
+          "headers": [["content-type", "application/json"]],
+          "body_hex": "7b226f6b223a747275657d"
+        }
+      },
+      {
+        "name": "partial_content_binary_body_and_duplicate_headers",
+        "encoded_hex": "0200ce030c636f6e74656e742d74797065186170706c69636174696f6e2f6f637465742d73747265616d03782d61013103782d610132060001fffe807f",
+        "decoded": {
+          "direction": "response",
+          "status": 206,
+          "headers": [
+            ["content-type", "application/octet-stream"],
+            ["x-a", "1"],
+            ["x-a", "2"]
+          ],
+          "body_hex": "0001fffe807f"
+        }
+      }
+    ],
+    "invalid": [
+      {
+        "name": "request_decode_rejects_wrong_type_byte",
+        "direction": "request",
+        "bytes_hex": "0203474554012f0000",
+        "expected_error": "invalid_type"
+      },
+      {
+        "name": "response_decode_rejects_wrong_type_byte",
+        "direction": "response",
+        "bytes_hex": "0100c80000",
+        "expected_error": "invalid_type"
+      },
+      {
+        "name": "request_decode_rejects_truncated_input",
+        "direction": "request",
+        "bytes_hex": "0103474554012f00",
+        "expected_error": "buffer_underflow"
+      },
+      {
+        "name": "request_decode_rejects_trailing_bytes",
+        "direction": "request",
+        "bytes_hex": "0103474554012f0000ff",
+        "expected_error": "trailing_bytes"
+      },
+      {
+        "name": "request_decode_rejects_invalid_utf8_in_method",
+        "direction": "request",
+        "bytes_hex": "010180",
+        "expected_error": "invalid_utf8"
+      },
+      {
+        "name": "request_decode_rejects_a_non_minimal_length_determinant",
+        "direction": "request",
+        "bytes_hex": "018103474554012f0000",
+        "expected_error": "non_canonical_length"
+      },
+      {
+        "name": "request_decode_rejects_a_zero_length_long_form_alias",
+        "direction": "request",
+        "bytes_hex": "0180012f0000",
+        "expected_error": "non_canonical_length"
+      },
+      {
+        "name": "request_decode_rejects_an_over_long_determinant_instead_of_truncating",
+        "direction": "request",
+        "bytes_hex": "0189010000000000000003474554012f0000",
+        "expected_error": "length_determinant_overflow"
+      }
+    ]
+  },
+  "giftwrap": {
+    "receiver_identity_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "receiver_identity_public_hex": "0484bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b08cc43d63b2859d469fee15f31c9edb5324266e6fd0407e87382d60fc4511acd8",
+    "cases": [
+      {
+        "name": "sealed_request_and_response_round_trip",
+        "ephemeral_secret_hex": "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+        "shared_secret_hex": "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60",
+        "request_nonce_hex": "6162636465666768696a6b6c",
+        "response_nonce_hex": "6d6e6f707172737475767778",
+        "request_envelope": {
+          "direction": "request",
+          "method": "POST",
+          "target": "/orders",
+          "headers": [["content-type", "application/json"]],
+          "body_hex": "7b226974656d223a22776964676574227d"
+        },
+        "request_envelope_hex": "0104504f5354072f6f7264657273010c636f6e74656e742d74797065106170706c69636174696f6e2f6a736f6e117b226974656d223a22776964676574227d",
+        "request_wrap_hex": "0104207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb828c18ff7dbee879a4335a05294dea1e99e251f4b3e3b020b507f87064993fb2026162636465666768696a6b6ca8e7d30218157def8b6f5bc30c9f30e0e0c8a143c813efd80359ac1c67ca4e67d68348e2c4e6c8e51957dac06afd4e613e91b54344faaf94a0d1fe4c315a0ae3828eb3e8f87cd113d5fcff81aeb8c23226b37eafcc85e85ef3fc8e4cc81f5683a327dc0421f3e82b85385bde486231",
+        "response_envelope": {
+          "direction": "response",
+          "status": 200,
+          "headers": [["content-type", "application/json"]],
+          "body_hex": "7b226f6b223a747275657d"
+        },
+        "response_envelope_hex": "0200c8010c636f6e74656e742d74797065106170706c69636174696f6e2f6a736f6e0b7b226f6b223a747275657d",
+        "response_wrap_hex": "026d6e6f707172737475767778565d67d0937110da5e5c37adc1b64fa489649fbad053337f9f66f3c04f81d37cac8dbca04a36278e023046c236a538c9a55e0abe2c04e745495d25a81c6e"
+      }
+    ]
+  },
+  "fulfilment": {
+    "cases": [
+      {
+        "name": "derived_fulfilment_satisfies_its_own_condition",
+        "shared_secret_hex": "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60",
+        "fulfilment_hex": "92bc1a620ea08019f53dc166f76393b57e7b8478fe4b4366394a479c71b05aa4",
+        "condition_hex": "a4e761af5a6cc5b4c159a11fe1485afed3bf782fc4c92a27053e71c875bc6335",
+        "matches": true
+      },
+      {
+        "name": "a_different_secrets_fulfilment_does_not_satisfy_this_condition",
+        "shared_secret_hex": "8182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0",
+        "fulfilment_hex": "bbd45e695a57f47155860d33a8bacfecf360f51861db03ea36638cb6ed7f2605",
+        "condition_hex": "a4e761af5a6cc5b4c159a11fe1485afed3bf782fc4c92a27053e71c875bc6335",
+        "matches": false
+      }
+    ]
+  }
+}
