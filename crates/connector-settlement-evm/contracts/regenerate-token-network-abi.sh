@@ -9,8 +9,8 @@
 # Solidity it claims to describe" gate the issue asks for, so do not hand-edit the two JSON
 # files this script writes.
 #
-# SettlementChannel.json and MockERC20.json are untouched by this script -- they come from the
-# standalone .sol files in this same directory, not from packages/contracts.
+# MockERC20.json is untouched by this script -- it comes from the standalone .sol file in this
+# same directory, not from packages/contracts.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

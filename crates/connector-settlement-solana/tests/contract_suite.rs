@@ -9,7 +9,8 @@ mod support;
 
 use std::sync::Arc;
 
-use connector_settlement::contract::assert_upholds_the_contract;
+use chrono::Duration;
+use connector_settlement::contract::{assert_upholds_the_contract, ContractFixture};
 use connector_settlement::SettlementBackend;
 use connector_settlement_solana::SolanaSettlementBackend;
 use solana_sdk::signature::{Keypair, Signer};
@@ -35,11 +36,24 @@ async fn solana_settlement_backend_upholds_the_contract() {
         // against rather than a name it would have to hash down to one.
         let counterparty = Keypair::new().pubkey().to_bytes().to_vec();
         let other_counterparty = Keypair::new().pubkey().to_bytes().to_vec();
-        (
-            Arc::new(backend) as Arc<dyn SettlementBackend>,
+        ContractFixture {
+            backend: Arc::new(backend) as Arc<dyn SettlementBackend>,
             counterparty,
             other_counterparty,
-        )
+            // The deployed settlement program does not verify a claim's
+            // signature (issue #576's sibling gap, tracked separately for
+            // Solana), so any bytes suffice here.
+            sign: Box::new(
+                |_channel: &connector_settlement::ChannelId,
+                 _nonce: u64,
+                 _cumulative_amount: u128| { vec![0u8] },
+            ),
+            // No minimum enforced by the deployed program, so a
+            // zero-length challenge period is already due the instant the
+            // channel closes -- no advancing needed.
+            instant_settlement_timeout: Duration::zero(),
+            advance_past_instant_settlement_timeout: Box::new(|| Box::pin(async {})),
+        }
     })
     .await;
 }

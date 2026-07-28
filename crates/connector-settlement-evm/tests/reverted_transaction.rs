@@ -16,19 +16,43 @@ use std::sync::Arc;
 use chrono::Duration;
 use connector_settlement::{Claim, SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_signer::{derive_evm_address, evm_balance_proof_digest, EvmBalanceProof};
+use libsecp256k1::{Message, PublicKey, SecretKey};
 
 use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
+
+const ANVIL_CHAIN_ID: u64 = 31_337;
+
+fn channel_id_bytes(id: &str) -> [u8; 32] {
+    let hex_digits = id.trim_start_matches("0x");
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+            .expect("channel id is 0x-prefixed 64-hex");
+    }
+    out
+}
+
+fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
+    let message = Message::parse(digest);
+    let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
+    let mut bytes = signature.serialize().to_vec();
+    let recovery_byte: u8 = recovery_id.into();
+    bytes.push(recovery_byte + 27);
+    bytes
+}
 
 /// Two concurrent `redeem` calls against the same channel, submitting the
 /// *same* claim: both read the channel's pre-redemption state (redeemed =
 /// 0) before either sends its transaction, so both pass the client-side
 /// `StaleClaim` check and both submit. Only the first to land actually
 /// redeems; the second's transaction reverts on chain, because the
-/// contract's own check now sees `cumulativeAmount <= channel.redeemed`.
-/// Before this backend checked `receipt.status`, that revert was invisible:
-/// `confirm` returned `Ok` regardless, and the loser would have reported
-/// the channel's real (unaffected) state as if its own redemption had
-/// succeeded.
+/// contract's own nonce check now sees `balanceProof.nonce <=
+/// counterpartyState.nonce` (`TokenNetwork.sol`'s `InvalidNonce`). Before
+/// this backend checked `receipt.status`,
+/// that revert was invisible: `confirm` returned `Ok` regardless, and the
+/// loser would have reported the channel's real (unaffected) state as if
+/// its own redemption had succeeded.
 #[tokio::test]
 async fn a_racing_redeem_that_reverts_on_chain_is_reported_as_an_explicit_error() {
     if !require_anvil() {
@@ -43,19 +67,35 @@ async fn a_racing_redeem_that_reverts_on_chain_is_reported_as_an_explicit_error(
     let backend = Arc::new(
         EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
             .await
-            .expect("deploy SettlementChannel"),
+            .expect("deploy a TokenNetwork through a fresh registry"),
     );
+    let token_network_address = backend.address().to_fixed_bytes();
+
+    let counterparty_secret = SecretKey::parse(&[5u8; 32]).expect("valid secret key");
+    let counterparty_public = PublicKey::from_secret_key(&counterparty_secret);
+    let counterparty = derive_evm_address(&counterparty_public.serialize()).to_vec();
 
     let channel = backend
-        .open(b"racing-redeem-peer".to_vec(), Duration::seconds(3600))
+        .open(counterparty, Duration::seconds(3600))
         .await
         .expect("open");
     backend.fund(&channel, 1_000).await.expect("fund");
 
-    let claim = || Claim {
-        nonce: 1,
-        cumulative_amount: 400,
-        signature: vec![9],
+    let claim = || {
+        let proof = EvmBalanceProof {
+            channel_id: channel_id_bytes(&channel.0),
+            nonce: 1,
+            transferred_amount: 400,
+            locked_amount: 0,
+            locks_root: [0u8; 32],
+            chain_id: ANVIL_CHAIN_ID,
+            token_network_address,
+        };
+        Claim {
+            nonce: 1,
+            cumulative_amount: 400,
+            signature: sign_evm(&counterparty_secret, &evm_balance_proof_digest(&proof)),
+        }
     };
 
     let backend_a = Arc::clone(&backend);
@@ -94,13 +134,22 @@ async fn a_racing_redeem_that_reverts_on_chain_is_reported_as_an_explicit_error(
     let state = backend.channel_state(&channel).await.expect("read state");
     assert_eq!(state.redeemed, 400);
 
+    let proof = EvmBalanceProof {
+        channel_id: channel_id_bytes(&channel.0),
+        nonce: 2,
+        transferred_amount: 900,
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: ANVIL_CHAIN_ID,
+        token_network_address,
+    };
     let state = backend
         .redeem(
             &channel,
             Claim {
                 nonce: 2,
                 cumulative_amount: 900,
-                signature: vec![9],
+                signature: sign_evm(&counterparty_secret, &evm_balance_proof_digest(&proof)),
             },
         )
         .await

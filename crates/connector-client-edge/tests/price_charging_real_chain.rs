@@ -74,14 +74,6 @@ fn sealed_sample_prepare(receiver_public: &connector_signer::PublicKeyBytes) -> 
     }
 }
 
-/// The on-chain channel id `EvmSettlementBackend::open` returns is a
-/// decimal counter -- reformatted here as the 0x-prefixed 64-char hex
-/// `client_claim.rs` requires of an EVM claim's `channelId`.
-fn channel_id_hex(id: &str) -> String {
-    let n: u128 = id.parse().expect("channel id is a decimal integer");
-    format!("0x{n:064x}")
-}
-
 /// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
 /// `r || s || v` signature, `v` in the conventional `{27, 28}` range).
 fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
@@ -207,12 +199,16 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
             .expect("deploy mock USDC");
     let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
         .await
-        .expect("deploy SettlementChannel");
+        .expect("deploy a TokenNetwork through a fresh registry");
 
     // A channel genuinely opened and funded with real (anvil-minted mock
     // USDC) value -- `deposited` below is read back from the chain's own
-    // receipt, never a number this test invents.
-    let counterparty = b"pay-to-write-counterparty".to_vec();
+    // receipt, never a number this test invents. The counterparty must be
+    // a real 20-byte EVM address (issue #576): `TokenNetwork` requires one
+    // able to sign balance proofs, not an arbitrary peer name.
+    let counterparty_secret = SecretKey::parse(&[11u8; 32]).expect("valid secret key");
+    let counterparty_public = PublicKey::from_secret_key(&counterparty_secret);
+    let counterparty = derive_evm_address(&counterparty_public.serialize()).to_vec();
     let paid_channel = backend
         .open(counterparty.clone(), Duration::hours(1))
         .await
@@ -246,7 +242,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let (status, bytes) = post_claim(
         connector,
         signer,
-        &evm_claim_json(&channel_id_hex(&paid_channel.0), 1, paid_state.deposited),
+        &evm_claim_json(&paid_channel.0, 1, paid_state.deposited),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -263,11 +259,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let (status_two, bytes_two) = post_claim(
         connector_two,
         signer_two,
-        &evm_claim_json(
-            &channel_id_hex(&underpaid_channel.0),
-            1,
-            underpaid_state.deposited,
-        ),
+        &evm_claim_json(&underpaid_channel.0, 1, underpaid_state.deposited),
     )
     .await;
     assert_eq!(status_two, StatusCode::OK);

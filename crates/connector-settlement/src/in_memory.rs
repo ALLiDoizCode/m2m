@@ -103,11 +103,14 @@ impl SettlementBackend for InMemorySettlementBackend {
         counterparty: Vec<u8>,
         settlement_timeout: Duration,
     ) -> Result<ChannelId, SettlementError> {
-        // A plain decimal counter, matching the shape `SettlementChannel.sol`'s
-        // own `uint256` channel counter takes on a real chain (issue #575) --
-        // this fake's channel id doubles as the peer-wire `ClaimBook`'s
-        // channel id in this workspace's own tests, which now requires a
-        // decimal or hex on-chain-`bytes32`-shaped string.
+        // A plain decimal counter (issue #575) -- this fake's channel id
+        // doubles as the peer-wire `ClaimBook`'s channel id in this
+        // workspace's own tests, which now requires a decimal or hex
+        // on-chain-`bytes32`-shaped string. `EvmSettlementBackend`'s own
+        // channel ids are the `0x`-prefixed hex `bytes32` `TokenNetwork`
+        // assigns (issue #576); this backend keeps the decimal shape as
+        // its own, still-accepted alternative rather than mimicking a real
+        // chain it does not otherwise resemble.
         let id = ChannelId(self.next_id.fetch_add(1, Ordering::SeqCst).to_string());
         self.channels().insert(
             id.clone(),

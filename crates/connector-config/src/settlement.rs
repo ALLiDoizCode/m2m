@@ -51,11 +51,11 @@ pub enum SettlementChain {
 }
 
 /// A fully validated `[settlement]` section: which chain, where its RPC
-/// endpoint is, which already-deployed `SettlementChannel` contract and
-/// ERC-20 asset it settles through, and where the signing key material
-/// lives. Constructed only by [`resolve_settlement`], so a value that
-/// exists has already had every field checked -- downstream code never
-/// re-validates any of them.
+/// endpoint is, which already-deployed `TokenNetworkRegistry` and ERC-20
+/// asset it settles through, and where the signing key material lives.
+/// Constructed only by [`resolve_settlement`], so a value that exists has
+/// already had every field checked -- downstream code never re-validates
+/// any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementConfig {
     chain: SettlementChain,
@@ -77,13 +77,19 @@ impl SettlementConfig {
         &self.rpc_url
     }
 
-    /// The already-deployed `SettlementChannel` contract this backend
-    /// drives every channel operation against.
+    /// The already-deployed `TokenNetworkRegistry` this backend resolves
+    /// its actual `TokenNetwork` through, keyed by [`token_address`](Self::token_address)
+    /// (issue #576) -- not a channel contract itself.
     pub fn contract_address(&self) -> [u8; 20] {
         self.contract_address
     }
 
-    /// The ERC-20 asset every channel this backend opens settles in.
+    /// The ERC-20 asset every channel this backend opens settles in, and
+    /// the input `TokenNetworkRegistry.getTokenNetwork` resolves
+    /// [`contract_address`](Self::contract_address) against to find the
+    /// actual `TokenNetwork` (issue #576 closes out this field's half of
+    /// issue #564 -- construction now reads it rather than validating and
+    /// discarding it; #564 narrows to its `decimals` half, still unread).
     pub fn token_address(&self) -> [u8; 20] {
         self.token_address
     }

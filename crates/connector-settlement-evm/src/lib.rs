@@ -1,37 +1,37 @@
-//! EVM settlement backend (issue #459, ADR 0001, ADR 0002): a real,
+//! EVM settlement backend (issue #576, ADR 0001, ADR 0002): a real,
 //! chain-backed [`SettlementBackend`] driven against
-//! `contracts/SettlementChannel.sol` -- a minimal ERC-20 payment channel
-//! (issue #542; native-ETH before that) with no `lockedAmount`/`locksRoot`
-//! fields (ADR 0004).
+//! `packages/contracts/src/TokenNetwork.sol` -- the two-sided, EIP-712
+//! payment-channel contract the live TypeScript fleet already settles
+//! through, reached through its `TokenNetworkRegistry` factory -- with no
+//! `lockedAmount`/`locksRoot` value in use (ADR 0004; both are still
+//! hashed as zero, since the deployed contract's signed struct includes
+//! them).
+//!
+//! `contracts/SettlementChannel.sol` -- this crate's own throwaway,
+//! signature-unverified channel contract (issue #459; quarantined against
+//! accidental deployment by issue #568) -- is gone. Nothing in this crate
+//! constructs, deploys or calls it anymore.
 //!
 //! Unlike [`connector_settlement::InMemorySettlementBackend`], this
 //! backend holds no local channel state of its own: every
-//! [`SettlementBackend`] method reads the chain fresh (via
-//! `SettlementChannel::channelState`) before deciding what the port's
-//! rules require, and mutates the chain via a real transaction only once
-//! that check passes. This mirrors the "pre-flight, then submit" pattern
-//! the existing TypeScript EVM provider already uses for its one
-//! chain-specific precondition (`ChallengeNotExpiredError` before
-//! `settleChannel`) -- checking client-side first, rather than relying on
-//! decoding a reverted transaction's custom-error selector, keeps every
-//! [`SettlementError`] variant the port's own contract suite exercises
-//! (`ChannelNotFound`, `ChannelClosed`, `StaleClaim`,
-//! `InsufficientChannelBalance`) exact, and reserves
-//! [`SettlementError::Backend`] for genuine I/O failure (a dropped
-//! transaction, an RPC error) rather than for rules this port already
-//! names.
+//! [`SettlementBackend`] method reads the chain fresh before deciding what
+//! the port's rules require, and mutates the chain via a real transaction
+//! only once that check passes. `TokenNetwork` tracks a `ParticipantState`
+//! (deposit, nonce, transferred amount) per side of a channel rather than
+//! one shared balance, so this backend has to know which side it is: see
+//! [`EvmSettlementBackend::read_state`] for how a single
+//! [`connector_settlement::ChannelState`] is derived from that two-sided
+//! shape.
 
 mod bindings;
-// Also compiled for this crate's own `#[cfg(test)]` unit tests below (issue
-// #568's constructor-guard test needs `Anvil`/`DEPLOYER_PRIVATE_KEY` and, via
-// `super::bindings`, direct access to `SettlementChannelContract::deploy` --
-// something an integration test in `tests/` cannot reach, since that is a
-// private module).
+// Also compiled for this crate's own `#[cfg(test)]` unit tests (none left
+// after issue #576 removed the #568 constructor-guard tests, which were
+// `SettlementChannel`-specific -- kept available the same way regardless,
+// matching `connector-operator`'s own `test_support` precedent).
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use chrono::Duration;
@@ -39,16 +39,17 @@ use ethers::middleware::nonce_manager::NonceManagerMiddleware;
 use ethers::middleware::{Middleware, SignerMiddleware};
 use ethers::providers::{Http, JsonRpcClient, PendingTransaction, Provider, ProviderError};
 use ethers::signers::{LocalWallet, Signer as EvmSigner};
-use ethers::types::{Address, Bytes, TransactionReceipt, U256};
+use ethers::types::{Address, BlockNumber, Bytes, TransactionReceipt, U256};
 
 use connector_settlement::{
     ChannelId, ChannelState, ChannelStatus, Claim, SettlementBackend, SettlementError,
 };
 
-use bindings::{
-    ChannelOpenedFilter, Erc20 as Erc20Contract, MockErc20 as MockErc20Contract,
-    SettlementChannel as SettlementChannelContract,
+use bindings::token_network::{
+    BalanceProof, ChannelOpenedFilter, TokenNetwork as TokenNetworkContract,
 };
+use bindings::token_network_registry::TokenNetworkRegistry as TokenNetworkRegistryContract;
+use bindings::{Erc20 as Erc20Contract, MockErc20 as MockErc20Contract};
 
 /// The signing client every contract call is made through, wrapped in a
 /// [`NonceManagerMiddleware`] so that concurrent calls against the same
@@ -58,61 +59,113 @@ use bindings::{
 /// and conflicting when both land.
 type EvmClient = NonceManagerMiddleware<SignerMiddleware<Provider<Http>, LocalWallet>>;
 
-/// A [`SettlementBackend`] backed by a real `SettlementChannel` contract
-/// instance on an EVM chain, settling in whatever ERC-20 that instance was
-/// deployed with (issue #542).
+/// A [`SettlementBackend`] backed by a real `TokenNetwork` contract
+/// instance on an EVM chain, resolved through a `TokenNetworkRegistry`
+/// (issue #566), settling in whatever ERC-20 that `TokenNetwork` was
+/// created for.
 pub struct EvmSettlementBackend {
-    contract: SettlementChannelContract<EvmClient>,
+    contract: TokenNetworkContract<EvmClient>,
     token: Erc20Contract<EvmClient>,
+    registry_address: Address,
+    /// This backend's own signing address -- every channel it opens names
+    /// this address as one of the two on-chain participants, so
+    /// [`read_state`](Self::read_state) can tell which `ParticipantState`
+    /// is "self" and which is the counterparty's.
+    own_address: Address,
+    /// Serializes [`fund`](SettlementBackend::fund): `setTotalDeposit`
+    /// takes the counterparty's *new total* deposit, not an increment, so
+    /// computing that total requires a read-then-write this backend's own
+    /// `&self` concurrency (every method takes `&self`, so nothing stops
+    /// two calls racing) would otherwise race on -- two concurrent `fund`
+    /// calls could both read the same stale total, both submit the same
+    /// higher total, and the second transaction would move zero real
+    /// tokens despite appearing to succeed (issue #576's "two concurrent
+    /// `fund` calls ... do not lose a deposit" AC). The old
+    /// `SettlementChannel.sol` this backend replaces took an increment
+    /// server-side and needed no such lock.
+    deposit_lock: tokio::sync::Mutex<()>,
 }
 
 impl EvmSettlementBackend {
-    /// Bind to an already-deployed `SettlementChannel` at
-    /// `contract_address`, signing every transaction with `private_key`
-    /// (a hex-encoded secp256k1 key, `0x`-prefix optional). The token this
-    /// backend approves and pulls from is read back from the contract
-    /// itself (`token()`, its own immutable state) rather than passed in
-    /// separately -- a deployed `SettlementChannel` and the asset it
-    /// settles are fixed together at deployment, so there is exactly one
-    /// answer to ask the chain for.
+    /// Bind to the `TokenNetwork` that `registry_address`'s
+    /// `TokenNetworkRegistry.getTokenNetwork(token_address)` resolves to,
+    /// signing every transaction with `private_key` (a hex-encoded
+    /// secp256k1 key, `0x`-prefix optional). Refuses -- naming both
+    /// addresses -- if the registry has no `TokenNetwork` registered for
+    /// `token_address` (the zero address, issue #576's AC): a
+    /// `TokenNetworkRegistry` is a factory keyed by token, and there is no
+    /// single "the" channel contract to fall back to guessing at.
     pub async fn connect(
         rpc_url: &str,
         private_key: &str,
-        contract_address: Address,
+        registry_address: Address,
+        token_address: Address,
     ) -> Result<Self, SettlementError> {
-        let client = Arc::new(build_client(rpc_url, private_key).await?.0);
-        let contract = SettlementChannelContract::new(contract_address, client.clone());
-        let token_address = contract.token().call().await.map_err(backend_error)?;
+        let (client, own_address) = build_client(rpc_url, private_key).await?;
+        let client = Arc::new(client);
+        let registry = TokenNetworkRegistryContract::new(registry_address, client.clone());
+        let token_network_address = registry
+            .get_token_network(token_address)
+            .call()
+            .await
+            .map_err(backend_error)?;
+        if token_network_address.is_zero() {
+            return Err(SettlementError::Backend(format!(
+                "registry {registry_address:?} has no TokenNetwork registered for token \
+                 {token_address:?}"
+            )));
+        }
+        let contract = TokenNetworkContract::new(token_network_address, client.clone());
         let token = Erc20Contract::new(token_address, client);
-        Ok(Self { contract, token })
+        Ok(Self {
+            contract,
+            token,
+            registry_address,
+            own_address,
+            deposit_lock: tokio::sync::Mutex::new(()),
+        })
     }
 
-    /// Deploy a fresh `SettlementChannel` settling `token_address`, signed
-    /// and paid for by `private_key`, and bind to it. Used by this crate's
-    /// own tests and by local `anvil` tooling -- the contract's constructor
-    /// reverts (`NotForDeployment`) unless given its own
-    /// `DEPLOYMENT_ACKNOWLEDGEMENT` (issue #568: this contract must never
-    /// land on a chain that holds real value -- see the `DO NOT DEPLOY`
-    /// block at the top of `contracts/SettlementChannel.sol`), which this
-    /// function supplies automatically. There is no other, production-
-    /// facing way to construct one: `EvmSettlementBackend::connect` only
-    /// ever binds to an address that is already deployed.
+    /// Deploy a fresh `TokenNetworkRegistry` and create a `TokenNetwork`
+    /// for `token_address` through it, signed and paid for by
+    /// `private_key`, then bind to the result exactly as
+    /// [`connect`](Self::connect) would. Used by this crate's own tests
+    /// and by local `anvil` tooling -- it exercises the same
+    /// registry-resolution path a production [`connect`](Self::connect)
+    /// call does, rather than deploying a `TokenNetwork` directly and
+    /// side-stepping the registry.
     pub async fn deploy(
         rpc_url: &str,
         private_key: &str,
         token_address: Address,
     ) -> Result<Self, SettlementError> {
-        let client = Arc::new(build_client(rpc_url, private_key).await?.0);
-        let contract = SettlementChannelContract::deploy(
-            client.clone(),
-            (token_address, deployment_acknowledgement()),
-        )
-        .map_err(backend_error)?
-        .send()
-        .await
-        .map_err(backend_error)?;
+        let (client, own_address) = build_client(rpc_url, private_key).await?;
+        let client = Arc::new(client);
+        let registry = TokenNetworkRegistryContract::deploy(client.clone(), ())
+            .map_err(backend_error)?
+            .send()
+            .await
+            .map_err(backend_error)?;
+        let registry_address = registry.address();
+
+        let call = registry.create_token_network(token_address);
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+
+        let token_network_address = registry
+            .get_token_network(token_address)
+            .call()
+            .await
+            .map_err(backend_error)?;
+        let contract = TokenNetworkContract::new(token_network_address, client.clone());
         let token = Erc20Contract::new(token_address, client);
-        Ok(Self { contract, token })
+        Ok(Self {
+            contract,
+            token,
+            registry_address,
+            own_address,
+            deposit_lock: tokio::sync::Mutex::new(()),
+        })
     }
 
     /// Deploy a fresh, mintable mock ERC-20 (`contracts/MockERC20.sol`)
@@ -121,8 +174,7 @@ impl EvmSettlementBackend {
     /// this exists so a disposable test or devnet chain, which starts with
     /// no token deployed at all, has something real for
     /// [`EvmSettlementBackend::deploy`] to point at; a production
-    /// deployment always names an already-deployed token address instead
-    /// (issue #542).
+    /// deployment always names an already-deployed token address instead.
     pub async fn deploy_mock_token(
         rpc_url: &str,
         private_key: &str,
@@ -144,61 +196,131 @@ impl EvmSettlementBackend {
         Ok(contract.address())
     }
 
-    /// The address this backend's `SettlementChannel` is deployed at.
+    /// The address this backend's `TokenNetwork` is deployed at -- the
+    /// contract every channel operation is actually sent to.
     pub fn address(&self) -> Address {
         self.contract.address()
     }
 
-    /// Resolve `channel` to the on-chain id it names, or
-    /// [`SettlementError::ChannelNotFound`] if `channel`'s id was never
-    /// assigned by a prior [`open`](SettlementBackend::open) call --
-    /// either because it does not parse as one (e.g. a caller-fabricated
-    /// id) or because it is not lower than the contract's own
-    /// `channelCounter`, the one thing that only ever increases as
-    /// channels are opened.
-    async fn existing_channel_id(&self, channel: &ChannelId) -> Result<U256, SettlementError> {
-        let id = U256::from_dec_str(&channel.0)
-            .map_err(|_| SettlementError::ChannelNotFound(channel.clone()))?;
-        let counter = self
-            .contract
-            .channel_counter()
-            .call()
-            .await
-            .map_err(backend_error)?;
-        if id >= counter {
+    /// The `TokenNetworkRegistry` address this backend's `TokenNetwork`
+    /// was resolved through -- what a `[settlement] contract_address`
+    /// config value names (issue #576: the operator-facing address is the
+    /// stable registry, not whichever `TokenNetwork` it currently resolves
+    /// to).
+    pub fn registry_address(&self) -> Address {
+        self.registry_address
+    }
+
+    /// Resolve `channel` to the on-chain id it names and confirm a channel
+    /// actually exists there (`TokenNetwork.channels(id).state !=
+    /// NonExistent`) -- [`SettlementError::ChannelNotFound`] either because
+    /// `channel`'s string does not parse as a `bytes32` id at all, or
+    /// because nothing was ever opened at the one it names.
+    async fn existing_channel_id(&self, channel: &ChannelId) -> Result<[u8; 32], SettlementError> {
+        let id = parse_channel_id(channel)?;
+        let (_, state, _, _, _, _) = self.fetch_channel(id).await?;
+        if state == CHANNEL_STATE_NONEXISTENT {
             return Err(SettlementError::ChannelNotFound(channel.clone()));
         }
         Ok(id)
     }
 
-    /// The one place this backend calls the contract's `channelState` --
-    /// both [`read_state`](Self::read_state) and
-    /// [`settle`](SettlementBackend::settle) need it, for different subsets
-    /// of the same eight-tuple.
-    async fn fetch_channel_state(
+    /// The one place this backend calls `TokenNetwork.channels` -- both
+    /// [`read_state`](Self::read_state) and
+    /// [`settle`](SettlementBackend::settle) need a subset of the same
+    /// six-tuple.
+    async fn fetch_channel(
         &self,
-        id: U256,
-    ) -> Result<(Address, Bytes, Address, U256, U256, U256, u8, U256), SettlementError> {
+        id: [u8; 32],
+    ) -> Result<(U256, u8, U256, U256, Address, Address), SettlementError> {
         self.contract
-            .channel_state(id)
+            .channels(id)
             .call()
             .await
             .map_err(backend_error)
     }
 
+    /// The latest block's own timestamp, read from the chain this backend
+    /// talks to -- what [`settle`](SettlementBackend::settle) compares a
+    /// channel's settlement deadline against, rather than this process's
+    /// own wall clock. `TokenNetwork.settleChannel` itself checks
+    /// `block.timestamp`, which a real chain's block production can drift
+    /// from this process's system clock by more than a negligible amount
+    /// (and, for a test chain whose clock has been deliberately warped
+    /// ahead via `evm_increaseTime`, by a great deal) -- reading the
+    /// chain's own notion of "now" is what actually agrees with the
+    /// on-chain check this precondition exists to anticipate.
+    async fn chain_timestamp(&self) -> Result<U256, SettlementError> {
+        let block = self
+            .contract
+            .client()
+            .get_block(BlockNumber::Latest)
+            .await
+            .map_err(backend_error)?
+            .ok_or_else(|| SettlementError::Backend("chain has no latest block".to_string()))?;
+        Ok(block.timestamp)
+    }
+
+    /// Which of a channel's two on-chain participants is this backend's
+    /// own counterparty -- the other one, whichever side `own_address`
+    /// is not. [`SettlementError::Backend`] if neither side is
+    /// `own_address` at all, which should never happen for a channel this
+    /// backend itself opened (every [`open`](SettlementBackend::open) call
+    /// names `own_address` as one of the two participants), but is
+    /// reported rather than silently guessed at if it ever does.
+    fn counterparty_of(
+        &self,
+        participant1: Address,
+        participant2: Address,
+    ) -> Result<Address, SettlementError> {
+        if participant1 == self.own_address {
+            Ok(participant2)
+        } else if participant2 == self.own_address {
+            Ok(participant1)
+        } else {
+            Err(SettlementError::Backend(format!(
+                "channel participants {participant1:?}/{participant2:?} include neither this \
+                 backend's own signing address {:?}",
+                self.own_address
+            )))
+        }
+    }
+
+    /// Derive a single [`ChannelState`] from `TokenNetwork`'s two-sided
+    /// state (issue #576's core mismatch): `deposited` is the
+    /// counterparty's own `ParticipantState.deposit` -- the balance
+    /// `claimFromChannel` actually bounds a claim against
+    /// (`TokenNetwork.sol:317`) -- and `redeemed` is
+    /// `claimedAmounts[channelId][self]` -- what *this* backend has
+    /// already pulled out via [`redeem`](SettlementBackend::redeem).
+    /// Reading the sides the other way round would report a channel that
+    /// looks funded and is not.
     async fn read_state(
         &self,
         channel: &ChannelId,
-        id: U256,
+        id: [u8; 32],
     ) -> Result<ChannelState, SettlementError> {
-        let (_payer, counterparty, _payout, _timeout, deposited, redeemed, status, _closed_at) =
-            self.fetch_channel_state(id).await?;
+        let (_settlement_timeout, state, _closed_at, _opened_at, participant1, participant2) =
+            self.fetch_channel(id).await?;
+        let counterparty = self.counterparty_of(participant1, participant2)?;
+        let (counterparty_deposit, _nonce, _transferred_amount) = self
+            .contract
+            .participants(id, counterparty)
+            .call()
+            .await
+            .map_err(backend_error)?;
+        let self_claimed = self
+            .contract
+            .claimed_amounts(id, self.own_address)
+            .call()
+            .await
+            .map_err(backend_error)?;
         Ok(ChannelState {
             id: channel.clone(),
-            counterparty: counterparty.to_vec(),
-            status: status_from_u8(status),
-            deposited: deposited.as_u128(),
-            redeemed: redeemed.as_u128(),
+            counterparty: counterparty.as_bytes().to_vec(),
+            status: status_from_u8(state)?,
+            deposited: counterparty_deposit.as_u128(),
+            redeemed: self_claimed.as_u128(),
         })
     }
 
@@ -213,7 +335,7 @@ impl EvmSettlementBackend {
     async fn open_channel(
         &self,
         channel: &ChannelId,
-    ) -> Result<(U256, ChannelState), SettlementError> {
+    ) -> Result<([u8; 32], ChannelState), SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         let state = self.read_state(channel, id).await?;
         match state.status {
@@ -230,7 +352,7 @@ impl EvmSettlementBackend {
     async fn redeemable_channel(
         &self,
         channel: &ChannelId,
-    ) -> Result<(U256, ChannelState), SettlementError> {
+    ) -> Result<([u8; 32], ChannelState), SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         let state = self.read_state(channel, id).await?;
         if state.status == ChannelStatus::Settled {
@@ -240,11 +362,16 @@ impl EvmSettlementBackend {
     }
 }
 
-fn status_from_u8(status: u8) -> ChannelStatus {
-    match status {
-        0 => ChannelStatus::Open,
-        1 => ChannelStatus::Closed,
-        _ => ChannelStatus::Settled,
+const CHANNEL_STATE_NONEXISTENT: u8 = 0;
+
+fn status_from_u8(state: u8) -> Result<ChannelStatus, SettlementError> {
+    match state {
+        1 => Ok(ChannelStatus::Open),
+        2 => Ok(ChannelStatus::Closed),
+        3 => Ok(ChannelStatus::Settled),
+        other => Err(SettlementError::Backend(format!(
+            "TokenNetwork reported an unknown channel state {other}"
+        ))),
     }
 }
 
@@ -274,31 +401,56 @@ async fn build_client(
     Ok((NonceManagerMiddleware::new(signer, address), address))
 }
 
-/// Derive a 20-byte EVM address for an arbitrary counterparty identifier.
-/// A genuine peer address (already 20 bytes) passes through unchanged;
-/// anything else (the port's own contract suite uses plain ASCII peer
-/// names, not addresses) is hashed down to one -- deterministically, so
-/// the same counterparty bytes always name the same on-chain address, and
-/// validly, so `SettlementChannel.redeem`'s ERC-20 transfer to it never
-/// reverts for want of a real recipient.
-fn counterparty_address(counterparty: &[u8]) -> Address {
-    if counterparty.len() == 20 {
-        Address::from_slice(counterparty)
-    } else {
-        Address::from_slice(&ethers::utils::keccak256(counterparty)[12..])
+/// A `TokenNetwork` counterparty must be a real 20-byte EVM address: it has
+/// to *sign* balance proofs (`TokenNetwork.claimFromChannel` recovers the
+/// signer and checks it against this exact address), so hashing an
+/// arbitrary identifier down to something address-shaped -- what this
+/// backend did before issue #576 -- produces an address nobody holds the
+/// key to. `SettlementChannel.sol`'s `redeem` transferred to exactly such
+/// an unrecoverable address; `open` now refuses rather than inventing one
+/// (issue #566's first comment, issue #576's AC).
+fn counterparty_address(counterparty: &[u8]) -> Result<Address, SettlementError> {
+    if counterparty.len() != 20 {
+        return Err(SettlementError::Backend(format!(
+            "a TokenNetwork counterparty must be a 20-byte EVM address able to sign balance \
+             proofs, got {} bytes",
+            counterparty.len()
+        )));
     }
+    Ok(Address::from_slice(counterparty))
 }
 
-/// The value `SettlementChannel`'s constructor requires as its
-/// `acknowledgement` argument -- must stay byte-for-byte the same string,
-/// hashed the same way, as the contract's own `DEPLOYMENT_ACKNOWLEDGEMENT`
-/// constant (issue #568). Deliberately not a shared constant between Rust
-/// and Solidity (there is no such mechanism across that boundary); a test
-/// asserts the two sides agree.
-fn deployment_acknowledgement() -> [u8; 32] {
-    ethers::utils::keccak256(
-        b"SettlementChannel is UNSAFE and test-only -- see issue #568 DO NOT DEPLOY",
-    )
+/// `TokenNetwork`'s channel id is a `bytes32`
+/// (`keccak256(participant1, participant2, channelCounter)`,
+/// `TokenNetwork.sol:199`), formatted as `0x`-prefixed, zero-padded lowercase
+/// hex -- the same shape `connector_runtime::claim::parse_channel_id`
+/// already accepts for a peer-wire channel id (issue #575's AC4), so an id
+/// this backend hands back is usable there unchanged.
+fn format_channel_id(id: [u8; 32]) -> ChannelId {
+    let mut hex = String::with_capacity(2 + 64);
+    hex.push_str("0x");
+    for byte in id {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    ChannelId(hex)
+}
+
+/// The inverse of [`format_channel_id`]. A channel id that does not parse
+/// as 32 bytes of hex is reported as [`SettlementError::ChannelNotFound`]
+/// rather than a distinct parse-error variant -- from this port's
+/// perspective a malformed id and one nothing was ever opened at mean the
+/// same thing: there is no channel to operate on.
+fn parse_channel_id(channel: &ChannelId) -> Result<[u8; 32], SettlementError> {
+    let hex_digits = channel.0.strip_prefix("0x").unwrap_or(channel.0.as_str());
+    if hex_digits.len() != 64 || !hex_digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(SettlementError::ChannelNotFound(channel.clone()));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+            .map_err(|_| SettlementError::ChannelNotFound(channel.clone()))?;
+    }
+    Ok(out)
 }
 
 fn backend_error<E: std::fmt::Display>(error: E) -> SettlementError {
@@ -343,14 +495,12 @@ impl SettlementBackend for EvmSettlementBackend {
         counterparty: Vec<u8>,
         settlement_timeout: Duration,
     ) -> Result<ChannelId, SettlementError> {
-        let payout_address = counterparty_address(&counterparty);
+        let participant2 = counterparty_address(&counterparty)?;
         let seconds = settlement_timeout.num_seconds().max(0) as u64;
 
-        let call = self.contract.open(
-            Bytes::from(counterparty),
-            payout_address,
-            U256::from(seconds),
-        );
+        let call = self
+            .contract
+            .open_channel(participant2, U256::from(seconds));
         let pending = call.send().await.map_err(backend_error)?;
         let receipt = confirm(pending).await?;
 
@@ -360,7 +510,7 @@ impl SettlementBackend for EvmSettlementBackend {
                 log.topics.clone(),
                 log.data.clone(),
             ) {
-                return Ok(ChannelId(decoded.channel_id.to_string()));
+                return Ok(format_channel_id(decoded.channel_id));
             }
         }
         Err(SettlementError::Backend(
@@ -373,26 +523,25 @@ impl SettlementBackend for EvmSettlementBackend {
         channel: &ChannelId,
         amount: u128,
     ) -> Result<ChannelState, SettlementError> {
-        let (id, _state) = self.open_channel(channel).await?;
+        // Serializes the read-then-write below against other concurrent
+        // `fund` calls on this backend -- see `deposit_lock`'s own doc.
+        let _guard = self.deposit_lock.lock().await;
 
-        // Approve-then-fund (issue #542): two transactions, where a single
-        // `payable` call sufficed for native ETH. Approving a large fixed
-        // allowance every time, rather than exactly `amount`, is
-        // deliberate: `approve` overwrites rather than adds, so two
-        // concurrent `fund` calls from the same payer against this same
-        // contract (every `SettlementBackend` method takes `&self`)
-        // approving their own exact amounts can race -- the second
-        // approval overwrites the first's before the first's `fund` spends
-        // it, and that `fund` then reverts for insufficient allowance.
-        // Approving the same large value under a race is idempotent: the
-        // final on-chain allowance is that value either way, and it is
-        // confirmed mined before this call's own `fund` is ever sent, so
-        // it is always enough.
+        let (id, state) = self.open_channel(channel).await?;
+        let counterparty = Address::from_slice(&state.counterparty);
+        let new_total = U256::from(state.deposited) + U256::from(amount);
+
+        // Approve-then-deposit: two transactions, where a single `payable`
+        // call sufficed for native ETH. Approving a large fixed allowance,
+        // rather than exactly `amount`, means a stale approval from an
+        // earlier call (or another channel funded through this same
+        // backend) is still always enough -- `deposit_lock` above already
+        // rules out two `fund` calls racing each other's approval.
         let approve = self.token.approve(self.contract.address(), U256::MAX);
         let pending = approve.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 
-        let call = self.contract.fund(id, U256::from(amount));
+        let call = self.contract.set_total_deposit(id, counterparty, new_total);
         let pending = call.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 
@@ -418,11 +567,20 @@ impl SettlementBackend for EvmSettlementBackend {
             });
         }
 
-        let call = self.contract.redeem(
-            id,
-            U256::from(claim.cumulative_amount),
-            Bytes::from(claim.signature),
-        );
+        let balance_proof = BalanceProof {
+            channel_id: id,
+            nonce: U256::from(claim.nonce),
+            transferred_amount: U256::from(claim.cumulative_amount),
+            // ADR 0004: this port never uses HTLCs, but the deployed
+            // typehash still hashes these two fields -- omitting them
+            // would compute a different EIP-712 digest than the one
+            // `claim.signature` was actually produced over.
+            locked_amount: U256::zero(),
+            locks_root: [0u8; 32],
+        };
+        let call =
+            self.contract
+                .claim_from_channel(id, balance_proof, Bytes::from(claim.signature));
         let pending = call.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 
@@ -432,7 +590,7 @@ impl SettlementBackend for EvmSettlementBackend {
     async fn close(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         let (id, _state) = self.open_channel(channel).await?;
 
-        let call = self.contract.close(id);
+        let call = self.contract.close_channel(id);
         let pending = call.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 
@@ -441,10 +599,10 @@ impl SettlementBackend for EvmSettlementBackend {
 
     async fn settle(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         let id = self.existing_channel_id(channel).await?;
-        let (_payer, _counterparty, _payout, timeout, _deposited, _redeemed, status, closed_at) =
-            self.fetch_channel_state(id).await?;
+        let (settlement_timeout, state, closed_at, _opened_at, _p1, _p2) =
+            self.fetch_channel(id).await?;
 
-        match status_from_u8(status) {
+        match status_from_u8(state)? {
             ChannelStatus::Settled => return Err(SettlementError::ChannelSettled(channel.clone())),
             // Never closed (still Open) has no deadline to have passed.
             ChannelStatus::Open => {
@@ -452,18 +610,13 @@ impl SettlementBackend for EvmSettlementBackend {
             }
             ChannelStatus::Closed => {}
         }
-        let available_at = closed_at + timeout;
-        let now = U256::from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock is after the Unix epoch")
-                .as_secs(),
-        );
+        let available_at = closed_at + settlement_timeout;
+        let now = self.chain_timestamp().await?;
         if now < available_at {
             return Err(SettlementError::SettlementNotYetDue(channel.clone()));
         }
 
-        let call = self.contract.settle(id);
+        let call = self.contract.settle_channel(id);
         let pending = call.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 
@@ -473,89 +626,5 @@ impl SettlementBackend for EvmSettlementBackend {
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         self.read_state(channel, id).await
-    }
-}
-
-/// Issue #568: `SettlementChannel.sol` must be impossible to deploy by
-/// accident. These tests drive the constructor's own guard directly against
-/// `bindings::SettlementChannelContract` -- something only this crate's own
-/// unit tests can reach, since `bindings` is a private module and an
-/// integration test in `tests/` only ever sees this crate's public API.
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use ethers::types::Address;
-
-    use crate::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
-    use crate::{
-        build_client, deployment_acknowledgement, EvmSettlementBackend, SettlementChannelContract,
-    };
-
-    // Both tests below share this one base port rather than using adjacent
-    // bases (e.g. 18_690/18_691) -- `Anvil::spawn`'s port is
-    // `base_port.wrapping_add(pid % 1_000).wrapping_add(offset)` off one
-    // process-wide atomic `offset` counter, so two adjacent bases can
-    // collide (base 18_690 at offset 1 == base 18_691 at offset 0) if the
-    // two calls' atomic fetches land in the "wrong" order relative to their
-    // bases. Sharing one base makes the atomic offset the only thing that
-    // varies, which is guaranteed distinct per call.
-    const ANVIL_BASE_PORT: u16 = 18_690;
-
-    #[tokio::test]
-    async fn a_deployment_with_the_wrong_acknowledgement_reverts() {
-        if !require_anvil() {
-            return;
-        }
-        let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
-        let client = Arc::new(
-            build_client(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
-                .await
-                .expect("build client")
-                .0,
-        );
-
-        let wrong_acknowledgement = [0u8; 32];
-        assert_ne!(
-            wrong_acknowledgement,
-            deployment_acknowledgement(),
-            "the test's own \"wrong\" value must not accidentally be the real one"
-        );
-
-        let result =
-            SettlementChannelContract::deploy(client, (Address::zero(), wrong_acknowledgement))
-                .expect("build deployment call")
-                .send()
-                .await;
-
-        assert!(
-            result.is_err(),
-            "a SettlementChannel deployed with the wrong acknowledgement must fail to deploy, \
-             not silently succeed -- issue #568"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_deployment_with_the_correct_acknowledgement_succeeds() {
-        if !require_anvil() {
-            return;
-        }
-        let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
-        let token = EvmSettlementBackend::deploy_mock_token(
-            &anvil.rpc_url,
-            DEPLOYER_PRIVATE_KEY,
-            1_000_000,
-        )
-        .await
-        .expect("deploy mock USDC");
-
-        let backend =
-            EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token).await;
-
-        assert!(
-            backend.is_ok(),
-            "the sanctioned test-only deploy path must still work: {:?}",
-            backend.err()
-        );
     }
 }

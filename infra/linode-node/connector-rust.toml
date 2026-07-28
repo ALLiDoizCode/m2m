@@ -107,19 +107,14 @@ fee = 0
 # ── Settlement (issue #542) — DELIBERATELY NOT CONFIGURED ───────────────
 # There is no `[settlement]` section in this file, and there must not be one.
 #
-# ⚠️ DO NOT DEPLOY `SettlementChannel.sol` ⚠️ (issue #568). It is not merely
-# "no address yet" — the contract itself must never be deployed to a chain
-# that holds real value. `redeem` never verifies the signature it is given
-# (any address can drain a funded channel), `close` has no access control
-# (any address can close any channel), and there is no refund path (a
-# deposit that is never redeemed is stranded forever). Its constructor now
-# reverts unless given a test-only acknowledgement value, so a normal
-# deployment (e.g. a bare `forge create`) fails outright rather than
-# quietly placing an unsafe contract on chain — see the `DO NOT DEPLOY` block
-# at the top of `crates/connector-settlement-evm/contracts/SettlementChannel.sol`.
-# Issue #566 replaces it with a real, signature-verifying `TokenNetwork` and
-# deletes this file; only once that lands is there a contract an operator
-# should ever put a real address here for.
+# `EvmSettlementBackend` drives `packages/contracts/src/TokenNetwork.sol` --
+# the real, signature-verifying payment channel contract the live
+# TypeScript fleet already settles through on Base Sepolia -- reached
+# through a `TokenNetworkRegistry` factory (issue #566, issue #576).
+# `crates/connector-settlement-evm/contracts/SettlementChannel.sol`, this
+# crate's own throwaway, signature-unverified channel contract (issue #459,
+# quarantined against accidental deployment by issue #568), is gone: there
+# is nothing left to warn against deploying.
 #
 # The two states below are not symmetric, and that asymmetry is by design:
 #
@@ -132,28 +127,31 @@ fee = 0
 #
 #   * PRESENT BUT WRONG is a hard startup failure, on purpose (ADR 0009,
 #     fail-closed). `connector-cli::runtime::build` calls
-#     `EvmSettlementBackend::connect`, which reads `token()` off the address
-#     it is given. Against the zero address that read comes back `0x`,
-#     `connect` errors, and the process exits 1 — it does NOT start with
+#     `EvmSettlementBackend::connect`, which resolves `token_address`
+#     through `contract_address`'s `TokenNetworkRegistry.getTokenNetwork`.
+#     Against a registry with no `TokenNetwork` registered for that token
+#     that resolves to the zero address, `connect` errors naming both
+#     addresses, and the process exits 1 — it does NOT start with
 #     settlement quietly disabled. A placeholder address is therefore not a
 #     harmless "syntactically valid" filler here: it is the difference
 #     between a node that boots and a node that does not.
 #
 # The block below is the shape an operator will eventually fill in, once
-# issue #566's replacement contract is deployed for real — do NOT uncomment
-# it against a `SettlementChannel.sol` deployment, per the warning above.
-# `token_address` is already the real mock USDC `./connector.yaml` names, and
-# `rpc_url` is that config's own known-good EVM RPC. That shape is not
+# this box is meant to settle for real: `contract_address` names the
+# `TokenNetworkRegistry`, not a channel contract directly (issue #576).
+# `token_address` is already the real mock USDC `./connector.yaml` names,
+# and `rpc_url` is that config's own known-good EVM RPC. That shape is not
 # decoration — `crates/connector-bin/tests/devnet_configs_load.rs` uncomments
-# this very block and boots it against a freshly deployed contract on a local
-# anvil (the explicit test-only escape hatch), so it stays a template that
-# actually works.
+# this very block and boots it against a freshly deployed registry and
+# `TokenNetwork` on a local anvil (the explicit test-only escape hatch), so
+# it stays a template that actually works. #577 tracks actually shipping
+# this section filled in against the live Base Sepolia deployment.
 #
 # --- BEGIN settlement template (uncomment when a contract is deployed) ---
 # [settlement]
 # chain = "evm"
 # rpc_url = "https://base-sepolia-rpc.publicnode.com"
-# # REPLACE the zero address with the deployed `SettlementChannel` address.
+# # REPLACE the zero address with the deployed `TokenNetworkRegistry` address.
 # contract_address = "0x0000000000000000000000000000000000000000"
 # token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 # decimals = 6

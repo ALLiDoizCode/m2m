@@ -10,6 +10,7 @@
 use std::io::Write;
 
 use ed25519_dalek::Keypair;
+use libsecp256k1::{Message, PublicKey, SecretKey};
 use rand::rngs::OsRng;
 use tower::ServiceExt;
 
@@ -20,6 +21,36 @@ use connector_operator::test_support::sign_request;
 use connector_runtime::{ChannelView, ChannelViewStatus};
 use connector_settlement_evm::test_support::{anvil_available, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_signer::{derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof};
+
+/// `anvil`'s own default chain id (`Anvil::spawn`'s `--chain-id 31337`),
+/// and so the EIP-712 domain a claim against its deployed `TokenNetwork`
+/// must be signed under.
+const ANVIL_CHAIN_ID: u64 = 31_337;
+
+/// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
+/// `r || s || v` signature, `v` in the conventional `{27, 28}` range) --
+/// what `TokenNetwork.claimFromChannel`'s `ECDSA.recover` requires. Mirrors
+/// `connector-client-edge/tests/price_charging_real_chain.rs`'s own
+/// `sign_evm` helper.
+fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
+    let message = Message::parse(digest);
+    let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
+    let mut bytes = signature.serialize().to_vec();
+    let recovery_byte: u8 = recovery_id.into();
+    bytes.push(recovery_byte + 27);
+    bytes
+}
+
+fn channel_id_bytes(id: &str) -> [u8; 32] {
+    let hex_digits = id.trim_start_matches("0x");
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+            .expect("channel id is 0x-prefixed 64-hex");
+    }
+    out
+}
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -62,11 +93,20 @@ async fn a_channel_lifecycle_reaches_a_real_chain_through_a_config_driven_node()
         EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
             .await
             .expect("deploy mock USDC");
-    let contract = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
         .await
-        .expect("deploy SettlementChannel");
-    let contract_address = contract.address();
-    drop(contract);
+        .expect("deploy a TokenNetwork through a fresh registry");
+    let registry_address = backend.registry_address();
+    let token_network_address = backend.address();
+    drop(backend);
+
+    // The channel's counterparty must be a real address able to sign a
+    // balance proof `TokenNetwork.claimFromChannel` recovers (issue #576)
+    // -- generated here rather than a placeholder, since the redeem step
+    // below signs a genuine claim with its key.
+    let counterparty_secret = SecretKey::parse(&[7u8; 32]).unwrap();
+    let counterparty_public = PublicKey::from_secret_key(&counterparty_secret);
+    let counterparty_address = derive_evm_address(&counterparty_public.serialize());
 
     let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
     key_file
@@ -97,7 +137,7 @@ write_keys = ["{write_key_hex}"]
 [settlement]
 chain = "evm"
 rpc_url = "{rpc_url}"
-contract_address = "{contract_address:?}"
+contract_address = "{registry_address:?}"
 token_address = "{token:?}"
 decimals = 6
 
@@ -119,7 +159,7 @@ key_file = "{key_path}"
 
     // Open.
     let open_body = serde_json::to_vec(&serde_json::json!({
-        "counterparty_hex": "0x000000000000000000000000000000000000aa",
+        "counterparty_hex": to_hex(&counterparty_address),
         "settlement_timeout_seconds": 3600,
     }))
     .unwrap();
@@ -144,13 +184,32 @@ key_file = "{key_path}"
     let funded: ChannelView = body_channel_view(response).await;
     assert_eq!(funded.deposited, 1_000);
 
-    // Redeem: the contract stores a claim's signature only as an opaque
-    // audit trail (crates/connector-settlement-evm/contracts/SettlementChannel.sol's
-    // own doc comment) -- any bytes satisfy it here.
+    // Redeem: `TokenNetwork.claimFromChannel` verifies a real EIP-712
+    // signature over the balance proof (issue #576), recovered against the
+    // channel's counterparty -- a genuine claim, signed by the same key
+    // that opened the channel as counterparty above, rather than an
+    // arbitrary placeholder.
+    let proof = EvmBalanceProof {
+        channel_id: channel_id_bytes(&opened.id),
+        nonce: 1,
+        transferred_amount: 400,
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: ANVIL_CHAIN_ID,
+        token_network_address: token_network_address.to_fixed_bytes(),
+    };
+    let signature = sign_evm(&counterparty_secret, &evm_balance_proof_digest(&proof));
+    let signature_hex = format!(
+        "0x{}",
+        signature
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
     let redeem_body = serde_json::to_vec(&serde_json::json!({
         "nonce": 1,
         "cumulative_amount": 400,
-        "signature_hex": "0x09",
+        "signature_hex": signature_hex,
     }))
     .unwrap();
     let redeem_path = format!("/channels/{}/redeem", opened.id);

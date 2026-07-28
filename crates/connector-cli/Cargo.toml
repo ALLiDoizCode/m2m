@@ -21,6 +21,7 @@ connector-settlement-evm = { path = "../connector-settlement-evm", features = ["
 chrono = "0.4"
 ed25519-dalek = "1"
 hyper = { version = "0.14", features = ["full"] }
+libsecp256k1 = "0.6"
 rand = "0.7"
 serde_json = "1"
 tempfile = "3"
