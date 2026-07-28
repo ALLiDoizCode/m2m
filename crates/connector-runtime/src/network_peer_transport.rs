@@ -463,9 +463,10 @@ async fn serve_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_client::{AppOutcome, FakeAppClient};
+    use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
     use crate::peer_transport::InProcessPeerTransport;
+    use crate::test_support::{answered, envelope_request_data, fulfill_data};
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
     use connector_domain::derive_condition;
@@ -480,7 +481,7 @@ mod tests {
             expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
             execution_condition: derive_condition(&FULFILLMENT),
             destination: destination.to_string(),
-            data: b"hello".to_vec(),
+            data: envelope_request_data(b"hello"),
         }
     }
 
@@ -586,10 +587,7 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
             route.handler_url(),
-            AppOutcome::Delivered {
-                data: b"delivered by the peer".to_vec(),
-                fulfillment: Some(FULFILLMENT),
-            },
+            answered(b"delivered by the peer", Some(FULFILLMENT)),
         );
         let peer = Arc::new(Connector::new(
             vec![route],
@@ -611,7 +609,7 @@ mod tests {
             response,
             PacketResponse::Fulfill(Fulfill {
                 fulfillment: FULFILLMENT,
-                data: b"delivered by the peer".to_vec(),
+                data: fulfill_data(b"delivered by the peer"),
             })
         );
         assert_eq!(ack, ClaimAckOutcome::NotSent);
@@ -758,13 +756,7 @@ mod tests {
     async fn reconnects_to_a_peer_that_becomes_reachable_again_without_operator_action() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            AppOutcome::Delivered {
-                data: b"first".to_vec(),
-                fulfillment: Some(FULFILLMENT),
-            },
-        );
+        app_client.respond(route.handler_url(), answered(b"first", Some(FULFILLMENT)));
         let peer = Arc::new(Connector::new(
             vec![route.clone()],
             vec![],
@@ -787,7 +779,7 @@ mod tests {
             first,
             PacketResponse::Fulfill(Fulfill {
                 fulfillment: FULFILLMENT,
-                data: b"first".to_vec(),
+                data: fulfill_data(b"first"),
             })
         );
 
@@ -801,13 +793,7 @@ mod tests {
             other => panic!("expected a reject while the peer is down, got {other:?}"),
         }
 
-        app_client.respond(
-            route.handler_url(),
-            AppOutcome::Delivered {
-                data: b"second".to_vec(),
-                fulfillment: Some(FULFILLMENT),
-            },
-        );
+        app_client.respond(route.handler_url(), answered(b"second", Some(FULFILLMENT)));
         let _server_again = PeerWireServer::bind(addr, peer).await.unwrap();
 
         let (after_recovery, _, _) = transport
@@ -817,7 +803,7 @@ mod tests {
             after_recovery,
             PacketResponse::Fulfill(Fulfill {
                 fulfillment: FULFILLMENT,
-                data: b"second".to_vec(),
+                data: fulfill_data(b"second"),
             })
         );
     }

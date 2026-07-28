@@ -25,7 +25,9 @@ use tower::ServiceExt;
 
 use connector_client_edge::router;
 use connector_config::StaticRoute;
-use connector_domain::{derive_condition, Fulfill, Prepare, Reject};
+use connector_domain::{
+    derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
+};
 use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
@@ -49,7 +51,15 @@ fn sample_prepare() -> Prepare {
         expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
         execution_condition: derive_condition(&FULFILLMENT),
         destination: "g.example.app".to_string(),
-        data: b"hello app".to_vec(),
+        // Per ADR 0018/issue #519 a `Prepare`'s `data` carries a structured
+        // envelope, decoded above the `AppClient` boundary (issue #521).
+        data: EnvelopeRequest {
+            method: "POST".to_string(),
+            target: "/".to_string(),
+            headers: vec![],
+            body: b"hello app".to_vec(),
+        }
+        .encode(),
     }
 }
 
@@ -84,9 +94,18 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
 fn deliverable_connector(route: StaticRoute, app_client: Arc<FakeAppClient>) -> Arc<Connector> {
     app_client.respond(
         route.handler_url(),
-        AppOutcome::Delivered {
-            data: b"ok".to_vec(),
-            fulfillment: Some(FULFILLMENT),
+        AppOutcome::Answered {
+            response: EnvelopeResponse {
+                status: 200,
+                headers: vec![(
+                    "TOON-Fulfillment".to_string(),
+                    FULFILLMENT
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                )],
+                body: b"ok".to_vec(),
+            },
         },
     );
     Arc::new(Connector::new(
