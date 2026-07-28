@@ -416,10 +416,12 @@ async fn handle_ilp(
     let has_claim_header =
         headers.contains_key(CLAIM_HEADER) || headers.contains_key(CLAIM_WRAPPED_HEADER);
     if !has_claim_header {
-        if let Some(price) = state.connector.app_route_price(&prepare.destination) {
-            if price > 0 {
-                return payment_required(&prepare.destination, price);
-            }
+        let price = state
+            .connector
+            .app_route_price(&prepare.destination)
+            .unwrap_or(0);
+        if price > 0 {
+            return payment_required(&prepare.destination, price);
         }
     }
 
