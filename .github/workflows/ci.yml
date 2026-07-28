@@ -9,48 +9,10 @@ on:
       - main
 
 jobs:
-  # Detect which areas changed so heavy, chain-specific Docker integration jobs
-  # run on PRs only when relevant, without path-gating the whole workflow
-  # (which would drop required checks on unrelated PRs).
-  changes:
-    name: Detect changed paths
-    runs-on: ubuntu-latest
-    outputs:
-      solana: ${{ steps.filter.outputs.solana }}
-      mina: ${{ steps.filter.outputs.mina }}
-      evm: ${{ steps.filter.outputs.evm }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Filter changed paths
-        uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            solana:
-              - 'packages/solana-program/**'
-              - 'packages/connector/src/settlement/solana-**'
-              - 'packages/connector/test/integration/solana-**'
-              - 'infra/solana/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/ci.yml'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-            mina:
-              - 'packages/connector/src/settlement/mina-**'
-              - 'packages/connector/src/settlement/provider/mina-**'
-              - 'packages/connector/test/integration/mina-**'
-              - 'docker-compose.yml'
-              - '.github/workflows/ci.yml'
-            evm:
-              - 'packages/connector/src/settlement/payment-channel-sdk.ts'
-              - 'packages/connector/src/settlement/provider/evm-**'
-              - 'packages/connector/test/integration/standalone-**'
-              - 'packages/faucet/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/ci.yml'
-
+  # The connector itself is Rust (ADR 0017) — `rust-gate` below is this repo's
+  # real gate. The npm surface that remains is devnet tooling only (the faucet,
+  # its Mina zkApp, the faucet dApp, and tools/fund-peers), so this job just
+  # keeps it lint-clean and formatted.
   lint-and-format:
     name: Lint and Format Check
     runs-on: ubuntu-latest
@@ -94,175 +56,6 @@ jobs:
         run: |
           echo "Checking Prettier formatting..."
           npm run format:check
-
-  test:
-    name: Test (Node.js ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        node-version: ['22.12.0', '22.x']
-      fail-fast: false # Continue testing other versions even if one fails
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-
-      - name: Verify environment
-        run: |
-          echo "Node version: $(node --version)"
-          echo "npm version: $(npm --version)"
-          echo "PATH: $PATH"
-
-      - name: Install dependencies with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: npm ci --ignore-scripts --verbose
-
-      - name: Install libsql native module for Linux
-        run: |
-          # Force install the Linux x64 glibc native module for libsql
-          # This is needed because package-lock.json may have been generated on macOS
-          npm install @libsql/linux-x64-gnu --no-save --ignore-scripts || true
-
-      - name: Verify installation
-        run: |
-          echo "Verifying workspace dependencies..."
-          npm list --depth=0 || true
-          echo ""
-          echo "Checking for Jest binary..."
-          which jest || echo "jest not in PATH - will use npx"
-          echo ""
-          echo "Checking workspace binaries..."
-          ls -la node_modules/.bin/ | grep -E 'jest|ts-jest' || echo "Jest binaries not found in root"
-
-      - name: Build shared and mina-zkapp packages (required for tests)
-        run: |
-          echo "Building shared package..."
-          npm run build --workspace=packages/shared
-          test -d packages/shared/dist && echo "✓ Shared package built successfully" || (echo "✗ Shared package build failed" && exit 1)
-
-          echo "Building mina-zkapp package (connector imports via dynamic import)..."
-          npm run build --workspace=packages/mina-zkapp
-          test -d packages/mina-zkapp/dist && echo "✓ Mina zkApp package ready" || exit 1
-
-      - name: Run unit tests with coverage (excluding mina-zkapp)
-        run: |
-          echo "Running unit tests across all workspaces..."
-          echo "Using npx to ensure jest is found..."
-          npm run test:unit --workspace=packages/connector -- --coverage --ci --verbose
-          npm test --workspace=packages/shared -- --ci --verbose
-          npm test --workspace=tools/send-packet -- --ci --verbose
-        env:
-          CI: true
-          NODE_ENV: test
-
-      - name: Run mina-zkapp tests in serial isolation (WASM memory)
-        run: |
-          echo "Running mina-zkapp tests with reduced parallelism to avoid WASM OOM..."
-          NODE_OPTIONS='--max-old-space-size=8192' npm test --workspace=packages/mina-zkapp -- --runInBand --ci --verbose
-        env:
-          CI: true
-          NODE_ENV: test
-
-      - name: Verify coverage output
-        if: matrix.node-version == '22.12.0'
-        run: |
-          echo "Checking for coverage files..."
-          find . -name "lcov.info" -type f || echo "No lcov.info files found"
-          test -f coverage/lcov.info && echo "✓ Coverage file exists" || echo "⚠ Coverage file not found"
-
-      - name: Upload coverage to Codecov (Node 22.12.0 only)
-        if: matrix.node-version == '22.12.0'
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage/lcov.info
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
-        continue-on-error: true
-
-  # contracts-coverage moved to .github/workflows/contracts.yml — that workflow
-  # is path-filtered to `packages/contracts/**` and authenticates foundryup
-  # against api.github.com so it doesn't 403 on rate-limited runner IPs.
-
-  build:
-    name: Build All Packages
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.12.0'
-          cache: 'npm'
-
-      - name: Verify environment
-        run: |
-          echo "Node version: $(node --version)"
-          echo "npm version: $(npm --version)"
-
-      - name: Install dependencies with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: npm ci --ignore-scripts --verbose
-
-      - name: Verify installation
-        run: |
-          echo "Verifying dependencies..."
-          npm list --depth=0 || true
-
-      - name: Build all packages
-        run: |
-          echo "Building all packages (shared first, then others)..."
-          npm run build
-        env:
-          NODE_ENV: production
-
-      - name: Verify dist artifacts
-        run: |
-          echo "Verifying build artifacts..."
-
-          if [ -d packages/connector/dist ]; then
-            echo "✓ connector built successfully"
-            ls -lh packages/connector/dist | head -10
-          else
-            echo "✗ connector build failed"
-            exit 1
-          fi
-
-          if [ -d packages/shared/dist ]; then
-            echo "✓ shared built successfully"
-            ls -lh packages/shared/dist | head -10
-          else
-            echo "✗ shared build failed"
-            exit 1
-          fi
-
-          echo ""
-          echo "All packages built successfully! ✓"
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts-${{ github.sha }}
-          path: |
-            packages/*/dist
-          retention-days: 7
-        if: always()
 
   security:
     name: Security Audit
@@ -323,93 +116,12 @@ jobs:
         with:
           sarif_file: snyk.sarif
 
-  type-check:
-    name: TypeScript Type Check
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.12.0'
-          cache: 'npm'
-
-      - name: Install dependencies with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: npm ci --ignore-scripts --verbose
-
-      - name: Build shared and mina-zkapp packages (required for type checking connector)
-        run: |
-          echo "Building shared package for type definitions..."
-          npm run build --workspace=packages/shared
-          test -d packages/shared/dist && echo "✓ Shared package ready" || exit 1
-
-          echo "Building mina-zkapp package (connector imports via dynamic import)..."
-          npm run build --workspace=packages/mina-zkapp
-          test -d packages/mina-zkapp/dist && echo "✓ Mina zkApp package ready" || exit 1
-
-      - name: Type check all packages
-        run: |
-          echo "Type checking all packages..."
-          echo "Checking shared..."
-          npx tsc --noEmit --composite false --skipLibCheck true -p packages/shared/tsconfig.json
-          echo "✓ shared type check passed"
-
-          echo "Checking connector..."
-          npx tsc --noEmit --composite false --skipLibCheck true -p packages/connector/tsconfig.json
-          echo "✓ connector type check passed"
-
-          echo ""
-          echo "All type checks passed! ✓"
-
-  # No-false-PASS guard (issue #398 / ADR-0001): fails only on lint/typecheck
-  # violations that exceed the frozen per-workspace allowlist in
-  # .sandcastle/gate-baseline.json, not on the live thresholds this job
-  # happens to run with. See packages/gate.
-  gate-correctness:
-    name: Gate Correctness Guard
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.12.0'
-          cache: 'npm'
-
-      - name: Install dependencies with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: npm ci --ignore-scripts --verbose
-
-      - name: Build shared and mina-zkapp packages (required for typecheck)
-        run: |
-          npm run build --workspace=packages/shared
-          npm run build --workspace=packages/mina-zkapp
-
-      - name: Build gate-check tool
-        run: npm run build --workspace=packages/gate
-
-      - name: Run correctness guard against frozen baseline
-        run: node packages/gate/dist/cli.js correctness
-
-  # Gate for the Cargo workspace (crates/*, packages/solana-program). Runs
-  # unconditionally, like the npm gate, so a newly added crate is covered by
+  # Gate for the Cargo workspace (crates/*, packages/solana-program) — the
+  # connector itself. Runs unconditionally, so a newly added crate is covered by
   # build/test/clippy/fmt without editing this job. payment-channel
-  # (packages/solana-program) is excluded from test/clippy: it needs the
-  # Solana SBF toolchain to test meaningfully (covered by the solana-program
-  # job below) and pre-dates this gate's warnings-denied clippy policy.
+  # (packages/solana-program) is excluded from test/clippy: it needs the Solana
+  # SBF toolchain to test meaningfully (covered by the solana-program job below)
+  # and pre-dates this gate's warnings-denied clippy policy.
   rust-gate:
     name: Rust Workspace Gate
     runs-on: ubuntu-latest
@@ -508,43 +220,8 @@ jobs:
       - name: Clippy (warnings denied)
         run: cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings
 
-  rfc-links:
-    name: Verify RFC Links
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.12.0'
-          cache: 'npm'
-
-      - name: Install dependencies with retry
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: npm ci --ignore-scripts --verbose
-
-      - name: Verify RFC Links
-        env:
-          RFC_LINKS_TEST: 'true'
-        run: |
-          echo "Verifying RFC links in documentation..."
-          npm run test:rfc-links
-          echo "✓ RFC links verified"
-
-  # The container-based standalone E2E job that lived here was removed with the
-  # embedded ConnectorNode (#457). It built the TypeScript connector image and
-  # ran `npm run test:standalone-docker --workspace=packages/connector`; the
-  # runtime, the admin API and BTP surfaces it asserted, and that npm script all
-  # no longer exist. The Rust connector's own container coverage belongs with
-  # #431's cutover, not here.
-
-  # Solana program tests (Rust/BPF)
+  # Solana program tests (Rust/BPF) — packages/solana-program is the Cargo
+  # crate `payment-channel`, a Cargo workspace member, not a TypeScript package.
   solana-program:
     name: Solana Program Tests (Rust)
     runs-on: ubuntu-latest
@@ -596,21 +273,11 @@ jobs:
           done
 
   # Summary job to provide clear CI status
+  # Summary job to provide clear CI status
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
-    needs:
-      [
-        lint-and-format,
-        test,
-        build,
-        type-check,
-        gate-correctness,
-        rust-gate,
-        security,
-        rfc-links,
-        solana-program,
-      ]
+    needs: [lint-and-format, rust-gate, security, solana-program]
     if: always()
 
     steps:
@@ -622,24 +289,15 @@ jobs:
           echo ""
           echo "Job Results:"
           echo "  Lint & Format: ${{ needs.lint-and-format.result }}"
-          echo "  Tests: ${{ needs.test.result }}"
-          echo "  Build: ${{ needs.build.result }}"
-          echo "  Type Check: ${{ needs.type-check.result }}"
-          echo "  Gate Correctness Guard: ${{ needs.gate-correctness.result }}"
           echo "  Rust Workspace Gate: ${{ needs.rust-gate.result }}"
           echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Security: ${{ needs.security.result }}"
-          echo "  RFC Links: ${{ needs.rfc-links.result }}"
           echo ""
 
-          # Check if any required job failed
-          # Security job is advisory due to transitive dependency vulnerabilities
+          # Security is advisory (transitive dependency vulnerabilities), so it
+          # does not gate. Everything else does.
           if [[ "${{ needs.lint-and-format.result }}" == "failure" ]] || \
-             [[ "${{ needs.test.result }}" == "failure" ]] || \
-             [[ "${{ needs.build.result }}" == "failure" ]] || \
-             [[ "${{ needs.type-check.result }}" == "failure" ]] || \
-             [[ "${{ needs.gate-correctness.result }}" == "failure" ]] || \
              [[ "${{ needs.rust-gate.result }}" == "failure" ]] || \
              [[ "${{ needs.solana-program.result }}" == "failure" ]]; then
             echo "❌ CI Pipeline FAILED"
@@ -652,8 +310,6 @@ jobs:
             echo "All critical checks completed successfully!"
           fi
 
-  # Non-gating bake-in job: validates the devbox environment on every CI run.
-  # Intentionally NOT listed in ci-status `needs:` so it does not block merges.
   devbox-validate:
     name: Devbox Environment Validation
     runs-on: ubuntu-latest
