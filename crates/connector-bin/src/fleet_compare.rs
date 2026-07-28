@@ -42,16 +42,16 @@
 //!    outcome on fleet B by construction, not by sorting or matching them
 //!    up after the fact.
 //!
-//! Everything else -- the reject code, `accumulated_fee`, the fulfilled
+//! Everything else -- the reject code, `accumulated_cost`, the fulfilled
 //! preimage, the HTTP status, and the app-level `data` payload once
 //! addresses are scrubbed out of it -- is compared exactly. Those are
 //! precisely the fields a real behavioral divergence would show up in, so
 //! nothing here touches them.
 //!
-//! `accumulated_fee` is always `0` as observed through this harness: the
+//! `accumulated_cost` is always `0` as observed through this harness: the
 //! client edge does not yet expose peer-wire fee accumulation over HTTP
 //! (`docs/protocol/client-edge-spec.md` §1.6 is explicitly forward-looking
-//! -- no `TOON-Accumulated-Fee` response header exists yet), so this
+//! -- no `TOON-Accumulated-Cost` response header exists yet), so this
 //! harness compares whatever the wire currently carries, not more than
 //! that.
 
@@ -150,7 +150,7 @@ pub enum Outcome {
         code: String,
         message: String,
         data: Vec<u8>,
-        accumulated_fee: u64,
+        accumulated_cost: u64,
     },
     /// The client edge answered, but not with HTTP 200 (e.g. a malformed
     /// PREPARE rejected at `400` before it was ever routed).
@@ -248,9 +248,9 @@ impl Outcome {
                 code,
                 message,
                 data,
-                accumulated_fee,
+                accumulated_cost,
             } => format!(
-                "REJECT code={code} accumulated_fee={accumulated_fee} message={} data={}",
+                "REJECT code={code} accumulated_cost={accumulated_cost} message={} data={}",
                 normalize_text(message, prefix),
                 normalize_text(&String::from_utf8_lossy(data), prefix),
             ),
@@ -316,7 +316,7 @@ pub async fn send_packet(
             code: reject.code.as_str().to_string(),
             message: reject.message,
             data: reject.data,
-            accumulated_fee: reject.accumulated_fee,
+            accumulated_cost: reject.accumulated_cost,
         },
         Err(source) => Outcome::Malformed {
             detail: source.to_string(),
@@ -455,13 +455,13 @@ mod tests {
             code: "F02".to_string(),
             message: "no route to destination 'g.fleet-a.missing'".to_string(),
             data: Vec::new(),
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         let b = Outcome::Reject {
             code: "F02".to_string(),
             message: "no route to destination 'g.fleet-b.missing'".to_string(),
             data: Vec::new(),
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         assert_eq!(a.normalized("g.fleet-a"), b.normalized("g.fleet-b"));
     }
@@ -473,14 +473,14 @@ mod tests {
             message: "error sending request for url (http://127.0.0.1:54321/): connection refused"
                 .to_string(),
             data: Vec::new(),
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         let b = Outcome::Reject {
             code: "T01".to_string(),
             message: "error sending request for url (http://127.0.0.1:9999/): connection refused"
                 .to_string(),
             data: Vec::new(),
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         assert_eq!(a.normalized("g.fleet"), b.normalized("g.fleet"));
     }
@@ -491,13 +491,13 @@ mod tests {
             code: "F99".to_string(),
             message: "app declined the delivery with HTTP 402".to_string(),
             data: Vec::new(),
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         let b = Outcome::Reject {
             code: "F02".to_string(),
             message: "no route to destination 'g.fleet.app'".to_string(),
             data: Vec::new(),
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         assert_ne!(a.normalized("g.fleet"), b.normalized("g.fleet"));
     }
@@ -512,7 +512,7 @@ mod tests {
             code: "F02".to_string(),
             message: "no route to destination 'g.fleet.app'".to_string(),
             data: Vec::new(),
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         assert_ne!(fulfil.normalized("g.fleet"), reject.normalized("g.fleet"));
     }
@@ -581,7 +581,7 @@ mod tests {
                 code: "F02".to_string(),
                 message: "no route to destination 'g.fleet-b.app'".to_string(),
                 data: Vec::new(),
-                accumulated_fee: 0,
+                accumulated_cost: 0,
             },
             Duration::from_millis(1),
         );

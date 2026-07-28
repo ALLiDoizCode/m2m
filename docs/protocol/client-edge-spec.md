@@ -205,8 +205,8 @@ version 1 does not change to gain this; only the connector's backend does.
 
 A client MAY send an ordinary PREPARE it expects to be rejected (a probe, `CONTEXT.md` "Probe")
 to learn a path's cost. RFC-0027's REJECT `data` is reserved for an application-level reject's own
-diagnostic payload (an `F99`/`T99`/`R99` from the terminating app), so `accumulatedFee` MUST NOT be
-packed into it; instead the connector returns it as a response header, `TOON-Accumulated-Fee`
+diagnostic payload (an `F99`/`T99`/`R99` from the terminating app), so `accumulatedCost` MUST NOT be
+packed into it; instead the connector returns it as a response header, `TOON-Accumulated-Cost`
 (decimal string, `uint64`), alongside the unchanged OER REJECT body — the client-edge equivalent
 of the peer wire carrying the field at the frame level, beside the packet, rather than inside it.
 The header is present on every REJECT response, `0` when the packet never left this connector.

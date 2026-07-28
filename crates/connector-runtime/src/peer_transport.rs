@@ -61,7 +61,7 @@ pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
         triggered_by: String::new(),
         message: format!("peer '{peer_id}' unreachable"),
         data: Vec::new(),
-        accumulated_fee: 0,
+        accumulated_cost: 0,
     })
 }
 
