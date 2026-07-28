@@ -26,12 +26,23 @@ pub(crate) fn encode_var_uint(value: u64) -> Vec<u8> {
 }
 
 /// Decode a VarUInt, returning the value and the number of bytes consumed.
+///
+/// Canonical only: a length determinant is rejected unless the bytes it
+/// introduces are exactly what [`encode_var_uint`] would produce for the
+/// value decoded from them (issue #546) -- so a non-minimal long form
+/// (`0x81 0x03` for the value `3`), a zero-length long form aliasing `0x00`
+/// (`0x80`), and a determinant wider than 8 bytes (which cannot fit a
+/// `u64` without silently discarding high-order bytes) are all refused
+/// rather than accepted as a synonym for some other, shorter encoding.
 pub(crate) fn decode_var_uint(buf: &[u8], offset: usize) -> Result<(u64, usize), PacketError> {
     let first = *buf.get(offset).ok_or(PacketError::BufferUnderflow)?;
     if first <= 127 {
         return Ok((first as u64, 1));
     }
     let length = (first & 0x7f) as usize;
+    if length > 8 {
+        return Err(PacketError::LengthDeterminantOverflow);
+    }
     let start = offset + 1;
     let end = start + length;
     if end > buf.len() {
@@ -41,7 +52,11 @@ pub(crate) fn decode_var_uint(buf: &[u8], offset: usize) -> Result<(u64, usize),
     for &byte in &buf[start..end] {
         value = (value << 8) | byte as u64;
     }
-    Ok((value, 1 + length))
+    let consumed = 1 + length;
+    if encode_var_uint(value) != buf[offset..offset + consumed] {
+        return Err(PacketError::NonCanonicalLength);
+    }
+    Ok((value, consumed))
 }
 
 /// Encode a VarOctetString: a VarUInt length prefix followed by the bytes.
@@ -185,5 +200,67 @@ mod tests {
             decode_var_uint(&[0x81], 0),
             Err(PacketError::BufferUnderflow)
         ));
+    }
+
+    #[test]
+    fn var_uint_decode_rejects_non_minimal_long_form() {
+        // 0x81 0x03 is a long-form encoding of 3, which canonically fits in
+        // the single short-form byte 0x03.
+        assert!(matches!(
+            decode_var_uint(&[0x81, 0x03], 0),
+            Err(PacketError::NonCanonicalLength)
+        ));
+    }
+
+    #[test]
+    fn var_uint_decode_rejects_zero_length_long_form_as_an_alias_for_zero() {
+        // 0x80 declares a zero-byte determinant, decoding to 0 -- the same
+        // value the canonical short form 0x00 already encodes.
+        assert!(matches!(
+            decode_var_uint(&[0x80], 0),
+            Err(PacketError::NonCanonicalLength)
+        ));
+    }
+
+    #[test]
+    fn var_uint_decode_rejects_a_determinant_wider_than_8_bytes() {
+        // 0x89 declares a 9-byte determinant -- one byte more than a u64
+        // can hold, and the previous behavior silently truncated it.
+        let encoded = [0x89, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+        assert!(matches!(
+            decode_var_uint(&encoded, 0),
+            Err(PacketError::LengthDeterminantOverflow)
+        ));
+    }
+
+    #[test]
+    fn var_uint_decode_accepts_the_widest_canonical_determinant() {
+        let encoded = encode_var_uint(u64::MAX);
+        assert_eq!(encoded.len(), 9); // 1 type byte + 8 content bytes
+        let (value, consumed) = decode_var_uint(&encoded, 0).expect("decode");
+        assert_eq!(value, u64::MAX);
+        assert_eq!(consumed, encoded.len());
+    }
+
+    proptest::proptest! {
+        /// The missing property issue #546 names: every byte sequence
+        /// `decode_var_uint` accepts must re-encode to exactly itself --
+        /// not merely to a value that decodes back to the same number.
+        #[test]
+        fn var_uint_decode_accepts_only_canonical_bytes(value in proptest::prelude::any::<u64>()) {
+            let encoded = encode_var_uint(value);
+            let (decoded, consumed) = decode_var_uint(&encoded, 0).expect("decode");
+            proptest::prop_assert_eq!(decoded, value);
+            proptest::prop_assert_eq!(consumed, encoded.len());
+            proptest::prop_assert_eq!(encode_var_uint(decoded), encoded);
+        }
+
+        /// Decoding must never panic on arbitrary bytes.
+        #[test]
+        fn var_uint_decode_never_panics_on_arbitrary_bytes(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..16)
+        ) {
+            let _ = decode_var_uint(&bytes, 0);
+        }
     }
 }
