@@ -17,11 +17,15 @@ use chrono::{DateTime, Utc};
 use connector_settlement::{ChannelState, ChannelStatus};
 use serde::{Deserialize, Serialize};
 
-/// A static route as seen by the operator surface.
+/// A static route as seen by the operator surface. `price` is the flat
+/// per-packet amount a claim must advance by to pay for this route (issue
+/// #520) -- always present, since a terminated route is never silently
+/// free.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteView {
     pub prefix: String,
     pub handler_url: String,
+    pub price: u64,
 }
 
 /// A leased route (issue #427) as seen by the operator surface -- only

@@ -32,6 +32,10 @@ key_file = "/app/data/signer.key"
 [[routes]]
 prefix = "g.rust.store"
 handler_url = "http://store:3300"
+# Deliberately free -- see infra/linode-node/connector-rust.toml's own
+# comment on `price` (issue #520): this devnet fleet is for behavioural
+# comparison, not a pricing decision.
+price = 0
 
 # ── Operator surface (optional) ─────────────────────────────────────────
 # See infra/linode-node/connector-rust.toml's own note — omitted for the

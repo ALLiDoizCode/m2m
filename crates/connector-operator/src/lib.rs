@@ -589,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_reports_the_connectors_configured_static_routes() {
-        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
         let app = test_router(vec![route], "correct-token");
 
         let response = get(app, "/routes", Some("correct-token")).await;
@@ -600,6 +600,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
+        assert_eq!(routes[0].price, 25);
     }
 
     #[tokio::test]

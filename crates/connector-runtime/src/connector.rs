@@ -773,6 +773,7 @@ impl Connector {
             .map(|route| RouteView {
                 prefix: route.prefix().to_string(),
                 handler_url: route.handler_url().to_string(),
+                price: route.price(),
             })
             .collect()
     }
@@ -1557,7 +1558,7 @@ mod tests {
 
     #[test]
     fn routes_reports_every_configured_static_route() {
-        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
@@ -1567,6 +1568,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
+        assert_eq!(routes[0].price, 25);
     }
 
     #[tokio::test]

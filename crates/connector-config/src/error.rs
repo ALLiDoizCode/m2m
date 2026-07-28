@@ -97,6 +97,25 @@ pub enum ConfigError {
     RoutePeerIdEmpty { prefix: String },
 
     #[error(
+        "route '{prefix}' terminates locally at '{handler_url}' but sets no 'price': a \
+         terminated route is never silently free -- set 'price = 0' if that is deliberate"
+    )]
+    RouteMissingPrice { prefix: String, handler_url: String },
+
+    #[error(
+        "handler_url '{handler_url}' is priced inconsistently: route '{first_prefix}' charges \
+         {first_price} but route '{second_prefix}' charges {second_price} -- an app cannot tell \
+         which request arrived under which price, so the cheaper one would always win"
+    )]
+    ConflictingHandlerPrice {
+        handler_url: String,
+        first_prefix: String,
+        first_price: u64,
+        second_prefix: String,
+        second_price: u64,
+    },
+
+    #[error(
         "route '{prefix}' forwards to peer_id '{peer_id}', which no '[[peers]]' entry configures"
     )]
     UnknownPeerId { prefix: String, peer_id: String },

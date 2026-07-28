@@ -63,6 +63,10 @@ addr = "203.0.113.20:4001"
 [[routes]]
 prefix = "g.rust.relay"
 handler_url = "http://relay:3100"
+# Deliberately free (issue #520: a route is never SILENTLY free, so this is
+# explicit) -- this devnet fleet exists to compare against the TypeScript
+# fleet's own behaviour on the same prefix, not to make a pricing decision.
+price = 0
 
 [[routes]]
 prefix = "g.rust.store"

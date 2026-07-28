@@ -213,10 +213,12 @@ key_file = "{}"
 [[routes]]
 prefix = "g.example.other"
 handler_url = "http://localhost:5000"
+price = 25
 
 [[children]]
 name = "billing"
 handler_url = "http://localhost:4000"
+price = 0
 "#,
                 key_path.display()
             )
@@ -228,6 +230,29 @@ handler_url = "http://localhost:4000"
             prefixes,
             vec!["g.example.other", "g.example.connector.billing"]
         );
+        let prices: Vec<u64> = config.routes().iter().map(|r| r.price()).collect();
+        assert_eq!(prices, vec![25, 0]);
+    }
+
+    #[test]
+    fn rejects_a_terminated_route_with_no_price() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.other"
+handler_url = "http://localhost:5000"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::RouteMissingPrice { .. })));
     }
 
     #[test]

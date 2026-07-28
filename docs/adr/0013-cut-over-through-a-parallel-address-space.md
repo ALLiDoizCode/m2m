@@ -19,6 +19,15 @@ switched off.
 
 ## Consequences
 
+> **The comparison half is superseded by [ADR 0017](0017-the-typescript-connector-is-a-prototype.md).**
+> The mechanism below stands — a parallel prefix, both fleets live, migration and rollback by
+> repointing a destination — and survives as a _migration_ mechanism. What does not survive is the
+> old fleet's role as a control: the TypeScript connector is a prototype rather than a reference
+> implementation, so the cutover is judged by whether the new fleet is good enough, not by measured
+> parity with the old one. The premise this ADR assumed but never named — that an app cannot tell
+> which connector is in front of it — was false when written (#492) and is not what makes the
+> cutover safe.
+
 Rollback is changing a destination string, and the old fleet remains available as a control for
 comparing behaviour under identical conditions rather than against memory.
 
