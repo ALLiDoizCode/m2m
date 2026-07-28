@@ -127,8 +127,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # `submodules: recursive` (matching contracts.yml): connector-settlement-evm's
+      # abi_provenance test (issue #572) runs a real `forge build` of packages/contracts,
+      # which needs its lib/openzeppelin-contracts and lib/forge-std submodules checked out.
+      # Without this, forge build fails on unresolved imports and the gate reports a false
+      # failure that has nothing to do with the Rust code it's meant to be testing.
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

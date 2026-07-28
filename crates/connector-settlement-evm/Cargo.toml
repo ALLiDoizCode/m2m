@@ -18,3 +18,4 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 [dev-dependencies]
 connector-settlement = { path = "../connector-settlement", features = ["test-util"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+serde_json = "1"

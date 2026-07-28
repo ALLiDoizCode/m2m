@@ -15,7 +15,9 @@ mod route;
 mod test_support;
 
 pub use app_client::{AppClient, AppOutcome, Delivery, FakeAppClient, HttpAppClient};
-pub use claim::{ClaimAckOutcome, ClaimBook, ClaimRejectReason, WireClaim};
+pub use claim::{
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, InvalidChannelId, WireClaim,
+};
 pub use clock::{Clock, SystemClock, TestClock};
 pub use connector::{ChannelOperationError, Connector, LeaseRouteError, ProbeDenied};
 pub use journal::{FileJournal, InMemoryJournal, Journal, JournalError};

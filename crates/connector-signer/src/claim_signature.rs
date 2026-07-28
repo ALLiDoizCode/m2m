@@ -1,11 +1,12 @@
-//! Verifying a client edge payment claim's own cryptographic signature —
-//! the last, deliberately most expensive stage of the claim gate
-//! (`docs/protocol/client-edge-spec.md` §1.3 step 4, issue #506). This is
-//! distinct from [`crate::verify`], which checks the peer wire's internal,
-//! chain-agnostic claim digest (`connector_domain::claim_digest`) signed by
-//! this connector's own [`crate::Signer`]: a client edge claim is signed by
-//! the *buyer's own wallet*, in that chain's native scheme, over a
-//! chain-specific balance proof this module reconstructs independently.
+//! Verifying a payment claim's own cryptographic signature -- for the
+//! client edge, the last, deliberately most expensive stage of the claim
+//! gate (`docs/protocol/client-edge-spec.md` §1.3 step 4, issue #506); for
+//! the peer wire, the whole of `ClaimBook::accept_inbound`'s crypto check
+//! (issue #575, ADR 0024). Both are signed by the counterparty's own key,
+//! in that chain's native scheme, over a chain-specific balance proof this
+//! module reconstructs independently -- distinct from [`crate::verify`],
+//! the `Signer` contract suite's own "a signature recovers to its signer's
+//! own public key" check, which no claim-verification path calls.
 //!
 //! Both directions below verify only whether a signature is cryptographically
 //! valid for the given fields, against an explicitly supplied expected
