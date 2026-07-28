@@ -190,13 +190,17 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     }
 
     let anvil = Anvil::spawn().await;
-    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
         .await
         .expect("deploy SettlementChannel");
 
-    // A channel genuinely opened and funded with real (anvil-minted test)
-    // ETH -- `deposited` below is read back from the chain's own receipt,
-    // never a number this test invents.
+    // A channel genuinely opened and funded with real (anvil-minted mock
+    // USDC) value -- `deposited` below is read back from the chain's own
+    // receipt, never a number this test invents.
     let counterparty = b"pay-to-write-counterparty".to_vec();
     let paid_channel = backend
         .open(counterparty.clone(), Duration::hours(1))
@@ -205,7 +209,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let paid_state = backend
         .fund(&paid_channel, 1_000)
         .await
-        .expect("fund the channel with real ETH");
+        .expect("fund the channel with real ERC-20 value");
     assert_eq!(
         paid_state.deposited, 1_000,
         "a real transaction genuinely moved this value on chain"
@@ -218,7 +222,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let underpaid_state = backend
         .fund(&underpaid_channel, 40)
         .await
-        .expect("fund the second channel with real ETH, less than the route's price");
+        .expect("fund the second channel with real ERC-20 value, less than the route's price");
     assert_eq!(underpaid_state.deposited, 40);
 
     let route = StaticRoute::new_priced("g.example.app", HANDLER_URL, 100).unwrap();

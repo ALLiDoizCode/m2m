@@ -277,18 +277,21 @@ fn verify_content_digest(header_value: Option<&str>, body: &[u8]) -> Result<(), 
 /// Compute the RFC 9530 `Content-Digest` field value for `body`. The
 /// connector itself never signs a write -- it only verifies one an
 /// operator's own tooling already signed -- so this exists purely for
-/// tests across this crate that need to construct a validly-signed
-/// request.
-#[cfg(test)]
-pub(crate) fn compute_content_digest(body: &[u8]) -> String {
+/// tests (in this crate, and -- behind the `test-util` feature,
+/// `crate::test_support` -- in any crate downstream that needs to
+/// construct a validly-signed request against a real config-driven
+/// connector, e.g. `connector-cli`'s settlement lifecycle test).
+#[cfg(any(test, feature = "test-util"))]
+pub fn compute_content_digest(body: &[u8]) -> String {
     format!("sha-256=:{}:", BASE64.encode(Sha256::digest(body)))
 }
 
 /// Hex-encode a keypair's public key the way `keyid` is written on the
 /// wire. Shared by every test across this crate that needs to sign a
-/// write request.
-#[cfg(test)]
-pub(crate) fn keyid_hex(keypair: &ed25519_dalek::Keypair) -> String {
+/// write request -- see [`compute_content_digest`]'s doc comment for the
+/// `test-util` feature's purpose.
+#[cfg(any(test, feature = "test-util"))]
+pub fn keyid_hex(keypair: &ed25519_dalek::Keypair) -> String {
     keypair
         .public
         .to_bytes()
@@ -300,9 +303,10 @@ pub(crate) fn keyid_hex(keypair: &ed25519_dalek::Keypair) -> String {
 /// Sign a well-formed write request, returning the three headers a
 /// caller needs (`signature-input`, `signature`, `content-digest`).
 /// Shared by every test across this crate that needs to construct a
-/// validly-signed request.
-#[cfg(test)]
-pub(crate) fn sign_request(
+/// validly-signed request -- see [`compute_content_digest`]'s doc comment
+/// for the `test-util` feature's purpose.
+#[cfg(any(test, feature = "test-util"))]
+pub fn sign_request(
     keypair: &ed25519_dalek::Keypair,
     method: &str,
     path: &str,

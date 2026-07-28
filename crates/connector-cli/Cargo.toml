@@ -9,10 +9,20 @@ connector-config = { path = "../connector-config" }
 connector-client-edge = { path = "../connector-client-edge" }
 connector-operator = { path = "../connector-operator" }
 connector-runtime = { path = "../connector-runtime" }
+connector-settlement = { path = "../connector-settlement" }
+connector-settlement-evm = { path = "../connector-settlement-evm" }
 connector-signer = { path = "../connector-signer" }
 axum = "0.6"
+ethers = { version = "2", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+connector-operator = { path = "../connector-operator", features = ["test-util"] }
+connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
+chrono = "0.4"
+ed25519-dalek = "1"
+hyper = { version = "0.14", features = ["full"] }
+rand = "0.7"
+serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.4", features = ["util"] }
