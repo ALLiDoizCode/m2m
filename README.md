@@ -678,7 +678,7 @@ Your business `code` is auto-mapped to an ILP error code by the connector:
 | `timeout`            | `T00` | operation timed out         |
 | _(anything else)_    | `F99` | fallback                    |
 
-#### Minimal Node.js App (drop-in replacement)
+#### Minimal Node.js App
 
 Create an `app/` directory alongside `docker-compose.prod.yml`:
 
@@ -805,7 +805,7 @@ CMD ["python", "app.py"]
 
 #### Wire it into `docker-compose.prod.yml`
 
-Replace the sample app block with your own:
+Add this service under `services:` in `docker-compose.prod.yml`:
 
 ```yaml
 services:
