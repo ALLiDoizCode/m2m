@@ -239,7 +239,8 @@ pub async fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>),
         Arc::new(HttpAppClient::new()),
         Arc::new(peer_transport),
         Arc::new(SystemClock),
-    );
+    )
+    .with_identity_signer(signer.clone());
     if let Some(settlement) = config.settlement() {
         connector = connector.with_settlement(build_settlement_backend(settlement).await?);
     }

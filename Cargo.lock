@@ -1059,6 +1059,7 @@ dependencies = [
  "connector-cli",
  "connector-domain",
  "connector-settlement-evm",
+ "connector-signer",
  "ethers",
  "reqwest",
  "serde_json",

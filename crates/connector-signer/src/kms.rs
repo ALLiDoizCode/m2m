@@ -4,7 +4,7 @@ use std::sync::{Mutex, RwLock};
 
 use libsecp256k1::{PublicKey, SecretKey};
 
-use crate::crypto::{generate_keypair, sign_digest};
+use crate::crypto::{ecdh_x_coordinate, generate_keypair, sign_digest};
 use crate::error::SignerError;
 use crate::signer::{PublicKeyBytes, Signature, Signer};
 
@@ -21,6 +21,12 @@ pub trait KmsBackend: Send + Sync {
     /// The old key remains resolvable by callers that still hold it; only
     /// the signer's active pointer moves.
     fn rotate_key(&self, key_id: &str) -> Result<String, SignerError>;
+    /// Derive the ECDH shared secret between `key_id`'s key and
+    /// `peer_public_key` (issue #524) -- a real backend performs this
+    /// server-side, exactly like `sign`, so the secret key never crosses
+    /// this boundary.
+    fn ecdh(&self, key_id: &str, peer_public_key: &PublicKeyBytes)
+        -> Result<[u8; 32], SignerError>;
 }
 
 /// A [`Signer`] backed by a [`KmsBackend`]: the "key management service"
@@ -62,6 +68,10 @@ impl Signer for KmsSigner {
         let new_id = self.backend.rotate_key(&guard)?;
         *guard = new_id.clone();
         Ok(new_id)
+    }
+
+    fn ecdh(&self, peer_public_key: &PublicKeyBytes) -> Result<[u8; 32], SignerError> {
+        self.backend.ecdh(&self.key_id(), peer_public_key)
     }
 }
 
@@ -125,6 +135,16 @@ impl KmsBackend for InMemoryKmsBackend {
             .expect("InMemoryKmsBackend lock poisoned")
             .insert(new_id.clone(), StoredKey { secret, public });
         Ok(new_id)
+    }
+
+    fn ecdh(
+        &self,
+        key_id: &str,
+        peer_public_key: &PublicKeyBytes,
+    ) -> Result<[u8; 32], SignerError> {
+        let peer_public = PublicKey::parse(peer_public_key).map_err(|_| SignerError::InvalidKey)?;
+        self.with_key(key_id, |key| ecdh_x_coordinate(&key.secret, &peer_public))?
+            .ok_or(SignerError::InvalidKey)
     }
 }
 
