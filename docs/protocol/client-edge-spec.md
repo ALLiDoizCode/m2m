@@ -1,13 +1,19 @@
 # Client edge specification
 
-**Status:** Normative. Version 1 documents current, shipped behavior; §3 defines how a future
-version is introduced per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
-Where this document and an ADR disagree, the ADR wins — this document is reconciled to match, not
-the other way around.
+**Status:** Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
+Rust implementation (`crates/connector-client-edge`) the definition of this wire, and a committed
+set of vectors — generated from property tests over its invariants, not yet landed (issue #527) —
+the cross-repo contract `toon-client`, `rig` and `swap` are actually held to. This document remains
+prose describing that wire for a human reader: useful as orientation, evidence of intent, and a
+map of what's shipped versus what isn't, but it is not itself something to conform to, and a
+disagreement between this text and the code is a bug in this text. Where this document and an ADR
+disagree, the ADR wins — this document is reconciled to match, not the other way around. Version 1
+below is organized by section number so `crates/connector-client-edge`'s own doc comments can cite
+it; §3 sketches how a future version would be introduced, per
+[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
 **Consumers:** `toon-client` and any other app that pays this connector directly — installed on
 machines this repository's operators do not control.
-**Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). The key words MUST, MUST NOT, SHOULD and MAY
-are per RFC 2119.
+**Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md).
 
 The **client edge** is the protocol a client speaks to the connector it attaches to
 (`CONTEXT.md`). Unlike the peer wire, it is versioned rather than redesigned: its far end is
@@ -54,17 +60,21 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
   | Status | Meaning                                                                         |
   | ------ | ------------------------------------------------------------------------------- |
   | `400`  | Malformed request: not a PREPARE, undecodable OER, oversized body.              |
-  | `401`  | An `ILP-Peer-Id` was presented but authentication failed.                       |
+  | `401`  | An `ILP-Peer-Id` was presented but authentication failed (§1.2 — not yet        |
+  |        | implemented; no request is refused on this ground today).                       |
+  | `402`  | Unpaid request to a route this connector terminates and prices: x402 v2         |
+  |        | payment-required terms, JSON body (not OER). See §1.4.                          |
   | `413`  | Request body exceeds the configured maximum (default 5 MiB).                    |
   | `500`  | Reserved by this spec for transport failure only; an unexpected                 |
   |        | internal error during routing is surfaced as a `200` + `T00` REJECT, not a 500. |
 
-  `402` is not part of this version: an earlier draft used it for an x402 v2 payment-required
-  greeting, removed with discovery ([ADR 0006](../adr/0006-the-connector-is-mechanism-not-policy.md))
-  and not reinstated ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)).
-  See §1.4.
-
 ### 1.2 Identity
+
+**Not yet implemented.** No code in `crates/connector-client-edge` reads `ILP-Peer-Id` or
+`Authorization` today; every request is handled identically regardless of what it presents on
+either header, and the `401` this section describes is never returned. `GET /ilp/identity` (§1.7)
+answers a different question — the connector's own key, not who is asking — and ships today. This
+section specifies the intended design for the rest:
 
 A request identifies its sender in one of two ways:
 
@@ -120,7 +130,15 @@ never reaches the terminating app:
    MUST advance by at least the route's configured flat price, so a minimal fresh claim cannot pay
    for an expensive route. This compares the claim's plaintext `transferredAmount` directly.
 4. **Cryptographic verification** — the signature (EIP-712 for EVM, Ed25519 for Solana) recovers
-   to the channel's counterparty.
+   to _some_ key, and that key is checked against the claim's own declared signer
+   (`signerAddress`/`signerPublicKey`). **This is narrower than "recovers to the channel's
+   counterparty":** this connector has no settlement configuration and no per-channel
+   counterparty registry yet (`ClientClaimGate`, [issue
+   #542](https://github.com/toon-protocol/connector/issues/542) — settlement is unconstructed), so
+   there is nothing to check the declared signer against. A well-formed signature from a key the
+   claim itself names passes this check; a forger who signs correctly with their own key and
+   simply declares themselves the payer is not caught by it. Widen this once #542 gives this gate
+   a channel registry to look a real counterparty up in.
 
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
@@ -135,26 +153,66 @@ zkApp-specific fields the peer wire's predecessor once carried for it (`zkAppAdd
 part of this connector's claim shape and are not documented here. A Mina client's claim is rejected
 clearly and immediately; it is not owed a code path, only an unambiguous refusal.
 
-### 1.4 x402 v2 greeting (removed)
+### 1.4 Answering an unpaid request: x402 v2 terms
 
-Earlier drafts of this document specified an x402 v2 payment-required greeting: an unpaid request
-to a locally-terminated route received a `402` carrying a JSON body naming the route's price and
-accepted payment schemes, so an unaffiliated client could learn what to pay without an
-out-of-band channel. That behavior is removed, not merely undocumented.
+An unpaid request — no claim header of either kind — addressing a route this connector both
+terminates and prices is answered `402` with that route's terms instead of being routed at all
+([issue #526](https://github.com/toon-protocol/connector/issues/526), [ADR
+0022](../adr/0022-a-connector-answers-it-does-not-announce.md)): the app behind a priced route is
+never asked to do free work for an anonymous, unpaying caller. A present claim header (valid or
+not) suppresses this response unconditionally — its validation is §1.3's job, not this section's
+— and an unpaid request to an unpriced or unmatched destination falls through unchanged, exactly
+as it always has.
 
-[ADR 0006](../adr/0006-the-connector-is-mechanism-not-policy.md) removed discovery from the
-connector entirely — the connector forwards and settles what it is told to, and does not announce
-itself. A greeting that states a route's price is discovery: it lets a client learn something from
-the connector that the connector was not explicitly configured to hand out. [ADR
-0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md) confirms the gap is closed
-by probing (§1.6) instead, and that the greeting is not reinstated. Price discovery, in every
-form, lives outside the connector; the Rust connector MUST NOT grow this or any equivalent, and
-the deployed TypeScript fleet's greeting is a permanent, intentional divergence from this
-specification rather than a target to converge on. An unpaid request to a locally-terminated
-route is refused, not met with a priced offer; the exact reject code is §1.3's concern, not this
-section's.
+This is **answering, not announcing** ([ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md)):
+a reply to the request that asked, changing no state and reaching nobody who did not ask. [ADR
+0006](../adr/0006-the-connector-is-mechanism-not-policy.md) rules out the connector pushing facts
+about itself into a network unprompted — a genuine greeting, sent before anyone asked — which is
+not what this is; an earlier draft of this section described the same status code as exactly that
+unprompted greeting, and _that_ stays removed. [ADR
+0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s "neither is reinstated"
+was written against that same earlier, unprompted shape.
+
+The body is an x402 v2 `PaymentRequired` document — `Content-Type: application/json` — repeated
+byte-for-byte, base64-encoded, in a `Payment-Required` response header:
+
+```json
+{
+  "x402Version": 2,
+  "resource": { "url": "g.example.app" },
+  "accepts": [
+    {
+      "scheme": "toon-channel",
+      "network": "g.example.app",
+      "amount": "100",
+      "payTo": "g.example.app",
+      "maxTimeoutSeconds": 60,
+      "httpEndpoint": "/ilp",
+      "extra": { "ilpAddress": "g.example.app", "endpoint": "/ilp", "price": "100" }
+    }
+  ]
+}
+```
+
+`accepts` is a list — ADR 0022 notes terms are plural — but exactly one entry exists today, for
+the one payment method this client edge's own claim gate (§1.3) actually understands: a TOON
+payment channel claim, presented back over this same `POST /ilp`. There is no per-chain `exact`
+scheme entry naming a settlement `asset`/`payTo` address, for EVM, Solana or any other chain,
+because no settlement address is configured anywhere in this connector yet — answering terms
+(issue #526) is a smaller, different thing from adding that configuration. `extra` is limited to
+what the code actually sets — `ilpAddress`, `endpoint`, `price` — and carries nothing else.
+
+`price` (both the top-level `amount` and `extra.price`, always equal) is read from the same
+longest-prefix route lookup that §1.3's value binding and §1.7's `GET /ilp/routes/price` charge
+and answer against, so this response never states a price a real request wouldn't also be charged.
 
 ### 1.5 Request-request binding (RFC 9421)
+
+**Not yet implemented.** No `requireRequestBinding` config field, `RouteTermination` type or RFC
+9421 verification exists anywhere in `crates/`; this section specifies the intended design, not
+current behavior. This subsection describes what the route-**termination** feature — see
+`CLAUDE.md`'s terminology note on `RouteTermination`/`checkRequestBinding` — does once it exists in
+the Rust connector.
 
 For a locally-terminated route configured with `requireRequestBinding: true`, the connector binds
 the _inner_ HTTP request it will proxy to the app (the literal HTTP envelope carried verbatim in
@@ -178,9 +236,11 @@ against a different request or a different route's price fails the digest/price 
 
 ### 1.6 Probing for cost
 
-This subsection is forward-looking, unlike the rest of §1: today's shipped connector charges a
-percentage spread with no per-hop fee accumulation, so there is nothing yet for a REJECT to
-report. It specifies what v1's unchanged request/response shape carries once the connector
+**Not yet implemented.** This subsection is forward-looking, unlike the rest of §1: today's
+shipped connector charges a percentage spread with no per-hop fee accumulation, so there is
+nothing yet for a REJECT to report, and no `TOON-Accumulated-Cost` header, `403` probe-rate-limit
+response, or per-identity probe accounting exists in `crates/connector-client-edge` today. It
+specifies what v1's unchanged request/response shape carries once the connector
 originating a client's PREPARE speaks the redesigned peer wire
 (`docs/protocol/peer-wire-spec.md` §5.2, [ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)) —
 version 1 does not change to gain this; only the connector's backend does.
@@ -221,7 +281,7 @@ state, and is never pushed into a network unprompted.
   one port whenever the operator surface is enabled.
 - **`GET /ilp/routes/price?destination=<ILP address>`** — unauthenticated. Returns `200` with the
   price of the locally-terminated route `destination` would match, reading the same
-  longest-prefix lookup the x402 greeting (§1.4) and claim value binding (§1.3) charge against, so
+  longest-prefix lookup the x402 terms (§1.4) and claim value binding (§1.3) charge against, so
   this never states a price a real request wouldn't also be charged:
   ```json
   { "destination": "g.example.app", "price": 100 }
