@@ -48,6 +48,7 @@ async fn every_channel_operation_estimates_its_own_gas_and_succeeds() {
         .redeem(
             &channel,
             Claim {
+                nonce: 1,
                 cumulative_amount: 400,
                 signature: vec![9],
             },

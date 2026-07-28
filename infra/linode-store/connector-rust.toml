@@ -73,14 +73,25 @@ price = 1000
 # is PRESENT but names an address with no contract at it is a hard startup
 # failure by design (ADR 0009, fail-closed) — `EvmSettlementBackend::connect`
 # reads `token()` off that address, gets `0x` back, and the process exits 1.
-# So the zero address is not a harmless placeholder here, and no
-# `SettlementChannel` has been deployed to this chain to replace it with.
+# So the zero address is not a harmless placeholder here.
 #
-# The template below is the shape to fill in once one is deployed — same
-# real USDC (`./connector.yaml`'s `tokenAddress`), same known-good RPC, same
-# key file reused for settlement signing. It is uncommented and booted
-# against a local anvil by `crates/connector-bin/tests/devnet_configs_load.rs`,
-# so it stays a template that actually works.
+# ⚠️ DO NOT DEPLOY `SettlementChannel.sol` ⚠️ (issue #568) — this is not
+# only "no address yet". The contract itself is unsafe to deploy anywhere
+# real value could reach it: `redeem` never verifies its signature, `close`
+# has no access control, and there is no refund path. Its constructor now
+# reverts without a test-only acknowledgement, so a normal deployment fails
+# outright — see the `DO NOT DEPLOY` block at the top of
+# `crates/connector-settlement-evm/contracts/SettlementChannel.sol`. Issue
+# #566 replaces it with a real, signature-verifying `TokenNetwork`; only
+# that replacement is ever meant to be named by a real `contract_address`.
+#
+# The template below is the shape to fill in once issue #566's replacement
+# is deployed for real — do NOT uncomment it against a `SettlementChannel.sol`
+# deployment. Same real USDC (`./connector.yaml`'s `tokenAddress`), same
+# known-good RPC, same key file reused for settlement signing. It is
+# uncommented and booted against a local anvil (the explicit test-only
+# escape hatch) by `crates/connector-bin/tests/devnet_configs_load.rs`, so
+# it stays a template that actually works.
 #
 # --- BEGIN settlement template (uncomment when a contract is deployed) ---
 # [settlement]

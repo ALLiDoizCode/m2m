@@ -148,6 +148,7 @@ key_file = "{key_path}"
     // audit trail (crates/connector-settlement-evm/contracts/SettlementChannel.sol's
     // own doc comment) -- any bytes satisfy it here.
     let redeem_body = serde_json::to_vec(&serde_json::json!({
+        "nonce": 1,
         "cumulative_amount": 400,
         "signature_hex": "0x09",
     }))

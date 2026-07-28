@@ -506,29 +506,19 @@ mod tests {
     }
 
     /// The `AppOutcome` a `FakeAppClient` produces for an app that answers
-    /// `200` with `body`, optionally claiming `fulfillment` via the
-    /// `TOON-Fulfillment` response header (issue #417, until #525 derives
-    /// it instead).
-    fn answered(body: &[u8], fulfillment: Option<[u8; 32]>) -> AppOutcome {
-        answered_with_status(200, body, fulfillment)
+    /// `200` with `body`. The app supplies nothing toward fulfilment (issue
+    /// #525): whether the packet fulfils is decided entirely by whether its
+    /// execution condition matches the fulfilment its own sealed secret
+    /// derives, never by anything in this response.
+    fn answered(body: &[u8]) -> AppOutcome {
+        answered_with_status(200, body)
     }
 
-    fn answered_with_status(status: u16, body: &[u8], fulfillment: Option<[u8; 32]>) -> AppOutcome {
-        let headers = fulfillment
-            .map(|fulfillment| {
-                vec![(
-                    "TOON-Fulfillment".to_string(),
-                    fulfillment
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                )]
-            })
-            .unwrap_or_default();
+    fn answered_with_status(status: u16, body: &[u8]) -> AppOutcome {
         AppOutcome::Answered {
             response: EnvelopeResponse {
                 status,
-                headers,
+                headers: vec![],
                 body: body.to_vec(),
             },
         }
@@ -536,10 +526,9 @@ mod tests {
 
     /// The response envelope `Connector::deliver_to_app` seals into
     /// `Fulfill.data` for the same inputs `answered` above configures a
-    /// `FakeAppClient` with -- `TOON-Fulfillment` stripped before it
-    /// reaches the client (issue #521). Compare against
-    /// [`open_sealed_envelope`]'s result, since sealing makes the raw wire
-    /// bytes non-deterministic per call.
+    /// `FakeAppClient` with. Compare against [`open_sealed_envelope`]'s
+    /// result, since sealing makes the raw wire bytes non-deterministic per
+    /// call.
     fn fulfill_envelope(body: &[u8]) -> EnvelopeResponse {
         fulfill_envelope_with_status(200, body)
     }
@@ -572,6 +561,10 @@ mod tests {
         Arc::new(LocalSigner::generate("test-signer"))
     }
 
+    /// A `Prepare` never expected to reach a genuine fulfilment -- its
+    /// `execution_condition` is a fixed placeholder unrelated to any
+    /// sealed secret, so a test using this bare (rather than
+    /// [`sealed_sample_prepare`]) must not expect a `Fulfill`.
     fn sample_prepare(destination: &str) -> Prepare {
         Prepare {
             amount: 0,
@@ -584,17 +577,23 @@ mod tests {
     }
 
     /// As [`sample_prepare`], but with `data` sealed to `receiver_public`
-    /// (issue #524) -- for a test whose `Prepare` genuinely reaches
-    /// `Connector::deliver_to_app`. Returns the shared secret alongside, to
-    /// open the sealed `Fulfill`/termination-`Reject` this produces.
+    /// (issue #524) and `execution_condition` set to match the fulfilment
+    /// this same sealed secret derives (ADR 0019, issue #525) -- for a test
+    /// whose `Prepare` genuinely reaches `Connector::deliver_to_app` and
+    /// expects it to fulfil. Returns the shared secret alongside, to open
+    /// the sealed `Fulfill`/termination-`Reject` this produces.
     fn sealed_sample_prepare(
         destination: &str,
         receiver_public: &PublicKeyBytes,
     ) -> (Prepare, [u8; 32]) {
         let (data, shared_secret) = sealed_envelope_request_data(b"hello app", receiver_public);
+        let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
+            &shared_secret,
+        ));
         (
             Prepare {
                 data,
+                execution_condition: condition,
                 ..sample_prepare(destination)
             },
             shared_secret,
@@ -620,10 +619,7 @@ mod tests {
     async fn a_client_sending_a_matching_packet_receives_the_apps_outcome() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            answered(b"app said yes", Some(FULFILLMENT)),
-        );
+        app_client.respond(route.handler_url(), answered(b"app said yes"));
         let signer = test_signer();
         let connector = Arc::new(
             Connector::new(
@@ -720,7 +716,7 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
             route.handler_url(),
-            answered_with_status(402, b"payment required", Some(FULFILLMENT)),
+            answered_with_status(402, b"payment required"),
         );
         let signer = test_signer();
         let connector = Arc::new(
@@ -764,7 +760,7 @@ mod tests {
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered by the second connector", Some(FULFILLMENT)),
+            answered(b"delivered by the second connector"),
         );
         let second_hop_identity = test_signer();
         let second_hop = Arc::new(
@@ -822,7 +818,7 @@ mod tests {
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered by the second connector", Some(FULFILLMENT)),
+            answered(b"delivered by the second connector"),
         );
         let payer_signer = LocalSigner::generate("payer-claim-key");
         let payer_address =
@@ -933,7 +929,7 @@ mod tests {
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered over the network transport", Some(FULFILLMENT)),
+            answered(b"delivered over the network transport"),
         );
         let second_hop_identity = test_signer();
         let second_hop = Arc::new(
@@ -1128,7 +1124,7 @@ mod tests {
     async fn a_present_claim_header_suppresses_the_greeting() {
         let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+        app_client.respond(route.handler_url(), answered(b"ok"));
         let signer = test_signer();
         let connector = Arc::new(
             Connector::new(
@@ -1173,10 +1169,7 @@ mod tests {
     async fn an_unpaid_request_to_a_free_route_still_reaches_the_app() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            answered(b"free work", Some(FULFILLMENT)),
-        );
+        app_client.respond(route.handler_url(), answered(b"free work"));
         let signer = test_signer();
         let connector = Arc::new(
             Connector::new(
@@ -1330,7 +1323,7 @@ mod tests {
         async fn a_fresh_plaintext_claim_lets_the_packet_reach_the_app() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            app_client.respond(route.handler_url(), answered(b"ok"));
             let signer = test_signer();
             let connector = Arc::new(
                 Connector::new(
@@ -1360,7 +1353,7 @@ mod tests {
         async fn a_replayed_claim_nonce_rejects_before_reaching_the_app() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            app_client.respond(route.handler_url(), answered(b"ok"));
             let signer = test_signer();
             let connector = Arc::new(
                 Connector::new(
@@ -1404,7 +1397,7 @@ mod tests {
         async fn a_malformed_claim_header_rejects_with_f01_before_reaching_the_app() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            app_client.respond(route.handler_url(), answered(b"ok"));
             let connector = Arc::new(Connector::new(
                 vec![route],
                 vec![],
@@ -1459,7 +1452,7 @@ mod tests {
         async fn a_wrapped_claim_is_unwrapped_and_lets_the_packet_reach_the_app() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            app_client.respond(route.handler_url(), answered(b"ok"));
             let identity_signer = test_signer();
             let connector = Arc::new(
                 Connector::new(
@@ -1540,7 +1533,7 @@ mod tests {
             let route =
                 StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            app_client.respond(route.handler_url(), answered(b"ok"));
             let signer = test_signer();
             let connector = Arc::new(
                 Connector::new(
@@ -1575,7 +1568,7 @@ mod tests {
             let route =
                 StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            app_client.respond(route.handler_url(), answered(b"ok"));
             let connector = Arc::new(Connector::new(
                 vec![route],
                 vec![],

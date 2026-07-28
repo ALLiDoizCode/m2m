@@ -22,7 +22,12 @@
 //! names.
 
 mod bindings;
-#[cfg(feature = "test-util")]
+// Also compiled for this crate's own `#[cfg(test)]` unit tests below (issue
+// #568's constructor-guard test needs `Anvil`/`DEPLOYER_PRIVATE_KEY` and, via
+// `super::bindings`, direct access to `SettlementChannelContract::deploy` --
+// something an integration test in `tests/` cannot reach, since that is a
+// private module).
+#[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 
 use std::sync::Arc;
@@ -83,19 +88,28 @@ impl EvmSettlementBackend {
 
     /// Deploy a fresh `SettlementChannel` settling `token_address`, signed
     /// and paid for by `private_key`, and bind to it. Used by this crate's
-    /// own tests and by whichever operator tooling first needs to stand a
-    /// new settlement contract up rather than point at an existing one.
+    /// own tests and by local `anvil` tooling -- the contract's constructor
+    /// reverts (`NotForDeployment`) unless given its own
+    /// `DEPLOYMENT_ACKNOWLEDGEMENT` (issue #568: this contract must never
+    /// land on a chain that holds real value -- see the `DO NOT DEPLOY`
+    /// block at the top of `contracts/SettlementChannel.sol`), which this
+    /// function supplies automatically. There is no other, production-
+    /// facing way to construct one: `EvmSettlementBackend::connect` only
+    /// ever binds to an address that is already deployed.
     pub async fn deploy(
         rpc_url: &str,
         private_key: &str,
         token_address: Address,
     ) -> Result<Self, SettlementError> {
         let client = Arc::new(build_client(rpc_url, private_key).await?.0);
-        let contract = SettlementChannelContract::deploy(client.clone(), token_address)
-            .map_err(backend_error)?
-            .send()
-            .await
-            .map_err(backend_error)?;
+        let contract = SettlementChannelContract::deploy(
+            client.clone(),
+            (token_address, deployment_acknowledgement()),
+        )
+        .map_err(backend_error)?
+        .send()
+        .await
+        .map_err(backend_error)?;
         let token = Erc20Contract::new(token_address, client);
         Ok(Self { contract, token })
     }
@@ -248,6 +262,18 @@ fn counterparty_address(counterparty: &[u8]) -> Address {
     }
 }
 
+/// The value `SettlementChannel`'s constructor requires as its
+/// `acknowledgement` argument -- must stay byte-for-byte the same string,
+/// hashed the same way, as the contract's own `DEPLOYMENT_ACKNOWLEDGEMENT`
+/// constant (issue #568). Deliberately not a shared constant between Rust
+/// and Solidity (there is no such mechanism across that boundary); a test
+/// asserts the two sides agree.
+fn deployment_acknowledgement() -> [u8; 32] {
+    ethers::utils::keccak256(
+        b"SettlementChannel is UNSAFE and test-only -- see issue #568 DO NOT DEPLOY",
+    )
+}
+
 fn backend_error<E: std::fmt::Display>(error: E) -> SettlementError {
     SettlementError::Backend(error.to_string())
 }
@@ -389,5 +415,89 @@ impl SettlementBackend for EvmSettlementBackend {
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         self.read_state(channel, id).await
+    }
+}
+
+/// Issue #568: `SettlementChannel.sol` must be impossible to deploy by
+/// accident. These tests drive the constructor's own guard directly against
+/// `bindings::SettlementChannelContract` -- something only this crate's own
+/// unit tests can reach, since `bindings` is a private module and an
+/// integration test in `tests/` only ever sees this crate's public API.
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ethers::types::Address;
+
+    use crate::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
+    use crate::{
+        build_client, deployment_acknowledgement, EvmSettlementBackend, SettlementChannelContract,
+    };
+
+    // Both tests below share this one base port rather than using adjacent
+    // bases (e.g. 18_690/18_691) -- `Anvil::spawn`'s port is
+    // `base_port.wrapping_add(pid % 1_000).wrapping_add(offset)` off one
+    // process-wide atomic `offset` counter, so two adjacent bases can
+    // collide (base 18_690 at offset 1 == base 18_691 at offset 0) if the
+    // two calls' atomic fetches land in the "wrong" order relative to their
+    // bases. Sharing one base makes the atomic offset the only thing that
+    // varies, which is guaranteed distinct per call.
+    const ANVIL_BASE_PORT: u16 = 18_690;
+
+    #[tokio::test]
+    async fn a_deployment_with_the_wrong_acknowledgement_reverts() {
+        if !require_anvil() {
+            return;
+        }
+        let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+        let client = Arc::new(
+            build_client(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+                .await
+                .expect("build client")
+                .0,
+        );
+
+        let wrong_acknowledgement = [0u8; 32];
+        assert_ne!(
+            wrong_acknowledgement,
+            deployment_acknowledgement(),
+            "the test's own \"wrong\" value must not accidentally be the real one"
+        );
+
+        let result =
+            SettlementChannelContract::deploy(client, (Address::zero(), wrong_acknowledgement))
+                .expect("build deployment call")
+                .send()
+                .await;
+
+        assert!(
+            result.is_err(),
+            "a SettlementChannel deployed with the wrong acknowledgement must fail to deploy, \
+             not silently succeed -- issue #568"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deployment_with_the_correct_acknowledgement_succeeds() {
+        if !require_anvil() {
+            return;
+        }
+        let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+        let token = EvmSettlementBackend::deploy_mock_token(
+            &anvil.rpc_url,
+            DEPLOYER_PRIVATE_KEY,
+            1_000_000,
+        )
+        .await
+        .expect("deploy mock USDC");
+
+        let backend =
+            EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token).await;
+
+        assert!(
+            backend.is_ok(),
+            "the sanctioned test-only deploy path must still work: {:?}",
+            backend.err()
+        );
     }
 }

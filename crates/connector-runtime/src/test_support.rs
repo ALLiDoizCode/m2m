@@ -11,13 +11,13 @@
 
 use std::sync::{Arc, OnceLock};
 
-use connector_domain::{EnvelopeRequest, EnvelopeResponse};
-use connector_signer::giftwrap::{open_response, seal_request};
+use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse};
+use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
 use connector_signer::{evm_balance_proof_digest, Address, LocalSigner, Signer};
 
 use crate::app_client::AppOutcome;
 use crate::claim::{evm_proof, parse_channel_id, ChannelDomain, WireClaim};
-use crate::connector::{Connector, FULFILLMENT_HEADER};
+use crate::connector::Connector;
 
 /// This crate's one shared "this connector's own identity" fixture: every
 /// [`envelope_request_data`]/[`sealed_envelope_request_data`] call seals to
@@ -56,14 +56,6 @@ pub(crate) fn sealed_envelope_request_data(body: &[u8]) -> (Vec<u8>, [u8; 32]) {
     .expect("seal")
 }
 
-/// The common case: only the wire bytes are needed, and the shared secret
-/// (a fresh one every call) is discarded -- most `Prepare` construction in
-/// this crate's tests just needs *a* validly sealed envelope and never
-/// inspects the sealed response it produces.
-pub(crate) fn envelope_request_data(body: &[u8]) -> Vec<u8> {
-    sealed_envelope_request_data(body).0
-}
-
 /// Open `data` (a `Fulfill.data`, or a termination `Reject.data`) with
 /// `shared_secret` and decode it as a response envelope -- the inverse of
 /// what `Connector::deliver_to_app` seals with, so a test can assert on
@@ -74,51 +66,42 @@ pub(crate) fn open_sealed_envelope(shared_secret: &[u8; 32], data: &[u8]) -> Env
     EnvelopeResponse::decode(&opened).expect("decode response envelope")
 }
 
-/// Hex-encode `fulfillment` the way an app's `TOON-Fulfillment` response
-/// header carries it (issue #417) -- the inverse of
-/// `connector::decode_fulfillment_header`.
-fn encode_fulfillment_header(fulfillment: [u8; 32]) -> String {
-    fulfillment
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+/// The fulfilment a terminating `Connector` derives for a packet sealed
+/// with `shared_secret` (ADR 0019, issue #525) -- what a genuine sender
+/// mints its execution condition from before sealing, and what a test
+/// compares a `Fulfill`'s own `fulfillment` field against.
+pub(crate) fn expected_fulfillment(shared_secret: &[u8; 32]) -> [u8; 32] {
+    derive_fulfillment(shared_secret)
+}
+
+/// The execution condition a sender must mint for `shared_secret`'s packet
+/// to fulfil (ADR 0019, issue #525): `derive_condition` of the fulfilment
+/// that secret itself derives.
+pub(crate) fn matching_condition(shared_secret: &[u8; 32]) -> [u8; 32] {
+    derive_condition(&expected_fulfillment(shared_secret))
 }
 
 /// The `AppOutcome` a `FakeAppClient` produces for an app that answers
-/// `200` with `body`, optionally claiming `fulfillment` via the
-/// `TOON-Fulfillment` response header (issue #417's still-standing
-/// mechanism, until #525 derives a fulfilment from a sealed secret
-/// instead).
-pub(crate) fn answered(body: &[u8], fulfillment: Option<[u8; 32]>) -> AppOutcome {
-    answered_with_status(200, body, fulfillment)
+/// `200` with `body`. The app supplies nothing toward fulfilment (issue
+/// #525): whether the packet fulfils is decided entirely by whether its
+/// execution condition matches the fulfilment its own sealed secret
+/// derives, never by anything in this response.
+pub(crate) fn answered(body: &[u8]) -> AppOutcome {
+    answered_with_status(200, body)
 }
 
-pub(crate) fn answered_with_status(
-    status: u16,
-    body: &[u8],
-    fulfillment: Option<[u8; 32]>,
-) -> AppOutcome {
-    let headers = fulfillment
-        .map(|fulfillment| {
-            vec![(
-                FULFILLMENT_HEADER.to_string(),
-                encode_fulfillment_header(fulfillment),
-            )]
-        })
-        .unwrap_or_default();
+pub(crate) fn answered_with_status(status: u16, body: &[u8]) -> AppOutcome {
     AppOutcome::Answered {
         response: EnvelopeResponse {
             status,
-            headers,
+            headers: vec![],
             body: body.to_vec(),
         },
     }
 }
 
 /// The response envelope `Connector::handle_prepare` seals into `Fulfill
-/// .data` for an app answering `200` with `body` -- `TOON-Fulfillment` (if
-/// any) is stripped before it reaches the client (issue #521), so this
-/// never takes a fulfillment argument. Compare against
+/// .data` for an app answering `200` with `body`. Compare against
 /// [`open_sealed_envelope`]'s result, since sealing makes the raw wire
 /// bytes non-deterministic per call.
 pub(crate) fn fulfill_envelope(body: &[u8]) -> EnvelopeResponse {

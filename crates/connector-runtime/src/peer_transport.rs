@@ -275,36 +275,44 @@ mod tests {
     use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
     use crate::test_support::{
-        answered, envelope_request_data, fulfill_envelope, identity_signer, open_sealed_envelope,
-        sealed_envelope_request_data, sign_wire_claim, with_test_channel,
+        answered, expected_fulfillment, fulfill_envelope, identity_signer, matching_condition,
+        open_sealed_envelope, sealed_envelope_request_data, sign_wire_claim, with_test_channel,
     };
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::derive_condition;
     use connector_signer::{LocalSigner, Signer};
 
-    const FULFILLMENT: [u8; 32] = [7u8; 32];
-
+    /// Seals a fixed body and sets `execution_condition` to match the
+    /// fulfilment its own (discarded) shared secret derives (ADR 0019,
+    /// issue #525) -- what a genuine sender does before ever transmitting a
+    /// packet, so this is, by construction, one that fulfils if it reaches
+    /// an app that answers at all. A test that also needs the secret back
+    /// uses [`sealed_prepare`] instead.
     fn prepare(destination: &str) -> Prepare {
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
         Prepare {
             amount: 0,
             // Comfortably after `test_clock()`'s instant (2030-01-01).
             expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-            execution_condition: derive_condition(&FULFILLMENT),
+            execution_condition: matching_condition(&shared_secret),
             destination: destination.to_string(),
-            data: envelope_request_data(b"hello"),
+            data,
         }
     }
 
     /// A `Prepare` addressed to `"g.example.app"`, sealed to
-    /// [`identity_signer`]'s identity and carrying `body` (issue #524).
-    /// Returns the shared secret alongside, to open the sealed
-    /// `Fulfill`/termination-`Reject` this produces.
+    /// [`identity_signer`]'s identity and carrying `body` (issue #524),
+    /// with `execution_condition` set to match the fulfilment this same
+    /// sealed secret derives (ADR 0019, issue #525). Returns the shared
+    /// secret alongside, to open the sealed `Fulfill`/termination-`Reject`
+    /// this produces, or to compute the expected fulfilment via
+    /// `expected_fulfillment`.
     fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
         let (data, shared_secret) = sealed_envelope_request_data(body);
         (
             Prepare {
                 data,
+                execution_condition: matching_condition(&shared_secret),
                 ..prepare("g.example.app")
             },
             shared_secret,
@@ -321,10 +329,7 @@ mod tests {
     async fn forwards_to_the_registered_peer_and_returns_its_response() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            answered(b"delivered by the peer", Some(FULFILLMENT)),
-        );
+        app_client.respond(route.handler_url(), answered(b"delivered by the peer"));
         let peer = Arc::new(
             Connector::new(
                 vec![route],
@@ -343,7 +348,7 @@ mod tests {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                 assert_eq!(
                     open_sealed_envelope(&shared_secret, &fulfill.data),
                     fulfill_envelope(b"delivered by the peer")
@@ -464,7 +469,7 @@ mod tests {
     async fn a_single_peer_link_answers_several_concurrent_forwards() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+        app_client.respond(route.handler_url(), answered(b"ok"));
         let peer = Arc::new(
             Connector::new(
                 vec![route],
@@ -521,10 +526,7 @@ mod tests {
         {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(
-                route.handler_url(),
-                answered(b"delivered by the peer", Some(FULFILLMENT)),
-            );
+            app_client.respond(route.handler_url(), answered(b"delivered by the peer"));
             let deliverer = Arc::new(
                 Connector::new(
                     vec![route],
@@ -549,7 +551,7 @@ mod tests {
             let (response, _ack, reached) = transport.forward("peer-b", sealed, 0, None).await;
             match response {
                 PacketResponse::Fulfill(fulfill) => {
-                    assert_eq!(fulfill.fulfillment, FULFILLMENT);
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
                     assert_eq!(
                         open_sealed_envelope(&shared_secret, &fulfill.data),
                         fulfill_envelope(b"delivered by the peer")
