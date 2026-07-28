@@ -75,6 +75,12 @@ data/*.db
 # .claude/
 .auto-bmad-tmp/
 
+# Agent worktrees. `.claude/` itself is tracked (the BMAD commands above), so
+# this ignores only the checkouts agents create underneath it — currently
+# multiple GB on a working machine. Previously untracked via a local, uncommitted
+# `.git/info/exclude`, which a fresh clone does not inherit.
+**/.claude/worktrees/
+
 # Mina zkApp ESM build (faucet USDC-mint single-instance bundle) — built at image time
 packages/mina-zkapp/dist-esm/
 # Per-recreate lightnet zkApp deploy result (contains sensitive admin/token keys)
