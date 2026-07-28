@@ -741,7 +741,7 @@ impl Connector {
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
-                let outcome = Self::accept_if_fulfilled(&condition, Some(fulfill));
+                let outcome = Self::accept_if_fulfilled(&condition, fulfill);
                 if matches!(outcome, PacketResponse::Fulfill(_)) {
                     self.claims
                         .record_fulfillment(peer_id, forwarded_amount, self.clock.now());
@@ -847,10 +847,10 @@ impl Connector {
             // matches.
             AppOutcome::Answered { response } => Self::accept_if_fulfilled(
                 condition,
-                Some(Fulfill {
+                Fulfill {
                     fulfillment: derive_fulfillment(shared_secret),
                     data: response.encode(),
-                }),
+                },
             ),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),
@@ -1083,20 +1083,19 @@ impl Connector {
     /// prevents an intermediate hop (relaying a peer's answer) or a
     /// terminating one (relaying an app's) from producing a valid
     /// fulfilment without the destination's actual participation (issue
-    /// #417). Anything else -- no candidate, or one that fails to verify --
-    /// is a REJECT, never a fulfilment this connector invents itself.
-    fn accept_if_fulfilled(condition: &[u8; 32], candidate: Option<Fulfill>) -> PacketResponse {
-        match candidate {
-            Some(fulfill) if fulfillment_matches_condition(condition, &fulfill.fulfillment) => {
-                PacketResponse::Fulfill(fulfill)
-            }
-            _ => PacketResponse::Reject(Reject {
+    /// #417). A candidate that fails to verify is a REJECT, never a
+    /// fulfilment this connector invents itself.
+    fn accept_if_fulfilled(condition: &[u8; 32], candidate: Fulfill) -> PacketResponse {
+        if fulfillment_matches_condition(condition, &candidate.fulfillment) {
+            PacketResponse::Fulfill(candidate)
+        } else {
+            PacketResponse::Reject(Reject {
                 code: RejectCode::f99_application_error(),
                 triggered_by: String::new(),
                 message: "fulfillment does not match execution condition".to_string(),
                 data: Vec::new(),
                 accumulated_cost: 0,
-            }),
+            })
         }
     }
 }

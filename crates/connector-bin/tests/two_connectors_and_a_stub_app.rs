@@ -17,7 +17,7 @@ use std::process::Command;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare};
-use connector_signer::giftwrap::{open_response, seal_request};
+use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
 use connector_signer::{LocalSigner, PublicKeyBytes, Signer};
 
 mod support;
@@ -54,9 +54,7 @@ fn sample_prepare(destination: &str, data: Vec<u8>, shared_secret: &[u8; 32]) ->
     Prepare {
         amount: 0,
         expires_at: Utc::now() + ChronoDuration::minutes(5),
-        execution_condition: derive_condition(&connector_signer::giftwrap::derive_fulfillment(
-            shared_secret,
-        )),
+        execution_condition: derive_condition(&derive_fulfillment(shared_secret)),
         destination: destination.to_string(),
         data,
     }
@@ -155,10 +153,7 @@ fee = 0
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body = response.bytes().await.expect("response body");
     let fulfill = Fulfill::decode(&body).expect("decode Fulfill");
-    assert_eq!(
-        fulfill.fulfillment,
-        connector_signer::giftwrap::derive_fulfillment(&shared_secret)
-    );
+    assert_eq!(fulfill.fulfillment, derive_fulfillment(&shared_secret));
     // Real HTTP end to end, so the response envelope carries whatever
     // incidental headers axum added (`content-type`, `date`, ...) -- only
     // status and body are asserted, exactly as the shared `AppClient`
@@ -192,10 +187,7 @@ fee = 0
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body = response.bytes().await.expect("response body");
     let fulfill = Fulfill::decode(&body).expect("decode Fulfill for the decline case");
-    assert_eq!(
-        fulfill.fulfillment,
-        connector_signer::giftwrap::derive_fulfillment(&decline_secret)
-    );
+    assert_eq!(fulfill.fulfillment, derive_fulfillment(&decline_secret));
     let opened = open_response(&decline_secret, &fulfill.data).expect("open sealed response");
     let response_envelope = EnvelopeResponse::decode(&opened).expect("decode envelope");
     assert_eq!(response_envelope.status, 402);

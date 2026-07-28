@@ -33,7 +33,7 @@ use connector_domain::{
 use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
-use connector_signer::giftwrap::seal_request;
+use connector_signer::giftwrap::{derive_fulfillment, seal_request};
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof, LocalSigner, Signer,
 };
@@ -68,9 +68,7 @@ fn sealed_sample_prepare(receiver_public: &connector_signer::PublicKeyBytes) -> 
     Prepare {
         amount: 0,
         expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-        execution_condition: derive_condition(&connector_signer::giftwrap::derive_fulfillment(
-            &shared_secret,
-        )),
+        execution_condition: derive_condition(&derive_fulfillment(&shared_secret)),
         destination: "g.example.app".to_string(),
         data,
     }
