@@ -1,12 +1,17 @@
-//! Claim validation: nonce and watermark rules (ADR 0004, ADR 0005,
-//! `docs/protocol/peer-wire-spec.md` §3.2-§3.5, issue #423). Pure, no I/O --
-//! a claim's signature is chain-specific (peer-wire-spec.md §3.5) and is
-//! verified elsewhere (`connector-signer`), against the digest
+//! Claim validation: nonce, watermark and value-binding rules (ADR 0004, ADR
+//! 0005, `docs/protocol/peer-wire-spec.md` §3.2-§3.5,
+//! `docs/protocol/client-edge-spec.md` §1.3, issues #423, #522). Pure, no
+//! I/O -- a claim's signature is chain-specific (peer-wire-spec.md §3.5) and
+//! is verified elsewhere (`connector-signer`), against the digest
 //! [`claim_digest`] computes here so both the signer and every verifier
-//! hash exactly the same bytes. What this module owns is the one rule every
+//! hash exactly the same bytes. What this module owns is the rules every
 //! claim must satisfy regardless of chain or signature scheme: its nonce
-//! must strictly advance the payee's watermark, and its cumulative amount
-//! must never decrease (`CONTEXT.md` "Nonce", "Watermark").
+//! must strictly advance the payee's watermark, its cumulative amount must
+//! never decrease (`CONTEXT.md` "Nonce", "Watermark"), and -- for a
+//! locally-terminated, priced route -- it must advance value by at least
+//! that route's price ([`validate_price`]). Deliberately cheaper than
+//! cryptographic verification and run before it, so a replay or an
+//! underpayment never spends a signature check.
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -32,6 +37,11 @@ pub enum ClaimError {
 
     #[error("claim amount {claimed} is less than the watermark's already-accepted {watermark}")]
     AmountNotAdvancing { claimed: u64, watermark: u64 },
+
+    #[error(
+        "claim advances value by {advanced}, less than the terminated route's price of {price}"
+    )]
+    Underpayment { advanced: u64, price: u64 },
 }
 
 /// Whether a claim of `nonce`/`cumulative_amount` may advance `watermark`.
@@ -57,6 +67,28 @@ pub fn validate_claim(
             claimed: cumulative_amount,
             watermark: watermark.cumulative_amount,
         });
+    }
+    Ok(())
+}
+
+/// Whether a claim of `cumulative_amount` advances value past `watermark` by
+/// at least `price` -- the value-binding step of `client-edge-spec.md` §1.3,
+/// run after freshness ([`validate_claim`]) and before cryptographic
+/// verification (issue #522): a minimal claim that merely advances the
+/// nonce is not, by itself, worth anything, and this is the check that
+/// stops it from buying a route it does not cover. `price` of `0` always
+/// passes -- a route documented as deliberately free
+/// (`connector_config::StaticRoute::price`) charges nothing and rejects
+/// nothing here.
+pub fn validate_price(
+    watermark: Option<Watermark>,
+    cumulative_amount: u64,
+    price: u64,
+) -> Result<(), ClaimError> {
+    let prior = watermark.map_or(0, |watermark| watermark.cumulative_amount);
+    let advanced = cumulative_amount.saturating_sub(prior);
+    if advanced < price {
+        return Err(ClaimError::Underpayment { advanced, price });
     }
     Ok(())
 }
@@ -165,6 +197,65 @@ mod tests {
     }
 
     #[test]
+    fn a_first_claim_advancing_by_exactly_the_price_is_accepted() {
+        assert!(validate_price(None, 100, 100).is_ok());
+    }
+
+    #[test]
+    fn a_first_claim_advancing_by_less_than_the_price_is_underpayment() {
+        let err = validate_price(None, 99, 100).unwrap_err();
+        assert_eq!(
+            err,
+            ClaimError::Underpayment {
+                advanced: 99,
+                price: 100
+            }
+        );
+    }
+
+    #[test]
+    fn a_zero_price_route_accepts_a_claim_that_advances_nothing() {
+        assert!(validate_price(
+            Some(Watermark {
+                nonce: 1,
+                cumulative_amount: 100
+            }),
+            100,
+            0
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn value_binding_is_measured_against_the_watermark_not_the_raw_cumulative_amount() {
+        let watermark = Watermark {
+            nonce: 5,
+            cumulative_amount: 100,
+        };
+        // Advances by only 40 -- below a price of 50 -- even though the
+        // claim's own cumulative_amount (140) looks larger than the price.
+        let err = validate_price(Some(watermark), 140, 50).unwrap_err();
+        assert_eq!(
+            err,
+            ClaimError::Underpayment {
+                advanced: 40,
+                price: 50
+            }
+        );
+        // Advancing by exactly the price is accepted.
+        assert!(validate_price(Some(watermark), 150, 50).is_ok());
+    }
+
+    #[test]
+    fn a_claim_advancing_by_more_than_the_price_is_accepted() {
+        let watermark = Watermark {
+            nonce: 5,
+            cumulative_amount: 100,
+        };
+        assert!(validate_price(Some(watermark), 1_000, 50).is_ok());
+    }
+
+    #[test]
     fn advancing_the_watermark_records_exactly_the_accepted_claim() {
         let watermark = advance_watermark(7, 250);
         assert_eq!(
@@ -232,6 +323,22 @@ mod tests {
                 prop_assert!(claim_nonce > watermark_nonce);
                 prop_assert!(claim_amount >= watermark_amount);
             }
+        }
+
+        /// Value binding accepts a claim exactly when its advance over the
+        /// watermark (or over zero, with none yet) meets the price -- never
+        /// less, regardless of how large the claim's own cumulative_amount
+        /// looks in isolation.
+        #[test]
+        fn value_binding_accepts_iff_the_advance_meets_the_price(
+            watermark in proptest::option::of((any::<u64>(), any::<u64>()).prop_map(|(nonce, cumulative_amount)| Watermark { nonce, cumulative_amount })),
+            cumulative_amount in any::<u64>(),
+            price in any::<u64>(),
+        ) {
+            let prior = watermark.map_or(0, |w| w.cumulative_amount);
+            let advanced = cumulative_amount.saturating_sub(prior);
+            let result = validate_price(watermark, cumulative_amount, price);
+            prop_assert_eq!(result.is_ok(), advanced >= price);
         }
     }
 }

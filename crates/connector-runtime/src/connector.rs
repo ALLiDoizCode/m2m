@@ -622,11 +622,11 @@ impl Connector {
             .filter(|route| !is_expired(route.expires_at(), now))
             .collect();
 
-        let app_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
         let peer_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
         let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
 
-        let app_match = select_route(&prepare.destination, &app_prefixes)
+        let app_match = self
+            .select_app_route(&prepare.destination)
             .map(|index| (self.routes[index].prefix().len(), RouteTarget::App(index)));
         let peer_match = select_route(&prepare.destination, &peer_prefixes).map(|index| {
             (
@@ -817,6 +817,23 @@ impl Connector {
                 accumulated_cost: 0,
             }),
         }
+    }
+
+    /// The index into `self.routes` that `destination` longest-prefix
+    /// matches against, if any -- the one place app-route selection lives,
+    /// shared by [`Self::handle_prepare_traced`] and [`Self::app_route_price`]
+    /// so the client edge's claim gate (issue #522) asks here rather than
+    /// keeping a second copy of this selection.
+    fn select_app_route(&self, destination: &str) -> Option<usize> {
+        let app_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
+        select_route(destination, &app_prefixes)
+    }
+
+    /// The price of the app route `destination` would resolve to, or
+    /// `None` if no app route matches it.
+    pub fn app_route_price(&self, destination: &str) -> Option<u64> {
+        self.select_app_route(destination)
+            .map(|index| self.routes[index].price())
     }
 
     /// This node's static routes, for the operator surface's read-only
@@ -1611,6 +1628,18 @@ mod tests {
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
         assert_eq!(routes[0].price, 25);
+    }
+
+    #[test]
+    fn app_route_price_reports_the_matched_routes_price() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![route], app_client, clock);
+
+        assert_eq!(connector.app_route_price("g.example.app"), Some(25));
+        assert_eq!(connector.app_route_price("g.example.app.sub"), Some(25));
+        assert_eq!(connector.app_route_price("g.nowhere"), None);
     }
 
     #[tokio::test]

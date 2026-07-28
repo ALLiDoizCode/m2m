@@ -1,37 +1,55 @@
 //! Client-edge router, mountable rather than a server. See ADR 0001, ADR
 //! 0003, and `docs/protocol/client-edge-spec.md` -- this implements §1.1
 //! (transport and framing: `POST /ilp`, OER-encoded PREPARE in, OER-encoded
-//! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome) and, as of
-//! issue #504, the front half of §1.3 (payment claims): a present claim is
-//! parsed, structurally validated and checked for freshness/watermark
-//! before the packet is routed, deliberately before any cryptographic claim
-//! signature verification (issue #506) or value binding against a route's
-//! price (issue #507) -- neither of those exist at this ingress yet.
-//! Identity (§1.2) and the x402 greeting (§1.4) remain unimplemented; a
-//! request presenting no claim header at all still passes through
-//! unchanged, exactly as it always has.
+//! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome), most of
+//! §1.3 (payment claims, issues #504 and #522): a present claim is parsed,
+//! structurally validated, checked for freshness/watermark, and checked to
+//! advance value by at least the destination's matched app route's price,
+//! before the packet is routed -- deliberately before any cryptographic
+//! claim signature verification (issue #506), which does not exist at this
+//! ingress yet -- and, as of issue #526, §1.4 (the x402 greeting) and the
+//! answering half of identity: `GET /ilp/identity` reports the public key a
+//! sender seals a packet to (ADR 0018), and an unpaid request to a route
+//! this connector terminates and prices is answered with that route's
+//! terms (ADR 0020, ADR 0022) instead of being routed at all. `GET
+//! /ilp/routes/price` answers what a given destination would cost. Both
+//! live under `/ilp` (matching §3.2's `GET /ilp/versions` precedent for an
+//! unauthenticated, client-edge-facing answer) rather than at the bare
+//! path, since the operator surface already owns a bearer-gated `GET
+//! /identity` of its own (issue #420) and the two routers are merged onto
+//! one port whenever the operator surface is enabled. None of
+//! this pushes anything into a network unprompted (ADR 0022) -- each is a
+//! reply to a request that reached this connector's own client edge, and
+//! changes no state. A request presenting no claim header and addressing
+//! an unpriced (or unmatched) destination still passes through unchanged,
+//! exactly as it always has, and pay-to-write is absolute for a priced
+//! route -- there is no configuration, flag or build profile that disables
+//! either check. Identity (§1.2, beyond the key answer) remains
+//! unimplemented.
 //!
-//! Per ADR 0001, this handler deserializes, calls exactly one method on
+//! Per ADR 0001, `handle_ilp` deserializes, calls exactly one method on
 //! [`Connector`], and serializes; the `match` below is that serialization
 //! step, not a routing or delivery decision -- those live entirely in
-//! [`Connector::handle_prepare`].
+//! [`Connector::handle_prepare`]. `identity` and `route_price` answer
+//! directly from this connector's own configuration and never touch
+//! [`Connector::handle_prepare`] at all.
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::State;
+use axum::body::{Body, Bytes};
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 use connector_runtime::Connector;
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
-use connector_signer::PublicKeyBytes;
+use connector_signer::{PublicKeyBytes, Signer};
 
 mod claim_gate;
 pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
@@ -39,9 +57,11 @@ pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 const OCTET_STREAM: &str = "application/octet-stream";
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
 const CLAIM_WRAPPED_HEADER: &str = "ilp-payment-channel-claim-wrapped";
+const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
 
 struct ClientEdgeState {
     connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
     claim_gate: ClientClaimGate,
     /// This connector's own NIP-59 receiver key, used to unwrap a
     /// privacy-wrapped claim (client-edge-spec.md §1.3). `None` means this
@@ -51,12 +71,14 @@ struct ClientEdgeState {
     wrap_receiver_secret: Option<[u8; 32]>,
 }
 
-/// Mount the client edge at `connector`: `POST /ilp` per
-/// `docs/protocol/client-edge-spec.md` §1.1, with no configured NIP-59
-/// receiver key -- a privacy-wrapped claim is refused rather than accepted.
-/// Use [`router_with_wrap_key`] to accept wrapped claims.
-pub fn router(connector: Arc<Connector>) -> Router {
-    router_with_wrap_key(connector, None)
+/// Mount the client edge at `connector`, signing/answering identity with
+/// `signer`: `POST /ilp` per `docs/protocol/client-edge-spec.md` §1.1, plus
+/// `GET /ilp/identity` and `GET /ilp/routes/price` (§1.2/§1.4, issue #526),
+/// with no configured NIP-59 receiver key -- a privacy-wrapped claim is
+/// refused rather than accepted. Use [`router_with_wrap_key`] to accept
+/// wrapped claims.
+pub fn router(connector: Arc<Connector>, signer: Arc<dyn Signer>) -> Router {
+    router_with_wrap_key(connector, signer, None)
 }
 
 /// As [`router`], but able to unwrap a privacy-wrapped claim
@@ -64,15 +86,19 @@ pub fn router(connector: Arc<Connector>) -> Router {
 /// connector's own NIP-59 receiver key.
 pub fn router_with_wrap_key(
     connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
 ) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
+        signer,
         claim_gate: ClientClaimGate::new(),
         wrap_receiver_secret,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
+        .route("/ilp/identity", get(identity))
+        .route("/ilp/routes/price", get(route_price))
         .with_state(state)
 }
 
@@ -97,6 +123,158 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// This connector's own identity (ADR 0018, ADR 0022): the uncompressed
+/// secp256k1 public key a sender must seal a packet's payload to before it
+/// can address this connector, plus the key id identifying it. Unlike the
+/// operator surface's own bearer-gated `GET /identity` (issue #420, a
+/// different audience per ADR 0022) -- mounted at `/ilp/identity` so the
+/// two cannot collide when both routers merge onto one port -- this one is
+/// unauthenticated -- an unaffiliated sender who has never registered with this connector's
+/// operator still needs this key before it can form a packet at all, and
+/// answering it decides nothing and reaches nobody who did not ask.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct ClientEdgeIdentity {
+    #[serde(rename = "keyId")]
+    key_id: String,
+    #[serde(rename = "publicKey")]
+    public_key: String,
+}
+
+async fn identity(State(state): State<Arc<ClientEdgeState>>) -> Response {
+    match state.signer.public_key() {
+        Ok(public_key) => Json(ClientEdgeIdentity {
+            key_id: state.signer.key_id(),
+            public_key: format!("0x{}", hex_encode(&public_key)),
+        })
+        .into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RoutePriceQuery {
+    destination: String,
+}
+
+/// What a given destination would cost to deliver to, per ADR 0022's
+/// "a sender can ask what a route of its costs" -- reuses
+/// [`Connector::app_route_price`], the same longest-prefix lookup the
+/// x402 greeting and the claim gate's value binding already use, so this
+/// answers with exactly the price a real request to `destination` would be
+/// charged, never a second source of truth.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct RoutePriceView {
+    destination: String,
+    price: u64,
+}
+
+async fn route_price(
+    State(state): State<Arc<ClientEdgeState>>,
+    Query(query): Query<RoutePriceQuery>,
+) -> Response {
+    match state.connector.app_route_price(&query.destination) {
+        Some(price) => Json(RoutePriceView {
+            destination: query.destination,
+            price,
+        })
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!(
+                "no locally-terminated route matches '{}'",
+                query.destination
+            ),
+        )
+            .into_response(),
+    }
+}
+
+/// The x402 v2 payment-required greeting (client-edge-spec.md §1.4): the
+/// terms of the one payment method this connector's client edge actually
+/// understands -- a TOON payment channel claim, over this same `/ilp`
+/// endpoint. `accepts` is a list (ADR 0022's fourth acceptance criterion)
+/// so a later method can be offered alongside this one without changing
+/// the answer's shape; only one entry exists today because on-chain
+/// settlement addresses (the `exact` x402 scheme's `asset`/`payTo`) are not
+/// yet configured anywhere in this connector (issue #526 is answering
+/// terms, not adding that config).
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct X402PaymentRequired {
+    #[serde(rename = "x402Version")]
+    x402_version: u32,
+    resource: X402Resource,
+    accepts: Vec<X402PaymentOption>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct X402Resource {
+    url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct X402PaymentOption {
+    scheme: String,
+    network: String,
+    amount: String,
+    #[serde(rename = "payTo")]
+    pay_to: String,
+    #[serde(rename = "maxTimeoutSeconds")]
+    max_timeout_seconds: u64,
+    #[serde(rename = "httpEndpoint")]
+    http_endpoint: String,
+    extra: X402ChannelExtra,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct X402ChannelExtra {
+    #[serde(rename = "ilpAddress")]
+    ilp_address: String,
+    endpoint: String,
+    price: String,
+}
+
+const X402_VERSION: u32 = 2;
+const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
+
+/// Answer an unpaid request to `destination`, a route this connector
+/// terminates and prices at `price`, with its terms instead of performing
+/// the app's work (client-edge-spec.md §1.4, ADR 0022) -- this changes no
+/// state and is only ever a reply to the request that asked.
+fn payment_required(destination: &str, price: u64) -> Response {
+    let terms = X402PaymentRequired {
+        x402_version: X402_VERSION,
+        resource: X402Resource {
+            url: destination.to_string(),
+        },
+        accepts: vec![X402PaymentOption {
+            scheme: "toon-channel".to_string(),
+            network: destination.to_string(),
+            amount: price.to_string(),
+            pay_to: destination.to_string(),
+            max_timeout_seconds: X402_MAX_TIMEOUT_SECONDS,
+            http_endpoint: "/ilp".to_string(),
+            extra: X402ChannelExtra {
+                ilp_address: destination.to_string(),
+                endpoint: "/ilp".to_string(),
+                price: price.to_string(),
+            },
+        }],
+    };
+    let body = serde_json::to_vec(&terms).expect("x402 terms always serialize");
+    let header_value = BASE64.encode(&body);
+    Response::builder()
+        .status(StatusCode::PAYMENT_REQUIRED)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(PAYMENT_REQUIRED_HEADER, header_value)
+        .body(Body::from(body))
+        .expect("well-formed x402 response")
+        .into_response()
 }
 
 /// Decode a claim header's raw (still base64-encoded) bytes into the
@@ -160,14 +338,17 @@ fn decode_claim_header(
 
 /// Extract and fully validate whatever claim header `headers` carries, per
 /// client-edge-spec.md §1.3. `Ok(())` covers both "no claim header was
-/// present at all" -- out of this ticket's scope (the x402 greeting/value
-/// binding that would refuse an unpaid request), so the request proceeds
-/// unchanged, exactly as it always has -- and "a present claim validated
-/// cleanly"; the caller doesn't need to tell those apart. A plaintext
-/// header takes precedence when both are present, since a client presenting
-/// both is presenting the same claim twice, not two different ones.
+/// present at all" -- reachable here only when `destination` is unpriced or
+/// unmatched, since `handle_ilp` answers the x402 greeting instead of
+/// calling this at all for an unpaid request to a priced route (issue
+/// #526) -- so the request proceeds unchanged, exactly as it always has --
+/// and "a present claim validated cleanly"; the caller doesn't need to tell
+/// those apart. A plaintext header takes precedence when both are present,
+/// since a client presenting both is presenting the same claim twice, not
+/// two different ones.
 fn extract_and_validate_claim(
     headers: &HeaderMap,
+    destination: &str,
     state: &ClientEdgeState,
 ) -> Result<(), ClaimIngestRejection> {
     let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
@@ -183,13 +364,24 @@ fn extract_and_validate_claim(
         wrapped,
         state.wrap_receiver_secret.as_ref(),
     )?;
-    state.claim_gate.ingest(&claim_json)?;
+    // No matching app route means nothing here is priced -- routing itself
+    // (not this gate) is what refuses an unroutable destination, with F02.
+    let price = state.connector.app_route_price(destination).unwrap_or(0);
+    state.claim_gate.ingest(&claim_json, price)?;
     Ok(())
 }
 
 fn claim_rejected_response(rejection: ClaimIngestRejection) -> Response {
+    // Underpayment is a distinct ILP error (F03: Invalid Amount, issue
+    // #522) from every other claim-ingest refusal above it (F01: Invalid
+    // Packet) -- the claim is structurally and cryptographically fine, it
+    // simply isn't enough value.
+    let code = match rejection {
+        ClaimIngestRejection::Underpayment { .. } => RejectCode::f03_invalid_amount(),
+        _ => RejectCode::f01_invalid_packet(),
+    };
     let reject = Reject {
-        code: RejectCode::f01_invalid_packet(),
+        code,
         triggered_by: String::new(),
         message: rejection.message(),
         data: Vec::new(),
@@ -213,10 +405,30 @@ async fn handle_ilp(
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
+    // An unpaid request -- no claim header of either kind -- addressing a
+    // route this connector terminates and prices is answered with that
+    // route's terms instead of being routed at all (client-edge-spec.md
+    // §1.4, ADR 0022): the app is never asked to do free work for an
+    // anonymous, unpaying caller. A present claim header suppresses the
+    // greeting unconditionally (its validation, including underpayment, is
+    // §1.3's job below); an unpriced or unmatched destination is
+    // unaffected and falls through unchanged, exactly as it always has.
+    let has_claim_header =
+        headers.contains_key(CLAIM_HEADER) || headers.contains_key(CLAIM_WRAPPED_HEADER);
+    if !has_claim_header {
+        let price = state
+            .connector
+            .app_route_price(&prepare.destination)
+            .unwrap_or(0);
+        if price > 0 {
+            return payment_required(&prepare.destination, price);
+        }
+    }
+
     // A claim header's validation failure rejects the packet before it is
     // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
     // do work that was never validly paid for.
-    if let Err(rejection) = extract_and_validate_claim(&headers, &state) {
+    if let Err(rejection) = extract_and_validate_claim(&headers, &prepare.destination, &state) {
         return claim_rejected_response(rejection);
     }
 
@@ -240,7 +452,6 @@ async fn handle_ilp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
     use axum::http::Request;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
@@ -249,6 +460,7 @@ mod tests {
         AppOutcome, FakeAppClient, InProcessPeerTransport, NetworkPeerTransport, PeerRoute,
         PeerWireServer, TestClock,
     };
+    use connector_signer::LocalSigner;
     use tower::ServiceExt;
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
@@ -312,6 +524,10 @@ mod tests {
         .encode()
     }
 
+    fn test_signer() -> Arc<dyn Signer> {
+        Arc::new(LocalSigner::generate("test-signer"))
+    }
+
     fn sample_prepare(destination: &str) -> Prepare {
         Prepare {
             amount: 0,
@@ -351,7 +567,7 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
-        let app = router(connector);
+        let app = router(connector, test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -381,7 +597,7 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
-        let app = router(connector);
+        let app = router(connector, test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -409,7 +625,7 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
-        let app = router(connector);
+        let app = router(connector, test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -440,7 +656,7 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
-        let app = router(connector);
+        let app = router(connector, test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -487,7 +703,7 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         ));
-        let app = router(first_hop);
+        let app = router(first_hop, test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -545,7 +761,7 @@ mod tests {
             .with_signer(Arc::new(payer_signer))
             .with_peer_claim_channel("second-hop", "channel-a"),
         );
-        let app = router(first_hop.clone());
+        let app = router(first_hop.clone(), test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -588,7 +804,7 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         ));
-        let app = router(first_hop);
+        let app = router(first_hop, test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -640,7 +856,7 @@ mod tests {
             Arc::new(peer_transport),
             test_clock(),
         ));
-        let app = router(first_hop);
+        let app = router(first_hop, test_signer());
 
         let request = Request::builder()
             .method("POST")
@@ -657,6 +873,230 @@ mod tests {
             fulfill.data,
             fulfill_data(b"delivered over the network transport")
         );
+    }
+
+    /// A sender can ask this connector who it is and get back the key it
+    /// would seal a packet to (ADR 0018, ADR 0022, issue #526) --
+    /// unauthenticated, no request body, and answered from this connector's
+    /// own signer with no state change.
+    #[tokio::test]
+    async fn a_sender_can_ask_this_connectors_identity_and_gets_its_public_key() {
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let signer = test_signer();
+        let app = router(connector, signer.clone());
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/ilp/identity")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let identity: ClientEdgeIdentity = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(identity.key_id, signer.key_id());
+        assert_eq!(
+            identity.public_key,
+            format!("0x{}", hex_encode(&signer.public_key().unwrap()))
+        );
+    }
+
+    /// A sender can ask what a given terminated route costs and gets that
+    /// route's configured price back (ADR 0022, issue #526), reading the
+    /// same value `app_route_price` -- and so the claim gate and the x402
+    /// greeting -- would charge against a real request.
+    #[tokio::test]
+    async fn a_sender_can_ask_what_a_route_costs() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 42).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/ilp/routes/price?destination=g.example.app.sub")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let view: RoutePriceView = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view.price, 42);
+    }
+
+    /// Asking about a destination that matches no locally-terminated route
+    /// is a 404, not a fabricated price.
+    #[tokio::test]
+    async fn asking_the_price_of_an_unmatched_destination_is_a_404() {
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/ilp/routes/price?destination=g.nowhere")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The heart of issue #526: an unpaid request to a route this connector
+    /// terminates and prices is answered with its terms (x402 v2, §1.4)
+    /// instead of ever reaching the app -- the free-gateway failure mode
+    /// ADR 0022 exists to close.
+    #[tokio::test]
+    async fn an_unpaid_request_to_a_priced_route_is_answered_with_terms_not_performed() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        // Deliberately no `app_client.respond(...)` registered: `deliveries()`
+        // records a call the moment `AppClient::deliver` runs, regardless of
+        // outcome, so an empty list below proves the app was never reached
+        // at all -- not merely that it answered unfavorably.
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let payment_required_header = response
+            .headers()
+            .get(PAYMENT_REQUIRED_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(terms.x402_version, 2);
+        assert_eq!(terms.resource.url, "g.example.app");
+        assert_eq!(terms.accepts.len(), 1, "terms are carried as a list");
+        assert_eq!(terms.accepts[0].amount, "100");
+
+        // The header carries the same body the greeting sends over the wire.
+        let header_bytes = BASE64.decode(&payment_required_header).unwrap();
+        assert_eq!(header_bytes, bytes.to_vec());
+
+        assert!(
+            app_client.deliveries().is_empty(),
+            "the app must never be asked to do the work an unpaid request didn't pay for"
+        );
+    }
+
+    /// A claim header suppresses the greeting even to a priced route --
+    /// §1.3's own validation (freshness, value, eventually signature) is
+    /// what judges a paid request, not the unpaid-answer path.
+    #[tokio::test]
+    async fn a_present_claim_header_suppresses_the_greeting() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let claim_json = format!(
+            r#"{{
+                "version": "1.0",
+                "blockchain": "evm",
+                "messageId": "msg-1",
+                "timestamp": "2026-02-02T12:00:00.000Z",
+                "senderId": "peer-bob",
+                "channelId": "0x{channel}",
+                "nonce": 1,
+                "transferredAmount": "100",
+                "lockedAmount": "0",
+                "locksRoot": "0x{zeros}",
+                "signature": "0xabcdef",
+                "signerAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
+            }}"#,
+            channel = "ab".repeat(32),
+            zeros = "0".repeat(64),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header(CLAIM_HEADER, BASE64.encode(claim_json.as_bytes()))
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        Fulfill::decode(&bytes).expect("a validly paid claim still reaches the app");
+        assert_eq!(app_client.deliveries().len(), 1);
+    }
+
+    /// An unpaid request to an explicitly free (`price == 0`) route is
+    /// unaffected -- it still reaches the app exactly as it always has,
+    /// since there is nothing to charge and so nothing to answer with
+    /// terms instead of.
+    #[tokio::test]
+    async fn an_unpaid_request_to_a_free_route_still_reaches_the_app() {
+        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(
+            route.handler_url(),
+            answered(b"free work", Some(FULFILLMENT)),
+        );
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        Fulfill::decode(&bytes).expect("decode fulfill");
+        assert_eq!(app_client.deliveries().len(), 1);
     }
 
     /// End-to-end claim ingest (issue #504): a claim presented in
@@ -719,10 +1159,6 @@ mod tests {
                 .unwrap()
         }
 
-        fn hex_encode(bytes: &[u8]) -> String {
-            bytes.iter().map(|b| format!("{b:02x}")).collect()
-        }
-
         #[tokio::test]
         async fn a_fresh_plaintext_claim_lets_the_packet_reach_the_app() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
@@ -735,7 +1171,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector);
+            let app = router(connector, test_signer());
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -762,7 +1198,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector);
+            let app = router(connector, test_signer());
 
             let first = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -801,7 +1237,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector);
+            let app = router(connector, test_signer());
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -828,7 +1264,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector);
+            let app = router(connector, test_signer());
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -875,7 +1311,7 @@ mod tests {
                 BASE64.encode(&wrapped.encrypted_payload),
             );
 
-            let app = router_with_wrap_key(connector, Some(receiver_secret_bytes));
+            let app = router_with_wrap_key(connector, test_signer(), Some(receiver_secret_bytes));
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
                 CLAIM_WRAPPED_HEADER,
@@ -900,7 +1336,7 @@ mod tests {
                 test_clock(),
             ));
             // `router`, not `router_with_wrap_key`: no receiver key configured.
-            let app = router(connector);
+            let app = router(connector, test_signer());
 
             let envelope_json = r#"{"ephemeralPublicKey":"04","encryptedPayload":"AAAA","timestamp":0,"version":"1.0"}"#;
             let request = request_with_claim_header(
@@ -913,6 +1349,108 @@ mod tests {
             let reject = Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code.as_str(), "F01");
             assert!(reject.message.contains("not configured to unwrap"));
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// A claim advancing by at least a priced route's price is
+        /// accepted and the packet is delivered (issue #522).
+        #[tokio::test]
+        async fn a_claim_covering_the_routes_price_is_accepted_and_delivered() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector, test_signer());
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, 100),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("decode fulfill");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// A claim advancing by less than a priced route's price is
+        /// refused as underpayment (F03), distinguishably from a stale,
+        /// malformed or unverifiable claim (all F01), and never reaches
+        /// the app (issue #522).
+        #[tokio::test]
+        async fn a_claim_underpaying_the_routes_price_is_refused_as_underpayment() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector, test_signer());
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, 99),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            // An ILP-level outcome, even a reject, is always HTTP 200.
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F03");
+            assert_ne!(reject.code.as_str(), "F01");
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// A claim's value is checked before this ingress would ever spend
+        /// cryptographic work verifying its signature -- proven here by a
+        /// claim whose signature is garbage, yet still refused for
+        /// underpayment (F03) rather than any signature-shaped reason,
+        /// since no signature verification exists at this ingress yet
+        /// (issue #506) and the value check runs unconditionally first
+        /// (issue #522).
+        #[tokio::test]
+        async fn the_value_check_runs_before_any_cryptographic_work() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector, test_signer());
+
+            let garbage_signature_claim = evm_claim_json(1, 50).replace(
+                r#""signature": "0xabcdef""#,
+                r#""signature": "0xnotarealsignatureatall""#,
+            );
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &garbage_signature_claim,
+            );
+            let response = app.oneshot(request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F03");
             assert!(app_client.deliveries().is_empty());
         }
     }
