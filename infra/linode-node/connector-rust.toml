@@ -96,3 +96,34 @@ fee = 0
 # does not attempt to solve. Add an [operator] section per
 # deploy/connector-rust/README.md steps 2-3 before relying on GET /metrics
 # or the write surface on this node.
+
+# ── Settlement (issue #542) ─────────────────────────────────────────────
+# The Rust fleet settles the same 6-decimal USDC the TypeScript node on this
+# box does (issue #542's own decision comment) -- `token_address` below is
+# that SAME real, already-deployed mock USDC `./connector.yaml:38` names,
+# not a placeholder. `rpc_url` is that config's own known-good EVM RPC
+# (`./connector.yaml`'s own comment: publicnode over sepolia.base.org, which
+# fails openChannel with a stale read).
+#
+# `contract_address` IS a placeholder, and deliberately an unmistakable one
+# (the zero address), the same convention `[[peers]]`'s `addr` above uses
+# RFC 5737 for: `crates/connector-settlement-evm/contracts/SettlementChannel.sol`
+# has never been deployed anywhere outside a disposable `anvil` instance in
+# this workspace's own tests (checked `packages/contracts/deployments/`,
+# every open PR, every `sandcastle/issue-*` branch -- none deploy it). This
+# keeps the file syntactically valid and loadable (ADR 0009: a malformed
+# settlement section is a refuse-to-start error) without asserting a
+# deployment that has not happened. REPLACE with the real deployed
+# `SettlementChannel` address once one exists on this chain.
+[settlement]
+chain = "evm"
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x0000000000000000000000000000000000000000"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.key]
+# Same key material as [signer] above -- this devnet overlay does not
+# separate "connector identity" from "settlement signer" (a real deployment
+# with different risk profiles for each might).
+key_file = "/app/data/signer.key"

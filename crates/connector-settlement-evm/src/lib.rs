@@ -1,7 +1,8 @@
 //! EVM settlement backend (issue #459, ADR 0001, ADR 0002): a real,
 //! chain-backed [`SettlementBackend`] driven against
-//! `contracts/SettlementChannel.sol` -- a minimal native-ETH payment
-//! channel with no `lockedAmount`/`locksRoot` fields (ADR 0004).
+//! `contracts/SettlementChannel.sol` -- a minimal ERC-20 payment channel
+//! (issue #542; native-ETH before that) with no `lockedAmount`/`locksRoot`
+//! fields (ADR 0004).
 //!
 //! Unlike [`connector_settlement::InMemorySettlementBackend`], this
 //! backend holds no local channel state of its own: every
@@ -36,7 +37,10 @@ use connector_settlement::{
     ChannelId, ChannelState, ChannelStatus, Claim, SettlementBackend, SettlementError,
 };
 
-use bindings::{ChannelOpenedFilter, SettlementChannel as SettlementChannelContract};
+use bindings::{
+    ChannelOpenedFilter, Erc20 as Erc20Contract, MockErc20 as MockErc20Contract,
+    SettlementChannel as SettlementChannelContract,
+};
 
 /// The signing client every contract call is made through, wrapped in a
 /// [`NonceManagerMiddleware`] so that concurrent calls against the same
@@ -47,38 +51,80 @@ use bindings::{ChannelOpenedFilter, SettlementChannel as SettlementChannelContra
 type EvmClient = NonceManagerMiddleware<SignerMiddleware<Provider<Http>, LocalWallet>>;
 
 /// A [`SettlementBackend`] backed by a real `SettlementChannel` contract
-/// instance on an EVM chain.
+/// instance on an EVM chain, settling in whatever ERC-20 that instance was
+/// deployed with (issue #542).
 pub struct EvmSettlementBackend {
     contract: SettlementChannelContract<EvmClient>,
+    token: Erc20Contract<EvmClient>,
 }
 
 impl EvmSettlementBackend {
     /// Bind to an already-deployed `SettlementChannel` at
     /// `contract_address`, signing every transaction with `private_key`
-    /// (a hex-encoded secp256k1 key, `0x`-prefix optional).
+    /// (a hex-encoded secp256k1 key, `0x`-prefix optional). The token this
+    /// backend approves and pulls from is read back from the contract
+    /// itself (`token()`, its own immutable state) rather than passed in
+    /// separately -- a deployed `SettlementChannel` and the asset it
+    /// settles are fixed together at deployment, so there is exactly one
+    /// answer to ask the chain for.
     pub async fn connect(
         rpc_url: &str,
         private_key: &str,
         contract_address: Address,
     ) -> Result<Self, SettlementError> {
-        let client = Arc::new(build_client(rpc_url, private_key).await?);
-        Ok(Self {
-            contract: SettlementChannelContract::new(contract_address, client),
-        })
+        let client = Arc::new(build_client(rpc_url, private_key).await?.0);
+        let contract = SettlementChannelContract::new(contract_address, client.clone());
+        let token_address = contract.token().call().await.map_err(backend_error)?;
+        let token = Erc20Contract::new(token_address, client);
+        Ok(Self { contract, token })
     }
 
-    /// Deploy a fresh `SettlementChannel` instance, signed and paid for by
-    /// `private_key`, and bind to it. Used by this crate's own tests and
-    /// by whichever operator tooling first needs to stand a new
-    /// settlement contract up rather than point at an existing one.
-    pub async fn deploy(rpc_url: &str, private_key: &str) -> Result<Self, SettlementError> {
-        let client = Arc::new(build_client(rpc_url, private_key).await?);
-        let contract = SettlementChannelContract::deploy(client, ())
+    /// Deploy a fresh `SettlementChannel` settling `token_address`, signed
+    /// and paid for by `private_key`, and bind to it. Used by this crate's
+    /// own tests and by whichever operator tooling first needs to stand a
+    /// new settlement contract up rather than point at an existing one.
+    pub async fn deploy(
+        rpc_url: &str,
+        private_key: &str,
+        token_address: Address,
+    ) -> Result<Self, SettlementError> {
+        let client = Arc::new(build_client(rpc_url, private_key).await?.0);
+        let contract = SettlementChannelContract::deploy(client.clone(), token_address)
             .map_err(backend_error)?
             .send()
             .await
             .map_err(backend_error)?;
-        Ok(Self { contract })
+        let token = Erc20Contract::new(token_address, client);
+        Ok(Self { contract, token })
+    }
+
+    /// Deploy a fresh, mintable mock ERC-20 (`contracts/MockERC20.sol`)
+    /// and mint `mint_to_deployer` of it to `private_key`'s own address,
+    /// returning the token's address. Never used against a real chain --
+    /// this exists so a disposable test or devnet chain, which starts with
+    /// no token deployed at all, has something real for
+    /// [`EvmSettlementBackend::deploy`] to point at; a production
+    /// deployment always names an already-deployed token address instead
+    /// (issue #542).
+    pub async fn deploy_mock_token(
+        rpc_url: &str,
+        private_key: &str,
+        mint_to_deployer: u128,
+    ) -> Result<Address, SettlementError> {
+        let (client, deployer) = build_client(rpc_url, private_key).await?;
+        let client = Arc::new(client);
+        let contract = MockErc20Contract::deploy(
+            client,
+            ("USD Coin (mock)".to_string(), "USDC".to_string(), 6u8),
+        )
+        .map_err(backend_error)?
+        .send()
+        .await
+        .map_err(backend_error)?;
+        let call = contract.mint(deployer, U256::from(mint_to_deployer));
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+        Ok(contract.address())
     }
 
     /// The address this backend's `SettlementChannel` is deployed at.
@@ -159,7 +205,14 @@ impl EvmSettlementBackend {
     }
 }
 
-async fn build_client(rpc_url: &str, private_key: &str) -> Result<EvmClient, SettlementError> {
+/// Builds the signing client every contract call goes through, alongside
+/// the address it signs as -- callers that need to name that address
+/// directly (minting a mock token to it, for instance) would otherwise
+/// have to re-derive it from `private_key` a second time.
+async fn build_client(
+    rpc_url: &str,
+    private_key: &str,
+) -> Result<(EvmClient, Address), SettlementError> {
     // ethers' default HTTP polling interval (7s) is tuned for mainnet block
     // times, not a fast-confirming chain -- every open/fund/redeem/close
     // otherwise pays that whole interval waiting for a receipt Anvil (or
@@ -175,7 +228,7 @@ async fn build_client(rpc_url: &str, private_key: &str) -> Result<EvmClient, Set
     let wallet: LocalWallet = private_key.parse().map_err(backend_error)?;
     let address = wallet.address();
     let signer = SignerMiddleware::new(provider, wallet.with_chain_id(chain_id));
-    Ok(NonceManagerMiddleware::new(signer, address))
+    Ok((NonceManagerMiddleware::new(signer, address), address))
 }
 
 /// Derive a 20-byte EVM address for an arbitrary counterparty identifier.
@@ -183,7 +236,7 @@ async fn build_client(rpc_url: &str, private_key: &str) -> Result<EvmClient, Set
 /// anything else (the port's own contract suite uses plain ASCII peer
 /// names, not addresses) is hashed down to one -- deterministically, so
 /// the same counterparty bytes always name the same on-chain address, and
-/// validly, so `SettlementChannel.redeem`'s plain-ETH payout to it never
+/// validly, so `SettlementChannel.redeem`'s ERC-20 transfer to it never
 /// reverts for want of a real recipient.
 fn counterparty_address(counterparty: &[u8]) -> Address {
     if counterparty.len() == 20 {
@@ -267,7 +320,24 @@ impl SettlementBackend for EvmSettlementBackend {
     ) -> Result<ChannelState, SettlementError> {
         let (id, _state) = self.open_channel(channel).await?;
 
-        let call = self.contract.fund(id).value(U256::from(amount));
+        // Approve-then-fund (issue #542): two transactions, where a single
+        // `payable` call sufficed for native ETH. Approving a large fixed
+        // allowance every time, rather than exactly `amount`, is
+        // deliberate: `approve` overwrites rather than adds, so two
+        // concurrent `fund` calls from the same payer against this same
+        // contract (every `SettlementBackend` method takes `&self`)
+        // approving their own exact amounts can race -- the second
+        // approval overwrites the first's before the first's `fund` spends
+        // it, and that `fund` then reverts for insufficient allowance.
+        // Approving the same large value under a race is idempotent: the
+        // final on-chain allowance is that value either way, and it is
+        // confirmed mined before this call's own `fund` is ever sent, so
+        // it is always enough.
+        let approve = self.token.approve(self.contract.address(), U256::MAX);
+        let pending = approve.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+
+        let call = self.contract.fund(id, U256::from(amount));
         let pending = call.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 

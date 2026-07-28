@@ -59,3 +59,19 @@ price = 0
 # ── Operator surface (optional) ─────────────────────────────────────────
 # See infra/linode-node/connector-rust.toml's own note — omitted for the
 # same reason.
+
+# ── Settlement (issue #542) ─────────────────────────────────────────────
+# See infra/linode-node/connector-rust.toml's own note: same real USDC
+# (`./connector.yaml`'s `tokenAddress`), same known-good RPC, same
+# placeholder-until-deployed `contract_address` (the zero address --
+# `SettlementChannel.sol` has never been deployed anywhere outside a
+# disposable test chain), same key file reused for settlement signing.
+[settlement]
+chain = "evm"
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x0000000000000000000000000000000000000000"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.key]
+key_file = "/app/data/signer.key"
