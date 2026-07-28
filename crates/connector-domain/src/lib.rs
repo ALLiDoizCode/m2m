@@ -6,7 +6,7 @@
 //! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),
 //! claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423), and the
 //! structured envelope a packet carries to and from the app behind a
-//! terminating connector (ADR 0018, issue #519).
+//! terminated route (ADR 0018, issue #519).
 
 mod address;
 mod claim;

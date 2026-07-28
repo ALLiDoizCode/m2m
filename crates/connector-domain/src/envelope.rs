@@ -57,6 +57,18 @@ fn decode_utf8_field(bytes: Vec<u8>, field: &'static str) -> Result<String, Enve
     String::from_utf8(bytes).map_err(|_| EnvelopeError::InvalidUtf8(field))
 }
 
+/// Decode a var-octet-string field and validate it as UTF-8 in one step,
+/// returning the string and the number of bytes consumed.
+fn decode_string_field(
+    buf: &[u8],
+    offset: usize,
+    field: &'static str,
+) -> Result<(String, usize), EnvelopeError> {
+    let (bytes, n) =
+        decode_var_octet_string(buf, offset).map_err(|_| EnvelopeError::BufferUnderflow)?;
+    Ok((decode_utf8_field(bytes, field)?, n))
+}
+
 /// Encode a header list as a count prefix followed by each `(name, value)`
 /// pair in order -- a plain sequence, never a map, so that both header
 /// order and duplicate header names survive a round trip.
@@ -77,23 +89,19 @@ fn decode_headers(
     let mut total = n;
     let mut headers = Vec::new();
     for _ in 0..count {
-        let (name_bytes, n) = decode_var_octet_string(buf, offset + total)
-            .map_err(|_| EnvelopeError::BufferUnderflow)?;
+        let (name, n) = decode_string_field(buf, offset + total, "header name")?;
         total += n;
-        let name = decode_utf8_field(name_bytes, "header name")?;
 
-        let (value_bytes, n) = decode_var_octet_string(buf, offset + total)
-            .map_err(|_| EnvelopeError::BufferUnderflow)?;
+        let (value, n) = decode_string_field(buf, offset + total, "header value")?;
         total += n;
-        let value = decode_utf8_field(value_bytes, "header value")?;
 
         headers.push((name, value));
     }
     Ok((headers, total))
 }
 
-/// The request a terminating connector is to make of the app behind it: a
-/// method, a target, headers and a body.
+/// The request the connector is to make of the app behind a terminated
+/// route: a method, a target, headers and a body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeRequest {
     pub method: String,
@@ -116,15 +124,11 @@ impl EnvelopeRequest {
     pub fn decode(buf: &[u8]) -> Result<EnvelopeRequest, EnvelopeError> {
         let mut offset = decode_type_byte(buf, TYPE_ENVELOPE_REQUEST)?;
 
-        let (method_bytes, n) =
-            decode_var_octet_string(buf, offset).map_err(|_| EnvelopeError::BufferUnderflow)?;
+        let (method, n) = decode_string_field(buf, offset, "method")?;
         offset += n;
-        let method = decode_utf8_field(method_bytes, "method")?;
 
-        let (target_bytes, n) =
-            decode_var_octet_string(buf, offset).map_err(|_| EnvelopeError::BufferUnderflow)?;
+        let (target, n) = decode_string_field(buf, offset, "target")?;
         offset += n;
-        let target = decode_utf8_field(target_bytes, "target")?;
 
         let (headers, n) = decode_headers(buf, offset)?;
         offset += n;
@@ -146,8 +150,7 @@ impl EnvelopeRequest {
     }
 }
 
-/// The app's response to a terminated request: a status, headers and a
-/// body.
+/// The app's response back to the connector: a status, headers and a body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeResponse {
     pub status: u16,
