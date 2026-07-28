@@ -82,9 +82,11 @@ compared before being serialized; a giftwrap vector is opened back with the rece
 a fulfilment vector's condition is checked against `fulfillment_matches_condition`) before writing
 it out. Regenerating (`cargo run -p connector-vectors --bin generate-vectors`) against an
 unchanged implementation is therefore a no-op — same fixtures through the same code always produce
-the same bytes — and `cargo test -p connector-vectors` is the gate: it regenerates the set
-in-memory and fails if it no longer matches `vectors/wire-vectors.json` on disk, so a change to the
-wire that does not regenerate the committed vectors fails `cargo test --workspace`.
+the same data — and `cargo test -p connector-vectors` is the gate: it regenerates the set in
+memory and fails if its _data_ (compared as parsed JSON, not raw bytes — this repo's pre-commit
+hook reformats staged JSON with `prettier`, which carries no data of its own) no longer matches
+`vectors/wire-vectors.json` on disk, so a change to the wire that does not regenerate the committed
+vectors fails `cargo test --workspace`.
 
 See `vectors/README.md` for the file's schema, aimed at a reader in another repository who is not
 importing any Rust from this one.
