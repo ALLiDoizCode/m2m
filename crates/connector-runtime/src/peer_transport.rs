@@ -61,7 +61,7 @@ pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
         triggered_by: String::new(),
         message: format!("peer '{peer_id}' unreachable"),
         data: Vec::new(),
-        accumulated_fee: 0,
+        accumulated_cost: 0,
     })
 }
 
@@ -272,8 +272,9 @@ impl PeerTransport for InProcessPeerTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_client::{AppOutcome, FakeAppClient};
+    use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
+    use crate::test_support::{answered, envelope_request_data, fulfill_data};
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
     use connector_domain::{claim_digest, derive_condition};
@@ -288,7 +289,7 @@ mod tests {
             expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
             execution_condition: derive_condition(&FULFILLMENT),
             destination: destination.to_string(),
-            data: b"hello".to_vec(),
+            data: envelope_request_data(b"hello"),
         }
     }
 
@@ -304,10 +305,7 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
             route.handler_url(),
-            AppOutcome::Delivered {
-                data: b"delivered by the peer".to_vec(),
-                fulfillment: Some(FULFILLMENT),
-            },
+            answered(b"delivered by the peer", Some(FULFILLMENT)),
         );
         let peer = Arc::new(Connector::new(
             vec![route],
@@ -327,7 +325,7 @@ mod tests {
             response,
             PacketResponse::Fulfill(connector_domain::Fulfill {
                 fulfillment: FULFILLMENT,
-                data: b"delivered by the peer".to_vec(),
+                data: fulfill_data(b"delivered by the peer"),
             })
         );
         assert_eq!(ack, ClaimAckOutcome::NotSent);
@@ -447,13 +445,7 @@ mod tests {
     async fn a_single_peer_link_answers_several_concurrent_forwards() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            AppOutcome::Delivered {
-                data: b"ok".to_vec(),
-                fulfillment: Some(FULFILLMENT),
-            },
-        );
+        app_client.respond(route.handler_url(), answered(b"ok", Some(FULFILLMENT)));
         let peer = Arc::new(Connector::new(
             vec![route],
             vec![],
@@ -509,10 +501,7 @@ mod tests {
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(
                 route.handler_url(),
-                AppOutcome::Delivered {
-                    data: b"delivered by the peer".to_vec(),
-                    fulfillment: Some(FULFILLMENT),
-                },
+                answered(b"delivered by the peer", Some(FULFILLMENT)),
             );
             let deliverer = Arc::new(Connector::new(
                 vec![route],
@@ -538,7 +527,7 @@ mod tests {
                 response,
                 PacketResponse::Fulfill(connector_domain::Fulfill {
                     fulfillment: FULFILLMENT,
-                    data: b"delivered by the peer".to_vec(),
+                    data: fulfill_data(b"delivered by the peer"),
                 })
             );
             assert!(reached);

@@ -54,7 +54,7 @@ an ILP-level REJECT.
 | ----------- | --------- | ------------------------------------------------------------------------- |
 | `0x01`      | PREPARE   | §2 packet fields + §4 fee/minimum-delivery fields + optional claim (§3.2) |
 | `0x02`      | FULFILL   | §2 packet fields                                                          |
-| `0x03`      | REJECT    | §2 packet fields + accumulated-fee field (§5.2)                           |
+| `0x03`      | REJECT    | §2 packet fields + accumulated-cost field (§5.2)                          |
 | `0x04`      | FLUSH     | A claim only (§3.3), no `correlationId`                                   |
 | `0x05`      | CLAIM_ACK | Acknowledges a claim carried on a PREPARE or FLUSH (§3.4)                 |
 | `0x06`      | PING/PONG | Liveness; no payload beyond a direction bit                               |
@@ -77,7 +77,7 @@ Every PREPARE, FULFILL and REJECT frame carries an ILPv4 packet (RFC-0027), OER-
 
 The peer wire adds fields alongside the ILP packet rather than inside its `data`, because `data`
 is reserved for the application payload the connector never reads. Those additional fields are
-defined in §3 (claims) and §4–§5 (fee, minimum delivery, accumulated fee).
+defined in §3 (claims) and §4–§5 (fee, minimum delivery, accumulated cost).
 
 ## 3. Execution condition, fulfilment, and claim exchange
 
@@ -223,7 +223,7 @@ survives every hop is guaranteed to deliver at least `M` at the destination — 
 locally at each hop with no knowledge of the rest of the path, and requires no field beyond the
 one `minimumDelivery` the sender set.
 
-## 5. Reject codes and the accumulated-fee field
+## 5. Reject codes and the accumulated-cost field
 
 ### 5.1 Codes in use on the peer wire
 
@@ -247,29 +247,44 @@ under the prepay model, has no peer-wire use: PREPAREs never carry claims now (�
 nothing to gate at PREPARE time. A payer that cannot be trusted to pay is handled at the claim
 layer (§3.4), not the packet layer.
 
-### 5.2 Accumulated fee
+### 5.2 Accumulated cost
 
-Every REJECT frame carries `accumulatedFee` (`uint64`), the running total of the fees of the hops
-the packet actually passed through, per [ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md).
-The field starts at `0`:
+Every REJECT frame carries `accumulatedCost` (`uint64`): the running total of what the packet's
+path has charged so far, per [ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)
+and issue #523 -- the fees of the hops the packet actually passed through, plus the price of the
+route that terminated it, if it reached one. The field starts at `0`:
 
-- When a connector **originates** a REJECT for its own reason (no route, expired, ceiling
-  exceeded, cannot meet minimum delivery, or an application-level reject from its own terminating
-  app), it sets `accumulatedFee = 0` on the REJECT it sends upstream — it never forwarded this
-  packet past itself, so no fee applies to a hop it never used.
+- When a connector **originates** a REJECT for a reason that added no value to the packet at all
+  (no route, expired, ceiling exceeded, cannot meet minimum delivery), it sets
+  `accumulatedCost = 0` on the REJECT it sends upstream — it never forwarded or terminated this
+  packet, so nothing applies to a hop it never used.
+- When a connector **originates** a REJECT because the packet reached one of its own terminated
+  routes and was rejected there (an application-level reject from the terminating app, or a
+  fulfillment that didn't match the execution condition), it sets `accumulatedCost` to that
+  route's configured price (`0` if the route is explicitly free) — the packet did reach a
+  termination, and that termination's price is what a probe exists to discover, independent of
+  whether the app happened to accept or decline this particular attempt.
 - When a connector **relays** a REJECT it received from its own next hop back to its own upstream
   peer, it MUST add its own configured fee for the (already-successful) forward it made of the
-  corresponding PREPARE, before sending the REJECT upstream: `accumulatedFee' = accumulatedFee +
+  corresponding PREPARE, before sending the REJECT upstream: `accumulatedCost' = accumulatedCost +
 thisHopFee`.
 
 The sender therefore receives, on any REJECT for any reason, the sum of the fees of every hop
-that successfully forwarded the packet before it stopped — this is strictly more information for
-strictly less protocol than a dedicated quoting message, and is why a **probe** (a packet sent
-expecting rejection, `CONTEXT.md` "Probe") needs no protocol of its own: it is an ordinary PREPARE
-whose reject reveals the real, current cost of the path it actually traversed.
+that successfully forwarded the packet plus the price of the route it reached, before it stopped
+— this is strictly more information for strictly less protocol than a dedicated quoting message,
+and is why a **probe** (a packet sent expecting rejection, `CONTEXT.md` "Probe") needs no protocol
+of its own: it is an ordinary PREPARE whose reject reveals the real, current cost of the path it
+actually traversed.
 
-Never include a per-hop breakdown — only the sum. `accumulatedFee` leaks total path cost, not
-topology or any individual hop's pricing ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)).
+Never include a per-hop breakdown, and never split the total between fees and price — only the
+sum. `accumulatedCost` leaks total path cost, not topology or any individual hop's or route's
+pricing ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)).
+
+The second bullet above is forward-looking, matching `client-edge-spec.md` §1.6's own note: the
+Rust connector does not yet carry a price on a terminated route (blocked on issue #520, "A
+terminated route carries a price," itself still open), so a REJECT raised at a termination today
+always sets `accumulatedCost = 0`, exactly like the first bullet. Once #520 lands, a terminated
+route's REJECT path follows the second bullet.
 
 ### 5.3 Ceiling enforcement
 

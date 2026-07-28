@@ -1,5 +1,14 @@
 # Connector Release Contract
 
+> **Historical — describes the retired TypeScript connector.** Its source, its
+> `.releaserc.json`, and the `release.yml` / `build-and-publish.yml` pipelines
+> referenced below were removed by ADR
+> [0017](docs/adr/0017-the-typescript-connector-is-a-prototype.md). Already-published
+> `@toon-protocol/connector` versions and `ghcr.io/toon-protocol/connector` tags are
+> unaffected and the guarantees below still hold for them. The Rust connector's image
+> is published by `.github/workflows/publish-connector-rust-image.yml`
+> (`ghcr.io/toon-protocol/connector-rust`) and does not yet have a written contract.
+
 This document describes the supply-chain guarantees the connector project makes
 about its published artifacts (npm package and GHCR container image), and the
 recommended pinning strategy for downstream consumers.

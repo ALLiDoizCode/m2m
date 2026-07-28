@@ -58,13 +58,6 @@ Thumbs.db
 
 # Test databases
 data/*.db
-packages/connector/data/*.db
-
-# Test runtime artifacts — ledger snapshots + claim DBs + anon SDK state.
-# These accumulate during test runs with randomized port-base suffixes and
-# must never be committed (contains transient state, not source).
-packages/connector/data/ledger-*.json
-packages/connector/terms-agreement
 
 # Playwright test artifacts
 .playwright-mcp/
@@ -81,6 +74,12 @@ packages/connector/terms-agreement
 # .bmad-infrastructure-devops/
 # .claude/
 .auto-bmad-tmp/
+
+# Agent worktrees. `.claude/` itself is tracked (the BMAD commands above), so
+# this ignores only the checkouts agents create underneath it — currently
+# multiple GB on a working machine. Previously untracked via a local, uncommitted
+# `.git/info/exclude`, which a fresh clone does not inherit.
+**/.claude/worktrees/
 
 # Mina zkApp ESM build (faucet USDC-mint single-instance bundle) — built at image time
 packages/mina-zkapp/dist-esm/

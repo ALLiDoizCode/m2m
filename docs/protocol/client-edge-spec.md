@@ -187,8 +187,8 @@ version 1 does not change to gain this; only the connector's backend does.
 
 A client MAY send an ordinary PREPARE it expects to be rejected (a probe, `CONTEXT.md` "Probe")
 to learn a path's cost. RFC-0027's REJECT `data` is reserved for an application-level reject's own
-diagnostic payload (an `F99`/`T99`/`R99` from the terminating app), so `accumulatedFee` MUST NOT be
-packed into it; instead the connector returns it as a response header, `TOON-Accumulated-Fee`
+diagnostic payload (an `F99`/`T99`/`R99` from the terminating app), so `accumulatedCost` MUST NOT be
+packed into it; instead the connector returns it as a response header, `TOON-Accumulated-Cost`
 (decimal string, `uint64`), alongside the unchanged OER REJECT body — the client-edge equivalent
 of the peer wire carrying the field at the frame level, beside the packet, rather than inside it.
 The header is present on every REJECT response, `0` when the packet never left this connector.
@@ -199,6 +199,35 @@ rate-limits probes per that identity. A sender with no channel, or one over its 
 is rejected at ingress with `403` (a status this subsection adds to §1.1's table, distinct from
 `401`: the peer authenticated successfully, but is not authorized to probe) without being
 forwarded.
+
+### 1.7 Answering: identity and route price
+
+A sender must hold the terminating connector's public key before it can seal a packet to it (§1
+above; [ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)), and must know a
+route's price before it can construct a claim that pays for it. Both are answered directly by the
+connector that terminates the route, over the same client edge a payer already speaks to it on
+([ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md)) — **answering, not announcing**: each
+of the following is a reply to a request that reached this connector's own client edge, changes no
+state, and is never pushed into a network unprompted.
+
+- **`GET /ilp/identity`** — unauthenticated, no request body. Returns the uncompressed secp256k1
+  public key a sender must seal a packet's payload to, plus the key id identifying it:
+  ```json
+  { "keyId": "...", "publicKey": "0x04..." }
+  ```
+  Mounted under `/ilp` rather than at the bare `/identity` because the operator surface already
+  serves its own bearer-gated `GET /identity` (issue #420) for a different audience — a different
+  operator-authenticated caller asking a different question — and the two routers are merged onto
+  one port whenever the operator surface is enabled.
+- **`GET /ilp/routes/price?destination=<ILP address>`** — unauthenticated. Returns `200` with the
+  price of the locally-terminated route `destination` would match, reading the same
+  longest-prefix lookup the x402 greeting (§1.4) and claim value binding (§1.3) charge against, so
+  this never states a price a real request wouldn't also be charged:
+  ```json
+  { "destination": "g.example.app", "price": 100 }
+  ```
+  `404` when no locally-terminated route matches `destination` — this endpoint never fabricates a
+  price for a route it does not serve.
 
 ## 2. What version 1 does not do
 

@@ -16,7 +16,9 @@
 use std::process::Command;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use connector_domain::{derive_condition, Fulfill, Prepare, Reject};
+use connector_domain::{
+    derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
+};
 
 mod support;
 use support::{spawn_connector, spawn_stub_app, write_config, write_raw_key_file};
@@ -27,13 +29,23 @@ const FULFILLMENT: [u8; 32] = [7u8; 32];
 /// binaries, so there is no shared constant to import.
 const DECLINE_BODY: &[u8] = b"please decline this one";
 
-fn sample_prepare(destination: &str, data: &[u8]) -> Prepare {
+/// ADR 0018/issue #519: a terminated route now reads a structured envelope
+/// out of `Prepare.data` rather than an opaque body, still plaintext at
+/// this point (sealing is issue #524) -- a minimal `POST /` envelope
+/// around `body`, matching `stub_app`'s one handler, mounted at `/`.
+fn sample_prepare(destination: &str, body: &[u8]) -> Prepare {
     Prepare {
         amount: 0,
         expires_at: Utc::now() + ChronoDuration::minutes(5),
         execution_condition: derive_condition(&FULFILLMENT),
         destination: destination.to_string(),
-        data: data.to_vec(),
+        data: EnvelopeRequest {
+            method: "POST".to_string(),
+            target: "/".to_string(),
+            headers: vec![],
+            body: body.to_vec(),
+        }
+        .encode(),
     }
 }
 
@@ -55,6 +67,7 @@ key_file = "{}"
 [[routes]]
 prefix = "g.b.app"
 handler_url = "http://{}"
+price = 0
 "#,
         key_b.path().display(),
         stub_app.addr,
@@ -108,14 +121,25 @@ fee = 0
     let body = response.bytes().await.expect("response body");
     let fulfill = Fulfill::decode(&body).expect("decode Fulfill");
     assert_eq!(fulfill.fulfillment, FULFILLMENT);
+    // Real HTTP end to end, so the response envelope carries whatever
+    // incidental headers axum added (`content-type`, `date`, ...) -- only
+    // status and body are asserted, exactly as the shared `AppClient`
+    // contract suite in `connector-runtime` does for the same reason.
+    let response_envelope = EnvelopeResponse::decode(&fulfill.data).expect("decode envelope");
+    assert_eq!(response_envelope.status, 200);
     assert_eq!(
-        fulfill.data,
+        response_envelope.body,
         b"delivered by stub app: hello from the client edge"
     );
 
     // The stub app can also decline -- proving a real failure travels back
     // through both hops too, not just the happy path (the stub app "returns
-    // success or failure", per the issue's own acceptance criteria).
+    // success or failure", per the issue's own acceptance criteria). Per
+    // issue #521/ADR 0020, the app's 402 is itself just an answer, not a
+    // transport failure -- what actually rejects this is that the stub
+    // app's decline branch supplies no `TOON-Fulfillment` header (issue
+    // #417, until #525 derives a fulfilment instead of asking the app for
+    // one), the same rule a 200 with no header would also fail.
     let declining_prepare = sample_prepare("g.b.app", DECLINE_BODY);
     let response = client
         .post(format!("http://{}/ilp", connector_a.client_edge_addr))
@@ -127,8 +151,8 @@ fee = 0
     let body = response.bytes().await.expect("response body");
     let reject = Reject::decode(&body).expect("decode Reject");
     assert!(
-        reject.message.contains("402"),
-        "expected the app's 402 decline to travel back, got: {}",
+        reject.message.contains("execution condition"),
+        "expected a reject for lack of a verifying fulfillment, got: {}",
         reject.message
     );
 }

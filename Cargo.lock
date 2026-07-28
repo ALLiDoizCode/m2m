@@ -875,6 +875,17 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "chacha20"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
@@ -882,6 +893,19 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
+dependencies = [
+ "aead",
+ "chacha20 0.9.1",
+ "cipher",
+ "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -915,6 +939,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.6",
  "inout",
+ "zeroize",
 ]
 
 [[package]]
@@ -1034,7 +1059,6 @@ dependencies = [
  "connector-cli",
  "connector-domain",
  "reqwest",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1062,11 +1086,23 @@ name = "connector-client-edge"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "bs58",
  "chrono",
  "connector-config",
  "connector-domain",
  "connector-runtime",
+ "connector-settlement",
+ "connector-settlement-evm",
+ "connector-signer",
+ "ed25519-dalek",
+ "ethers",
+ "hex",
  "hyper",
+ "libsecp256k1",
+ "rand 0.7.3",
+ "serde",
+ "serde_json",
  "tokio",
  "tower",
 ]
@@ -1088,6 +1124,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "proptest",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
 ]
@@ -1188,8 +1225,15 @@ dependencies = [
 name = "connector-signer"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "hkdf",
  "libsecp256k1",
  "rand 0.7.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "sha3",
  "thiserror 2.0.19",
 ]
@@ -2771,6 +2815,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12cb882ccb290b8646e554b157ab0b71e64e8d5bef775cd66b6531e52d302669"
 
 [[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac 0.12.1",
+]
+
+[[package]]
 name = "hmac"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4174,6 +4227,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "poly1305"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "opaque-debug",
+ "universal-hash",
+]
+
+[[package]]
 name = "polyval"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4532,7 +4596,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
- "chacha20",
+ "chacha20 0.10.1",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
