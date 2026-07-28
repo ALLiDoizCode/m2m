@@ -2,16 +2,17 @@
 //! 0003, and `docs/protocol/client-edge-spec.md` -- this implements §1.1
 //! (transport and framing: `POST /ilp`, OER-encoded PREPARE in, OER-encoded
 //! FULFILL/REJECT out, always HTTP 200 for an ILP-level outcome) and, as of
-//! issues #504 and #522, most of §1.3 (payment claims): a present claim is
-//! parsed, structurally validated, checked for freshness/watermark, and
-//! checked to advance value by at least the destination's matched app
-//! route's price, before the packet is routed -- deliberately before any
-//! cryptographic claim signature verification (issue #506), which does not
-//! exist at this ingress yet. Identity (§1.2) and the x402 greeting (§1.4)
-//! remain unimplemented; a request presenting no claim header at all still
-//! passes through unchanged, exactly as it always has, and pay-to-write is
-//! absolute for one that is present -- there is no configuration, flag or
-//! build profile that disables the price check.
+//! issues #504, #522 and #506/#544, all four steps of §1.3 (payment
+//! claims): a present claim is parsed, structurally validated, checked for
+//! freshness/watermark, checked to advance value by at least the
+//! destination's matched app route's price, and cryptographically
+//! verified (`ClientClaimGate` -- see its own doc comment for what
+//! "verified" means absent a channel-counterparty registry, issue #542) --
+//! all before the packet is routed. Identity (§1.2) and the x402 greeting
+//! (§1.4) remain unimplemented; a request presenting no claim header at all
+//! still passes through unchanged, exactly as it always has, and
+//! pay-to-write is absolute for one that is present -- there is no
+//! configuration, flag or build profile that disables any of §1.3's checks.
 //!
 //! Per ADR 0001, this handler deserializes, calls exactly one method on
 //! [`Connector`], and serializes; the `match` below is that serialization
@@ -602,16 +603,48 @@ mod tests {
         assert_eq!(fulfill.data, b"delivered over the network transport");
     }
 
-    /// End-to-end claim ingest (issue #504): a claim presented in
+    /// End-to-end claim ingest (issue #504, #506/#544): a claim presented in
     /// `ILP-Payment-Channel-Claim`(`-Wrapped`) is parsed, structurally
-    /// validated and checked for freshness/watermark before the packet is
-    /// routed, exercised at this crate's real HTTP seam rather than against
-    /// `ClientClaimGate` directly.
+    /// validated, checked for freshness/watermark and cryptographically
+    /// verified before the packet is routed, exercised at this crate's real
+    /// HTTP seam rather than against `ClientClaimGate` directly.
     mod claim_headers {
         use super::*;
-        use libsecp256k1::{PublicKey, SecretKey};
+        use libsecp256k1::{Message, PublicKey, SecretKey};
 
-        fn evm_claim_json(nonce: u64, transferred_amount: u64) -> String {
+        const EVM_CHAIN_ID: u64 = 8453;
+        const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
+
+        /// A fixed, deterministic EVM keypair every genuine claim below is
+        /// signed with, so each test's own signature verifies.
+        fn evm_signer() -> (SecretKey, connector_signer::Address) {
+            let secret = SecretKey::parse(&[9u8; 32]).unwrap();
+            let public = PublicKey::from_secret_key(&secret);
+            (
+                secret,
+                connector_signer::derive_evm_address(&public.serialize()),
+            )
+        }
+
+        /// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
+        /// `r || s || v` signature, `v` in the conventional `{27, 28}` range).
+        fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
+            let message = Message::parse(digest);
+            let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
+            let mut bytes = signature.serialize().to_vec();
+            let recovery_byte: u8 = recovery_id.into();
+            bytes.push(recovery_byte + 27);
+            bytes
+        }
+
+        /// An EVM claim JSON carrying whatever `signature` hex string is
+        /// given verbatim, genuine or not.
+        fn evm_claim_json_with_signature(
+            nonce: u64,
+            transferred_amount: u64,
+            signature_hex: &str,
+        ) -> String {
+            let (_secret, address) = evm_signer();
             format!(
                 r#"{{
                     "version": "1.0",
@@ -624,11 +657,40 @@ mod tests {
                     "transferredAmount": "{transferred_amount}",
                     "lockedAmount": "0",
                     "locksRoot": "0x{zeros}",
-                    "signature": "0xabcdef",
-                    "signerAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
+                    "signature": "{signature_hex}",
+                    "signerAddress": "{address}",
+                    "chainId": {EVM_CHAIN_ID},
+                    "tokenNetworkAddress": "{token_network_address}"
                 }}"#,
                 channel = "ab".repeat(32),
                 zeros = "0".repeat(64),
+                address = connector_signer::to_hex(&address),
+                token_network_address = connector_signer::to_hex(&EVM_TOKEN_NETWORK_ADDRESS),
+            )
+        }
+
+        /// An EVM claim JSON with a genuine EIP-712 signature over its own
+        /// fields (issue #506/#544) -- every test using this helper
+        /// exercises the real verification path, not a bypass.
+        fn evm_claim_json(nonce: u64, transferred_amount: u64) -> String {
+            let channel = "ab".repeat(32);
+            let mut channel_id = [0u8; 32];
+            channel_id.copy_from_slice(&hex::decode(&channel).unwrap());
+            let (secret, _address) = evm_signer();
+            let proof = connector_signer::EvmBalanceProof {
+                channel_id,
+                nonce,
+                transferred_amount: u128::from(transferred_amount),
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: EVM_CHAIN_ID,
+                token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+            };
+            let signature = sign_evm(&secret, &connector_signer::evm_balance_proof_digest(&proof));
+            evm_claim_json_with_signature(
+                nonce,
+                transferred_amount,
+                &format!("0x{}", hex_encode(&signature)),
             )
         }
 
@@ -963,10 +1025,10 @@ mod tests {
         /// A claim's value is checked before this ingress would ever spend
         /// cryptographic work verifying its signature -- proven here by a
         /// claim whose signature is garbage, yet still refused for
-        /// underpayment (F03) rather than any signature-shaped reason,
-        /// since no signature verification exists at this ingress yet
-        /// (issue #506) and the value check runs unconditionally first
-        /// (issue #522).
+        /// underpayment (F03) rather than as an unverifiable signature
+        /// (which would also be F01, indistinguishable from this by code
+        /// alone), since the value check runs unconditionally before
+        /// verification is ever attempted (issue #522, #506/#544).
         #[tokio::test]
         async fn the_value_check_runs_before_any_cryptographic_work() {
             let route =
@@ -981,10 +1043,8 @@ mod tests {
             ));
             let app = router(connector);
 
-            let garbage_signature_claim = evm_claim_json(1, 50).replace(
-                r#""signature": "0xabcdef""#,
-                r#""signature": "0xnotarealsignatureatall""#,
-            );
+            let garbage_signature_claim =
+                evm_claim_json_with_signature(1, 50, "0xnotarealsignatureatall");
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
                 CLAIM_HEADER,
@@ -994,6 +1054,37 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let reject = Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code.as_str(), "F03");
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// A claim whose value binding passes but whose signature does not
+        /// verify is refused before the packet reaches the app -- the
+        /// gate's actual last stage (issue #506/#544).
+        #[tokio::test]
+        async fn a_claim_failing_signature_verification_never_reaches_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router(connector);
+
+            let unverifiable_claim = evm_claim_json_with_signature(1, 100, "0xabcd");
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &unverifiable_claim,
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(reject.message.contains("signature"));
             assert!(app_client.deliveries().is_empty());
         }
     }
