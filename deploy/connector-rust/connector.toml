@@ -40,9 +40,15 @@ key_file = "/app/data/signer.key"
 # `prefix` are delivered to the payment-oblivious app at `handler_url`.
 # Replace with your own app's ILP address and handler URL, or remove this
 # block entirely if this node only forwards to peers.
+#
+# `price` is required on every terminated route (issue #520): a claim must
+# advance by at least this much to pay for the app's work. It is never
+# silently free -- write `price = 0` if that is deliberate. Denominated in
+# the smallest unit of whatever this node settles in (ADR 0010).
 [[routes]]
 prefix = "g.example.connector.app"
 handler_url = "http://app:3100"
+price = 100
 
 # ── Operator surface (ADR 0008) ─────────────────────────────────────────
 # Reads (peers, routes, channels, claims, exposure, identity, the write

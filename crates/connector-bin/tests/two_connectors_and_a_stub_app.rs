@@ -55,6 +55,7 @@ key_file = "{}"
 [[routes]]
 prefix = "g.b.app"
 handler_url = "http://{}"
+price = 0
 "#,
         key_b.path().display(),
         stub_app.addr,
