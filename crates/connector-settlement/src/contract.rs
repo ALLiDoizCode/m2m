@@ -24,16 +24,23 @@ use crate::port::{ChannelId, ChannelStatus, Claim, SettlementBackend, Settlement
 /// freshly built implementation from `build`. A conforming implementation
 /// passes this function without modification -- that unmodified pass is
 /// what "upholds the contract" means (ADR 0007).
+///
+/// `build` also hands back two counterparty identities (issue #574) rather
+/// than this suite hardcoding its own: a plain ASCII peer name is not
+/// expressible as a real signing address on every chain this port has an
+/// implementation for (an EVM counterparty must recover from a signature,
+/// a Solana one is a 32-byte pubkey), so an implementation whose chain
+/// requires a real key supplies one instead of being handed a name it has
+/// no key for.
 pub async fn assert_upholds_the_contract<F, Fut>(build: F)
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Arc<dyn SettlementBackend>>,
+    Fut: Future<Output = (Arc<dyn SettlementBackend>, Vec<u8>, Vec<u8>)>,
 {
-    let backend = build().await;
+    let (backend, counterparty, other_counterparty) = build().await;
     let timeout = Duration::seconds(3600);
 
     // Opening a channel reports it open, unfunded, to the counterparty given.
-    let counterparty = b"counterparty-a".to_vec();
     let channel = backend
         .open(counterparty.clone(), timeout)
         .await
@@ -135,10 +142,15 @@ where
         }
     );
 
-    // Closing a channel is terminal: its own state reports Closed, that
-    // status is durable when queried back separately, and neither funding
-    // nor redemption is possible against it afterward -- nor can it be
-    // closed a second time.
+    // Closing a channel starts its challenge period (issue #574): its own
+    // state reports Closed, that status is durable when queried back
+    // separately, funding is refused, and it cannot be closed a second
+    // time -- but redeeming during the window that follows still
+    // succeeds. Forfeiting that window (the old behaviour here) hands the
+    // whole outstanding balance back to whichever party closed the
+    // channel; `TokenNetwork.claimFromChannel` deliberately accepts both
+    // `Opened` and `Closed` for exactly this reason
+    // (`packages/contracts/src/TokenNetwork.sol:262-263`, `:273`).
     let state = backend.close(&channel).await.expect("close");
     assert_eq!(state.status, ChannelStatus::Closed);
 
@@ -151,7 +163,9 @@ where
     let err = backend.fund(&channel, 10).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));
 
-    let err = backend
+    // A later, still-superseding claim redeems during the challenge
+    // window -- this is the window's whole point (issue #574).
+    let state = backend
         .redeem(
             &channel,
             Claim {
@@ -161,17 +175,57 @@ where
             },
         )
         .await
-        .unwrap_err();
-    assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));
+        .expect("redeem during the challenge window");
+    assert_eq!(state.redeemed, 121);
 
     let err = backend.close(&channel).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));
+
+    // `timeout` above is a full hour and no real time has elapsed since
+    // `close` -- settling this channel now must fail with the named
+    // "not yet due" error (issue #574), not a generic backend string.
+    // `MIN_SETTLEMENT_TIMEOUT` on the real `TokenNetwork` this port will
+    // eventually retarget onto (issue #566) is itself one hour
+    // (`TokenNetwork.sol:31`); observing that timeout actually elapse
+    // would need a chain whose clock this suite can advance, which is
+    // deliberately not what the scenario below asks for.
+    let err = backend.settle(&channel).await.unwrap_err();
+    assert_eq!(err, SettlementError::SettlementNotYetDue(channel.clone()));
+
+    // A channel opened with no challenge period at all becomes settleable
+    // the instant it is closed -- proving `settle` genuinely reaches a
+    // terminal, no-longer-redeemable state (not just that it refuses
+    // early) without this suite waiting out a real timeout.
+    let immediate = backend
+        .open(counterparty.clone(), Duration::zero())
+        .await
+        .expect("open with no challenge period");
+    backend.fund(&immediate, 200).await.expect("fund");
+    backend.close(&immediate).await.expect("close");
+    let state = backend.settle(&immediate).await.expect("settle");
+    assert_eq!(state.status, ChannelStatus::Settled);
+
+    let err = backend
+        .redeem(
+            &immediate,
+            Claim {
+                nonce: 1,
+                cumulative_amount: 50,
+                signature: vec![6],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, SettlementError::ChannelSettled(immediate.clone()));
+
+    let err = backend.settle(&immediate).await.unwrap_err();
+    assert_eq!(err, SettlementError::ChannelSettled(immediate));
 
     // A channel id from one open() call names only that channel -- a
     // second channel to a different counterparty has its own independent,
     // freshly-unfunded state.
     let other = backend
-        .open(b"counterparty-b".to_vec(), timeout)
+        .open(other_counterparty.clone(), timeout)
         .await
         .expect("open");
     assert_ne!(other, channel);
@@ -186,6 +240,8 @@ where
     let err = backend.fund(&missing, 1).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelNotFound(missing.clone()));
     let err = backend.close(&missing).await.unwrap_err();
+    assert_eq!(err, SettlementError::ChannelNotFound(missing.clone()));
+    let err = backend.settle(&missing).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelNotFound(missing));
 }
 
@@ -197,7 +253,11 @@ mod tests {
     #[tokio::test]
     async fn in_memory_settlement_backend_upholds_the_contract() {
         assert_upholds_the_contract(|| async {
-            Arc::new(InMemorySettlementBackend::new()) as Arc<dyn SettlementBackend>
+            (
+                Arc::new(InMemorySettlementBackend::new()) as Arc<dyn SettlementBackend>,
+                b"counterparty-a".to_vec(),
+                b"counterparty-b".to_vec(),
+            )
         })
         .await;
     }

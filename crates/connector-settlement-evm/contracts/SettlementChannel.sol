@@ -12,9 +12,13 @@ pragma solidity ^0.8.24;
 ///     `ecrecover`/EIP-712 check anywhere in this file. Any address can
 ///     call `redeem(channelId, <deposited>, "")` on a funded channel and
 ///     send the whole balance to `payoutAddress`.
-///   - `close` has no access control. Any address can close any channel.
-///   - There is no refund path. `redeem` is the only exit `fund` pairs
-///     with; anything deposited and never redeemed is stranded forever.
+///   - `close` and `settle` have no access control, deliberately (issue
+///     #574: this matches `TokenNetwork.closeChannel`/`settleChannel`,
+///     which are permissionless by design so a counterparty cannot strand
+///     a channel by refusing to act). That is not itself the danger here
+///     -- the danger is that `redeem`'s missing signature check means
+///     *any* address, not just a channel's real counterparty, can be the
+///     one who benefits from that permissionlessness.
 ///
 /// This is not a latent bug -- the contract's own header below says claim
 /// authenticity is out of scope for it by design. It just means the
@@ -45,15 +49,17 @@ interface IERC20 {
 /// the legacy TokenNetwork contract and are not reintroduced here).
 ///
 /// DO NOT DEPLOY THIS CONTRACT -- see the file-level warning above. It
-/// redeems on an unverified signature, closes with no access control, and
-/// has no refund path; issue #566 deletes it once its replacement lands.
+/// redeems on an unverified signature, and `close`/`settle` are
+/// permissionless by design rather than by omission; issue #566 deletes it
+/// once its replacement lands.
 /// @dev Claim authenticity is a peer-wire concern the SettlementBackend
 /// port itself declines to specify (crates/connector-settlement/src/port.rs
 /// -- "this port does not verify a claim"); this contract enforces exactly
 /// what the port's own contract suite requires -- monotonic redemption,
-/// bounded by what was deposited, terminal once closed -- and stores a
-/// claim's signature only as an opaque audit trail on the `ChannelRedeemed`
-/// event, not as something it cryptographically checks.
+/// bounded by what was deposited, redeemable through a closed channel's
+/// challenge period and terminal only once settled (issue #574) -- and
+/// stores a claim's signature only as an opaque audit trail on the
+/// `ChannelRedeemed` event, not as something it cryptographically checks.
 ///
 /// A channel's counterparty is recorded twice, deliberately: `counterparty`
 /// is an opaque identifier (the port's own `open` takes `Vec<u8>`, not
@@ -64,9 +70,16 @@ interface IERC20 {
 /// `connector-settlement-evm`'s `counterparty_address`) since this contract
 /// has no opinion on how that derivation works.
 contract SettlementChannel {
+    /// @dev `Closed` and `Settled` are deliberately distinct (issue #574):
+    /// `close` starts a challenge period (`settlementTimeout`) during which
+    /// `redeem` still works -- refusing to redeem in that window would hand
+    /// the whole outstanding balance back to whichever party closed the
+    /// channel. Only `Settled`, reached once that timeout has elapsed and
+    /// `settle` has run, is terminal.
     enum Status {
         Open,
-        Closed
+        Closed,
+        Settled
     }
 
     struct Channel {
@@ -77,6 +90,9 @@ contract SettlementChannel {
         uint256 deposited;
         uint256 redeemed;
         Status status;
+        /// @dev Block timestamp `close` ran, if it has. `settle` measures
+        /// its own timeout from here.
+        uint256 closedAt;
     }
 
     /// @notice The ERC-20 token every channel this contract manages is
@@ -108,12 +124,18 @@ contract SettlementChannel {
     event ChannelFunded(uint256 indexed channelId, uint256 amount, uint256 totalDeposited);
     event ChannelRedeemed(uint256 indexed channelId, uint256 cumulativeAmount, bytes signature);
     event ChannelClosed(uint256 indexed channelId);
+    event ChannelSettled(uint256 indexed channelId, uint256 refundAmount);
 
     error ChannelNotFound(uint256 channelId);
     error ChannelAlreadyClosed(uint256 channelId);
+    error ChannelAlreadySettled(uint256 channelId);
     error StaleClaim(uint256 claimed, uint256 alreadyRedeemed);
     error InsufficientChannelBalance(uint256 requested, uint256 deposited);
     error SettlementTransferFailed(uint256 channelId);
+    /// @notice Thrown by `settle` when called before `closedAt +
+    /// settlementTimeout` (issue #574) -- `availableAt` is that deadline,
+    /// so a caller can tell "try again later" apart from a genuine error.
+    error SettlementNotYetDue(uint256 channelId, uint256 availableAt);
     /// @notice Thrown by the constructor when `acknowledgement` does not
     /// equal `DEPLOYMENT_ACKNOWLEDGEMENT` -- see the file-level DO NOT
     /// DEPLOY block above (issue #568).
@@ -133,10 +155,8 @@ contract SettlementChannel {
 
     /// @notice Open a new channel from the caller to `counterparty`
     /// (paid out to `payoutAddress` on redemption), open and unfunded.
-    /// `settlementTimeout` is recorded but not otherwise enforced by this
-    /// contract -- there is no on-chain challenge period here, since the
-    /// port's own `close` is already terminal (no intermediate "closed,
-    /// awaiting settlement" state).
+    /// `settlementTimeout` is the challenge period `close` starts and
+    /// `settle` enforces (issue #574).
     function open(bytes calldata counterparty, address payoutAddress, uint256 settlementTimeout)
         external
         returns (uint256 channelId)
@@ -149,7 +169,8 @@ contract SettlementChannel {
             settlementTimeout: settlementTimeout,
             deposited: 0,
             redeemed: 0,
-            status: Status.Open
+            status: Status.Open,
+            closedAt: 0
         });
         emit ChannelOpened(channelId, msg.sender, payoutAddress, settlementTimeout);
     }
@@ -172,9 +193,12 @@ contract SettlementChannel {
     /// `cumulativeAmount`, and the newly-owed delta is paid to
     /// `payoutAddress` immediately. Rejects a claim that does not
     /// supersede the highest one redeemed so far, or that exceeds what has
-    /// been deposited.
+    /// been deposited. Succeeds against a channel that is `Open` or
+    /// `Closed` alike (issue #574) -- the whole point of the challenge
+    /// period `close` starts is that redemption still works during it;
+    /// only a `Settled` channel refuses.
     function redeem(uint256 channelId, uint256 cumulativeAmount, bytes calldata signature) external {
-        Channel storage channel = _open(channelId);
+        Channel storage channel = _redeemable(channelId);
         if (cumulativeAmount <= channel.redeemed) {
             revert StaleClaim(cumulativeAmount, channel.redeemed);
         }
@@ -190,12 +214,40 @@ contract SettlementChannel {
         if (!ok) revert SettlementTransferFailed(channelId);
     }
 
-    /// @notice Close a channel. Terminal: no further funding or redemption
-    /// is possible against it afterward, and it cannot be closed again.
+    /// @notice Close a channel, starting its challenge period: no further
+    /// funding is possible against it afterward, and it cannot be closed a
+    /// second time, but `redeem` still works until `settle` actually runs
+    /// (issue #574).
     function close(uint256 channelId) external {
         Channel storage channel = _open(channelId);
         channel.status = Status.Closed;
+        channel.closedAt = block.timestamp;
         emit ChannelClosed(channelId);
+    }
+
+    /// @notice Settle a channel once its challenge period --
+    /// `closedAt + settlementTimeout` -- has elapsed: pays out its
+    /// remaining, unredeemed deposit to `payer` and marks it permanently
+    /// done. Reverts with `SettlementNotYetDue` if called too early
+    /// (including against a channel that was never closed at all -- its
+    /// deadline is unreachable). Deliberately permissionless (issue #574,
+    /// matching `TokenNetwork.settleChannel`): no `msg.sender` check, so a
+    /// counterparty cannot strand a channel's deposit by refusing to ever
+    /// settle it.
+    function settle(uint256 channelId) external {
+        Channel storage channel = _existing(channelId);
+        if (channel.status == Status.Settled) revert ChannelAlreadySettled(channelId);
+        uint256 availableAt =
+            channel.status == Status.Closed ? channel.closedAt + channel.settlementTimeout : type(uint256).max;
+        if (block.timestamp < availableAt) revert SettlementNotYetDue(channelId, availableAt);
+
+        channel.status = Status.Settled;
+        uint256 refund = channel.deposited - channel.redeemed;
+        emit ChannelSettled(channelId, refund);
+        if (refund > 0) {
+            bool ok = token.transfer(channel.payer, refund);
+            if (!ok) revert SettlementTransferFailed(channelId);
+        }
     }
 
     /// @notice A channel's current state, as this contract records it.
@@ -209,7 +261,8 @@ contract SettlementChannel {
             uint256 settlementTimeout,
             uint256 deposited,
             uint256 redeemed,
-            Status status
+            Status status,
+            uint256 closedAt
         )
     {
         Channel storage channel = _existing(channelId);
@@ -220,7 +273,8 @@ contract SettlementChannel {
             channel.settlementTimeout,
             channel.deposited,
             channel.redeemed,
-            channel.status
+            channel.status,
+            channel.closedAt
         );
     }
 
@@ -229,8 +283,18 @@ contract SettlementChannel {
         if (channel.payer == address(0)) revert ChannelNotFound(channelId);
     }
 
+    /// @dev Requires `Open` -- shared by `fund` and `close`, which both
+    /// refuse a `Closed` or `Settled` channel alike.
     function _open(uint256 channelId) internal view returns (Channel storage channel) {
         channel = _existing(channelId);
+        if (channel.status == Status.Settled) revert ChannelAlreadySettled(channelId);
         if (channel.status != Status.Open) revert ChannelAlreadyClosed(channelId);
+    }
+
+    /// @dev Requires not `Settled` -- used by `redeem`, which succeeds
+    /// against both `Open` and `Closed` (issue #574).
+    function _redeemable(uint256 channelId) internal view returns (Channel storage channel) {
+        channel = _existing(channelId);
+        if (channel.status == Status.Settled) revert ChannelAlreadySettled(channelId);
     }
 }

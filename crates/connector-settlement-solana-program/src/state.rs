@@ -24,17 +24,30 @@ const PAYOUT_OFFSET: usize = COUNTERPARTY_OFFSET + MAX_COUNTERPARTY_LEN; // 108
 const SETTLEMENT_TIMEOUT_OFFSET: usize = PAYOUT_OFFSET + 32; // 140
 const DEPOSITED_OFFSET: usize = SETTLEMENT_TIMEOUT_OFFSET + 8; // 148
 const REDEEMED_OFFSET: usize = DEPOSITED_OFFSET + 8; // 156
-const STATUS_OFFSET: usize = REDEEMED_OFFSET + 8; // 164
+const CLOSED_AT_OFFSET: usize = REDEEMED_OFFSET + 8; // 164
+const STATUS_OFFSET: usize = CLOSED_AT_OFFSET + 8; // 172
 
 /// Total size of a `Channel` account's data, discriminator included. 3 bytes
 /// past `STATUS_OFFSET` are reserved padding.
 pub const ACCOUNT_SIZE: usize = STATUS_OFFSET + 4;
 
+/// `Closed` and `Settled` are deliberately distinct (issue #574): `Close`
+/// starts a challenge period (`settlement_timeout`) during which `Redeem`
+/// still works -- refusing to redeem in that window would hand the whole
+/// outstanding balance back to whichever party closed the channel. Only
+/// `Settled`, reached once that timeout has elapsed and `Settle` has run,
+/// is terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ChannelStatus {
     Open = 0,
+    /// Closed: its challenge period is running (or, once the timeout has
+    /// elapsed, is simply unclaimed). `Fund` and a second `Close` are
+    /// refused, but `Redeem` still succeeds.
     Closed = 1,
+    /// Settled: `Settle` has run to completion. Terminal -- no further
+    /// `Fund` or `Redeem` is possible.
+    Settled = 2,
 }
 
 /// A channel's on-chain state -- the Solana-side twin of
@@ -48,6 +61,9 @@ pub struct Channel {
     pub settlement_timeout: i64,
     pub deposited: u64,
     pub redeemed: u64,
+    /// Unix timestamp `Close` ran, if it has (`0` otherwise). `Settle`
+    /// measures its own timeout from here (issue #574).
+    pub closed_at: i64,
     pub status: ChannelStatus,
 }
 
@@ -69,6 +85,7 @@ impl Channel {
         let status = match data[STATUS_OFFSET] {
             0 => ChannelStatus::Open,
             1 => ChannelStatus::Closed,
+            2 => ChannelStatus::Settled,
             _ => return Err(ProgramError::InvalidAccountData),
         };
 
@@ -91,6 +108,11 @@ impl Channel {
             ),
             redeemed: u64::from_le_bytes(
                 data[REDEEMED_OFFSET..REDEEMED_OFFSET + 8]
+                    .try_into()
+                    .map_err(|_| ProgramError::InvalidAccountData)?,
+            ),
+            closed_at: i64::from_le_bytes(
+                data[CLOSED_AT_OFFSET..CLOSED_AT_OFFSET + 8]
                     .try_into()
                     .map_err(|_| ProgramError::InvalidAccountData)?,
             ),
@@ -118,6 +140,7 @@ impl Channel {
             .copy_from_slice(&self.settlement_timeout.to_le_bytes());
         data[DEPOSITED_OFFSET..DEPOSITED_OFFSET + 8].copy_from_slice(&self.deposited.to_le_bytes());
         data[REDEEMED_OFFSET..REDEEMED_OFFSET + 8].copy_from_slice(&self.redeemed.to_le_bytes());
+        data[CLOSED_AT_OFFSET..CLOSED_AT_OFFSET + 8].copy_from_slice(&self.closed_at.to_le_bytes());
         data[STATUS_OFFSET] = self.status as u8;
         data[STATUS_OFFSET + 1..ACCOUNT_SIZE].fill(0);
         Ok(())

@@ -1,14 +1,16 @@
 //! Instruction handlers -- the Solana-side twin of
-//! `SettlementChannel.sol`'s four functions. Like the Solidity contract,
+//! `SettlementChannel.sol`'s five functions. Like the Solidity contract,
 //! this program enforces exactly what the `SettlementBackend` port's
 //! contract suite requires (monotonic redemption, bounded by what was
-//! deposited, terminal once closed) and does not verify a claim's
+//! deposited, redeemable through a closed channel's challenge period and
+//! terminal only once settled -- issue #574) and does not verify a claim's
 //! signature -- that is a peer-wire concern the port itself declines to
 //! specify (`connector-settlement/src/port.rs`). The signature is logged as
 //! an opaque audit trail, the Solana analogue of the Solidity contract's
 //! `ChannelRedeemed` event carrying it unverified.
 
 use solana_program::account_info::{next_account_info, AccountInfo};
+use solana_program::clock::Clock;
 use solana_program::entrypoint::ProgramResult;
 use solana_program::msg;
 use solana_program::program::invoke;
@@ -45,6 +47,7 @@ pub fn process_instruction(
             signature,
         } => redeem(accounts, cumulative_amount, signature),
         ChannelInstruction::Close => close(accounts),
+        ChannelInstruction::Settle => settle(accounts),
     }
 }
 
@@ -87,6 +90,7 @@ fn open(
         settlement_timeout,
         deposited: 0,
         redeemed: 0,
+        closed_at: 0,
         status: ChannelStatus::Open,
     };
     state.write(&mut channel.try_borrow_mut_data()?)?;
@@ -105,8 +109,8 @@ fn fund(accounts: &[AccountInfo], amount: u64) -> ProgramResult {
     }
 
     let mut state = Channel::read(&channel.try_borrow_data()?)?;
-    if state.status == ChannelStatus::Closed {
-        return Err(ChannelError::ChannelAlreadyClosed.into());
+    if state.status != ChannelStatus::Open {
+        return Err(channel_not_open_error(&state));
     }
 
     invoke(
@@ -134,8 +138,8 @@ fn redeem(accounts: &[AccountInfo], cumulative_amount: u64, signature: Vec<u8>) 
     }
 
     let mut state = Channel::read(&channel.try_borrow_data()?)?;
-    if state.status == ChannelStatus::Closed {
-        return Err(ChannelError::ChannelAlreadyClosed.into());
+    if state.status == ChannelStatus::Settled {
+        return Err(ChannelError::ChannelAlreadySettled.into());
     }
     if cumulative_amount <= state.redeemed {
         return Err(ChannelError::StaleClaim.into());
@@ -178,12 +182,79 @@ fn close(accounts: &[AccountInfo]) -> ProgramResult {
     }
 
     let mut state = Channel::read(&channel.try_borrow_data()?)?;
-    if state.status == ChannelStatus::Closed {
-        return Err(ChannelError::ChannelAlreadyClosed.into());
+    if state.status != ChannelStatus::Open {
+        return Err(channel_not_open_error(&state));
     }
 
     state.status = ChannelStatus::Closed;
+    state.closed_at = Clock::get()?.unix_timestamp;
     state.write(&mut channel.try_borrow_mut_data()?)?;
     msg!("channel closed: {}", channel.key);
     Ok(())
+}
+
+/// Settle a channel once its challenge period -- `closed_at +
+/// settlement_timeout` -- has elapsed: pays out its remaining, unredeemed
+/// deposit to `payer` and marks it permanently done. Fails with
+/// `SettlementNotYetDue` if called too early (including against a channel
+/// that was never closed at all -- its deadline is unreachable).
+/// Deliberately permissionless (issue #574, matching
+/// `TokenNetwork.settleChannel`): no signer-identity check beyond "some
+/// transaction fee payer signed this", so a counterparty cannot strand a
+/// channel's deposit by refusing to ever settle it.
+fn settle(accounts: &[AccountInfo]) -> ProgramResult {
+    let accounts_iter = &mut accounts.iter();
+    let caller = next_account_info(accounts_iter)?;
+    let channel = next_account_info(accounts_iter)?;
+    let payer_account = next_account_info(accounts_iter)?;
+
+    if !caller.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    let mut state = Channel::read(&channel.try_borrow_data()?)?;
+    if state.status == ChannelStatus::Settled {
+        return Err(ChannelError::ChannelAlreadySettled.into());
+    }
+    let available_at = if state.status == ChannelStatus::Closed {
+        state.closed_at.saturating_add(state.settlement_timeout)
+    } else {
+        i64::MAX
+    };
+    let now = Clock::get()?.unix_timestamp;
+    if now < available_at {
+        return Err(ChannelError::SettlementNotYetDue.into());
+    }
+    if payer_account.key != &state.payer {
+        return Err(ChannelError::WrongPayoutAccount.into());
+    }
+
+    let refund = state.deposited.saturating_sub(state.redeemed);
+    if refund > 0 {
+        **channel.try_borrow_mut_lamports()? = channel
+            .lamports()
+            .checked_sub(refund)
+            .ok_or(ProgramError::InsufficientFunds)?;
+        **payer_account.try_borrow_mut_lamports()? = payer_account
+            .lamports()
+            .checked_add(refund)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+    }
+
+    state.status = ChannelStatus::Settled;
+    state.write(&mut channel.try_borrow_mut_data()?)?;
+    msg!("channel settled: {} refund={}", channel.key, refund);
+    Ok(())
+}
+
+/// `fund` and `close` both require `Open`; distinguish `Closed` from
+/// `Settled` in the error reported rather than collapsing both into
+/// `ChannelAlreadyClosed` (issue #574 -- mirrors `SettlementChannel.sol`'s
+/// `_open`).
+fn channel_not_open_error(state: &Channel) -> ProgramError {
+    if state.status == ChannelStatus::Settled {
+        ChannelError::ChannelAlreadySettled.into()
+    } else {
+        ChannelError::ChannelAlreadyClosed.into()
+    }
 }

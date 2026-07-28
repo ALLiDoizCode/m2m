@@ -19,6 +19,15 @@ pub enum ChannelError {
     WrongPayoutAccount = 3,
     CounterpartyTooLong = 4,
     ChannelAlreadyInitialized = 5,
+    /// The channel is `Settled` and the attempted operation requires it
+    /// not be (issue #574). Distinct from `ChannelAlreadyClosed`, which
+    /// still permits `Redeem`: nothing is possible against a settled
+    /// channel.
+    ChannelAlreadySettled = 6,
+    /// `Settle` was called before its channel's challenge period --
+    /// `settlement_timeout`, counted from `Close` -- has elapsed, or
+    /// before `Close` was ever called at all (issue #574).
+    SettlementNotYetDue = 7,
 }
 
 impl From<ChannelError> for ProgramError {
