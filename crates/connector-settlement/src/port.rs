@@ -152,6 +152,15 @@ pub enum SettlementError {
     )]
     StaleNonce { claimed: u64, already_redeemed: u64 },
 
+    /// A claim's `signature` could not be put into the form its chain's
+    /// verifier requires (issue #590) -- e.g. an EVM claim whose trailing
+    /// recovery-id byte is outside both libsecp256k1's `{0, 1}` and
+    /// Ethereum's `{27, 28}` conventions. Named distinctly so a malformed
+    /// claim is refused before it is ever submitted, rather than
+    /// discovered as a reverted on-chain transaction.
+    #[error("claim signature is invalid: {0}")]
+    InvalidClaimSignature(String),
+
     #[error("settlement backend error: {0}")]
     Backend(String),
 }

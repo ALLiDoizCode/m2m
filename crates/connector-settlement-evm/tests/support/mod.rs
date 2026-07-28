@@ -111,15 +111,19 @@ pub fn channel_id_bytes(id: &str) -> [u8; 32] {
     out
 }
 
-/// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
-/// `r || s || v` signature, `v` in the conventional `{27, 28}` range) --
-/// what `TokenNetwork.claimFromChannel`'s `ECDSA.recover` requires.
+/// Sign `digest` exactly the way the production peer-wire/client-edge
+/// signing path does (`connector_signer::crypto::sign_digest`): a 65-byte
+/// `r || s || v` signature with `v` in libsecp256k1's raw `{0, 1}` range,
+/// *not* the `{27, 28}` an EVM wallet would append. `EvmSettlementBackend`
+/// itself normalizes that before submitting to `claimFromChannel` (issue
+/// #590) -- a test signing the wallet range here would paper over that
+/// normalization never being exercised.
 pub fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
     let message = Message::parse(digest);
     let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
     let mut bytes = signature.serialize().to_vec();
     let recovery_byte: u8 = recovery_id.into();
-    bytes.push(recovery_byte + 27);
+    bytes.push(recovery_byte);
     bytes
 }
 
