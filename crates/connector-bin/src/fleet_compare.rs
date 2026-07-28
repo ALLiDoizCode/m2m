@@ -58,7 +58,7 @@
 use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
-use connector_domain::{derive_condition, Fulfill, Prepare, Reject};
+use connector_domain::{derive_condition, EnvelopeRequest, Fulfill, Prepare, Reject};
 use serde::Deserialize;
 
 /// One fleet to drive packets at: its client edge's base URL (e.g.
@@ -130,7 +130,19 @@ impl PacketSpec {
             expires_at: Utc::now() + ChronoDuration::seconds(self.expires_in_seconds),
             execution_condition: condition,
             destination: format!("{prefix}.{}", self.destination),
-            data: self.data.clone().into_bytes(),
+            // ADR 0018/issue #519: a terminated route now reads a
+            // structured envelope out of `data` rather than an opaque
+            // body, still plaintext at this point (sealing is issue
+            // #524) -- a minimal `POST /` envelope around this spec's own
+            // `data` field, matching every app this harness drives (a
+            // single handler mounted at `/`).
+            data: EnvelopeRequest {
+                method: "POST".to_string(),
+                target: "/".to_string(),
+                headers: vec![],
+                body: self.data.clone().into_bytes(),
+            }
+            .encode(),
         }
     }
 }

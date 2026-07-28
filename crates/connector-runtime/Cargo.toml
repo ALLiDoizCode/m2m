@@ -22,6 +22,6 @@ url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-hyper = { version = "0.14", features = ["server", "http1", "tcp", "runtime"] }
+hyper = { version = "0.14", features = ["server", "http1", "tcp", "runtime", "stream"] }
 tempfile = "3"
 proptest = "1"
