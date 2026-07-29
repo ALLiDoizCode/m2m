@@ -17,10 +17,11 @@ impl Signature {
     /// `r || s || recovery_id`, 65 bytes -- the one encoding this crate's
     /// callers use whenever a signature needs to travel as opaque bytes
     /// (the peer wire's `WireClaim`, and a claim journaled for later
-    /// on-chain redemption, issue #425). Neither `connector-settlement`
-    /// backend verifies this signature on chain (it is logged only as an
-    /// audit trail), so the same raw encoding round-trips to either chain
-    /// unchanged.
+    /// on-chain redemption, issue #425). `recovery_id` here is always
+    /// libsecp256k1's raw `{0, 1}`, never the Ethereum-wallet `{27, 28}`
+    /// convention (issue #590) -- `EvmSettlementBackend::redeem` is the
+    /// one place that gets converted, immediately before a real on-chain
+    /// `TokenNetwork.claimFromChannel` call recovers and verifies it.
     pub fn to_bytes(&self) -> [u8; 65] {
         let mut bytes = [0u8; 65];
         bytes[..32].copy_from_slice(&self.r);

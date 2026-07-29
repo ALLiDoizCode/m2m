@@ -457,6 +457,37 @@ fn backend_error<E: std::fmt::Display>(error: E) -> SettlementError {
     SettlementError::Backend(error.to_string())
 }
 
+/// Put a claim's `r || s || v` signature's trailing recovery-id byte into
+/// the `{27, 28}` range `TokenNetwork.claimFromChannel`'s `ECDSA.recover`
+/// requires (issue #590). The peer wire (and every other producer of a
+/// [`Claim`]) carries whatever libsecp256k1 itself emits -- `{0, 1}` -- so
+/// this is the one place that convention is bridged to the Ethereum-wallet
+/// one an on-chain verifier expects; a value already in `{27, 28}` is left
+/// unchanged rather than shifted again, so this is safe to call regardless
+/// of which convention a caller happens to hand in. Anything else is a
+/// malformed signature refused up front rather than submitted to revert on
+/// chain.
+fn normalize_recovery_id(mut signature: Vec<u8>) -> Result<Vec<u8>, SettlementError> {
+    let Some(&last) = signature.last() else {
+        return Err(SettlementError::InvalidClaimSignature(
+            "claim signature is empty".to_string(),
+        ));
+    };
+    let normalized = match last {
+        0 | 1 => last + 27,
+        27 | 28 => last,
+        other => {
+            return Err(SettlementError::InvalidClaimSignature(format!(
+                "recovery id {other} is outside both libsecp256k1's {{0,1}} and Ethereum's \
+                 {{27,28}} ranges"
+            )))
+        }
+    };
+    let last_index = signature.len() - 1;
+    signature[last_index] = normalized;
+    Ok(signature)
+}
+
 /// Wait for `pending` to mine and confirm it actually succeeded (issue
 /// #425: "confirmation ... handled explicitly rather than assumed",
 /// "a failed or reverted settlement transaction leaves recoverable
@@ -578,9 +609,10 @@ impl SettlementBackend for EvmSettlementBackend {
             locked_amount: U256::zero(),
             locks_root: [0u8; 32],
         };
-        let call =
-            self.contract
-                .claim_from_channel(id, balance_proof, Bytes::from(claim.signature));
+        let signature = normalize_recovery_id(claim.signature)?;
+        let call = self
+            .contract
+            .claim_from_channel(id, balance_proof, Bytes::from(signature));
         let pending = call.send().await.map_err(backend_error)?;
         confirm(pending).await?;
 
@@ -626,5 +658,65 @@ impl SettlementBackend for EvmSettlementBackend {
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         self.read_state(channel, id).await
+    }
+}
+
+#[cfg(test)]
+mod recovery_id_tests {
+    use super::normalize_recovery_id;
+    use connector_settlement::SettlementError;
+
+    fn signature_ending_in(last: u8) -> Vec<u8> {
+        let mut bytes = vec![0u8; 65];
+        bytes[64] = last;
+        bytes
+    }
+
+    #[test]
+    fn a_libsecp256k1_recovery_id_of_zero_is_normalized_to_the_ethereum_wallet_convention() {
+        let normalized = normalize_recovery_id(signature_ending_in(0)).unwrap();
+        assert_eq!(normalized.last(), Some(&27));
+    }
+
+    #[test]
+    fn a_libsecp256k1_recovery_id_of_one_is_normalized_to_the_ethereum_wallet_convention() {
+        let normalized = normalize_recovery_id(signature_ending_in(1)).unwrap();
+        assert_eq!(normalized.last(), Some(&28));
+    }
+
+    #[test]
+    fn a_recovery_id_already_in_the_ethereum_wallet_convention_is_left_unchanged() {
+        assert_eq!(
+            normalize_recovery_id(signature_ending_in(27))
+                .unwrap()
+                .last(),
+            Some(&27)
+        );
+        assert_eq!(
+            normalize_recovery_id(signature_ending_in(28))
+                .unwrap()
+                .last(),
+            Some(&28)
+        );
+    }
+
+    #[test]
+    fn normalization_is_idempotent_and_never_shifts_an_already_normalized_signature_again() {
+        let once = normalize_recovery_id(signature_ending_in(0)).unwrap();
+        let twice = normalize_recovery_id(once.clone()).unwrap();
+        assert_eq!(once, twice);
+        assert_eq!(twice.last(), Some(&27));
+    }
+
+    #[test]
+    fn an_out_of_range_recovery_id_is_refused_with_a_named_error_rather_than_submitted() {
+        let error = normalize_recovery_id(signature_ending_in(2)).unwrap_err();
+        assert!(matches!(error, SettlementError::InvalidClaimSignature(_)));
+    }
+
+    #[test]
+    fn an_empty_signature_is_refused_rather_than_panicking() {
+        let error = normalize_recovery_id(Vec::new()).unwrap_err();
+        assert!(matches!(error, SettlementError::InvalidClaimSignature(_)));
     }
 }
