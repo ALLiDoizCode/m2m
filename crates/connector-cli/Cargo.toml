@@ -15,6 +15,7 @@ connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
 axum = "0.6"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
+tracing = "0.1"
 
 [dev-dependencies]
 connector-operator = { path = "../connector-operator", features = ["test-util"] }

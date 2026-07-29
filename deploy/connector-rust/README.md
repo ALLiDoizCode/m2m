@@ -144,6 +144,28 @@ exit-1, not a runtime surprise. Only `chain = "evm"` is accepted today.
 boots exactly that block against a freshly deployed registry on anvil, so it
 is a template that is known to load.
 
+## 4c. Durable claim state
+
+`connector.toml` sets `state_dir = "/app/state"`. That directory holds the
+append-only claim journals — `client-edge-claims.log` and `peer-claims.log` —
+whose replay is what makes a claim's **replay watermark** survive a restart.
+Without it the watermarks live only in process memory: a restart resets every
+channel to "no claim ever seen", and a channel with no watermark accepts any
+nonce, so every claim a client has already spent becomes free service again
+(issue #605).
+
+It must be a **volume**, not a path inside the container's writable layer — a
+watermark that dies with the container is the same defect one indirection
+down. The image runs as uid `10001`; a named volume is chowned for you, a host
+bind mount is not (`chown 10001:10001` it first, exactly like `signer.key` in
+step 1).
+
+Two things fail closed here rather than degrading quietly:
+
+- a config with `[[client_channels]]` but no `state_dir` **does not load**;
+- a `state_dir` the node cannot write, or a journal it cannot replay (a
+  corrupt line), is an **exit 1 at startup**, naming the path.
+
 ## 5. Build the image
 
 ```bash
@@ -164,11 +186,19 @@ docker run --rm \
   -p 3000:3000 \
   -v "$(pwd)/deploy/connector-rust/connector.toml:/app/config/connector.toml:ro" \
   -v "$(pwd)/deploy/connector-rust/signer.key:/app/data/signer.key:ro" \
+  -v connector_rust_state:/app/state \
   connector-rust:local
 ```
 
 (The image's `CMD` already points at `/app/config/connector.toml` --
 nothing more to pass on the command line.)
+
+`-v connector_rust_state:/app/state` is the `state_dir` from step 4c. Drop it
+and the node still starts, but every claim watermark it holds dies with the
+container — which is the whole of issue #605. In a compose file the equivalent
+is a `connector_rust_state:/app/state` entry under `volumes:` for the service,
+plus a top-level `volumes: { connector_rust_state: }` — see
+`infra/linode-node/docker-compose.node.rust.yml`.
 
 ## 7. Verify
 

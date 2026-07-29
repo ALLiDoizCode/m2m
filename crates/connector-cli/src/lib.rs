@@ -96,7 +96,7 @@ pub async fn run<S: AsRef<str>>(args: &[S]) -> Result<RunningNode, CliError> {
     let config = load_config(args)?;
     let runtime = build(&config).await?;
     let client_edge_addr = config.client_edge_addr();
-    let router = router(&runtime, &config);
+    let router = router(&runtime, &config)?;
 
     let peer_wire_server = match config.peer_wire_addr() {
         Some(addr) => Some(

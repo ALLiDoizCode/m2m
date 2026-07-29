@@ -184,6 +184,16 @@ impl RejectCode {
         RejectCode("R01".to_string())
     }
 
+    /// T00: Internal Error -- this connector could not do its own part of
+    /// the work, through no fault of the packet. Retryable, and
+    /// deliberately temporary rather than final (issue #605): a claim this
+    /// connector could not durably record is refused under this code, so a
+    /// sender learns to retry rather than that its perfectly good claim was
+    /// invalid.
+    pub fn t00_internal_error() -> RejectCode {
+        RejectCode("T00".to_string())
+    }
+
     /// T01: Peer Unreachable -- the app could not be reached over HTTP.
     pub fn t01_peer_unreachable() -> RejectCode {
         RejectCode("T01".to_string())

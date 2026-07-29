@@ -33,6 +33,26 @@ client_edge_addr = "0.0.0.0:4000"
 # address it could bind is its own, which is what this already is.
 peer_wire_addr = "0.0.0.0:4001"
 
+# ── Durable claim state (issue #605) ──────────────────────────────────────
+# Where this node writes the claim journals whose replay is what makes a
+# replay watermark survive a restart. Without it, `ClientClaimGate` (and
+# `ClaimBook`) keep every channel's watermark in process memory only, so a
+# `docker compose up -d`, a crash or an OOM kill resets every channel to "no
+# claim ever seen" -- and a gate with no watermark accepts any nonce, which
+# makes every claim a client already spent free service again.
+#
+# This MUST be a mounted volume, not a path inside the container's writable
+# layer: a path that dies with the container is a watermark that dies with
+# the container, which is the same defect one indirection down. See
+# ./docker-compose.store.rust.yml's `connector_rust_state` volume, and note
+# the container runs as uid 10001 -- a named volume is chowned for it, a
+# bind mount of a host directory is not (`chown 10001:10001` it first).
+#
+# Config load refuses `[[client_channels]]` without this, and startup
+# refuses to boot at all if the directory cannot be written -- loudly, with
+# the path, rather than at the first claim hours later.
+state_dir = "/app/state"
+
 [signer]
 # Real key material, generated per-box, never committed — see
 # infra/linode-node/connector-rust.toml's own [signer] comment.

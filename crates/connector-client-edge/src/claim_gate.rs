@@ -43,14 +43,44 @@
 //! [`ClaimIngestRejection::ChannelLookupFailed`]: the claim is refused,
 //! loudly and distinguishably from a channel that genuinely does not
 //! exist, and under no circumstance falls back to trusting it.
+//!
+//! **What survives a restart** (issue #605): every watermark this gate
+//! advances is written to a [`Journal`] -- the same ADR 0005 port the peer
+//! wire's own `connector_runtime::ClaimBook` persists its watermarks
+//! through, and the same [`JournalEntry::InboundClaimAccepted`] alphabet,
+//! rather than a second persistence mechanism invented for this edge. A
+//! gate can only be built by [`ClientClaimGate::restore`], which replays
+//! that journal before serving anything, so a process that restarts
+//! resumes at the watermark it left off at instead of at `None` -- and
+//! `validate_claim(None, ..)` accepts any nonce, which makes every claim
+//! the client already spent free service again. Two consequences are
+//! deliberate and load-bearing:
+//!
+//! * A journal that cannot be read, or that has a line this build cannot
+//!   decode, is an error out of [`ClientClaimGate::restore`] -- the node
+//!   refuses to start rather than starting from zero, since starting from
+//!   zero is precisely the defect.
+//! * A claim whose acceptance cannot be made durable is **refused**
+//!   ([`ClaimIngestRejection::NotDurable`]) and advances nothing, rather
+//!   than accepted against an in-memory watermark a crash would erase. The
+//!   journal append happens before the in-memory watermark moves and
+//!   before the claim is handed back for the packet to be routed, exactly
+//!   as ADR 0005 requires ("the journal being written before value is
+//!   considered moved"). The append happens under the write lock that
+//!   decides the acceptance, after -- never across -- the channel
+//!   resolution await above, so a durable order is an accepted order and
+//!   no in-flight lookup stalls another packet.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use connector_domain::client_claim::{
     parse_client_claim, ClientClaim, ClientClaimError, EvmClientClaim, SolanaClientClaim,
 };
-use connector_domain::{advance_watermark, validate_claim, validate_price, ClaimError, Watermark};
+use connector_domain::{
+    advance_watermark, validate_claim, validate_price, ClaimError, JournalEntry, Watermark,
+};
+use connector_runtime::{Journal, JournalError};
 use connector_signer::{verify_evm_balance_proof, verify_solana_balance_proof, EvmBalanceProof};
 
 use crate::channels::{decode_base58_bytes, decode_hex_bytes, ClientChannelRegistry};
@@ -93,6 +123,16 @@ pub enum ClaimIngestRejection {
     /// refuse the claim -- an unverifiable claim is never accepted.
     ChannelLookupFailed(String),
     SignatureInvalid,
+    /// The claim was structurally valid, fresh, value-covering and
+    /// correctly signed -- and this connector could not durably record
+    /// having accepted it (issue #605). Kept distinct from every refusal
+    /// above for the same reason they are kept distinct from each other:
+    /// nothing is wrong with the claim, so a sender must not be told its
+    /// claim was invalid, and the same claim resubmitted once this
+    /// connector's journal is writable again is still good. This is the
+    /// only refusal here that is this connector's own fault, and the only
+    /// one answered as a temporary (`T00`) rather than a final error.
+    NotDurable,
     WrapUnsupported,
     WrapFailed(String),
 }
@@ -131,6 +171,10 @@ impl ClaimIngestRejection {
             ClaimIngestRejection::SignatureInvalid => "claim rejected: signature does not \
                  verify against this channel's recorded counterparty"
                 .to_string(),
+            ClaimIngestRejection::NotDurable => "claim rejected: this connector could not \
+                 durably record having accepted this claim, and will not accept a claim it \
+                 could not remember spending -- retry"
+                .to_string(),
             ClaimIngestRejection::WrapUnsupported => "claim rejected: this connector is not \
                  configured to unwrap a privacy-wrapped claim"
                 .to_string(),
@@ -142,27 +186,68 @@ impl ClaimIngestRejection {
 }
 
 /// Per-channel watermark state for claims presented at the client edge,
-/// over the channels this connector has a record of.
+/// over the channels this connector has a record of -- durable across a
+/// restart, since a watermark that only lives in this process is not a
+/// replay defence at all (issue #605). See this module's own doc.
 pub struct ClientClaimGate {
     /// Whose signature this gate accepts, per channel (issue #558). Fixed
     /// at construction rather than mutable behind the lock: a channel's
     /// counterparty is configuration, not something an arriving claim may
     /// teach this connector.
     channels: ClientChannelRegistry,
+    /// The live watermarks, and the durable record they are recovered
+    /// from, held behind the *same* lock (issue #605): every accepted
+    /// claim is journaled and then reflected here, and no other claim on
+    /// any channel is judged in between, so the durable record and the
+    /// in-memory one can never disagree about what was accepted or in
+    /// what order.
     watermarks: RwLock<HashMap<String, Watermark>>,
+    journal: Arc<dyn Journal>,
 }
 
 impl ClientClaimGate {
-    /// A gate accepting claims on `channels` and no others. An empty
-    /// registry refuses every claim as
+    /// A gate accepting claims on `channels` and no others, resuming from
+    /// the watermarks `journal` already records (issue #605).
+    ///
+    /// This is the only way to build a gate, and it always replays: there
+    /// is deliberately no constructor that starts a gate at no watermarks
+    /// without saying where its watermarks came from, because a gate that
+    /// silently starts at `None` accepts every nonce a client has already
+    /// spent.
+    ///
+    /// An empty registry refuses every claim as
     /// [`ClaimIngestRejection::UnknownChannel`] -- see
     /// [`crate::ClientChannelRegistry`]'s own doc for why that is the
     /// intended failure mode rather than an oversight.
-    pub fn new(channels: ClientChannelRegistry) -> ClientClaimGate {
-        ClientClaimGate {
+    ///
+    /// # Errors
+    ///
+    /// A journal that cannot be read, or that carries a line this build
+    /// cannot decode ([`JournalError::Corrupt`]). The caller must fail --
+    /// per ADR 0009, before anything else starts -- rather than fall back
+    /// to an empty set of watermarks.
+    pub fn restore(
+        channels: ClientChannelRegistry,
+        journal: Arc<dyn Journal>,
+    ) -> Result<ClientClaimGate, JournalError> {
+        let watermarks = replay_watermarks(&journal.read_all()?);
+        Ok(ClientClaimGate {
             channels,
-            watermarks: RwLock::new(HashMap::new()),
-        }
+            watermarks: RwLock::new(watermarks),
+            journal,
+        })
+    }
+
+    /// The watermark this gate currently holds for `channel_key` (the
+    /// chain-namespaced key `ClientClaim::channel_key` produces), or `None`
+    /// if it has never accepted a claim on that channel. Read-only: the
+    /// only thing that advances a watermark is a fully accepted claim.
+    pub fn watermark(&self, channel_key: &str) -> Option<Watermark> {
+        self.watermarks
+            .read()
+            .expect("client claim watermarks lock poisoned")
+            .get(channel_key)
+            .copied()
     }
 
     /// Parse and fully validate a plaintext claim JSON body (already
@@ -173,9 +258,10 @@ impl ClientClaimGate {
     /// last, the claim's signature against the counterparty recorded for
     /// the channel it names (issue #506/#544, #558).
     /// Advances this claim's channel watermark only when the claim is
-    /// fully accepted -- a rejected claim, whether stale, underpaying or
-    /// unverifiable, leaves the watermark exactly as it was, so a
-    /// corrected resubmission is still judged against the same baseline.
+    /// fully accepted -- a rejected claim, whether stale, underpaying,
+    /// unverifiable or unrecordable, leaves the watermark exactly as it
+    /// was, so a corrected resubmission is still judged against the same
+    /// baseline.
     ///
     /// `async` because resolving a channel nothing declared is a read
     /// against a chain (issue #556). The watermark lock is deliberately
@@ -187,6 +273,20 @@ impl ClientClaimGate {
     /// under the write lock immediately before the watermark advances,
     /// which is what makes two concurrent claims on one channel still
     /// serialise. The second evaluation is the authoritative one.
+    ///
+    /// The advance is made durable before it is made visible (issue #605):
+    /// the accepted claim is appended to this gate's journal, and only if
+    /// that append reports the entry durable does the in-memory watermark
+    /// move and the claim come back `Ok`. An append that fails refuses the
+    /// claim as [`ClaimIngestRejection::NotDurable`] and changes nothing,
+    /// so this connector never renders service against a watermark a
+    /// restart would forget. That append is the *last* thing before the
+    /// watermark moves, inside the same write lock the authoritative
+    /// re-check was decided under and after the channel resolution await
+    /// has already completed -- the two requirements compose rather than
+    /// compete, because the only work that has to happen across the await
+    /// is the lookup, and the only work that has to happen under the lock
+    /// is the re-check, the append and the advance, in that order.
     pub async fn ingest(
         &self,
         claim_json: &str,
@@ -206,7 +306,9 @@ impl ClientClaimGate {
             check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
         }
 
-        verify_claim_signature(&self.channels, &claim).await?;
+        // The one await, and the only work that has to happen outside the
+        // lock -- so it is also the last thing that happens outside it.
+        let signature = verify_claim_signature(&self.channels, &claim).await?;
 
         let mut watermarks = self
             .watermarks
@@ -217,6 +319,32 @@ impl ClientClaimGate {
         // the channel lookup was in flight, and accepting both would be
         // exactly the replay this gate exists to refuse.
         check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
+
+        // Durable first, visible second (ADR 0005, issue #605). Under the
+        // same write lock, and after the authoritative re-check just
+        // above, so the order entries land in the journal is exactly the
+        // order watermarks advanced in -- a replay of the journal after a
+        // restart reconstructs this state and not some interleaving of it.
+        // Nothing awaits between here and the insert below, so the lock
+        // spans a decision and an fsync and no I/O this gate has to wait
+        // on a chain for.
+        // The signature is retained rather than discarded for the same
+        // reason the peer wire retains it (issue #425): a watermark says
+        // what was spent, but only the claim itself is redeemable.
+        if let Err(err) = self.journal.append(&JournalEntry::InboundClaimAccepted {
+            channel_id: key.clone(),
+            nonce: claim.nonce(),
+            cumulative_amount: claim.transferred_amount(),
+            signature,
+        }) {
+            tracing::error!(
+                %err,
+                channel = %key,
+                "refusing a valid claim: its acceptance could not be durably recorded"
+            );
+            return Err(ClaimIngestRejection::NotDurable);
+        }
+
         watermarks.insert(
             key,
             advance_watermark(claim.nonce(), claim.transferred_amount()),
@@ -254,6 +382,44 @@ fn check_freshness_and_value(
     Ok(())
 }
 
+/// Rebuild the per-channel watermarks a journal records, folding every
+/// [`JournalEntry::InboundClaimAccepted`] in it -- the client edge's own
+/// half of the replay `connector_runtime::ClaimBook::set_journal` does for
+/// the peer wire, over the same entry.
+///
+/// Componentwise `max` rather than last-wins, unlike the peer wire's fold:
+/// entries are appended in accepted order and each accepted claim strictly
+/// advances, so the two agree on any journal this gate itself wrote. They
+/// differ only on a journal that has been reordered or spliced, and there
+/// the direction of the disagreement matters -- a watermark recovered by
+/// `max` can never come back lower than something already accepted, which
+/// is the one failure this whole mechanism exists to prevent.
+///
+/// Entries of other kinds are ignored rather than refused: the entry
+/// alphabet is shared with the peer wire, and this gate is only the
+/// authority on the ones it writes.
+fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, Watermark> {
+    let mut watermarks: HashMap<String, Watermark> = HashMap::new();
+    for entry in entries {
+        let JournalEntry::InboundClaimAccepted {
+            channel_id,
+            nonce,
+            cumulative_amount,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        let watermark = watermarks.entry(channel_id.clone()).or_insert(Watermark {
+            nonce: 0,
+            cumulative_amount: 0,
+        });
+        watermark.nonce = watermark.nonce.max(*nonce);
+        watermark.cumulative_amount = watermark.cumulative_amount.max(*cumulative_amount);
+    }
+    watermarks
+}
+
 /// Verify a claim's signature against the counterparty `channels` records
 /// for the channel it names -- the gate's last stage, run only once
 /// structure, freshness and value have all passed (issue #506/#544, #558).
@@ -261,10 +427,15 @@ fn check_freshness_and_value(
 /// precisely because it is the *signature's* missing half: a replay or an
 /// underpayment is still refused for what it is, before this connector
 /// spends any cryptographic work, exactly as #544 ordered it.
+///
+/// Returns the verified signature's raw bytes -- decoded here anyway to
+/// check it, and what the journal entry recording this claim's acceptance
+/// carries (issue #605/#425), so nothing downstream has to re-parse the
+/// claim's chain-specific wire encoding to learn them.
 async fn verify_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &ClientClaim,
-) -> Result<(), ClaimIngestRejection> {
+) -> Result<Vec<u8>, ClaimIngestRejection> {
     match claim {
         ClientClaim::Evm(claim) => verify_evm_claim_signature(channels, claim).await,
         ClientClaim::Solana(claim) => verify_solana_claim_signature(channels, claim),
@@ -274,7 +445,7 @@ async fn verify_claim_signature(
 async fn verify_evm_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &EvmClientClaim,
-) -> Result<(), ClaimIngestRejection> {
+) -> Result<Vec<u8>, ClaimIngestRejection> {
     // An id that is not a 32-byte `channelId` cannot be a channel this
     // connector recorded, and cannot be one any chain could resolve either
     // -- so it is unknown rather than merely unverifiable, and is settled
@@ -325,7 +496,7 @@ async fn verify_evm_claim_signature(
         token_network_address: channel.token_network_address,
     };
     if verify_evm_balance_proof(&proof, &signature, &channel.counterparty) {
-        Ok(())
+        Ok(signature.to_vec())
     } else {
         Err(ClaimIngestRejection::SignatureInvalid)
     }
@@ -334,7 +505,7 @@ async fn verify_evm_claim_signature(
 fn verify_solana_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &SolanaClientClaim,
-) -> Result<(), ClaimIngestRejection> {
+) -> Result<Vec<u8>, ClaimIngestRejection> {
     let Some(channel_account) = decode_base58_bytes::<32>(&claim.channel_account) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
@@ -358,7 +529,7 @@ fn verify_solana_claim_signature(
         &signature,
         &counterparty,
     ) {
-        Ok(())
+        Ok(signature)
     } else {
         Err(ClaimIngestRejection::SignatureInvalid)
     }
@@ -369,6 +540,7 @@ mod tests {
     use super::*;
     use crate::channels::test_source::FakeChannelSource;
     use crate::channels::EvmChannel;
+    use connector_runtime::{FileJournal, InMemoryJournal};
     use connector_signer::{derive_evm_address, evm_balance_proof_digest, to_hex, Address};
     use libsecp256k1::{Message, PublicKey, SecretKey};
     use std::sync::Arc;
@@ -407,9 +579,22 @@ mod tests {
         channels
     }
 
-    /// A gate with a record of [`test_channels`] and nothing else.
+    /// A gate with a record of [`test_channels`] and nothing else, over a
+    /// journal that lives only as long as the gate does. Every test below
+    /// that is not about durability uses this; the durability tests build
+    /// their own gates over a [`FileJournal`] so that a "restart" is a
+    /// second gate on the same path, not a mocked one.
     fn gate() -> ClientClaimGate {
-        ClientClaimGate::new(test_channels())
+        gate_over(test_channels())
+    }
+
+    /// A gate over `channels`, journaling somewhere that lives no longer
+    /// than the test does. Tests about *which* claims a gate accepts use
+    /// this; that an accepted watermark outlives the process is the
+    /// `durability` module's own subject, and it uses a real file.
+    fn gate_over(channels: ClientChannelRegistry) -> ClientClaimGate {
+        ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
     }
 
     /// A fixed, deterministic EVM keypair -- deterministic on purpose, since
@@ -816,7 +1001,11 @@ mod tests {
     /// falling back to the claim's own declared signer (issue #558's AC8).
     #[tokio::test]
     async fn a_gate_with_no_recorded_channels_accepts_nothing() {
-        let gate = ClientClaimGate::new(ClientChannelRegistry::new());
+        let gate = ClientClaimGate::restore(
+            ClientChannelRegistry::new(),
+            Arc::new(InMemoryJournal::new()),
+        )
+        .expect("a fresh in-memory journal has nothing to replay");
         assert_eq!(
             gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await,
             Err(ClaimIngestRejection::UnknownChannel)
@@ -837,7 +1026,7 @@ mod tests {
     async fn a_claim_on_a_channel_only_the_chain_knows_about_is_accepted() {
         let (_secret, address) = evm_signer();
         let channel_id = decode_hex_bytes::<32>(&unrecorded_channel_id()).unwrap();
-        let gate = ClientClaimGate::new(ClientChannelRegistry::new().with_source(Arc::new(
+        let gate = gate_over(ClientChannelRegistry::new().with_source(Arc::new(
             FakeChannelSource::knowing(vec![(
                 channel_id,
                 EvmChannel {
@@ -867,7 +1056,7 @@ mod tests {
         let forger = SecretKey::parse(&[13u8; 32]).unwrap();
         let forger_address = derive_evm_address(&PublicKey::from_secret_key(&forger).serialize());
         let (_secret, genuine) = evm_signer();
-        let gate = ClientClaimGate::new(ClientChannelRegistry::new().with_source(Arc::new(
+        let gate = gate_over(ClientChannelRegistry::new().with_source(Arc::new(
             FakeChannelSource::knowing(vec![(
                 channel_id,
                 EvmChannel {
@@ -893,7 +1082,7 @@ mod tests {
     /// random.
     #[tokio::test]
     async fn a_claim_whose_channel_lookup_fails_is_refused_distinguishably() {
-        let gate = ClientClaimGate::new(ClientChannelRegistry::new().with_source(Arc::new(
+        let gate = gate_over(ClientChannelRegistry::new().with_source(Arc::new(
             FakeChannelSource::unreachable("connection refused"),
         )));
 
@@ -930,9 +1119,11 @@ mod tests {
                 },
             )
             .expect("a 32-byte hex channel id");
-        let gate = ClientClaimGate::new(channels.with_source(Arc::new(
-            FakeChannelSource::unreachable("connection refused"),
-        )));
+        let gate = gate_over(
+            channels.with_source(Arc::new(FakeChannelSource::unreachable(
+                "connection refused",
+            ))),
+        );
 
         assert!(gate
             .ingest(&evm_claim_json(&channel_id(), 1, 100), 0)
@@ -1289,6 +1480,359 @@ mod tests {
 
         let result = gate.ingest(&claim, 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::SignatureInvalid));
+    }
+
+    // -- Watermark durability across a restart (issue #605) --
+
+    mod durability {
+        use super::*;
+
+        /// A [`Journal`] whose `append` always fails -- ADR 0007's fake,
+        /// not a mock: a real journal on a full or read-only disk behaves
+        /// exactly like this, and the gate must refuse claims rather than
+        /// accept ones it cannot remember.
+        struct UnwritableJournal;
+
+        impl Journal for UnwritableJournal {
+            fn append(&self, _entry: &JournalEntry) -> Result<(), JournalError> {
+                Err(JournalError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "read-only journal",
+                )))
+            }
+
+            fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
+                Ok(Vec::new())
+            }
+        }
+
+        /// A [`Journal`] whose `read_all` fails, standing in for a journal
+        /// file that exists but cannot be read back.
+        struct UnreadableJournal;
+
+        impl Journal for UnreadableJournal {
+            fn append(&self, _entry: &JournalEntry) -> Result<(), JournalError> {
+                Ok(())
+            }
+
+            fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
+                Err(JournalError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "unreadable journal",
+                )))
+            }
+        }
+
+        fn file_gate(path: &std::path::Path) -> ClientClaimGate {
+            ClientClaimGate::restore(
+                test_channels(),
+                Arc::new(FileJournal::open(path).expect("open the journal file")),
+            )
+            .expect("replay the journal")
+        }
+
+        /// Issue #605's own failure, end to end: a client spends a claim,
+        /// the process restarts, and the client re-presents the very same
+        /// claim. Before this fix the restarted gate held no watermark for
+        /// the channel and accepted it -- and every claim above it -- as
+        /// fresh, so 50 already-spent writes became 50 free ones.
+        #[tokio::test]
+        async fn a_claim_accepted_before_a_restart_is_refused_after_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+            let channel = channel_id();
+
+            {
+                let gate = file_gate(&path);
+                gate.ingest(&evm_claim_json(&channel, 50, 50_000), 1000)
+                    .await
+                    .expect("the first process accepts the claim");
+            }
+
+            // A second gate over the same journal file: a restarted
+            // process, reading the same durable state off the same disk.
+            let restarted = file_gate(&path);
+
+            assert_eq!(
+                restarted
+                    .ingest(&evm_claim_json(&channel, 50, 50_000), 1000)
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing),
+                "a claim already spent before the restart must not be spendable after it"
+            );
+        }
+
+        /// The rest of the replay-attack surface the ticket names: not
+        /// just the last claim, but every lower nonce beneath it.
+        #[tokio::test]
+        async fn no_nonce_at_or_below_the_pre_restart_watermark_is_spendable_after_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+            let channel = channel_id();
+
+            {
+                let gate = file_gate(&path);
+                for nonce in 1..=5 {
+                    gate.ingest(&evm_claim_json(&channel, nonce, nonce * 1000), 1000)
+                        .await
+                        .expect("a run of claims, each advancing by the price");
+                }
+            }
+
+            let restarted = file_gate(&path);
+            for nonce in 1..=5 {
+                assert_eq!(
+                    restarted
+                        .ingest(&evm_claim_json(&channel, nonce, nonce * 1000), 1000)
+                        .await,
+                    Err(ClaimIngestRejection::NonceNotAdvancing),
+                    "nonce {nonce} was spent before the restart"
+                );
+            }
+
+            // The next genuinely fresh claim still works: recovery
+            // restores the watermark, it does not wedge the channel.
+            assert!(restarted
+                .ingest(&evm_claim_json(&channel, 6, 6000), 1000)
+                .await
+                .is_ok());
+        }
+
+        /// Recovery is per channel, not a single global high-water mark:
+        /// a channel that was never claimed on before the restart still
+        /// accepts its first claim afterwards.
+        #[tokio::test]
+        async fn a_restart_recovers_each_channels_watermark_independently() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+
+            {
+                let gate = file_gate(&path);
+                gate.ingest(&evm_claim_json(&channel_id(), 9, 9000), 0)
+                    .await
+                    .expect("first channel claimed on");
+            }
+
+            let restarted = file_gate(&path);
+            assert_eq!(
+                restarted
+                    .ingest(&evm_claim_json(&channel_id(), 9, 9000), 0)
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+            assert!(restarted
+                .ingest(&evm_claim_json(&second_channel_id(), 1, 10), 0)
+                .await
+                .is_ok());
+        }
+
+        /// Solana claims recover the same way -- the journal is keyed by
+        /// the same chain-namespaced `channel_key` the live watermark map
+        /// is, so neither chain's recovery can answer for the other's.
+        #[tokio::test]
+        async fn a_solana_claim_accepted_before_a_restart_is_refused_after_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+
+            {
+                let gate = file_gate(&path);
+                gate.ingest(
+                    &genuine_solana_claim_json(&SOLANA_CHANNEL_ACCOUNT, 4, 400),
+                    0,
+                )
+                .await
+                .expect("the first process accepts the claim");
+            }
+
+            let restarted = file_gate(&path);
+            assert_eq!(
+                restarted
+                    .ingest(
+                        &genuine_solana_claim_json(&SOLANA_CHANNEL_ACCOUNT, 4, 400),
+                        0
+                    )
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+        }
+
+        /// A refused claim leaves nothing durable behind either: the
+        /// journal is a record of what was *accepted*, so a corrected
+        /// resubmission after a restart is still judged against the same
+        /// baseline the live process judged it against.
+        #[tokio::test]
+        async fn a_refused_claim_writes_nothing_a_restart_could_recover() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+            let channel = channel_id();
+
+            {
+                let gate = file_gate(&path);
+                gate.ingest(&evm_claim_json(&channel, 1, 99), 100)
+                    .await
+                    .unwrap_err(); // underpayment
+            }
+
+            let restarted = file_gate(&path);
+            assert_eq!(restarted.watermark(&format!("evm:{channel}")), None);
+            assert!(restarted
+                .ingest(&evm_claim_json(&channel, 1, 100), 100)
+                .await
+                .is_ok());
+        }
+
+        /// A claim this connector cannot durably record is refused, not
+        /// accepted against a watermark that only exists in this process
+        /// -- accepting it would be exactly the defect, one restart later.
+        #[tokio::test]
+        async fn a_claim_that_cannot_be_journaled_is_refused_and_advances_nothing() {
+            let gate = ClientClaimGate::restore(test_channels(), Arc::new(UnwritableJournal))
+                .expect("an unwritable journal still reads back empty");
+
+            assert_eq!(
+                gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await,
+                Err(ClaimIngestRejection::NotDurable)
+            );
+            assert_eq!(gate.watermark(&format!("evm:{}", channel_id())), None);
+        }
+
+        /// `NotDurable` is distinguishable from every other refusal, for
+        /// the same reason the others are distinguishable from each other:
+        /// nothing was wrong with this claim.
+        #[test]
+        fn a_not_durable_refusal_does_not_blame_the_claim() {
+            let message = ClaimIngestRejection::NotDurable.message();
+            assert!(message.contains("durably record"), "{message}");
+            assert_ne!(
+                ClaimIngestRejection::NotDurable,
+                ClaimIngestRejection::SignatureInvalid
+            );
+        }
+
+        /// A journal that cannot be read is a refusal to build a gate at
+        /// all, which the caller turns into a refusal to start (ADR 0009)
+        /// -- never a gate that quietly starts at no watermarks, since
+        /// that is the state that accepts every spent claim.
+        #[test]
+        fn an_unreadable_journal_refuses_to_produce_a_gate() {
+            let result = ClientClaimGate::restore(test_channels(), Arc::new(UnreadableJournal));
+            assert!(matches!(result, Err(JournalError::Io(_))));
+        }
+
+        /// A corrupt line is the same refusal: this build will not guess
+        /// what a line it cannot decode meant, and will not skip it.
+        #[tokio::test]
+        async fn a_corrupt_journal_line_refuses_to_produce_a_gate() {
+            use std::io::Write;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+            {
+                let gate = file_gate(&path);
+                gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0)
+                    .await
+                    .expect("one good entry");
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "this is not a journal entry").unwrap();
+            drop(file);
+
+            let result = ClientClaimGate::restore(
+                test_channels(),
+                Arc::new(FileJournal::open(&path).expect("open")),
+            );
+            assert!(matches!(result, Err(JournalError::Corrupt(_))));
+        }
+
+        /// A replayed watermark can only ever move forwards. The fold is
+        /// componentwise `max` rather than last-wins precisely so that a
+        /// journal whose entries are out of order -- however it got that
+        /// way -- cannot hand a restarted node a *lower* watermark than
+        /// one already accepted, which is the failure this whole
+        /// mechanism exists to prevent.
+        #[test]
+        fn replay_never_recovers_a_watermark_lower_than_one_already_recorded() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 7,
+                    cumulative_amount: 700,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 2,
+                    cumulative_amount: 200,
+                    signature: vec![2],
+                },
+            ];
+
+            let watermarks = replay_watermarks(&entries);
+            assert_eq!(
+                watermarks.get("evm:0xabc").copied(),
+                Some(Watermark {
+                    nonce: 7,
+                    cumulative_amount: 700
+                })
+            );
+        }
+
+        /// Entries the peer wire writes share this journal's alphabet but
+        /// not this gate's authority: replaying them must not invent a
+        /// client-edge watermark out of an outbound claim or a fulfilment.
+        #[test]
+        fn replay_ignores_entries_that_are_not_accepted_inbound_claims() {
+            let entries = vec![
+                JournalEntry::OutboundClaimSigned {
+                    peer_id: "peer-b".to_string(),
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                },
+                JournalEntry::InboundFulfillmentRecorded {
+                    channel_id: "evm:0xabc".to_string(),
+                    amount: 50,
+                },
+            ];
+
+            assert!(replay_watermarks(&entries).is_empty());
+        }
+
+        /// The journal keeps the claim itself, not merely its watermark:
+        /// a watermark says what was spent, but only the signed claim is
+        /// redeemable on chain (issue #425), and this edge's claims are
+        /// the only ones a client-facing node ever holds.
+        #[tokio::test]
+        async fn an_accepted_claim_is_journaled_with_the_signature_it_was_verified_by() {
+            let journal = Arc::new(InMemoryJournal::new());
+            let gate = ClientClaimGate::restore(test_channels(), journal.clone())
+                .expect("nothing to replay");
+            gate.ingest(&evm_claim_json(&channel_id(), 3, 300), 0)
+                .await
+                .expect("accepted");
+
+            let entries = journal.read_all().unwrap();
+            assert_eq!(entries.len(), 1);
+            let JournalEntry::InboundClaimAccepted {
+                channel_id,
+                nonce,
+                cumulative_amount,
+                signature,
+            } = &entries[0]
+            else {
+                panic!("expected an accepted-claim entry, got {:?}", entries[0]);
+            };
+            assert_eq!(channel_id, &format!("evm:{}", super::channel_id()));
+            assert_eq!(*nonce, 3);
+            assert_eq!(*cumulative_amount, 300);
+            assert_eq!(
+                signature.len(),
+                65,
+                "the raw 65-byte EIP-712 signature, not its hex text"
+            );
+        }
     }
 
     #[tokio::test]

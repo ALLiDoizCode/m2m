@@ -78,9 +78,15 @@ services:
     volumes:
       - ./connector.local.toml:/app/config/connector.toml:ro
       - ./secrets:/app/secrets:ro
+      # Durable claim watermarks (issue #605) -- the `state_dir` named in
+      # ./connector.local.toml.
+      - connector_local_state:/app/state
     command: ['/app/config/connector.toml']
     ports:
       # 127.0.0.1 on purpose: a published port bypasses ufw, so an unadorned
       # "3000:3000" would put an unauthenticated client edge on the internet.
       - '127.0.0.1:3000:3000'
     restart: 'no'
+
+volumes:
+  connector_local_state:

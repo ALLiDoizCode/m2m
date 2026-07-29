@@ -404,3 +404,106 @@ price = 100
         "expected an actionable price-on-a-peer-route error, got: {stderr}"
     );
 }
+
+// -- Durable claim state (issue #605) --
+
+/// A node that can accept claims but names nowhere durable to record them
+/// never starts. Without this it starts happily, serves, and gives every
+/// already-spent claim back to the client the next time it restarts --
+/// with nothing in any log to see, because from the gate's point of view
+/// every replayed nonce genuinely looks fresh.
+#[test]
+fn exits_non_zero_when_client_channels_are_configured_without_a_state_dir() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_file}"
+
+[[client_channels]]
+channel_id = "0x{channel}"
+counterparty = "0x00000000000000000000000000000000000000aa"
+chain_id = 8453
+token_network_address = "0x00000000000000000000000000000000000000bb"
+"#,
+        key_file = key_file.path().display(),
+        channel = "ab".repeat(32),
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("state_dir"),
+        "expected the error to name the field to add, got: {stderr}"
+    );
+}
+
+/// A node with nowhere writable fails at startup, naming the path -- not
+/// at the first claim, hours later, on a packet path where the only
+/// honest answer left is to refuse a claim that was perfectly good.
+#[test]
+fn exits_non_zero_when_the_state_dir_cannot_be_written() {
+    let key_file = write_raw_key_file();
+    // A regular file standing where a directory is asked for: the same
+    // failure a read-only mount produces, reproducible without root.
+    let blocker = tempfile::NamedTempFile::new().expect("temp file");
+    let state_dir = blocker.path().join("state");
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+"#,
+        key_file = key_file.path().display(),
+        state_dir = state_dir.display(),
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("state_dir") && stderr.contains(&state_dir.display().to_string()),
+        "expected the error to name the unusable path, got: {stderr}"
+    );
+}
+
+/// A journal this build cannot decode stops the node. Refusing to start is
+/// the whole point: the only other option is starting from no watermarks,
+/// which is exactly the defect.
+#[test]
+fn exits_non_zero_on_a_corrupt_claim_journal() {
+    let key_file = write_raw_key_file();
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    std::fs::write(
+        state_dir.path().join("client-edge-claims.log"),
+        "not a journal entry\n",
+    )
+    .expect("write a corrupt journal");
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+"#,
+        key_file = key_file.path().display(),
+        state_dir = state_dir.path().display(),
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("client-edge-claims.log"),
+        "expected the error to name the journal it could not replay, got: {stderr}"
+    );
+}

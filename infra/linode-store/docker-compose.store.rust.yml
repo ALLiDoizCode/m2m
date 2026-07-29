@@ -71,12 +71,22 @@
 
 services:
   connector-rust:
+    # ORDERING (issue #605): ./connector-rust.toml now sets `state_dir`, and
+    # `RawConfig` is `deny_unknown_fields` -- so the tag below MUST be
+    # re-pinned to an image built from #605 or later BEFORE (or in the same
+    # `up -d` as) that file reaches a box. An older image reads `state_dir`
+    # as an unknown top-level key and exits 1 on config load.
     image: ghcr.io/toon-protocol/connector-rust:sha-4fca005
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
+      # Durable claim watermarks (issue #605) -- see the header.
+      - connector_rust_state:/app/state
     ports:
       # Loopback-only, deliberately — see the header. Not '4000:4000'.
       - '127.0.0.1:4000:4000'
       - '${STORE_PEER_WIRE_BIND:?set STORE_PEER_WIRE_BIND to this box VPC address; see header}:4001:4001'
     restart: unless-stopped
+
+volumes:
+  connector_rust_state:

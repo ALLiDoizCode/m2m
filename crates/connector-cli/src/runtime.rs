@@ -5,17 +5,20 @@
 //! [`build`] and [`router`] and branches on neither.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::Router;
 
 use connector_client_edge::{
-    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, EvmChannel,
+    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, ClientClaimGate, EvmChannel,
 };
 use connector_config::{Config, SecretLocation, SettlementChain, SettlementConfig};
-use connector_runtime::{Connector, HttpAppClient, NetworkPeerTransport, PeerRoute, SystemClock};
+use connector_runtime::{
+    Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
+    NetworkPeerTransport, PeerRoute, SystemClock,
+};
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
 use connector_signer::{LocalSigner, Signer, SignerError};
@@ -63,6 +66,21 @@ pub enum RuntimeError {
     /// RPC endpoint was unreachable, or the contract address named in
     /// config has no code at it.
     Settlement(SettlementError),
+    /// `state_dir` names a directory this node cannot create or write a
+    /// journal file in (issue #605) -- typically a read-only mount, or a
+    /// directory owned by another uid than the one the container runs as.
+    /// A startup failure on purpose: the alternative is a node that serves
+    /// happily and hands out free service after its next restart.
+    StateDirUnusable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// A journal under `state_dir` exists but could not be replayed --
+    /// unreadable, or carrying a line this build cannot decode. Refusing
+    /// to start is the whole point: the only other option is to start with
+    /// watermarks this node cannot vouch for, which is exactly the defect
+    /// issue #605 describes.
+    JournalUnreplayable { path: PathBuf, source: JournalError },
 }
 
 impl fmt::Display for RuntimeError {
@@ -109,6 +127,19 @@ impl fmt::Display for RuntimeError {
                     "failed to construct the configured settlement backend: {source}"
                 )
             }
+            RuntimeError::StateDirUnusable { path, source } => write!(
+                f,
+                "state_dir {} is not usable for this node's claim journals: {source} -- \
+                 the connector refuses to start rather than keep claim watermarks only in \
+                 memory, where a restart would make every already-spent claim replayable",
+                path.display()
+            ),
+            RuntimeError::JournalUnreplayable { path, source } => write!(
+                f,
+                "failed to replay the claim journal at {}: {source} -- the connector \
+                 refuses to start rather than resume from watermarks it cannot vouch for",
+                path.display()
+            ),
         }
     }
 }
@@ -287,6 +318,42 @@ impl ClientChannelSource for SettlementChannelSource {
     }
 }
 
+/// The two journal files a node keeps under its `state_dir` (issue #605).
+/// Two files rather than one because they are two different books --
+/// `ClaimBook`'s channel ids are peer-wire channels, the client edge's are
+/// chain-namespaced client channels -- and because each is replayed by a
+/// different owner at startup; sharing one file would mean each replaying
+/// the other's entries and each holding a second writer's file handle on
+/// the same path.
+const PEER_WIRE_JOURNAL: &str = "peer-claims.log";
+const CLIENT_EDGE_JOURNAL: &str = "client-edge-claims.log";
+
+/// Open `name` under this node's configured `state_dir`, creating the
+/// directory if it is not there yet.
+///
+/// Opening happens at startup, before anything is served, precisely so a
+/// node with nowhere writable fails here -- with the path in the message --
+/// rather than at the first claim, hours later, on a packet path where the
+/// only honest answer left is to refuse the claim (issue #605).
+fn open_journal(state_dir: &Path, name: &str) -> Result<Arc<dyn Journal>, RuntimeError> {
+    std::fs::create_dir_all(state_dir).map_err(|source| RuntimeError::StateDirUnusable {
+        path: state_dir.to_path_buf(),
+        source,
+    })?;
+    let path = state_dir.join(name);
+    let journal = FileJournal::open(&path).map_err(|source| match source {
+        JournalError::Io(source) => RuntimeError::StateDirUnusable {
+            path: path.clone(),
+            source,
+        },
+        source => RuntimeError::JournalUnreplayable {
+            path: path.clone(),
+            source,
+        },
+    })?;
+    Ok(Arc::new(journal))
+}
+
 /// Everything [`build`] produced from a validated [`Config`], and
 /// everything [`router`] needs from it. A struct rather than a tuple
 /// because the third member is the kind of thing that only ever grows: as
@@ -319,6 +386,10 @@ pub struct Runtime {
 /// That same connection is handed to [`router`] as a
 /// [`ClientChannelSource`] (issue #556): one chain connection, used both
 /// to move value and to read who a channel belongs to.
+///
+/// A node that names a `state_dir` also has its peer-wire claim journal
+/// armed here (issue #605), so the watermarks that wire's `ClaimBook`
+/// keeps outlive the process exactly as the client edge's do.
 pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let signer = build_signer(config.signer_key())?;
     let mut peer_transport = NetworkPeerTransport::new();
@@ -345,6 +416,31 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             backend: backend.clone(),
         }));
         connector = connector.with_settlement(backend as Arc<dyn SettlementBackend>);
+    }
+    // The peer wire's own claim watermarks and exposure, made durable by
+    // the same `state_dir` the client edge's are (issue #605, and #556's
+    // reconciliation row "Journal: `ClaimBook::new(None, ..)` installs the
+    // in-memory journal ... watermarks reset on restart; spent nonces
+    // respend"). Both surfaces are the same sentence -- a watermark must
+    // outlive the process -- so they get the same answer rather than two,
+    // and arming one while leaving the other in memory would mean shipping
+    // the fix and the bug side by side.
+    if let Some(state_dir) = config.state_dir() {
+        let journal = open_journal(state_dir, PEER_WIRE_JOURNAL)?;
+        let (armed, divergences) = connector.with_journal(journal).map_err(|source| {
+            RuntimeError::JournalUnreplayable {
+                path: state_dir.join(PEER_WIRE_JOURNAL),
+                source,
+            }
+        })?;
+        connector = armed;
+        for divergence in divergences {
+            // Reported, never absorbed (issue #424). Not fatal: a
+            // divergence is an accounting disagreement inside a journal
+            // that replayed fine, not a journal this node cannot trust to
+            // have replayed at all.
+            tracing::error!(%divergence, "replaying the peer-wire journal found a divergence");
+        }
     }
     Ok(Runtime {
         connector: Arc::new(connector),
@@ -394,21 +490,56 @@ fn client_channels(
     }
 }
 
+/// The client edge's claim gate: the channels this node accepts claims on,
+/// resumed from the watermarks its journal already records (issue #605).
+///
+/// A node with no `state_dir` gets an in-memory journal, which is sound
+/// only because [`Config::load`] has already refused any config that both
+/// omits `state_dir` and configures a channel to accept claims on: such a
+/// gate refuses every claim as unknown, so it has no watermark to lose.
+///
+/// `source` is threaded straight through to [`client_channels`] (issue
+/// #556): a gate resolves an undeclared channel from the chain and
+/// journals its watermark like any other, so the unaffiliated buyer's
+/// claims are exactly as replay-proof across a restart as a declared
+/// buyer's are.
+fn client_claim_gate(
+    config: &Config,
+    source: Option<Arc<dyn ClientChannelSource>>,
+) -> Result<ClientClaimGate, RuntimeError> {
+    let (journal, path) = match config.state_dir() {
+        Some(state_dir) => (
+            open_journal(state_dir, CLIENT_EDGE_JOURNAL)?,
+            state_dir.join(CLIENT_EDGE_JOURNAL),
+        ),
+        None => (
+            Arc::new(InMemoryJournal::new()) as Arc<dyn Journal>,
+            PathBuf::from(CLIENT_EDGE_JOURNAL),
+        ),
+    };
+    ClientClaimGate::restore(client_channels(config, source), journal)
+        .map_err(|source| RuntimeError::JournalUnreplayable { path, source })
+}
+
 /// Merge the client edge and (if `[operator]` is configured) the operator
 /// surface into the one router the binary serves. The operator router is
 /// mounted only when [`Config::operator`] is `Some` -- absence means the
 /// surface is not started at all, exactly as it means for
 /// [`connector_operator::router`] itself.
-pub fn router(runtime: &Runtime, config: &Config) -> Router {
+///
+/// Fallible since issue #605: the client edge's claim gate is restored from
+/// a durable journal here, and a journal that will not replay must stop the
+/// node starting rather than let it start at no watermarks.
+pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError> {
     let connector = runtime.connector.clone();
     let signer = runtime.signer.clone();
-    let app = connector_client_edge::router_with_channels(
+    let app = connector_client_edge::router_with_gate(
         connector.clone(),
         signer.clone(),
         None,
-        client_channels(config, runtime.client_channel_source.clone()),
+        client_claim_gate(config, runtime.client_channel_source.clone())?,
     );
-    match config.operator() {
+    Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
             connector,
             signer,
@@ -416,7 +547,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Router {
             operator.write_keys().to_vec(),
         )),
         None => app,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -543,7 +674,7 @@ key_file = "{}"
             )
         });
         let runtime = build(&config).await.expect("build");
-        let app = router(&runtime, &config);
+        let app = router(&runtime, &config).expect("router");
 
         // No `[operator]` section: `/routes` (an operator-surface path)
         // 404s -- it was never merged in, rather than merged in and
@@ -581,10 +712,12 @@ key_file = "{}"
     /// declared -- and a claim on any other channel is not (issue #558).
     #[test]
     fn every_configured_client_channel_is_recorded() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
         let (config, _key_path) = config_with_raw_key_file(|key_path| {
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_path}"
@@ -596,6 +729,7 @@ chain_id = 8453
 token_network_address = "0x00000000000000000000000000000000000000bb"
 "#,
                 key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
                 channel = "ab".repeat(32),
             )
         });
@@ -604,6 +738,146 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
         assert!(!channels.is_empty());
         assert_eq!(config.client_channels()[0].chain_id(), 8453);
         assert_eq!(config.client_channels()[0].counterparty()[19], 0xaa);
+    }
+
+    /// Issue #605's startup half: a node that names a `state_dir` gets a
+    /// real, on-disk claim gate, and the file it journals to is under that
+    /// directory -- which is what an operator has to mount for the
+    /// watermarks to outlive the container.
+    #[test]
+    fn a_configured_state_dir_is_where_the_client_edge_journals() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        client_claim_gate(&config, None).expect("a writable state_dir produces a gate");
+        assert!(
+            state_dir.path().join(CLIENT_EDGE_JOURNAL).exists(),
+            "the journal file is created at startup, not lazily at the first claim"
+        );
+    }
+
+    /// A `state_dir` this node cannot write is a startup failure naming the
+    /// path -- not a node that serves happily and forgets every spent claim
+    /// at its next restart (issue #605).
+    #[test]
+    fn a_state_dir_that_cannot_be_created_refuses_to_build_a_gate() {
+        let blocker = tempfile::NamedTempFile::new().expect("temp file");
+        // A regular file where a directory is asked for: `create_dir_all`
+        // cannot make this into a directory, exactly as it cannot make a
+        // directory under a read-only mount.
+        let state_dir = blocker.path().join("state");
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.display(),
+            )
+        });
+
+        let Err(error) = client_claim_gate(&config, None) else {
+            panic!("an unusable state_dir must not produce a gate");
+        };
+        assert!(matches!(error, RuntimeError::StateDirUnusable { .. }));
+        let message = error.to_string();
+        assert!(
+            message.contains(&state_dir.display().to_string()),
+            "the failure must name the path an operator has to fix: {message}"
+        );
+    }
+
+    /// A journal carrying a line this build cannot decode stops the node
+    /// starting. The alternative -- skipping the line, or starting empty --
+    /// is precisely the "silently start from zero" this ticket forbids.
+    #[test]
+    fn a_corrupt_client_edge_journal_refuses_to_build_a_gate() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        std::fs::write(
+            state_dir.path().join(CLIENT_EDGE_JOURNAL),
+            "not a journal entry\n",
+        )
+        .expect("write a corrupt journal");
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        let Err(error) = client_claim_gate(&config, None) else {
+            panic!("a corrupt journal must not produce a gate");
+        };
+        assert!(matches!(error, RuntimeError::JournalUnreplayable { .. }));
+    }
+
+    /// The peer wire's own journal is armed off the same `state_dir`
+    /// (issue #605, #556's "Journal" row): one answer for both surfaces,
+    /// not a fix for the client edge and the same bug left standing on the
+    /// wire between connectors.
+    #[tokio::test]
+    async fn a_configured_state_dir_also_arms_the_peer_wire_journal() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        let _runtime = build(&config).await.expect("build");
+        assert!(state_dir.path().join(PEER_WIRE_JOURNAL).exists());
+    }
+
+    /// A node with no `state_dir` still builds -- config load has already
+    /// guaranteed it has no channel to accept a claim on, so it has no
+    /// watermark a restart could lose.
+    #[tokio::test]
+    async fn a_node_with_no_state_dir_and_no_client_channels_still_builds() {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        let runtime = build(&config).await.expect("build");
+        assert!(router(&runtime, &config).is_ok());
     }
 
     #[tokio::test]
@@ -625,7 +899,7 @@ write_keys = ["{key}"]
             )
         });
         let runtime = build(&config).await.expect("build");
-        let app = router(&runtime, &config);
+        let app = router(&runtime, &config).expect("router");
 
         // The operator surface is mounted: `/routes` is a real path now,
         // rejecting for lack of a bearer token rather than 404ing.

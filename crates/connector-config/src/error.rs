@@ -216,4 +216,16 @@ pub enum ConfigError {
 
     #[error("[[client_channels]] names channel '{value}' more than once")]
     ClientChannelDuplicate { value: String },
+
+    #[error(
+        "[[client_channels]] is configured but 'state_dir' is not: this node would accept \
+         claims and keep their replay watermarks only in memory, so every claim a client \
+         has already spent becomes spendable again the next time this process restarts \
+         (issue #605). Set a top-level state_dir to a directory this node can write, and \
+         mount it so it outlives the container"
+    )]
+    ClientChannelsWithoutStateDir,
+
+    #[error("state_dir '{path}' exists but is not a directory")]
+    StateDirNotADirectory { path: PathBuf },
 }
