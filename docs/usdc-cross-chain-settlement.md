@@ -36,6 +36,13 @@ base units). The connector's claim payloads (`transferredAmount` in
 decimals are aligned they need no scaling. Add a startup assertion that each
 configured token's `decimals == 6` so a misconfig fails loud instead of mis-settling.
 
+**Shipped for the Rust connector (issue #564).** `[settlement] decimals` is honoured as
+exactly that assertion, not as a scale factor: `EvmSettlementBackend::connect` reads the
+configured token's own `decimals()` and refuses to start when it disagrees with the
+config file, naming both values. Nothing multiplies or divides by `decimals` anywhere on
+the value path — because of the rule above, there is nothing to normalize — so the only
+honest way to honour the field is to refuse a node whose declared scale is a lie.
+
 ## EVM — migrate mock USDC 18 → 6 ✅ done
 
 Done in `packages/contracts/script/DeployLocal.s.sol` (the devnet USDC peers settle

@@ -439,7 +439,11 @@ mod on_chain {
     /// A real `EvmSettlementBackend`, connected exactly the way the running
     /// container's own is -- through the registry, with the same key.
     async fn backend(rpc: &str) -> EvmSettlementBackend {
-        EvmSettlementBackend::connect(rpc, SETTLEMENT_KEY, registry(), token())
+        // 6 decimals: the same scale `connector.local.toml`'s `[settlement]`
+        // section declares, and the scale the local stack's mock USDC is
+        // deployed at -- `connect` refuses to bind if the two disagree
+        // (issue #564), so this is the running container's own value.
+        EvmSettlementBackend::connect(rpc, SETTLEMENT_KEY, registry(), token(), 6)
             .await
             .expect("connect through the TokenNetworkRegistry")
     }

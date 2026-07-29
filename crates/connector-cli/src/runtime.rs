@@ -197,6 +197,12 @@ fn read_settlement_private_key(location: &SecretLocation) -> Result<String, Runt
 /// it actually drives through `token_address`, rather than deploying a
 /// fresh one (issue #542) -- only [`SettlementChain::Evm`] is constructible
 /// today, matching the one chain `connector-config` accepts at load time.
+///
+/// Every field of the section reaches the chain here: `decimals` is handed
+/// to [`EvmSettlementBackend::connect`], which refuses to connect when the
+/// configured scale and the token's own `decimals()` disagree (issue #564).
+/// A `[settlement]` section that names a scale the deployed token does not
+/// agree with is a startup failure, not a line with no effect (ADR 0009).
 async fn build_settlement_backend(
     settlement: &SettlementConfig,
 ) -> Result<Arc<dyn SettlementBackend>, RuntimeError> {
@@ -210,6 +216,7 @@ async fn build_settlement_backend(
                 &private_key,
                 registry_address,
                 token_address,
+                settlement.decimals(),
             )
             .await?;
             Ok(Arc::new(backend) as Arc<dyn SettlementBackend>)
@@ -531,6 +538,74 @@ key_file = "{key_path}"
                 .await
                 .expect("a settlement backend was constructed and attached");
             assert_eq!(opened.deposited, 0);
+        }
+
+        /// AC (issue #564): "`decimals` is honoured: ... startup compares
+        /// it with the token contract's own `decimals()` and refuses to
+        /// start when the two disagree, naming both". The mock USDC
+        /// deployed below is 6-decimal, as every token in this fleet is
+        /// (`docs/usdc-cross-chain-settlement.md`); a config file claiming
+        /// `decimals = 18` against it must fail to build rather than load
+        /// clean and settle at a scale nobody consults.
+        #[tokio::test]
+        async fn settlement_decimals_the_token_disagrees_with_refuses_to_build() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement_backend =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            let registry_address = settlement_backend.registry_address();
+            drop(settlement_backend);
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement]
+chain = "evm"
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 18
+
+[settlement.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                rpc_url = anvil.rpc_url,
+                registry_address = registry_address,
+                token = token,
+            ));
+
+            let error = build(&config)
+                .await
+                .err()
+                .expect("a decimals the token disagrees with refuses to build");
+            let message = error.to_string();
+            // Both values are named, so an operator reading the failure can
+            // tell which side is wrong without opening a block explorer.
+            assert!(
+                message.contains("decimals is 18") && message.contains("decimals() = 6"),
+                "the failure must name both the configured and the on-chain decimals: {message}"
+            );
         }
 
         /// AC: "a node with no settlement section still starts and still
