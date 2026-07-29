@@ -117,7 +117,9 @@ Required fields on every claim, regardless of chain: `version` (`'1.0'`), `block
   but always zero — see [ADR 0004](../adr/0004-value-moves-on-fulfilment.md) — and dropped
   entirely once a client edge version built against the rewritten balance proof ships),
   `signature` (EIP-712), `signerAddress`; optional `chainId`, `tokenNetworkAddress`,
-  `tokenAddress` for dynamic on-chain verification of an unregistered channel.
+  `tokenAddress`. `signerAddress` and the optional domain fields ride the wire but carry no
+  authority — step 4 below reads both the signer and the signing domain from the connector's own
+  per-channel record instead.
 - **solana**: `programId`, `channelAccount` (both base58), `nonce`, `transferredAmount` (lamports,
   decimal string), `signature` (base64 Ed25519), `signerPublicKey` (base58); optional `cluster`.
 
@@ -135,21 +137,22 @@ never reaches the terminating app:
 3. **Value binding** (for a locally-terminated, priced route) — the claim's cumulative amount
    MUST advance by at least the route's configured flat price, so a minimal fresh claim cannot pay
    for an expensive route. This compares the claim's plaintext `transferredAmount` directly.
-4. **Cryptographic verification** — the signature (EIP-712 for EVM, Ed25519 for Solana) recovers
-   to _some_ key, and that key is checked against the claim's own declared signer
-   (`signerAddress`/`signerPublicKey`). **This is narrower than "recovers to the channel's
-   counterparty":** `ClientClaimGate` has no per-channel counterparty registry, so there is
-   nothing to check the declared signer against. A well-formed signature from a key the claim
-   itself names passes this check; a forger who signs correctly with their own key and simply
-   declares themselves the payer is not caught by it. Widen this once the gate has a channel
-   registry to look a real counterparty up in.
+4. **Cryptographic verification** — the signature (EIP-712 for EVM, Ed25519 for Solana) MUST
+   recover to **the counterparty recorded for the channel the claim names**
+   ([issue #558](https://github.com/toon-protocol/connector/issues/558)). A claim's own
+   `signerAddress`/`signerPublicKey` is not consulted, and neither is the EIP-712 domain
+   (`chainId`/`tokenNetworkAddress`) it declares for itself: both come from the connector's
+   per-channel record, so a claim has no say in what it is checked against. A forger who signs
+   correctly with a key of their own and declares themselves the payer is refused here, because
+   that key is not the channel's counterparty.
 
-   The reason this gap is narrower than it was: [issue
-   #542](https://github.com/toon-protocol/connector/issues/542) has since landed a `[settlement]`
-   config section and a construction site for it, and `connector-settlement-evm` now targets the
-   deployed `TokenNetwork` through a `TokenNetworkRegistry` (`getTokenNetwork(token)`), so a
-   counterparty _is_ now discoverable on chain. What is missing is the wiring from that backend
-   into this gate — not, as this section previously said, settlement itself.
+   A claim naming a channel the connector has **no record of** is refused with its own reason,
+   distinguishable from a bad signature and from an underpayment — there is nothing to verify it
+   against, and unverifiable is never accepted. A node that records no channel therefore accepts
+   no claim at all; that is the intended failure mode, since the only alternative is trusting
+   what a claim says about itself. Where the record comes from is a deployment question rather
+   than a wire one: today it is the `[[client_channels]]` config section, whose entries carry the
+   counterparty and the signing domain per channel.
 
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.

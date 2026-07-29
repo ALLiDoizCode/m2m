@@ -11,7 +11,7 @@
 //! counterparty is a property of the channel, not of the claim. So it is
 //! recorded here, keyed by the channel, and a claim gets no say in it:
 //! [`crate::ClientClaimGate`] reads the signer -- and, for EVM, the EIP-712
-//! domain the digest is computed under (ADR 0004) -- out of this registry
+//! domain the digest is computed under (ADR 0024) -- out of this registry
 //! and never out of the claim.
 //!
 //! Deliberately the same shape the peer wire already settled on:
@@ -58,7 +58,7 @@ impl std::error::Error for InvalidChannelIdentifier {}
 
 /// Everything this connector needs to verify an EVM claim on one channel
 /// without believing anything the claim says about itself: whose signature
-/// it accepts, and the EIP-712 domain (ADR 0004) that signature must have
+/// it accepts, and the EIP-712 domain (ADR 0024) that signature must have
 /// been produced under. `chain_id` and `token_network_address` are
 /// per-channel rather than node-wide for the same reason the peer wire's
 /// `ChannelDomain` is (issue #566): each token gets its own `TokenNetwork`,

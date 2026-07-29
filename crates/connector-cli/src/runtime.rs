@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 
+use connector_client_edge::{ClientChannelRegistry, EvmChannel};
 use connector_config::{Config, SecretLocation, SettlementChain, SettlementConfig};
 use connector_runtime::{Connector, HttpAppClient, NetworkPeerTransport, PeerRoute, SystemClock};
 use connector_settlement::{SettlementBackend, SettlementError};
@@ -260,13 +261,41 @@ pub async fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>),
     Ok((Arc::new(connector), signer))
 }
 
+/// The channels this node accepts client-edge claims on, and whose
+/// counterparty each claim's signature must recover to (issue #558), read
+/// from `[[client_channels]]`. A node that configures none has a record of
+/// no channel and refuses every claim -- deliberately, since the only
+/// alternative to "no record of this channel" is trusting what the claim
+/// says about its own signer, which is exactly the hole #558 closes.
+fn client_channels(config: &Config) -> ClientChannelRegistry {
+    let mut channels = ClientChannelRegistry::new();
+    for channel in config.client_channels() {
+        channels
+            .record_evm(
+                channel.channel_id(),
+                EvmChannel {
+                    counterparty: channel.counterparty(),
+                    chain_id: channel.chain_id(),
+                    token_network_address: channel.token_network_address(),
+                },
+            )
+            .expect("config load already validated every channel_id as a 32-byte identifier");
+    }
+    channels
+}
+
 /// Merge the client edge and (if `[operator]` is configured) the operator
 /// surface into the one router the binary serves. The operator router is
 /// mounted only when [`Config::operator`] is `Some` -- absence means the
 /// surface is not started at all, exactly as it means for
 /// [`connector_operator::router`] itself.
 pub fn router(connector: Arc<Connector>, signer: Arc<dyn Signer>, config: &Config) -> Router {
-    let app = connector_client_edge::router(connector.clone(), signer.clone());
+    let app = connector_client_edge::router_with_channels(
+        connector.clone(),
+        signer.clone(),
+        None,
+        client_channels(config),
+    );
     match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
             connector,
@@ -413,6 +442,56 @@ key_file = "{}"
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A node with no `[[client_channels]]` has a record of no channel, so
+    /// its client edge refuses every claim rather than trusting a claim's
+    /// own declared signer (issue #558).
+    #[test]
+    fn a_node_configuring_no_client_channels_has_a_record_of_none() {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(client_channels(&config).is_empty());
+    }
+
+    /// Every configured channel reaches the client edge's registry, so a
+    /// claim on it is verified against the counterparty the operator
+    /// declared -- and a claim on any other channel is not (issue #558).
+    #[test]
+    fn every_configured_client_channel_is_recorded() {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_id = "0x{channel}"
+counterparty = "0x00000000000000000000000000000000000000aa"
+chain_id = 8453
+token_network_address = "0x00000000000000000000000000000000000000bb"
+"#,
+                key_path = key_path.display(),
+                channel = "ab".repeat(32),
+            )
+        });
+
+        let channels = client_channels(&config);
+        assert!(!channels.is_empty());
+        assert_eq!(config.client_channels()[0].chain_id(), 8453);
+        assert_eq!(config.client_channels()[0].counterparty()[19], 0xaa);
     }
 
     #[tokio::test]

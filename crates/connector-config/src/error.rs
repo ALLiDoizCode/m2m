@@ -201,4 +201,19 @@ pub enum ConfigError {
 
     #[error("settlement kms_key_id must not be empty")]
     SettlementKmsIdEmpty,
+
+    #[error(
+        "invalid [[client_channels]] channel_id '{value}': must be 64 hex characters \
+         (an on-chain 32-byte channel identifier), optionally '0x'-prefixed"
+    )]
+    ClientChannelInvalidId { value: String },
+
+    #[error(
+        "invalid [[client_channels]] {field} '{value}': must be 40 hex characters \
+         (a 20-byte EVM address), optionally '0x'-prefixed"
+    )]
+    ClientChannelInvalidAddress { field: &'static str, value: String },
+
+    #[error("[[client_channels]] names channel '{value}' more than once")]
+    ClientChannelDuplicate { value: String },
 }

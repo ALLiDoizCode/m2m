@@ -90,6 +90,7 @@ price       = 100
 | `peer_wire_addr`   | `host:port` | no       | Absent ⇒ no inbound peer listener.                                         |
 | `[[peers]]`        | array       | no       | `{ id, addr }` — the peers `routes.peer_id` may name.                      |
 | `[settlement]`     | table       | no       | Absent ⇒ every channel operation answers `503`.                            |
+| `[[client_channels]]` | array     | no      | Absent ⇒ the client edge has a record of no channel, so it refuses every claim. |
 
 A `[[routes]]` entry sets **exactly one** of `handler_url` (terminate here) or `peer_id` (forward
 there). A terminated route **must** carry a `price` — write `price = 0` if free is deliberate,
@@ -109,6 +110,16 @@ units, and [`docs/usdc-cross-chain-settlement.md`](docs/usdc-cross-chain-settlem
 "6 decimals everywhere" keeps those units uniform across chains, so there is nothing to convert.
 It is checked instead: startup reads the token's own `decimals()` and refuses to start when the
 two disagree, naming both. Write the scale the deployed token actually has — today, `6`.
+
+`[[client_channels]]` is what makes a paid write possible: each entry names a payment channel this
+node accepts client-edge claims on, and the counterparty whose signature it accepts on that
+channel — `channel_id` (the on-chain 32-byte identifier), `counterparty` (a 20-byte EVM address),
+`chain_id` and `token_network_address` (the EIP-712 domain the balance proof is signed under, per
+[ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)). A claim's signature
+is checked against that recorded counterparty and never against the signer the claim declares for
+itself, and a claim naming a channel with no entry here is refused as unknown. A node configuring
+none therefore accepts no paid write at all — deliberately, since the only alternative to "no
+record of this channel" is believing what a claim says about itself.
 
 > The `*.yaml` files under `config/`, `deploy/node-quickstart/`, `deploy/pay-edge/` and
 > `infra/linode-node/` are the **retired TypeScript connector's** configuration
