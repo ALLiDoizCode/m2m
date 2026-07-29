@@ -51,9 +51,9 @@ pub enum AppOutcome {
 /// other value beginning with `/` is an absolute-path escape attempt and is
 /// refused, as is a scheme (`http:`, `javascript:`, ...), a `..` or `.`
 /// path segment, or a percent-encoded form of any of those -- checked
-/// against both `target` as written and its fully percent-decoded form, so
-/// an encoded equivalent (`%2e%2e`, `%2Fadmin`, `%68ttp%3a...`) cannot smuggle
-/// past a check for the literal characters.
+/// against the fully percent-decoded form, so an encoded equivalent
+/// (`%2e%2e`, `%2Fadmin`, `%68ttp%3a...`) cannot smuggle past a check for
+/// the literal characters.
 ///
 /// Shared by [`HttpAppClient`] and [`FakeAppClient`] so both implementations
 /// of this port enforce the identical rule (ADR 0007: a fake must genuinely
@@ -92,13 +92,13 @@ fn resolve_target_under_handler(handler_url: &Url, target: &str) -> Result<Url, 
 
 /// Whether `sub_path` (a target's path portion, already known not to start
 /// with `/`) contains a scheme, a `..`/`.` segment, or a percent-encoded
-/// form of either -- checked against `sub_path` itself and its fully
-/// percent-decoded form, since a single decode pass reveals an encoded `/`
-/// or `..` without needing to special-case where in the string it appears.
+/// form of either -- checked against the fully percent-decoded form, since
+/// a single decode pass reveals an encoded `/` or `..` without needing to
+/// special-case where in the string it appears, and a scheme prefix
+/// survives decoding unchanged (a `scheme ":"` is plain ASCII with no `%`
+/// of its own, so decoding a string that already looks like one is a
+/// no-op).
 fn path_attempts_to_escape(sub_path: &str) -> bool {
-    if looks_like_a_scheme(sub_path) {
-        return true;
-    }
     let decoded = percent_decode_str(sub_path).decode_utf8_lossy();
     if decoded.starts_with('/') || looks_like_a_scheme(&decoded) {
         return true;
