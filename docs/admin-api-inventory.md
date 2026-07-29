@@ -5,7 +5,21 @@
 **Story:** 38.1 — HTTP endpoint inventory doc  
 **Last Updated:** 2026-04-21
 
-> **Purpose:** Single source-of-truth enumerating every HTTP route the connector exposes. This document is the operator-facing view; the machine-readable source is [`packages/connector/src/http/admin-api-inventory.ts`](../packages/connector/src/http/admin-api-inventory.ts).
+> **Historical — this inventories the retired TypeScript connector, not the one in this
+> repository.** Its machine-readable source (`packages/connector/src/http/admin-api-inventory.ts`)
+> was deleted with that implementation ([ADR 0017](adr/0017-the-typescript-connector-is-a-prototype.md),
+> #465, #543), so nothing regenerates or checks this document any more. It remains accurate for
+> the published `ghcr.io/toon-protocol/connector` image the devnet fleet still runs.
+>
+> **The Rust connector's HTTP surface is much smaller** and shares one port: `POST /ilp`,
+> `GET /ilp/identity`, `GET /ilp/routes/price` on the client edge
+> ([`docs/protocol/client-edge-spec.md`](protocol/client-edge-spec.md)), plus the bearer-gated
+> reads and RFC 9421-signed writes of the operator surface
+> ([`docs/operators/admin-api.md`](operators/admin-api.md),
+> [ADR 0008](adr/0008-operator-surface-splits-read-from-write.md)). There is no health endpoint,
+> no explorer UI and no separate admin port.
+
+> **Purpose (as written):** Single source-of-truth enumerating every HTTP route the connector exposes. This document is the operator-facing view; the machine-readable source was `packages/connector/src/http/admin-api-inventory.ts`.
 
 ---
 

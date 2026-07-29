@@ -1,6 +1,28 @@
 # Local-delivery fulfillment contract — sender-chosen execution conditions
 
-**Status:** Normative (issue #309) · **Consumers:** `@toon-protocol/sdk` swap handler
+> **Superseded — a record of the retired TypeScript prototype, not a contract anything in this
+> repository implements.**
+>
+> Every seam this document pins (`ConnectorNode.setLocalDeliveryHandler()`, `setPacketHandler()`,
+> `POST /handle-packet`, `packages/connector/src/core/packet-handler.ts`,
+> `packages/shared/src/types/local-delivery.ts`) was deleted with the TypeScript connector —
+> [ADR 0017](adr/0017-the-typescript-connector-is-a-prototype.md), #465 and #543. The paths below
+> resolve only in git history.
+>
+> The Rust connector does not implement this contract and will not.
+> [ADR 0019](adr/0019-a-terminating-connector-derives-the-fulfilment.md) inverts it: the
+> **terminating connector** derives the fulfilment from the shared secret sealed into the packet's
+> gift wrap ([ADR 0018](adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)), so an app
+> never supplies a preimage, is never handed an `executionCondition`, and has no way to fail this
+> contract's enforcement step. For what a terminated route actually exchanges with its app, read
+> [`docs/protocol/client-edge-spec.md`](protocol/client-edge-spec.md) §1.8 and
+> [`vectors/README.md`](../vectors/README.md).
+>
+> Kept because the peer-wire spec's §3.1 "legacy class" and several ADRs cite it as the record of
+> what the prototype promised.
+
+**Status:** Superseded (was: Normative, issue #309) · **Consumers (historical):**
+`@toon-protocol/sdk` swap handler
 (rolling-swap maker, toon-meta#145 §3), toon-client daemon leg-B termination
 (toon-client#350), any app registered via `ConnectorNode.setLocalDeliveryHandler()` /
 `setPacketHandler()` or the HTTP `POST /handle-packet` seam.

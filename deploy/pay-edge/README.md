@@ -1,5 +1,14 @@
 # pay-edge — put a TOON payment proxy in front of your app
 
+> **This recipe runs the retired TypeScript connector image**
+> (`ghcr.io/toon-protocol/connector:3.44.0`) and its YAML configuration. That image is still
+> published and still what the devnet fleet runs, but its source is no longer in this repository —
+> [ADR 0017](../../docs/adr/0017-the-typescript-connector-is-a-prototype.md). Everything below
+> describes that image's behaviour, not the Rust connector's; where the two differ, the Rust
+> connector is authoritative for new work. To run the Rust connector instead, start from
+> [`deploy/connector-rust/README.md`](../connector-rust/README.md) — note that it takes a TOML
+> file, not a `connector.yaml`, and that a Rust equivalent of this recipe does not exist yet.
+
 Run the TOON **connector as a payment proxy** ("nginx for payments") in front of
 any generic, payment-oblivious HTTP backend, settling against the **shared live
 devnet**. A paid request enters the connector's `POST /ilp` edge; the connector
@@ -37,9 +46,15 @@ payer ──POST /ilp (3000)──▶ connector ──proxies the paid HTTP requ
 3. **Drop in YOUR app.** Replace the `app` service in `docker-compose.yml` with
    your own image listening on `:8080`, and point `connector.yaml`'s `upstream`
    at it (`http://<your-service>:8080`). Nothing else changes — your app stays
-   payment-oblivious. The connector injects `X-TOON-Payer` / `X-TOON-Amount` /
+   payment-oblivious. This image injects `X-TOON-Payer` / `X-TOON-Amount` /
    `X-TOON-Chain` request headers so your app _can_ do per-payer logic if it
-   wants, but never has to.
+   wants, but never has to. **Do not build on those headers.** They are a
+   prototype artefact — `X-TOON-Payer` carries the immediate previous hop, not
+   the payer, so on any path longer than one hop it names the wrong party
+   ([ADR 0017](../../docs/adr/0017-the-typescript-connector-is-a-prototype.md)) —
+   and the Rust connector sends no such headers at all, by decision
+   ([ADR 0020](../../docs/adr/0020-a-price-is-flat-and-attaches-to-a-handler.md)).
+   An app that reads them will need changing when this edge moves.
 
 4. **Make a paid call.** There is currently **no in-repo prover.**
    `prove-roundtrip.ts` used to live here: it funded a wallet, opened an on-chain

@@ -36,6 +36,13 @@ equivalent contract.
 docker pull ghcr.io/toon-protocol/connector-rust:sha-<short-sha>
 ```
 
+For a **whole stack** on one machine rather than a single node — connector,
+relay, a local `anvil` carrying the settlement topology, and a real paid write
+plus on-chain redeem end to end — see
+[`local-stack/README.md`](local-stack/README.md). That is a rehearsal, not a
+deployment: nothing in it is published or pinned, and every key in it is a test
+fixture.
+
 Skip to [step 6](#6-run-it) to run it — the config/key setup in steps 1-4
 below is identical whether you built the image locally or pulled it.
 
@@ -113,6 +120,29 @@ directory reads it automatically.
 `connector.toml`'s `[[routes]]` block points at an example app
 (`http://app:3100`). Replace `prefix` and `handler_url` with your own app's
 ILP address and handler URL, or delete the block if this node only peers.
+`price` is required on a terminated route — write `price = 0` if free is
+deliberate, because it is never silently free.
+
+To peer, add `peer_wire_addr` and a `[[peers]]` entry, then a `[[routes]]`
+entry that names the peer's `id` instead of a `handler_url`. **Bind
+`peer_wire_addr` to a private interface**: the shipped peer transport is
+plain TCP with no TLS and no peer authentication
+(`crates/connector-runtime/src/network_peer_transport.rs`), and it carries
+signed balance proofs.
+
+## 4b. (Optional) settlement
+
+Omit `[settlement]` entirely and the node routes and charges normally, but
+every channel operation on the operator surface answers `503` — there is no
+backend to run it. Configure it and the node resolves the
+`TokenNetworkRegistry` at `contract_address` **at startup**, so a wrong RPC
+URL or a registry that does not answer `getTokenNetwork(token)` is an
+exit-1, not a runtime surprise. Only `chain = "evm"` is accepted today.
+
+`infra/linode-node/connector-rust.toml` carries a commented, annotated
+`[settlement]` block to copy from; `crates/connector-bin/tests/devnet_configs_load.rs`
+boots exactly that block against a freshly deployed registry on anvil, so it
+is a template that is known to load.
 
 ## 5. Build the image
 
@@ -146,7 +176,16 @@ nothing more to pass on the command line.)
 # The client edge answered (400: an empty body isn't a valid PREPARE).
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:3000/ilp
 
-# The operator surface requires the token you generated in step 2.
+# The identity a sender seals a packet's payload to (ADR 0018).
+curl -s http://localhost:3000/ilp/identity
+# → {"keyId":"...","publicKey":"0x04..."}
+
+# The price of the route you configured in step 4 (404 if nothing matches).
+curl -s 'http://localhost:3000/ilp/routes/price?destination=g.example.connector.app'
+# → {"destination":"g.example.connector.app","price":100}
+
+# The operator surface requires the token you generated in step 2. It shares
+# this one port -- there is no separate admin port, and no health endpoint.
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/metrics        # 401
 curl -s http://localhost:3000/metrics -H "Authorization: Bearer <token-from-step-2>"
 ```

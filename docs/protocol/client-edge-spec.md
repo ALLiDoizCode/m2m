@@ -67,7 +67,8 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
   |        | implemented; no request is refused on this ground today).                       |
   | `402`  | Unpaid request to a route this connector terminates and prices: x402 v2         |
   |        | payment-required terms, JSON body (not OER). See §1.4.                          |
-  | `413`  | Request body exceeds the configured maximum (default 5 MiB).                    |
+  | `413`  | Request body too large. There is no config field for this: the limit is         |
+  |        | axum's own `DefaultBodyLimit` (2 MiB), which this router does not override.     |
   | `500`  | Reserved by this spec for transport failure only; an unexpected                 |
   |        | internal error during routing is surfaced as a `200` + `T00` REJECT, not a 500. |
 
@@ -135,13 +136,18 @@ never reaches the terminating app:
 4. **Cryptographic verification** — the signature (EIP-712 for EVM, Ed25519 for Solana) recovers
    to _some_ key, and that key is checked against the claim's own declared signer
    (`signerAddress`/`signerPublicKey`). **This is narrower than "recovers to the channel's
-   counterparty":** this connector has no settlement configuration and no per-channel
-   counterparty registry yet (`ClientClaimGate`, [issue
-   #542](https://github.com/toon-protocol/connector/issues/542) — settlement is unconstructed), so
-   there is nothing to check the declared signer against. A well-formed signature from a key the
-   claim itself names passes this check; a forger who signs correctly with their own key and
-   simply declares themselves the payer is not caught by it. Widen this once #542 gives this gate
-   a channel registry to look a real counterparty up in.
+   counterparty":** `ClientClaimGate` has no per-channel counterparty registry, so there is
+   nothing to check the declared signer against. A well-formed signature from a key the claim
+   itself names passes this check; a forger who signs correctly with their own key and simply
+   declares themselves the payer is not caught by it. Widen this once the gate has a channel
+   registry to look a real counterparty up in.
+
+   The reason this gap is narrower than it was: [issue
+   #542](https://github.com/toon-protocol/connector/issues/542) has since landed a `[settlement]`
+   config section and a construction site for it, and `connector-settlement-evm` now targets the
+   deployed `TokenNetwork` through a `TokenNetworkRegistry` (`getTokenNetwork(token)`), so a
+   counterparty _is_ now discoverable on chain. What is missing is the wiring from that backend
+   into this gate — not, as this section previously said, settlement itself.
 
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
@@ -239,14 +245,21 @@ against a different request or a different route's price fails the digest/price 
 
 ### 1.6 Probing for cost
 
-**Not yet implemented.** This subsection is forward-looking, unlike the rest of §1: today's
-shipped connector charges a percentage spread with no per-hop fee accumulation, so there is
-nothing yet for a REJECT to report, and no `TOON-Accumulated-Cost` header, `403` probe-rate-limit
-response, or per-identity probe accounting exists in `crates/connector-client-edge` today. It
-specifies what v1's unchanged request/response shape carries once the connector
-originating a client's PREPARE speaks the redesigned peer wire
-(`docs/protocol/peer-wire-spec.md` §5.2, [ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)) —
-version 1 does not change to gain this; only the connector's backend does.
+**Not yet implemented at this edge.** No `TOON-Accumulated-Cost` header, `403` probe-rate-limit
+response, or per-identity probe accounting exists in `crates/connector-client-edge` today.
+
+What has changed since this section was written is the reason: the connector no longer "charges a
+percentage spread with no per-hop fee accumulation" — there is no percentage anywhere
+([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md)), and a REJECT genuinely does
+accumulate cost now. `connector_domain::Reject` carries an `accumulated_cost` field that sums
+every hop's flat fee and adds a terminated route's price
+(`docs/protocol/peer-wire-spec.md` §5.2, issues #523/#545/#584). That field is **not** part of the
+RFC-0027 OER encoding — it rides beside the packet — so the client edge, which answers with the
+encoded REJECT and nothing else, currently drops it on the floor. There is now something real to
+report; what is missing is only the header that would report it.
+
+The rest of this subsection specifies what v1's unchanged request/response shape carries once that
+header exists — version 1 does not change to gain it.
 
 A client MAY send an ordinary PREPARE it expects to be rejected (a probe, `CONTEXT.md` "Probe")
 to learn a path's cost. RFC-0027's REJECT `data` is reserved for an application-level reject's own

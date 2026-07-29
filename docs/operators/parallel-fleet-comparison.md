@@ -68,6 +68,29 @@ is in front of it."_
 The app can tell. The two connectors deliver differently enough that the same app answers them
 differently:
 
+> **The Rust column below is a snapshot of `connector-rust:sha-0e45cef`, not of the connector
+> today.** Every one of its five rows has since changed, and the record is kept unedited only
+> because the ADRs it provoked cite it. What the Rust connector does now:
+>
+> - `prepare.data` is a **gift wrap** ([ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)),
+>   not an opaque body: sealed to the terminating connector's identity key, carrying a shared
+>   secret and an OER-encoded envelope — method, target, headers, body — that only the terminating
+>   connector can open.
+> - The request path is `handler_url` **joined with the envelope's `target`**, and the method is
+>   the envelope's method, not always `POST` (`connector_runtime::HttpAppClient::deliver`, #553).
+> - No `X-TOON-Payer`/`-Amount`/`-Chain`, and no `TOON-Received-At`: the app is told nothing about
+>   the payment at all, which [ADR 0020](../adr/0020-a-price-is-flat-and-attaches-to-a-handler.md)
+>   makes a decision rather than the omission this record calls it. The envelope's own headers are
+>   forwarded verbatim, minus hop-by-hop headers, `host` and `content-length`.
+> - The app's **complete** response — status, headers and body — comes back in the reply's
+>   envelope. An HTTP status is envelope content, never a packet outcome, so a `404` is a real
+>   answer and is not converted to `F99`.
+> - **There is no `TOON-Fulfillment` header.** [ADR 0019](../adr/0019-a-terminating-connector-derives-the-fulfilment.md)
+>   has the terminating connector derive the fulfilment from the gift wrap's shared secret; the app
+>   supplies none and never could. The row below, and the paragraph after the table that tells an
+>   app to "learn to answer with `TOON-Fulfillment`", are both retired advice — an app that did so
+>   today would simply have that header carried back as one more response header.
+
 |                        | TypeScript `HttpProxyHandler`                                                                                   | Rust `HttpAppClient::deliver`                                                                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | what `prepare.data` is | an encoded HTTP envelope — method, target, headers, body                                                        | an opaque request body                                                                                                                                                       |

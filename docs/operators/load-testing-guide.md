@@ -1,5 +1,12 @@
 # Load Testing Guide
 
+> **Historical — none of this runs.** Every command below targets the retired TypeScript connector
+> ([ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md)): `tools/send-packet`, the
+> `packages/connector` workspace, `jest.load.config.js` and the `test:performance` /
+> `benchmark` npm scripts were all deleted with it. The Rust connector has no load-testing harness
+> yet; the nearest thing is the manual before/after benchmark in `crates/connector-runtime`
+> (`#[ignore]`d, see its module doc). Kept as the record of what was measured and how.
+
 ## Prerequisites
 
 - Node.js >= 22.11.0
