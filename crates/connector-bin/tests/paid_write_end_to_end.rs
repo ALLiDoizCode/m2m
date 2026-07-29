@@ -17,6 +17,7 @@
 //! claim's accepted value together, and that an underpaid claim reaches
 //! neither.
 
+use std::io::Write;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
@@ -26,9 +27,13 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::Router;
 use chrono::Duration as ChronoDuration;
+use ed25519_dalek::Keypair;
 use libsecp256k1::{Message, PublicKey, SecretKey};
+use rand::rngs::OsRng;
 
 use connector_domain::{EnvelopeResponse, Fulfill, Prepare, Reject};
+use connector_operator::test_support::sign_request;
+use connector_runtime::ChannelView;
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
@@ -63,15 +68,20 @@ const ANVIL_BASE_PORT: u16 = 19_000;
 /// the price" claim below is easy to read.
 const ROUTE_PRICE: u128 = 100;
 
-/// Sign `digest` exactly the way a real EVM wallet would (a 65-byte
-/// `r || s || v` signature, `v` in the conventional `{27, 28}` range) --
-/// mirrors every other real-chain claim test in this workspace.
+/// Sign `digest` exactly the way the production signing path does
+/// (`connector_signer::crypto::sign_digest`): a 65-byte `r || s || v`
+/// signature with `v` in libsecp256k1's raw `{0, 1}` range, not the
+/// `{27, 28}` an EVM wallet would append. `EvmSettlementBackend` itself
+/// normalizes that before submitting to `claimFromChannel` (issue #590),
+/// and the client edge's own verification accepts either range -- signing
+/// the wallet range here would exercise neither of those paths for real
+/// (issue #594).
 fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
     let message = Message::parse(digest);
     let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
     let mut bytes = signature.serialize().to_vec();
     let recovery_byte: u8 = recovery_id.into();
-    bytes.push(recovery_byte + 27);
+    bytes.push(recovery_byte);
     bytes
 }
 
@@ -89,17 +99,19 @@ fn channel_id_bytes(id: &str) -> [u8; 32] {
     out
 }
 
-/// A genuinely EIP-712-signed EVM claim JSON (issue #506/#544, #575) over
-/// the real deployed `TokenNetwork`'s own chain id and address -- not
-/// arbitrary constants -- so a reader can tell this claim actually refers
-/// to the chain this test just funded a channel on.
+/// A genuinely EIP-712-signed EVM claim (issue #506/#544, #575) over the
+/// real deployed `TokenNetwork`'s own chain id and address -- not arbitrary
+/// constants -- so a reader can tell this claim actually refers to the
+/// chain this test just funded a channel on. Returns the claim JSON
+/// alongside the raw signature bytes, so a caller can also redeem the same
+/// claim against the chain (issue #594) without re-deriving it.
 fn evm_claim_json(
     secret: &SecretKey,
     channel_id_hex: &str,
     nonce: u64,
     transferred_amount: u128,
     token_network_address: [u8; 20],
-) -> String {
+) -> (String, Vec<u8>) {
     let public = PublicKey::from_secret_key(secret);
     let address = derive_evm_address(&public.serialize());
 
@@ -114,7 +126,7 @@ fn evm_claim_json(
     };
     let signature = sign_evm(secret, &evm_balance_proof_digest(&proof));
 
-    format!(
+    let json = format!(
         r#"{{
             "version": "1.0",
             "blockchain": "evm",
@@ -135,7 +147,8 @@ fn evm_claim_json(
         signature = hex_encode(&signature),
         address = to_hex(&address),
         token_network_address = to_hex(&token_network_address),
-    )
+    );
+    (json, signature)
 }
 
 /// A real, independently queryable app: a genuine `axum` HTTP server bound
@@ -262,23 +275,50 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
 
     // A real, spawned, compiled `connector` binary -- started from a config
     // file, exactly as a deployment would be, fronting the app above at a
-    // priced route.
+    // priced route. AC1: a real `[settlement]` section, connected to the
+    // same registry/`TokenNetwork` this test just deployed and funded --
+    // the connector's own value-moving side of the chain, not merely a
+    // chain sitting next to it -- plus an `[operator]` section so the test
+    // can redeem the accepted claim through the same surface a real
+    // operator would use, never by reaching around the connector into the
+    // settlement backend directly.
     let key_file = write_raw_key_file(9);
+    let mut settlement_key_file = tempfile::NamedTempFile::new().expect("temp settlement key file");
+    settlement_key_file
+        .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
+        .expect("write settlement key file");
+    let write_keypair = Keypair::generate(&mut OsRng);
+    let write_key_hex = hex_encode(&write_keypair.public.to_bytes());
+    let registry_address = backend.registry_address();
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
 
 [signer]
-key_file = "{}"
+key_file = "{key_file}"
+
+[operator]
+bearer_token = "operator-secret"
+write_keys = ["{write_key_hex}"]
+
+[settlement]
+chain = "evm"
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.key]
+key_file = "{settlement_key_file}"
 
 [[routes]]
 prefix = "g.example.app"
-handler_url = "http://{}"
-price = {}
+handler_url = "http://{app_addr}"
+price = {ROUTE_PRICE}
 "#,
-        key_file.path().display(),
-        app_addr,
-        ROUTE_PRICE,
+        key_file = key_file.path().display(),
+        settlement_key_file = settlement_key_file.path().display(),
+        rpc_url = anvil.rpc_url,
     ));
     let connector = spawn_connector(config.path());
     let connector_identity = identity_from_key_seed(9);
@@ -290,7 +330,7 @@ price = {}
     // advanced by exactly the price, never merely "some amount >= price."
     let (data, shared_secret) = sealed_prepare_data(b"paid write", &connector_identity);
     let prepare = sample_prepare("g.example.app", data, &shared_secret);
-    let claim = evm_claim_json(
+    let (claim, claim_signature) = evm_claim_json(
         &buyer_secret,
         &paid_channel.0,
         1,
@@ -321,13 +361,56 @@ price = {}
     );
     assert_eq!(after_paid[0].as_ref(), b"paid write");
 
+    // AC2/AC3: redeem that exact claim against the real chain, through the
+    // connector's own operator surface -- not inferred from the fulfil, and
+    // not a second, hand-built settlement backend reaching around the
+    // connector under test. A signature `TokenNetwork.claimFromChannel`
+    // would refuse to recover (e.g. against the wrong deposit) fails this
+    // redeem for real; joining it to the same test as the fulfilled write
+    // is what proves the accept decision and the on-chain value are the
+    // same claim, not two coincidentally-matching half-proofs.
+    let redeem_body = serde_json::to_vec(&serde_json::json!({
+        "nonce": 1,
+        "cumulative_amount": ROUTE_PRICE,
+        "signature_hex": format!("0x{}", hex_encode(&claim_signature)),
+    }))
+    .expect("encode redeem body");
+    let redeem_path = format!("/channels/{}/redeem", paid_channel.0);
+    let (sig_input, sig, digest) = sign_request(
+        &write_keypair,
+        "POST",
+        &redeem_path,
+        &redeem_body,
+        1_000,
+        Some(9_999_999_999),
+    );
+    let response = client
+        .post(format!(
+            "http://{}{redeem_path}",
+            connector.client_edge_addr
+        ))
+        .header("signature-input", sig_input)
+        .header("signature", sig)
+        .header("content-digest", digest)
+        .body(redeem_body)
+        .send()
+        .await
+        .expect("POST /channels/:id/redeem");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let redeemed: ChannelView = response.json().await.expect("decode ChannelView");
+    assert_eq!(
+        redeemed.redeemed, ROUTE_PRICE,
+        "the claim's cumulative amount, read back from the chain through the operator \
+         surface, advanced by exactly the route's price -- not inferred from the fulfil"
+    );
+
     // AC4: an underpaid packet -- a fresh claim on a channel genuinely
     // funded with less than the route's price -- is refused, and the app
     // records nothing for it.
     let (underpaid_data, underpaid_secret) =
         sealed_prepare_data(b"underpaid write attempt", &connector_identity);
     let underpaid_prepare = sample_prepare("g.example.app", underpaid_data, &underpaid_secret);
-    let underpaid_claim = evm_claim_json(
+    let (underpaid_claim, _) = evm_claim_json(
         &buyer_secret,
         &underpaid_channel.0,
         1,
