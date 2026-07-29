@@ -1055,12 +1055,15 @@ name = "connector"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "connector-cli",
  "connector-domain",
+ "connector-settlement",
  "connector-settlement-evm",
  "connector-signer",
  "ethers",
+ "libsecp256k1",
  "reqwest",
  "serde_json",
  "tempfile",
