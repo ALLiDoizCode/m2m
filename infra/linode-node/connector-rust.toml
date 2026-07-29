@@ -71,11 +71,15 @@ addr = "203.0.113.20:4001"
 
 [[routes]]
 prefix = "g.rust.relay"
-# `/write`, not the bare origin: `HttpAppClient::deliver` POSTs to this URL
-# exactly as written — it takes no path from the packet — and the relay app
-# serves only `POST /write` and `GET /health`. A bare `http://relay:3100`
-# comes back F99 "app declined the delivery with HTTP 404", which is what
-# this route did when first deployed (#492).
+# `/write`, not the bare origin: `HttpAppClient::deliver` POSTs here, and the
+# relay app serves only `POST /write` and `GET /health`. A bare
+# `http://relay:3100` comes back F99 "app declined the delivery with HTTP
+# 404", which is what this route did when first deployed (#492).
+#
+# An envelope's own `target` cannot override this path (issue #596, ADR
+# 0025): it is resolved strictly beneath `/write`, never in place of it, so
+# a sender cannot address `/health` (or anywhere else) through this route at
+# this route's price by naming it as the target.
 #
 # The path is only the half of the app-delivery gap that config can close.
 # docs/operators/parallel-fleet-comparison.md has the rest.

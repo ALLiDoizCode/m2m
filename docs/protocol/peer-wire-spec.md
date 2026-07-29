@@ -275,18 +275,19 @@ one `minimumDelivery` the sender set.
 
 Peer-wire REJECTs use the existing RFC-0027 §3.3 codes:
 
-| Code              | Meaning here                                                                  |
-| ----------------- | ----------------------------------------------------------------------------- |
-| `F01`             | Malformed frame or packet; absent/all-zero `executionCondition` (§3.1).       |
-| `F02`             | No route to `destination`.                                                    |
-| `F08`             | Duplicate packet (replay of a `correlationId` already answered).              |
-| `R00`             | PREPARE expired before it could be forwarded or answered.                     |
-| `R01`             | This hop cannot meet the declared `minimumDelivery` after its fee (§4).       |
-| `R02`             | `expiresAt` leaves insufficient time for this hop to forward and get a reply. |
-| `T00`             | Internal error at this connector (retryable).                                 |
-| `T01`             | The configured next-hop peer is unreachable (stream down).                    |
-| `T04`             | This connector's exposure ceiling for the inbound peer is exceeded (§5.3).    |
-| `F99`/`T99`/`R99` | Application-level reject from the terminating app, passed through unchanged.  |
+| Code              | Meaning here                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `F00`             | A terminated envelope's `target` attempted to escape the route's handler path (issue #596). |
+| `F01`             | Malformed frame or packet; absent/all-zero `executionCondition` (§3.1).                     |
+| `F02`             | No route to `destination`.                                                                  |
+| `F08`             | Duplicate packet (replay of a `correlationId` already answered).                            |
+| `R00`             | PREPARE expired before it could be forwarded or answered.                                   |
+| `R01`             | This hop cannot meet the declared `minimumDelivery` after its fee (§4).                     |
+| `R02`             | `expiresAt` leaves insufficient time for this hop to forward and get a reply.               |
+| `T00`             | Internal error at this connector (retryable).                                               |
+| `T01`             | The configured next-hop peer is unreachable (stream down).                                  |
+| `T04`             | This connector's exposure ceiling for the inbound peer is exceeded (§5.3).                  |
+| `F99`/`T99`/`R99` | Application-level reject from the terminating app, passed through unchanged.                |
 
 `F06_UNEXPECTED_PAYMENT`, previously used to reject a PREPARE arriving without an inline claim
 under the prepay model, has no peer-wire use: PREPAREs never carry claims now (§3.2), so there is
@@ -301,11 +302,13 @@ and issue #523 -- the fees of the hops the packet actually passed through, plus 
 route that terminated it, if it reached one. The field starts at `0`:
 
 - When a connector **originates** a REJECT for a reason that added no value to the packet at all
-  (no route, expired, ceiling exceeded, cannot meet minimum delivery, or the terminating app
-  itself unreachable), it sets `accumulatedCost = 0` on the REJECT it sends upstream — it never
-  forwarded or terminated this packet, so nothing applies to a hop it never used. An app that
-  could not be reached (`T01`) is the termination-side mirror of a forwarding hop that cannot
-  reach its own peer: no priced work was done, so no price is added.
+  (no route, expired, ceiling exceeded, cannot meet minimum delivery, the terminating app itself
+  unreachable, or an envelope target that attempted to escape the route's handler path), it sets
+  `accumulatedCost = 0` on the REJECT it sends upstream — it never forwarded or terminated this
+  packet, so nothing applies to a hop it never used. An app that could not be reached (`T01`) is
+  the termination-side mirror of a forwarding hop that cannot reach its own peer: no priced work
+  was done, so no price is added. A refused target (`F00`, issue #596) is the same reasoning one
+  step earlier — the app was never even called, so nothing accumulates.
 - When a connector **originates** a REJECT because the packet reached one of its own terminated
   routes and was rejected there (an application-level reject from the terminating app, or a
   fulfillment that didn't match the execution condition), it sets `accumulatedCost` to that

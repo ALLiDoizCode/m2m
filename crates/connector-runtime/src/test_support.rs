@@ -42,9 +42,20 @@ pub(crate) fn identity_signer() -> Arc<dyn Signer> {
 /// `Fulfill`/`Reject` this `Prepare` produces (see
 /// [`open_sealed_envelope`]).
 pub(crate) fn sealed_envelope_request_data(body: &[u8]) -> (Vec<u8>, [u8; 32]) {
+    sealed_envelope_request_data_with_target("/", body)
+}
+
+/// Like [`sealed_envelope_request_data`], but with a caller-chosen
+/// `target` -- for a test that exercises how a `Connector` resolves (or
+/// refuses) it against a route's handler path (issue #596), rather than
+/// the default minimal `POST /`.
+pub(crate) fn sealed_envelope_request_data_with_target(
+    target: &str,
+    body: &[u8],
+) -> (Vec<u8>, [u8; 32]) {
     let plaintext = EnvelopeRequest {
         method: "POST".to_string(),
-        target: "/".to_string(),
+        target: target.to_string(),
         headers: vec![],
         body: body.to_vec(),
     }

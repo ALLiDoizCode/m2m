@@ -1188,6 +1188,7 @@ dependencies = [
  "connector-settlement",
  "connector-signer",
  "hyper",
+ "percent-encoding",
  "prometheus",
  "proptest",
  "reqwest",

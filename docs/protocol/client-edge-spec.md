@@ -321,6 +321,15 @@ terminating connector derives from that shared secret (ADR 0019) is likewise par
 `vectors/wire-vectors.json`'s `envelope`, `giftwrap` and `fulfilment` sections are the reproducible
 bytes for all of the above — this paragraph is orientation, not the thing to conform to.
 
+The envelope's `target` is resolved strictly _beneath_ the terminated route's own configured
+handler path, never in place of it
+([ADR 0025](../adr/0025-an-envelope-target-is-confined-beneath-the-handler-path.md), issue #596):
+`""` and `"/"` both address the handler's own path, and any other value naming an absolute path, a
+`..`/`.` segment, a scheme, an authority, or a percent-encoded equivalent of any of those is refused
+(`F00`) before the app is ever called, rather than delivered. This is what keeps ADR 0020's "one
+handler, one price" true in the presence of a sender-chosen `target` — a route's configured handler
+is the one thing a sender's own envelope can never override.
+
 ## 2. What version 1 does not do
 
 Version 1 has no field or header identifying its own version. That is the gap §3 closes: version

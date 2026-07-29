@@ -6,13 +6,15 @@
 //! either a complete answer (whatever its status) or the absence of one. It
 //! never sees a [`connector_domain::Prepare`], a key or a claim: the
 //! envelope is decoded above this boundary (`Connector::deliver_to_app`),
-//! and this is a thin adapter that makes the request it is given and
-//! reports what came back.
+//! and this is a thin adapter that makes the request it is given -- with
+//! its target confined beneath the route's own handler path (issue #596,
+//! ADR 0025) -- and reports what came back.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use percent_encoding::percent_decode_str;
 use url::Url;
 
 use connector_domain::{EnvelopeRequest, EnvelopeResponse};
@@ -27,6 +29,113 @@ pub enum AppOutcome {
     Answered { response: EnvelopeResponse },
     /// The app could not be reached at all, or did not answer in time.
     Unreachable { message: String },
+    /// Issue #596: `request.target` attempted to escape the route's
+    /// configured handler path -- an absolute path, a `..` segment, a
+    /// scheme, an authority, or a percent-encoded equivalent of any of
+    /// those. Refused before any request was made, so the app was never
+    /// reached and (per [`crate::connector::Connector`]'s pricing) the
+    /// payer is not charged for it.
+    Refused { message: String },
+}
+
+/// Resolve `target` strictly beneath `handler_url`'s own path (ADR 0025,
+/// issue #596): the route's configured handler path is authoritative, and
+/// an envelope's target can only ever address something nested under it.
+/// Unlike RFC 3986 reference resolution (`Url::join`), which lets an
+/// absolute path, a scheme or an authority in `target` *replace* the base
+/// entirely, `target` is appended after `handler_url`'s own path -- it can
+/// never replace any part of it.
+///
+/// `""` and `"/"` both mean "the handler's own path, nothing appended"
+/// (the common case a client uses when it has exactly one endpoint). Any
+/// other value beginning with `/` is an absolute-path escape attempt and is
+/// refused, as is a scheme (`http:`, `javascript:`, ...), a `..` or `.`
+/// path segment, a backslash, or a percent-encoded form of any of those --
+/// checked against the fully percent-decoded form, so an encoded equivalent
+/// (`%2e%2e`, `%2Fadmin`, `%5c`, `%68ttp%3a...`) cannot smuggle past a check
+/// for the literal characters.
+///
+/// Shared by [`HttpAppClient`] and [`FakeAppClient`] so both implementations
+/// of this port enforce the identical rule (ADR 0007: a fake must genuinely
+/// uphold the contract it stands in for).
+fn resolve_target_under_handler(handler_url: &Url, target: &str) -> Result<Url, String> {
+    let (path_part, query_part) = match target.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (target, None),
+    };
+
+    let sub_path = match path_part {
+        "" | "/" => "",
+        other if other.starts_with('/') => {
+            return Err(format!(
+                "envelope target '{target}' is an absolute path -- it must be relative to the \
+                 route's handler path, never in place of it"
+            ));
+        }
+        other => other,
+    };
+
+    if !sub_path.is_empty() && path_attempts_to_escape(sub_path) {
+        return Err(format!(
+            "envelope target '{target}' attempts to escape the route's handler path"
+        ));
+    }
+
+    let mut resolved = handler_url.clone();
+    if !sub_path.is_empty() {
+        let base = resolved.path().trim_end_matches('/').to_string();
+        resolved.set_path(&format!("{base}/{sub_path}"));
+    }
+    resolved.set_query(query_part);
+    Ok(resolved)
+}
+
+/// Whether `sub_path` (a target's path portion, already known not to start
+/// with `/`) contains a scheme, a `..`/`.` segment, a backslash, or a
+/// percent-encoded form of any of those -- checked against the fully
+/// percent-decoded form, since a single decode pass reveals an encoded `/`,
+/// `\` or `..` without needing to special-case where in the string it
+/// appears, and a scheme prefix survives decoding unchanged (a `scheme ":"`
+/// is plain ASCII with no `%` of its own, so decoding a string that already
+/// looks like one is a no-op).
+///
+/// A backslash is refused outright rather than merely treated as another
+/// separator. RFC 3986 gives `\` no meaning in a path, but the WHATWG URL
+/// parser this crate implements treats it as a path separator for a special
+/// scheme (`http`/`https`) *and* removes dot segments while doing so -- so
+/// `..\admin` under a handler at `/write` normalizes all the way out to
+/// `/admin`, escaping the route's path exactly as `../admin` would while
+/// slipping past a check that only splits on `/`. Since there is no faithful
+/// reading of a backslash to preserve -- the target delivered would never be
+/// the target the sender wrote -- the whole class is refused.
+fn path_attempts_to_escape(sub_path: &str) -> bool {
+    let decoded = percent_decode_str(sub_path).decode_utf8_lossy();
+    if decoded.starts_with('/') || decoded.contains('\\') || looks_like_a_scheme(&decoded) {
+        return true;
+    }
+    decoded
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
+/// Whether `s` begins with an RFC 3986 `scheme ":"` -- `ALPHA *( ALPHA /
+/// DIGIT / "+" / "-" / "." ) ":"` -- which would let `target` name an
+/// absolute URI rather than a path relative to the handler.
+fn looks_like_a_scheme(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    for c in chars {
+        if c == ':' {
+            return true;
+        }
+        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+            return false;
+        }
+    }
+    false
 }
 
 /// Header names meaningful only for one hop of a connection (RFC 7230
@@ -56,10 +165,11 @@ pub trait AppClient: Send + Sync {
 }
 
 /// The production [`AppClient`]: makes exactly the request the envelope
-/// describes -- `handler_url`'s origin with `request.target` as the path
-/// (and query), `request.method`, `request.headers` minus hop-by-hop
-/// headers, `request.body` -- and reports back the app's complete response,
-/// whatever its status.
+/// describes -- `request.target` resolved strictly beneath `handler_url`'s
+/// own path (never in place of it, see [`resolve_target_under_handler`]),
+/// `request.method`, `request.headers` minus hop-by-hop headers,
+/// `request.body` -- and reports back the app's complete response, whatever
+/// its status.
 pub struct HttpAppClient {
     client: reqwest::Client,
 }
@@ -81,13 +191,9 @@ impl Default for HttpAppClient {
 #[async_trait]
 impl AppClient for HttpAppClient {
     async fn deliver(&self, handler_url: &Url, request: &EnvelopeRequest) -> AppOutcome {
-        let url = match handler_url.join(&request.target) {
+        let url = match resolve_target_under_handler(handler_url, &request.target) {
             Ok(url) => url,
-            Err(source) => {
-                return AppOutcome::Unreachable {
-                    message: format!("envelope target '{}' is invalid: {source}", request.target),
-                };
-            }
+            Err(message) => return AppOutcome::Refused { message },
         };
         let method = match reqwest::Method::from_bytes(request.method.as_bytes()) {
             Ok(method) => method,
@@ -189,6 +295,14 @@ impl FakeAppClient {
 #[async_trait]
 impl AppClient for FakeAppClient {
     async fn deliver(&self, handler_url: &Url, request: &EnvelopeRequest) -> AppOutcome {
+        // Same confinement rule as `HttpAppClient` (issue #596) -- a target
+        // that escapes never reaches the app, so it is refused here before
+        // the delivery is even recorded, exactly as it never fires a real
+        // HTTP request in the production client.
+        if let Err(message) = resolve_target_under_handler(handler_url, &request.target) {
+            return AppOutcome::Refused { message };
+        }
+
         self.deliveries
             .lock()
             .expect("deliveries lock")
@@ -211,6 +325,130 @@ impl AppClient for FakeAppClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #596's core rule, exercised directly against the pure resolver
+    /// rather than through a full delivery: a target resolves *beneath*
+    /// the handler's own path, never in place of it, and any attempt to
+    /// escape that path -- as an absolute path, a `..`/`.` segment, a
+    /// scheme, an authority, or a percent-encoded equivalent of any of
+    /// those -- is refused rather than resolved.
+    mod resolve_target_under_handler_tests {
+        use super::*;
+
+        fn handler() -> Url {
+            let mut url = Url::parse("http://relay:3100").unwrap();
+            url.set_path("/write");
+            url
+        }
+
+        #[test]
+        fn empty_and_bare_slash_both_mean_the_handlers_own_path() {
+            assert_eq!(
+                resolve_target_under_handler(&handler(), "")
+                    .unwrap()
+                    .as_str(),
+                "http://relay:3100/write"
+            );
+            assert_eq!(
+                resolve_target_under_handler(&handler(), "/")
+                    .unwrap()
+                    .as_str(),
+                "http://relay:3100/write"
+            );
+        }
+
+        #[test]
+        fn a_relative_target_nests_beneath_the_handlers_path() {
+            let resolved = resolve_target_under_handler(&handler(), "orders/42").unwrap();
+            assert_eq!(resolved.as_str(), "http://relay:3100/write/orders/42");
+        }
+
+        #[test]
+        fn a_query_string_survives_resolution() {
+            let resolved = resolve_target_under_handler(&handler(), "search?q=x").unwrap();
+            assert_eq!(resolved.as_str(), "http://relay:3100/write/search?q=x");
+        }
+
+        /// The exact scenario the issue reports: a bare-origin-shaped
+        /// absolute path (as `/` or `/admin`) must never displace the
+        /// route's own configured `/write`.
+        #[test]
+        fn an_absolute_path_is_refused() {
+            assert!(resolve_target_under_handler(&handler(), "/admin").is_err());
+            assert!(resolve_target_under_handler(&handler(), "/health").is_err());
+        }
+
+        #[test]
+        fn a_dot_dot_segment_is_refused() {
+            assert!(resolve_target_under_handler(&handler(), "../health").is_err());
+            assert!(resolve_target_under_handler(&handler(), "a/../../health").is_err());
+            assert!(resolve_target_under_handler(&handler(), ".").is_err());
+        }
+
+        #[test]
+        fn a_scheme_or_authority_is_refused() {
+            assert!(resolve_target_under_handler(&handler(), "http://evil.example/x").is_err());
+            assert!(resolve_target_under_handler(&handler(), "javascript:alert(1)").is_err());
+            assert!(resolve_target_under_handler(&handler(), "//evil.example/x").is_err());
+        }
+
+        /// A backslash escape. RFC 3986 gives `\` no meaning in a path, but
+        /// the WHATWG URL parser treats it as a separator for a special
+        /// scheme and removes dot segments as it goes -- so before this was
+        /// refused, `..\admin` against a handler at `/write` resolved all
+        /// the way out to `http://relay:3100/admin`, escaping the route's
+        /// path entirely while splitting only on `/` saw one harmless
+        /// segment. The percent-encoded forms (`%2e%2e\`, `%5c`) are the
+        /// same escape spelled to dodge a literal-character check.
+        #[test]
+        fn a_backslash_escape_is_refused() {
+            for target in [
+                r"..\admin",
+                r"..\..\admin",
+                r"a\..\..\admin",
+                r"%2e%2e\admin",
+                r"..%5cadmin",
+                r"%2e%2e%5cadmin",
+                r"\admin",
+            ] {
+                assert!(
+                    resolve_target_under_handler(&handler(), target).is_err(),
+                    "target {target:?} should be refused"
+                );
+            }
+        }
+
+        #[test]
+        fn a_percent_encoded_escape_is_refused() {
+            // %2e%2e is a percent-encoded "..".
+            assert!(resolve_target_under_handler(&handler(), "%2e%2e/health").is_err());
+            // %2F is a percent-encoded "/", smuggling an absolute path
+            // inside what looks like a single segment.
+            assert!(resolve_target_under_handler(&handler(), "%2Fadmin").is_err());
+        }
+
+        /// Two routes on the same origin at different prices (the cheap
+        /// `/health` route and the expensive `/write` route from the
+        /// issue) cannot be reached through one another: resolving a
+        /// target against the cheap route's handler can only ever produce
+        /// a URL nested under `/health`, never `/write`.
+        #[test]
+        fn a_cheap_routes_handler_can_never_resolve_into_a_different_routes_path() {
+            let mut cheap = Url::parse("http://relay:3100").unwrap();
+            cheap.set_path("/health");
+
+            for target in [
+                "/write",
+                "../write",
+                "%2e%2e/write",
+                r"..\write",
+                r"%2e%2e%5cwrite",
+            ] {
+                let result = resolve_target_under_handler(&cheap, target);
+                assert!(result.is_err(), "target {target:?} should be refused");
+            }
+        }
+    }
 
     fn request(method: &str, target: &str, body: &[u8]) -> EnvelopeRequest {
         EnvelopeRequest {
@@ -237,7 +475,7 @@ mod tests {
         );
 
         let outcome = fake
-            .deliver(&handler_url, &request("POST", "/orders", b"hello"))
+            .deliver(&handler_url, &request("POST", "orders", b"hello"))
             .await;
 
         assert_eq!(
@@ -256,7 +494,7 @@ mod tests {
     async fn fake_app_client_records_every_delivery() {
         let fake = FakeAppClient::new();
         let handler_url = Url::parse("http://localhost:4000").unwrap();
-        let sent = request("POST", "/orders", b"hello");
+        let sent = request("POST", "orders", b"hello");
 
         fake.deliver(&handler_url, &sent).await;
 
@@ -274,6 +512,37 @@ mod tests {
         let outcome = fake.deliver(&handler_url, &request("GET", "/", b"")).await;
 
         assert!(matches!(outcome, AppOutcome::Unreachable { .. }));
+    }
+
+    /// Issue #596: a `FakeAppClient` enforces the same target confinement
+    /// as `HttpAppClient` (asserted for the real client below), and never
+    /// records a delivery for a target it refused -- the app was never
+    /// reached, so there is nothing to have recorded.
+    #[tokio::test]
+    async fn fake_app_client_refuses_an_escaping_target_without_recording_a_delivery() {
+        let fake = FakeAppClient::new();
+        let handler_url = Url::parse("http://localhost:4000/write").unwrap();
+        fake.respond(
+            &handler_url,
+            answered_response(200, b"should never be reached"),
+        );
+
+        let outcome = fake
+            .deliver(&handler_url, &request("GET", "/admin", b""))
+            .await;
+
+        assert!(matches!(outcome, AppOutcome::Refused { .. }));
+        assert!(fake.deliveries().is_empty());
+    }
+
+    fn answered_response(status: u16, body: &[u8]) -> AppOutcome {
+        AppOutcome::Answered {
+            response: EnvelopeResponse {
+                status,
+                headers: vec![],
+                body: body.to_vec(),
+            },
+        }
     }
 
     /// Contract suite (ADR 0007): both [`AppClient`] implementations honor
@@ -380,7 +649,7 @@ mod tests {
             declining: Url,
         ) {
             match client
-                .deliver(&accepting, &request("POST", "/orders", b"payload"))
+                .deliver(&accepting, &request("POST", "orders", b"payload"))
                 .await
             {
                 AppOutcome::Answered { response } => {
@@ -393,7 +662,7 @@ mod tests {
             // ADR 0020's central rule: a non-2xx status is a real answer,
             // not converted into anything resembling a failure.
             match client
-                .deliver(&declining, &request("GET", "/missing", b""))
+                .deliver(&declining, &request("GET", "missing", b""))
                 .await
             {
                 AppOutcome::Answered { response } => {
@@ -453,17 +722,21 @@ mod tests {
         }
 
         /// AC1: a packet whose envelope names a method and a target causes
-        /// exactly that request to the app's handler.
+        /// exactly that request to the app's handler. Issue #596: the
+        /// route's handler is configured with its own path (`/write`, not
+        /// the bare origin), and a relative target nests beneath it rather
+        /// than beside or in place of it.
         #[tokio::test]
         async fn http_app_client_makes_exactly_the_request_the_envelope_describes() {
-            let (url, observed) = spawn_test_app(200, vec![], b"ok").await;
+            let (mut handler_url, observed) = spawn_test_app(200, vec![], b"ok").await;
+            handler_url.set_path("/write");
 
             HttpAppClient::new()
                 .deliver(
-                    &url,
+                    &handler_url,
                     &EnvelopeRequest {
                         method: "PUT".to_string(),
-                        target: "/orders/42".to_string(),
+                        target: "orders/42".to_string(),
                         headers: vec![("x-request-id".to_string(), "abc-123".to_string())],
                         body: b"payload".to_vec(),
                     },
@@ -472,11 +745,33 @@ mod tests {
 
             let observed = observed.lock().unwrap().clone().expect("app was called");
             assert_eq!(observed.method, "PUT");
-            assert_eq!(observed.path, "/orders/42");
+            assert_eq!(observed.path, "/write/orders/42");
             assert_eq!(observed.body, b"payload");
             assert!(observed.headers.iter().any(|(name, value)| {
                 name.eq_ignore_ascii_case("x-request-id") && value == "abc-123"
             }));
+        }
+
+        /// Issue #596's central scenario, against a real spawned server: a
+        /// route whose handler is priced for `/write` must never be
+        /// reachable at a different, cheaper path on the same origin (here
+        /// `/health`) just because a sender's envelope names it as the
+        /// target. The refusal happens before any request reaches the
+        /// server at all.
+        #[tokio::test]
+        async fn http_app_client_refuses_a_target_that_escapes_the_handler_path() {
+            let (mut handler_url, observed) = spawn_test_app(200, vec![], b"ok").await;
+            handler_url.set_path("/write");
+
+            let outcome = HttpAppClient::new()
+                .deliver(&handler_url, &request("GET", "/health", b""))
+                .await;
+
+            assert!(matches!(outcome, AppOutcome::Refused { .. }));
+            assert!(
+                observed.lock().unwrap().is_none(),
+                "the app must never be reached for a refused target"
+            );
         }
 
         /// AC7: hop-by-hop headers do not cross the connector, in either
