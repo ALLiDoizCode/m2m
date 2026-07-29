@@ -1640,17 +1640,15 @@ mod tests {
                 };
                 // `peer_signer.sign` produces a recovery id in
                 // `libsecp256k1`'s own `{0, 1}` convention
-                // (`connector_signer::crypto::sign_digest`); the wire
-                // accepts either that or the Ethereum-wallet `{27, 28}`
-                // convention when *verifying* (`recover_evm_signer`
-                // normalizes both), but `TokenNetwork`'s on-chain
-                // `ECDSA.recover` only accepts `{27, 28}` -- adjusted here
-                // so this claim genuinely redeems on the real chain below
-                // rather than merely passing this node's own internal
-                // check. Production signing the wire itself submits to a
-                // real chain is issue #577's job, not this ticket's.
-                let mut signature = peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap();
-                signature.recovery_id += 27;
+                // (`connector_signer::crypto::sign_digest`), exactly what
+                // the wire carries (peer-wire-spec.md §3.5). No `+ 27`
+                // here: `EvmSettlementBackend::redeem` is the one place
+                // that gets normalized to the Ethereum-wallet `{27, 28}`
+                // range `TokenNetwork`'s on-chain `ECDSA.recover` requires
+                // (issue #590) -- this test proves that normalization by
+                // signing through the production path unmodified and
+                // still redeeming against the real chain below.
+                let signature = peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap();
                 WireClaim {
                     channel_id: channel_id.0.clone(),
                     nonce,

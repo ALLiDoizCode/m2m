@@ -189,6 +189,17 @@ used (issue #506) — over exactly the fields the deployed `TokenNetwork.sol` ty
 `lockedAmount`/`locksRoot` included, hashed as zeros. The Solana row remains aspirational: the peer
 wire has no Ed25519 claim path yet.
 
+**Recovery id (issue #590):** an `evm` claim's signature is 65 bytes, `r (32) ‖ s (32) ‖ v (1)`. The
+wire carries `v` exactly as libsecp256k1 emits it — `{0, 1}` — never the Ethereum-wallet `{27, 28}`
+convention; `WireClaim::encode`/`decode` round-trip that byte unchanged, and nothing on the peer wire
+adds 27 to it. `TokenNetwork.claimFromChannel`'s `ECDSA.recover` accepts only `{27, 28}`, so
+`EvmSettlementBackend::redeem` is the one place that conversion happens, immediately before
+submission — idempotent (a value already in `{27, 28}` passes through unchanged) and refusing
+anything outside both ranges with a named error rather than submitting it to revert on chain. A
+verifier checking a claim's signature off the wire (`recover_evm_signer`, used by both the peer wire
+and the client edge) accepts either convention, since it never submits on chain and so has no reason
+to prefer one.
+
 ### 3.6 Relationship to application-level claims (e.g. rolling-swap)
 
 The peer-wire claim in this section is the connector's own per-hop claim — the "leg A" claim in
