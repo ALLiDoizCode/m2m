@@ -31,8 +31,10 @@
 #             writable layer: a watermark that dies with the container is
 #             the same defect one indirection down -- a restarted node with
 #             no watermark accepts every nonce a client has already spent.
-#             A named volume is also what gets chowned to the container's
-#             uid 10001 automatically; a host bind mount would need an
+#             A named volume inherits uid 10001 from the /app/state the
+#             image itself ships (an image from before that path existed
+#             initializes the volume root-owned and the node refuses to
+#             start); a host bind mount inherits nothing and needs an
 #             explicit `chown 10001:10001` like ./signer-rust.key does.
 #
 # Generate ./signer-rust.key per deploy/connector-rust/README.md step 1 --
