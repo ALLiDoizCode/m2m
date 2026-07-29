@@ -315,10 +315,31 @@ key_file = "{settlement_key_file}"
 prefix = "g.example.app"
 handler_url = "http://{app_addr}"
 price = {ROUTE_PRICE}
+
+# Issue #558: whose signature this node accepts on each of the two channels
+# opened above -- the buyer's address, the one the chain itself holds as
+# their counterparty. Without this the connector has a record of no channel
+# and refuses every claim, rather than believing what a claim says about its
+# own signer.
+[[client_channels]]
+channel_id = "{paid_channel_id}"
+counterparty = "{buyer}"
+chain_id = {ANVIL_CHAIN_ID}
+token_network_address = "{token_network}"
+
+[[client_channels]]
+channel_id = "{underpaid_channel_id}"
+counterparty = "{buyer}"
+chain_id = {ANVIL_CHAIN_ID}
+token_network_address = "{token_network}"
 "#,
         key_file = key_file.path().display(),
         settlement_key_file = settlement_key_file.path().display(),
         rpc_url = anvil.rpc_url,
+        paid_channel_id = paid_channel.0,
+        underpaid_channel_id = underpaid_channel.0,
+        buyer = to_hex(&buyer_address),
+        token_network = to_hex(&token_network_address),
     ));
     let connector = spawn_connector(config.path());
     let connector_identity = identity_from_key_seed(9);

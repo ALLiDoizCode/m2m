@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawClientChannel};
 use crate::error::ConfigError;
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{resolve_peers, PeerConfig, RawPeer};
@@ -45,6 +46,12 @@ struct RawConfig {
     /// section existed.
     #[serde(default)]
     settlement: Option<RawSettlementConfig>,
+    /// The payment channels this node accepts client-edge claims on, and
+    /// the counterparty whose signature it accepts on each (issue #558).
+    /// Absent -- or empty -- means this node has a record of no channel,
+    /// so every claim presented at its client edge is refused as unknown.
+    #[serde(default)]
+    client_channels: Vec<RawClientChannel>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -65,6 +72,7 @@ pub struct Config {
     peer_wire_addr: Option<SocketAddr>,
     operator: Option<OperatorConfig>,
     settlement: Option<SettlementConfig>,
+    client_channels: Vec<ClientChannelConfig>,
 }
 
 impl Config {
@@ -117,6 +125,7 @@ impl Config {
             .transpose()?;
         let operator = resolve_operator(raw.operator)?;
         let settlement = resolve_settlement(raw.settlement)?;
+        let client_channels = resolve_client_channels(raw.client_channels)?;
 
         Ok(Config {
             client_edge_addr,
@@ -127,6 +136,7 @@ impl Config {
             peer_wire_addr,
             operator,
             settlement,
+            client_channels,
         })
     }
 
@@ -184,6 +194,15 @@ impl Config {
     /// has.
     pub fn settlement(&self) -> Option<&SettlementConfig> {
         self.settlement.as_ref()
+    }
+
+    /// The payment channels this node accepts client-edge claims on, and
+    /// the counterparty whose signature it accepts on each (issue #558).
+    /// Empty means this node has a record of no channel at all, so every
+    /// claim presented at its client edge is refused as unknown rather
+    /// than trusted about who signed it.
+    pub fn client_channels(&self) -> &[ClientChannelConfig] {
+        &self.client_channels
     }
 }
 

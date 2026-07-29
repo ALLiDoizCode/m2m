@@ -25,7 +25,7 @@ use tower::ServiceExt;
 
 use libsecp256k1::{Message, PublicKey, SecretKey};
 
-use connector_client_edge::router;
+use connector_client_edge::{router_with_channels, ClientChannelRegistry, EvmChannel};
 use connector_config::StaticRoute;
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
@@ -89,13 +89,25 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The channel counterparty every claim below is signed by: the same real
+/// 20-byte EVM address the channels are genuinely opened to on chain
+/// (issue #558 -- a claim signed by anyone else is refused, so a test that
+/// signed with an unrelated key would be proving nothing about price).
+fn counterparty_secret() -> SecretKey {
+    SecretKey::parse(&[11u8; 32]).expect("valid secret key")
+}
+
+fn counterparty_address() -> [u8; 20] {
+    derive_evm_address(&PublicKey::from_secret_key(&counterparty_secret()).serialize())
+}
+
 /// An EVM claim JSON with a genuine EIP-712 signature over its own fields
-/// (issue #506/#544) -- a forged or unsigned claim would be refused before
-/// ever reaching the price check this file exists to prove.
+/// (issue #506/#544), produced by the channel's real on-chain counterparty
+/// (issue #558) -- a forged or unsigned claim would be refused before ever
+/// reaching the price check this file exists to prove.
 fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) -> String {
-    let secret = SecretKey::parse(&[9u8; 32]).unwrap();
-    let public = PublicKey::from_secret_key(&secret);
-    let address = derive_evm_address(&public.serialize());
+    let secret = counterparty_secret();
+    let address = counterparty_address();
 
     let mut channel_id = [0u8; 32];
     channel_id.copy_from_slice(
@@ -167,13 +179,36 @@ fn test_signer() -> Arc<dyn Signer> {
     Arc::new(LocalSigner::generate("test-signer"))
 }
 
+/// A registry recording `channel_id` as a channel of this connector's,
+/// with the address the chain itself holds as its counterparty (issue
+/// #558) -- read back from the settlement backend rather than assumed, so
+/// the key a claim must be signed by is the one the chain would settle
+/// against.
+fn channels_recording(channel_id: &str, counterparty: &[u8]) -> ClientChannelRegistry {
+    let mut address = [0u8; 20];
+    address.copy_from_slice(counterparty);
+    let mut channels = ClientChannelRegistry::new();
+    channels
+        .record_evm(
+            channel_id,
+            EvmChannel {
+                counterparty: address,
+                chain_id: CHAIN_ID,
+                token_network_address: TOKEN_NETWORK_ADDRESS,
+            },
+        )
+        .expect("a real on-chain channel id is a 32-byte hex identifier");
+    channels
+}
+
 async fn post_claim(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     claim_json: &str,
+    channels: ClientChannelRegistry,
 ) -> (StatusCode, Bytes) {
     let prepare = sealed_sample_prepare(&signer.public_key().unwrap());
-    let app = router(connector, signer);
+    let app = router_with_channels(connector, signer, None, channels);
     let request = Request::builder()
         .method("POST")
         .uri("/ilp")
@@ -206,9 +241,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     // receipt, never a number this test invents. The counterparty must be
     // a real 20-byte EVM address (issue #576): `TokenNetwork` requires one
     // able to sign balance proofs, not an arbitrary peer name.
-    let counterparty_secret = SecretKey::parse(&[11u8; 32]).expect("valid secret key");
-    let counterparty_public = PublicKey::from_secret_key(&counterparty_secret);
-    let counterparty = derive_evm_address(&counterparty_public.serialize()).to_vec();
+    let counterparty = counterparty_address().to_vec();
     let paid_channel = backend
         .open(counterparty.clone(), Duration::hours(1))
         .await
@@ -243,6 +276,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
         connector,
         signer,
         &evm_claim_json(&paid_channel.0, 1, paid_state.deposited),
+        channels_recording(&paid_channel.0, &paid_state.counterparty),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -260,6 +294,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
         connector_two,
         signer_two,
         &evm_claim_json(&underpaid_channel.0, 1, underpaid_state.deposited),
+        channels_recording(&underpaid_channel.0, &underpaid_state.counterparty),
     )
     .await;
     assert_eq!(status_two, StatusCode::OK);

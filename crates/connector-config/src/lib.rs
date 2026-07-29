@@ -8,6 +8,7 @@
 //! read into this crate; a [`SecretLocation`] is a pointer (a file path or a
 //! KMS identifier), validated for presence but not for content.
 
+mod client_channel;
 mod config;
 mod error;
 mod operator;
@@ -16,6 +17,7 @@ mod route;
 mod secret;
 mod settlement;
 
+pub use client_channel::ClientChannelConfig;
 pub use config::Config;
 pub use error::ConfigError;
 pub use operator::OperatorConfig;
