@@ -103,6 +103,13 @@ exists but is not yet selectable from config), `rpc_url`, `contract_address` (th
 `key_file`/`kms_key_id` choice as `[signer]`. An absent section is fine; a present but wrong one
 is a startup failure, because the backend resolves the registry before the node serves anything.
 
+`decimals` is a declaration, not a conversion. Nothing scales by it: every amount on the value
+path — route prices, claim amounts, channel deposits — is already in the settlement token's base
+units, and [`docs/usdc-cross-chain-settlement.md`](docs/usdc-cross-chain-settlement.md)'s
+"6 decimals everywhere" keeps those units uniform across chains, so there is nothing to convert.
+It is checked instead: startup reads the token's own `decimals()` and refuses to start when the
+two disagree, naming both. Write the scale the deployed token actually has — today, `6`.
+
 > The `*.yaml` files under `config/`, `deploy/node-quickstart/`, `deploy/pay-edge/` and
 > `infra/linode-node/` are the **retired TypeScript connector's** configuration
 > (`nodeId`, `btpServerPort`, `adminApi`). Only `*.toml` describes this binary.
@@ -188,9 +195,10 @@ no second port. The split is read from write
   `toon_settlement_total`).
 - **Writes** need an RFC 9421 HTTP Message Signature from an ed25519 key on `write_keys`, with
   the body bound by an RFC 9530 `Content-Digest`. A bearer token is never sufficient to move
-  value. `POST /packets`, `/routes/leased`, `/channels`, `/channels/:id/fund`, `/redeem`,
-  `/redeem-latest`, `/close`, `/cooperative-close`. Channel operations answer `503` when no
-  `[settlement]` backend is configured.
+  value. `POST /packets`, `/routes/leased`, `/channels`, and — all under the channel they act on
+  — `/channels/:id/fund`, `/channels/:id/redeem`, `/channels/:id/redeem-latest`,
+  `/channels/:id/close`, `/channels/:id/cooperative-close`. Channel operations answer `503` when
+  no `[settlement]` backend is configured.
 
 There is **no health endpoint** on either surface.
 

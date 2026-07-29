@@ -95,11 +95,24 @@ impl EvmSettlementBackend {
     /// `token_address` (the zero address, issue #576's AC): a
     /// `TokenNetworkRegistry` is a factory keyed by token, and there is no
     /// single "the" channel contract to fall back to guessing at.
+    ///
+    /// `expected_decimals` is the scale the operator wrote down
+    /// (`[settlement] decimals`). Nothing here scales by it -- every amount
+    /// this backend moves is already in the token's own base units, and
+    /// `docs/usdc-cross-chain-settlement.md`'s "6 decimals everywhere" is
+    /// what makes that safe across chains -- so it is checked rather than
+    /// applied: `connect` reads the token's own `decimals()` and refuses,
+    /// naming both values, when they disagree (issue #564, ADR 0009). That
+    /// is exactly the startup assertion
+    /// `docs/usdc-cross-chain-settlement.md` asks for, and the check that
+    /// turns a stale `decimals = 18` from a line with no effect into a
+    /// refusal to start.
     pub async fn connect(
         rpc_url: &str,
         private_key: &str,
         registry_address: Address,
         token_address: Address,
+        expected_decimals: u8,
     ) -> Result<Self, SettlementError> {
         let (client, own_address) = build_client(rpc_url, private_key).await?;
         let client = Arc::new(client);
@@ -117,6 +130,13 @@ impl EvmSettlementBackend {
         }
         let contract = TokenNetworkContract::new(token_network_address, client.clone());
         let token = Erc20Contract::new(token_address, client);
+        let on_chain_decimals = token.decimals().call().await.map_err(backend_error)?;
+        if on_chain_decimals != expected_decimals {
+            return Err(SettlementError::Backend(format!(
+                "[settlement] decimals is {expected_decimals}, but token {token_address:?} \
+                 reports decimals() = {on_chain_decimals}"
+            )));
+        }
         Ok(Self {
             contract,
             token,

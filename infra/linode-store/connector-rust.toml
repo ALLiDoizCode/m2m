@@ -104,6 +104,10 @@ price = 1000
 # # REPLACE the zero address with the deployed `TokenNetworkRegistry` address.
 # contract_address = "0x0000000000000000000000000000000000000000"
 # token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+# # The scale the deployed token itself reports. Nothing scales by it --
+# # claims are already in the token's base units -- but startup reads the
+# # token's own `decimals()` and refuses to boot if the two disagree (issue
+# # #564), so a stale value here is a refusal to start, not a silent no-op.
 # decimals = 6
 #
 # [settlement.key]

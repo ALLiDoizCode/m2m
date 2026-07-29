@@ -26,6 +26,12 @@ abigen!(MockErc20, "./contracts/MockERC20.json");
 // not tied to the mock's compiled artifact (it carries no `mint`), and
 // correct against the real, already-deployed USDC contract production
 // points at just as much as against `MockErc20` above.
+//
+// `decimals()` is here only so `EvmSettlementBackend::connect` can refuse a
+// `[settlement] decimals` that the deployed token disagrees with (issue
+// #564). It is not part of any value path: every claim in this network is
+// denominated in the token's own base units, and every chain settles
+// 6-decimal USDC, so nothing scales.
 abigen!(
     Erc20,
     r#"[
@@ -33,6 +39,7 @@ abigen!(
         function transferFrom(address from, address to, uint256 amount) external returns (bool)
         function transfer(address to, uint256 amount) external returns (bool)
         function balanceOf(address account) external view returns (uint256)
+        function decimals() external view returns (uint8)
     ]"#
 );
 

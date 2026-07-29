@@ -89,13 +89,28 @@ impl SettlementConfig {
     /// [`contract_address`](Self::contract_address) against to find the
     /// actual `TokenNetwork` (issue #576 closes out this field's half of
     /// issue #564 -- construction now reads it rather than validating and
-    /// discarding it; #564 narrows to its `decimals` half, still unread).
+    /// discarding it).
     pub fn token_address(&self) -> [u8; 20] {
         self.token_address
     }
 
     /// The settlement asset's decimal precision (6 for the USDC this
     /// connector settles -- issue #542's decision comment).
+    ///
+    /// Nothing scales by this value, and nothing should: every amount on
+    /// this connector's value path -- route prices, claim amounts, channel
+    /// deposits -- is already in the settlement token's own base units, and
+    /// `docs/usdc-cross-chain-settlement.md`'s "6 decimals everywhere"
+    /// makes those units uniform across every chain in the fleet, so there
+    /// is no cross-chain normalization for a scale factor to feed.
+    ///
+    /// It is honoured as a *check* instead (issue #564):
+    /// `EvmSettlementBackend::connect` reads the deployed token's own
+    /// `decimals()` and refuses to start when it disagrees with this value,
+    /// naming both. That is the startup assertion
+    /// `docs/usdc-cross-chain-settlement.md` calls for, and it is what
+    /// keeps a stale `decimals = 18` from loading as if it were honoured
+    /// (ADR 0009).
     pub fn decimals(&self) -> u8 {
         self.decimals
     }
