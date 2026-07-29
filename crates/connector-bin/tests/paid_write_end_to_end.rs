@@ -288,12 +288,7 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
         .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
         .expect("write settlement key file");
     let write_keypair = Keypair::generate(&mut OsRng);
-    let write_key_hex = write_keypair
-        .public
-        .to_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let write_key_hex = hex_encode(&write_keypair.public.to_bytes());
     let registry_address = backend.registry_address();
     let config = write_config(&format!(
         r#"
