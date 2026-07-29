@@ -1949,7 +1949,7 @@ mod tests {
     /// the header on a path with no claim in it at all; these cover the
     /// cases that need a real claim, and so need `claim_headers`'s signer.
     mod cost_discovery {
-        use super::claim_headers::{evm_claim_json, request_with_claim_header};
+        use super::claim_headers::{evm_claim_json, request_with_claim_header, test_channels};
         use super::*;
 
         const PRICE: u64 = 100;
@@ -1993,7 +1993,17 @@ mod tests {
                 )
                 .with_identity_signer(signer.clone()),
             );
-            (router(connector, signer.clone()), app_client, signer)
+            // Since #558 a claim verifies against the counterparty this
+            // connector records for the channel it names, so a router with
+            // no channels recorded refuses every claim -- including the
+            // paid write these tests set themselves up with. The recorded
+            // channel is `claim_headers`' own, the one `evm_claim_json`
+            // signs against.
+            (
+                router_with_channels(connector, signer.clone(), None, test_channels()),
+                app_client,
+                signer,
+            )
         }
 
         /// Before #548 a route's price was disclosed only inside an
@@ -2070,12 +2080,16 @@ mod tests {
 
         /// The gate is satisfiable by a deployed node (issue #548's last
         /// acceptance criterion): a claim clearing §1.3's gate at this edge
-        /// is how a connector learns an unaffiliated sender holds a channel
-        /// with it, since no configuration file names one and no chain
-        /// indexes one. Having paid once, the same sender may probe -- and
-        /// what comes back is the route's price as one figure, with the app
-        /// still only ever having been asked to do the work that was paid
-        /// for.
+        /// is how a connector learns a sender is actually *using* a channel
+        /// with it. Since issue #558 that node does hold prior
+        /// configuration about the channel -- it must already record the
+        /// counterparty whose signature it accepts there, or the claim
+        /// could not verify at all -- but recording whose signature is
+        /// accepted is not the same as having been paid, and it is the
+        /// payment that this gate records. No chain indexes that either.
+        /// Having paid once, the same sender may probe -- and what comes
+        /// back is the route's price as one figure, with the app still only
+        /// ever having been asked to do the work that was paid for.
         #[tokio::test]
         async fn a_probe_from_a_sender_that_has_paid_reports_the_price_without_delivering() {
             let (app, app_client, signer) = priced_route_router();

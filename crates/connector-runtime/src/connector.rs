@@ -584,10 +584,14 @@ impl Connector {
     /// Record that `channel_id` names a payment channel this connector
     /// recognizes (issue #548) -- the client edge calls this the moment a
     /// claim on that channel clears its own gate (structure, freshness,
-    /// value, signature), which is the only evidence a connector ever gets
-    /// that an unaffiliated sender holds a channel with it: no
-    /// configuration file names a client's channel, and no chain offers an
-    /// index of them (the same reason `known_channels` exists).
+    /// value, and signature against the counterparty recorded for that
+    /// channel, issue #558), which is the only evidence a connector ever
+    /// gets that a sender is actually *using* a channel with it. Since
+    /// #558 a connector does hold prior configuration about such a channel
+    /// -- it must already record whose signature it accepts there, or no
+    /// claim on it could verify -- but that says only which key may spend,
+    /// never that anyone has; and no chain offers an index of who has (the
+    /// same reason `known_channels` exists).
     ///
     /// Idempotent, and deliberately not undone -- a channel that has closed
     /// simply retains a probe allowance it can no longer pay with, which
