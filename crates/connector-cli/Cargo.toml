@@ -12,6 +12,7 @@ connector-runtime = { path = "../connector-runtime" }
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm" }
 connector-signer = { path = "../connector-signer" }
+async-trait = "0.1"
 axum = "0.6"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 

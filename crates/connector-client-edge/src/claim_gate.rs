@@ -34,6 +34,15 @@
 //! signature and from an underpayment -- there is nothing to verify it
 //! against, and "unverifiable" is never "accepted". No configuration, flag
 //! or build profile falls back to the claim's self-declared signer.
+//!
+//! **Where that record comes from** (issue #556): the registry answers
+//! from what the config file declared, or -- for a channel nothing
+//! declared -- from the chain, via a [`crate::ClientChannelSource`]. That
+//! resolution is the one part of this gate that can do I/O, which is why
+//! [`ClientClaimGate::ingest`] is `async`. A resolution that *fails* is
+//! [`ClaimIngestRejection::ChannelLookupFailed`]: the claim is refused,
+//! loudly and distinguishably from a channel that genuinely does not
+//! exist, and under no circumstance falls back to trusting it.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -74,6 +83,15 @@ pub enum ClaimIngestRejection {
     /// be checked against. Matches the peer wire's own
     /// `connector_runtime::ClaimRejectReason::UnknownChannel`.
     UnknownChannel,
+    /// This connector could not find out who the claim's channel belongs
+    /// to (issue #556) -- its [`crate::ClientChannelSource`] failed, e.g.
+    /// an unreachable RPC endpoint. Distinct from
+    /// [`ClaimIngestRejection::UnknownChannel`] on purpose: that one is a
+    /// fact about the channel, this one is a failure of this connector's,
+    /// and reporting an outage as "no such channel" would tell a
+    /// legitimate payer to go away for a reason that is not true. Both
+    /// refuse the claim -- an unverifiable claim is never accepted.
+    ChannelLookupFailed(String),
     SignatureInvalid,
     WrapUnsupported,
     WrapFailed(String),
@@ -106,6 +124,10 @@ impl ClaimIngestRejection {
                  connector has no record of, so there is no counterparty to verify its \
                  signature against"
                 .to_string(),
+            ClaimIngestRejection::ChannelLookupFailed(reason) => format!(
+                "claim rejected: this connector could not look up the channel's counterparty, \
+                 so the claim cannot be verified -- retry once the lookup succeeds: {reason}"
+            ),
             ClaimIngestRejection::SignatureInvalid => "claim rejected: signature does not \
                  verify against this channel's recorded counterparty"
                 .to_string(),
@@ -154,7 +176,18 @@ impl ClientClaimGate {
     /// fully accepted -- a rejected claim, whether stale, underpaying or
     /// unverifiable, leaves the watermark exactly as it was, so a
     /// corrected resubmission is still judged against the same baseline.
-    pub fn ingest(
+    ///
+    /// `async` because resolving a channel nothing declared is a read
+    /// against a chain (issue #556). The watermark lock is deliberately
+    /// **not** held across that await -- a `std::sync::RwLock` guard held
+    /// across a suspension point would stall every other packet in flight
+    /// -- so the freshness and value rules are evaluated twice: once up
+    /// front, which is what keeps #544's ordering promise that a replay or
+    /// an underpayment never pays for a signature check, and once more
+    /// under the write lock immediately before the watermark advances,
+    /// which is what makes two concurrent claims on one channel still
+    /// serialise. The second evaluation is the authoritative one.
+    pub async fn ingest(
         &self,
         claim_json: &str,
         price: u64,
@@ -165,36 +198,60 @@ impl ClientClaimGate {
         })?;
 
         let key = claim.channel_key();
+        {
+            let watermarks = self
+                .watermarks
+                .read()
+                .expect("client claim watermarks lock poisoned");
+            check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
+        }
+
+        verify_claim_signature(&self.channels, &claim).await?;
+
         let mut watermarks = self
             .watermarks
             .write()
             .expect("client claim watermarks lock poisoned");
-        let current = watermarks.get(&key).copied();
-        if let Err(error) = validate_claim(current, claim.nonce(), claim.transferred_amount()) {
-            return Err(match error {
-                ClaimError::NonceNotAdvancing { .. } => ClaimIngestRejection::NonceNotAdvancing,
-                ClaimError::AmountNotAdvancing { .. } => ClaimIngestRejection::AmountNotAdvancing,
-                ClaimError::Underpayment { .. } => {
-                    unreachable!("validate_claim never returns Underpayment")
-                }
-            });
-        }
-        if let Err(error) = validate_price(current, claim.transferred_amount(), price) {
-            return Err(match error {
-                ClaimError::Underpayment { advanced, price } => {
-                    ClaimIngestRejection::Underpayment { advanced, price }
-                }
-                other => unreachable!("validate_price only ever returns Underpayment: {other:?}"),
-            });
-        }
-        verify_claim_signature(&self.channels, &claim)?;
-
+        // Re-read rather than reusing the value from above: a concurrent
+        // claim on this same channel may have advanced the watermark while
+        // the channel lookup was in flight, and accepting both would be
+        // exactly the replay this gate exists to refuse.
+        check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
         watermarks.insert(
             key,
             advance_watermark(claim.nonce(), claim.transferred_amount()),
         );
         Ok(claim)
     }
+}
+
+/// client-edge-spec.md §1.3 steps 2 and 3 against `current`: the claim's
+/// nonce and cumulative amount must advance this channel's watermark, and
+/// the advance must cover `price`. Pure, and cheap enough to run twice --
+/// see [`ClientClaimGate::ingest`] for why it is.
+fn check_freshness_and_value(
+    current: Option<Watermark>,
+    claim: &ClientClaim,
+    price: u64,
+) -> Result<(), ClaimIngestRejection> {
+    if let Err(error) = validate_claim(current, claim.nonce(), claim.transferred_amount()) {
+        return Err(match error {
+            ClaimError::NonceNotAdvancing { .. } => ClaimIngestRejection::NonceNotAdvancing,
+            ClaimError::AmountNotAdvancing { .. } => ClaimIngestRejection::AmountNotAdvancing,
+            ClaimError::Underpayment { .. } => {
+                unreachable!("validate_claim never returns Underpayment")
+            }
+        });
+    }
+    if let Err(error) = validate_price(current, claim.transferred_amount(), price) {
+        return Err(match error {
+            ClaimError::Underpayment { advanced, price } => {
+                ClaimIngestRejection::Underpayment { advanced, price }
+            }
+            other => unreachable!("validate_price only ever returns Underpayment: {other:?}"),
+        });
+    }
+    Ok(())
 }
 
 /// Verify a claim's signature against the counterparty `channels` records
@@ -204,28 +261,42 @@ impl ClientClaimGate {
 /// precisely because it is the *signature's* missing half: a replay or an
 /// underpayment is still refused for what it is, before this connector
 /// spends any cryptographic work, exactly as #544 ordered it.
-fn verify_claim_signature(
+async fn verify_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &ClientClaim,
 ) -> Result<(), ClaimIngestRejection> {
     match claim {
-        ClientClaim::Evm(claim) => verify_evm_claim_signature(channels, claim),
+        ClientClaim::Evm(claim) => verify_evm_claim_signature(channels, claim).await,
         ClientClaim::Solana(claim) => verify_solana_claim_signature(channels, claim),
     }
 }
 
-fn verify_evm_claim_signature(
+async fn verify_evm_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &EvmClientClaim,
 ) -> Result<(), ClaimIngestRejection> {
     // An id that is not a 32-byte `channelId` cannot be a channel this
-    // connector recorded, since nothing else can be recorded -- so it is
-    // unknown rather than merely unverifiable.
+    // connector recorded, and cannot be one any chain could resolve either
+    // -- so it is unknown rather than merely unverifiable, and is settled
+    // here without spending a lookup on it.
     let Some(channel_id) = decode_hex_bytes::<32>(&claim.channel_id) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
-    let Some(channel) = channels.evm(&channel_id) else {
-        return Err(ClaimIngestRejection::UnknownChannel);
+    let channel = match channels.evm(&channel_id).await {
+        Ok(Some(channel)) => channel,
+        Ok(None) => return Err(ClaimIngestRejection::UnknownChannel),
+        // Loud, per issue #556: an operator has to be able to tell "my
+        // chain endpoint is down, so no *new* channel can be recognised"
+        // apart from "someone is claiming on channels that do not exist".
+        // The claim is refused either way.
+        Err(failure) => {
+            tracing::warn!(
+                channel_id = %claim.channel_id,
+                error = %failure,
+                "refusing a client claim: could not resolve its channel's counterparty"
+            );
+            return Err(ClaimIngestRejection::ChannelLookupFailed(failure.0));
+        }
     };
 
     // `lockedAmount`/`locksRoot` are read from the claim because they are
@@ -267,6 +338,9 @@ fn verify_solana_claim_signature(
     let Some(channel_account) = decode_base58_bytes::<32>(&claim.channel_account) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
+    // Declared records only -- see `ClientChannelRegistry::solana`: there
+    // is no Solana client-edge channel source, so a Solana claim is
+    // payable exactly when configuration named its channel.
     let Some(counterparty) = channels.solana(&channel_account) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
@@ -282,7 +356,7 @@ fn verify_solana_claim_signature(
         claim.nonce,
         claim.transferred_amount,
         &signature,
-        counterparty,
+        &counterparty,
     ) {
         Ok(())
     } else {
@@ -293,9 +367,11 @@ fn verify_solana_claim_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::test_source::FakeChannelSource;
     use crate::channels::EvmChannel;
     use connector_signer::{derive_evm_address, evm_balance_proof_digest, to_hex, Address};
     use libsecp256k1::{Message, PublicKey, SecretKey};
+    use std::sync::Arc;
 
     const EVM_CHAIN_ID: u64 = 8453;
     const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
@@ -466,69 +542,80 @@ mod tests {
         format!("0x{}", "ef".repeat(32))
     }
 
-    #[test]
-    fn a_fresh_claim_is_accepted() {
+    #[tokio::test]
+    async fn a_fresh_claim_is_accepted() {
         let gate = gate();
-        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0);
+        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn a_replayed_nonce_is_rejected_without_touching_the_watermark() {
+    #[tokio::test]
+    async fn a_replayed_nonce_is_rejected_without_touching_the_watermark() {
         let gate = gate();
         let channel = channel_id();
         gate.ingest(&evm_claim_json(&channel, 5, 500), 0)
+            .await
             .expect("first claim accepted");
 
-        let replay = gate.ingest(&evm_claim_json(&channel, 5, 999), 0);
+        let replay = gate.ingest(&evm_claim_json(&channel, 5, 999), 0).await;
         assert_eq!(replay, Err(ClaimIngestRejection::NonceNotAdvancing));
 
         // The watermark still holds at nonce 5 -- a genuinely advancing
         // claim after the rejected replay is judged against it, not against
         // whatever the rejected replay tried to claim.
-        let next = gate.ingest(&evm_claim_json(&channel, 6, 500), 0);
+        let next = gate.ingest(&evm_claim_json(&channel, 6, 500), 0).await;
         assert!(next.is_ok());
     }
 
-    #[test]
-    fn an_amount_going_backwards_is_rejected() {
+    #[tokio::test]
+    async fn an_amount_going_backwards_is_rejected() {
         let gate = gate();
         let channel = channel_id();
         gate.ingest(&evm_claim_json(&channel, 1, 500), 0)
+            .await
             .expect("first claim accepted");
 
-        let result = gate.ingest(&evm_claim_json(&channel, 2, 100), 0);
+        let result = gate.ingest(&evm_claim_json(&channel, 2, 100), 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::AmountNotAdvancing));
     }
 
-    #[test]
-    fn the_watermark_never_advances_on_a_rejected_claim() {
+    #[tokio::test]
+    async fn the_watermark_never_advances_on_a_rejected_claim() {
         let gate = gate();
         let channel = channel_id();
         gate.ingest(&evm_claim_json(&channel, 5, 500), 0)
+            .await
             .expect("first claim accepted");
         gate.ingest(&evm_claim_json(&channel, 5, 999), 0)
+            .await
             .unwrap_err(); // replay, rejected
         gate.ingest(&evm_claim_json(&channel, 6, 100), 0)
+            .await
             .unwrap_err(); // amount regresses vs. watermark 500
 
         // Watermark is still exactly (5, 500): a claim of nonce 6 / amount
         // 500 (equal, not less) still advances cleanly.
-        assert!(gate.ingest(&evm_claim_json(&channel, 6, 500), 0).is_ok());
+        assert!(gate
+            .ingest(&evm_claim_json(&channel, 6, 500), 0)
+            .await
+            .is_ok());
     }
 
-    #[test]
-    fn different_channels_have_independent_watermarks() {
+    #[tokio::test]
+    async fn different_channels_have_independent_watermarks() {
         let gate = gate();
         gate.ingest(&evm_claim_json(&channel_id(), 5, 500), 0)
+            .await
             .expect("first channel");
 
-        let result = gate.ingest(&evm_claim_json(&second_channel_id(), 1, 10), 0);
+        let result = gate
+            .ingest(&evm_claim_json(&second_channel_id(), 1, 10), 0)
+            .await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn a_mina_claim_is_rejected_distinguishably_from_malformed() {
+    #[tokio::test]
+    async fn a_mina_claim_is_rejected_distinguishably_from_malformed() {
         let gate = gate();
         let json = r#"{
             "version": "1.0",
@@ -544,27 +631,33 @@ mod tests {
             "salt": "salt"
         }"#;
 
-        assert_eq!(gate.ingest(json, 0), Err(ClaimIngestRejection::Mina));
+        assert_eq!(gate.ingest(json, 0).await, Err(ClaimIngestRejection::Mina));
     }
 
-    #[test]
-    fn a_structurally_invalid_claim_is_rejected_as_malformed() {
+    #[tokio::test]
+    async fn a_structurally_invalid_claim_is_rejected_as_malformed() {
         let gate = gate();
-        let result = gate.ingest(r#"{"version": "1.0", "blockchain": "evm"}"#, 0);
+        let result = gate
+            .ingest(r#"{"version": "1.0", "blockchain": "evm"}"#, 0)
+            .await;
         assert!(matches!(result, Err(ClaimIngestRejection::Malformed(_))));
     }
 
-    #[test]
-    fn a_first_claim_advancing_by_at_least_the_price_is_accepted() {
+    #[tokio::test]
+    async fn a_first_claim_advancing_by_at_least_the_price_is_accepted() {
         let gate = gate();
-        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 100);
+        let result = gate
+            .ingest(&evm_claim_json(&channel_id(), 1, 100), 100)
+            .await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn a_first_claim_advancing_by_less_than_the_price_is_underpayment() {
+    #[tokio::test]
+    async fn a_first_claim_advancing_by_less_than_the_price_is_underpayment() {
         let gate = gate();
-        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 99), 100);
+        let result = gate
+            .ingest(&evm_claim_json(&channel_id(), 1, 99), 100)
+            .await;
         assert_eq!(
             result,
             Err(ClaimIngestRejection::Underpayment {
@@ -574,31 +667,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_underpaying_claim_does_not_advance_the_watermark() {
+    #[tokio::test]
+    async fn an_underpaying_claim_does_not_advance_the_watermark() {
         let gate = gate();
         let channel = channel_id();
         gate.ingest(&evm_claim_json(&channel, 1, 99), 100)
+            .await
             .unwrap_err();
 
         // A corrected resubmission is judged against the same (untouched)
         // baseline -- nonce 1 would otherwise fail as a replay if the
         // rejected claim above had advanced anything.
-        let result = gate.ingest(&evm_claim_json(&channel, 1, 100), 100);
+        let result = gate.ingest(&evm_claim_json(&channel, 1, 100), 100).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn a_later_claim_only_needs_to_cover_the_price_since_the_watermark() {
+    #[tokio::test]
+    async fn a_later_claim_only_needs_to_cover_the_price_since_the_watermark() {
         let gate = gate();
         let channel = channel_id();
         gate.ingest(&evm_claim_json(&channel, 1, 100), 100)
+            .await
             .expect("first claim covers the price");
 
         // Advances by only 50 past the watermark of 100 -- underpayment
         // against a price of 100, even though the claim's own cumulative
         // transferredAmount (150) is larger than the price in isolation.
-        let result = gate.ingest(&evm_claim_json(&channel, 2, 150), 100);
+        let result = gate.ingest(&evm_claim_json(&channel, 2, 150), 100).await;
         assert_eq!(
             result,
             Err(ClaimIngestRejection::Underpayment {
@@ -608,22 +703,25 @@ mod tests {
         );
 
         // Advancing by exactly the price is accepted.
-        assert!(gate.ingest(&evm_claim_json(&channel, 2, 200), 100).is_ok());
+        assert!(gate
+            .ingest(&evm_claim_json(&channel, 2, 200), 100)
+            .await
+            .is_ok());
     }
 
-    #[test]
-    fn a_zero_price_route_charges_nothing() {
+    #[tokio::test]
+    async fn a_zero_price_route_charges_nothing() {
         let gate = gate();
-        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 0), 0);
+        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 0), 0).await;
         assert!(result.is_ok());
     }
 
     // -- Signature verification (issue #506/#544) --
 
-    #[test]
-    fn a_genuine_evm_signature_is_accepted() {
+    #[tokio::test]
+    async fn a_genuine_evm_signature_is_accepted() {
         let gate = gate();
-        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0);
+        let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await;
         assert!(result.is_ok());
     }
 
@@ -631,8 +729,8 @@ mod tests {
     /// self-consistent -- and signed by a key that is not the channel's
     /// counterparty. Before #558 this was *accepted*, because the claim was
     /// checked against the signer it declared for itself.
-    #[test]
-    fn an_evm_claim_signed_by_a_key_that_is_not_the_channels_counterparty_is_rejected() {
+    #[tokio::test]
+    async fn an_evm_claim_signed_by_a_key_that_is_not_the_channels_counterparty_is_rejected() {
         let gate = gate();
 
         // An attacker's own freshly generated keypair, declared as this
@@ -651,15 +749,15 @@ mod tests {
             evm_claim_json_signed_by(&forger_secret, &forger_address, &channel_id(), 1, 100);
 
         assert_eq!(
-            gate.ingest(&claim, 0),
+            gate.ingest(&claim, 0).await,
             Err(ClaimIngestRejection::SignatureInvalid)
         );
     }
 
     /// A forged claim is refused *and* leaves nothing behind: the channel's
     /// real counterparty is judged against the same baseline afterwards.
-    #[test]
-    fn a_forged_claim_advances_no_watermark() {
+    #[tokio::test]
+    async fn a_forged_claim_advances_no_watermark() {
         let gate = gate();
         let forger_secret = SecretKey::parse(&[0x5a; 32]).unwrap();
         let forger_address =
@@ -668,12 +766,14 @@ mod tests {
             &evm_claim_json_signed_by(&forger_secret, &forger_address, &channel_id(), 9, 900),
             0,
         )
+        .await
         .unwrap_err();
 
         // The counterparty's own first claim, at a far lower nonce and
         // amount than the forgery named, is still a fresh first claim.
         assert!(gate
             .ingest(&evm_claim_json(&channel_id(), 1, 100), 0)
+            .await
             .is_ok());
     }
 
@@ -682,8 +782,8 @@ mod tests {
     /// by the channel's actual counterparty, is accepted: the field is
     /// unverified decoration, and this connector does not act on it either
     /// way.
-    #[test]
-    fn an_evm_claims_declared_signer_field_carries_no_authority() {
+    #[tokio::test]
+    async fn an_evm_claims_declared_signer_field_carries_no_authority() {
         let gate = gate();
         let (secret, _address) = evm_signer();
         let claim = evm_claim_json_signed_by(
@@ -694,18 +794,18 @@ mod tests {
             100,
         );
 
-        assert!(gate.ingest(&claim, 0).is_ok());
+        assert!(gate.ingest(&claim, 0).await.is_ok());
     }
 
     /// A claim naming a channel this connector has no record of is refused
     /// -- distinguishably from a bad signature and from an underpayment
     /// (issue #558's AC2).
-    #[test]
-    fn a_claim_on_an_unrecorded_channel_is_refused_as_unknown_channel() {
+    #[tokio::test]
+    async fn a_claim_on_an_unrecorded_channel_is_refused_as_unknown_channel() {
         let gate = gate();
         let claim = evm_claim_json(&unrecorded_channel_id(), 1, 100);
 
-        let result = gate.ingest(&claim, 0);
+        let result = gate.ingest(&claim, 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::UnknownChannel));
         assert_ne!(result, Err(ClaimIngestRejection::SignatureInvalid));
         assert!(result.unwrap_err().message().contains("no record of"));
@@ -714,23 +814,142 @@ mod tests {
     /// An empty registry is not an open door: a gate with a record of no
     /// channel at all refuses even a perfectly signed claim, rather than
     /// falling back to the claim's own declared signer (issue #558's AC8).
-    #[test]
-    fn a_gate_with_no_recorded_channels_accepts_nothing() {
+    #[tokio::test]
+    async fn a_gate_with_no_recorded_channels_accepts_nothing() {
         let gate = ClientClaimGate::new(ClientChannelRegistry::new());
         assert_eq!(
-            gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0),
+            gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await,
             Err(ClaimIngestRejection::UnknownChannel)
         );
+    }
+
+    /// Issue #556/#502: a channel **nothing declared**, resolved from the
+    /// chain, is accepted -- the unaffiliated buyer's path. On a tree
+    /// without this change there is no source to consult and this exact
+    /// claim is refused `UnknownChannel`, so an operator has to edit
+    /// `[[client_channels]]` and restart before anyone new can pay.
+    ///
+    /// The claim is signed by [`evm_signer`] and the *source* -- standing
+    /// in for `TokenNetwork.channels(id)` -- is what names that address as
+    /// the channel's counterparty. Nothing here reads the claim's own
+    /// `signerAddress`; the forger tests below still pass unchanged.
+    #[tokio::test]
+    async fn a_claim_on_a_channel_only_the_chain_knows_about_is_accepted() {
+        let (_secret, address) = evm_signer();
+        let channel_id = decode_hex_bytes::<32>(&unrecorded_channel_id()).unwrap();
+        let gate = ClientClaimGate::new(ClientChannelRegistry::new().with_source(Arc::new(
+            FakeChannelSource::knowing(vec![(
+                channel_id,
+                EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                },
+            )]),
+        )));
+
+        let accepted = gate
+            .ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 100), 100)
+            .await
+            .expect("a channel the chain knows about is payable without a config edit");
+        assert_eq!(
+            accepted.channel_key(),
+            format!("evm:{}", unrecorded_channel_id())
+        );
+    }
+
+    /// The forger rule survives the new source: a claim signed by a key
+    /// that is not what the *chain* holds as the channel's counterparty is
+    /// still refused, even though the channel itself resolves.
+    #[tokio::test]
+    async fn a_claim_signed_by_someone_other_than_the_chains_counterparty_is_still_refused() {
+        let channel_id = decode_hex_bytes::<32>(&unrecorded_channel_id()).unwrap();
+        let forger = SecretKey::parse(&[13u8; 32]).unwrap();
+        let forger_address = derive_evm_address(&PublicKey::from_secret_key(&forger).serialize());
+        let (_secret, genuine) = evm_signer();
+        let gate = ClientClaimGate::new(ClientChannelRegistry::new().with_source(Arc::new(
+            FakeChannelSource::knowing(vec![(
+                channel_id,
+                EvmChannel {
+                    counterparty: genuine,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                },
+            )]),
+        )));
+
+        let claim =
+            evm_claim_json_signed_by(&forger, &forger_address, &unrecorded_channel_id(), 1, 100);
+        assert_eq!(
+            gate.ingest(&claim, 0).await,
+            Err(ClaimIngestRejection::SignatureInvalid)
+        );
+    }
+
+    /// A source that cannot answer refuses the claim -- it never degrades
+    /// to trusting what the claim says about itself -- and says so
+    /// distinguishably from a channel that genuinely does not exist, so an
+    /// operator can tell an RPC outage from a sender naming channels at
+    /// random.
+    #[tokio::test]
+    async fn a_claim_whose_channel_lookup_fails_is_refused_distinguishably() {
+        let gate = ClientClaimGate::new(ClientChannelRegistry::new().with_source(Arc::new(
+            FakeChannelSource::unreachable("connection refused"),
+        )));
+
+        let result = gate
+            .ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 100), 0)
+            .await;
+        assert_eq!(
+            result,
+            Err(ClaimIngestRejection::ChannelLookupFailed(
+                "connection refused".to_string()
+            ))
+        );
+        assert_ne!(result, Err(ClaimIngestRejection::UnknownChannel));
+        let message = result.unwrap_err().message();
+        assert!(message.contains("could not look up"), "{message}");
+        assert!(message.contains("connection refused"), "{message}");
+    }
+
+    /// A node whose config declares its channels keeps working while its
+    /// chain endpoint is down: the declared record answers, and the broken
+    /// source is never consulted. This is the "still start and serve when
+    /// the chain is unreachable" requirement at claim level.
+    #[tokio::test]
+    async fn a_declared_channel_is_still_payable_while_the_chain_is_unreachable() {
+        let mut channels = ClientChannelRegistry::new();
+        let (_secret, address) = evm_signer();
+        channels
+            .record_evm(
+                &channel_id(),
+                EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                },
+            )
+            .expect("a 32-byte hex channel id");
+        let gate = ClientClaimGate::new(channels.with_source(Arc::new(
+            FakeChannelSource::unreachable("connection refused"),
+        )));
+
+        assert!(gate
+            .ingest(&evm_claim_json(&channel_id(), 1, 100), 0)
+            .await
+            .is_ok());
     }
 
     /// An unrecorded channel is refused *after* freshness and value, not
     /// before: #544's ordering is preserved, so an underpaying claim still
     /// costs this ingress no channel lookup or cryptographic work to
     /// refuse (issue #558's AC4).
-    #[test]
-    fn an_underpaying_claim_on_an_unrecorded_channel_is_still_refused_as_underpayment() {
+    #[tokio::test]
+    async fn an_underpaying_claim_on_an_unrecorded_channel_is_still_refused_as_underpayment() {
         let gate = gate();
-        let result = gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 99), 100);
+        let result = gate
+            .ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 99), 100)
+            .await;
         assert_eq!(
             result,
             Err(ClaimIngestRejection::Underpayment {
@@ -740,8 +959,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_evm_claim_with_a_corrupted_signature_is_rejected_not_panicking() {
+    #[tokio::test]
+    async fn an_evm_claim_with_a_corrupted_signature_is_rejected_not_panicking() {
         let gate = gate();
         let (secret, address) = evm_signer();
         let proof = EvmBalanceProof {
@@ -768,12 +987,12 @@ mod tests {
             ),
         );
 
-        let result = gate.ingest(&claim, 0);
+        let result = gate.ingest(&claim, 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::SignatureInvalid));
     }
 
-    #[test]
-    fn an_evm_claim_with_a_truncated_signature_is_rejected_not_panicking() {
+    #[tokio::test]
+    async fn an_evm_claim_with_a_truncated_signature_is_rejected_not_panicking() {
         let gate = gate();
         let (_secret, address) = evm_signer();
         let claim = evm_claim_json_with(
@@ -788,7 +1007,7 @@ mod tests {
             ),
         );
 
-        let result = gate.ingest(&claim, 0);
+        let result = gate.ingest(&claim, 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::SignatureInvalid));
     }
 
@@ -797,8 +1016,8 @@ mod tests {
     /// `chainId`/`tokenNetworkAddress` at all still verifies, and a claim
     /// declaring a *different* domain than the one recorded gains nothing by
     /// it -- both are judged against the recorded domain.
-    #[test]
-    fn an_evm_claims_declared_eip712_domain_carries_no_authority() {
+    #[tokio::test]
+    async fn an_evm_claims_declared_eip712_domain_carries_no_authority() {
         let gate = gate();
         let (secret, address) = evm_signer();
         let proof = EvmBalanceProof {
@@ -820,7 +1039,7 @@ mod tests {
             &to_hex(&address),
             "",
         );
-        assert!(gate.ingest(&no_declared_domain, 0).is_ok());
+        assert!(gate.ingest(&no_declared_domain, 0).await.is_ok());
 
         // The same signature, now declaring a domain it was not produced
         // under. It is still checked against the recorded one, so it still
@@ -843,14 +1062,14 @@ mod tests {
             &to_hex(&address),
             r#", "chainId": 1, "tokenNetworkAddress": "0x00000000000000000000000000000000000000ff""#,
         );
-        assert!(gate.ingest(&wrong_declared_domain, 0).is_ok());
+        assert!(gate.ingest(&wrong_declared_domain, 0).await.is_ok());
     }
 
     /// A claim signed under a domain that is *not* the channel's recorded
     /// one does not verify -- the recorded domain is the only one this
     /// connector computes a digest under.
-    #[test]
-    fn an_evm_claim_signed_under_another_domain_is_rejected() {
+    #[tokio::test]
+    async fn an_evm_claim_signed_under_another_domain_is_rejected() {
         let gate = gate();
         let (secret, address) = evm_signer();
         let proof = EvmBalanceProof {
@@ -874,13 +1093,13 @@ mod tests {
         );
 
         assert_eq!(
-            gate.ingest(&claim, 0),
+            gate.ingest(&claim, 0).await,
             Err(ClaimIngestRejection::SignatureInvalid)
         );
     }
 
-    #[test]
-    fn a_claim_failing_signature_verification_does_not_advance_the_watermark() {
+    #[tokio::test]
+    async fn a_claim_failing_signature_verification_does_not_advance_the_watermark() {
         let gate = gate();
         let channel = channel_id();
         let (_secret, address) = evm_signer();
@@ -895,12 +1114,12 @@ mod tests {
                 to_hex(&EVM_TOKEN_NETWORK_ADDRESS)
             ),
         );
-        gate.ingest(&bad_signature_claim, 0).unwrap_err();
+        gate.ingest(&bad_signature_claim, 0).await.unwrap_err();
 
         // The watermark was never advanced by the rejected claim -- the
         // same nonce/amount is accepted here as a fresh first claim, not
         // refused as a replay.
-        let genuine = gate.ingest(&evm_claim_json(&channel, 1, 100), 0);
+        let genuine = gate.ingest(&evm_claim_json(&channel, 1, 100), 0).await;
         assert!(genuine.is_ok());
     }
 
@@ -963,11 +1182,11 @@ mod tests {
         )
     }
 
-    #[test]
-    fn a_genuine_solana_signature_is_accepted() {
+    #[tokio::test]
+    async fn a_genuine_solana_signature_is_accepted() {
         let gate = gate();
         let claim = genuine_solana_claim_json(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
-        let result = gate.ingest(&claim, 0);
+        let result = gate.ingest(&claim, 0).await;
         assert!(result.is_ok());
     }
 
@@ -975,8 +1194,8 @@ mod tests {
     /// over the right message, produced by a key that is not the channel's
     /// recorded counterparty and declared as the claim's own signer. Both
     /// families verify against the registry, not against themselves.
-    #[test]
-    fn a_solana_claim_signed_by_a_key_that_is_not_the_channels_counterparty_is_rejected() {
+    #[tokio::test]
+    async fn a_solana_claim_signed_by_a_key_that_is_not_the_channels_counterparty_is_rejected() {
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine;
         use ed25519_dalek::Signer as Ed25519Signer;
@@ -1003,7 +1222,7 @@ mod tests {
         );
 
         assert_eq!(
-            gate.ingest(&claim, 0),
+            gate.ingest(&claim, 0).await,
             Err(ClaimIngestRejection::SignatureInvalid)
         );
     }
@@ -1011,12 +1230,12 @@ mod tests {
     /// A Solana claim naming a channel account this connector has no record
     /// of is refused as [`ClaimIngestRejection::UnknownChannel`], the same
     /// as its EVM counterpart.
-    #[test]
-    fn a_solana_claim_on_an_unrecorded_channel_is_refused_as_unknown_channel() {
+    #[tokio::test]
+    async fn a_solana_claim_on_an_unrecorded_channel_is_refused_as_unknown_channel() {
         let gate = gate();
         let claim = genuine_solana_claim_json(&[8u8; 32], 1, 100);
         assert_eq!(
-            gate.ingest(&claim, 0),
+            gate.ingest(&claim, 0).await,
             Err(ClaimIngestRejection::UnknownChannel)
         );
     }
@@ -1024,8 +1243,8 @@ mod tests {
     /// A Solana claim's `signerPublicKey` carries no authority either: a
     /// claim genuinely signed by the recorded counterparty is accepted
     /// however it declares itself.
-    #[test]
-    fn a_solana_claims_declared_signer_field_carries_no_authority() {
+    #[tokio::test]
+    async fn a_solana_claims_declared_signer_field_carries_no_authority() {
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine;
         use ed25519_dalek::Signer as Ed25519Signer;
@@ -1044,11 +1263,11 @@ mod tests {
             &base58_encode(&[7u8; 32]),
         );
 
-        assert!(gate.ingest(&claim, 0).is_ok());
+        assert!(gate.ingest(&claim, 0).await.is_ok());
     }
 
-    #[test]
-    fn a_solana_claim_with_a_corrupted_signature_is_rejected_not_panicking() {
+    #[tokio::test]
+    async fn a_solana_claim_with_a_corrupted_signature_is_rejected_not_panicking() {
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine;
         use ed25519_dalek::Signer as Ed25519Signer;
@@ -1068,12 +1287,12 @@ mod tests {
             &base58_encode(&keypair.public.to_bytes()),
         );
 
-        let result = gate.ingest(&claim, 0);
+        let result = gate.ingest(&claim, 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::SignatureInvalid));
     }
 
-    #[test]
-    fn a_mina_claim_is_never_routed_into_signature_verification() {
+    #[tokio::test]
+    async fn a_mina_claim_is_never_routed_into_signature_verification() {
         // Mina is refused at structural parsing (ADR 0002), long before
         // this gate would ever reach a signature check -- there is no Mina
         // arm in `verify_claim_signature` to route into.
@@ -1091,6 +1310,6 @@ mod tests {
             "proof": "AAAA",
             "salt": "salt"
         }"#;
-        assert_eq!(gate.ingest(json, 0), Err(ClaimIngestRejection::Mina));
+        assert_eq!(gate.ingest(json, 0).await, Err(ClaimIngestRejection::Mina));
     }
 }

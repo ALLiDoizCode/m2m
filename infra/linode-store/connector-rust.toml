@@ -82,6 +82,14 @@ price = 1000
 # the zero address back, and the process exits 1. So the zero address is
 # not a harmless placeholder here.
 #
+#
+# One further consequence, since issue #556: an absent `[settlement]`
+# section is also the absence of a client-edge channel *source*. With no
+# chain to ask, the only channels this node can accept a claim on are the
+# ones a `[[client_channels]]` section declares -- so an unaffiliated buyer
+# who opens a channel on chain cannot pay here until #577 fills the section
+# below in. The mechanism is landed; this box is not yet pointed at a
+# chain.
 # `EvmSettlementBackend` drives `packages/contracts/src/TokenNetwork.sol`,
 # reached through that registry (issue #566, issue #576) --
 # `contracts/SettlementChannel.sol`, this crate's own throwaway,

@@ -148,11 +148,26 @@ never reaches the terminating app:
 
    A claim naming a channel the connector has **no record of** is refused with its own reason,
    distinguishable from a bad signature and from an underpayment — there is nothing to verify it
-   against, and unverifiable is never accepted. A node that records no channel therefore accepts
-   no claim at all; that is the intended failure mode, since the only alternative is trusting
-   what a claim says about itself. Where the record comes from is a deployment question rather
-   than a wire one: today it is the `[[client_channels]]` config section, whose entries carry the
-   counterparty and the signing domain per channel.
+   against, and unverifiable is never accepted. A node that can vouch for no channel therefore
+   accepts no claim at all; that is the intended failure mode, since the only alternative is
+   trusting what a claim says about itself.
+
+   Where the record comes from is a deployment question rather than a wire one, and there are two
+   sources ([issue #556](https://github.com/toon-protocol/connector/issues/556)). A node declares
+   channels in its `[[client_channels]]` config section, whose entries carry the counterparty and
+   the signing domain per channel; and a node with a `[settlement]` section **resolves any other
+   channel from the chain that section already names**, reading the counterparty and the EIP-712
+   domain off the deployed `TokenNetwork` itself. The second is what makes §1.2's anonymous path
+   real: an unaffiliated buyer registers on chain, which the connector can read, rather than with
+   the operator. A declared channel is authoritative and is never resolved, so a node with no
+   settlement backend — or one whose chain endpoint is unreachable — still accepts claims on
+   exactly the channels it wrote down.
+
+   A resolution that **fails** — an unreachable endpoint rather than an absent channel — refuses
+   the claim under a third, separate reason. It never degrades to accepting the claim, and it is
+   never reported as "no such channel": an operator has to be able to tell an outage from a sender
+   naming channels at random, and a legitimate payer has to be told to retry rather than told they
+   do not exist.
 
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
@@ -292,8 +307,9 @@ The claim on a probe **identifies rather than pays**: it is validated in full (�
 against a price of `0`, so possession of the channel is proven and a replay is still refused, but
 no value need advance — a sender probes by reissuing at the same cumulative amount with a fresh
 nonce. A connector recognizes a channel once a claim on it has cleared §1.3's gate at this edge.
-It necessarily already records that channel's counterparty — step 4 above verifies against it, so
-without a record no claim on the channel could clear the gate at all — but a record says only
+It necessarily already holds that channel's counterparty, whether declared or resolved from chain
+— step 4 above verifies against it, so without one no claim on the channel could clear the gate at
+all — but holding a counterparty says only
 _whose signature is accepted here_, never that anyone has turned up and paid; no chain indexes
 that, so a cleared claim is the only evidence a connector ever gets of it. This is what makes the
 probe gate satisfiable by a deployed node: a sender able to pay is, by the same record, a sender

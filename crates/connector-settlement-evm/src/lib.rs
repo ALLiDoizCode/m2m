@@ -67,6 +67,13 @@ pub struct EvmSettlementBackend {
     contract: TokenNetworkContract<EvmClient>,
     token: Erc20Contract<EvmClient>,
     registry_address: Address,
+    /// The chain id `build_client` read from the RPC endpoint at connect
+    /// time -- half of the EIP-712 domain a claim against this backend's
+    /// `TokenNetwork` is signed under (OpenZeppelin's `EIP712` derives the
+    /// domain separator from `block.chainid` and `address(this)`). Read
+    /// once rather than per call: a chain does not renumber itself, and a
+    /// node pointed at a different chain is a restart.
+    chain_id: u64,
     /// This backend's own signing address -- every channel it opens names
     /// this address as one of the two on-chain participants, so
     /// [`read_state`](Self::read_state) can tell which `ParticipantState`
@@ -114,7 +121,7 @@ impl EvmSettlementBackend {
         token_address: Address,
         expected_decimals: u8,
     ) -> Result<Self, SettlementError> {
-        let (client, own_address) = build_client(rpc_url, private_key).await?;
+        let (client, own_address, chain_id) = build_client(rpc_url, private_key).await?;
         let client = Arc::new(client);
         let registry = TokenNetworkRegistryContract::new(registry_address, client.clone());
         let token_network_address = registry
@@ -141,6 +148,7 @@ impl EvmSettlementBackend {
             contract,
             token,
             registry_address,
+            chain_id,
             own_address,
             deposit_lock: tokio::sync::Mutex::new(()),
         })
@@ -159,7 +167,7 @@ impl EvmSettlementBackend {
         private_key: &str,
         token_address: Address,
     ) -> Result<Self, SettlementError> {
-        let (client, own_address) = build_client(rpc_url, private_key).await?;
+        let (client, own_address, chain_id) = build_client(rpc_url, private_key).await?;
         let client = Arc::new(client);
         let registry = TokenNetworkRegistryContract::deploy(client.clone(), ())
             .map_err(backend_error)?
@@ -183,6 +191,7 @@ impl EvmSettlementBackend {
             contract,
             token,
             registry_address,
+            chain_id,
             own_address,
             deposit_lock: tokio::sync::Mutex::new(()),
         })
@@ -200,7 +209,7 @@ impl EvmSettlementBackend {
         private_key: &str,
         mint_to_deployer: u128,
     ) -> Result<Address, SettlementError> {
-        let (client, deployer) = build_client(rpc_url, private_key).await?;
+        let (client, deployer, _chain_id) = build_client(rpc_url, private_key).await?;
         let client = Arc::new(client);
         let contract = MockErc20Contract::deploy(
             client,
@@ -229,6 +238,67 @@ impl EvmSettlementBackend {
     /// to).
     pub fn registry_address(&self) -> Address {
         self.registry_address
+    }
+
+    /// The chain id this backend's RPC endpoint reported at connect time.
+    /// With [`address`](Self::address) this is the complete EIP-712 domain
+    /// a `BalanceProof` on any of this `TokenNetwork`'s channels must be
+    /// signed under -- `TokenNetwork` inherits OpenZeppelin's
+    /// `EIP712("TokenNetwork", "1")`, whose `_hashTypedDataV4` builds its
+    /// domain separator from `block.chainid` and `address(this)`. Issue
+    /// #556's open question about where a channel's signing domain comes
+    /// from is answered here: it is a property of the deployed contract,
+    /// so it is read from the deployment rather than written down twice.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Who this backend's counterparty is on `channel_id`, as the chain
+    /// itself holds it -- the client edge's own channel record (issue
+    /// #556), so that a claim can be verified against the party who
+    /// actually opened the channel rather than against whoever the claim
+    /// declares.
+    ///
+    /// `Ok(None)`, rather than an error, for every "this is not a channel
+    /// this backend can be paid on":
+    ///
+    /// - nothing was ever opened at `channel_id`;
+    /// - the channel has already `Settled`, so a claim against it can
+    ///   never be redeemed (`TokenNetwork.claimFromChannel` requires
+    ///   `Opened` or `Closed`, `TokenNetwork.sol:273`) and honouring one
+    ///   would be giving work away. A merely `Closed` channel still
+    ///   redeems during its challenge period (issue #574), so it still
+    ///   answers;
+    /// - neither participant is this backend's own signing address, i.e.
+    ///   it is somebody else's channel.
+    ///
+    /// `Err` is reserved for a lookup that genuinely failed -- an
+    /// unreachable endpoint, a malformed response -- so a caller can tell
+    /// "there is no such channel" apart from "I could not find out".
+    ///
+    /// One `eth_call`: `TokenNetwork.channels(id)` carries the state and
+    /// both participants, so this deliberately does not go through
+    /// [`read_state`](Self::read_state), whose three reads exist to report
+    /// deposits and claimed amounts nothing here needs.
+    pub async fn channel_counterparty(
+        &self,
+        channel_id: [u8; 32],
+    ) -> Result<Option<Address>, SettlementError> {
+        let (_settlement_timeout, state, _closed_at, _opened_at, participant1, participant2) =
+            self.fetch_channel(channel_id).await?;
+        if state == CHANNEL_STATE_NONEXISTENT {
+            return Ok(None);
+        }
+        if status_from_u8(state)? == ChannelStatus::Settled {
+            return Ok(None);
+        }
+        if participant1 == self.own_address {
+            Ok(Some(participant2))
+        } else if participant2 == self.own_address {
+            Ok(Some(participant1))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Resolve `channel` to the on-chain id it names and confirm a channel
@@ -402,7 +472,7 @@ fn status_from_u8(state: u8) -> Result<ChannelStatus, SettlementError> {
 async fn build_client(
     rpc_url: &str,
     private_key: &str,
-) -> Result<(EvmClient, Address), SettlementError> {
+) -> Result<(EvmClient, Address, u64), SettlementError> {
     // ethers' default HTTP polling interval (7s) is tuned for mainnet block
     // times, not a fast-confirming chain -- every open/fund/redeem/close
     // otherwise pays that whole interval waiting for a receipt Anvil (or
@@ -418,7 +488,11 @@ async fn build_client(
     let wallet: LocalWallet = private_key.parse().map_err(backend_error)?;
     let address = wallet.address();
     let signer = SignerMiddleware::new(provider, wallet.with_chain_id(chain_id));
-    Ok((NonceManagerMiddleware::new(signer, address), address))
+    Ok((
+        NonceManagerMiddleware::new(signer, address),
+        address,
+        chain_id,
+    ))
 }
 
 /// A `TokenNetwork` counterparty must be a real 20-byte EVM address: it has

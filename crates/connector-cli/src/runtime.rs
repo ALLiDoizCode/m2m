@@ -8,9 +8,12 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::Router;
 
-use connector_client_edge::{ClientChannelRegistry, EvmChannel};
+use connector_client_edge::{
+    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, EvmChannel,
+};
 use connector_config::{Config, SecretLocation, SettlementChain, SettlementConfig};
 use connector_runtime::{Connector, HttpAppClient, NetworkPeerTransport, PeerRoute, SystemClock};
 use connector_settlement::{SettlementBackend, SettlementError};
@@ -206,7 +209,7 @@ fn read_settlement_private_key(location: &SecretLocation) -> Result<String, Runt
 /// agree with is a startup failure, not a line with no effect (ADR 0009).
 async fn build_settlement_backend(
     settlement: &SettlementConfig,
-) -> Result<Arc<dyn SettlementBackend>, RuntimeError> {
+) -> Result<Arc<EvmSettlementBackend>, RuntimeError> {
     match settlement.chain() {
         SettlementChain::Evm => {
             let private_key = read_settlement_private_key(settlement.key())?;
@@ -220,9 +223,85 @@ async fn build_settlement_backend(
                 settlement.decimals(),
             )
             .await?;
-            Ok(Arc::new(backend) as Arc<dyn SettlementBackend>)
+            Ok(Arc::new(backend))
         }
     }
+}
+
+/// The client edge's channel records, read from the same deployed
+/// `TokenNetwork` the `[settlement]` section already names (issue #556).
+///
+/// This is the seam issue #607 left for this work. Before it, the only
+/// source of a channel's counterparty was the `[[client_channels]]` config
+/// section, so a node whose operator had not written a buyer's channel
+/// down by hand refused that buyer's every claim -- which contradicts
+/// issue #502's *"anonymity is a first-class path, not a fallback: it is
+/// how an unaffiliated buyer pays for a terminated route without
+/// registering with the operator first"*. A buyer registers on chain
+/// instead, and this reads that registration.
+///
+/// A newtype rather than an `impl` on [`EvmSettlementBackend`] itself
+/// because both the trait and the type are foreign to this crate; keeping
+/// the adapter here also keeps `connector-settlement-evm` free of any
+/// dependency on the HTTP edge, and matches ADR 0001's rule that
+/// construction decisions live in `connector-cli`.
+struct SettlementChannelSource {
+    backend: Arc<EvmSettlementBackend>,
+}
+
+/// Hand-written because [`EvmSettlementBackend`] holds contract handles
+/// and a signing client that are not `Debug`, and
+/// [`ClientChannelSource`] requires it so a registry can name its source
+/// in a log line. Names the deployment rather than dumping the client.
+impl fmt::Debug for SettlementChannelSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SettlementChannelSource")
+            .field("token_network", &self.backend.address())
+            .field("chain_id", &self.backend.chain_id())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl ClientChannelSource for SettlementChannelSource {
+    async fn evm_channel(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        let counterparty = self
+            .backend
+            .channel_counterparty(*channel_id)
+            .await
+            .map_err(|error| ChannelLookupFailed(error.to_string()))?;
+        // The signing domain comes from the same deployment the
+        // counterparty did (issue #556's open question): `TokenNetwork`
+        // inherits OpenZeppelin's `EIP712("TokenNetwork", "1")`, whose
+        // domain separator is built from `block.chainid` and
+        // `address(this)`, so a per-entry config field for either could
+        // only ever restate -- or contradict -- what the chain says.
+        Ok(counterparty.map(|counterparty| EvmChannel {
+            counterparty: counterparty.to_fixed_bytes(),
+            chain_id: self.backend.chain_id(),
+            token_network_address: self.backend.address().to_fixed_bytes(),
+        }))
+    }
+}
+
+/// Everything [`build`] produced from a validated [`Config`], and
+/// everything [`router`] needs from it. A struct rather than a tuple
+/// because the third member is the kind of thing that only ever grows: as
+/// issue #556 arms more of the node, more of what `build` connects has to
+/// reach the routers without being reconstructed (and, for a chain
+/// connection, without being connected twice).
+pub struct Runtime {
+    pub connector: Arc<Connector>,
+    pub signer: Arc<dyn Signer>,
+    /// Where the client edge resolves a payment channel nothing declared
+    /// (issue #556) -- `Some` exactly when `[settlement]` is configured,
+    /// since the deployed `TokenNetwork` it names is what holds the
+    /// answer. `None` leaves the client edge with only `[[client_channels]]`
+    /// to go on, which is what a node with no settlement backend has.
+    pub client_channel_source: Option<Arc<dyn ClientChannelSource>>,
 }
 
 /// Construct the live [`Connector`] and [`Signer`] a validated [`Config`]
@@ -236,7 +315,11 @@ async fn build_settlement_backend(
 /// connection is why this function is `async` at all; an unconfigured node
 /// still builds with no settlement backend, same as before this section
 /// existed.
-pub async fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>), RuntimeError> {
+///
+/// That same connection is handed to [`router`] as a
+/// [`ClientChannelSource`] (issue #556): one chain connection, used both
+/// to move value and to read who a channel belongs to.
+pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let signer = build_signer(config.signer_key())?;
     let mut peer_transport = NetworkPeerTransport::new();
     for peer in config.peers() {
@@ -255,19 +338,43 @@ pub async fn build(config: &Config) -> Result<(Arc<Connector>, Arc<dyn Signer>),
         Arc::new(SystemClock),
     )
     .with_identity_signer(signer.clone());
+    let mut client_channel_source: Option<Arc<dyn ClientChannelSource>> = None;
     if let Some(settlement) = config.settlement() {
-        connector = connector.with_settlement(build_settlement_backend(settlement).await?);
+        let backend = build_settlement_backend(settlement).await?;
+        client_channel_source = Some(Arc::new(SettlementChannelSource {
+            backend: backend.clone(),
+        }));
+        connector = connector.with_settlement(backend as Arc<dyn SettlementBackend>);
     }
-    Ok((Arc::new(connector), signer))
+    Ok(Runtime {
+        connector: Arc::new(connector),
+        signer,
+        client_channel_source,
+    })
 }
 
 /// The channels this node accepts client-edge claims on, and whose
-/// counterparty each claim's signature must recover to (issue #558), read
-/// from `[[client_channels]]`. A node that configures none has a record of
-/// no channel and refuses every claim -- deliberately, since the only
-/// alternative to "no record of this channel" is trusting what the claim
-/// says about its own signer, which is exactly the hole #558 closes.
-fn client_channels(config: &Config) -> ClientChannelRegistry {
+/// counterparty each claim's signature must recover to (issues #558,
+/// #556): everything `[[client_channels]]` declares, plus -- when
+/// `[settlement]` is configured -- the deployed `TokenNetwork` itself, for
+/// any channel the config file does not mention.
+///
+/// The two compose rather than replace each other. A declared channel is
+/// still answered from config without touching a chain, so a node with no
+/// settlement backend still declares its channels and a node whose RPC
+/// endpoint is down still serves the channels it wrote down. What the
+/// source adds is the case `[[client_channels]]` cannot express: a buyer
+/// this operator has never heard of, who opened a channel on chain and
+/// wants to pay for a write (issue #502).
+///
+/// A node with neither still has a record of no channel and refuses every
+/// claim -- deliberately, since the only alternative to "no record of this
+/// channel" is trusting what the claim says about its own signer, which is
+/// exactly the hole #558 closes.
+fn client_channels(
+    config: &Config,
+    source: Option<Arc<dyn ClientChannelSource>>,
+) -> ClientChannelRegistry {
     let mut channels = ClientChannelRegistry::new();
     for channel in config.client_channels() {
         channels
@@ -281,7 +388,10 @@ fn client_channels(config: &Config) -> ClientChannelRegistry {
             )
             .expect("config load already validated every channel_id as a 32-byte identifier");
     }
-    channels
+    match source {
+        Some(source) => channels.with_source(source),
+        None => channels,
+    }
 }
 
 /// Merge the client edge and (if `[operator]` is configured) the operator
@@ -289,12 +399,14 @@ fn client_channels(config: &Config) -> ClientChannelRegistry {
 /// mounted only when [`Config::operator`] is `Some` -- absence means the
 /// surface is not started at all, exactly as it means for
 /// [`connector_operator::router`] itself.
-pub fn router(connector: Arc<Connector>, signer: Arc<dyn Signer>, config: &Config) -> Router {
+pub fn router(runtime: &Runtime, config: &Config) -> Router {
+    let connector = runtime.connector.clone();
+    let signer = runtime.signer.clone();
     let app = connector_client_edge::router_with_channels(
         connector.clone(),
         signer.clone(),
         None,
-        client_channels(config),
+        client_channels(config, runtime.client_channel_source.clone()),
     );
     match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
@@ -352,8 +464,8 @@ key_file = "{}"
             )
         });
 
-        let (connector, _signer) = build(&config).await.expect("build");
-        assert!(connector.routes().is_empty());
+        let runtime = build(&config).await.expect("build");
+        assert!(runtime.connector.routes().is_empty());
     }
 
     #[tokio::test]
@@ -430,8 +542,8 @@ key_file = "{}"
                 key_path.display()
             )
         });
-        let (connector, signer) = build(&config).await.expect("build");
-        let app = router(connector, signer, &config);
+        let runtime = build(&config).await.expect("build");
+        let app = router(&runtime, &config);
 
         // No `[operator]` section: `/routes` (an operator-surface path)
         // 404s -- it was never merged in, rather than merged in and
@@ -461,7 +573,7 @@ key_file = "{}"
             )
         });
 
-        assert!(client_channels(&config).is_empty());
+        assert!(client_channels(&config, None).is_empty());
     }
 
     /// Every configured channel reaches the client edge's registry, so a
@@ -488,7 +600,7 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
             )
         });
 
-        let channels = client_channels(&config);
+        let channels = client_channels(&config, None);
         assert!(!channels.is_empty());
         assert_eq!(config.client_channels()[0].chain_id(), 8453);
         assert_eq!(config.client_channels()[0].counterparty()[19], 0xaa);
@@ -512,8 +624,8 @@ write_keys = ["{key}"]
                 key_path.display()
             )
         });
-        let (connector, signer) = build(&config).await.expect("build");
-        let app = router(connector, signer, &config);
+        let runtime = build(&config).await.expect("build");
+        let app = router(&runtime, &config);
 
         // The operator surface is mounted: `/routes` is a real path now,
         // rejecting for lack of a bearer token rather than 404ing.
@@ -603,7 +715,8 @@ key_file = "{key_path}"
                 token = token,
             ));
 
-            let (connector, _signer) = build(&config).await.expect("build");
+            let runtime = build(&config).await.expect("build");
+            let connector = runtime.connector.clone();
             // A real 20-byte EVM address (issue #576): `TokenNetwork`
             // requires a counterparty able to sign balance proofs, not an
             // arbitrary peer name.
@@ -705,8 +818,9 @@ key_file = "{}"
                 )
             });
 
-            let (connector, _signer) = build(&config).await.expect("build");
-            let result = connector
+            let runtime = build(&config).await.expect("build");
+            let result = runtime
+                .connector
                 .open_channel(b"no-settlement-peer".to_vec(), Duration::seconds(3600))
                 .await;
             assert!(matches!(

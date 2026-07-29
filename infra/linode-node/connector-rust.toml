@@ -140,6 +140,14 @@ fee = 0
 #     harmless "syntactically valid" filler here: it is the difference
 #     between a node that boots and a node that does not.
 #
+#
+# One further consequence, since issue #556: an absent `[settlement]`
+# section is also the absence of a client-edge channel *source*. With no
+# chain to ask, the only channels this node can accept a claim on are the
+# ones a `[[client_channels]]` section declares -- so an unaffiliated buyer
+# who opens a channel on chain cannot pay here until #577 fills the section
+# below in. The mechanism is landed; this box is not yet pointed at a
+# chain.
 # The block below is the shape an operator will eventually fill in, once
 # this box is meant to settle for real: `contract_address` names the
 # `TokenNetworkRegistry`, not a channel contract directly (issue #576).

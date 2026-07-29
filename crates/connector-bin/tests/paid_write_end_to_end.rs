@@ -457,6 +457,169 @@ token_network_address = "{token_network}"
     );
 }
 
+/// Issues #556/#502: **an unaffiliated buyer pays with no config edit.**
+///
+/// Everything about this test is the test above minus one thing: the
+/// config file has no `[[client_channels]]` section at all. The buyer has
+/// never registered with this operator, is named nowhere in the node's
+/// configuration, and the node was started before their channel existed.
+/// They open a channel with the connector on chain, fund it, sign a claim,
+/// and the write lands -- because the connector resolves the channel's
+/// counterparty from the deployed `TokenNetwork` its `[settlement]`
+/// section already names.
+///
+/// That is issue #502's *"anonymity is a first-class path, not a fallback:
+/// it is how an unaffiliated buyer pays for a terminated route without
+/// registering with the operator first"*. On a tree without this change
+/// this test fails: the connector holds a record of no channel, refuses
+/// the claim F01 "no record of", and the app records nothing.
+///
+/// Note what is deliberately *not* relaxed: the claim is still verified
+/// against the counterparty the chain holds, never against the
+/// `signerAddress` it declares for itself. The second half of this test
+/// signs an otherwise perfect claim with a key the chain does not know and
+/// asserts it is still refused.
+#[tokio::test]
+async fn an_unaffiliated_buyer_pays_for_a_write_with_no_client_channels_configured() {
+    if !require_anvil() {
+        return;
+    }
+
+    let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("mint a fresh mock ERC-20 for this test");
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+        .await
+        .expect("deploy a TokenNetwork through a fresh registry");
+    let token_network_address = backend.address().to_fixed_bytes();
+    let registry_address = backend.registry_address();
+
+    // A buyer the operator has never heard of.
+    let buyer_secret = SecretKey::parse(&[37u8; 32]).expect("valid secret key");
+    let buyer_address = derive_evm_address(&PublicKey::from_secret_key(&buyer_secret).serialize());
+
+    let (app_addr, recorded) = spawn_recording_app().await;
+
+    // The node is configured and started *before* the buyer's channel
+    // exists, and names no channel of anyone's.
+    let key_file = write_raw_key_file(11);
+    let mut settlement_key_file = tempfile::NamedTempFile::new().expect("temp settlement key file");
+    settlement_key_file
+        .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
+        .expect("write settlement key file");
+    let config = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement]
+chain = "evm"
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.key]
+key_file = "{settlement_key_file}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://{app_addr}"
+price = {ROUTE_PRICE}
+
+# Deliberately no `[[client_channels]]`: nothing in this file names the
+# buyer, their channel, or the signing domain. Everything the claim is
+# checked against is read from the chain named above.
+"#,
+        key_file = key_file.path().display(),
+        settlement_key_file = settlement_key_file.path().display(),
+        rpc_url = anvil.rpc_url,
+    ));
+    let connector = spawn_connector(config.path());
+    let connector_identity = identity_from_key_seed(11);
+
+    // Only now does the buyer open and fund their channel -- after the
+    // node is already serving, so nothing about it could have been read at
+    // startup even in principle.
+    let channel = backend
+        .open(buyer_address.to_vec(), ChronoDuration::hours(1))
+        .await
+        .expect("the buyer opens a channel with this connector");
+    let state = backend
+        .fund(&channel, 10 * ROUTE_PRICE)
+        .await
+        .expect("fund it with real ERC-20 value");
+    assert_eq!(state.deposited, 10 * ROUTE_PRICE);
+
+    let client = reqwest::Client::new();
+    let (data, shared_secret) = sealed_prepare_data(b"unaffiliated write", &connector_identity);
+    let prepare = sample_prepare("g.example.app", data, &shared_secret);
+    let (claim, _signature) = evm_claim_json(
+        &buyer_secret,
+        &channel.0,
+        1,
+        ROUTE_PRICE,
+        token_network_address,
+    );
+    let body = post_ilp_packet(
+        &client,
+        &connector.client_edge_addr,
+        &claim,
+        &prepare,
+        "POST /ilp: unaffiliated paid write",
+    )
+    .await;
+    Fulfill::decode(&body).expect(
+        "a buyer whose channel exists only on chain pays without the operator editing config",
+    );
+
+    let after_paid = recorded.lock().expect("recorded lock").clone();
+    assert_eq!(
+        after_paid.len(),
+        1,
+        "the app recorded the unaffiliated buyer's write"
+    );
+    assert_eq!(after_paid[0].as_ref(), b"unaffiliated write");
+
+    // And the guarantee #607 established is intact: a claim on the same,
+    // genuinely on-chain channel, signed by somebody who is not its
+    // counterparty, is still refused. Reading the record from a chain
+    // changed where the counterparty comes from, not whether one is
+    // required.
+    let forger_secret = SecretKey::parse(&[38u8; 32]).expect("valid secret key");
+    let (forged_data, forged_shared) =
+        sealed_prepare_data(b"forged write attempt", &connector_identity);
+    let forged_prepare = sample_prepare("g.example.app", forged_data, &forged_shared);
+    let (forged_claim, _) = evm_claim_json(
+        &forger_secret,
+        &channel.0,
+        2,
+        2 * ROUTE_PRICE,
+        token_network_address,
+    );
+    let body = post_ilp_packet(
+        &client,
+        &connector.client_edge_addr,
+        &forged_claim,
+        &forged_prepare,
+        "POST /ilp: forged write",
+    )
+    .await;
+    let reject = Reject::decode(&body).expect("decode reject");
+    assert_eq!(reject.code.as_str(), "F01");
+
+    let after_forged = recorded.lock().expect("recorded lock").clone();
+    assert_eq!(
+        after_forged.len(),
+        1,
+        "the forged claim never reached the app -- still exactly the one genuine write"
+    );
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;

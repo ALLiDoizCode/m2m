@@ -64,7 +64,10 @@ use connector_signer::{PublicKeyBytes, Signer};
 
 mod channels;
 mod claim_gate;
-pub use channels::{ClientChannelRegistry, EvmChannel, InvalidChannelIdentifier};
+pub use channels::{
+    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, EvmChannel,
+    InvalidChannelIdentifier,
+};
 pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 
 const OCTET_STREAM: &str = "application/octet-stream";
@@ -122,10 +125,15 @@ pub fn router_with_wrap_key(
 
 /// As [`router_with_wrap_key`], but with a record of the payment channels
 /// whose claims this edge accepts, and whose counterparty each claim's
-/// signature must recover to (issue #558). This is the seam a node's
-/// startup arming (issue #556) populates from its settlement backend's own
-/// `ChannelState::counterparty`; a `channels` with no record in it refuses
-/// every claim.
+/// signature must recover to (issue #558).
+///
+/// `channels` carries both sources of that record: whatever the node
+/// declared (`[[client_channels]]`) and, optionally, a
+/// [`ClientChannelSource`] resolving anything else against the chain
+/// (issue #556, [`ClientChannelRegistry::with_source`]) -- which is what
+/// lets an unaffiliated buyer who has opened a channel on chain pay
+/// without the operator editing config first (issue #502). A `channels`
+/// with neither refuses every claim.
 pub fn router_with_channels(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
@@ -396,7 +404,7 @@ fn decode_claim_header(
 /// plaintext header takes precedence when both are present, since a client
 /// presenting both is presenting the same claim twice, not two different
 /// ones.
-fn extract_and_validate_claim(
+async fn extract_and_validate_claim(
     headers: &HeaderMap,
     price: u64,
     state: &ClientEdgeState,
@@ -414,7 +422,7 @@ fn extract_and_validate_claim(
         wrapped,
         state.wrap_receiver_secret.as_ref(),
     )?;
-    let claim = state.claim_gate.ingest(&claim_json, price)?;
+    let claim = state.claim_gate.ingest(&claim_json, price).await?;
     Ok(Some(claim.channel_key()))
 }
 
@@ -508,7 +516,7 @@ async fn handle_ilp(
     // A claim header's validation failure rejects the packet before it is
     // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
     // do work that was never validly paid for.
-    match extract_and_validate_claim(&headers, price, &state) {
+    match extract_and_validate_claim(&headers, price, &state).await {
         Err(rejection) => return claim_rejected_response(rejection, price),
         // A claim that cleared the gate is this connector's evidence that
         // the sender holds the channel it names (issue #548), which is what
@@ -553,7 +561,7 @@ async fn handle_probe(
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
-    let channel_key = match extract_and_validate_claim(&headers, 0, &state) {
+    let channel_key = match extract_and_validate_claim(&headers, 0, &state).await {
         Ok(Some(channel_key)) => channel_key,
         Ok(None) => {
             return (
@@ -1936,6 +1944,108 @@ mod tests {
             assert!(
                 reject.message.contains("no record of"),
                 "an unknown channel is refused for being unknown, not for a bad signature: {}",
+                reject.message
+            );
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// Issues #556/#502, at the real HTTP seam: a buyer this operator
+        /// has never heard of -- no `[[client_channels]]` entry, nothing
+        /// declared for their channel at all -- pays and the write lands,
+        /// because the connector resolves the channel's counterparty from
+        /// the chain the channel was opened on.
+        ///
+        /// This is the test that fails on `origin/main`: there, the only
+        /// possible record is a declared one, so this exact request is
+        /// refused F01 "no record of" and the app is never asked to work.
+        #[tokio::test]
+        async fn a_claim_on_a_channel_only_the_chain_knows_about_reaches_the_app() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+
+            // Nothing declared. The source stands in for
+            // `TokenNetwork.channels(id)`, which is what names the buyer
+            // as this channel's counterparty.
+            let (_secret, counterparty) = evm_signer();
+            let mut channel_id = [0u8; 32];
+            channel_id.copy_from_slice(&hex::decode("ab".repeat(32)).unwrap());
+            let channels = ClientChannelRegistry::new().with_source(Arc::new(
+                crate::channels::test_source::FakeChannelSource::knowing(vec![(
+                    channel_id,
+                    EvmChannel {
+                        counterparty,
+                        chain_id: EVM_CHAIN_ID,
+                        token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    },
+                )]),
+            ));
+            assert!(
+                !channels.is_empty(),
+                "a registry with a source can vouch for channels nobody wrote down"
+            );
+
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router_with_channels(connector, signer, None, channels);
+            let request =
+                request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect(
+                "an unaffiliated buyer's on-chain channel is payable without a config edit",
+            );
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// A lookup this connector could not complete refuses the claim --
+        /// it never degrades to believing what the claim says about its
+        /// own signer -- and says which failure it was, so an operator can
+        /// tell a broken RPC endpoint from a sender guessing channel ids.
+        #[tokio::test]
+        async fn a_claim_whose_channel_lookup_fails_never_reaches_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let channels = ClientChannelRegistry::new().with_source(Arc::new(
+                crate::channels::test_source::FakeChannelSource::unreachable("connection refused"),
+            ));
+            let app = router_with_channels(connector, test_signer(), None, channels);
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, 100),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(
+                reject.message.contains("could not look up"),
+                "an unreachable chain is reported as such, not as an unknown channel: {}",
                 reject.message
             );
             assert!(app_client.deliveries().is_empty());
