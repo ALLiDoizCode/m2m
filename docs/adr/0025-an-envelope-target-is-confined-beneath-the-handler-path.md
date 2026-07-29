@@ -43,7 +43,7 @@ Pricing below).
 
 **A backslash is refused outright**, not merely treated as a second separator. RFC 3986 gives `\`
 no meaning inside a path, but the WHATWG URL parser the `url` crate implements treats it as a path
-separator for a special scheme (`http`/`https`) *and* applies dot-segment removal while doing so.
+separator for a special scheme (`http`/`https`) _and_ applies dot-segment removal while doing so.
 So `..\admin` against a handler at `/write` normalizes out to `/admin` -- the same escape as
 `../admin`, but invisible to a check that splits only on `/`, and reachable in encoded form as
 `%2e%2e%5cadmin`. There is no faithful reading of a backslash left to preserve (the target
