@@ -1,0 +1,54 @@
+# =============================================================================
+# Local deployment rehearsal: the Rust connector + a payment-oblivious app,
+# both in containers on one machine, settling against a local anvil.
+#
+# LOCAL / DEV ONLY -- this is deliberately NOT under infra/linode-*, which
+# owns devnet. Nothing here is published, deployed or SSH'd anywhere.
+#
+# Prerequisites
+#   1. an anvil on the host at 127.0.0.1:8545 with the settlement topology
+#      deployed (USDC MockERC20 6-dec, TokenNetworkRegistry, TokenNetwork)
+#   2. a TCP forwarder so a container can reach that anvil -- anvil binds
+#      127.0.0.1 only, which `host-gateway` (172.17.0.1) cannot reach:
+#        python3 deploy/connector-rust/local-stack/rpcproxy.py 172.17.0.1 8546
+#   3. images:
+#        docker build -f deploy/connector-rust/Dockerfile -t connector-rust:local .
+#        docker build --target builder -f deploy/connector-rust/Dockerfile \
+#          -t connector-rust-builder:local .
+#        docker build -f deploy/connector-rust/local-stack/Dockerfile.stub-app \
+#          -t connector-rust-stub-app:local .
+#   4. secrets: deploy/connector-rust/local-stack/prepare.sh
+#
+#   docker compose -f deploy/connector-rust/local-stack/docker-compose.local.yml up -d
+# =============================================================================
+
+services:
+  # The genuinely payment-oblivious app: it sees a POST and answers, and knows
+  # nothing about channels, claims, settlement or ILP conditions. It is not
+  # reachable from the host -- only the connector may deliver to it, which is
+  # what check 4 (an unpaid packet is answered with x402 terms and the app
+  # receives NOTHING) needs in order to mean anything.
+  app:
+    image: connector-rust-stub-app:local
+    command: ["0.0.0.0:3100"]
+    restart: "no"
+
+  # The Rust connector. `[settlement]` is live, so this container cannot come
+  # up at all unless the chain answers -- ADR 0009's refuse-to-start contract
+  # is what makes a clean boot here evidence of anything.
+  connector:
+    image: connector-rust:local
+    depends_on:
+      - app
+    extra_hosts:
+      # anvil lives on the host, outside compose. 172.17.0.1 on this machine.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./connector.local.toml:/app/config/connector.toml:ro
+      - ./secrets:/app/secrets:ro
+    command: ["/app/config/connector.toml"]
+    ports:
+      # 127.0.0.1 on purpose: a published port bypasses ufw, so an unadorned
+      # "3000:3000" would put an unauthenticated client edge on the internet.
+      - "127.0.0.1:3000:3000"
+    restart: "no"

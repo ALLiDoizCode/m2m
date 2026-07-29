@@ -1,0 +1,31 @@
+# =============================================================================
+# stub-app -- container image for `crates/connector-bin/src/bin/stub_app.rs`,
+# the workspace's own genuinely payment-oblivious HTTP app.
+#
+# LOCAL / DEV ONLY. Nothing publishes this and nothing on devnet runs it: it
+# exists so `docker-compose.local.yml` has something real to deliver to when
+# rehearsing a deployment on one machine, instead of the in-process
+# `FakeAppClient` every unit test uses.
+#
+# It reuses the builder stage of `deploy/connector-rust/Dockerfile` rather than
+# recompiling: `cargo build --release --locked -p connector` already produces
+# BOTH binaries of the `connector` package (`connector` and `stub-app`), so
+# tagging that stage once and copying out of it costs nothing.
+#
+#   docker build --target builder -f deploy/connector-rust/Dockerfile \
+#     -t connector-rust-builder:local .
+#   docker build -f deploy/connector-rust/local-stack/Dockerfile.stub-app \
+#     -t connector-rust-stub-app:local .
+# =============================================================================
+
+FROM connector-rust-builder:local AS builder
+
+FROM alpine:3.22 AS runtime
+
+RUN adduser -D -u 10002 app
+
+COPY --from=builder /workspace/target/release/stub-app /usr/local/bin/stub-app
+
+USER app
+ENTRYPOINT ["/usr/local/bin/stub-app"]
+CMD ["0.0.0.0:3100"]
