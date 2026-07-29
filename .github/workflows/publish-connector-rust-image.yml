@@ -33,7 +33,13 @@ on:
 
 concurrency:
   group: publish-connector-rust-image
-  cancel-in-progress: false
+  # Supersede an in-flight build when a newer commit lands on main. This image
+  # is published per-push and tagged by content, so only the newest is ever
+  # wanted -- and `false` meant a superseded build held the group while the
+  # build someone was actually waiting on sat queued behind it (46 minutes,
+  # observed 2026-07-29). An older run's `sha-` tag is not lost by being
+  # cancelled: it can be rebuilt by `workflow_dispatch` on that commit.
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -86,7 +92,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          # amd64 ONLY. The arm64 half compiled the entire Rust workspace under
+          # QEMU emulation -- `cargo build` runs natively for whichever
+          # architecture buildx presents as the container's own (see the
+          # Dockerfile header), so emulated arm64 means an emulated rustc, and
+          # the two-platform build took 89 minutes against roughly 10 native.
+          #
+          # Nothing consumes arm64. Both devnet boxes are x86_64 (`uname -m` on
+          # 104.237.150.177 and 45.79.173.113), and no compose file, overlay or
+          # doc outside the Dockerfile's own example line references an arm
+          # target.
+          #
+          # This DOES reverse an acceptance criterion of #487, which asked for
+          # both platforms -- recorded here rather than quietly dropped. Restore
+          # the second platform the moment something actually runs on one; the
+          # Dockerfile needs no change, it is this line and a slower build.
+          platforms: linux/amd64
 
       # Make the package public so a deployment (e.g. #490's devnet overlay)
       # can `docker pull` without authenticating to GHCR -- GHCR defaults a
