@@ -317,8 +317,7 @@ async fn the_relays_paid_write_store_is_not_reachable_from_the_host() {
     let Some(_edge) = edge() else { return };
     let error = tokio::net::TcpStream::connect("127.0.0.1:3100")
         .await
-        .err()
-        .expect("127.0.0.1:3100 must not accept a connection from the host");
+        .expect_err("127.0.0.1:3100 must not accept a connection from the host");
     println!("relay :3100 from the host: {error}");
 
     // ...while the FREE read surface on the same container is published.
