@@ -6,8 +6,10 @@
 //! present claim is parsed, structurally validated, checked for
 //! freshness/watermark, checked to advance value by at least the
 //! destination's matched app route's price, and -- last -- cryptographically
-//! verified (`ClientClaimGate` -- see its own doc comment for what
-//! "verified" means absent a channel-counterparty registry, issue #542),
+//! verified against the counterparty this connector records for the channel
+//! the claim names (`ClientClaimGate` over a `ClientChannelRegistry`, issue
+//! #558 -- a claim's own declared signer carries no authority, and a claim
+//! naming an unrecorded channel is refused outright),
 //! all before the packet is routed; and, as of issue #526, §1.4 (the x402
 //! greeting) and the answering half of identity: `GET /ilp/identity`
 //! reports the public key a sender seals a packet to (ADR 0018), and an
@@ -60,7 +62,9 @@ use connector_runtime::{Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
 
+mod channels;
 mod claim_gate;
+pub use channels::{ClientChannelRegistry, EvmChannel, InvalidChannelIdentifier};
 pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 
 const OCTET_STREAM: &str = "application/octet-stream";
@@ -90,8 +94,12 @@ struct ClientEdgeState {
 /// `signer`: `POST /ilp` per `docs/protocol/client-edge-spec.md` §1.1, plus
 /// `GET /ilp/identity` and `GET /ilp/routes/price` (§1.2/§1.4, issue #526),
 /// with no configured NIP-59 receiver key -- a privacy-wrapped claim is
-/// refused rather than accepted. Use [`router_with_wrap_key`] to accept
-/// wrapped claims.
+/// refused rather than accepted -- and a record of no payment channel at
+/// all, so every claim presented to it is refused as
+/// [`ClaimIngestRejection::UnknownChannel`] (issue #558). Use
+/// [`router_with_wrap_key`] to accept wrapped claims, and
+/// [`router_with_channels`] to give this edge the channels whose claims it
+/// should accept.
 pub fn router(connector: Arc<Connector>, signer: Arc<dyn Signer>) -> Router {
     router_with_wrap_key(connector, signer, None)
 }
@@ -104,10 +112,30 @@ pub fn router_with_wrap_key(
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
 ) -> Router {
+    router_with_channels(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        ClientChannelRegistry::new(),
+    )
+}
+
+/// As [`router_with_wrap_key`], but with a record of the payment channels
+/// whose claims this edge accepts, and whose counterparty each claim's
+/// signature must recover to (issue #558). This is the seam a node's
+/// startup arming (issue #556) populates from its settlement backend's own
+/// `ChannelState::counterparty`; a `channels` with no record in it refuses
+/// every claim.
+pub fn router_with_channels(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    channels: ClientChannelRegistry,
+) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
-        claim_gate: ClientClaimGate::new(),
+        claim_gate: ClientClaimGate::new(channels),
         wrap_receiver_secret,
     });
     Router::new()
@@ -1240,7 +1268,7 @@ mod tests {
         );
         let (prepare, _shared_secret) =
             sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
-        let app = router(connector, signer);
+        let app = router_with_channels(connector, signer, None, claim_headers::test_channels());
 
         // A genuinely signed claim: since issue #506/#544 the gate's last
         // stage verifies the signature, so a placeholder one would be
@@ -1312,6 +1340,26 @@ mod tests {
         const EVM_CHAIN_ID: u64 = 8453;
         const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
 
+        /// The one channel every claim below is presented on, recorded with
+        /// [`evm_signer`]'s address as its counterparty (issue #558) -- a
+        /// claim signed by anyone else, or naming any other channel, is
+        /// refused however well-formed it is.
+        pub(super) fn test_channels() -> ClientChannelRegistry {
+            let (_secret, counterparty) = evm_signer();
+            let mut channels = ClientChannelRegistry::new();
+            channels
+                .record_evm(
+                    &"ab".repeat(32),
+                    EvmChannel {
+                        counterparty,
+                        chain_id: EVM_CHAIN_ID,
+                        token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    },
+                )
+                .expect("a 32-byte hex channel id");
+            channels
+        }
+
         /// A fixed, deterministic EVM keypair every genuine claim below is
         /// signed with, so each test's own signature verifies.
         fn evm_signer() -> (SecretKey, connector_signer::Address) {
@@ -1342,6 +1390,24 @@ mod tests {
             signature_hex: &str,
         ) -> String {
             let (_secret, address) = evm_signer();
+            evm_claim_json_with_signature_and_signer(
+                nonce,
+                transferred_amount,
+                signature_hex,
+                &address,
+            )
+        }
+
+        /// As [`evm_claim_json_with_signature`], but declaring whatever
+        /// `signer_address` it is given -- what a forger does (issue #558):
+        /// sign with a key of one's own and name oneself the payer.
+        fn evm_claim_json_with_signature_and_signer(
+            nonce: u64,
+            transferred_amount: u64,
+            signature_hex: &str,
+            signer_address: &connector_signer::Address,
+        ) -> String {
+            let address = signer_address;
             format!(
                 r#"{{
                     "version": "1.0",
@@ -1361,8 +1427,37 @@ mod tests {
                 }}"#,
                 channel = "ab".repeat(32),
                 zeros = "0".repeat(64),
-                address = connector_signer::to_hex(&address),
+                address = connector_signer::to_hex(address),
                 token_network_address = connector_signer::to_hex(&EVM_TOKEN_NETWORK_ADDRESS),
+            )
+        }
+
+        /// A claim over the recorded channel, genuinely and correctly
+        /// signed -- by a key that is not that channel's counterparty, and
+        /// declaring itself the payer. The forger of issue #558.
+        fn forged_evm_claim_json(nonce: u64, transferred_amount: u64) -> String {
+            let secret = SecretKey::parse(&[0x5a; 32]).unwrap();
+            let address = connector_signer::derive_evm_address(
+                &PublicKey::from_secret_key(&secret).serialize(),
+            );
+            let channel = "ab".repeat(32);
+            let mut channel_id = [0u8; 32];
+            channel_id.copy_from_slice(&hex::decode(&channel).unwrap());
+            let proof = connector_signer::EvmBalanceProof {
+                channel_id,
+                nonce,
+                transferred_amount: u128::from(transferred_amount),
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: EVM_CHAIN_ID,
+                token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+            };
+            let signature = sign_evm(&secret, &connector_signer::evm_balance_proof_digest(&proof));
+            evm_claim_json_with_signature_and_signer(
+                nonce,
+                transferred_amount,
+                &format!("0x{}", hex_encode(&signature)),
+                &address,
             )
         }
 
@@ -1439,7 +1534,7 @@ mod tests {
             );
             let (prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
-            let app = router(connector, signer);
+            let app = router_with_channels(connector, signer, None, test_channels());
 
             let request =
                 request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
@@ -1467,7 +1562,7 @@ mod tests {
                 )
                 .with_identity_signer(signer.clone()),
             );
-            let app = router(connector, signer.clone());
+            let app = router_with_channels(connector, signer.clone(), None, test_channels());
 
             let (first_prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
@@ -1507,7 +1602,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector, test_signer());
+            let app = router_with_channels(connector, test_signer(), None, test_channels());
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -1534,7 +1629,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector, test_signer());
+            let app = router_with_channels(connector, test_signer(), None, test_channels());
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -1591,7 +1686,12 @@ mod tests {
 
             let (prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &identity_signer.public_key().unwrap());
-            let app = router_with_wrap_key(connector, identity_signer, Some(receiver_secret_bytes));
+            let app = router_with_channels(
+                connector,
+                identity_signer,
+                Some(receiver_secret_bytes),
+                test_channels(),
+            );
             let request = request_with_claim_header(&prepare, CLAIM_WRAPPED_HEADER, &envelope_json);
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -1649,7 +1749,7 @@ mod tests {
             );
             let (prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
-            let app = router(connector, signer);
+            let app = router_with_channels(connector, signer, None, test_channels());
 
             let request =
                 request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
@@ -1678,7 +1778,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector, test_signer());
+            let app = router_with_channels(connector, test_signer(), None, test_channels());
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -1715,7 +1815,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector, test_signer());
+            let app = router_with_channels(connector, test_signer(), None, test_channels());
 
             let garbage_signature_claim =
                 evm_claim_json_with_signature(1, 50, "0xnotarealsignatureatall");
@@ -1745,7 +1845,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router(connector, test_signer());
+            let app = router_with_channels(connector, test_signer(), None, test_channels());
 
             let unverifiable_claim = evm_claim_json_with_signature(1, 100, "0xabcd");
             let request = request_with_claim_header(
@@ -1759,6 +1859,85 @@ mod tests {
             let reject = Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code.as_str(), "F01");
             assert!(reject.message.contains("signature"));
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// The forger of issue #558, at this crate's real HTTP seam: a
+        /// claim signed perfectly well with a key of the sender's own, over
+        /// a channel this connector *does* have a record of, declaring that
+        /// key as its signer. It never reaches the app, because the key is
+        /// not the channel's counterparty.
+        #[tokio::test]
+        async fn a_claim_signed_by_a_key_that_is_not_the_channels_counterparty_never_reaches_the_app(
+        ) {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router_with_channels(connector, test_signer(), None, test_channels());
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &forged_evm_claim_json(1, 100),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(
+                reject.message.contains("counterparty"),
+                "the refusal names why it was refused: {}",
+                reject.message
+            );
+            assert!(
+                app_client.deliveries().is_empty(),
+                "a forger must never buy the app's work"
+            );
+        }
+
+        /// A claim naming a channel this connector has no record of is
+        /// refused with its own reason, distinguishable from a bad
+        /// signature -- and, since the registry is what says which channels
+        /// exist, an edge mounted with no channels at all accepts nothing
+        /// (issue #558's AC2 and AC8).
+        #[tokio::test]
+        async fn a_claim_on_an_unrecorded_channel_never_reaches_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            // `router`, not `router_with_channels`: no channel recorded.
+            let app = router(connector, test_signer());
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, 100),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(
+                reject.message.contains("no record of"),
+                "an unknown channel is refused for being unknown, not for a bad signature: {}",
+                reject.message
+            );
             assert!(app_client.deliveries().is_empty());
         }
     }
