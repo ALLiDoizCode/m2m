@@ -793,7 +793,10 @@ impl Connector {
     /// adds a forwarding hop's fee to a relayed reject. `AppOutcome::Unreachable`
     /// does not: the app was never actually reached to do the priced work,
     /// matching how a forwarding hop that cannot reach its own peer adds
-    /// nothing either.
+    /// nothing either. Neither does `AppOutcome::Refused` (issue #596): a
+    /// target that attempts to escape the route's handler path is refused
+    /// before any request is made, so like `Unreachable`, the app never did
+    /// any priced work and the payer is not charged for the attempt.
     ///
     /// Per ADR 0018/issue #524, `prepare.data` is a gift wrap sealed to this
     /// connector's own identity key: opened here, above the [`AppClient`]
@@ -874,6 +877,19 @@ impl Connector {
             ),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),
+                triggered_by: String::new(),
+                message,
+                data: Vec::new(),
+                accumulated_cost: 0,
+            }),
+            // Issue #596: distinguishable from both an undecodable envelope
+            // (F01, above) and an app's own answer -- including a 404,
+            // which arrives as `Answered` and rides home on a FULFILL, not
+            // a reject at all -- so a sender can tell "your envelope named
+            // somewhere this route's handler does not expose" apart from
+            // either.
+            AppOutcome::Refused { message } => PacketResponse::Reject(Reject {
+                code: RejectCode::f00_bad_request(),
                 triggered_by: String::new(),
                 message,
                 data: Vec::new(),
@@ -1152,8 +1168,8 @@ mod tests {
     use crate::test_support::{
         answered, answered_with_status, expected_fulfillment, fulfill_envelope,
         fulfill_envelope_with_status, identity_signer, matching_condition, open_sealed_envelope,
-        sealed_envelope_request_data, sign_wire_claim, test_channel_domain, test_channel_id,
-        with_test_channel,
+        sealed_envelope_request_data, sealed_envelope_request_data_with_target, sign_wire_claim,
+        test_channel_domain, test_channel_id, with_test_channel,
     };
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
@@ -3274,6 +3290,32 @@ mod tests {
             match response {
                 PacketResponse::Reject(reject) => {
                     assert_eq!(reject.code.as_str(), "T01");
+                    assert_eq!(reject.accumulated_cost, 0);
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+
+        /// Issue #596: an envelope whose target attempts to escape the
+        /// route's configured handler path is refused with a code distinct
+        /// from both F01 (the envelope itself failed to decode) and F99 (a
+        /// mismatched fulfilment) -- and, like `AppOutcome::Unreachable`,
+        /// carries no price, since the app was never reached to do any of
+        /// the priced work.
+        #[tokio::test]
+        async fn an_escaping_target_reject_is_distinguishable_and_carries_zero() {
+            let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000/write", 25)
+                .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = connector_with(vec![route], app_client, test_clock());
+            let (data, _shared_secret) =
+                sealed_envelope_request_data_with_target("/admin", b"hello");
+
+            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F00");
                     assert_eq!(reject.accumulated_cost, 0);
                 }
                 other => panic!("expected a reject, got {other:?}"),
