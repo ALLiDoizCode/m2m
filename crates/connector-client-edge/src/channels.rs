@@ -1,6 +1,6 @@
-//! Per-channel counterparty registry for the client edge (issue #558):
-//! which key this connector accepts a claim's signature from, for each
-//! channel it has a record of.
+//! Per-channel counterparty registry for the client edge (issues #558,
+//! #556): which key this connector accepts a claim's signature from, for
+//! each channel it has a record of.
 //!
 //! This is what turns `client-edge-spec.md` §1.3 step 4 from a
 //! self-referential check into a real one. A claim carries its own
@@ -22,17 +22,71 @@
 //! edge, over the client edge's own claim shapes, since a client-edge
 //! claim's channel is never a peer-wire channel.
 //!
-//! **An unpopulated registry refuses every claim.** That is the intended
-//! failure mode, not an oversight: the only alternative to "no record of
-//! this channel" is trusting what the claim says about itself, which is
-//! the hole this module exists to close. Populating it from a settlement
-//! backend's own `ChannelState::counterparty` at startup is issue #556's
-//! job (arming the connector); until that lands, a node that wants to
-//! accept claims builds its registry explicitly and mounts the edge with
-//! [`crate::router_with_channels`].
+//! # Where a record comes from
+//!
+//! Two sources, and they compose rather than replace each other:
+//!
+//! 1. **Declared** -- [`ClientChannelRegistry::record_evm`] /
+//!    [`record_solana`](ClientChannelRegistry::record_solana), which
+//!    `connector-cli` fills from the `[[client_channels]]` config section.
+//!    A node with no settlement backend at all still declares its channels
+//!    this way, and a declared channel is authoritative: it is answered
+//!    from memory and never resolved.
+//! 2. **Resolved from chain** -- an optional [`ClientChannelSource`]
+//!    ([`ClientChannelRegistry::with_source`]), asked only about a channel
+//!    nothing was declared for. `connector-cli` builds one over the
+//!    `[settlement]` section's own `TokenNetwork`, so a client that has
+//!    opened a channel with this connector on chain can pay without the
+//!    operator hand-editing config and restarting.
+//!
+//! The second is what makes issue #502's *"anonymity is a first-class
+//! path, not a fallback: it is how an unaffiliated buyer pays for a
+//! terminated route without registering with the operator first"* true
+//! rather than aspirational. An unaffiliated buyer registers with the
+//! *chain* -- a public fact this connector can read for itself -- instead
+//! of with the operator.
+//!
+//! **Nothing falls back to the claim's own self-declared signer.** A
+//! registry with neither a record nor a source refuses every claim
+//! ([`crate::ClaimIngestRejection::UnknownChannel`]); a source that cannot
+//! answer -- an unreachable RPC endpoint, say -- refuses the claim it was
+//! asked about ([`crate::ClaimIngestRejection::ChannelLookupFailed`]),
+//! distinguishably and never silently. "Unverifiable" is never "accepted",
+//! by configuration, flag or build profile.
+//!
+//! # Caching, and why invalidation is a non-problem
+//!
+//! A resolution happens on the packet path, so it must not become an RPC
+//! round trip per packet. Every resolved channel is therefore memoised for
+//! the process's lifetime and **is never invalidated**, because what is
+//! memoised is immutable on chain. `TokenNetwork.openChannel`
+//! (`packages/contracts/src/TokenNetwork.sol:206-213`) assigns
+//! `participant1`/`participant2` once, when the channel is created, and no
+//! other function in that contract ever assigns either field again --
+//! `setTotalDeposit`, `claimFromChannel`, `closeChannel` and
+//! `settleChannel` mutate deposits, claimed amounts and `state` only. The
+//! EIP-712 domain is immutable for the same reason one layer up:
+//! OpenZeppelin's `EIP712("TokenNetwork", "1")` derives it from
+//! `block.chainid` and `address(this)`, and a deployed `TokenNetwork`'s
+//! address does not move.
+//!
+//! What is *not* memoised is any answer that could change: a lookup
+//! failure, and a "no such channel". A buyer who opens a channel and pays
+//! a second later has to be payable on their next attempt rather than
+//! after a TTL, which is exactly the registration-free path #502 asks for.
+//! The cost is that a sender naming channels that do not exist can make
+//! this connector perform one `eth_call` each. Two things bound it: a
+//! resolution is a single `TokenNetwork.channels(id)` read rather than the
+//! three-call `SettlementBackend::channel_state` path, and the lookup is
+//! the claim gate's *last* stage, so a claim must already be structurally
+//! valid, fresh and value-covering to reach it at all (issue #544's
+//! ordering). Rate-limiting it is deliberately left out of this change --
+//! see the PR description.
 
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
+use async_trait::async_trait;
 use connector_signer::Address;
 
 /// A channel identifier that is not the on-chain value its chain's claims
@@ -55,6 +109,52 @@ impl std::fmt::Display for InvalidChannelIdentifier {
 }
 
 impl std::error::Error for InvalidChannelIdentifier {}
+
+/// A [`ClientChannelSource`] could not answer whether a channel exists or
+/// who its counterparty is -- an unreachable RPC endpoint, a node that
+/// answered with garbage, a timeout. Deliberately distinct from "this
+/// channel does not exist": the first is a failure of *this connector's*,
+/// the second is a fact about the world, and conflating them would let an
+/// RPC outage read as a definitive "no such channel".
+///
+/// Either way the claim is refused. This type exists so a refusal can say
+/// which of the two happened, never so anything can recover from it by
+/// believing the claim instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelLookupFailed(pub String);
+
+impl std::fmt::Display for ChannelLookupFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ChannelLookupFailed {}
+
+/// Where a channel nothing was declared for is looked up -- in production
+/// the deployed `TokenNetwork` the `[settlement]` section already names
+/// (`connector-cli`'s `SettlementChannelSource`). Kept a port rather than a
+/// direct dependency on `connector-settlement-evm` so this crate stays
+/// chain-agnostic, and so a test can substitute a source without a chain.
+///
+/// An implementation MUST report the counterparty **as the chain itself
+/// holds it**, never anything derived from a claim: this trait exists
+/// precisely so that a claim has no say in what it is checked against.
+#[async_trait]
+pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
+    /// The record for `channel_id`, or `Ok(None)` if that is not a channel
+    /// this connector can be paid on -- it was never opened, it has
+    /// already settled (a claim on a settled channel can never be
+    /// redeemed, so accepting one would be giving the app's work away), or
+    /// neither of its participants is this connector.
+    ///
+    /// `Err` means the lookup itself failed and the answer is unknown. It
+    /// must never be reported for a channel that is merely absent.
+    async fn evm_channel(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed>;
+}
 
 /// Everything this connector needs to verify an EVM claim on one channel
 /// without believing anything the claim says about itself: whose signature
@@ -80,17 +180,38 @@ pub struct EvmChannel {
 /// of thing and can never satisfy each other, the same way
 /// `connector_domain::ClientClaim::channel_key` namespaces the watermark
 /// map.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+///
+/// See this module's own doc for the two sources a record comes from, and
+/// for why the resolution cache is never invalidated.
+#[derive(Debug, Default)]
 pub struct ClientChannelRegistry {
     evm: HashMap<[u8; 32], EvmChannel>,
     solana: HashMap<[u8; 32], [u8; 32]>,
+    /// Consulted only for an EVM channel nothing was declared for. `None`
+    /// is a node with no settlement backend: it accepts claims on exactly
+    /// what its config file declares, and on nothing else.
+    source: Option<Arc<dyn ClientChannelSource>>,
+    /// Memoised answers from [`Self::source`]. Never invalidated -- see
+    /// this module's doc.
+    resolved: RwLock<HashMap<[u8; 32], EvmChannel>>,
 }
 
 impl ClientChannelRegistry {
     /// An empty registry -- one that refuses every claim, since it has a
-    /// record of no channel at all. See this module's own doc comment.
+    /// record of no channel at all and no source to resolve one from. See
+    /// this module's own doc comment.
     pub fn new() -> ClientChannelRegistry {
         ClientChannelRegistry::default()
+    }
+
+    /// Consult `source` for any EVM channel this registry has no declared
+    /// record of. Additive: everything already recorded stays
+    /// authoritative and is still answered without a lookup, so
+    /// `[[client_channels]]` keeps working exactly as it did -- and keeps
+    /// working when the chain is unreachable.
+    pub fn with_source(mut self, source: Arc<dyn ClientChannelSource>) -> ClientChannelRegistry {
+        self.source = Some(source);
+        self
     }
 
     /// Record `channel_id`'s counterparty and EIP-712 domain. `channel_id`
@@ -125,19 +246,63 @@ impl ClientChannelRegistry {
         Ok(())
     }
 
-    /// Whether this registry has a record of no channel at all -- every
-    /// claim presented to a gate holding it is refused as
-    /// [`crate::ClaimIngestRejection::UnknownChannel`].
+    /// Whether this registry can vouch for no channel at all -- nothing
+    /// declared and no source to resolve one from -- so that every claim
+    /// presented to a gate holding it is refused as
+    /// [`crate::ClaimIngestRejection::UnknownChannel`]. A registry with a
+    /// source is not empty however little it was told at startup: the
+    /// channels it can answer for live on a chain, not in this map.
     pub fn is_empty(&self) -> bool {
-        self.evm.is_empty() && self.solana.is_empty()
+        self.evm.is_empty() && self.solana.is_empty() && self.source.is_none()
     }
 
-    pub(crate) fn evm(&self, channel_id: &[u8; 32]) -> Option<&EvmChannel> {
-        self.evm.get(channel_id)
+    /// The record for an EVM channel: declared first, then already
+    /// resolved, then -- once per channel -- the source.
+    ///
+    /// `Ok(None)` is "no such channel this connector can be paid on";
+    /// `Err` is "the lookup failed, so the answer is unknown". Both refuse
+    /// the claim; they are kept apart so the refusal can say which.
+    pub(crate) async fn evm(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        if let Some(channel) = self.evm.get(channel_id) {
+            return Ok(Some(*channel));
+        }
+        // Scoped so the read guard is released before the `.await` below:
+        // a `std::sync::RwLock` guard held across a suspension point is
+        // both non-`Send` and a way to stall every other packet in flight.
+        {
+            let resolved = self
+                .resolved
+                .read()
+                .expect("resolved client channels lock poisoned");
+            if let Some(channel) = resolved.get(channel_id) {
+                return Ok(Some(*channel));
+            }
+        }
+        let Some(source) = self.source.as_ref() else {
+            return Ok(None);
+        };
+        let Some(channel) = source.evm_channel(channel_id).await? else {
+            // Deliberately not memoised: a channel opened a second from
+            // now must be payable on that sender's next attempt.
+            return Ok(None);
+        };
+        self.resolved
+            .write()
+            .expect("resolved client channels lock poisoned")
+            .insert(*channel_id, channel);
+        Ok(Some(channel))
     }
 
-    pub(crate) fn solana(&self, channel_account: &[u8; 32]) -> Option<&[u8; 32]> {
-        self.solana.get(channel_account)
+    /// The counterparty recorded for a Solana channel. Declared records
+    /// only: this connector has no Solana settlement backend to resolve
+    /// one from (`connector-settlement-solana` implements no client-edge
+    /// source yet), so a Solana channel is payable exactly when
+    /// `[[client_channels]]`-equivalent configuration names it.
+    pub(crate) fn solana(&self, channel_account: &[u8; 32]) -> Option<[u8; 32]> {
+        self.solana.get(channel_account).copied()
     }
 }
 
@@ -159,7 +324,62 @@ pub(crate) fn decode_base58_bytes<const N: usize>(s: &str) -> Option<[u8; N]> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_source {
+    //! A stand-in for a chain, shared with [`crate::claim_gate`]'s own
+    //! tests: answers for exactly the channels it was handed, counts how
+    //! often it was asked, and can be made to fail the way an unreachable
+    //! RPC endpoint does.
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    pub(crate) struct FakeChannelSource {
+        channels: HashMap<[u8; 32], EvmChannel>,
+        failure: Option<String>,
+        lookups: AtomicUsize,
+    }
+
+    impl FakeChannelSource {
+        pub(crate) fn knowing(channels: Vec<([u8; 32], EvmChannel)>) -> FakeChannelSource {
+            FakeChannelSource {
+                channels: channels.into_iter().collect(),
+                failure: None,
+                lookups: AtomicUsize::new(0),
+            }
+        }
+
+        pub(crate) fn unreachable(reason: &str) -> FakeChannelSource {
+            FakeChannelSource {
+                channels: HashMap::new(),
+                failure: Some(reason.to_string()),
+                lookups: AtomicUsize::new(0),
+            }
+        }
+
+        pub(crate) fn lookups(&self) -> usize {
+            self.lookups.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ClientChannelSource for FakeChannelSource {
+        async fn evm_channel(
+            &self,
+            channel_id: &[u8; 32],
+        ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            if let Some(reason) = &self.failure {
+                return Err(ChannelLookupFailed(reason.clone()));
+            }
+            Ok(self.channels.get(channel_id).copied())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_source::FakeChannelSource;
     use super::*;
 
     fn evm_channel() -> EvmChannel {
@@ -170,8 +390,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_recorded_evm_channel_is_found_under_the_id_it_was_recorded_by() {
+    #[tokio::test]
+    async fn a_recorded_evm_channel_is_found_under_the_id_it_was_recorded_by() {
         let mut registry = ClientChannelRegistry::new();
         let channel_id = format!("0x{}", "ab".repeat(32));
         registry
@@ -179,11 +399,11 @@ mod tests {
             .expect("a 32-byte hex channel id");
 
         let key = decode_hex_bytes::<32>(&channel_id).unwrap();
-        assert_eq!(registry.evm(&key), Some(&evm_channel()));
+        assert_eq!(registry.evm(&key).await, Ok(Some(evm_channel())));
     }
 
-    #[test]
-    fn the_0x_prefix_is_not_part_of_a_channels_identity() {
+    #[tokio::test]
+    async fn the_0x_prefix_is_not_part_of_a_channels_identity() {
         let mut registry = ClientChannelRegistry::new();
         registry
             .record_evm(&"ab".repeat(32), evm_channel())
@@ -192,7 +412,7 @@ mod tests {
         // A claim naming the same channel with the `0x` prefix names the
         // same channel -- the prefix is notation, not identity.
         let key = decode_hex_bytes::<32>(&format!("0x{}", "ab".repeat(32))).unwrap();
-        assert_eq!(registry.evm(&key), Some(&evm_channel()));
+        assert_eq!(registry.evm(&key).await, Ok(Some(evm_channel())));
     }
 
     #[test]
@@ -217,7 +437,7 @@ mod tests {
             .record_solana(&account, &counterparty)
             .expect("a 32-byte base58 account");
 
-        assert_eq!(registry.solana(&[3u8; 32]), Some(&[7u8; 32]));
+        assert_eq!(registry.solana(&[3u8; 32]), Some([7u8; 32]));
     }
 
     #[test]
@@ -235,5 +455,95 @@ mod tests {
     #[test]
     fn a_fresh_registry_has_a_record_of_no_channel() {
         assert!(ClientChannelRegistry::new().is_empty());
+    }
+
+    /// Issues #556/#502: a channel nothing declared, that the chain knows
+    /// about, is answered for. This is the whole point of the source --
+    /// without it an unaffiliated buyer cannot pay until an operator edits
+    /// a config file and restarts the node.
+    #[tokio::test]
+    async fn a_channel_only_the_source_knows_about_is_resolved() {
+        let registry = ClientChannelRegistry::new().with_source(Arc::new(
+            FakeChannelSource::knowing(vec![([0x07; 32], evm_channel())]),
+        ));
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+    }
+
+    /// The cache: a second claim on the same channel costs no second
+    /// lookup, which is what keeps the packet path off the RPC endpoint.
+    #[tokio::test]
+    async fn a_resolved_channel_is_answered_from_memory_the_second_time() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+
+        for _ in 0..5 {
+            assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        }
+        assert_eq!(
+            source.lookups(),
+            1,
+            "the chain is asked once per channel, not once per packet"
+        );
+    }
+
+    /// A declared channel is authoritative: the source is never consulted
+    /// for it, so a node whose config names its channels keeps accepting
+    /// their claims while the RPC endpoint is down.
+    #[tokio::test]
+    async fn a_declared_channel_is_never_looked_up() {
+        let source = Arc::new(FakeChannelSource::unreachable("connection refused"));
+        let mut registry = ClientChannelRegistry::new();
+        registry
+            .record_evm(&"07".repeat(32), evm_channel())
+            .expect("a 32-byte hex channel id");
+        let registry = registry.with_source(source.clone());
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(source.lookups(), 0);
+    }
+
+    /// A channel the source does not know about is absent, not a failure
+    /// -- and "absent" is not memoised, so a buyer who opens their channel
+    /// a moment later is not locked out by a stale negative.
+    #[tokio::test]
+    async fn an_unknown_channel_is_absent_rather_than_a_failure_and_is_not_cached() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
+        assert_eq!(
+            source.lookups(),
+            2,
+            "a channel that did not exist yet is asked about again"
+        );
+    }
+
+    /// A lookup this connector could not complete is a failure of its own,
+    /// never silently "no such channel" and never a reason to believe what
+    /// the claim says about itself.
+    #[tokio::test]
+    async fn a_lookup_failure_is_reported_as_a_failure() {
+        let registry = ClientChannelRegistry::new().with_source(Arc::new(
+            FakeChannelSource::unreachable("connection refused"),
+        ));
+
+        assert_eq!(
+            registry.evm(&[0x07; 32]).await,
+            Err(ChannelLookupFailed("connection refused".to_string()))
+        );
+    }
+
+    /// A registry with a source can vouch for channels it was never told
+    /// about, so it is not "empty" in the sense the gate cares about.
+    #[test]
+    fn a_registry_with_a_source_is_not_empty() {
+        let registry =
+            ClientChannelRegistry::new().with_source(Arc::new(FakeChannelSource::knowing(vec![])));
+        assert!(!registry.is_empty());
     }
 }

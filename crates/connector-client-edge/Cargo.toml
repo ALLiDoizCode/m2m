@@ -8,12 +8,14 @@ license.workspace = true
 connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }
+async-trait = "0.1"
 axum = "0.6"
 base64 = "0.22"
 bs58 = "0.5"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1"
 
 [dev-dependencies]
 connector-config = { path = "../connector-config" }

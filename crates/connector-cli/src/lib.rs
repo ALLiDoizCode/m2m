@@ -10,7 +10,7 @@ use axum::Router;
 use connector_config::{Config, ConfigError};
 use connector_runtime::PeerWireServer;
 
-pub use runtime::{build, router, RuntimeError};
+pub use runtime::{build, router, Runtime, RuntimeError};
 
 /// Everything that can stop the connector from producing a validated,
 /// running node.
@@ -94,13 +94,13 @@ pub struct RunningNode {
 /// 0001 the binary itself makes no decision beyond "did this fail".
 pub async fn run<S: AsRef<str>>(args: &[S]) -> Result<RunningNode, CliError> {
     let config = load_config(args)?;
-    let (connector, signer) = build(&config).await?;
+    let runtime = build(&config).await?;
     let client_edge_addr = config.client_edge_addr();
-    let router = router(connector.clone(), signer, &config);
+    let router = router(&runtime, &config);
 
     let peer_wire_server = match config.peer_wire_addr() {
         Some(addr) => Some(
-            PeerWireServer::bind(addr, connector)
+            PeerWireServer::bind(addr, runtime.connector.clone())
                 .await
                 .map_err(CliError::PeerWireBind)?,
         ),
