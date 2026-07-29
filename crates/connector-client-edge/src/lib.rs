@@ -28,6 +28,14 @@
 //! any of §1.3's checks. Identity (§1.2, beyond the key answer) remains
 //! unimplemented.
 //!
+//! As of issue #548 this edge also implements §1.6, cost discovery: every
+//! REJECT it answers with carries the running cost total in a
+//! `TOON-Accumulated-Cost` header beside the unchanged OER body (ADR 0011 --
+//! a reject reports what the path would have charged, rather than a quoting
+//! protocol answering about a path the packet never took), and `POST
+//! /ilp/probe` is the ingress a sender uses to raise one deliberately,
+//! gated by [`Connector::handle_probe`]'s channel and rate-limit checks.
+//!
 //! Per ADR 0001, `handle_ilp` deserializes, calls exactly one method on
 //! [`Connector`], and serializes; the `match` below is that serialization
 //! step, not a routing or delivery decision -- those live entirely in
@@ -48,7 +56,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
-use connector_runtime::Connector;
+use connector_runtime::{Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
 
@@ -59,6 +67,12 @@ const OCTET_STREAM: &str = "application/octet-stream";
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
 const CLAIM_WRAPPED_HEADER: &str = "ilp-payment-channel-claim-wrapped";
 const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
+/// client-edge-spec.md §1.6: a REJECT's running cost total rides beside the
+/// OER body in this header rather than inside it, since RFC-0027's REJECT
+/// `data` is reserved for an application-level reject's own diagnostic
+/// payload. Decimal `uint64`, present on every REJECT this edge answers
+/// with (issue #548).
+const ACCUMULATED_COST_HEADER: &str = "toon-accumulated-cost";
 
 struct ClientEdgeState {
     connector: Arc<Connector>,
@@ -98,6 +112,7 @@ pub fn router_with_wrap_key(
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
+        .route("/ilp/probe", post(handle_probe))
         .route("/ilp/identity", get(identity))
         .route("/ilp/routes/price", get(route_price))
         .with_state(state)
@@ -338,26 +353,32 @@ fn decode_claim_header(
 }
 
 /// Extract and fully validate whatever claim header `headers` carries, per
-/// client-edge-spec.md §1.3. `Ok(())` covers both "no claim header was
-/// present at all" -- reachable here only when `destination` is unpriced or
-/// unmatched, since `handle_ilp` answers the x402 greeting instead of
-/// calling this at all for an unpaid request to a priced route (issue
-/// #526) -- so the request proceeds unchanged, exactly as it always has --
-/// and "a present claim validated cleanly"; the caller doesn't need to tell
-/// those apart. A plaintext header takes precedence when both are present,
-/// since a client presenting both is presenting the same claim twice, not
-/// two different ones.
+/// client-edge-spec.md §1.3, against `price` -- the matched route's price,
+/// `0` for an unpriced or unmatched destination, since routing itself (not
+/// this gate) is what refuses an unroutable one, with F02.
+///
+/// `Ok(None)` means no claim header was present at all -- reachable here
+/// only when the destination is unpriced or unmatched, since `handle_ilp`
+/// answers the x402 greeting instead of calling this at all for an unpaid
+/// request to a priced route (issue #526) -- so the request proceeds
+/// unchanged, exactly as it always has. `Ok(Some(channel_key))` means a
+/// present claim validated cleanly, and names the channel it validated on:
+/// the evidence, and the only evidence this connector ever gets, that an
+/// unaffiliated sender holds a payment channel with it (issue #548). A
+/// plaintext header takes precedence when both are present, since a client
+/// presenting both is presenting the same claim twice, not two different
+/// ones.
 fn extract_and_validate_claim(
     headers: &HeaderMap,
-    destination: &str,
+    price: u64,
     state: &ClientEdgeState,
-) -> Result<(), ClaimIngestRejection> {
+) -> Result<Option<String>, ClaimIngestRejection> {
     let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
         (value, false)
     } else if let Some(value) = headers.get(CLAIM_WRAPPED_HEADER) {
         (value, true)
     } else {
-        return Ok(());
+        return Ok(None);
     };
 
     let claim_json = decode_claim_header(
@@ -365,35 +386,65 @@ fn extract_and_validate_claim(
         wrapped,
         state.wrap_receiver_secret.as_ref(),
     )?;
-    // No matching app route means nothing here is priced -- routing itself
-    // (not this gate) is what refuses an unroutable destination, with F02.
-    let price = state.connector.app_route_price(destination).unwrap_or(0);
-    state.claim_gate.ingest(&claim_json, price)?;
-    Ok(())
+    let claim = state.claim_gate.ingest(&claim_json, price)?;
+    Ok(Some(claim.channel_key()))
 }
 
-fn claim_rejected_response(rejection: ClaimIngestRejection) -> Response {
+/// Answer an ILP-level outcome the way client-edge-spec.md §1.1 and §1.6
+/// specify: always `200`, the OER-encoded packet as the body, and -- on a
+/// REJECT and only a REJECT -- the running cost total in
+/// `TOON-Accumulated-Cost` (issue #548). Every REJECT this edge answers
+/// with goes through here, so none can report an outcome without also
+/// reporting what reaching it cost; a FULFILL carries no such header,
+/// having been paid for rather than priced.
+fn packet_response(response: PacketResponse) -> Response {
+    match response {
+        PacketResponse::Fulfill(fulfill) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, OCTET_STREAM)],
+            fulfill.encode(),
+        )
+            .into_response(),
+        PacketResponse::Reject(reject) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, OCTET_STREAM),
+                (
+                    header::HeaderName::from_static(ACCUMULATED_COST_HEADER),
+                    reject.accumulated_cost.to_string().as_str(),
+                ),
+            ],
+            reject.encode(),
+        )
+            .into_response(),
+    }
+}
+
+/// A claim-ingest refusal, as an OER REJECT. `price` is the matched route's
+/// price, and rides home as `accumulated_cost` on an underpayment (issue
+/// #548): that refusal's whole subject is a figure the sender did not
+/// cover, and disclosing it only inside a human-readable `message` -- the
+/// one channel through which a price was ever disclosed before -- forces a
+/// client to parse English, or to discover the price by underpaying first,
+/// which is exactly what cost discovery exists to prevent. Every other
+/// refusal here is decided before any route price is in play and reports
+/// `0`: nothing was traversed and nothing terminated.
+fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Response {
     // Underpayment is a distinct ILP error (F03: Invalid Amount, issue
     // #522) from every other claim-ingest refusal above it (F01: Invalid
     // Packet) -- the claim is structurally and cryptographically fine, it
     // simply isn't enough value.
-    let code = match rejection {
-        ClaimIngestRejection::Underpayment { .. } => RejectCode::f03_invalid_amount(),
-        _ => RejectCode::f01_invalid_packet(),
+    let (code, accumulated_cost) = match rejection {
+        ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
+        _ => (RejectCode::f01_invalid_packet(), 0),
     };
-    let reject = Reject {
+    packet_response(PacketResponse::Reject(Reject {
         code,
         triggered_by: String::new(),
         message: rejection.message(),
         data: Vec::new(),
-        accumulated_cost: 0,
-    };
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, OCTET_STREAM)],
-        reject.encode(),
-    )
-        .into_response()
+        accumulated_cost,
+    }))
 }
 
 async fn handle_ilp(
@@ -416,38 +467,89 @@ async fn handle_ilp(
     // unaffected and falls through unchanged, exactly as it always has.
     let has_claim_header =
         headers.contains_key(CLAIM_HEADER) || headers.contains_key(CLAIM_WRAPPED_HEADER);
-    if !has_claim_header {
-        let price = state
-            .connector
-            .app_route_price(&prepare.destination)
-            .unwrap_or(0);
-        if price > 0 {
-            return payment_required(&prepare.destination, price);
-        }
+    // No matching app route means nothing here is priced -- routing itself
+    // (not this gate) is what refuses an unroutable destination, with F02.
+    let price = state
+        .connector
+        .app_route_price(&prepare.destination)
+        .unwrap_or(0);
+    if !has_claim_header && price > 0 {
+        return payment_required(&prepare.destination, price);
     }
 
     // A claim header's validation failure rejects the packet before it is
     // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
     // do work that was never validly paid for.
-    if let Err(rejection) = extract_and_validate_claim(&headers, &prepare.destination, &state) {
-        return claim_rejected_response(rejection);
+    match extract_and_validate_claim(&headers, price, &state) {
+        Err(rejection) => return claim_rejected_response(rejection, price),
+        // A claim that cleared the gate is this connector's evidence that
+        // the sender holds the channel it names (issue #548), which is what
+        // makes that sender eligible to probe at `POST /ilp/probe` later.
+        Ok(Some(channel_key)) => state.connector.recognize_channel(&channel_key),
+        Ok(None) => {}
     }
 
     // client-edge-spec.md v1 carries no minimum-delivery field (§4 of
     // peer-wire-spec.md scopes it to the peer wire) -- a client-originated
     // packet declares no guarantee yet, so this hop enforces none, exactly
     // matching today's actual (unguaranteed) behavior.
-    let encoded = match state.connector.handle_prepare(prepare, 0).await {
-        PacketResponse::Fulfill(fulfill) => fulfill.encode(),
-        PacketResponse::Reject(reject) => reject.encode(),
+    packet_response(state.connector.handle_prepare(prepare, 0).await)
+}
+
+/// `POST /ilp/probe` -- a probe's ingress (client-edge-spec.md §1.6, ADR
+/// 0011): an ordinary PREPARE a sender expects to be rejected, sent to
+/// learn what a path costs from the `TOON-Accumulated-Cost` the REJECT
+/// comes back with. Body and response framing are `POST /ilp`'s exactly
+/// (§1.1); what differs is the gate in front, and that nothing is charged.
+///
+/// Because a probe traverses this connector's network for free, it is
+/// accepted only from a sender identified by a payment channel claim, and
+/// only within a rate limit per that channel -- ADR 0011's two conditions,
+/// enforced in [`Connector::handle_probe`]. Both denials, and a probe that
+/// presents no usable claim at all, are `403`: the sender may be perfectly
+/// well authenticated (§1.2's `401` is a different failure) and is simply
+/// not authorized to probe. A `403` carries no OER body, per §1.1's rule
+/// that a non-2xx status never does.
+///
+/// The claim here identifies rather than pays: it is validated in full,
+/// against a price of `0`, so possession of the channel is proven and a
+/// replayed claim is still refused, but no value need advance. A sender
+/// probes by reissuing at the same cumulative amount with a fresh nonce.
+async fn handle_probe(
+    State(state): State<Arc<ClientEdgeState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let prepare = match Prepare::decode(&body) {
+        Ok(prepare) => prepare,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, OCTET_STREAM)],
-        encoded,
-    )
-        .into_response()
+    let channel_key = match extract_and_validate_claim(&headers, 0, &state) {
+        Ok(Some(channel_key)) => channel_key,
+        Ok(None) => {
+            return (
+                StatusCode::FORBIDDEN,
+                "a probe must identify itself with a payment channel claim".to_string(),
+            )
+                .into_response();
+        }
+        Err(rejection) => return (StatusCode::FORBIDDEN, rejection.message()).into_response(),
+    };
+
+    match state.connector.handle_probe(&channel_key, prepare, 0).await {
+        Ok(response) => packet_response(response),
+        Err(ProbeDenied::NoOpenChannel) => (
+            StatusCode::FORBIDDEN,
+            format!("no payment channel this connector recognizes: '{channel_key}'"),
+        )
+            .into_response(),
+        Err(ProbeDenied::RateLimited) => (
+            StatusCode::FORBIDDEN,
+            format!("probe rate limit exceeded for '{channel_key}'"),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -1305,7 +1407,7 @@ mod tests {
             }"#
         }
 
-        fn request_with_claim_header(
+        pub(super) fn request_with_claim_header(
             prepare: &Prepare,
             header_name: &str,
             claim_json: &str,
@@ -1658,6 +1760,229 @@ mod tests {
             assert_eq!(reject.code.as_str(), "F01");
             assert!(reject.message.contains("signature"));
             assert!(app_client.deliveries().is_empty());
+        }
+    }
+
+    /// Cost discovery at the client edge (issue #548,
+    /// `client-edge-spec.md` §1.6, ADR 0011): the running cost total a
+    /// REJECT reports, and `POST /ilp/probe`, the ingress a sender uses to
+    /// raise one deliberately. `tests/accumulated_cost_header.rs` covers
+    /// the header on a path with no claim in it at all; these cover the
+    /// cases that need a real claim, and so need `claim_headers`'s signer.
+    mod cost_discovery {
+        use super::claim_headers::{evm_claim_json, request_with_claim_header};
+        use super::*;
+
+        const PRICE: u64 = 100;
+
+        fn cost_header(response: &Response) -> Option<u64> {
+            response
+                .headers()
+                .get(ACCUMULATED_COST_HEADER)
+                .map(|value| value.to_str().unwrap().parse::<u64>().unwrap())
+        }
+
+        fn probe_request(prepare: &Prepare, claim_json: Option<&str>) -> Request<Body> {
+            let builder = Request::builder().method("POST").uri("/ilp/probe");
+            let builder = match claim_json {
+                Some(claim_json) => {
+                    builder.header(CLAIM_HEADER, BASE64.encode(claim_json.as_bytes()))
+                }
+                None => builder,
+            };
+            builder
+                .body(Body::from(prepare.encode()))
+                .expect("well-formed probe request")
+        }
+
+        /// A router over one priced, terminating route whose app answers,
+        /// plus the app client so a test can assert whether the app was
+        /// ever asked to do anything.
+        fn priced_route_router() -> (Router, Arc<FakeAppClient>, Arc<dyn Signer>) {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", PRICE).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            (router(connector, signer.clone()), app_client, signer)
+        }
+
+        /// Before #548 a route's price was disclosed only inside an
+        /// underpayment reject's human-readable `message` -- so a client
+        /// learned a price by underpaying first, which is exactly what cost
+        /// discovery exists to prevent. The figure now rides the header a
+        /// client already reads for every other reject.
+        #[tokio::test]
+        async fn an_underpaying_claim_reports_the_routes_price_in_the_header() {
+            let (app, app_client, _signer) = priced_route_router();
+
+            let request = request_with_claim_header(
+                &sample_prepare("g.example.app"),
+                CLAIM_HEADER,
+                &evm_claim_json(1, PRICE - 1),
+            );
+            let response = app.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(cost_header(&response), Some(PRICE));
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            assert_eq!(Reject::decode(&bytes).unwrap().code.as_str(), "F03");
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// Every other claim refusal is decided before any route price is
+        /// in play: nothing was traversed and nothing terminated, so the
+        /// figure is `0` -- present, and honestly zero.
+        #[tokio::test]
+        async fn a_malformed_claim_reports_zero_rather_than_the_routes_price() {
+            let (app, _app_client, _signer) = priced_route_router();
+
+            let request =
+                request_with_claim_header(&sample_prepare("g.example.app"), CLAIM_HEADER, "{}");
+            let response = app.oneshot(request).await.unwrap();
+
+            assert_eq!(cost_header(&response), Some(0));
+        }
+
+        /// ADR 0011: probing traverses the network for free, so it is
+        /// accepted only from a sender holding a channel this connector
+        /// recognizes. A probe presenting nothing is not authorized, and
+        /// says so with a status distinct from an ILP-level outcome.
+        #[tokio::test]
+        async fn a_probe_presenting_no_claim_is_forbidden() {
+            let (app, _app_client, _signer) = priced_route_router();
+
+            let response = app
+                .oneshot(probe_request(&sample_prepare("g.example.app"), None))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        /// A claim that verifies proves the sender holds the channel, but
+        /// this connector has never seen that channel before -- ADR 0011's
+        /// first condition is not met and the packet is never forwarded.
+        #[tokio::test]
+        async fn a_probe_on_a_channel_this_connector_has_never_seen_is_forbidden() {
+            let (app, app_client, _signer) = priced_route_router();
+
+            let response = app
+                .oneshot(probe_request(
+                    &sample_prepare("g.example.app"),
+                    Some(&evm_claim_json(1, PRICE)),
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// The gate is satisfiable by a deployed node (issue #548's last
+        /// acceptance criterion): a claim clearing §1.3's gate at this edge
+        /// is how a connector learns an unaffiliated sender holds a channel
+        /// with it, since no configuration file names one and no chain
+        /// indexes one. Having paid once, the same sender may probe -- and
+        /// what comes back is the route's price as one figure, with the app
+        /// still only ever having been asked to do the work that was paid
+        /// for.
+        #[tokio::test]
+        async fn a_probe_from_a_sender_that_has_paid_reports_the_price_without_delivering() {
+            let (app, app_client, signer) = priced_route_router();
+            let (paid, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+
+            let paid_response = app
+                .clone()
+                .oneshot(request_with_claim_header(
+                    &paid,
+                    CLAIM_HEADER,
+                    &evm_claim_json(1, PRICE),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(paid_response.status(), StatusCode::OK);
+            assert_eq!(app_client.deliveries().len(), 1);
+
+            // A fresh nonce at the same cumulative amount: the claim
+            // identifies, and advances no value at all.
+            let probe_response = app
+                .oneshot(probe_request(
+                    &sample_prepare("g.example.app"),
+                    Some(&evm_claim_json(2, PRICE)),
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(probe_response.status(), StatusCode::OK);
+            assert_eq!(cost_header(&probe_response), Some(PRICE));
+            let bytes = hyper::body::to_bytes(probe_response.into_body())
+                .await
+                .unwrap();
+            Reject::decode(&bytes).expect("a probe is answered with a reject");
+            // Still one: free traversal is all a probe buys.
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// Issue #548's fifth acceptance criterion, end to end: a sender
+        /// that funds a packet from the figure a probe returned is not then
+        /// rejected for underpaying it. The figure a probe reports and the
+        /// figure the claim gate charges are the same route price read from
+        /// the same lookup, so this holds by construction -- and this test
+        /// is what keeps it holding.
+        #[tokio::test]
+        async fn funding_a_packet_from_the_figure_a_probe_returned_is_not_underpayment() {
+            let (app, app_client, signer) = priced_route_router();
+            let (paid, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+
+            // Pay once, so this connector recognizes the channel.
+            app.clone()
+                .oneshot(request_with_claim_header(
+                    &paid,
+                    CLAIM_HEADER,
+                    &evm_claim_json(1, PRICE),
+                ))
+                .await
+                .unwrap();
+
+            let probe_response = app
+                .clone()
+                .oneshot(probe_request(
+                    &sample_prepare("g.example.app"),
+                    Some(&evm_claim_json(2, PRICE)),
+                ))
+                .await
+                .unwrap();
+            let quoted = cost_header(&probe_response).expect("a probe reports a figure");
+
+            // Fund exactly what the probe quoted, and nothing more.
+            let (second, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let response = app
+                .oneshot(request_with_claim_header(
+                    &second,
+                    CLAIM_HEADER,
+                    &evm_claim_json(3, PRICE + quoted),
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("a packet funded from the probe's figure fulfils");
+            assert_eq!(app_client.deliveries().len(), 2);
         }
     }
 }
