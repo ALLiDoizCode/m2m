@@ -7,6 +7,14 @@ claim over `connector_signer::evm_balance_proof_digest` -- the same EIP-712 `Bal
 cumulative_amount` that no chain has ever verified. `claim_digest` is deleted, not kept as a
 second answer to the same question.
 
+> **Since this was written.** `SettlementChannel.sol`, referred to below in the present tense, has
+> been deleted (#578, #589). `connector-settlement-evm` was rewritten against the deployed
+> `TokenNetwork`, reached through a `TokenNetworkRegistry` via `getTokenNetwork(token)` — the same
+> contract whose typehash this ADR's digest is computed for. The gap it describes ("nothing had
+> ever redeemed a peer-wire claim on chain", against a contract "that does not check a claim's
+> signature at all") is therefore closed: the redemption target now verifies the signature this
+> ADR made the wire produce. The decision itself is unchanged.
+
 ## The disagreement this records
 
 `docs/protocol/peer-wire-spec.md` §3.5 already said, before this issue, that an `evm` claim's

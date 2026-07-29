@@ -1,5 +1,19 @@
 # Connector Admin API Reference
 
+> **Historical — this is the retired TypeScript connector's admin API**
+> ([ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md)), still accurate for the
+> published `ghcr.io/toon-protocol/connector` image the devnet fleet runs, and describing nothing
+> in `crates/`.
+>
+> The Rust connector's equivalent is the **operator surface**
+> ([ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md)), and it is a different
+> design in every respect that matters here: one port (merged onto `client_edge_addr`, not 8081
+> and 8080), no health endpoint at all, bearer-token auth for **reads only**, and RFC 9421
+> request signatures — never a bearer token or an API key — for every **write**. It is mounted
+> only when the config file has an `[operator]` section. Its routes are enumerated in
+> [`crates/connector-operator`](../../crates/connector-operator) and in the repository
+> [README](../../README.md#the-operator-surface).
+
 The connector exposes an administrative HTTP API for runtime peer and route management, as well as a separate health/metrics server.
 
 ## Quick Links

@@ -33,6 +33,14 @@ by a configured peer id and verification key), not a wire handshake this spec de
 that cannot be authenticated to a configured peer is closed; there is no anonymous peer wire
 identity, unlike the client edge.
 
+**Implementation gap.** `connector_runtime::network_peer_transport` ships **plain TCP**: the
+framing (§1.2) and the lazy-redial behaviour the port's contract suite requires, and neither TLS
+nor any authentication of the far end. A `[[peers]]` entry is an address, not a verification key,
+and the config has no field for one. Everything above this paragraph is what a peer wire exposed
+outside a trusted network MUST do; until that is implemented, `peer_wire_addr` MUST be bound to a
+private interface, because the wire is unencrypted and unauthenticated and carries signed balance
+proofs.
+
 ### 1.2 Frame envelope
 
 Every message on the stream is one length-prefixed frame:
@@ -65,12 +73,23 @@ guess at its meaning — an unknown frame is a version mismatch, not a packet to
 ## 2. Packet structure
 
 Every PREPARE, FULFILL and REJECT frame carries an ILPv4 packet (RFC-0027), OER-encoded
-(RFC-0030), byte-identical to the existing `@toon-protocol/shared` encoder/decoder:
+(RFC-0030). The encoder is `connector_domain::oer`; its length determinants are canonical, so a
+non-minimal, zero-length-alias or over-wide determinant is refused rather than accepted as a
+synonym ([ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md)). (This spec previously
+defined the encoding as "byte-identical to the existing `@toon-protocol/shared` encoder/decoder";
+that TypeScript package was deleted with the prototype, and `vectors/wire-vectors.json` is the
+definition now — [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md).)
 
 - **PREPARE**: `amount` (uint64, the value this hop transfers to its immediate next hop),
   `destination` (ILP address, RFC-0015), `expiresAt`, `executionCondition` (32 bytes — see §3.1),
-  `data` (opaque application payload; a connector MUST NOT interpret it, per the `app`/`connector`
-  boundary in `CONTEXT.md`).
+  `data`. Opacity is a property of **carriage**, not of the bytes
+  ([ADR 0016](../adr/0016-payload-opacity-is-a-property-of-carriage.md)): a **forwarding** hop MUST
+  NOT interpret `data`, and structurally cannot — it is a gift wrap sealed to the terminating
+  connector's identity key ([ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)),
+  so a forwarding hop cannot see the method, target, headers or size of what crossed it. The
+  **terminating** connector opens it, and the request envelope inside is exactly what it makes of
+  the app. The `app`/`connector` boundary in `CONTEXT.md` is preserved by that asymmetry, not by a
+  blanket prohibition.
 - **FULFILL**: `fulfillment` (32-byte preimage), `data` (opaque return payload).
 - **REJECT**: `code` (RFC-0027 §3.3 three-character code), `triggeredBy` (ILP address of the
   connector that generated the error), `message`, `data`.
@@ -88,11 +107,13 @@ the peer wire MUST carry a non-zero, 32-byte `executionCondition` chosen by the 
 connector receiving a PREPARE with an absent or all-zero condition MUST reject it with
 `F01_INVALID_PACKET`. There is no derived-preimage (HKDF) fallback on the peer wire — that path
 is deleted, leaving one security model: a hop is paid only against a preimage it cannot forge.
-(The client edge's **legacy** class — an absent or all-zero condition, documented in
-[`docs/local-delivery-fulfillment-contract.md`](../local-delivery-fulfillment-contract.md) — is a
-client-edge-only allowance and does not apply once a packet is forwarded onto the peer wire; a
-connector originating a forward onto the peer wire on behalf of a legacy client-edge request MUST
-mint a real condition, never forward a zero one.)
+(The prototype's **legacy** class — an absent or all-zero condition auto-fulfilled without
+verification, recorded in
+[`docs/local-delivery-fulfillment-contract.md`](../local-delivery-fulfillment-contract.md), now
+superseded — has no counterpart here. `connector_domain::condition` defines presence as
+"not all-zero" and treats an absent condition as invalid on **both** wires, so there is no
+client-edge allowance left for this paragraph to carve out; a zero condition is refused at ingress
+rather than needing a real one minted for it on the way out.)
 
 A FULFILL's `fulfillment` MUST satisfy `sha256(fulfillment) == executionCondition` of the PREPARE
 it answers. A connector MUST verify this on every FULFILL it relays upstream before treating the

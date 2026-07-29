@@ -31,6 +31,36 @@ does not bump it.
 The structured request/response envelope every terminated packet carries once opened
 (`docs/protocol/client-edge-spec.md` §1.8).
 
+**Encoding** (everything a replaying SDK needs to _produce_ `encoded_hex`, not merely check it).
+Two OER primitives (RFC-0030), both defined in `connector_domain::oer`:
+
+- **VarUInt** — a value in `0..=127` is that single byte. Anything larger is `0x80 | n`, where `n`
+  is the number of bytes in the value's _minimal_ big-endian representation, followed by those `n`
+  bytes. Decoding is canonical-only (ADR 0023): a determinant is refused unless it is byte-identical
+  to what encoding the decoded value would produce, so a non-minimal long form (`0x81 0x03` for
+  `3`), a zero-length long form (`0x80` aliasing `0x00`), and any `n > 8` are all
+  `non_canonical_length`/`length_determinant_overflow` rather than accepted synonyms.
+- **VarOctetString** — a VarUInt byte count, then exactly that many bytes.
+
+An envelope is then, with no framing or padding of its own:
+
+```text
+request  = 0x01 || VarOctetString(method) || VarOctetString(target)
+              || VarUInt(header_count) || header_count × ( VarOctetString(name)
+                                                        || VarOctetString(value) )
+              || VarOctetString(body)
+
+response = 0x02 || status (2 bytes, big-endian uint16)
+              || VarUInt(header_count) || header_count × ( VarOctetString(name)
+                                                        || VarOctetString(value) )
+              || VarOctetString(body)
+```
+
+`method`, `target`, and every header name and value are UTF-8 (a non-UTF-8 sequence is
+`invalid_utf8`); `body` is arbitrary bytes. Headers are a **sequence, never a map** — order and
+duplicate names are both part of the encoding. The leading type byte is the only discriminator
+between the two directions, and any byte after the body is `trailing_bytes`, never ignored.
+
 - `valid[]`: `{ name, encoded_hex, decoded }`. `encoded_hex` is the canonical OER encoding;
   decoding it must reproduce `decoded` exactly, and re-encoding `decoded` must reproduce
   `encoded_hex` exactly. `decoded.direction` is `"request"` (`method`, `target`, `headers`,
@@ -50,24 +80,41 @@ to test against; `receiver_identity_public_hex` is the value a real connector wo
 
 **Mechanism** (everything a replaying SDK needs and cannot get from this file's field names alone):
 
+- **Two different 32-byte secrets are in play, and they are not the same thing.** The **ECDH
+  result** is derived: the sender ECDHs a fresh, per-packet secp256k1 ephemeral key against the
+  receiver's identity public key, and takes the result's raw X-coordinate (32 bytes, not hashed or
+  otherwise processed before going into HKDF). The **shared secret** (`shared_secret_hex`) is
+  _drawn at random_ by the sender, independently of ECDH, and is carried encrypted inside the
+  request. The ECDH result exists only to protect that carriage; everything after the request --
+  the response's key and the fulfilment -- comes from the random shared secret.
 - The receiver's identity key is a secp256k1 keypair; `receiver_identity_public_hex` is the
-  65-byte uncompressed form (`0x04 || X || Y`). The sender ECDHs a fresh, per-packet secp256k1
-  ephemeral key against this public key; the shared secret is the ECDH result's raw X-coordinate
-  (32 bytes) -- not hashed or otherwise processed before going into HKDF.
-- The AEAD key is derived with **HKDF-SHA256, no salt** (`HKDF-Extract` is called with an all-zero
-  salt, i.e. `Hkdf::new(None, ikm)`), expanded to 32 bytes with one of three fixed ASCII `info`
-  strings, each domain-separating a different derived value from the same ECDH/shared-secret
-  input: `toon-giftwrap-request` (the request's AEAD key), `toon-giftwrap-response` (the
-  response's AEAD key), `toon-giftwrap-fulfillment` (the `fulfilment` section below).
+  65-byte uncompressed form (`0x04 || X || Y`).
+- Every derived value uses the same construction — **HKDF-SHA256, no salt** (`HKDF-Extract` is
+  called with an all-zero salt, i.e. `Hkdf::new(None, ikm)`), expanded to exactly 32 bytes with a
+  fixed ASCII `info` string. **The three uses do not share an `ikm`**, and getting this wrong is
+  the easiest way to fail a replay:
+
+  | Derived value          | `ikm`                                     | `info`                      |
+  | ---------------------- | ----------------------------------------- | --------------------------- |
+  | request AEAD key       | the ECDH result's X-coordinate (32 bytes) | `toon-giftwrap-request`     |
+  | response AEAD key      | the 32-byte shared secret                 | `toon-giftwrap-response`    |
+  | fulfilment (see below) | the 32-byte shared secret                 | `toon-giftwrap-fulfillment` |
+
+  Only the request direction touches ECDH. Once the receiver has recovered the shared secret from
+  inside the request, the response and the fulfilment are derived from that secret alone, which is
+  why the response needs no second key exchange.
+
 - The AEAD is **ChaCha20-Poly1305** (RFC 8439), 12-byte nonce, no additional authenticated data.
+  "Ciphertext" below always means the AEAD output including its trailing 16-byte Poly1305 tag, so
+  a sealed blob is 16 bytes longer than its plaintext.
 - Wire framing:
   - A **request** (`request_wrap_hex`) is `0x01 || ephemeral_public_key (65 bytes, uncompressed) ||
 nonce (12 bytes) || ciphertext`. The plaintext AEAD encrypts is `shared_secret (32 bytes) ||
 encoded_envelope` -- the 32-byte shared secret rides _inside_ the encrypted request, not
     alongside it, which is what lets the response be sealed with no second key exchange.
   - A **response** (`response_wrap_hex`) is `0x02 || nonce (12 bytes) || ciphertext`, where the
-    plaintext is just the encoded response envelope -- no embedded secret, since the response is
-    sealed directly with `shared_secret_hex`.
+    plaintext is just the encoded response envelope -- no embedded secret and no ephemeral key,
+    since the response's AEAD key comes from `shared_secret_hex` alone (per the table above).
 
 Each `cases[]` entry pins every input a real seal draws at random (`ephemeral_secret_hex`,
 `shared_secret_hex`, `request_nonce_hex`, `response_nonce_hex`) so the output is reproducible:
