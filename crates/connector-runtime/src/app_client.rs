@@ -50,10 +50,10 @@ pub enum AppOutcome {
 /// (the common case a client uses when it has exactly one endpoint). Any
 /// other value beginning with `/` is an absolute-path escape attempt and is
 /// refused, as is a scheme (`http:`, `javascript:`, ...), a `..` or `.`
-/// path segment, or a percent-encoded form of any of those -- checked
-/// against the fully percent-decoded form, so an encoded equivalent
-/// (`%2e%2e`, `%2Fadmin`, `%68ttp%3a...`) cannot smuggle past a check for
-/// the literal characters.
+/// path segment, a backslash, or a percent-encoded form of any of those --
+/// checked against the fully percent-decoded form, so an encoded equivalent
+/// (`%2e%2e`, `%2Fadmin`, `%5c`, `%68ttp%3a...`) cannot smuggle past a check
+/// for the literal characters.
 ///
 /// Shared by [`HttpAppClient`] and [`FakeAppClient`] so both implementations
 /// of this port enforce the identical rule (ADR 0007: a fake must genuinely
@@ -91,16 +91,26 @@ fn resolve_target_under_handler(handler_url: &Url, target: &str) -> Result<Url, 
 }
 
 /// Whether `sub_path` (a target's path portion, already known not to start
-/// with `/`) contains a scheme, a `..`/`.` segment, or a percent-encoded
-/// form of either -- checked against the fully percent-decoded form, since
-/// a single decode pass reveals an encoded `/` or `..` without needing to
-/// special-case where in the string it appears, and a scheme prefix
-/// survives decoding unchanged (a `scheme ":"` is plain ASCII with no `%`
-/// of its own, so decoding a string that already looks like one is a
-/// no-op).
+/// with `/`) contains a scheme, a `..`/`.` segment, a backslash, or a
+/// percent-encoded form of any of those -- checked against the fully
+/// percent-decoded form, since a single decode pass reveals an encoded `/`,
+/// `\` or `..` without needing to special-case where in the string it
+/// appears, and a scheme prefix survives decoding unchanged (a `scheme ":"`
+/// is plain ASCII with no `%` of its own, so decoding a string that already
+/// looks like one is a no-op).
+///
+/// A backslash is refused outright rather than merely treated as another
+/// separator. RFC 3986 gives `\` no meaning in a path, but the WHATWG URL
+/// parser this crate implements treats it as a path separator for a special
+/// scheme (`http`/`https`) *and* removes dot segments while doing so -- so
+/// `..\admin` under a handler at `/write` normalizes all the way out to
+/// `/admin`, escaping the route's path exactly as `../admin` would while
+/// slipping past a check that only splits on `/`. Since there is no faithful
+/// reading of a backslash to preserve -- the target delivered would never be
+/// the target the sender wrote -- the whole class is refused.
 fn path_attempts_to_escape(sub_path: &str) -> bool {
     let decoded = percent_decode_str(sub_path).decode_utf8_lossy();
-    if decoded.starts_with('/') || looks_like_a_scheme(&decoded) {
+    if decoded.starts_with('/') || decoded.contains('\\') || looks_like_a_scheme(&decoded) {
         return true;
     }
     decoded
@@ -382,6 +392,32 @@ mod tests {
             assert!(resolve_target_under_handler(&handler(), "//evil.example/x").is_err());
         }
 
+        /// A backslash escape. RFC 3986 gives `\` no meaning in a path, but
+        /// the WHATWG URL parser treats it as a separator for a special
+        /// scheme and removes dot segments as it goes -- so before this was
+        /// refused, `..\admin` against a handler at `/write` resolved all
+        /// the way out to `http://relay:3100/admin`, escaping the route's
+        /// path entirely while splitting only on `/` saw one harmless
+        /// segment. The percent-encoded forms (`%2e%2e\`, `%5c`) are the
+        /// same escape spelled to dodge a literal-character check.
+        #[test]
+        fn a_backslash_escape_is_refused() {
+            for target in [
+                r"..\admin",
+                r"..\..\admin",
+                r"a\..\..\admin",
+                r"%2e%2e\admin",
+                r"..%5cadmin",
+                r"%2e%2e%5cadmin",
+                r"\admin",
+            ] {
+                assert!(
+                    resolve_target_under_handler(&handler(), target).is_err(),
+                    "target {target:?} should be refused"
+                );
+            }
+        }
+
         #[test]
         fn a_percent_encoded_escape_is_refused() {
             // %2e%2e is a percent-encoded "..".
@@ -401,7 +437,13 @@ mod tests {
             let mut cheap = Url::parse("http://relay:3100").unwrap();
             cheap.set_path("/health");
 
-            for target in ["/write", "../write", "%2e%2e/write"] {
+            for target in [
+                "/write",
+                "../write",
+                "%2e%2e/write",
+                r"..\write",
+                r"%2e%2e%5cwrite",
+            ] {
                 let result = resolve_target_under_handler(&cheap, target);
                 assert!(result.is_err(), "target {target:?} should be refused");
             }

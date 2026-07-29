@@ -33,12 +33,22 @@ because both are special-cased to resolve to `handler_url` unchanged rather than
 "replace the path with `/`".
 
 **Any other value beginning with `/` is refused**, along with a `.`/`..` path segment, a scheme
-(`javascript:`, `http:`, ...), an authority (`//host`, itself just another `/`-prefixed string), or
-a percent-encoded form of any of those (`%2e%2e`, `%2Fadmin`). The check runs against `target` as
-written and again against its fully percent-decoded form, so an encoded equivalent cannot smuggle a
-traversal past a check that only looked at the literal characters. Refusal happens before any HTTP
+(`javascript:`, `http:`, ...), an authority (`//host`, itself just another `/`-prefixed string), a
+backslash, or a percent-encoded form of any of those (`%2e%2e`, `%2Fadmin`, `%5c`). The check runs
+against `target`'s fully percent-decoded form, so an encoded equivalent cannot smuggle a traversal
+past a check that only looked at the literal characters -- and a scheme prefix survives decoding
+unchanged, so the decoded form is sufficient for that case too. Refusal happens before any HTTP
 request is attempted -- the app is never reached, so a refused target costs the payer nothing (see
 Pricing below).
+
+**A backslash is refused outright**, not merely treated as a second separator. RFC 3986 gives `\`
+no meaning inside a path, but the WHATWG URL parser the `url` crate implements treats it as a path
+separator for a special scheme (`http`/`https`) *and* applies dot-segment removal while doing so.
+So `..\admin` against a handler at `/write` normalizes out to `/admin` -- the same escape as
+`../admin`, but invisible to a check that splits only on `/`, and reachable in encoded form as
+`%2e%2e%5cadmin`. There is no faithful reading of a backslash left to preserve (the target
+delivered could never be the target the sender wrote), so the whole class is refused rather than
+normalized.
 
 **Multi-endpoint addressing survives.** ADR 0018 and issue #521 are explicit that an envelope's
 target must remain expressive enough to address more than one endpoint on an app. A relative target
