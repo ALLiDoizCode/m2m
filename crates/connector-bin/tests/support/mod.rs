@@ -13,6 +13,11 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
+use chrono::{Duration as ChronoDuration, Utc};
+use connector_domain::{derive_condition, EnvelopeRequest, Prepare};
+use connector_signer::giftwrap::{derive_fulfillment, seal_request};
+use connector_signer::{LocalSigner, PublicKeyBytes, Signer};
+
 /// A spawned child process, killed and reaped on drop -- so a test that
 /// panics midway still leaves no orphaned process behind.
 pub struct Process {
@@ -38,6 +43,50 @@ pub fn write_raw_key_file(seed: u8) -> tempfile::NamedTempFile {
         .write_all(&[seed; 32])
         .expect("write raw 32-byte key");
     key_file
+}
+
+/// The identity `write_raw_key_file(seed)` produces, reconstructed the same
+/// way `connector-cli::runtime::build` derives a signer from raw key-file
+/// bytes -- so a test can seal to a real connector process's actual
+/// identity without needing to ask it over the wire.
+pub fn identity_from_key_seed(seed: u8) -> PublicKeyBytes {
+    LocalSigner::from_secret_bytes("test-identity", [seed; 32])
+        .expect("valid key seed")
+        .public_key()
+        .expect("public key")
+}
+
+/// ADR 0018/issue #524: a terminated route's `Prepare.data` is a gift wrap
+/// sealed to the terminating connector's identity -- `receiver_public`,
+/// derived the same way `runtime::build()` derives it in the real binary
+/// (from the `[signer] key_file` raw bytes) -- around a minimal `POST /`
+/// envelope carrying `body`. Returns the wire bytes for `Prepare.data` and
+/// the shared secret the wrap carries, to open the sealed `Fulfill`/`Reject`
+/// this produces or to compute the fulfilment ADR 0019/issue #525 derives
+/// from it.
+pub fn sealed_prepare_data(body: &[u8], receiver_public: &PublicKeyBytes) -> (Vec<u8>, [u8; 32]) {
+    let plaintext = EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: body.to_vec(),
+    }
+    .encode();
+    seal_request(&plaintext, receiver_public).expect("seal")
+}
+
+/// A `Prepare` whose `execution_condition` matches the fulfilment
+/// `shared_secret` derives (ADR 0019, issue #525) -- what a genuine sender
+/// mints its condition from before ever transmitting a packet sealed with
+/// that same secret.
+pub fn sample_prepare(destination: &str, data: Vec<u8>, shared_secret: &[u8; 32]) -> Prepare {
+    Prepare {
+        amount: 0,
+        expires_at: Utc::now() + ChronoDuration::minutes(5),
+        execution_condition: derive_condition(&derive_fulfillment(shared_secret)),
+        destination: destination.to_string(),
+        data,
+    }
 }
 
 /// Parse the `addr` field out of one of the connector binary's structured
