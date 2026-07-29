@@ -69,7 +69,14 @@ FROM alpine:3.22 AS runtime
 # verifies TLS against the system root store when an app's handler_url is
 # https.
 RUN apk add --no-cache ca-certificates && \
-    adduser -D -u 10001 connector
+    adduser -D -u 10001 connector && \
+    # /app/state must exist in the image, owned by the runtime user, BEFORE
+    # any volume is mounted over it: a named volume mounted on a path the
+    # image does not provide is created root-owned, uid 10001 cannot write
+    # it, and the connector refuses to start (state_dir fails closed, issue
+    # #605). Providing the path here is what makes a fresh named volume
+    # inherit 10001 ownership on first mount.
+    mkdir -p /app/state && chown connector:connector /app/state
 
 COPY --from=builder /workspace/target/release/connector /usr/local/bin/connector
 

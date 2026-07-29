@@ -156,9 +156,12 @@ nonce, so every claim a client has already spent becomes free service again
 
 It must be a **volume**, not a path inside the container's writable layer — a
 watermark that dies with the container is the same defect one indirection
-down. The image runs as uid `10001`; a named volume is chowned for you, a host
-bind mount is not (`chown 10001:10001` it first, exactly like `signer.key` in
-step 1).
+down. The image runs as uid `10001`, and it ships `/app/state` already owned
+by that uid — that pre-existing path is what a fresh **named volume** inherits
+its ownership from on first mount, so a named volume needs no manual `chown`.
+(An image built before this path existed initializes the volume root-owned
+instead, and the node refuses to start on it.) A host bind mount inherits
+nothing: `chown 10001:10001` it first, exactly like `signer.key` in step 1.
 
 Two things fail closed here rather than degrading quietly:
 
