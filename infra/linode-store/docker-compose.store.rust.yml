@@ -71,7 +71,7 @@
 
 services:
   connector-rust:
-    image: ghcr.io/toon-protocol/connector-rust:sha-0e45cef
+    image: ghcr.io/toon-protocol/connector-rust:sha-6eaf92a
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
