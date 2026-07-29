@@ -294,7 +294,7 @@ no value need advance — a sender probes by reissuing at the same cumulative am
 nonce. A connector recognizes a channel once a claim on it has cleared §1.3's gate at this edge.
 It necessarily already records that channel's counterparty — step 4 above verifies against it, so
 without a record no claim on the channel could clear the gate at all — but a record says only
-*whose signature is accepted here*, never that anyone has turned up and paid; no chain indexes
+_whose signature is accepted here_, never that anyone has turned up and paid; no chain indexes
 that, so a cleared claim is the only evidence a connector ever gets of it. This is what makes the
 probe gate satisfiable by a deployed node: a sender able to pay is, by the same record, a sender
 able to probe, and a gate no deployed node could pass would not be a gate.

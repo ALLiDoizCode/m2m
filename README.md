@@ -79,18 +79,18 @@ handler_url = "http://app:3100"
 price       = 100
 ```
 
-| Key                | Type        | Required | Meaning                                                                    |
-| ------------------ | ----------- | -------- | -------------------------------------------------------------------------- |
-| `client_edge_addr` | `host:port` | yes      | Where `POST /ilp` (and, if configured, the operator surface) listens.      |
-| `[signer]`         | table       | yes      | Exactly one of `key_file` or `kms_key_id` — a location, never a key value. |
-| `[[routes]]`       | array       | no       | See below.                                                                 |
-| `apex`             | ILP address | no       | Required only if `[[children]]` is used.                                   |
-| `[[children]]`     | array       | no       | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.     |
-| `[operator]`       | table       | no       | Absent ⇒ the operator surface is not mounted at all.                       |
-| `peer_wire_addr`   | `host:port` | no       | Absent ⇒ no inbound peer listener.                                         |
-| `[[peers]]`        | array       | no       | `{ id, addr }` — the peers `routes.peer_id` may name.                      |
-| `[settlement]`     | table       | no       | Absent ⇒ every channel operation answers `503`.                            |
-| `[[client_channels]]` | array     | no      | Absent ⇒ the client edge has a record of no channel, so it refuses every claim. |
+| Key                   | Type        | Required | Meaning                                                                         |
+| --------------------- | ----------- | -------- | ------------------------------------------------------------------------------- |
+| `client_edge_addr`    | `host:port` | yes      | Where `POST /ilp` (and, if configured, the operator surface) listens.           |
+| `[signer]`            | table       | yes      | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.      |
+| `[[routes]]`          | array       | no       | See below.                                                                      |
+| `apex`                | ILP address | no       | Required only if `[[children]]` is used.                                        |
+| `[[children]]`        | array       | no       | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.          |
+| `[operator]`          | table       | no       | Absent ⇒ the operator surface is not mounted at all.                            |
+| `peer_wire_addr`      | `host:port` | no       | Absent ⇒ no inbound peer listener.                                              |
+| `[[peers]]`           | array       | no       | `{ id, addr }` — the peers `routes.peer_id` may name.                           |
+| `[settlement]`        | table       | no       | Absent ⇒ every channel operation answers `503`.                                 |
+| `[[client_channels]]` | array       | no       | Absent ⇒ the client edge has a record of no channel, so it refuses every claim. |
 
 A `[[routes]]` entry sets **exactly one** of `handler_url` (terminate here) or `peer_id` (forward
 there). A terminated route **must** carry a `price` — write `price = 0` if free is deliberate,
