@@ -12,6 +12,11 @@
 //! stack this file drives *does* configure settlement, so "the write landed"
 //! and "the money is redeemable on chain" are shown for one claim, in one run.
 //!
+//! And behind the route is the real published relay, the same image devnet
+//! runs, so the whole shape is here: a PAID sealed publish goes in through the
+//! connector and a FREE ordinary NIP-01 `REQ` takes the very same event back
+//! out of the relay's public WebSocket, with nothing paid for the read.
+//!
 //! LOCAL / DEV ONLY, and inert unless driven: every test below returns
 //! immediately unless `REHEARSAL_EDGE` is set, exactly the way
 //! `connector-settlement-evm`'s own `require_anvil()` gate keeps a
@@ -58,7 +63,18 @@ fn edge() -> Option<String> {
 }
 
 fn destination() -> String {
-    env("REHEARSAL_DESTINATION").unwrap_or_else(|| "g.local.app".to_string())
+    env("REHEARSAL_DESTINATION").unwrap_or_else(|| "g.local.relay".to_string())
+}
+
+/// The envelope target a real publisher sends. It matters more than it looks:
+/// `HttpAppClient::deliver` resolves it against the route's `handler_url` with
+/// `Url::join`, and RFC 3986 makes an absolute-path reference REPLACE the
+/// base's path -- so `"/"` against `http://relay:3100/write` resolves to
+/// `http://relay:3100/`, which the relay does not serve. `"/write"` is what
+/// lands. `a_paid_write_whose_envelope_target_is_a_bare_slash_misses_the_relay`
+/// proves the other side of that.
+fn target() -> String {
+    env("REHEARSAL_TARGET").unwrap_or_else(|| "/write".to_string())
 }
 
 fn chain_id() -> u64 {
@@ -102,13 +118,14 @@ async fn fetch_identity(edge: &str) -> PublicKeyBytes {
 /// connector's identity can have minted a condition it will ever match.
 fn sealed_prepare(
     destination: &str,
+    target: &str,
     body: &[u8],
     identity: &PublicKeyBytes,
 ) -> (Prepare, [u8; 32]) {
     let plaintext = EnvelopeRequest {
         method: "POST".to_string(),
-        target: "/".to_string(),
-        headers: vec![],
+        target: target.to_string(),
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
         body: body.to_vec(),
     }
     .encode();
@@ -188,6 +205,129 @@ fn claim_json(proof: &EvmBalanceProof, secret_hex: &str, signature: &[u8]) -> St
     )
 }
 
+// ── A real Nostr event, and the free read that serves it back ────────────────
+
+/// A genuinely signed NIP-01 event, and the `POST /write` body that carries it.
+///
+/// The relay runs with `TOON_DEV_MODE=false`, exactly as devnet does, so it
+/// verifies this signature before storing anything -- which is what makes
+/// "the relay stored it" a statement about a real event rather than about a
+/// blob this probe made up. BIP-340 Schnorr over the event's own SHA-256 id;
+/// neither `libsecp256k1` 0.6 nor `connector-signer` signs that way, hence
+/// `k256`'s `schnorr` here and nowhere else in the workspace.
+///
+/// The publisher's key is a fixed local test value: this event is worth
+/// nothing, is written only to a disposable container, and being deterministic
+/// means a failed run can be re-read by pubkey.
+fn signed_nostr_event(content: &str) -> (serde_json::Value, String) {
+    use k256::schnorr::signature::hazmat::PrehashSigner;
+    use k256::schnorr::SigningKey;
+    use sha2::{Digest, Sha256};
+
+    const PUBLISHER_KEY: [u8; 32] = [0x2a; 32];
+
+    let signing_key = SigningKey::from_bytes(&PUBLISHER_KEY).expect("nostr signing key");
+    let pubkey = hex_encode(&signing_key.verifying_key().to_bytes());
+    let created_at = now_secs();
+
+    // NIP-01's serialization for the id: the six-element array, no whitespace.
+    let serialized = serde_json::json!([0, pubkey, created_at, 1, [], content]).to_string();
+    let id = hex_encode(&Sha256::digest(serialized.as_bytes()));
+
+    let signature: k256::schnorr::Signature = signing_key
+        .sign_prehash(&hex_decode(&id))
+        .expect("schnorr sign the event id");
+
+    let event = serde_json::json!({
+        "id": id,
+        "pubkey": pubkey,
+        "created_at": created_at,
+        "kind": 1,
+        "tags": [],
+        "content": content,
+        "sig": hex_encode(&signature.to_bytes()),
+    });
+    (event, id)
+}
+
+/// The relay's `POST /write` body: `{ "event": <event> }`.
+fn write_body(event: &serde_json::Value) -> Vec<u8> {
+    serde_json::json!({ "event": event })
+        .to_string()
+        .into_bytes()
+}
+
+/// The relay's free-read WebSocket, published to loopback by the compose file.
+fn relay_ws() -> String {
+    env("REHEARSAL_RELAY_WS").unwrap_or_else(|| "ws://127.0.0.1:7100".to_string())
+}
+
+/// Ask the relay's public WS for one event by id, with an ordinary NIP-01
+/// `REQ` -- no payment, no claim, no connector: the free half of the loop,
+/// spoken by anything that speaks Nostr. `None` means the relay answered
+/// `EOSE` without ever sending the event, i.e. it does not have it.
+async fn free_read_by_id(id: &str) -> Option<serde_json::Value> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::time::{timeout, Duration};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(relay_ws())
+        .await
+        .expect("connect the free-read WS");
+    let request = serde_json::json!(["REQ", "rehearsal", { "ids": [id] }]).to_string();
+    socket
+        .send(Message::Text(request))
+        .await
+        .expect("send a NIP-01 REQ");
+
+    while let Ok(Some(Ok(message))) = timeout(Duration::from_secs(10), socket.next()).await {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let frame: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(frame) => frame,
+            Err(_) => continue,
+        };
+        match frame[0].as_str() {
+            Some("EVENT") => {
+                // Some deployed relays hand back the payload double-JSON-encoded
+                // (a string where an object belongs); accept either shape rather
+                // than reporting a real event as missing.
+                return Some(match frame[2].as_str() {
+                    Some(encoded) => serde_json::from_str(encoded).expect("event payload"),
+                    None => frame[2].clone(),
+                });
+            }
+            Some("EOSE") => return None,
+            _ => continue,
+        }
+    }
+    None
+}
+
+// ── 1. the relay's paid-write store is private ───────────────────────────────
+
+/// The privacy invariant the compose file enforces by construction: `3100`
+/// carries the PAID write surface and is never published, so the only way to
+/// reach it is through the connector. If the host could POST to it directly,
+/// every other check in this file would be theatre -- an unpaid writer would
+/// simply skip the connector.
+#[tokio::test]
+async fn the_relays_paid_write_store_is_not_reachable_from_the_host() {
+    let Some(_edge) = edge() else { return };
+    let error = tokio::net::TcpStream::connect("127.0.0.1:3100")
+        .await
+        .err()
+        .expect("127.0.0.1:3100 must not accept a connection from the host");
+    println!("relay :3100 from the host: {error}");
+
+    // ...while the FREE read surface on the same container is published.
+    tokio::net::TcpStream::connect("127.0.0.1:7100")
+        .await
+        .expect("the free-read WS is published");
+    println!("relay :7100 from the host: connected");
+}
+
 // ── 2. identity ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -217,13 +357,15 @@ async fn the_client_edge_quotes_the_configured_price_of_the_terminated_route() {
     assert!(body["price"].as_u64().expect("price") > 0);
 }
 
-// ── 4. an unpaid packet is answered with terms, not service ──────────────────
+// ── 4. an unpaid publish is refused, and the relay stores nothing ────────────
 
 #[tokio::test]
-async fn an_unpaid_packet_to_a_priced_route_is_answered_with_x402_terms() {
+async fn an_unpaid_publish_is_answered_with_x402_terms_and_never_reaches_the_relay() {
     let Some(edge) = edge() else { return };
     let identity = fetch_identity(&edge).await;
-    let (prepare, _secret) = sealed_prepare(&destination(), b"unpaid probe", &identity);
+    let (event, id) = signed_nostr_event("an unpaid write, which must never be stored");
+    let (prepare, _secret) =
+        sealed_prepare(&destination(), &target(), &write_body(&event), &identity);
 
     let response = reqwest::Client::new()
         .post(format!("{edge}/ilp"))
@@ -239,8 +381,17 @@ async fn an_unpaid_packet_to_a_priced_route_is_answered_with_x402_terms() {
     assert_eq!(terms["x402Version"], 2);
     assert_eq!(terms["accepts"][0]["scheme"], "toon-channel");
     // No OER packet came back at all, so `Connector::handle_prepare` was never
-    // reached and the app was never asked to work for free.
+    // reached and the relay was never asked to work for free.
     assert!(Prepare::decode(terms.to_string().as_bytes()).is_err());
+
+    // The event is genuinely publishable -- same construction the paid check
+    // uses, and the relay would have accepted it -- so its absence is the
+    // refusal's doing, not a malformed event's.
+    assert!(
+        free_read_by_id(&id).await.is_none(),
+        "the relay must not hold an event nobody paid for"
+    );
+    println!("REFUSED, AND NOT STORED -- free read of {id} came back EOSE with no EVENT");
 }
 
 // ── 5 + 6. a paid write, and that same claim redeeming on chain ──────────────
@@ -328,13 +479,16 @@ mod on_chain {
         (channel, proof, signature)
     }
 
-    /// Checks 5 and 6 joined: a paid write through the running connector's
-    /// client edge, and then that same claim -- same channel, same nonce, same
-    /// signature bytes -- redeemed on chain through
-    /// `EvmSettlementBackend::redeem`. The claim's value is backed by a deposit
-    /// this test genuinely moved on chain, not a number it wrote down.
+    /// The whole loop in one run: a paid, sealed publish through the running
+    /// connector's client edge lands a real Nostr event in the relay; the same
+    /// event comes back over the relay's FREE WebSocket to a reader that pays
+    /// nothing and never touches the connector; and the very claim that bought
+    /// the write -- same channel, same nonce, same signature bytes -- redeems
+    /// on chain through `EvmSettlementBackend::redeem`. The claim's value is
+    /// backed by a deposit this test genuinely moved on chain, not a number it
+    /// wrote down.
     #[tokio::test]
-    async fn a_paid_write_and_its_claim_redeem_on_chain_in_one_run() {
+    async fn a_paid_publish_lands_in_the_relay_reads_back_free_and_redeems_on_chain() {
         let (Some(edge), Some(rpc)) = (edge(), rpc()) else {
             return;
         };
@@ -352,8 +506,9 @@ mod on_chain {
 
         // ── the paid write ──────────────────────────────────────────────────
         let identity = fetch_identity(&edge).await;
-        let body = b"a paid write, backed by a real channel";
-        let (prepare, shared_secret) = sealed_prepare(&destination(), body, &identity);
+        let (event, id) = signed_nostr_event("a paid write, backed by a real channel");
+        let (prepare, shared_secret) =
+            sealed_prepare(&destination(), &target(), &write_body(&event), &identity);
 
         let response = reqwest::Client::new()
             .post(format!("{edge}/ilp"))
@@ -381,11 +536,28 @@ mod on_chain {
         let opened = open_response(&shared_secret, &fulfill.data).expect("open sealed answer");
         let envelope = EnvelopeResponse::decode(&opened).expect("decode envelope");
         assert_eq!(envelope.status, 200);
-        assert!(envelope.body.ends_with(body));
+        // The relay's own answer, sealed back through the connector: it names
+        // the event id it stored, so the write landing is the relay's word.
+        let stored: serde_json::Value =
+            serde_json::from_slice(&envelope.body).expect("the relay's JSON answer");
+        assert_eq!(stored["eventId"], id, "the relay stored THIS event");
         println!(
-            "WRITE LANDED -- FULFILL status={} body={:?}",
-            envelope.status,
-            String::from_utf8_lossy(&envelope.body)
+            "WRITE LANDED -- FULFILL status={} relay answer={}",
+            envelope.status, stored
+        );
+
+        // ── the free read: the other half nobody had proven locally ─────────
+        // No claim, no connector, no payment -- an ordinary NIP-01 REQ against
+        // the published WS. Paid write in, free read out.
+        let read_back = free_read_by_id(&id)
+            .await
+            .expect("the relay must serve the event it just stored");
+        assert_eq!(read_back["id"], id);
+        assert_eq!(read_back["sig"], event["sig"], "byte-identical signature");
+        assert_eq!(read_back["content"], event["content"]);
+        println!(
+            "FREE READ -- ws REQ {{\"ids\":[\"{id}\"]}} returned kind {} by {}: {:?}",
+            read_back["kind"], read_back["pubkey"], read_back["content"]
         );
 
         // ── the same claim, redeemed on chain ───────────────────────────────
@@ -415,6 +587,56 @@ mod on_chain {
             "CLAIM REDEEMED -- block {} tx {:?}; redeemer USDC {before} -> {after} (+{TRANSFERRED})",
             block.number.expect("number"),
             block.transactions.last().map(|tx| tx.hash),
+        );
+    }
+
+    /// The half of #492's app-delivery gap that `handler_url` alone cannot
+    /// close. `HttpAppClient::deliver` resolves the envelope's target against
+    /// `handler_url` with `Url::join`, and an absolute-path reference replaces
+    /// the base's path (RFC 3986 §5.3), so a sender that says `"/"` reaches
+    /// `http://relay:3100/` -- not `/write` -- no matter what the route
+    /// configures. `infra/linode-node/connector-rust.toml` says the connector
+    /// "takes no path from the packet"; this shows it does.
+    ///
+    /// Note what the miss is NOT: it is not an `F99`. Under ADR 0020 a 404 is
+    /// a real answer that consumed real work, so it rides home on a FULFILL
+    /// with `status: 404` and the payer is charged -- for nothing. The relay,
+    /// of course, stores nothing.
+    #[tokio::test]
+    async fn a_paid_write_whose_envelope_target_is_a_bare_slash_misses_the_relay() {
+        let (Some(edge), Some(rpc)) = (edge(), rpc()) else {
+            return;
+        };
+        let backend = backend(&rpc).await;
+        let (_channel, proof, signature) = funded_channel_and_claim(&backend).await;
+
+        let identity = fetch_identity(&edge).await;
+        let (event, id) = signed_nostr_event("a paid write aimed at the wrong path");
+        let (prepare, shared_secret) =
+            sealed_prepare(&destination(), "/", &write_body(&event), &identity);
+
+        let response = reqwest::Client::new()
+            .post(format!("{edge}/ilp"))
+            .header(
+                CLAIM_HEADER,
+                BASE64.encode(claim_json(&proof, PAYER_KEY, &signature).as_bytes()),
+            )
+            .body(prepare.encode())
+            .send()
+            .await
+            .expect("POST /ilp");
+        let bytes = response.bytes().await.expect("body");
+        let fulfill = Fulfill::decode(&bytes).expect("ADR 0020: a 404 is an answer, not a reject");
+        let opened = open_response(&shared_secret, &fulfill.data).expect("open sealed answer");
+        let envelope = EnvelopeResponse::decode(&opened).expect("decode envelope");
+
+        assert_eq!(envelope.status, 404, "the relay serves no `/`");
+        assert!(free_read_by_id(&id).await.is_none(), "and stored nothing");
+        println!(
+            "TARGET \"/\" MISSED THE RELAY -- FULFILL status={} body={:?}; \
+             the payer was charged and the relay stored nothing",
+            envelope.status,
+            String::from_utf8_lossy(&envelope.body)
         );
     }
 

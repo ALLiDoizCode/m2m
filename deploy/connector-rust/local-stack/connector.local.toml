@@ -17,10 +17,23 @@ key_file = "/app/secrets/signer.key"
 # ── The one locally-terminated, priced route ─────────────────────────────────
 # `price` is what issue #520 made mandatory on a terminated route and what
 # issue #526's x402 greeting quotes back to an unpaid caller. 1000 matches what
-# devnet's own terminated routes charge.
+# devnet's own terminated routes charge (infra/linode-node/connector-rust.toml).
+#
+# `/write`, not the bare origin -- the same value devnet's `g.rust.relay` route
+# carries, and for the same reason: the relay serves only `POST /write` and
+# `GET /health`, so a bare `http://relay:3100` comes back F99 "app declined the
+# delivery with HTTP 404" (#492).
+#
+# But the path is NOT settled by this line alone. `HttpAppClient::deliver` does
+# `handler_url.join(&request.target)`, and RFC 3986 says an absolute-path
+# reference REPLACES the base's path -- so a packet whose envelope target is
+# "/" resolves back to `http://relay:3100/` and 404s even with the `/write`
+# written here. The sender's envelope target is the other half; see
+# `crates/connector-bin/tests/local_stack_rehearsal.rs`, which proves both
+# halves, including that failure.
 [[routes]]
-prefix = "g.local.app"
-handler_url = "http://app:3100"
+prefix = "g.local.relay"
+handler_url = "http://relay:3100/write"
 price = 1000
 
 # ── Settlement (issue #542, ADR 0009) ────────────────────────────────────────

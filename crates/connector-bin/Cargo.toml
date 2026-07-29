@@ -31,3 +31,13 @@ reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"
 serde_json = "1"
 libsecp256k1 = "0.6"
 base64 = "0.22"
+# `local_stack_rehearsal.rs` only. A Nostr event is signed BIP-340 Schnorr over
+# its own SHA-256 id, which neither `libsecp256k1` 0.6 nor `connector-signer`
+# does -- and the relay verifies that signature (TOON_DEV_MODE=false), so a
+# probe cannot make an event up. `tokio-tungstenite` is the free-read side: a
+# plain NIP-01 `REQ` over the relay's public WS.
+k256 = { version = "0.13", features = ["schnorr"] }
+sha2 = "0.10"
+tokio-tungstenite = "0.20"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }

@@ -1,6 +1,13 @@
 # =============================================================================
-# Local deployment rehearsal: the Rust connector + a payment-oblivious app,
+# Local deployment rehearsal: the Rust connector + the real published relay,
 # both in containers on one machine, settling against a local anvil.
+#
+# This mirrors what a devnet node runs (infra/linode-node/docker-compose.node.yml
+# and .rust.yml): the same relay image, the same two ports, the same split
+# between a PAID write and a FREE read --
+#
+#   payer  ──POST /ilp──▶ connector ──POST /write──▶ relay:3100  (paid; PRIVATE)
+#   reader ──ws REQ (free)─────────────────────────▶ relay:7100  (Nostr reads)
 #
 # LOCAL / DEV ONLY -- this is deliberately NOT under infra/linode-*, which
 # owns devnet. Nothing here is published, deployed or SSH'd anywhere.
@@ -13,25 +20,49 @@
 #        python3 deploy/connector-rust/local-stack/rpcproxy.py 172.17.0.1 8546
 #   3. images:
 #        docker build -f deploy/connector-rust/Dockerfile -t connector-rust:local .
-#        docker build --target builder -f deploy/connector-rust/Dockerfile \
-#          -t connector-rust-builder:local .
-#        docker build -f deploy/connector-rust/local-stack/Dockerfile.stub-app \
-#          -t connector-rust-stub-app:local .
+#        docker pull ghcr.io/toon-protocol/relay:sha-a8693a9
 #   4. secrets: deploy/connector-rust/local-stack/prepare.sh
 #
 #   docker compose -f deploy/connector-rust/local-stack/docker-compose.local.yml up -d
 # =============================================================================
 
 services:
-  # The genuinely payment-oblivious app: it sees a POST and answers, and knows
-  # nothing about channels, claims, settlement or ILP conditions. It is not
-  # reachable from the host -- only the connector may deliver to it, which is
-  # what check 4 (an unpaid packet is answered with x402 terms and the app
-  # receives NOTHING) needs in order to mean anything.
-  app:
-    image: connector-rust-stub-app:local
-    command: ["0.0.0.0:3100"]
-    restart: "no"
+  # ── The oblivious relay: a real Nostr relay, and a genuinely payment-oblivious
+  # app. Its `POST /write` stores an event and knows nothing about channels,
+  # claims, settlement or ILP conditions; it trusts whatever payment headers the
+  # terminator injected without validating them. Same image, same environment as
+  # infra/linode-node/docker-compose.node.yml:32-47.
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:sha-a8693a9}
+    environment:
+      TOON_OBLIVIOUS_MODE: 'true'
+      TOON_BLS_PORT: '3100' # paid-write HTTP store (POST /write) -- PRIVATE
+      TOON_RELAY_PORT: '7100' # free-read Nostr WS -- published to loopback
+      TOON_CHAIN: 'none' # oblivious forces relay-only; explicit for safety
+      # IDENTITY, not money: the relay CLI refuses to boot without one. This is
+      # the same throwaway value devnet's compose defaults to, and this relay
+      # only ever holds locally-generated test events.
+      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
+      # false, as on devnet: every stored event's Schnorr signature is verified,
+      # so "the relay stored it" means a genuinely signed Nostr event, not a
+      # blob the probe made up.
+      TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
+    ports:
+      # ONLY the free-read WS is published, and only to loopback. 3100 is
+      # deliberately absent: the paid-write store must be reachable from the
+      # connector and from nowhere else, which is what makes "an unpaid write is
+      # refused" mean anything at all -- otherwise the host could just POST to
+      # the store directly and skip the connector.
+      - '127.0.0.1:${RELAY_WS_PORT:-7100}:7100'
+    expose:
+      - '3100' # paid-write store -- PRIVATE (only connector:3100 dials it)
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: 'no'
 
   # The Rust connector. `[settlement]` is live, so this container cannot come
   # up at all unless the chain answers -- ADR 0009's refuse-to-start contract
@@ -39,16 +70,17 @@ services:
   connector:
     image: connector-rust:local
     depends_on:
-      - app
+      relay:
+        condition: service_healthy
     extra_hosts:
       # anvil lives on the host, outside compose. 172.17.0.1 on this machine.
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     volumes:
       - ./connector.local.toml:/app/config/connector.toml:ro
       - ./secrets:/app/secrets:ro
-    command: ["/app/config/connector.toml"]
+    command: ['/app/config/connector.toml']
     ports:
       # 127.0.0.1 on purpose: a published port bypasses ufw, so an unadorned
       # "3000:3000" would put an unauthenticated client edge on the internet.
-      - "127.0.0.1:3000:3000"
-    restart: "no"
+      - '127.0.0.1:3000:3000'
+    restart: 'no'
