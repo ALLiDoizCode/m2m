@@ -1,6 +1,6 @@
 //! `pub struct Connector` -- the packet plane. See ADR 0001.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
@@ -257,6 +257,18 @@ pub struct Connector {
     /// so a node that never configures a limit still gets one rather than
     /// unbounded free traversal.
     probe_rate_limiter: ProbeRateLimiter,
+    /// Payment channels this connector has seen a valid claim on at its own
+    /// client edge (issue #548), and therefore recognizes as belonging to a
+    /// sender that holds a channel with it -- the other half of
+    /// [`Connector::handle_probe`]'s first gate, beside `claims`'s
+    /// configured peer-wire verification keys. Without this the gate is
+    /// unsatisfiable on a deployed node: nothing in a node's configuration
+    /// supplies a client's channel id, and a gate no node can pass is not a
+    /// gate (ADR 0011's "accepted only from a sender that already holds an
+    /// open payment channel with this connector"). Populated by
+    /// [`Connector::recognize_channel`], which the client edge calls when a
+    /// claim clears its gate.
+    recognized_channels: RwLock<HashSet<String>>,
 }
 
 /// [`Connector`]'s default probe rate limit absent
@@ -292,6 +304,7 @@ impl Connector {
             claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
             identity_signer: None,
             probe_rate_limiter: ProbeRateLimiter::new(DEFAULT_PROBE_LIMIT, default_probe_window()),
+            recognized_channels: RwLock::new(HashSet::new()),
         }
     }
 
@@ -568,36 +581,96 @@ impl Connector {
         (response, ack)
     }
 
+    /// Record that `channel_id` names a payment channel this connector
+    /// recognizes (issue #548) -- the client edge calls this the moment a
+    /// claim on that channel clears its own gate (structure, freshness,
+    /// value, signature), which is the only evidence a connector ever gets
+    /// that an unaffiliated sender holds a channel with it: no
+    /// configuration file names a client's channel, and no chain offers an
+    /// index of them (the same reason `known_channels` exists).
+    ///
+    /// Idempotent, and deliberately not undone -- a channel that has closed
+    /// simply retains a probe allowance it can no longer pay with, which
+    /// costs nothing beyond the rate limit that gates it anyway.
+    pub fn recognize_channel(&self, channel_id: &str) {
+        let mut recognized = self
+            .recognized_channels
+            .write()
+            .expect("recognized channels lock poisoned");
+        if !recognized.contains(channel_id) {
+            recognized.insert(channel_id.to_string());
+        }
+    }
+
+    /// Whether `channel_id` is a channel this connector recognizes: either
+    /// a peer-wire channel whose verification key its operator configured
+    /// ([`Connector::with_channel_verification_key`]), or a client channel
+    /// [`Connector::recognize_channel`] recorded when a claim on it
+    /// verified at this connector's client edge.
+    pub fn recognizes_channel(&self, channel_id: &str) -> bool {
+        self.claims.has_verification_key(channel_id)
+            || self
+                .recognized_channels
+                .read()
+                .expect("recognized channels lock poisoned")
+                .contains(channel_id)
+    }
+
     /// Entry point for a probe -- an ordinary packet a sender expects to be
     /// rejected, sent purely to learn a path's cost via the
     /// `accumulated_cost` every [`connector_domain::Reject`] now carries
     /// (issue #426, ADR 0011). Probes are not a distinct packet type and
-    /// fee accumulation is not a special mode for them (ADR 0011): once
-    /// past the two gates below, this is nothing but [`Connector::handle_prepare`]
-    /// -- any outcome, fulfilled or rejected, is reported exactly as it
-    /// would be for traffic that never called this method at all.
+    /// fee accumulation is not a special mode for them (ADR 0011): past the
+    /// gates below this is [`Connector::handle_prepare`], routed by the
+    /// ordinary routing table, and whatever comes back is reported exactly
+    /// as it would be for traffic that never called this method at all.
     ///
     /// Unlike [`Connector::handle_prepare`]/[`Connector::handle_peer_prepare`],
     /// a probe is gated *before* routing is attempted: probing traverses
     /// this connector's network for free, so it is accepted only from
     /// `channel_id` identifying a payment channel this connector already
-    /// recognizes (`ProbeDenied::NoOpenChannel` otherwise), and even then
-    /// only within a rate limit per that identity
-    /// (`ProbeDenied::RateLimited` otherwise) -- peer-wire-spec.md §5.2's
-    /// consequences, `docs/protocol/client-edge-spec.md` §1.6. Neither
-    /// denial reaches [`Connector::handle_prepare`]: the packet is never
-    /// forwarded.
+    /// recognizes (`ProbeDenied::NoOpenChannel` otherwise -- see
+    /// [`Connector::recognizes_channel`] for what makes that satisfiable on
+    /// a deployed node), and even then only within a rate limit per that
+    /// identity (`ProbeDenied::RateLimited` otherwise) -- peer-wire-spec.md
+    /// §5.2's consequences, `docs/protocol/client-edge-spec.md` §1.6.
+    /// Neither denial reaches [`Connector::handle_prepare`]: the packet is
+    /// never forwarded.
+    ///
+    /// A probe is never *delivered* to a locally terminated route (issue
+    /// #548). Free traversal is the whole of what ADR 0011 grants a probe;
+    /// it does not also buy the work behind a priced route, which is what
+    /// delivering here would hand over -- a sender able to seal a valid
+    /// envelope would get the app's answer for nothing, the one thing ADR
+    /// 0020's "an unpaid request to a priced route is answered with its
+    /// terms" exists to prevent. A destination that terminates here is
+    /// therefore answered with that route's price as `accumulated_cost`,
+    /// which is exactly the figure a real request would be charged and, for
+    /// a local termination, the whole path cost: no hop was traversed to
+    /// reach it.
     pub async fn handle_probe(
         &self,
         channel_id: &str,
         prepare: Prepare,
         minimum_delivery: u64,
     ) -> Result<PacketResponse, ProbeDenied> {
-        if !self.claims.has_verification_key(channel_id) {
+        if !self.recognizes_channel(channel_id) {
             return Err(ProbeDenied::NoOpenChannel);
         }
         if !self.probe_rate_limiter.allow(channel_id, self.clock.now()) {
             return Err(ProbeDenied::RateLimited);
+        }
+        if let Some(price) = self.app_route_price(&prepare.destination) {
+            return Ok(PacketResponse::Reject(Reject {
+                code: RejectCode::f03_invalid_amount(),
+                triggered_by: String::new(),
+                message: format!(
+                    "probe: '{}' terminates at this connector and costs {price}",
+                    prepare.destination
+                ),
+                data: Vec::new(),
+                accumulated_cost: price,
+            }));
         }
         Ok(self.handle_prepare(prepare, minimum_delivery).await)
     }
@@ -3364,6 +3437,133 @@ mod tests {
                 PacketResponse::Reject(reject) => {
                     assert_eq!(reject.code.as_str(), "F99");
                     assert_eq!(reject.accumulated_cost, 7 + 25);
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+        }
+    }
+
+    /// Issue #548, ADR 0011: `Connector::handle_probe`'s two gates, and
+    /// what a probe past them is and is not allowed to reach.
+    mod probing {
+        use super::*;
+
+        const CHANNEL: &str = "evm:0xchannel";
+
+        /// The gate that made `handle_probe` unreachable in practice:
+        /// nothing in a node's configuration names an unaffiliated client's
+        /// channel, so before #548 the only way to satisfy it was a
+        /// peer-wire verification key -- and a gate no deployed node can
+        /// pass is not a gate. A channel a claim has been seen on at this
+        /// connector's own client edge now satisfies it.
+        #[tokio::test]
+        async fn a_probe_on_an_unrecognized_channel_is_denied_and_one_on_a_recognized_channel_is_not(
+        ) {
+            let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
+
+            let denied = connector
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .await;
+            assert_eq!(denied, Err(ProbeDenied::NoOpenChannel));
+
+            connector.recognize_channel(CHANNEL);
+            let admitted = connector
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .await;
+            assert!(matches!(admitted, Ok(PacketResponse::Reject(_))));
+        }
+
+        /// ADR 0011: probing traverses the network for free, so it is
+        /// rate-limited per the identity that holds the channel.
+        #[tokio::test]
+        async fn a_recognized_channel_is_still_rate_limited() {
+            let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock())
+                .with_probe_rate_limit(1, Duration::seconds(60));
+            connector.recognize_channel(CHANNEL);
+
+            let first = connector
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .await;
+            assert!(first.is_ok());
+
+            let second = connector
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .await;
+            assert_eq!(second, Err(ProbeDenied::RateLimited));
+        }
+
+        /// A probe to a route this connector terminates reports that
+        /// route's price as one figure -- the whole path cost, since no hop
+        /// was traversed to reach it -- and the app behind it is never
+        /// asked to do the work. Free traversal is all ADR 0011 grants a
+        /// probe; it does not also buy what ADR 0020 prices.
+        #[tokio::test]
+        async fn a_probe_to_a_priced_local_route_reports_the_price_without_delivering() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                answered(b"work the app should never do"),
+            );
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+            connector.recognize_channel(CHANNEL);
+            let (probe, _shared_secret) = sealed_prepare(b"hello");
+
+            let response = connector.handle_probe(CHANNEL, probe, 0).await;
+
+            match response {
+                Ok(PacketResponse::Reject(reject)) => {
+                    assert_eq!(reject.accumulated_cost, 25);
+                }
+                other => panic!("expected a priced reject, got {other:?}"),
+            }
+            assert_eq!(app_client.deliveries().len(), 0);
+        }
+
+        /// The same packet sent through the ordinary entry point still
+        /// fulfils and still reaches the app: the rule above belongs to the
+        /// probe ingress, not to routing, so ADR 0011's "probes are not a
+        /// distinct packet type" holds for everything past the gate that a
+        /// probe does traverse.
+        #[tokio::test]
+        async fn the_same_packet_through_handle_prepare_still_reaches_the_app() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"work the app does do"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+            let (packet, _shared_secret) = sealed_prepare(b"hello");
+
+            let response = connector.handle_prepare(packet, 0).await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// A destination beyond this connector is routed by the ordinary
+        /// routing table (ADR 0011), so a probe's reject sums the fees of
+        /// the hops it actually reached.
+        #[tokio::test]
+        async fn a_probe_beyond_this_connector_accumulates_the_hops_it_traversed() {
+            let connector = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example", "unreachable-peer", 7)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+            connector.recognize_channel(CHANNEL);
+
+            let response = connector
+                .handle_probe(CHANNEL, prepare("g.example.remote", b"hello"), 0)
+                .await;
+
+            match response {
+                Ok(PacketResponse::Reject(reject)) => {
+                    // The peer was never reached, so this hop adds nothing
+                    // -- the figure is honest about what was traversed.
+                    assert_eq!(reject.accumulated_cost, 0);
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }

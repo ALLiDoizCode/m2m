@@ -67,6 +67,8 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
   |        | implemented; no request is refused on this ground today).                       |
   | `402`  | Unpaid request to a route this connector terminates and prices: x402 v2         |
   |        | payment-required terms, JSON body (not OER). See §1.4.                          |
+  | `403`  | A probe (`POST /ilp/probe`) from a sender not authorized to probe: no           |
+  |        | payment channel this connector recognizes, or over its rate limit. See §1.6.    |
   | `413`  | Request body too large. There is no config field for this: the limit is         |
   |        | axum's own `DefaultBodyLimit` (2 MiB), which this router does not override.     |
   | `500`  | Reserved by this spec for transport failure only; an unexpected                 |
@@ -245,36 +247,68 @@ against a different request or a different route's price fails the digest/price 
 
 ### 1.6 Probing for cost
 
-**Not yet implemented at this edge.** No `TOON-Accumulated-Cost` header, `403` probe-rate-limit
-response, or per-identity probe accounting exists in `crates/connector-client-edge` today.
-
-What has changed since this section was written is the reason: the connector no longer "charges a
-percentage spread with no per-hop fee accumulation" — there is no percentage anywhere
-([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md)), and a REJECT genuinely does
-accumulate cost now. `connector_domain::Reject` carries an `accumulated_cost` field that sums
-every hop's flat fee and adds a terminated route's price
+Implemented as of [issue #548](https://github.com/toon-protocol/connector/issues/548). The
+connector no longer "charges a percentage spread with no per-hop fee accumulation" — there is no
+percentage anywhere ([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md)), and a
+REJECT genuinely does accumulate cost: `connector_domain::Reject` carries an `accumulated_cost`
+field that sums every hop's flat fee and adds a terminated route's price
 (`docs/protocol/peer-wire-spec.md` §5.2, issues #523/#545/#584). That field is **not** part of the
-RFC-0027 OER encoding — it rides beside the packet — so the client edge, which answers with the
-encoded REJECT and nothing else, currently drops it on the floor. There is now something real to
-report; what is missing is only the header that would report it.
+RFC-0027 OER encoding — it rides beside the packet — so this edge reports it in a header. Version 1
+does not change to gain it: the request/response shape below is unchanged.
 
-The rest of this subsection specifies what v1's unchanged request/response shape carries once that
-header exists — version 1 does not change to gain it.
+**The header.** A client MAY send an ordinary PREPARE it expects to be rejected (a probe,
+`CONTEXT.md` "Probe") to learn a path's cost. RFC-0027's REJECT `data` is reserved for an
+application-level reject's own diagnostic payload (an `F99`/`T99`/`R99` from the terminating app),
+so `accumulatedCost` MUST NOT be packed into it; instead the connector returns it as a response
+header, `TOON-Accumulated-Cost` (decimal string, `uint64`), alongside the unchanged OER REJECT body
+— the client-edge equivalent of the peer wire carrying the field at the frame level, beside the
+packet, rather than inside it. The header is present on every REJECT response this edge answers
+with, from `POST /ilp` and `POST /ilp/probe` alike, and is absent from a FULFILL. It is `0` when
+nothing was traversed and nothing terminated — no route matched, or a claim was refused as
+malformed, stale or unverifiable — and otherwise reports one figure: the flat fee of every hop the
+packet actually reached, plus the price of the route it terminated at. Never a breakdown, and never
+a fee-versus-price split; ADR 0011's "returning a sum leaks nothing" is a property of the sum
+alone.
 
-A client MAY send an ordinary PREPARE it expects to be rejected (a probe, `CONTEXT.md` "Probe")
-to learn a path's cost. RFC-0027's REJECT `data` is reserved for an application-level reject's own
-diagnostic payload (an `F99`/`T99`/`R99` from the terminating app), so `accumulatedCost` MUST NOT be
-packed into it; instead the connector returns it as a response header, `TOON-Accumulated-Cost`
-(decimal string, `uint64`), alongside the unchanged OER REJECT body — the client-edge equivalent
-of the peer wire carrying the field at the frame level, beside the packet, rather than inside it.
-The header is present on every REJECT response, `0` when the packet never left this connector.
-Because probing traverses the network for free, this connector accepts one only from a sender
-authenticated as a configured peer holding an open payment channel with it (§1.2; the anonymous
-path is not eligible, since rate-limiting an identity requires one to persist across requests) and
-rate-limits probes per that identity. A sender with no channel, or one over its probe rate limit,
-is rejected at ingress with `403` (a status this subsection adds to §1.1's table, distinct from
-`401`: the peer authenticated successfully, but is not authorized to probe) without being
-forwarded.
+A claim refused for **underpayment** is the one refusal that reports a non-zero figure: the route's
+price. That refusal's whole subject is a figure the sender did not cover, and before #548 the only
+channel through which a price was ever disclosed was that reject's human-readable `message` — so a
+client learned a price by underpaying first, which is precisely what cost discovery exists to
+prevent.
+
+**The probe ingress: `POST /ilp/probe`.** Same request body and same response framing as `POST
+/ilp` (§1.1); what differs is the gate in front of it, and that nothing is charged. Because probing
+traverses the network for free, a probe is accepted only from a sender identified by a payment
+channel claim on a channel this connector recognizes, and only within a rate limit per that channel
+(ADR 0011's two conditions). A sender with no such channel, or one over its probe rate limit, is
+rejected at ingress with `403` (a status this subsection adds to §1.1's table, distinct from `401`:
+the sender may be perfectly well authenticated and is simply not authorized to probe) without being
+forwarded. A `403` carries no OER body, per §1.1's rule that a non-2xx status never does.
+
+The claim on a probe **identifies rather than pays**: it is validated in full (§1.3's four steps)
+against a price of `0`, so possession of the channel is proven and a replay is still refused, but
+no value need advance — a sender probes by reissuing at the same cumulative amount with a fresh
+nonce. A connector recognizes a channel once a claim on it has cleared §1.3's gate at this edge:
+no configuration file names an unaffiliated client's channel and no chain indexes one, so the
+claim is the only evidence a connector ever gets, and a gate no deployed node could pass would not
+be a gate.
+
+A probe is never **delivered** to a route this connector terminates. Free traversal is the whole of
+what ADR 0011 grants a probe; it does not also buy the work behind a priced route, which is what
+delivering would hand over. A destination that terminates here is answered `F03` with that route's
+price as `TOON-Accumulated-Cost` — the same figure a real request would be charged, and the whole
+path cost, since no hop was traversed to reach it. A destination beyond this connector is routed
+by the ordinary routing table, exactly as ADR 0011 requires: a probe is not a distinct packet type
+and fee accumulation is not a special mode for it.
+
+A probe reaching a **remote** termination learns that termination's price from the reject the
+remote connector raises there — a terminating connector adds its route's price to the running total
+([ADR 0020](../adr/0020-a-price-is-flat-and-attaches-to-a-handler.md) — a price accumulates into a
+reject's running total; issues #545/#584) — with each hop on the way back adding its own fee, so
+what arrives is one figure covering both. Note that this is the ordinary packet path: a probe is
+gated at the client edge it enters, and the peer wire carries no probe frame, so a remote
+connector cannot tell a probe from any other packet and the "never delivered to a termination"
+rule above applies only to the connector the probe was submitted to.
 
 ### 1.7 Answering: identity and route price
 
