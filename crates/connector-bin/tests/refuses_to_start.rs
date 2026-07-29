@@ -304,3 +304,103 @@ handler_url = "http://localhost:4000"
         "expected an actionable missing-price error, got: {stderr}"
     );
 }
+
+/// Issue #556, the parse layer: a key misspelled *inside* a section used
+/// to be dropped by `toml::from_str` and the node started as if it had
+/// never been written. `[operator]` is the sharpest case -- a mistyped
+/// `bearer_tokn` left the section resolving as "present but
+/// unauthenticated", so ADR 0008's own refuse-to-start error fired and
+/// pointed the operator at the wrong thing.
+#[test]
+fn exits_non_zero_on_a_misspelled_key_inside_a_section() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_tokn = "operator-secret"
+write_keys = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bearer_tokn"),
+        "expected the error to name the misspelled key, got: {stderr}"
+    );
+}
+
+/// Issue #556: `fee` on a terminated route was read by no branch of
+/// `resolve_routes` and silently earned nothing -- the same shape #520
+/// refused for a missing `price`.
+#[test]
+fn exits_non_zero_when_a_terminated_route_sets_a_fee() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://localhost:4000"
+price = 100
+fee = 5
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fee"),
+        "expected an actionable fee-on-a-terminated-route error, got: {stderr}"
+    );
+}
+
+/// The mirror image: `price` on a route forwarding to a peer charged
+/// nothing, so a node written to earn 100 per forwarded packet carried
+/// them free.
+#[test]
+fn exits_non_zero_when_a_peer_route_sets_a_price() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+addr = "127.0.0.1:4001"
+
+[[routes]]
+prefix = "g.example.store"
+peer_id = "store"
+price = 100
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("price"),
+        "expected an actionable price-on-a-peer-route error, got: {stderr}"
+    );
+}

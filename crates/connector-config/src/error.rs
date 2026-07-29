@@ -103,6 +103,21 @@ pub enum ConfigError {
     RouteMissingPrice { prefix: String, handler_url: String },
 
     #[error(
+        "route '{prefix}' terminates locally and sets 'fee = {fee}', which only a route \
+         forwarding to a 'peer_id' can charge (ADR 0010) -- a terminating app's work is paid \
+         for by 'price'. Remove the 'fee', or write 'price = {fee}' if that is what was meant"
+    )]
+    TerminatedRouteHasFee { prefix: String, fee: u64 },
+
+    #[error(
+        "route '{prefix}' forwards to a peer and sets 'price = {price}', which only a route \
+         terminating at a 'handler_url' can charge (issue #520) -- carriage over a peering \
+         relation is paid for by 'fee'. Remove the 'price', or write 'fee = {price}' if that \
+         is what was meant"
+    )]
+    PeerRouteHasPrice { prefix: String, price: u64 },
+
+    #[error(
         "handler_url '{handler_url}' is priced inconsistently: route '{first_prefix}' charges \
          {first_price} but route '{second_prefix}' charges {second_price} -- an app cannot tell \
          which request arrived under which price, so the cheaper one would always win"

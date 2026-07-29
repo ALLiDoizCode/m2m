@@ -5,7 +5,14 @@ use crate::error::ConfigError;
 /// The `[operator]` section as written in the config file. Its presence
 /// enables the operator surface (ADR 0008); its absence means the surface
 /// is not started at all, and none of the fields below are read.
+///
+/// `deny_unknown_fields` (issue #556): a mistyped `bearer_tokn` or
+/// `write_key` would otherwise be dropped and the section resolved as
+/// "present but unauthenticated", which `resolve_operator` then reports as
+/// a missing token rather than as the typo it is. The surface's own
+/// fail-closed guarantee (ADR 0008) is only as good as the parse beneath it.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawOperatorConfig {
     #[serde(default)]
     bearer_token: String,
