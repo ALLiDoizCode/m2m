@@ -25,23 +25,21 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::Router;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Duration as ChronoDuration;
 use libsecp256k1::{Message, PublicKey, SecretKey};
 
-use connector_domain::{
-    derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
-};
+use connector_domain::{EnvelopeResponse, Fulfill, Prepare, Reject};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
-use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
-use connector_signer::{
-    derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof, LocalSigner,
-    PublicKeyBytes, Signer,
-};
+use connector_signer::giftwrap::open_response;
+use connector_signer::{derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof};
 
 mod support;
-use support::{spawn_connector, write_config, write_raw_key_file};
+use support::{
+    identity_from_key_seed, sample_prepare, sealed_prepare_data, spawn_connector, write_config,
+    write_raw_key_file,
+};
 
 /// `anvil`'s own default chain id (`Anvil::spawn`'s `--chain-id 31337`), and
 /// so the EIP-712 domain a claim against its deployed `TokenNetwork` must be
@@ -140,34 +138,6 @@ fn evm_claim_json(
     )
 }
 
-fn identity_from_key_seed(seed: u8) -> PublicKeyBytes {
-    LocalSigner::from_secret_bytes("test-identity", [seed; 32])
-        .expect("valid key seed")
-        .public_key()
-        .expect("public key")
-}
-
-fn sealed_prepare_data(body: &[u8], receiver_public: &PublicKeyBytes) -> (Vec<u8>, [u8; 32]) {
-    let plaintext = EnvelopeRequest {
-        method: "POST".to_string(),
-        target: "/".to_string(),
-        headers: vec![],
-        body: body.to_vec(),
-    }
-    .encode();
-    seal_request(&plaintext, receiver_public).expect("seal")
-}
-
-fn sample_prepare(destination: &str, data: Vec<u8>, shared_secret: &[u8; 32]) -> Prepare {
-    Prepare {
-        amount: 0,
-        expires_at: Utc::now() + ChronoDuration::minutes(5),
-        execution_condition: derive_condition(&derive_fulfillment(shared_secret)),
-        destination: destination.to_string(),
-        data,
-    }
-}
-
 /// A real, independently queryable app: a genuine `axum` HTTP server bound
 /// to its own OS-assigned socket, reachable only over that socket (never
 /// invoked in-process) -- so "the app recorded the write" and "the app
@@ -205,6 +175,28 @@ async fn spawn_recording_app() -> (String, Arc<Mutex<Vec<Bytes>>>) {
     });
 
     (addr.to_string(), recorded)
+}
+
+/// POST a sealed `Prepare`, base64-carrying `claim` in the claim header, to
+/// a real connector's client edge, and return the raw response body -- the
+/// paid and underpaid cases below differ only in what they decode that body
+/// as (`Fulfill` vs `Reject`).
+async fn post_ilp_packet(
+    client: &reqwest::Client,
+    client_edge_addr: &str,
+    claim: &str,
+    prepare: &Prepare,
+    expect_msg: &str,
+) -> Bytes {
+    let response = client
+        .post(format!("http://{client_edge_addr}/ilp"))
+        .header(CLAIM_HEADER, base64_encode(claim.as_bytes()))
+        .body(prepare.encode())
+        .send()
+        .await
+        .expect(expect_msg);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.bytes().await.expect("response body")
 }
 
 #[tokio::test]
@@ -305,15 +297,14 @@ price = {}
         ROUTE_PRICE,
         token_network_address,
     );
-    let response = client
-        .post(format!("http://{}/ilp", connector.client_edge_addr))
-        .header(CLAIM_HEADER, base64_encode(claim.as_bytes()))
-        .body(prepare.encode())
-        .send()
-        .await
-        .expect("POST /ilp: paid write");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let body = response.bytes().await.expect("response body");
+    let body = post_ilp_packet(
+        &client,
+        &connector.client_edge_addr,
+        &claim,
+        &prepare,
+        "POST /ilp: paid write",
+    )
+    .await;
     let fulfill =
         Fulfill::decode(&body).expect("a claim covering exactly the route's price fulfils");
     let opened = open_response(&shared_secret, &fulfill.data).expect("open sealed response");
@@ -343,15 +334,14 @@ price = {}
         underpaid_state.deposited,
         token_network_address,
     );
-    let response = client
-        .post(format!("http://{}/ilp", connector.client_edge_addr))
-        .header(CLAIM_HEADER, base64_encode(underpaid_claim.as_bytes()))
-        .body(underpaid_prepare.encode())
-        .send()
-        .await
-        .expect("POST /ilp: underpaid write");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let body = response.bytes().await.expect("response body");
+    let body = post_ilp_packet(
+        &client,
+        &connector.client_edge_addr,
+        &underpaid_claim,
+        &underpaid_prepare,
+        "POST /ilp: underpaid write",
+    )
+    .await;
     let reject = Reject::decode(&body).expect("decode reject");
     assert_eq!(reject.code.as_str(), "F03");
 

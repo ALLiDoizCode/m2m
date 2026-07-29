@@ -15,61 +15,18 @@
 
 use std::process::Command;
 
-use chrono::{Duration as ChronoDuration, Utc};
-use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare};
-use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
-use connector_signer::{LocalSigner, PublicKeyBytes, Signer};
+use connector_domain::{EnvelopeResponse, Fulfill};
+use connector_signer::giftwrap::{derive_fulfillment, open_response};
 
 mod support;
-use support::{spawn_connector, spawn_stub_app, write_config, write_raw_key_file};
+use support::{
+    identity_from_key_seed, sample_prepare, sealed_prepare_data, spawn_connector, spawn_stub_app,
+    write_config, write_raw_key_file,
+};
 
 /// Must match `stub_app.rs`'s own `DECLINE_BODY` -- the two are separate
 /// binaries, so there is no shared constant to import.
 const DECLINE_BODY: &[u8] = b"please decline this one";
-
-/// ADR 0018/issue #524: a terminated route's `Prepare.data` is a gift wrap
-/// sealed to the terminating connector's identity -- `receiver_public`,
-/// derived the same way `runtime::build()` derives it in the real binary
-/// (from the `[signer] key_file` raw bytes) -- around a minimal `POST /`
-/// envelope carrying `body`, matching `stub_app`'s one handler, mounted at
-/// `/`. Returns the wire bytes for `Prepare.data` and the shared secret the
-/// wrap carries, to open the sealed `Fulfill`/`Reject` this produces or to
-/// compute the fulfilment ADR 0019/issue #525 derives from it.
-fn sealed_prepare_data(body: &[u8], receiver_public: &PublicKeyBytes) -> (Vec<u8>, [u8; 32]) {
-    let plaintext = EnvelopeRequest {
-        method: "POST".to_string(),
-        target: "/".to_string(),
-        headers: vec![],
-        body: body.to_vec(),
-    }
-    .encode();
-    seal_request(&plaintext, receiver_public).expect("seal")
-}
-
-/// A `Prepare` whose `execution_condition` matches the fulfilment
-/// `shared_secret` derives (ADR 0019, issue #525) -- what a genuine sender
-/// mints its condition from before ever transmitting a packet sealed with
-/// that same secret.
-fn sample_prepare(destination: &str, data: Vec<u8>, shared_secret: &[u8; 32]) -> Prepare {
-    Prepare {
-        amount: 0,
-        expires_at: Utc::now() + ChronoDuration::minutes(5),
-        execution_condition: derive_condition(&derive_fulfillment(shared_secret)),
-        destination: destination.to_string(),
-        data,
-    }
-}
-
-/// The identity `write_raw_key_file(seed)` produces, reconstructed the same
-/// way `connector-cli::runtime::build` derives a signer from raw key-file
-/// bytes -- so this test can seal to a real connector process's actual
-/// identity without needing to ask it over the wire.
-fn identity_from_key_seed(seed: u8) -> PublicKeyBytes {
-    LocalSigner::from_secret_bytes("test-identity", [seed; 32])
-        .expect("valid key seed")
-        .public_key()
-        .expect("public key")
-}
 
 #[tokio::test]
 async fn two_real_connector_processes_peer_over_the_network_and_deliver_to_a_stub_app() {
