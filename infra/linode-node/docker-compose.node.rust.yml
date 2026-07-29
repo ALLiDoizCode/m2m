@@ -63,7 +63,7 @@ services:
     # this overlay was authored against — see
     # deploy/connector-rust/README.md's tag table for what sha- means.
     # Re-pin this alongside any future update to connector-rust.toml.
-    image: ghcr.io/toon-protocol/connector-rust:sha-6eaf92a
+    image: ghcr.io/toon-protocol/connector-rust:sha-4fca005
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
