@@ -42,8 +42,13 @@ key_file = "/app/data/signer.key"
 prefix = "g.rust.store"
 # `/store`, not the bare origin — the same defect the node-side
 # connector-rust.toml's `g.rust.relay` route carried, for the same reason:
-# `HttpAppClient::deliver` POSTs to this URL exactly and takes no path from
-# the packet, and the store app serves only `POST /store` and `GET /health`.
+# `HttpAppClient::deliver` POSTs here, and the store app serves only
+# `POST /store` and `GET /health`.
+#
+# An envelope's own `target` cannot override this path (issue #596, ADR
+# 0025): it is resolved strictly beneath `/store`, never in place of it, so
+# a sender cannot address `/health` (or anywhere else) through this route at
+# this route's price by naming it as the target.
 #
 # UNVERIFIED against a running box. #492 deployed the apex only — the store
 # box did not exist at the time — so the relay side of this pair was proven

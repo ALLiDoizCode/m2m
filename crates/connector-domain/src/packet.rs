@@ -134,7 +134,12 @@ impl Fulfill {
 pub struct RejectCode(String);
 
 impl RejectCode {
-    /// F00: Bad Request -- generic final error.
+    /// F00: Bad Request -- generic final error. Used (issue #596) when a
+    /// terminated envelope's `target` attempts to escape the route's
+    /// configured handler path -- refused before the app is ever called,
+    /// distinct from F01 (the envelope itself did not decode) and from an
+    /// app's own answer, including a 404, which never produces a reject at
+    /// all.
     pub fn f00_bad_request() -> RejectCode {
         RejectCode("F00".to_string())
     }
