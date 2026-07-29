@@ -8,7 +8,13 @@ use crate::error::ConfigError;
 /// A `[[peers]]` entry as written in the config file: a peering relation
 /// this node dials out to. Accepting an inbound connection from a peer
 /// needs no configuration of its own -- see `Config::peer_wire_addr`.
+///
+/// `deny_unknown_fields` (issue #556): a peer entry carrying a key this
+/// build does not read -- a typo, or a field from a shape this connector
+/// does not implement -- fails config load loudly rather than being
+/// dropped and the node peering on terms nobody wrote.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawPeer {
     id: String,
     addr: String,

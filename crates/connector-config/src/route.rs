@@ -28,10 +28,24 @@ fn is_valid_ilp_address(address: &str) -> bool {
 /// A `[[routes]]` entry as written in the config file: forwards to the app
 /// at `handler_url`, or to the peer named `peer_id` -- exactly one of the
 /// two must be set. `fee` is only meaningful alongside `peer_id` (ADR
-/// 0010); it defaults to zero and is otherwise ignored. `price` is only
-/// meaningful alongside `handler_url` (issue #520) and is required there --
-/// see [`ConfigError::RouteMissingPrice`].
+/// 0010) and defaults to zero there; `price` is only meaningful alongside
+/// `handler_url` (issue #520) and is required there -- see
+/// [`ConfigError::RouteMissingPrice`].
+///
+/// Neither field is silently ignored on the branch it does not belong to
+/// (issue #556): `fee` is an `Option` rather than a defaulted `u64`
+/// precisely so [`resolve_routes`] can tell "written as zero" from "not
+/// written", and refuse the former on a terminated route
+/// ([`ConfigError::TerminatedRouteHasFee`]) exactly as it refuses a `price`
+/// on a peer route ([`ConfigError::PeerRouteHasPrice`]). Before that, a
+/// `peer_id` route with `price = 100` charged nothing and a `handler_url`
+/// route with `fee = 5` earned nothing, and neither was an error.
+///
+/// `deny_unknown_fields` closes the same hole for every other key: a
+/// mistyped `pefix` or `handler_ur` is a refuse-to-start error, not a route
+/// quietly resolved from the fields that happened to spell correctly.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawRoute {
     prefix: String,
     #[serde(default)]
@@ -39,7 +53,7 @@ pub(crate) struct RawRoute {
     #[serde(default)]
     peer_id: Option<String>,
     #[serde(default)]
-    fee: u64,
+    fee: Option<u64>,
     #[serde(default)]
     price: Option<u64>,
 }
@@ -49,7 +63,13 @@ pub(crate) struct RawRoute {
 /// existing TypeScript `child-expander`), so the runtime never sees anything
 /// but ordinary routes. Always terminates locally, so `price` is required
 /// exactly like an explicit `[[routes]]` entry with a `handler_url`.
+///
+/// `deny_unknown_fields` (issue #556): a child always terminates locally,
+/// so it has no `fee` field at all -- writing one used to vanish silently,
+/// and now fails config load, matching what an explicit `[[routes]]` entry
+/// with a `handler_url` does with the same key.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawChild {
     name: String,
     handler_url: String,
@@ -262,13 +282,31 @@ pub(crate) fn resolve_routes(
     for raw in raw_routes {
         match (raw.handler_url, raw.peer_id) {
             (Some(handler_url), None) => {
+                // A terminated route buys the app's work, priced by
+                // `price`; `fee` buys carriage over a peering relation
+                // this route has none of (ADR 0010). Refused rather than
+                // read and discarded (issue #556).
+                if let Some(fee) = raw.fee {
+                    return Err(ConfigError::TerminatedRouteHasFee {
+                        prefix: raw.prefix,
+                        fee,
+                    });
+                }
                 let route = build_route(raw.prefix, handler_url, raw.price)?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 insert_consistent_handler_price(&mut handler_prices, &route)?;
                 routes.push(route);
             }
             (None, Some(peer_id)) => {
-                let route = build_peer_route(raw.prefix, peer_id, raw.fee)?;
+                // Mirror image: a forwarded route has no terminating app
+                // whose work a `price` could pay for.
+                if let Some(price) = raw.price {
+                    return Err(ConfigError::PeerRouteHasPrice {
+                        prefix: raw.prefix,
+                        price,
+                    });
+                }
+                let route = build_peer_route(raw.prefix, peer_id, raw.fee.unwrap_or(0))?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 peer_routes.push(route);
             }
@@ -320,7 +358,7 @@ mod tests {
             prefix: prefix.to_string(),
             handler_url: Some(handler_url.to_string()),
             peer_id: None,
-            fee: 0,
+            fee: None,
             price: Some(price),
         }
     }
@@ -330,7 +368,7 @@ mod tests {
             prefix: prefix.to_string(),
             handler_url: None,
             peer_id: Some(peer_id.to_string()),
-            fee,
+            fee: Some(fee),
             price: None,
         }
     }
@@ -384,12 +422,117 @@ mod tests {
                 prefix: "g.example.app".to_string(),
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
-                fee: 0,
+                fee: None,
                 price: None,
             }],
             vec![],
         );
         assert!(matches!(result, Err(ConfigError::RouteMissingPrice { .. })));
+    }
+
+    /// Issue #556: `fee` was read only on the `peer_id` branch, so a
+    /// terminated route that wrote one earned nothing from it and nothing
+    /// said so. A field written down is honoured or refused, never dropped.
+    #[test]
+    fn a_terminated_route_that_sets_a_fee_is_rejected_rather_than_ignored() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.app".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: Some(5),
+                price: Some(100),
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::TerminatedRouteHasFee { fee: 5, .. })
+        ));
+    }
+
+    /// `fee = 0` on a terminated route is refused too: the point is that
+    /// the key was written at all, not that its value was non-zero --
+    /// `fee` is an `Option` precisely so this case is visible.
+    #[test]
+    fn a_terminated_route_that_sets_a_zero_fee_is_still_rejected() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.app".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: Some(0),
+                price: Some(100),
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::TerminatedRouteHasFee { fee: 0, .. })
+        ));
+    }
+
+    /// The mirror image: `price` was read only on the `handler_url`
+    /// branch, so a peer route that wrote `price = 100` charged nothing.
+    #[test]
+    fn a_peer_route_that_sets_a_price_is_rejected_rather_than_ignored() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.store".to_string(),
+                handler_url: None,
+                peer_id: Some("store".to_string()),
+                fee: Some(3),
+                price: Some(100),
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerRouteHasPrice { price: 100, .. })
+        ));
+    }
+
+    /// The counterweight to both: each field on the branch it belongs to
+    /// is still read and still honoured.
+    #[test]
+    fn each_field_is_honoured_on_the_branch_it_belongs_to() {
+        let (routes, peer_routes) = resolve_routes(
+            None,
+            vec![
+                priced_route("g.example.app", "http://localhost:4000", 100),
+                peer_route("g.example.store", "store", 3),
+            ],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(routes[0].price(), 100);
+        assert_eq!(peer_routes[0].fee(), 3);
+    }
+
+    /// A peer route that omits `fee` entirely still defaults to zero --
+    /// unlike a terminated route's `price`, carriage has never been
+    /// required to be written down (ADR 0010), and #556 does not change
+    /// that.
+    #[test]
+    fn a_peer_route_with_no_fee_still_defaults_to_zero() {
+        let (_, peer_routes) = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.store".to_string(),
+                handler_url: None,
+                peer_id: Some("store".to_string()),
+                fee: None,
+                price: None,
+            }],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(peer_routes[0].fee(), 0);
     }
 
     #[test]
@@ -493,7 +636,7 @@ mod tests {
                 prefix: "g.example.app".to_string(),
                 handler_url: None,
                 peer_id: None,
-                fee: 0,
+                fee: None,
                 price: None,
             }],
             vec![],
@@ -512,7 +655,7 @@ mod tests {
                 prefix: "g.example.app".to_string(),
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: Some("peer-b".to_string()),
-                fee: 0,
+                fee: None,
                 price: None,
             }],
             vec![],

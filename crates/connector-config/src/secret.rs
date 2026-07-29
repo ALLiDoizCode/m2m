@@ -6,7 +6,15 @@ use crate::error::ConfigError;
 
 /// The `[signer]` section as written in the config file: a location, not a
 /// secret. Exactly one of the two fields must be set.
+///
+/// `deny_unknown_fields` (issue #556): both fields are optional and their
+/// absence is meaningful, so a mistyped `key_fle` would otherwise parse as
+/// "neither location set" -- an error whose message points at the wrong
+/// thing -- and a mistyped `kms_key_i` alongside a real `key_file` would
+/// silently disappear. A key written down is honoured or refused, never
+/// dropped.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawSignerConfig {
     #[serde(default)]
     key_file: Option<PathBuf>,

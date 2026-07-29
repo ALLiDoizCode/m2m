@@ -653,4 +653,187 @@ key_file = "{}"
 
         assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
+
+    /// Issue #556's parse-layer spine: `deny_unknown_fields` on
+    /// `RawConfig` alone only guards the top level. A typo *inside* a
+    /// section was still parsed, dropped, and the node started as if the
+    /// key had never been written -- so a misspelled `bearer_tokn` read as
+    /// an unauthenticated operator surface and a misspelled `key_fle` read
+    /// as a signer with no location at all. Each of these now fails at the
+    /// parse stage, and the message names the offending key.
+    fn assert_names_the_unknown_key(result: Result<Config, ConfigError>, key: &str) {
+        let Err(ConfigError::Parse { source, .. }) = result else {
+            panic!("expected a parse error naming {key}, got {result:?}");
+        };
+        let message = source.to_string();
+        assert!(
+            message.contains(key),
+            "parse error should name the offending key {key}, got: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_signer_section_is_rejected() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+kms_key_di = "transposed"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert_names_the_unknown_key(result, "kms_key_di");
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_operator_section_is_rejected() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token = "operator-secret"
+write_keys = ["{key}"]
+bearer_tokn = "typo"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert_names_the_unknown_key(result, "bearer_tokn");
+    }
+
+    #[test]
+    fn an_unknown_key_in_a_peer_entry_is_rejected() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+addr = "127.0.0.1:4001"
+adrr = "127.0.0.1:4002"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert_names_the_unknown_key(result, "adrr");
+    }
+
+    #[test]
+    fn an_unknown_key_in_a_route_entry_is_rejected() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://localhost:4000"
+price = 100
+pirce = 5
+"#,
+                key_path.display()
+            )
+        });
+
+        assert_names_the_unknown_key(result, "pirce");
+    }
+
+    /// A `[[children]]` entry has no `fee` field at all, so the same
+    /// mistake a `[[routes]]` entry now refuses used to vanish entirely
+    /// here.
+    #[test]
+    fn an_unknown_key_in_a_child_entry_is_rejected() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+apex = "g.example"
+
+[signer]
+key_file = "{}"
+
+[[children]]
+name = "app"
+handler_url = "http://localhost:4000"
+price = 100
+fee = 5
+"#,
+                key_path.display()
+            )
+        });
+
+        assert_names_the_unknown_key(result, "fee");
+    }
+
+    /// The counterweight: a config file using every section this build
+    /// supports, with no unknown key anywhere, still loads. Without this
+    /// the tests above are satisfied by a config crate that refuses
+    /// everything.
+    #[test]
+    fn a_config_using_every_supported_section_still_loads() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+peer_wire_addr = "127.0.0.1:4001"
+apex = "g.example"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+addr = "127.0.0.1:4002"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://localhost:4000"
+price = 100
+
+[[routes]]
+prefix = "g.example.store"
+peer_id = "store"
+fee = 3
+
+[[children]]
+name = "child"
+handler_url = "http://localhost:4100"
+price = 7
+
+[operator]
+bearer_token = "operator-secret"
+write_keys = ["{key}"]
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.routes().len(), 2);
+        assert_eq!(config.peer_routes().len(), 1);
+        assert_eq!(config.peers().len(), 1);
+        assert!(config.operator().is_some());
+        assert!(config.peer_wire_addr().is_some());
+    }
 }
