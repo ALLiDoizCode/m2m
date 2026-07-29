@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -52,6 +52,13 @@ struct RawConfig {
     /// so every claim presented at its client edge is refused as unknown.
     #[serde(default)]
     client_channels: Vec<RawClientChannel>,
+    /// The directory this node keeps its durable money state in (issue
+    /// #605): the journals whose replay is what makes a claim watermark
+    /// survive a restart. Absent means this node writes none -- allowed
+    /// only for a node that cannot accept a claim in the first place,
+    /// since a watermark held only in memory is not a replay defence.
+    #[serde(default)]
+    state_dir: Option<String>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -73,6 +80,7 @@ pub struct Config {
     operator: Option<OperatorConfig>,
     settlement: Option<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
+    state_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -126,6 +134,27 @@ impl Config {
         let operator = resolve_operator(raw.operator)?;
         let settlement = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
+        let state_dir = raw.state_dir.map(PathBuf::from);
+
+        // A node that can accept a claim must be able to remember having
+        // accepted it (issue #605). Refused here, at load, rather than at
+        // the first claim: a node whose watermarks live only in memory
+        // hands out free service after every restart, and it does so
+        // silently -- there is nothing in a log to see, because from the
+        // gate's point of view every replayed nonce genuinely is fresh.
+        //
+        // Tied to `[[client_channels]]` rather than demanded of every
+        // node because a node with a record of no channel refuses every
+        // claim outright (issue #558): it has no watermark to lose, so
+        // requiring it to name a writable directory would be ceremony,
+        // and ceremony is what gets configured with a path nobody checked.
+        if let Some(path) = &state_dir {
+            if path.exists() && !path.is_dir() {
+                return Err(ConfigError::StateDirNotADirectory { path: path.clone() });
+            }
+        } else if !client_channels.is_empty() {
+            return Err(ConfigError::ClientChannelsWithoutStateDir);
+        }
 
         Ok(Config {
             client_edge_addr,
@@ -137,6 +166,7 @@ impl Config {
             operator,
             settlement,
             client_channels,
+            state_dir,
         })
     }
 
@@ -203,6 +233,19 @@ impl Config {
     /// than trusted about who signed it.
     pub fn client_channels(&self) -> &[ClientChannelConfig] {
         &self.client_channels
+    }
+
+    /// The directory this node keeps its durable money state in -- the
+    /// claim journals whose replay is what makes a watermark survive a
+    /// restart (issue #605). `None` means this node writes none, which
+    /// [`Config::load`] permits only when `[[client_channels]]` is empty
+    /// and so no claim can ever be accepted.
+    ///
+    /// The directory is not created or probed here: config load says what
+    /// was asked for, and whether it can actually be written is
+    /// `connector-cli`'s to find out at startup, loudly, before serving.
+    pub fn state_dir(&self) -> Option<&Path> {
+        self.state_dir.as_deref()
     }
 }
 
@@ -854,5 +897,142 @@ write_keys = ["{key}"]
         assert_eq!(config.peers().len(), 1);
         assert!(config.operator().is_some());
         assert!(config.peer_wire_addr().is_some());
+    }
+
+    // -- state_dir (issue #605) --
+
+    /// A node that can accept claims but has nowhere durable to record
+    /// them is refused at load. Without this it starts, serves, and hands
+    /// out free service after every restart -- silently, because a
+    /// forgotten watermark makes every replayed nonce look fresh.
+    #[test]
+    fn client_channels_without_a_state_dir_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_id = "0x{channel}"
+counterparty = "0x00000000000000000000000000000000000000aa"
+chain_id = 8453
+token_network_address = "0x00000000000000000000000000000000000000bb"
+"#,
+                key_path = key_path.display(),
+                channel = "ab".repeat(32),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::ClientChannelsWithoutStateDir)
+        ));
+        // The message has to tell the operator what to do about it, since
+        // this refusal is the first they will hear of the requirement.
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("state_dir"), "{message}");
+    }
+
+    /// The same config with a `state_dir` loads, and reports it.
+    #[test]
+    fn client_channels_with_a_state_dir_loads() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_id = "0x{channel}"
+counterparty = "0x00000000000000000000000000000000000000aa"
+chain_id = 8453
+token_network_address = "0x00000000000000000000000000000000000000bb"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+                channel = "ab".repeat(32),
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.state_dir(), Some(state_dir.path()));
+    }
+
+    /// A node with no channels needs no `state_dir`: it refuses every
+    /// claim as unknown (issue #558), so it has no watermark to lose. The
+    /// requirement follows the capability, not the ceremony.
+    #[test]
+    fn no_client_channels_needs_no_state_dir() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.state_dir(), None);
+    }
+
+    /// `state_dir` pointing at something that is not a directory is a
+    /// load failure, not a surprise at the first journal write.
+    #[test]
+    fn a_state_dir_that_is_a_file_is_refused_at_load() {
+        let not_a_dir = tempfile::NamedTempFile::new().expect("temp file");
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                state_dir = not_a_dir.path().display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::StateDirNotADirectory { .. })
+        ));
+    }
+
+    /// A `state_dir` that does not exist yet is not a load failure:
+    /// creating it is startup's job (`connector-cli`), and an operator
+    /// mounting a fresh empty volume must not have to pre-create it.
+    #[test]
+    fn a_state_dir_that_does_not_exist_yet_still_loads() {
+        let parent = tempfile::tempdir().expect("temp dir");
+        let state_dir = parent.path().join("not-created-yet");
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.display(),
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.state_dir(), Some(state_dir.as_path()));
     }
 }

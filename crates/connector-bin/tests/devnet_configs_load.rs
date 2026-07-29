@@ -11,9 +11,11 @@
 //! exactly as committed, substituting only what this sandbox physically
 //! cannot supply: the signer key file (real key material is never committed
 //! -- see `.gitignore`, and config load refuses a `key_file` that is not
-//! there) and the bind addresses (fixed devnet ports would flake or collide
+//! there), the bind addresses (fixed devnet ports would flake or collide
 //! across parallel test runs -- every other test in this crate binds
-//! `127.0.0.1:0` for the same reason). Nothing semantic is touched: no
+//! `127.0.0.1:0` for the same reason), and `state_dir` (a container path
+//! this host cannot create -- but the line itself must still be there,
+//! issue #605). Nothing semantic is touched: no
 //! prefix, no route, no peer, no `price`, and in particular no
 //! `[settlement]` value. This is the property a reader assumes this file
 //! provides, and the only case that catches a committed config which cannot
@@ -99,14 +101,27 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
 }
 
 /// Substitute only what this sandbox physically cannot supply: the signer
-/// key file (real key material is never committed) and the bind addresses
-/// (fixed ports collide across parallel test runs). Every other line --
-/// prefixes, handler URLs, peer id/addr, `price`, and every `[settlement]`
-/// value -- stays the literal committed content.
+/// key file (real key material is never committed), the bind addresses
+/// (fixed ports collide across parallel test runs) and `state_dir` (the
+/// committed value is a container path, `/app/state`, which no test host
+/// can create). Every other line -- prefixes, handler URLs, peer id/addr,
+/// `price`, and every `[settlement]` value -- stays the literal committed
+/// content.
+///
+/// The `state_dir` substitution is a path swap, not a removal: the
+/// committed files must keep naming one, since a devnet box without it
+/// would hold its claim watermarks in memory and forget every spent claim
+/// on restart (issue #605). `replace_expecting_a_match` is what makes that
+/// load-bearing -- deleting the line from either config fails this test
+/// rather than silently testing a node with no durable state.
 ///
 /// `peer_wire_addr` is substituted only where the file has one (the apex
 /// only dials out and sets none), so that one alone is not asserted on.
-fn with_sandbox_paths(raw: &str, key_path: &std::path::Path) -> String {
+fn with_sandbox_paths(
+    raw: &str,
+    key_path: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> String {
     let replaced = replace_expecting_a_match(
         raw,
         "key_file = \"/app/data/signer.key\"",
@@ -116,6 +131,11 @@ fn with_sandbox_paths(raw: &str, key_path: &std::path::Path) -> String {
         &replaced,
         "client_edge_addr = \"0.0.0.0:4000\"",
         "client_edge_addr = \"127.0.0.1:0\"",
+    );
+    let replaced = replace_expecting_a_match(
+        &replaced,
+        "state_dir = \"/app/state\"",
+        &format!("state_dir = \"{}\"", state_dir.display()),
     );
     replaced.replace(
         "peer_wire_addr = \"0.0.0.0:4001\"",
@@ -316,9 +336,13 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
     assert!(APEX_CONFIG.contains("g.rust.store"));
 
     let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
     // No peer_wire_addr in this file (the apex only dials out) -- only the
     // client edge is expected to log a listen line.
-    let connector = boot(&with_sandbox_paths(APEX_CONFIG, key_file.path()), false);
+    let connector = boot(
+        &with_sandbox_paths(APEX_CONFIG, key_file.path(), state_dir.path()),
+        false,
+    );
 
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.rust.relay").await;
 }
@@ -328,9 +352,13 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
     assert!(STORE_CONFIG.contains("g.rust.store"));
 
     let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
     // This file configures peer_wire_addr (it accepts the apex's
     // connection), so both listeners must come up.
-    let connector = boot(&with_sandbox_paths(STORE_CONFIG, key_file.path()), true);
+    let connector = boot(
+        &with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path()),
+        true,
+    );
 
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.rust.store").await;
 }
@@ -360,9 +388,10 @@ async fn the_apex_devnet_settlement_template_boots_against_a_deployed_contract()
     let (anvil, contract_address, token) = deploy_settlement_on_anvil().await;
 
     let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
     let text = uncomment_settlement_template(APEX_CONFIG);
     let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
-    let text = with_sandbox_paths(&text, key_file.path());
+    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
     drop(boot(&text, false));
 }
@@ -375,9 +404,10 @@ async fn the_store_devnet_settlement_template_boots_against_a_deployed_contract(
     let (anvil, contract_address, token) = deploy_settlement_on_anvil().await;
 
     let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
     let text = uncomment_settlement_template(STORE_CONFIG);
     let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
-    let text = with_sandbox_paths(&text, key_file.path());
+    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
     drop(boot(&text, true));
 }

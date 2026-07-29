@@ -172,6 +172,19 @@ never reaches the terminating app:
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
 
+**A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
+it compares against survives a restart: a connector that forgets a channel's watermark compares
+against nothing, and `None` accepts every nonce, so every claim the client already spent becomes
+free service again ([issue
+#605](https://github.com/toon-protocol/connector/issues/605)). A connector therefore MUST record
+each accepted claim durably before treating it as accepted, and MUST rebuild its watermarks from
+that record before serving. Two consequences follow, and both are refusals rather than degradations:
+a claim whose acceptance cannot be made durable is refused (as a **temporary** error — the claim
+itself is fine), and a record that cannot be read back, or that carries an entry the connector
+cannot decode, stops the connector starting rather than letting it start at no watermarks. Where
+the record lives is a deployment question rather than a wire one: today it is the `state_dir`
+config field, and a config that configures `[[client_channels]]` without one does not load.
+
 **Mina is not a supported chain.** [ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)
 drops Mina from the Rust connector: a Mina claim's on-chain lifecycle (open, deposit, close,
 settle) has no Rust implementation and none is planned, so a connector that accepted a Mina claim

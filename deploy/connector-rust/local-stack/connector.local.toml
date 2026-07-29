@@ -10,6 +10,14 @@
 # host reaches POST /ilp, GET /ilp/identity and GET /ilp/routes/price.
 client_edge_addr = "0.0.0.0:3000"
 
+# ── Durable claim state (issue #605) ─────────────────────────────────────────
+# The claim journals whose replay makes a replay watermark survive a restart.
+# A named volume in docker-compose.local.yml, not a bind mount of ./: the
+# container runs as uid 10001 and a named volume is chowned for it. Without
+# this a `docker compose restart` hands the payer every claim it already spent
+# back as free service.
+state_dir = "/app/state"
+
 [signer]
 # 32 raw bytes or 64 hex characters; written by prepare.sh, never committed.
 key_file = "/app/secrets/signer.key"

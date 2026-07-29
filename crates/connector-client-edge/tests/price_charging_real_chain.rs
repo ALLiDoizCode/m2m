@@ -25,7 +25,7 @@ use tower::ServiceExt;
 
 use libsecp256k1::{Message, PublicKey, SecretKey};
 
-use connector_client_edge::{router_with_channels, ClientChannelRegistry, EvmChannel};
+use connector_client_edge::{router_with_gate, ClientChannelRegistry, ClientClaimGate, EvmChannel};
 use connector_config::StaticRoute;
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
@@ -208,7 +208,15 @@ async fn post_claim(
     channels: ClientChannelRegistry,
 ) -> (StatusCode, Bytes) {
     let prepare = sealed_sample_prepare(&signer.public_key().unwrap());
-    let app = router_with_channels(connector, signer, None, channels);
+    // An in-memory journal: this test drives one process, and what a
+    // watermark does across a *restart* is `claim_gate`'s own durability
+    // module (issue #605).
+    let gate = ClientClaimGate::restore(
+        channels,
+        Arc::new(connector_runtime::InMemoryJournal::new()),
+    )
+    .expect("a fresh in-memory journal has nothing to replay");
+    let app = router_with_gate(connector, signer, None, gate);
     let request = Request::builder()
         .method("POST")
         .uri("/ilp")

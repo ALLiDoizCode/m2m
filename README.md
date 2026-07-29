@@ -79,18 +79,19 @@ handler_url = "http://app:3100"
 price       = 100
 ```
 
-| Key                   | Type        | Required | Meaning                                                                         |
-| --------------------- | ----------- | -------- | ------------------------------------------------------------------------------- |
-| `client_edge_addr`    | `host:port` | yes      | Where `POST /ilp` (and, if configured, the operator surface) listens.           |
-| `[signer]`            | table       | yes      | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.      |
-| `[[routes]]`          | array       | no       | See below.                                                                      |
-| `apex`                | ILP address | no       | Required only if `[[children]]` is used.                                        |
-| `[[children]]`        | array       | no       | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.          |
-| `[operator]`          | table       | no       | Absent ⇒ the operator surface is not mounted at all.                            |
-| `peer_wire_addr`      | `host:port` | no       | Absent ⇒ no inbound peer listener.                                              |
-| `[[peers]]`           | array       | no       | `{ id, addr }` — the peers `routes.peer_id` may name.                           |
-| `[settlement]`        | table       | no       | Absent ⇒ every channel operation answers `503`.                                 |
-| `[[client_channels]]` | array       | no       | Absent ⇒ the client edge has a record of no channel, so it refuses every claim. |
+| Key                   | Type        | Required  | Meaning                                                                                    |
+| --------------------- | ----------- | --------- | ------------------------------------------------------------------------------------------ |
+| `client_edge_addr`    | `host:port` | yes       | Where `POST /ilp` (and, if configured, the operator surface) listens.                      |
+| `[signer]`            | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                 |
+| `[[routes]]`          | array       | no        | See below.                                                                                 |
+| `apex`                | ILP address | no        | Required only if `[[children]]` is used.                                                   |
+| `[[children]]`        | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                     |
+| `[operator]`          | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                       |
+| `peer_wire_addr`      | `host:port` | no        | Absent ⇒ no inbound peer listener.                                                         |
+| `[[peers]]`           | array       | no        | `{ id, addr }` — the peers `routes.peer_id` may name.                                      |
+| `[settlement]`        | table       | no        | Absent ⇒ every channel operation answers `503`.                                            |
+| `[[client_channels]]` | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.            |
+| `state_dir`           | path        | see below | Where this node writes its claim journals. Required whenever `[[client_channels]]` is set. |
 
 A `[[routes]]` entry sets **exactly one** of `handler_url` (terminate here) or `peer_id` (forward
 there). A terminated route **must** carry a `price` — write `price = 0` if free is deliberate,
@@ -120,6 +121,21 @@ is checked against that recorded counterparty and never against the signer the c
 itself, and a claim naming a channel with no entry here is refused as unknown. A node configuring
 none therefore accepts no paid write at all — deliberately, since the only alternative to "no
 record of this channel" is believing what a claim says about itself.
+
+`state_dir` is where a claim's replay watermark is written down. Without it the watermarks live
+only in process memory, so a restart resets every channel to "no claim ever seen" — and a channel
+with no watermark accepts any nonce, which hands a client every claim it has already spent back
+as free service. Config load therefore **refuses** a file that sets `[[client_channels]]` without
+a `state_dir`, and startup refuses to boot at all if the directory cannot be written, naming the
+path. Two append-only files live there: `client-edge-claims.log` (claims accepted at `POST /ilp`)
+and `peer-claims.log` (the peer wire's own `ClaimBook`). Both are replayed before the node serves;
+a journal that cannot be read, or that carries a line this build cannot decode, is a refusal to
+start rather than a silent restart from zero.
+
+In a container this must be a **mounted volume**, not a path in the writable layer — a watermark
+that dies with the container is the same defect one indirection down. The image runs as uid
+`10001`, so a named volume (chowned automatically) is simpler than a host bind mount (`chown
+10001:10001` it first).
 
 > The `*.yaml` files under `config/`, `deploy/node-quickstart/`, `deploy/pay-edge/` and
 > `infra/linode-node/` are the **retired TypeScript connector's** configuration

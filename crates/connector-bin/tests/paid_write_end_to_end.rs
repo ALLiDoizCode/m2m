@@ -290,9 +290,15 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
     let write_keypair = Keypair::generate(&mut OsRng);
     let write_key_hex = hex_encode(&write_keypair.public.to_bytes());
     let registry_address = backend.registry_address();
+    // Issue #605: a node with `[[client_channels]]` must name a durable
+    // `state_dir` -- config load refuses one that does not, because its
+    // claim watermarks would live only in memory and every spent claim
+    // would be replayable after a restart.
+    let state_dir = tempfile::tempdir().expect("temp state dir");
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_file}"
@@ -334,6 +340,7 @@ chain_id = {ANVIL_CHAIN_ID}
 token_network_address = "{token_network}"
 "#,
         key_file = key_file.path().display(),
+        state_dir = state_dir.path().display(),
         settlement_key_file = settlement_key_file.path().display(),
         rpc_url = anvil.rpc_url,
         paid_channel_id = paid_channel.0,

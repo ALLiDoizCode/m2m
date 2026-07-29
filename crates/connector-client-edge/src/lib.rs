@@ -101,7 +101,7 @@ struct ClientEdgeState {
 /// all, so every claim presented to it is refused as
 /// [`ClaimIngestRejection::UnknownChannel`] (issue #558). Use
 /// [`router_with_wrap_key`] to accept wrapped claims, and
-/// [`router_with_channels`] to give this edge the channels whose claims it
+/// [`router_with_gate`] to give this edge the channels whose claims it
 /// should accept.
 pub fn router(connector: Arc<Connector>, signer: Arc<dyn Signer>) -> Router {
     router_with_wrap_key(connector, signer, None)
@@ -115,35 +115,44 @@ pub fn router_with_wrap_key(
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
 ) -> Router {
-    router_with_channels(
-        connector,
-        signer,
-        wrap_receiver_secret,
+    // A gate with a record of no channel accepts nothing, so it has no
+    // watermark a restart could lose and needs no durable journal (issue
+    // #605). A node that means to accept claims goes through
+    // `router_with_gate` and supplies a gate built over a real one.
+    let gate = ClientClaimGate::restore(
         ClientChannelRegistry::new(),
+        Arc::new(connector_runtime::InMemoryJournal::new()),
     )
+    .expect("a fresh in-memory journal has nothing to replay");
+    router_with_gate(connector, signer, wrap_receiver_secret, gate)
 }
 
-/// As [`router_with_wrap_key`], but with a record of the payment channels
-/// whose claims this edge accepts, and whose counterparty each claim's
-/// signature must recover to (issue #558).
+/// As [`router_with_wrap_key`], but with a fully built [`ClientClaimGate`]
+/// -- the channels whose claims this edge accepts (issue #558) *and* the
+/// durable journal their watermarks survive a restart in (issue #605).
 ///
-/// `channels` carries both sources of that record: whatever the node
+/// The gate is passed in rather than assembled here on purpose: building
+/// one can fail (a journal that will not replay), and that failure has to
+/// stop the node starting, which a function returning a [`Router`] cannot
+/// do. This is also the seam a node's startup arming (issue #556)
+/// populates: the [`ClientChannelRegistry`] the gate was built over
+/// carries both sources of a channel's record -- whatever the node
 /// declared (`[[client_channels]]`) and, optionally, a
 /// [`ClientChannelSource`] resolving anything else against the chain
-/// (issue #556, [`ClientChannelRegistry::with_source`]) -- which is what
-/// lets an unaffiliated buyer who has opened a channel on chain pay
-/// without the operator editing config first (issue #502). A `channels`
-/// with neither refuses every claim.
-pub fn router_with_channels(
+/// ([`ClientChannelRegistry::with_source`]), which is what lets an
+/// unaffiliated buyer who has opened a channel on chain pay without the
+/// operator editing config first (issue #502). A registry with neither
+/// refuses every claim.
+pub fn router_with_gate(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
-    channels: ClientChannelRegistry,
+    claim_gate: ClientClaimGate,
 ) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
-        claim_gate: ClientClaimGate::new(channels),
+        claim_gate,
         wrap_receiver_secret,
     });
     Router::new()
@@ -470,8 +479,15 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
     // #522) from every other claim-ingest refusal above it (F01: Invalid
     // Packet) -- the claim is structurally and cryptographically fine, it
     // simply isn't enough value.
+    //
+    // `NotDurable` is a third code again (T00: Internal Error, issue
+    // #605), and the only *temporary* one here: this connector could not
+    // record the claim, the claim itself is fine, and a sender told F01
+    // would conclude its perfectly good claim was invalid rather than
+    // retry it.
     let (code, accumulated_cost) = match rejection {
         ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
+        ClaimIngestRejection::NotDurable => (RejectCode::t00_internal_error(), 0),
         _ => (RejectCode::f01_invalid_packet(), 0),
     };
     packet_response(PacketResponse::Reject(Reject {
@@ -596,13 +612,22 @@ mod tests {
     use connector_config::StaticRoute;
     use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Reject};
     use connector_runtime::{
-        AppOutcome, FakeAppClient, InProcessPeerTransport, NetworkPeerTransport, PeerRoute,
-        PeerWireServer, TestClock,
+        AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, NetworkPeerTransport,
+        PeerRoute, PeerWireServer, TestClock,
     };
     use connector_signer::LocalSigner;
     use tower::ServiceExt;
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
+
+    /// A claim gate over `channels`, journaling to a store that lives no
+    /// longer than the test does. These tests are about the HTTP surface
+    /// in front of the gate; that a watermark survives a restart is
+    /// `claim_gate`'s own `durability` module, over a real file.
+    fn test_gate(channels: ClientChannelRegistry) -> ClientClaimGate {
+        ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+    }
 
     /// A structured envelope's plain encoding (ADR 0018/issue #519) -- used
     /// directly only by tests whose `Prepare` never reaches
@@ -1276,7 +1301,12 @@ mod tests {
         );
         let (prepare, _shared_secret) =
             sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
-        let app = router_with_channels(connector, signer, None, claim_headers::test_channels());
+        let app = router_with_gate(
+            connector,
+            signer,
+            None,
+            test_gate(claim_headers::test_channels()),
+        );
 
         // A genuinely signed claim: since issue #506/#544 the gate's last
         // stage verifies the signature, so a placeholder one would be
@@ -1542,7 +1572,7 @@ mod tests {
             );
             let (prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
-            let app = router_with_channels(connector, signer, None, test_channels());
+            let app = router_with_gate(connector, signer, None, test_gate(test_channels()));
 
             let request =
                 request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
@@ -1570,7 +1600,7 @@ mod tests {
                 )
                 .with_identity_signer(signer.clone()),
             );
-            let app = router_with_channels(connector, signer.clone(), None, test_channels());
+            let app = router_with_gate(connector, signer.clone(), None, test_gate(test_channels()));
 
             let (first_prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
@@ -1610,7 +1640,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router_with_channels(connector, test_signer(), None, test_channels());
+            let app = router_with_gate(connector, test_signer(), None, test_gate(test_channels()));
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -1637,7 +1667,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router_with_channels(connector, test_signer(), None, test_channels());
+            let app = router_with_gate(connector, test_signer(), None, test_gate(test_channels()));
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -1694,11 +1724,11 @@ mod tests {
 
             let (prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &identity_signer.public_key().unwrap());
-            let app = router_with_channels(
+            let app = router_with_gate(
                 connector,
                 identity_signer,
                 Some(receiver_secret_bytes),
-                test_channels(),
+                test_gate(test_channels()),
             );
             let request = request_with_claim_header(&prepare, CLAIM_WRAPPED_HEADER, &envelope_json);
             let response = app.oneshot(request).await.unwrap();
@@ -1757,7 +1787,7 @@ mod tests {
             );
             let (prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
-            let app = router_with_channels(connector, signer, None, test_channels());
+            let app = router_with_gate(connector, signer, None, test_gate(test_channels()));
 
             let request =
                 request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
@@ -1786,7 +1816,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router_with_channels(connector, test_signer(), None, test_channels());
+            let app = router_with_gate(connector, test_signer(), None, test_gate(test_channels()));
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -1823,7 +1853,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router_with_channels(connector, test_signer(), None, test_channels());
+            let app = router_with_gate(connector, test_signer(), None, test_gate(test_channels()));
 
             let garbage_signature_claim =
                 evm_claim_json_with_signature(1, 50, "0xnotarealsignatureatall");
@@ -1853,7 +1883,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router_with_channels(connector, test_signer(), None, test_channels());
+            let app = router_with_gate(connector, test_signer(), None, test_gate(test_channels()));
 
             let unverifiable_claim = evm_claim_json_with_signature(1, 100, "0xabcd");
             let request = request_with_claim_header(
@@ -1888,7 +1918,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            let app = router_with_channels(connector, test_signer(), None, test_channels());
+            let app = router_with_gate(connector, test_signer(), None, test_gate(test_channels()));
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -1928,7 +1958,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             ));
-            // `router`, not `router_with_channels`: no channel recorded.
+            // `router`, not `router_with_gate`: no channel recorded.
             let app = router(connector, test_signer());
 
             let request = request_with_claim_header(
@@ -1999,7 +2029,7 @@ mod tests {
 
             let (prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
-            let app = router_with_channels(connector, signer, None, channels);
+            let app = router_with_gate(connector, signer, None, test_gate(channels));
             let request =
                 request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
             let response = app.oneshot(request).await.unwrap();
@@ -2031,7 +2061,7 @@ mod tests {
             let channels = ClientChannelRegistry::new().with_source(Arc::new(
                 crate::channels::test_source::FakeChannelSource::unreachable("connection refused"),
             ));
-            let app = router_with_channels(connector, test_signer(), None, channels);
+            let app = router_with_gate(connector, test_signer(), None, test_gate(channels));
 
             let request = request_with_claim_header(
                 &sample_prepare("g.example.app"),
@@ -2110,7 +2140,7 @@ mod tests {
             // channel is `claim_headers`' own, the one `evm_claim_json`
             // signs against.
             (
-                router_with_channels(connector, signer.clone(), None, test_channels()),
+                router_with_gate(connector, signer.clone(), None, test_gate(test_channels())),
                 app_client,
                 signer,
             )

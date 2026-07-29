@@ -26,6 +26,30 @@
 # reverse proxy on the same host instead of publishing the port directly.
 client_edge_addr = "0.0.0.0:3000"
 
+# ── Durable claim state (issue #605) ─────────────────────────────────────
+# Where this node writes the claim journals whose replay is what makes a
+# replay watermark survive a restart:
+#
+#   client-edge-claims.log  claims accepted at POST /ilp
+#   peer-claims.log         the peer wire's own ClaimBook
+#
+# Both are append-only, fsync'd per accepted claim, and replayed before this
+# node serves anything. Without a state_dir every channel's watermark lives
+# in process memory only, so a restart resets each one to "no claim ever
+# seen" -- and a channel with no watermark accepts any nonce, handing a
+# client every claim it already spent back as free service.
+#
+# Config load REFUSES a file that sets [[client_channels]] without this, and
+# startup refuses to boot at all if the directory cannot be written, naming
+# the path -- never at the first claim, hours later.
+#
+# In a container this must be a MOUNTED VOLUME, not a path in the writable
+# layer: a watermark that dies with the container is the same defect one
+# indirection down. The image runs as uid 10001, so a named volume (chowned
+# for you) is simpler than a host bind mount (`chown 10001:10001` it first).
+# See README step 6.
+state_dir = "/app/state"
+
 # ── Signer ───────────────────────────────────────────────────────────────
 # Where this node's signing key material lives -- a location, never the
 # key itself (ADR 0012). key_file must contain either 32 raw bytes or 64
