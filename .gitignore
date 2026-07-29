@@ -95,3 +95,6 @@ deploy/connector-rust/operator.pem
 # never committed; mirrors deploy/connector-rust/signer.key above.
 infra/linode-node/signer-rust.key
 infra/linode-store/signer-rust.key
+
+# Local operator scratch notes — working files, never part of the repo.
+.connector-*-runbook.md
