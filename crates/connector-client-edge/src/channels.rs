@@ -38,8 +38,9 @@
 //!    `[settlement]` section's own `TokenNetwork`, so a client that has
 //!    opened a channel with this connector on chain can pay without the
 //!    operator hand-editing config and restarting. EVM is the only chain
-//!    with a registered source today (issue #629's prefactor for the
-//!    Solana entry to come, #611's parallel).
+//!    with a registered source today (issue #611); the source is now
+//!    keyed by chain (issue #629) so a Solana source can compose
+//!    alongside it later without restructuring this registry again.
 //!
 //! The second is what makes issue #502's *"anonymity is a first-class
 //! path, not a fallback: it is how an unaffiliated buyer pays for a
