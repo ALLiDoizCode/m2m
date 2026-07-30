@@ -26,35 +26,44 @@
 #   g.toon.relay  — terminates locally at the SAME running relay app
 #                   (relay:3100) this box's TypeScript connector already
 #                   fronts.
-#   g.toon.ario   — terminates at the store box's running store app
-#                   (10.83.0.1:3300, over the WireGuard segment below) under
-#                   the name the TS fleet's kind:10032 announce advertises as
-#                   its `routes.store` — which is the destination rig and the
+#   g.toon.ario   — terminates at the store box's running store app over
+#                   that box's public TLS front (see below) under the name
+#                   the TS fleet's kind:10032 announce advertises as its
+#                   `routes.store` — which is the destination rig and the
 #                   other announce-driven clients actually dial (#600).
 #   g.toon.store  — the same store app under this fleet's own non-Arweave
 #                   name, kept as an alias at the same price.
 #
-# ── The store leg is a TERMINATED route, not the peer wire (#600) ─────────
-# Both store routes reach the store app over plain HTTP across a WireGuard
-# tunnel between the two boxes (apex wg0 10.83.0.0/31 ↔ store 10.83.0.1/31,
-# keys generated on-box in /etc/wireguard, never committed; systemd
-# wg-quick@wg0 on both ends). That tunnel IS the private segment #600 asked
-# for — #492's peer-wire containment reasoning holds for any plaintext hop,
-# and the app-delivery HTTP here is exactly as plaintext as the peer wire
-# would be.
+# ── The store leg is a TERMINATED route over a PUBLIC TLS link (#600) ─────
+# The store box is another TOON node on the network, reached the way any
+# peer on the open internet would be — so the inter-node link is public,
+# carried over https and TLS-terminated by the store box's own nginx
+# (proxy.store.devnet.toonprotocol.dev, certbot-managed like this box's
+# hosts), the same shape as the TypeScript fleet's connector↔connector
+# links (BTP over wss://…:443). Both store routes below terminate at that
+# public https URL; no private segment exists between the boxes and none
+# is required.
 #
 # What this deliberately is NOT: the ADR 0003 peer wire with a store-side
-# Rust connector behind it. The PAID forwarded path is structurally unwired
-# today — the client edge prices only locally-terminated routes (so a peer
-# route greets nothing and charges nothing), the terminating side never
-# charges its `price` for a peer-wire arrival, and ADR 0024's peer claims
-# cannot be configured from any connector.toml. A peer-forwarded g.toon.store
-# would therefore have served the store app FOR FREE end to end. Terminating
-# here instead puts the store leg on the same claim-gated client-edge path
-# the proven g.toon.relay route uses (x402 greeting, F03 underpayment,
-# journaled watermark — issue #520's charging, #605's durability). The real
-# paid peer wire is tracked in #620; the previous placeholder [[peers]]
-# "store" @ 203.0.113.20 and the fee=0 peer route are gone with it.
+# Rust connector behind it — twice over.
+#
+#   * The peer wire cannot carry a public link (issue #623): raw-TCP
+#     custom framing (nothing nginx can TLS-terminate), no TLS of its own
+#     by ADR 0003's design, and SocketAddr-only [[peers]] addressing with
+#     nothing to hang a handshake on. It carries signed balance proofs
+#     (ADR 0004), so exposing it plaintext on a public IP is not an
+#     acceptable interim.
+#   * The PAID forwarded path is structurally unwired anyway (issue #620):
+#     the client edge prices only locally-terminated routes (a peer route
+#     greets nothing and charges nothing), the terminating side never
+#     charges its `price` for a peer-wire arrival, and ADR 0024's peer
+#     claims cannot be configured from any connector.toml. A peer-forwarded
+#     g.toon.store would have served the store app FOR FREE end to end.
+#
+# Terminating here instead puts the store leg on the same claim-gated
+# client-edge path the proven g.toon.relay route uses (x402 greeting, F03
+# underpayment, journaled watermark — issue #520's charging, #605's
+# durability).
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Distinct from the TypeScript node's 3000/8080/8081 (see
@@ -123,14 +132,16 @@ price = 1000
 [[routes]]
 prefix = "g.toon.ario"
 # `/store`, not the bare origin — the same shape as g.toon.relay's `/write`
-# above, for the same reason: `HttpAppClient::deliver` POSTs here, and the
-# store app serves only `POST /store` and `GET /health`. 10.83.0.1 is the
-# store box's WireGuard address (see the header): the store app's 3300 is
-# published on that address ALONE by
-# infra/linode-store/docker-compose.store.wg.yml, so this URL resolves only
-# from inside the tunnel. An envelope's own `target` cannot override the
-# path (issue #596, ADR 0025).
-handler_url = "http://10.83.0.1:3300/store"
+# above, for the same reason: the store app serves only `POST /store` and
+# `GET /health`. The URL is the store box's own public TLS front (see the
+# header): its nginx `location /store` proxies to the store app
+# (infra/linode-store/nginx/conf.d/node.conf), and `HttpAppClient`'s
+# reqwest is built with rustls-tls (the runtime image ships
+# ca-certificates for exactly this). An envelope's own `target` cannot
+# override the path (issue #596, ADR 0025) — though since #621 it may
+# literally restate it, which is how published rig's uploads
+# (`proxyPath: '/store'`) address this route.
+handler_url = "https://proxy.store.devnet.toonprotocol.dev/store"
 # Parity with the TS fleet's announced os.store capability for this same
 # destination (`price: '1000'` — 0.001 six-decimal USDC, ADR 0010), which is
 # the flat per-object figure rig quotes for git-object uploads. Same
@@ -143,7 +154,7 @@ prefix = "g.toon.store"
 # SAME handler_url. `insert_consistent_handler_price` requires the price to
 # match the g.toon.ario route's exactly (route.rs: a shared handler must not
 # be reachable at two prices, or the cheaper one always wins).
-handler_url = "http://10.83.0.1:3300/store"
+handler_url = "https://proxy.store.devnet.toonprotocol.dev/store"
 price = 1000
 
 # ── Operator surface (optional) ─────────────────────────────────────────
