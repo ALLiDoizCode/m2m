@@ -1175,6 +1175,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "bs58",
  "chrono",
  "connector-config",
  "connector-domain",
@@ -1225,6 +1226,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "connector-settlement",
+ "connector-settlement-solana",
  "solana-client",
  "solana-sdk",
  "spl-associated-token-account",

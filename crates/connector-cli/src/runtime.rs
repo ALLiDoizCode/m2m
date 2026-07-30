@@ -16,8 +16,8 @@ use connector_client_edge::{
     ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, ClientClaimGate, EvmChannel,
 };
 use connector_config::{
-    ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementConfig,
-    SolanaSettlementConfig,
+    ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementChain,
+    SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
     Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
@@ -432,12 +432,14 @@ pub struct Runtime {
 /// [`NetworkPeerTransport`] (issue #488 -- peer addressing finally has a
 /// config-file representation, closing the gap #416 deferred), and every
 /// `peer_id`-targeted `[[routes]]` entry becomes a [`PeerRoute`] alongside
-/// the terminated [`connector_config::StaticRoute`]s. If `[settlement]` is
-/// configured, this connects a real chain-backed [`SettlementBackend`] and
-/// attaches it via [`Connector::with_settlement`] (issue #542) -- that
-/// connection is why this function is `async` at all; an unconfigured node
-/// still builds with no settlement backend, same as before this section
-/// existed.
+/// the terminated [`connector_config::StaticRoute`]s. Every configured
+/// `[settlement.<chain>]` table's real chain-backed [`SettlementBackend`]
+/// is connected and attached under its own chain via
+/// [`Connector::with_settlement`] (issues #542, #630 -- a node with both
+/// tables holds both backends, and operator channel ops route per chain) --
+/// those connections are why this function is `async` at all; an
+/// unconfigured node still builds with no settlement backend, same as
+/// before this section existed.
 ///
 /// That same connection is handed to [`router`] as a
 /// [`ClientChannelSource`] (issue #556): one chain connection, used both
@@ -491,21 +493,26 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                 client_channel_source = Some(Arc::new(SettlementChannelSource {
                     backend: backend.clone(),
                 }));
-                connector = connector.with_settlement(backend as Arc<dyn SettlementBackend>);
+                connector = connector
+                    .with_settlement(SettlementChain::Evm, backend as Arc<dyn SettlementBackend>);
             }
             SettlementConfig::Solana(solana) => {
                 // Constructed and attached exactly as the EVM leg is
                 // (issue #630) -- `SolanaSettlementBackend::connect`'s own
-                // fail-closed identity checks (program reachable and
-                // executable, mint owned by the SPL Token program,
-                // configured decimals agreeing with the mint's own) run
-                // before this node serves any traffic. No
+                // fail-closed identity checks (program reachable,
+                // executable and proven to behave like the deployed
+                // payment-channel program, mint owned by the SPL Token
+                // program, configured decimals agreeing with the mint's
+                // own) run before this node serves any traffic. No
                 // `ClientChannelSource`/greeting terms yet: Solana channel
                 // resolution from chain and the greeting's per-chain
                 // settlement facts are epic #627's remaining children
                 // (#629, the greeting evolution), not this issue's.
                 let backend = build_solana_settlement_backend(solana).await?;
-                connector = connector.with_settlement(backend as Arc<dyn SettlementBackend>);
+                connector = connector.with_settlement(
+                    SettlementChain::Solana,
+                    backend as Arc<dyn SettlementBackend>,
+                );
             }
         }
     }
@@ -1160,7 +1167,7 @@ key_file = "{key_path}"
                     .as_bytes()
                     .to_vec();
             let opened = connector
-                .open_channel(counterparty, Duration::seconds(3600))
+                .open_channel(None, counterparty, Duration::seconds(3600))
                 .await
                 .expect("a settlement backend was constructed and attached");
             assert_eq!(opened.deposited, 0);
@@ -1255,7 +1262,11 @@ key_file = "{}"
             let runtime = build(&config).await.expect("build");
             let result = runtime
                 .connector
-                .open_channel(b"no-settlement-peer".to_vec(), Duration::seconds(3600))
+                .open_channel(
+                    None,
+                    b"no-settlement-peer".to_vec(),
+                    Duration::seconds(3600),
+                )
                 .await;
             assert!(matches!(
                 result,
@@ -1324,7 +1335,7 @@ key_file = "{key_path}"
             // generates an arbitrary EVM counterparty above.
             let counterparty = Keypair::new().pubkey().to_bytes().to_vec();
             let opened = connector
-                .open_channel(counterparty, Duration::seconds(3600))
+                .open_channel(None, counterparty, Duration::seconds(3600))
                 .await
                 .expect("a solana settlement backend was constructed and attached");
             assert_eq!(opened.deposited, 0);
@@ -1393,12 +1404,19 @@ key_file = "{key_path}"
         }
 
         /// A config naming both `[settlement.evm]` and `[settlement.solana]`
-        /// now constructs and attaches both real backends (issue #630
-        /// finishes what #628 left as an intentional fail-closed
-        /// placeholder for the Solana leg) -- neither chain's construction
-        /// trips over the other's being configured too.
+        /// constructs both real backends and the built `Connector` holds
+        /// *both*, each reachable on its own chain (issue #630, and its
+        /// review's merge blocker: `Connector`'s settlement slot was
+        /// last-one-wins, so on exactly this config every operator channel
+        /// op silently targeted Solana -- an EVM `open_channel` here
+        /// answered "a packages/solana-program counterparty must be a
+        /// 32-byte Solana pubkey, got 20 bytes"). Driven end to end
+        /// through `build` reading a config file: an EVM operator op lands
+        /// on the EVM backend (a real channel opens on the anvil chain), a
+        /// Solana one on the Solana backend, and per-channel-id ops route
+        /// each id to its own chain.
         #[tokio::test]
-        async fn evm_and_solana_together_both_construct() {
+        async fn a_both_chains_config_attaches_and_routes_both_backends() {
             if !anvil_available() {
                 eprintln!(
                     "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
@@ -1477,9 +1495,154 @@ key_file = "{solana_key_path}"
                 token = token,
             ));
 
-            build(&config)
+            let runtime = build(&config)
                 .await
                 .expect("both legs construct and attach without either refusing startup");
+            let connector = runtime.connector.clone();
+
+            // The regression op: an EVM channel open on a both-chains node
+            // must reach the EVM backend. On the last-one-wins slot this
+            // exact call hit the Solana backend and refused the 20-byte
+            // counterparty.
+            let evm_counterparty =
+                ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng())
+                    .address()
+                    .as_bytes()
+                    .to_vec();
+            let evm_channel = connector
+                .open_channel(
+                    Some(SettlementChain::Evm),
+                    evm_counterparty,
+                    Duration::seconds(3600),
+                )
+                .await
+                .expect("an EVM open on a both-chains node reaches the EVM backend");
+            assert!(
+                evm_channel.id.starts_with("0x"),
+                "a TokenNetwork bytes32 channel id, not a Solana account: {}",
+                evm_channel.id
+            );
+
+            // The Solana twin.
+            let solana_counterparty = Keypair::new().pubkey().to_bytes().to_vec();
+            let solana_channel = connector
+                .open_channel(
+                    Some(SettlementChain::Solana),
+                    solana_counterparty,
+                    Duration::seconds(3600),
+                )
+                .await
+                .expect("a Solana open on a both-chains node reaches the Solana backend");
+            assert!(
+                Pubkey::from_str(&solana_channel.id).is_ok(),
+                "a channel PDA account address, not a TokenNetwork bytes32: {}",
+                solana_channel.id
+            );
+
+            // Both backends are attached and reachable: the operator's
+            // channel list reports each channel fresh from its own chain.
+            let channels = connector.channels().await;
+            assert_eq!(channels.len(), 2);
+            assert!(channels.iter().any(|view| view.id == evm_channel.id));
+            assert!(channels.iter().any(|view| view.id == solana_channel.id));
+
+            // Per-channel-id ops route by the id's own namespace: closing
+            // each channel lands on the chain that opened it (on the
+            // last-one-wins slot, closing the EVM id asked Solana, which
+            // knows no such channel).
+            connector
+                .close_channel(&evm_channel.id)
+                .await
+                .expect("closing the EVM channel routes to the EVM backend");
+            connector
+                .close_channel(&solana_channel.id)
+                .await
+                .expect("closing the Solana channel routes to the Solana backend");
+
+            // And an open that names no chain is ambiguous here, not
+            // silently resolved to either backend.
+            let ambiguous = connector
+                .open_channel(
+                    None,
+                    Keypair::new().pubkey().to_bytes().to_vec(),
+                    Duration::seconds(3600),
+                )
+                .await;
+            assert!(matches!(
+                ambiguous,
+                Err(connector_runtime::ChannelOperationError::AmbiguousSettlementChain)
+            ));
+        }
+
+        /// Issue #630's review, finding 2: a `[settlement.solana]`
+        /// `program_id` that names a real, executable program which is
+        /// *not* the deployed payment-channel program (here: SPL Token
+        /// itself, executable on every cluster) must refuse startup naming
+        /// the program id -- not pass a mere "exists and is executable"
+        /// check and fail lazily at the first settle.
+        #[tokio::test]
+        async fn a_solana_program_id_naming_some_other_program_refuses_to_build() {
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+            let deployed = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = deployed.token_mint();
+            drop(deployed);
+
+            let seed = [14u8; 32];
+            let payer =
+                solana_sdk::signer::keypair::keypair_from_seed(&seed).expect("derive keypair");
+            let rpc = RpcClient::new_with_commitment(
+                validator.rpc_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            fund(&rpc, &payer.pubkey()).await;
+
+            let key_path = raw_key_file(seed);
+            let wrong_program_id = spl_token_program_id();
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "{rpc_url}"
+program_id = "{wrong_program_id}"
+token_address = "{token_mint}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                rpc_url = validator.rpc_url,
+            ));
+
+            let error = build(&config)
+                .await
+                .err()
+                .expect("a program_id naming some other executable program refuses to build");
+            let message = error.to_string();
+            assert!(
+                message.contains(&wrong_program_id.to_string()),
+                "the failure must name the configured program id: {message}"
+            );
+        }
+
+        /// The SPL Token program id -- a program that exists, is
+        /// executable, and is definitely not the payment-channel program,
+        /// on every Solana cluster including a fresh test validator.
+        fn spl_token_program_id() -> Pubkey {
+            Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+                .expect("the canonical SPL Token program id")
         }
     }
 }

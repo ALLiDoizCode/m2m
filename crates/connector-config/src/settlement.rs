@@ -115,11 +115,62 @@ pub(crate) struct RawSettlementKeyConfig {
 /// The chains a [`SettlementConfig`] can name. `connector-cli` constructs a
 /// real backend for both (issue #630 finished what #628 started), so both
 /// are recognized chains here rather than [`ConfigError::SettlementUnknownChain`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettlementChain {
     Evm,
     Solana,
 }
+
+impl SettlementChain {
+    /// The chain's config-file name -- the keyed `[settlement.<name>]`
+    /// table key and the legacy flat table's `chain` value. The one
+    /// spelling of each chain this workspace has, reused anywhere a chain
+    /// must be named to or by an operator (e.g. the operator surface's
+    /// `POST /channels` `chain` field).
+    pub fn name(self) -> &'static str {
+        match self {
+            SettlementChain::Evm => "evm",
+            SettlementChain::Solana => "solana",
+        }
+    }
+}
+
+impl std::fmt::Display for SettlementChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for SettlementChain {
+    type Err = UnknownSettlementChain;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "evm" => Ok(SettlementChain::Evm),
+            "solana" => Ok(SettlementChain::Solana),
+            other => Err(UnknownSettlementChain(other.to_string())),
+        }
+    }
+}
+
+/// A chain name [`SettlementChain::from_str`] does not recognize. Unlike
+/// the legacy flat table's [`ConfigError::SettlementUnknownChain`] (frozen
+/// at `"evm"` by design, issue #628), this names every chain the keyed
+/// config shape -- and therefore the rest of the fleet -- recognizes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSettlementChain(pub String);
+
+impl std::fmt::Display for UnknownSettlementChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown settlement chain '{}' -- supported chains: evm, solana",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownSettlementChain {}
 
 /// A fully validated `[settlement.evm]` (or legacy `[settlement]`) table:
 /// which already-deployed `TokenNetworkRegistry` and ERC-20 asset this

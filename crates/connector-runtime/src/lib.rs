@@ -20,6 +20,11 @@ pub use claim::{
 };
 pub use clock::{Clock, SystemClock, TestClock};
 pub use connector::{ChannelOperationError, Connector, LeaseRouteError, ProbeDenied};
+// Re-exported for callers that hold a `Connector` but not a config-crate
+// dependency of their own (`connector-operator`): the chain key
+// `Connector::with_settlement` files a settlement backend under, and
+// `Connector::open_channel` names a backend by.
+pub use connector_config::{SettlementChain, UnknownSettlementChain};
 pub use journal::{FileJournal, InMemoryJournal, Journal, JournalError};
 pub use metrics::Metrics;
 pub use network_peer_transport::{NetworkPeerTransport, PeerWireServer};
