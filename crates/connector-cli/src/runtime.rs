@@ -1061,7 +1061,7 @@ write_keys = ["{key}"]
             anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
         };
         use connector_settlement_solana::test_support::{
-            require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
+            fund, require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
         };
         use connector_settlement_solana::SolanaSettlementBackend;
         use ethers::signers::Signer as EvmSigner;
@@ -1091,25 +1091,6 @@ write_keys = ["{key}"]
             let mut file = tempfile::NamedTempFile::new().expect("temp key file");
             file.write_all(&seed).expect("write raw key file");
             file.into_temp_path()
-        }
-
-        /// Airdrop `pubkey` enough lamports to pay for the transactions
-        /// `SolanaSettlementBackend::connect` (`ensure_own_ata_exists`) and
-        /// `open` submit -- a freshly connected identity needs real
-        /// lamports on any real cluster, exactly as a freshly generated
-        /// production signer would.
-        async fn fund_solana_identity(rpc: &RpcClient, pubkey: &solana_sdk::pubkey::Pubkey) {
-            let signature = rpc
-                .request_airdrop(pubkey, 10_000_000_000)
-                .await
-                .expect("airdrop");
-            for _ in 0..200 {
-                if rpc.confirm_transaction(&signature).await.unwrap_or(false) {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            panic!("airdrop did not confirm in time");
         }
 
         /// AC: "`connector-cli::runtime::build` constructs the configured
@@ -1312,7 +1293,7 @@ key_file = "{}"
                 validator.rpc_url.clone(),
                 CommitmentConfig::confirmed(),
             );
-            fund_solana_identity(&rpc, &payer.pubkey()).await;
+            fund(&rpc, &payer.pubkey()).await;
 
             let key_path = raw_key_file(seed);
             let config = load_config(&format!(
@@ -1377,7 +1358,7 @@ key_file = "{key_path}"
                 validator.rpc_url.clone(),
                 CommitmentConfig::confirmed(),
             );
-            fund_solana_identity(&rpc, &payer.pubkey()).await;
+            fund(&rpc, &payer.pubkey()).await;
 
             let key_path = raw_key_file(seed);
             let config = load_config(&format!(
@@ -1459,7 +1440,7 @@ key_file = "{key_path}"
                 validator.rpc_url.clone(),
                 CommitmentConfig::confirmed(),
             );
-            fund_solana_identity(&rpc, &payer.pubkey()).await;
+            fund(&rpc, &payer.pubkey()).await;
 
             let evm_key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
             let solana_key_path = raw_key_file(seed);

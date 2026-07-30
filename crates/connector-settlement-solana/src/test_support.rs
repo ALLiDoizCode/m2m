@@ -1,7 +1,7 @@
 //! A real, disposable `solana-test-validator` harness other crates' tests
 //! reuse rather than reimplementing (issue #630): `connector-cli`'s own
 //! settlement-construction tests need exactly what this crate's own
-//! `tests/support/mod.rs` already provides its own integration tests.
+//! `tests/support/mod.rs` already provides for its own integration tests.
 //! Gated behind the `test-util` feature for the same reason
 //! `connector-settlement-evm`'s own `test_support` module is: a downstream
 //! crate's tests cannot see anything behind `#[cfg(test)]`, since that cfg
@@ -13,6 +13,27 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
+
+/// Airdrop `pubkey` enough lamports to submit a handful of transactions
+/// (issue #630) -- the shared "fund a freshly connected identity" step
+/// every caller of this harness that goes on to sign real transactions
+/// needs (`connector-cli`'s settlement-construction tests,
+/// `connect_identity.rs`'s own), rather than each reimplementing the same
+/// request-airdrop-then-poll-confirm loop.
+pub async fn fund(rpc: &RpcClient, pubkey: &Pubkey) {
+    let signature = rpc
+        .request_airdrop(pubkey, 10_000_000_000)
+        .await
+        .expect("airdrop");
+    for _ in 0..200 {
+        if rpc.confirm_transaction(&signature).await.unwrap_or(false) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("airdrop did not confirm in time");
+}
 
 /// The fixed program id this crate's tests load `payment_channel.so`
 /// under -- checked in at `deploy/payment_channel-keypair.json`, distinct

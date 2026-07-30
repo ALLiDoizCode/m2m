@@ -112,10 +112,9 @@ pub(crate) struct RawSettlementKeyConfig {
     kms_key_id: Option<String>,
 }
 
-/// The chains a [`SettlementConfig`] can name. `Solana` parses (issue #628)
-/// but has no constructible backend in `connector-cli` yet -- that is a
-/// startup-time refusal (epic #627's children), not a config-load one, so it
-/// is a recognized chain here rather than [`ConfigError::SettlementUnknownChain`].
+/// The chains a [`SettlementConfig`] can name. `connector-cli` constructs a
+/// real backend for both (issue #630 finished what #628 started), so both
+/// are recognized chains here rather than [`ConfigError::SettlementUnknownChain`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementChain {
     Evm,
