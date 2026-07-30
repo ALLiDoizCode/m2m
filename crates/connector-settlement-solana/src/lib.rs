@@ -338,6 +338,13 @@ impl SolanaSettlementBackend {
         self.token_mint
     }
 
+    /// The deployed `payment-channel` program instance this backend drives
+    /// (issue #632's greeting facts -- the Solana twin of
+    /// `EvmSettlementBackend::address`/`registry_address`).
+    pub fn program_id(&self) -> Pubkey {
+        self.program_id
+    }
+
     /// Test/dev-only accessor (issue #567): the pubkey bytes of the first
     /// counterparty identity a [`deploy`](Self::deploy)-built backend
     /// privately holds a key for -- what this crate's own tests pass as

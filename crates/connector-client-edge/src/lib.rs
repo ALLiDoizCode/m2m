@@ -94,6 +94,10 @@ struct ClientEdgeState {
     /// This node's channel-opening facts, carried in every x402 greeting
     /// (issue #617). `None` on a node with no settlement backend.
     settlement_terms: Option<X402SettlementTerms>,
+    /// Every configured chain's channel-opening facts (issue #632), carried
+    /// in `extra.settlements` beside [`settlement_terms`](Self::settlement_terms).
+    /// Empty on a node with no settlement backend.
+    settlements: Vec<X402ChainSettlementTerms>,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -152,19 +156,31 @@ pub fn router_with_gate(
     wrap_receiver_secret: Option<[u8; 32]>,
     claim_gate: ClientClaimGate,
 ) -> Router {
-    router_with_gate_and_terms(connector, signer, wrap_receiver_secret, claim_gate, None)
+    router_with_gate_and_terms(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        claim_gate,
+        None,
+        Vec::new(),
+    )
 }
 
-/// As [`router_with_gate`], but with the node's channel-opening facts
-/// (issue #617) to carry in every x402 greeting. `None` -- the plain
-/// [`router_with_gate`] -- is a node with no settlement backend, whose
-/// greeting keeps its pre-#617 shape exactly.
+/// As [`router_with_gate`], but with the node's channel-opening facts to
+/// carry in every x402 greeting: `settlement_terms` is the legacy
+/// EVM-shaped single object (issue #617), `settlements` is the additive
+/// per-chain list (issue #632) -- every chain this node settles on,
+/// including the same EVM entry `settlement_terms` already carries. `None`
+/// and an empty list together -- the plain [`router_with_gate`] -- is a
+/// node with no settlement backend, whose greeting keeps its pre-#617 shape
+/// exactly.
 pub fn router_with_gate_and_terms(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
     claim_gate: ClientClaimGate,
     settlement_terms: Option<X402SettlementTerms>,
+    settlements: Vec<X402ChainSettlementTerms>,
 ) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
@@ -172,6 +188,7 @@ pub fn router_with_gate_and_terms(
         claim_gate,
         wrap_receiver_secret,
         settlement_terms,
+        settlements,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
@@ -322,6 +339,16 @@ struct X402ChannelExtra {
     /// a parser written before this field existed is unaffected.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     settlement: Option<X402SettlementTerms>,
+    /// Every configured chain's channel-opening facts (issue #632), additive
+    /// beside [`settlement`](Self::settlement): a node settling on N chains
+    /// (epic #627) lists all N here, including the same EVM entry
+    /// `settlement` already carries verbatim. Absent -- not an empty array
+    /// -- on a node with no settlement backend at all, so the pre-#632
+    /// shape (and the pre-#617 shape beneath it) stays byte-identical for a
+    /// settlement-less node; the client 0.24.0 parser, which knows neither
+    /// field, is unaffected either way.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    settlements: Vec<X402ChainSettlementTerms>,
 }
 
 /// What an unaffiliated buyer needs to OPEN a channel with this node,
@@ -356,6 +383,49 @@ pub struct X402SettlementTerms {
     pub decimals: u8,
 }
 
+/// One configured chain's entry in the x402 greeting's `extra.settlements`
+/// list (issue #632, epic #627's per-chain expansion of the single EVM
+/// [`X402SettlementTerms`] issue #617 shipped). Untagged: each variant's own
+/// `chain` field already self-identifies (`"evm:<chainId>"`, `"solana"`), so
+/// nothing else needs to distinguish them on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum X402ChainSettlementTerms {
+    /// Exactly the same facts, in the same shape, the legacy `extra.settlement`
+    /// object carries -- a two-chain node's `settlements` entry for its EVM
+    /// leg is byte-identical to its legacy `settlement` object.
+    Evm(X402SettlementTerms),
+    Solana(X402SolanaSettlementTerms),
+}
+
+/// The Solana twin of [`X402SettlementTerms`] (issue #632): what an
+/// unaffiliated buyer needs to open a channel against this node's deployed
+/// `payment-channel` program instance. Every field is a fact
+/// `SolanaSettlementBackend::connect` already proved at startup (issue
+/// #630) -- the program is reachable, executable and proven to behave like
+/// the deployed payment-channel program, and the configured `decimals`
+/// agrees with the mint's own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct X402SolanaSettlementTerms {
+    /// Always `"solana"` -- unlike EVM, a Solana backend has no chain id to
+    /// append: the program id already names exactly one deployed instance.
+    pub chain: String,
+    /// The on-chain counterparty a buyer opens a channel WITH -- the
+    /// settlement backend's own signing pubkey, base58-encoded.
+    #[serde(rename = "settlementAddress")]
+    pub settlement_address: String,
+    /// The deployed `payment-channel` program instance, base58-encoded.
+    #[serde(rename = "programId")]
+    pub program_id: String,
+    /// The SPL mint every channel this backend opens settles in,
+    /// base58-encoded.
+    #[serde(rename = "tokenAddress")]
+    pub token_address: String,
+    /// The mint's own reported scale -- informational (claims are already
+    /// in base units), verified against the chain at startup (issue #630).
+    pub decimals: u8,
+}
+
 const X402_VERSION: u32 = 2;
 const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 
@@ -363,12 +433,14 @@ const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 /// terminates and prices at `price`, with its terms instead of performing
 /// the app's work (client-edge-spec.md §1.4, ADR 0022) -- this changes no
 /// state and is only ever a reply to the request that asked. `settlement`
-/// is the node's channel-opening facts (issue #617), included when it has
-/// a settlement backend.
+/// is the node's legacy EVM-shaped channel-opening facts (issue #617),
+/// `settlements` is the additive per-chain list (issue #632); both are
+/// included exactly when the node has the relevant backend(s).
 fn payment_required(
     destination: &str,
     price: u64,
     settlement: Option<&X402SettlementTerms>,
+    settlements: &[X402ChainSettlementTerms],
 ) -> Response {
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
@@ -387,6 +459,7 @@ fn payment_required(
                 endpoint: "/ilp".to_string(),
                 price: price.to_string(),
                 settlement: settlement.cloned(),
+                settlements: settlements.to_vec(),
             },
         }],
     };
@@ -589,7 +662,12 @@ async fn handle_ilp(
         .app_route_price(&prepare.destination)
         .unwrap_or(0);
     if !has_claim_header && price > 0 {
-        return payment_required(&prepare.destination, price, state.settlement_terms.as_ref());
+        return payment_required(
+            &prepare.destination,
+            price,
+            state.settlement_terms.as_ref(),
+            &state.settlements,
+        );
     }
 
     // A claim header's validation failure rejects the packet before it is
@@ -1343,11 +1421,17 @@ mod tests {
         );
 
         // A node with no settlement backend keeps the pre-#617 greeting
-        // shape exactly: no `settlement` key at all, not a null one.
+        // shape exactly: no `settlement` key at all, not a null one. Issue
+        // #632 adds `settlements` beside it on the same terms: absent, not
+        // an empty array, on a settlement-less node.
         let extra = serde_json::to_value(&terms.accepts[0].extra).unwrap();
         assert!(
             extra.get("settlement").is_none(),
             "a settlement-less node's greeting must not carry a settlement key: {extra}"
+        );
+        assert!(
+            extra.get("settlements").is_none(),
+            "a settlement-less node's greeting must not carry a settlements key: {extra}"
         );
     }
 
@@ -1380,6 +1464,7 @@ mod tests {
             None,
             test_gate(ClientChannelRegistry::new()),
             Some(terms.clone()),
+            vec![X402ChainSettlementTerms::Evm(terms.clone())],
         );
 
         let request = Request::builder()
@@ -1395,6 +1480,84 @@ mod tests {
             answered.accepts[0].extra.settlement.as_ref(),
             Some(&terms),
             "the greeting must carry the node's channel-opening facts verbatim"
+        );
+
+        // Issue #632: an EVM-only node's additive `settlements` list is a
+        // one-entry list, its entry byte-identical to the legacy object.
+        assert_eq!(
+            answered.accepts[0].extra.settlements,
+            vec![X402ChainSettlementTerms::Evm(terms)],
+            "an EVM-only node's settlements list must carry exactly one entry, matching `settlement` verbatim"
+        );
+    }
+
+    /// Issue #632: a node settling on two chains carries BOTH chains'
+    /// channel-opening facts in `extra.settlements`, while the legacy
+    /// `extra.settlement` object stays exactly what it was before this
+    /// issue -- the EVM entry alone, unaffected by the Solana leg's
+    /// presence. This is the demoable slice's acceptance criterion: "a node
+    /// with both [settlement.evm] and [settlement.solana] greets with both
+    /// chains' facts; an EVM-only node greets with the legacy object
+    /// unchanged plus a one-entry list."
+    #[tokio::test]
+    async fn a_two_chain_node_greets_with_both_chains_facts_and_an_unchanged_legacy_object() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let evm_terms = X402SettlementTerms {
+            chain: "evm:84532".to_string(),
+            settlement_address: "0xc0e55cd2e967a4f625627dae5d4946f54267c7ab".to_string(),
+            token_network_registry: "0xcc9079ade929b168b54145f6d25262b64fab9d5b".to_string(),
+            token_network: "0x1e95493fef46707e034b4a1945f25a8c76a1823d".to_string(),
+            token_address: "0x49bee1bca5d15fb0963117923403f9498119a9ce".to_string(),
+            decimals: 6,
+        };
+        let solana_terms = X402SolanaSettlementTerms {
+            chain: "solana".to_string(),
+            settlement_address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string(),
+            program_id: "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip".to_string(),
+            token_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            decimals: 6,
+        };
+        let app = router_with_gate_and_terms(
+            connector,
+            test_signer(),
+            None,
+            test_gate(ClientChannelRegistry::new()),
+            Some(evm_terms.clone()),
+            vec![
+                X402ChainSettlementTerms::Evm(evm_terms.clone()),
+                X402ChainSettlementTerms::Solana(solana_terms.clone()),
+            ],
+        );
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let answered: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            answered.accepts[0].extra.settlement.as_ref(),
+            Some(&evm_terms),
+            "the legacy settlement object stays the EVM leg alone, unchanged by the Solana leg"
+        );
+        assert_eq!(
+            answered.accepts[0].extra.settlements,
+            vec![
+                X402ChainSettlementTerms::Evm(evm_terms),
+                X402ChainSettlementTerms::Solana(solana_terms),
+            ],
+            "a two-chain node's settlements list carries both chains' facts"
         );
     }
 
