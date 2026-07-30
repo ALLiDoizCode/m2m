@@ -248,19 +248,21 @@ pub(crate) fn resolve_client_channels(
         // EVM and Solana are separate namespaces (issue #630, matching
         // `connector_client_edge::ClientChannelRegistry`'s own split), so
         // duplication is checked within a chain, never across.
-        let duplicate_value = match &channel {
-            ClientChannelConfig::Evm(evm) => channels.iter().any(|existing| {
-                matches!(existing, ClientChannelConfig::Evm(e) if e.channel_id == evm.channel_id)
-            }),
-            ClientChannelConfig::Solana(solana) => channels.iter().any(|existing| {
-                matches!(existing, ClientChannelConfig::Solana(s) if s.channel_account == solana.channel_account)
-            }),
+        let duplicate = match &channel {
+            ClientChannelConfig::Evm(evm) => channels
+                .iter()
+                .any(|existing| {
+                    matches!(existing, ClientChannelConfig::Evm(e) if e.channel_id == evm.channel_id)
+                })
+                .then(|| evm.channel_id.clone()),
+            ClientChannelConfig::Solana(solana) => channels
+                .iter()
+                .any(|existing| {
+                    matches!(existing, ClientChannelConfig::Solana(s) if s.channel_account == solana.channel_account)
+                })
+                .then(|| solana.channel_account.clone()),
         };
-        if duplicate_value {
-            let value = match &channel {
-                ClientChannelConfig::Evm(evm) => evm.channel_id.clone(),
-                ClientChannelConfig::Solana(solana) => solana.channel_account.clone(),
-            };
+        if let Some(value) = duplicate {
             return Err(ConfigError::ClientChannelDuplicate { value });
         }
         channels.push(channel);

@@ -109,7 +109,9 @@ static NEXT_PORT_OFFSET: AtomicU16 = AtomicU16::new(0);
 /// ports so tests spawning one concurrently don't collide.
 pub struct SolanaValidator {
     child: Child,
-    ledger: tempfile::TempDir,
+    // Never read after construction -- kept only so its directory outlives
+    // the validator process using it and is removed on drop.
+    _ledger: tempfile::TempDir,
     pub rpc_url: String,
 }
 
@@ -166,7 +168,7 @@ impl SolanaValidator {
 
         Self {
             child,
-            ledger,
+            _ledger: ledger,
             rpc_url,
         }
     }
@@ -176,6 +178,5 @@ impl Drop for SolanaValidator {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = &self.ledger;
     }
 }
