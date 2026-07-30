@@ -419,8 +419,13 @@ impl SolanaSettlementBackend {
     }
 
     /// [`resolve`](Self::resolve), then reject only a settled channel
-    /// (issue #574) -- used by [`redeem`](SettlementBackend::redeem),
-    /// which succeeds against both `Opened` and `Closed`.
+    /// (issue #574) -- the shared precondition/read-back for anything
+    /// that still works against a `Closed` channel:
+    /// [`redeem`](SettlementBackend::redeem)'s precondition and post-submit
+    /// read-back, and [`close`](SettlementBackend::close)'s post-submit
+    /// read-back (the channel is expected to be `Closed` by then, but
+    /// accepting `Opened` too costs nothing and avoids a near-identical
+    /// third check).
     async fn redeemable_channel(
         &self,
         channel: &ChannelId,
@@ -435,22 +440,38 @@ impl SolanaSettlementBackend {
         }
     }
 
-    /// Which side of `account` is this backend's own identity, and which
-    /// is the counterparty's -- [`SettlementError::Backend`] if neither
-    /// is, which should never happen for a channel this backend itself
-    /// opened.
-    fn counterparty_of(&self, account: &wire::ChannelAccount) -> Result<Pubkey, SettlementError> {
+    /// Whether this backend's own signing address is `account`'s
+    /// participant A (`true`) or participant B (`false`) --
+    /// [`SettlementError::Backend`] if it is neither, which should never
+    /// happen for a channel this backend itself opened. The one place
+    /// [`counterparty_of`](Self::counterparty_of) and
+    /// [`to_channel_state`](Self::to_channel_state) both need to know
+    /// which side is "self".
+    fn own_is_participant_a(
+        &self,
+        account: &wire::ChannelAccount,
+    ) -> Result<bool, SettlementError> {
         let own = self.payer.pubkey();
         if account.participant_a == own {
-            Ok(account.participant_b)
+            Ok(true)
         } else if account.participant_b == own {
-            Ok(account.participant_a)
+            Ok(false)
         } else {
             Err(SettlementError::Backend(format!(
                 "channel participants {}/{} include neither this backend's own signing address {own}",
                 account.participant_a, account.participant_b
             )))
         }
+    }
+
+    /// Which side of `account` is the counterparty's identity (the other
+    /// side from [`own_is_participant_a`](Self::own_is_participant_a)).
+    fn counterparty_of(&self, account: &wire::ChannelAccount) -> Result<Pubkey, SettlementError> {
+        Ok(if self.own_is_participant_a(account)? {
+            account.participant_b
+        } else {
+            account.participant_a
+        })
     }
 
     /// Derive a single [`ChannelState`] from `account`'s two-sided shape
@@ -464,24 +485,18 @@ impl SolanaSettlementBackend {
         channel: &ChannelId,
         account: &wire::ChannelAccount,
     ) -> Result<ChannelState, SettlementError> {
-        let own = self.payer.pubkey();
-        let (counterparty, deposited, redeemed) = if account.participant_a == own {
+        let (counterparty, deposited, redeemed) = if self.own_is_participant_a(account)? {
             (
                 account.participant_b,
                 account.deposit_b,
                 account.transferred_amount_b,
             )
-        } else if account.participant_b == own {
+        } else {
             (
                 account.participant_a,
                 account.deposit_a,
                 account.transferred_amount_a,
             )
-        } else {
-            return Err(SettlementError::Backend(format!(
-                "channel participants {}/{} include neither this backend's own signing address {own}",
-                account.participant_a, account.participant_b
-            )));
         };
         Ok(ChannelState {
             id: channel.clone(),
@@ -696,7 +711,7 @@ impl SettlementBackend for SolanaSettlementBackend {
         );
         self.submit(&[instruction], &[]).await?;
 
-        let (_pubkey, account) = self.open_channel_or_closed(channel).await?;
+        let (_pubkey, account) = self.redeemable_channel(channel).await?;
         self.to_channel_state(channel, &account)
     }
 
@@ -783,27 +798,6 @@ impl SettlementBackend for SolanaSettlementBackend {
                 deposited: 0,
                 redeemed: 0,
             }),
-        }
-    }
-}
-
-impl SolanaSettlementBackend {
-    /// [`resolve`](Self::resolve), accepting either `Opened` or `Closed`
-    /// -- used right after [`close`](SettlementBackend::close) submits,
-    /// since the channel is expected to be `Closed` by the time this reads
-    /// it back (unlike [`open_channel`](Self::open_channel), which is a
-    /// precondition check that specifically rejects `Closed`).
-    async fn open_channel_or_closed(
-        &self,
-        channel: &ChannelId,
-    ) -> Result<(Pubkey, wire::ChannelAccount), SettlementError> {
-        let (pubkey, resolved) = self.resolve(channel).await?;
-        match resolved {
-            Resolved::Live(account) if account.status == wire::ChannelStatus::Settled => {
-                Err(SettlementError::ChannelSettled(channel.clone()))
-            }
-            Resolved::Live(account) => Ok((pubkey, account)),
-            Resolved::Settled => Err(SettlementError::ChannelSettled(channel.clone())),
         }
     }
 }
