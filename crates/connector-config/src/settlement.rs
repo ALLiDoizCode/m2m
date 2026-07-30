@@ -83,7 +83,7 @@ pub(crate) struct RawEvmSettlementTable {
 /// `[settlement.solana]`: `contract_address` (an EVM `TokenNetworkRegistry`)
 /// has no Solana equivalent, so this table names a `program_id` instead --
 /// the deployed `connector-settlement-solana-program` instance a
-/// `SolanaSettlementBackend` would drive once #567 wires one in.
+/// `SolanaSettlementBackend` would drive once epic #627 wires one in.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawSolanaSettlementTable {
@@ -293,68 +293,61 @@ fn resolve_rpc_url(rpc_url: String) -> Result<String, ConfigError> {
     Ok(rpc_url)
 }
 
-fn resolve_evm_fields(
-    rpc_url: String,
-    contract_address: String,
-    token_address: String,
-    decimals: u8,
-    key: RawSettlementKeyConfig,
-) -> Result<EvmSettlementConfig, ConfigError> {
-    let rpc_url = resolve_rpc_url(rpc_url)?;
+/// Shared between the `[settlement.evm]` table and the legacy flat
+/// `[settlement]` shape (which is converted into one at the call site): both
+/// name the same fields, just under different config-file positions.
+fn resolve_evm_fields(table: RawEvmSettlementTable) -> Result<EvmSettlementConfig, ConfigError> {
+    let rpc_url = resolve_rpc_url(table.rpc_url)?;
 
-    let contract_address = parse_evm_address(&contract_address).ok_or_else(|| {
+    let contract_address = parse_evm_address(&table.contract_address).ok_or_else(|| {
         ConfigError::SettlementInvalidContractAddress {
-            value: contract_address.clone(),
+            value: table.contract_address.clone(),
         }
     })?;
-    let token_address = parse_evm_address(&token_address).ok_or_else(|| {
+    let token_address = parse_evm_address(&table.token_address).ok_or_else(|| {
         ConfigError::SettlementInvalidTokenAddress {
-            value: token_address.clone(),
+            value: table.token_address.clone(),
         }
     })?;
 
-    if decimals == 0 {
+    if table.decimals == 0 {
         return Err(ConfigError::SettlementZeroDecimals);
     }
 
-    let key = resolve_settlement_key(key)?;
+    let key = resolve_settlement_key(table.key)?;
 
     Ok(EvmSettlementConfig {
         rpc_url,
         contract_address,
         token_address,
-        decimals,
+        decimals: table.decimals,
         key,
     })
 }
 
 fn resolve_solana_fields(
-    rpc_url: String,
-    program_id: String,
-    token_address: String,
-    decimals: u8,
-    key: RawSettlementKeyConfig,
+    table: RawSolanaSettlementTable,
 ) -> Result<SolanaSettlementConfig, ConfigError> {
-    let rpc_url = resolve_rpc_url(rpc_url)?;
+    let rpc_url = resolve_rpc_url(table.rpc_url)?;
 
-    if program_id.trim().is_empty() {
+    if table.program_id.trim().is_empty() {
         return Err(ConfigError::SettlementMissingProgramId);
     }
-    if token_address.trim().is_empty() {
+    if table.token_address.trim().is_empty() {
         return Err(ConfigError::SettlementMissingSolanaTokenAddress);
     }
 
-    if decimals == 0 {
+    if table.decimals == 0 {
         return Err(ConfigError::SettlementZeroDecimals);
     }
 
-    let key = resolve_settlement_key(key)?;
+    let key = resolve_settlement_key(table.key)?;
 
     Ok(SolanaSettlementConfig {
         rpc_url,
-        program_id,
-        token_address,
-        decimals,
+        program_id: table.program_id,
+        token_address: table.token_address,
+        decimals: table.decimals,
         key,
     })
 }
@@ -386,13 +379,13 @@ pub(crate) fn resolve_settlement(
                     })
                 }
             };
-            let evm = resolve_evm_fields(
-                raw.rpc_url,
-                raw.contract_address,
-                raw.token_address,
-                raw.decimals,
-                raw.key,
-            )?;
+            let evm = resolve_evm_fields(RawEvmSettlementTable {
+                rpc_url: raw.rpc_url,
+                contract_address: raw.contract_address,
+                token_address: raw.token_address,
+                decimals: raw.decimals,
+                key: raw.key,
+            })?;
             Ok(vec![SettlementConfig::Evm(evm)])
         }
         RawSettlementSection::Keyed(raw) => {
@@ -401,22 +394,10 @@ pub(crate) fn resolve_settlement(
             }
             let mut out = Vec::new();
             if let Some(evm) = raw.evm {
-                out.push(SettlementConfig::Evm(resolve_evm_fields(
-                    evm.rpc_url,
-                    evm.contract_address,
-                    evm.token_address,
-                    evm.decimals,
-                    evm.key,
-                )?));
+                out.push(SettlementConfig::Evm(resolve_evm_fields(evm)?));
             }
             if let Some(solana) = raw.solana {
-                out.push(SettlementConfig::Solana(resolve_solana_fields(
-                    solana.rpc_url,
-                    solana.program_id,
-                    solana.token_address,
-                    solana.decimals,
-                    solana.key,
-                )?));
+                out.push(SettlementConfig::Solana(resolve_solana_fields(solana)?));
             }
             Ok(out)
         }
