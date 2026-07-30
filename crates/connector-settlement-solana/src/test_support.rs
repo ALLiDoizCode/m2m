@@ -1,7 +1,9 @@
-//! A real, disposable `solana-test-validator` harness other crates' tests
-//! reuse rather than reimplementing (issue #630): `connector-cli`'s own
-//! settlement-construction tests need exactly what this crate's own
-//! `tests/support/mod.rs` already provides for its own integration tests.
+//! A real, disposable `solana-test-validator` harness shared by this
+//! crate's own integration tests (via a dev-dependency on itself with
+//! `test-util` on) and other crates' (issue #630): `connector-cli`'s
+//! settlement-construction tests need exactly what this crate's
+//! integration tests already stand up, and one copy of the harness is one
+//! place to fix it.
 //! Gated behind the `test-util` feature for the same reason
 //! `connector-settlement-evm`'s own `test_support` module is: a downstream
 //! crate's tests cannot see anything behind `#[cfg(test)]`, since that cfg
@@ -61,6 +63,16 @@ fn program_so_path() -> PathBuf {
 /// tool is missing or the build itself fails, so callers can fold that
 /// into the same "skip locally, fail loudly in CI" policy every other gate
 /// in this harness already uses.
+///
+/// `--tools-version v1.52` pins the platform-tools release rather than
+/// taking whichever line the installed CLI defaults to: it is the same pin
+/// CI's own `solana-program` job builds with
+/// (`.github/workflows/ci.yml`), and the toolchain line the deployed
+/// devnet program itself was built from -- a v1.52 build of this source
+/// matches the live bytecode's exact size and is 99.7% byte-identical,
+/// where the v2.1 CLI's default tools line produces a differently-sized
+/// binary entirely (`packages/solana-program/deployments/devnet-public.md`,
+/// "Reproducible-build comparison").
 fn ensure_program_built() -> bool {
     if program_so_path().exists() {
         return true;

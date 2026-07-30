@@ -1,13 +1,11 @@
 //! `SolanaSettlementBackend` held to the `SettlementBackend` port's
 //! contract suite, unmodified, against a real `packages/solana-program`
 //! instance loaded into a real (if disposable) validator's genesis -- see
-//! `tests/support/mod.rs` for how that validator is stood up. The suite
+//! `connector_settlement_solana::test_support` for how that validator is stood up. The suite
 //! requiring no changes for the deployed program's own, very different
 //! wire (SPL-token PDAs and an Ed25519-precompile balance proof, in place
 //! of the old crate's native-SOL, unverified one) is the measure of
 //! success issue #567 itself names for the port being chain-agnostic.
-
-mod support;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -19,7 +17,9 @@ use connector_settlement_solana::SolanaSettlementBackend;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
-use support::{require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID};
+use connector_settlement_solana::test_support::{
+    require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
+};
 
 #[tokio::test]
 async fn solana_settlement_backend_upholds_the_contract() {
