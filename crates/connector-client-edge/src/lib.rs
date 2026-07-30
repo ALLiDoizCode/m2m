@@ -398,6 +398,7 @@ pub enum X402ChainSettlementTerms {
     /// object carries -- a two-chain node's `settlements` entry for its EVM
     /// leg is byte-identical to its legacy `settlement` object.
     Evm(X402SettlementTerms),
+    /// See [`X402SolanaSettlementTerms`] for what each field means.
     Solana(X402SolanaSettlementTerms),
 }
 
