@@ -167,7 +167,7 @@ jobs:
       #   docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 \
       #     -t ghcr.io/toon-protocol/sandcastle-connector:latest .sandcastle/
       #   docker push ghcr.io/toon-protocol/sandcastle-connector:latest
-      - name: Pull prebuilt sandcastle agent image (fallback: build)
+      - name: "Pull prebuilt sandcastle agent image (fallback: build)"
         run: |
           if docker pull ghcr.io/toon-protocol/sandcastle-connector:latest; then
             docker tag ghcr.io/toon-protocol/sandcastle-connector:latest sandcastle:connector

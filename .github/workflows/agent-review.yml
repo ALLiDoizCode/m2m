@@ -100,7 +100,7 @@ jobs:
       # built with AGENT_UID/GID=1001 for the runner user and retagged to the
       # name sandcastle derives from the checkout dir. Rebuild instructions in
       # agent-implement.yml's matching step. Falls back to building in place.
-      - name: Pull prebuilt sandcastle agent image (fallback: build)
+      - name: "Pull prebuilt sandcastle agent image (fallback: build)"
         run: |
           if docker pull ghcr.io/toon-protocol/sandcastle-connector:latest; then
             docker tag ghcr.io/toon-protocol/sandcastle-connector:latest sandcastle:connector
