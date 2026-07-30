@@ -32,12 +32,15 @@
 //!    A node with no settlement backend at all still declares its channels
 //!    this way, and a declared channel is authoritative: it is answered
 //!    from memory and never resolved.
-//! 2. **Resolved from chain** -- an optional [`ClientChannelSource`]
-//!    ([`ClientChannelRegistry::with_source`]), asked only about a channel
-//!    nothing was declared for. `connector-cli` builds one over the
+//! 2. **Resolved from chain** -- a [`ClientChannelSource`] registered per
+//!    chain ([`ClientChannelRegistry::with_source`]), asked only about a
+//!    channel nothing was declared for. `connector-cli` builds one over the
 //!    `[settlement]` section's own `TokenNetwork`, so a client that has
 //!    opened a channel with this connector on chain can pay without the
-//!    operator hand-editing config and restarting.
+//!    operator hand-editing config and restarting. EVM is the only chain
+//!    with a registered source today (issue #611); the source is now
+//!    keyed by chain (issue #629) so a Solana source can compose
+//!    alongside it later without restructuring this registry again.
 //!
 //! The second is what makes issue #502's *"anonymity is a first-class
 //! path, not a fallback: it is how an unaffiliated buyer pays for a
@@ -174,6 +177,20 @@ pub struct EvmChannel {
     pub token_network_address: Address,
 }
 
+/// Which chain a claim's channel lives on -- the key a
+/// [`ClientChannelSource`] is registered under in
+/// [`ClientChannelRegistry`], so resolving an undeclared channel dispatches
+/// on the claim's own chain through a registry rather than a single
+/// hardcoded slot. EVM is the only chain with a registered source today
+/// (issue #611); a Solana source (a future `ClientChannelSource`
+/// implementation over the Solana settlement backend) composes by
+/// registering a second entry under `ClaimChain::Solana`, not by
+/// restructuring this type again (issue #629).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ClaimChain {
+    Evm,
+}
+
 /// The channels this connector has a record of, and the counterparty it
 /// accepts a claim's signature from on each. EVM and Solana are separate
 /// namespaces -- a `channelId` and a `channelAccount` are different kinds
@@ -187,11 +204,13 @@ pub struct EvmChannel {
 pub struct ClientChannelRegistry {
     evm: HashMap<[u8; 32], EvmChannel>,
     solana: HashMap<[u8; 32], [u8; 32]>,
-    /// Consulted only for an EVM channel nothing was declared for. `None`
-    /// is a node with no settlement backend: it accepts claims on exactly
-    /// what its config file declares, and on nothing else.
-    source: Option<Arc<dyn ClientChannelSource>>,
-    /// Memoised answers from [`Self::source`]. Never invalidated -- see
+    /// Consulted only for a channel nothing was declared for, keyed by
+    /// [`ClaimChain`] so each chain's source answers for that chain alone --
+    /// never, say, an EVM source consulted for a Solana lookup. Empty is a
+    /// node with no settlement backend: it accepts claims on exactly what
+    /// its config file declares, and on nothing else.
+    sources: HashMap<ClaimChain, Arc<dyn ClientChannelSource>>,
+    /// Memoised answers from [`Self::sources`]. Never invalidated -- see
     /// this module's doc.
     resolved: RwLock<HashMap<[u8; 32], EvmChannel>>,
 }
@@ -209,8 +228,12 @@ impl ClientChannelRegistry {
     /// authoritative and is still answered without a lookup, so
     /// `[[client_channels]]` keeps working exactly as it did -- and keeps
     /// working when the chain is unreachable.
+    ///
+    /// Registers `source` under [`ClaimChain::Evm`] -- the only chain a
+    /// [`ClientChannelSource`] can speak for today, since the trait exposes
+    /// only [`ClientChannelSource::evm_channel`].
     pub fn with_source(mut self, source: Arc<dyn ClientChannelSource>) -> ClientChannelRegistry {
-        self.source = Some(source);
+        self.sources.insert(ClaimChain::Evm, source);
         self
     }
 
@@ -253,11 +276,15 @@ impl ClientChannelRegistry {
     /// source is not empty however little it was told at startup: the
     /// channels it can answer for live on a chain, not in this map.
     pub fn is_empty(&self) -> bool {
-        self.evm.is_empty() && self.solana.is_empty() && self.source.is_none()
+        self.evm.is_empty() && self.solana.is_empty() && self.sources.is_empty()
     }
 
     /// The record for an EVM channel: declared first, then already
-    /// resolved, then -- once per channel -- the source.
+    /// resolved, then -- once per channel -- the [`ClaimChain::Evm`] entry
+    /// of [`Self::sources`], if one is registered. A claim on a chain with
+    /// no registered entry resolves nothing here, the same
+    /// [`ClaimIngestRejection::UnknownChannel`] outcome as a registry with
+    /// no source at all (issue #629).
     ///
     /// `Ok(None)` is "no such channel this connector can be paid on";
     /// `Err` is "the lookup failed, so the answer is unknown". Both refuse
@@ -281,7 +308,7 @@ impl ClientChannelRegistry {
                 return Ok(Some(*channel));
             }
         }
-        let Some(source) = self.source.as_ref() else {
+        let Some(source) = self.sources.get(&ClaimChain::Evm) else {
             return Ok(None);
         };
         let Some(channel) = source.evm_channel(channel_id).await? else {
@@ -426,6 +453,24 @@ mod tests {
             registry.is_empty(),
             "nothing was recorded under a coerced id"
         );
+    }
+
+    /// Issue #629: the source is stored under the claim's chain
+    /// ([`ClaimChain::Evm`]) rather than as a single untyped slot a lookup
+    /// for any chain could fall into. An EVM source registered via
+    /// `with_source` must never answer a Solana lookup for the very same 32
+    /// bytes -- the regression a chain-agnostic "one source" field would
+    /// silently permit once a Solana entry is added alongside it.
+    #[tokio::test]
+    async fn an_evm_source_never_answers_a_solana_lookup_for_the_same_bytes() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x09; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new().with_source(source);
+
+        assert_eq!(registry.evm(&[0x09; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(registry.solana(&[0x09; 32]), None);
     }
 
     #[test]
