@@ -11,13 +11,12 @@
 #   Committing this file triggers nothing: pull_request-`labeled` workflows fire
 #   only from the default branch and only when someone applies the label.
 #
-# VERIFY ON FIRST RUN — the standalone-review path:
-#   Sandcastle 0.12.0 only exercises the reviewer inside its parallel loop, on a
-#   fresh branch it just created. Running it standalone against an existing PR
-#   head branch is our interpretation (see .sandcastle/agent-review-pr.ts). On
-#   the first live run confirm: (1) the sandbox checks out the existing PR head
-#   rather than erroring on the ref, and (2) review-prompt.md's built-in
-#   {{TARGET_BRANCH}} resolves to `main` so the diff is non-empty.
+# FIRST-LIVE-RUN OUTCOME (2026-07-30, connector#634): the standalone path works
+#   only when this job does NOT check out the PR head — sandcastle checks the
+#   existing head branch out in its own worktree, and git refuses the same
+#   branch in two worktrees ("already checked out" WorktreeError). Hence the
+#   checkout below pins `ref: main`. Still confirm on the next run that
+#   review-prompt.md's {{TARGET_BRANCH}} resolves to `main` (non-empty diff).
 #
 # Note: label events on PRs opened from FORKS run without secrets (GitHub
 # security), so this runner only works on same-repo PRs. That is expected for
@@ -80,8 +79,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Check out the PR head so the reviewer operates on the right branch.
-          ref: ${{ github.event.pull_request.head.ref }}
+          # Check out MAIN, not the PR head: sandcastle's branch strategy checks
+          # the PR head out in its own worktree under .sandcastle/worktrees/, and
+          # git refuses to check out one branch in two worktrees at once. Holding
+          # the PR head here made the first live run fail with WorktreeError
+          # ("already checked out") — the main tree must hold any OTHER ref.
+          ref: main
 
       - uses: actions/setup-node@v4
         with:
