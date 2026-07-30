@@ -338,6 +338,48 @@ impl SolanaSettlementBackend {
         self.token_mint
     }
 
+    /// Who this backend's counterparty is on the channel at `channel_account`,
+    /// as the chain itself holds it -- the Solana twin of
+    /// `EvmSettlementBackend::channel_counterparty` (issue #611), and the
+    /// client edge's own channel record for a Solana channel nothing was
+    /// declared for (issue #629/#631).
+    ///
+    /// `Ok(None)`, rather than an error, for every "this is not a channel
+    /// this backend can be paid on":
+    ///
+    /// - nothing was ever opened at `channel_account`, or it has already
+    ///   `Settled` (`redeem` requires `Opened` or `Closed` --
+    ///   [`SolanaSettlementBackend`]'s own top-of-file doc on why a settled
+    ///   channel's account does not even exist to be fetched -- and honouring
+    ///   a claim against it would be giving the app's work away; a merely
+    ///   `Closed` channel still redeems during its challenge window (issue
+    ///   #574), so it still answers);
+    /// - neither participant is this backend's own signing address, i.e. it
+    ///   is somebody else's channel.
+    ///
+    /// `Err` is reserved for a lookup that genuinely failed -- an
+    /// unreachable endpoint, a malformed response -- so a caller can tell
+    /// "there is no such channel" apart from "I could not find out".
+    pub async fn channel_counterparty(
+        &self,
+        channel_account: Pubkey,
+    ) -> Result<Option<Pubkey>, SettlementError> {
+        let Some(account) = self.fetch_account(&channel_account).await? else {
+            return Ok(None);
+        };
+        if account.status == wire::ChannelStatus::Settled {
+            return Ok(None);
+        }
+        let own = self.payer.pubkey();
+        if account.participant_a == own {
+            Ok(Some(account.participant_b))
+        } else if account.participant_b == own {
+            Ok(Some(account.participant_a))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Test/dev-only accessor (issue #567): the pubkey bytes of the first
     /// counterparty identity a [`deploy`](Self::deploy)-built backend
     /// privately holds a key for -- what this crate's own tests pass as

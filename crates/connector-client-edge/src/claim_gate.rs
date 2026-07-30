@@ -438,7 +438,7 @@ async fn verify_claim_signature(
 ) -> Result<Vec<u8>, ClaimIngestRejection> {
     match claim {
         ClientClaim::Evm(claim) => verify_evm_claim_signature(channels, claim).await,
-        ClientClaim::Solana(claim) => verify_solana_claim_signature(channels, claim),
+        ClientClaim::Solana(claim) => verify_solana_claim_signature(channels, claim).await,
     }
 }
 
@@ -502,18 +502,34 @@ async fn verify_evm_claim_signature(
     }
 }
 
-fn verify_solana_claim_signature(
+async fn verify_solana_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &SolanaClientClaim,
 ) -> Result<Vec<u8>, ClaimIngestRejection> {
+    // An id that is not a 32-byte Solana account cannot be a channel this
+    // connector recorded, and cannot be one any chain could resolve either
+    // -- so it is unknown rather than merely unverifiable, and is settled
+    // here without spending a lookup on it (mirrors `verify_evm_claim_signature`).
     let Some(channel_account) = decode_base58_bytes::<32>(&claim.channel_account) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
-    // Declared records only -- see `ClientChannelRegistry::solana`: there
-    // is no Solana client-edge channel source, so a Solana claim is
-    // payable exactly when configuration named its channel.
-    let Some(counterparty) = channels.solana(&channel_account) else {
-        return Err(ClaimIngestRejection::UnknownChannel);
+    // Declared, or -- for a channel nothing declared -- resolved from the
+    // chain via a registered `ClaimChain::Solana` source (issue #631).
+    let counterparty = match channels.solana(&channel_account).await {
+        Ok(Some(counterparty)) => counterparty,
+        Ok(None) => return Err(ClaimIngestRejection::UnknownChannel),
+        // Loud, per issue #556/#631: an operator has to be able to tell
+        // "my chain endpoint is down, so no *new* channel can be
+        // recognised" apart from "someone is claiming on channels that do
+        // not exist". The claim is refused either way.
+        Err(failure) => {
+            tracing::warn!(
+                channel_account = %claim.channel_account,
+                error = %failure,
+                "refusing a client claim: could not resolve its channel's counterparty"
+            );
+            return Err(ClaimIngestRejection::ChannelLookupFailed(failure.0));
+        }
     };
 
     use base64::engine::general_purpose::STANDARD as BASE64;
