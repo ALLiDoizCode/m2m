@@ -1,18 +1,25 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # STATUS (#600, 2026-07-30): NOT DEPLOYED. The devnet store leg shipped
 # WITHOUT this overlay: the apex terminates g.toon.ario / g.toon.store at
-# the store app directly over the boxes' WireGuard segment (see
-# infra/linode-node/connector-rust.toml's header and this directory's
-# docker-compose.store.wg.yml), because the PAID forwarded path this
-# overlay would sit behind is structurally unwired — a peer route is
-# neither priced nor charged at the client edge, a peer-wire arrival is
-# never charged the terminating route's price, and ADR 0024's peer claims
-# cannot be configured from any connector.toml. Deploying this today would
-# stand up a free-write path beside a paid one. Issue #620 tracks wiring
-# the paid peer wire; when it lands, the private segment already exists
-# (wg0, apex 10.83.0.0/31 ↔ store 10.83.0.1/31) and STORE_PEER_WIRE_BIND
-# below should be this box's WireGuard address 10.83.0.1 — the VPC this
-# file's comments were written for was never provisioned (#600).
+# the store app over this box's own PUBLIC TLS front
+# (https://proxy.store.devnet.toonprotocol.dev/store — nginx's `location
+# /store` in ./nginx/conf.d/node.conf; see
+# infra/linode-node/connector-rust.toml's header). Two findings closed
+# that door for this overlay:
+#   * the PAID forwarded path is structurally unwired (#620) — a peer
+#     route is neither priced nor charged at the client edge, a peer-wire
+#     arrival is never charged the terminating route's price, and ADR
+#     0024's peer claims cannot be configured from any connector.toml, so
+#     deploying this today would stand up a free-write path beside a paid
+#     one; and
+#   * the peer wire cannot carry the public inter-node link devnet
+#     topology calls for (#623) — raw-TCP framing nginx cannot
+#     TLS-terminate, no TLS of its own (ADR 0003), SocketAddr-only
+#     addressing. The VPC these files' comments were written for was
+#     never provisioned, and #600 settled that no private segment is
+#     wanted: node↔node links are public, like the TS fleet's BTP-over-wss.
+# When #620 + #623 land, STORE_PEER_WIRE_BIND's whole containment story
+# below should be revisited against the transport they choose.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ═══════════════════════════════════════════════════════════════════════════
 # TOON devnet — Rust connector, store side (issue #490, ADR 0013's parallel
