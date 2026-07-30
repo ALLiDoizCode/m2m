@@ -20,6 +20,11 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
+# This crate itself, with `test-util` on, so the integration tests reuse
+# the one `solana-test-validator` harness `src/test_support.rs` already
+# ships to downstream crates (`connector-cli`) instead of carrying a
+# duplicated copy under `tests/support/`.
+connector-settlement-solana = { path = ".", features = ["test-util"] }
 connector-settlement = { path = "../connector-settlement", features = ["test-util"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 tempfile = "3"
