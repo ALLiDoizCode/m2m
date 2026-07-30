@@ -45,8 +45,7 @@ connector-settlement             the chain-agnostic settlement port + its contra
   ├─ port.rs, contract.rs        the port, and the one suite every backend is run against
   └─ in_memory.rs                the fake
 connector-settlement-evm         real EVM backend: TokenNetworkRegistry → TokenNetwork
-connector-settlement-solana      real Solana backend
-connector-settlement-solana-program   the Solana payment-channel program it drives
+connector-settlement-solana      real Solana backend — drives packages/solana-program (the deployed payment-channel program)
 
 connector-runtime                the packet plane and its ports
   ├─ connector.rs                Connector — routing, delivery, fees, rejects
