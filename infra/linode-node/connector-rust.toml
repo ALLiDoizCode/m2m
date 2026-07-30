@@ -22,14 +22,39 @@
 # a wire conflict. `docs/operators/parallel-fleet-comparison.md` records the
 # period when the prefixes differed — read `g.rust` there as historical.
 #
-# Children mirror the TypeScript fleet's own two-app shape without importing
-# its Arweave-specific `.ario` naming:
+# Children mirror the TypeScript fleet's own two-app shape:
 #   g.toon.relay  — terminates locally at the SAME running relay app
 #                   (relay:3100) this box's TypeScript connector already
 #                   fronts.
-#   g.toon.store  — forwarded to the store-side Rust connector (peer
-#                   "store", below), which terminates it at the SAME running
-#                   store app (store:3300) on the store box.
+#   g.toon.ario   — terminates at the store box's running store app
+#                   (10.83.0.1:3300, over the WireGuard segment below) under
+#                   the name the TS fleet's kind:10032 announce advertises as
+#                   its `routes.store` — which is the destination rig and the
+#                   other announce-driven clients actually dial (#600).
+#   g.toon.store  — the same store app under this fleet's own non-Arweave
+#                   name, kept as an alias at the same price.
+#
+# ── The store leg is a TERMINATED route, not the peer wire (#600) ─────────
+# Both store routes reach the store app over plain HTTP across a WireGuard
+# tunnel between the two boxes (apex wg0 10.83.0.0/31 ↔ store 10.83.0.1/31,
+# keys generated on-box in /etc/wireguard, never committed; systemd
+# wg-quick@wg0 on both ends). That tunnel IS the private segment #600 asked
+# for — #492's peer-wire containment reasoning holds for any plaintext hop,
+# and the app-delivery HTTP here is exactly as plaintext as the peer wire
+# would be.
+#
+# What this deliberately is NOT: the ADR 0003 peer wire with a store-side
+# Rust connector behind it. The PAID forwarded path is structurally unwired
+# today — the client edge prices only locally-terminated routes (so a peer
+# route greets nothing and charges nothing), the terminating side never
+# charges its `price` for a peer-wire arrival, and ADR 0024's peer claims
+# cannot be configured from any connector.toml. A peer-forwarded g.toon.store
+# would therefore have served the store app FOR FREE end to end. Terminating
+# here instead puts the store leg on the same claim-gated client-edge path
+# the proven g.toon.relay route uses (x402 greeting, F03 underpayment,
+# journaled watermark — issue #520's charging, #605's durability). The real
+# paid peer wire is tracked in #620; the previous placeholder [[peers]]
+# "store" @ 203.0.113.20 and the fee=0 peer route are gone with it.
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Distinct from the TypeScript node's 3000/8080/8081 (see
@@ -68,31 +93,6 @@ state_dir = "/app/state"
 # the TypeScript node's `connector_data` volume.
 key_file = "/app/data/signer.key"
 
-# ── Peering with the store-side Rust connector ─────────────────────────────
-# This apex only DIALS OUT to the store connector below — it never accepts
-# an inbound peer connection itself, so no peer_wire_addr is set in this
-# file.
-#
-# REPLACE 203.0.113.20 with the store box's **VPC** address once
-# devnet-manage.sh has provisioned it — NOT its public IP. The peer wire is
-# plaintext and unauthenticated (ADR 0003) and carries signed balance proofs
-# (ADR 0004, #423), so #492 settled that it runs on a private segment only;
-# docker-compose.store.rust.yml's header has the full reasoning and the
-# store box publishes 4001 on that address alone. Dialing the store's public
-# IP from here would work and would defeat the point.
-#
-# It is a documentation-only placeholder (RFC 5737 TEST-NET-3), chosen so
-# this file is already a syntactically valid TOML file with a real
-# SocketAddr (ADR 0009: a malformed peer addr is a refuse-to-start error),
-# not so it is reachable. An unreachable peer is not a startup error —
-# `NetworkPeerTransport` dials lazily on the first packet — so the apex
-# serves `g.toon.relay` with this placeholder still in place, which is how
-# it was deployed apex-first in #492. Port 4001 matches the store box's own
-# connector-rust.toml peer_wire_addr.
-[[peers]]
-id = "store"
-addr = "203.0.113.20:4001"
-
 [[routes]]
 prefix = "g.toon.relay"
 # `/write`, not the bare origin: `HttpAppClient::deliver` POSTs here, and the
@@ -121,9 +121,30 @@ handler_url = "http://relay:3100/write"
 price = 1000
 
 [[routes]]
+prefix = "g.toon.ario"
+# `/store`, not the bare origin — the same shape as g.toon.relay's `/write`
+# above, for the same reason: `HttpAppClient::deliver` POSTs here, and the
+# store app serves only `POST /store` and `GET /health`. 10.83.0.1 is the
+# store box's WireGuard address (see the header): the store app's 3300 is
+# published on that address ALONE by
+# infra/linode-store/docker-compose.store.wg.yml, so this URL resolves only
+# from inside the tunnel. An envelope's own `target` cannot override the
+# path (issue #596, ADR 0025).
+handler_url = "http://10.83.0.1:3300/store"
+# Parity with the TS fleet's announced os.store capability for this same
+# destination (`price: '1000'` — 0.001 six-decimal USDC, ADR 0010), which is
+# the flat per-object figure rig quotes for git-object uploads. Same
+# claim-gate semantics as g.toon.relay's price above (#520, #557).
+price = 1000
+
+[[routes]]
 prefix = "g.toon.store"
-peer_id = "store"
-fee = 0
+# This fleet's own name for the same store leg — an alias, terminated at the
+# SAME handler_url. `insert_consistent_handler_price` requires the price to
+# match the g.toon.ario route's exactly (route.rs: a shared handler must not
+# be reachable at two prices, or the cheaper one always wins).
+handler_url = "http://10.83.0.1:3300/store"
+price = 1000
 
 # ── Operator surface (optional) ─────────────────────────────────────────
 # Omitted here deliberately: enabling it means committing (or securely
@@ -132,73 +153,43 @@ fee = 0
 # deploy/connector-rust/README.md steps 2-3 before relying on GET /metrics
 # or the write surface on this node.
 
-# ── Settlement (issue #542) — DELIBERATELY NOT CONFIGURED ───────────────
-# There is no `[settlement]` section in this file, and there must not be one.
+# ── Settlement (issues #542, #577) — LIVE against Base Sepolia ──────────
+# `EvmSettlementBackend` drives `packages/contracts/src/TokenNetwork.sol`,
+# the same signature-verifying payment-channel contract the TypeScript
+# fleet settles through, reached via the `TokenNetworkRegistry` named
+# below (issue #576). Startup calls `EvmSettlementBackend::connect`, which
+# resolves `token_address` through the registry and reads the token's own
+# `decimals()`; any disagreement is a refusal to start, not a silent no-op
+# (ADR 0009, issues #564/#566). A node that boots with this section has
+# therefore already proven the registry resolves this token.
 #
-# `EvmSettlementBackend` drives `packages/contracts/src/TokenNetwork.sol` --
-# the real, signature-verifying payment channel contract the live
-# TypeScript fleet already settles through on Base Sepolia -- reached
-# through a `TokenNetworkRegistry` factory (issue #566, issue #576).
-# `crates/connector-settlement-evm/contracts/SettlementChannel.sol`, this
-# crate's own throwaway, signature-unverified channel contract (issue #459,
-# quarantined against accidental deployment by issue #568), is gone: there
-# is nothing left to warn against deploying.
-#
-# The two states below are not symmetric, and that asymmetry is by design:
-#
-#   * ABSENT is a supported, deliberate configuration. The node starts and
-#     serves; channel operations answer
-#     `ChannelOperationError::NoSettlementBackend`, exactly the "not started
-#     at all" shape an absent `[operator]` section already has. This devnet
-#     fleet forwards packets for behavioural comparison against the
-#     TypeScript fleet (see `price = 0` above); it settles nothing.
-#
-#   * PRESENT BUT WRONG is a hard startup failure, on purpose (ADR 0009,
-#     fail-closed). `connector-cli::runtime::build` calls
-#     `EvmSettlementBackend::connect`, which resolves `token_address`
-#     through `contract_address`'s `TokenNetworkRegistry.getTokenNetwork`.
-#     Against a registry with no `TokenNetwork` registered for that token
-#     that resolves to the zero address, `connect` errors naming both
-#     addresses, and the process exits 1 — it does NOT start with
-#     settlement quietly disabled. A placeholder address is therefore not a
-#     harmless "syntactically valid" filler here: it is the difference
-#     between a node that boots and a node that does not.
-#
-#
-# One further consequence, since issue #556: an absent `[settlement]`
-# section is also the absence of a client-edge channel *source*. With no
-# chain to ask, the only channels this node can accept a claim on are the
-# ones a `[[client_channels]]` section declares -- so an unaffiliated buyer
-# who opens a channel on chain cannot pay here until #577 fills the section
-# below in. The mechanism is landed; this box is not yet pointed at a
-# chain.
-# The block below is the shape an operator will eventually fill in, once
-# this box is meant to settle for real: `contract_address` names the
-# `TokenNetworkRegistry`, not a channel contract directly (issue #576).
-# `token_address` is already the real mock USDC `./connector.yaml` names,
-# and `rpc_url` is that config's own known-good EVM RPC. That shape is not
-# decoration — `crates/connector-bin/tests/devnet_configs_load.rs` uncomments
-# this very block and boots it against a freshly deployed registry and
-# `TokenNetwork` on a local anvil (the explicit test-only escape hatch), so
-# it stays a template that actually works. #577 tracks actually shipping
-# this section filled in against the live Base Sepolia deployment.
-#
-# --- BEGIN settlement template (uncomment when a contract is deployed) ---
-# [settlement]
-# chain = "evm"
-# rpc_url = "https://base-sepolia-rpc.publicnode.com"
-# # REPLACE the zero address with the deployed `TokenNetworkRegistry` address.
-# contract_address = "0x0000000000000000000000000000000000000000"
-# token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
-# # The scale the deployed token itself reports. Nothing scales by it --
-# # claims are already in the token's base units -- but startup reads the
-# # token's own `decimals()` and refuses to boot if the two disagree (issue
-# # #564), so a stale value here is a refusal to start, not a silent no-op.
-# decimals = 6
-#
-# [settlement.key]
-# # Same key material as [signer] above -- this devnet overlay does not
-# # separate "connector identity" from "settlement signer" (a real
-# # deployment with different risk profiles for each might).
-# key_file = "/app/data/signer.key"
-# --- END settlement template ---
+# Since issue #556 this section is also the client edge's channel SOURCE:
+# with it, an unaffiliated buyer who opens a channel on chain pays this
+# node with no config edit (issue #611), and the accepted claim's
+# watermark is journaled under `state_dir` like a declared channel's
+# (issue #605).
+
+[settlement]
+chain = "evm"
+# The same known-good public endpoint ./connector.yaml already uses.
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+# The deployed `TokenNetworkRegistry` (issue #566) — a factory, not a
+# channel contract. On this deployment `getTokenNetwork(token_address)`
+# resolves to 0x1E95493fEF46707E034b4a1945f25a8C76A1823D, the TokenNetwork
+# the TypeScript fleet settles through today.
+contract_address = "0xcC9079adE929b168B54145f6d25262b64FAB9D5b"
+# 6-decimal devnet USDC — the fleet-wide settlement asset (ADR 0010).
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+# The scale the deployed token itself reports. Startup reads the token's
+# own `decimals()` and refuses to boot on disagreement (issue #564).
+decimals = 6
+
+[settlement.key]
+# Deliberately NOT the [signer] key above: the signer key is per-box
+# random material with no funds, while settlement signs transactions that
+# spend real testnet value. This file holds the fleet's funded settlement
+# account (the mnemonic-derived devnet key the TypeScript fleet also
+# settles with), provisioned on the box as ./settlement-rust.key and
+# mounted read-only exactly like ./signer-rust.key — including its
+# `chown 10001:10001`.
+key_file = "/app/data/settlement.key"

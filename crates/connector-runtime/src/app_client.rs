@@ -47,13 +47,21 @@ pub enum AppOutcome {
 /// never replace any part of it.
 ///
 /// `""` and `"/"` both mean "the handler's own path, nothing appended"
-/// (the common case a client uses when it has exactly one endpoint). Any
-/// other value beginning with `/` is an absolute-path escape attempt and is
-/// refused, as is a scheme (`http:`, `javascript:`, ...), a `..` or `.`
-/// path segment, a backslash, or a percent-encoded form of any of those --
-/// checked against the fully percent-decoded form, so an encoded equivalent
-/// (`%2e%2e`, `%2Fadmin`, `%5c`, `%68ttp%3a...`) cannot smuggle past a check
-/// for the literal characters.
+/// (the common case a client uses when it has exactly one endpoint), and so
+/// does an absolute path that is LITERALLY the handler's own configured
+/// path (issue #621): a target restating `handler_url.path()` character for
+/// character names nothing the route does not already serve, so refusing it
+/// defends nothing -- and the deployed TypeScript fleet's clients (rig's
+/// git-object uploads, `proxyPath: '/store'`) address their one endpoint
+/// exactly that way against a handler configured at that same path. Only
+/// the literal restatement is accepted: a percent-encoded spelling of it is
+/// still refused below with every other encoded form, and any other value
+/// beginning with `/` is an absolute-path escape attempt and is refused, as
+/// is a scheme (`http:`, `javascript:`, ...), a `..` or `.` path segment, a
+/// backslash, or a percent-encoded form of any of those -- checked against
+/// the fully percent-decoded form, so an encoded equivalent (`%2e%2e`,
+/// `%2Fadmin`, `%5c`, `%68ttp%3a...`) cannot smuggle past a check for the
+/// literal characters.
 ///
 /// Shared by [`HttpAppClient`] and [`FakeAppClient`] so both implementations
 /// of this port enforce the identical rule (ADR 0007: a fake must genuinely
@@ -66,6 +74,13 @@ fn resolve_target_under_handler(handler_url: &Url, target: &str) -> Result<Url, 
 
     let sub_path = match path_part {
         "" | "/" => "",
+        // The one absolute form accepted (issue #621): the literal
+        // restatement of the handler's own configured path resolves to
+        // that path and nothing else -- it cannot name anything the route
+        // does not already serve. Compared against the RAW target on
+        // purpose: an encoded spelling (`%2Fstore`) is not a restatement,
+        // it is an escape probe, and falls through to the refusals below.
+        other if other == handler_url.path() => "",
         other if other.starts_with('/') => {
             return Err(format!(
                 "envelope target '{target}' is an absolute path -- it must be relative to the \
@@ -376,6 +391,44 @@ mod tests {
         fn an_absolute_path_is_refused() {
             assert!(resolve_target_under_handler(&handler(), "/admin").is_err());
             assert!(resolve_target_under_handler(&handler(), "/health").is_err());
+        }
+
+        /// Issue #621: the literal restatement of the handler's own path
+        /// is the TypeScript fleet's client convention for "the handler's
+        /// own endpoint" (rig uploads send `proxyPath: '/store'` against a
+        /// handler at `/store`), and names nothing the route does not
+        /// already serve -- so it resolves to the handler's own path,
+        /// exactly like `""` and `"/"`.
+        #[test]
+        fn restating_the_handlers_own_path_resolves_to_it() {
+            assert_eq!(
+                resolve_target_under_handler(&handler(), "/write")
+                    .unwrap()
+                    .as_str(),
+                "http://relay:3100/write"
+            );
+            // A query still rides along, exactly as it does for `""`.
+            assert_eq!(
+                resolve_target_under_handler(&handler(), "/write?q=x")
+                    .unwrap()
+                    .as_str(),
+                "http://relay:3100/write?q=x"
+            );
+        }
+
+        /// Only the LITERAL restatement is accepted (issue #621): anything
+        /// nested under it stays an absolute-path refusal (a client with a
+        /// sub-resource addresses it relatively), a percent-encoded
+        /// spelling is an escape probe, and prefix/suffix near-misses are
+        /// not the handler's path.
+        #[test]
+        fn near_misses_of_the_handlers_own_path_are_still_refused() {
+            for target in ["/write/extra", "/writex", "/writ", "%2Fwrite", "/write/"] {
+                assert!(
+                    resolve_target_under_handler(&handler(), target).is_err(),
+                    "target {target:?} should be refused"
+                );
+            }
         }
 
         #[test]
