@@ -54,7 +54,7 @@
 # on its own:
 #
 #   - §1.3 (payment claims) and §1.4 (the x402 greeting) are implemented, and
-#     connector-rust.toml now prices g.rust.relay at 1000 (#522, #526, #562).
+#     connector-rust.toml now prices g.toon.relay at 1000 (#522, #526, #562).
 #     An unpaid request to that route is answered 402 rather than delivered.
 #   - The connector no longer injects X-TOON-Payer/-Amount/-Chain, or any
 #     header at all, into what it proxies (ADR 0020). The relay's POST /write

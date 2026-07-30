@@ -1,5 +1,12 @@
 # What the two fleets actually did, side by side
 
+> **Historical note (2026-07-30):** this document records the period when the two
+> fleets ran under distinct prefixes (`g.toon` vs `g.rust`). The comparison
+> concluded with the Rust connector carrying a paid write end to end on devnet,
+> and the Rust fleet was made the official implementation: its routes now serve
+> `g.toon.relay` / `g.toon.store`. Every `g.rust` below is the prefix as it was
+> at the time of the comparison.
+
 > **Closed record — there is no second run, and this is not an open defect.**
 >
 > [ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md) abandons the parallel-fleet

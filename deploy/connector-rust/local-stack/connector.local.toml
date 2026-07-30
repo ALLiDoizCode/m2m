@@ -27,7 +27,7 @@ key_file = "/app/secrets/signer.key"
 # issue #526's x402 greeting quotes back to an unpaid caller. 1000 matches what
 # devnet's own terminated routes charge (infra/linode-node/connector-rust.toml).
 #
-# `/write`, not the bare origin -- the same value devnet's `g.rust.relay` route
+# `/write`, not the bare origin -- the same value devnet's `g.toon.relay` route
 # carries, and for the same reason: the relay serves only `POST /write` and
 # `GET /health`, so a bare `http://relay:3100` comes back F99 "app declined the
 # delivery with HTTP 404" (#492).

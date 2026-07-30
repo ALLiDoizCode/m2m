@@ -332,8 +332,8 @@ async fn assert_answered_with_x402_greeting(client_edge_addr: &str, destination:
 
 #[tokio::test]
 async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
-    assert!(APEX_CONFIG.contains("g.rust.relay"));
-    assert!(APEX_CONFIG.contains("g.rust.store"));
+    assert!(APEX_CONFIG.contains("g.toon.relay"));
+    assert!(APEX_CONFIG.contains("g.toon.store"));
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
@@ -344,12 +344,12 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
         false,
     );
 
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.rust.relay").await;
+    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.relay").await;
 }
 
 #[tokio::test]
 async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
-    assert!(STORE_CONFIG.contains("g.rust.store"));
+    assert!(STORE_CONFIG.contains("g.toon.store"));
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
@@ -360,7 +360,7 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
         true,
     );
 
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.rust.store").await;
+    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.store").await;
 }
 
 /// Deploy a fresh `TokenNetworkRegistry`, a `TokenNetwork` through it, and
