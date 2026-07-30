@@ -102,8 +102,8 @@ jobs:
       # agent-implement.yml's matching step. Falls back to building in place.
       - name: "Pull prebuilt sandcastle agent image (fallback: build)"
         run: |
-          if docker pull ghcr.io/toon-protocol/sandcastle-connector:latest; then
-            docker tag ghcr.io/toon-protocol/sandcastle-connector:latest sandcastle:connector
+          if docker pull ghcr.io/toon-protocol/connector:sandcastle-agent; then
+            docker tag ghcr.io/toon-protocol/connector:sandcastle-agent sandcastle:connector
           else
             echo "::warning::Prebuilt image pull failed — building on the runner."
             npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
