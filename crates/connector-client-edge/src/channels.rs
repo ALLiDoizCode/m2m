@@ -265,9 +265,9 @@ impl ClientChannelRegistry {
     /// `[[client_channels]]` keeps working exactly as it did -- and keeps
     /// working when the chain is unreachable.
     ///
-    /// Registers `source` under [`ClaimChain::Evm`] -- the only chain a
-    /// [`ClientChannelSource`] can speak for today, since the trait exposes
-    /// only [`ClientChannelSource::evm_channel`].
+    /// Registers `source` under [`ClaimChain::Evm`], so it is consulted for
+    /// an EVM lookup and never a Solana one -- see
+    /// [`with_solana_source`](Self::with_solana_source) for that twin.
     pub fn with_source(mut self, source: Arc<dyn ClientChannelSource>) -> ClientChannelRegistry {
         self.sources.insert(ClaimChain::Evm, source);
         self
