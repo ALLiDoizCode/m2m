@@ -6,11 +6,37 @@ use url::Url;
 use crate::error::ConfigError;
 use crate::secret::SecretLocation;
 
-/// The `[settlement]` section as written in the config file. Its presence
-/// enables a settlement backend (issue #542); its absence means channel
-/// operations keep degrading to `ChannelOperationError::NoSettlementBackend`,
-/// exactly as before this section existed. `deny_unknown_fields` so a
-/// mistyped key (`rpc__url`, `contractaddress`, ...) fails config load
+/// The `[settlement]` section as written in the config file, in either shape
+/// this connector accepts (issue #628).
+///
+/// **Legacy** ([`RawSettlementConfig`]): the single flat form every shipped
+/// example and infra config already carries -- `chain`, `rpc_url`,
+/// `contract_address`, `token_address`, `decimals`, `[settlement.key]` -- and
+/// keeps parsing with unchanged semantics. Frozen at one chain (`"evm"`) by
+/// design: a config that wants a second chain, or wants Solana at all, uses
+/// the keyed form below instead of teaching this one a new `chain` value.
+///
+/// **Keyed** ([`RawKeyedSettlementConfig`]): `[settlement.evm]` and/or
+/// `[settlement.solana]`, one table per chain -- the shape chosen at
+/// decomposition (epic #627) for a node settling on more than one chain at
+/// once. A keyed table by construction, so `deny_unknown_fields` guards each
+/// chain's own fields without an ordering ambiguity a `[[settlement]]` array
+/// would have had.
+///
+/// `#[serde(untagged)]` picks whichever shape matches: the legacy shape
+/// requires `chain` and forbids `evm`/`solana` keys, the keyed shape forbids
+/// `chain` and only recognizes `evm`/`solana` -- mutually exclusive by
+/// construction, so a config can never be read two ways.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawSettlementSection {
+    Legacy(RawSettlementConfig),
+    Keyed(RawKeyedSettlementConfig),
+}
+
+/// The legacy flat `[settlement]` shape (issue #542): one chain, named by
+/// `chain`, with its fields directly under the section. `deny_unknown_fields`
+/// so a mistyped key (`rpc__url`, `contractaddress`, ...) fails config load
 /// loudly instead of being parsed, silently dropped, and honoured as if it
 /// had never been written.
 #[derive(Debug, Deserialize)]
@@ -24,12 +50,56 @@ pub(crate) struct RawSettlementConfig {
     key: RawSettlementKeyConfig,
 }
 
-/// The `[settlement.key]` sub-section: where the key material this
-/// backend signs settlement transactions with lives. Same File-or-KMS
-/// shape as the top-level `[signer]` section (`crate::secret`), kept as
-/// its own type rather than reused directly because the two locations are
-/// independent config-file positions with their own `deny_unknown_fields`
-/// boundary.
+/// The keyed `[settlement]` shape (issue #628): zero or more per-chain
+/// tables, each self-naming its chain by its own key rather than a `chain`
+/// field. `deny_unknown_fields` so a chain this connector has no table for
+/// (or a typo'd one, e.g. `slana`) fails loudly rather than being silently
+/// ignored.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawKeyedSettlementConfig {
+    #[serde(default)]
+    evm: Option<RawEvmSettlementTable>,
+    /// Parses into typed config today; the backend itself is not wired into
+    /// `connector-cli` yet, so a node naming this table refuses at
+    /// *construction*, not at load, with an explicit not-yet-wired error
+    /// (ADR 0009 stays fail-closed throughout -- see epic #627).
+    #[serde(default)]
+    solana: Option<RawSolanaSettlementTable>,
+}
+
+/// `[settlement.evm]`: the same fields the legacy flat shape carries, minus
+/// `chain` -- the table's own key already says which chain this is.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawEvmSettlementTable {
+    rpc_url: String,
+    contract_address: String,
+    token_address: String,
+    decimals: u8,
+    key: RawSettlementKeyConfig,
+}
+
+/// `[settlement.solana]`: `contract_address` (an EVM `TokenNetworkRegistry`)
+/// has no Solana equivalent, so this table names a `program_id` instead --
+/// the deployed `connector-settlement-solana-program` instance a
+/// `SolanaSettlementBackend` would drive once #567 wires one in.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSolanaSettlementTable {
+    rpc_url: String,
+    program_id: String,
+    token_address: String,
+    decimals: u8,
+    key: RawSettlementKeyConfig,
+}
+
+/// The `[settlement]`/`[settlement.evm]`/`[settlement.solana]` `key`
+/// sub-section: where the key material this backend signs settlement
+/// transactions with lives. Same File-or-KMS shape as the top-level
+/// `[signer]` section (`crate::secret`), kept as its own type rather than
+/// reused directly because these are independent config-file positions with
+/// their own `deny_unknown_fields` boundary.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawSettlementKeyConfig {
@@ -39,26 +109,24 @@ pub(crate) struct RawSettlementKeyConfig {
     kms_key_id: Option<String>,
 }
 
-/// The chains a [`SettlementConfig`] can name. Only [`SettlementChain::Evm`]
-/// is recognized today (issue #542) -- a `chain` value naming anything
-/// else, including "solana" (a real backend `connector-settlement-solana`
-/// already implements, just not yet wired into `connector-cli`), is refused
-/// at load time via [`ConfigError::SettlementUnknownChain`] rather than
-/// silently accepted and later failing to construct.
+/// The chains a [`SettlementConfig`] can name. `Solana` parses (issue #628)
+/// but has no constructible backend in `connector-cli` yet -- that is a
+/// startup-time refusal (epic #627's children), not a config-load one, so it
+/// is a recognized chain here rather than [`ConfigError::SettlementUnknownChain`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementChain {
     Evm,
+    Solana,
 }
 
-/// A fully validated `[settlement]` section: which chain, where its RPC
-/// endpoint is, which already-deployed `TokenNetworkRegistry` and ERC-20
-/// asset it settles through, and where the signing key material lives.
-/// Constructed only by [`resolve_settlement`], so a value that exists has
-/// already had every field checked -- downstream code never re-validates
-/// any of them.
+/// A fully validated `[settlement.evm]` (or legacy `[settlement]`) table:
+/// which already-deployed `TokenNetworkRegistry` and ERC-20 asset this
+/// backend settles through, where its RPC endpoint is, and where its signing
+/// key material lives. Constructed only by [`resolve_settlement`], so a value
+/// that exists has already had every field checked -- downstream code never
+/// re-validates any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettlementConfig {
-    chain: SettlementChain,
+pub struct EvmSettlementConfig {
     rpc_url: String,
     contract_address: [u8; 20],
     token_address: [u8; 20],
@@ -66,51 +134,32 @@ pub struct SettlementConfig {
     key: SecretLocation,
 }
 
-impl SettlementConfig {
-    /// The chain this settlement backend talks to.
-    pub fn chain(&self) -> SettlementChain {
-        self.chain
-    }
-
+impl EvmSettlementConfig {
     /// The RPC endpoint this backend connects through.
     pub fn rpc_url(&self) -> &str {
         &self.rpc_url
     }
 
-    /// The already-deployed `TokenNetworkRegistry` this backend resolves
-    /// its actual `TokenNetwork` through, keyed by [`token_address`](Self::token_address)
-    /// (issue #576) -- not a channel contract itself.
+    /// The already-deployed `TokenNetworkRegistry` this backend resolves its
+    /// actual `TokenNetwork` through, keyed by
+    /// [`token_address`](Self::token_address) (issue #576) -- not a channel
+    /// contract itself.
     pub fn contract_address(&self) -> [u8; 20] {
         self.contract_address
     }
 
-    /// The ERC-20 asset every channel this backend opens settles in, and
-    /// the input `TokenNetworkRegistry.getTokenNetwork` resolves
+    /// The ERC-20 asset every channel this backend opens settles in, and the
+    /// input `TokenNetworkRegistry.getTokenNetwork` resolves
     /// [`contract_address`](Self::contract_address) against to find the
-    /// actual `TokenNetwork` (issue #576 closes out this field's half of
-    /// issue #564 -- construction now reads it rather than validating and
-    /// discarding it).
+    /// actual `TokenNetwork` (issue #576).
     pub fn token_address(&self) -> [u8; 20] {
         self.token_address
     }
 
     /// The settlement asset's decimal precision (6 for the USDC this
-    /// connector settles -- issue #542's decision comment).
-    ///
-    /// Nothing scales by this value, and nothing should: every amount on
-    /// this connector's value path -- route prices, claim amounts, channel
-    /// deposits -- is already in the settlement token's own base units, and
-    /// `docs/usdc-cross-chain-settlement.md`'s "6 decimals everywhere"
-    /// makes those units uniform across every chain in the fleet, so there
-    /// is no cross-chain normalization for a scale factor to feed.
-    ///
-    /// It is honoured as a *check* instead (issue #564):
-    /// `EvmSettlementBackend::connect` reads the deployed token's own
-    /// `decimals()` and refuses to start when it disagrees with this value,
-    /// naming both. That is the startup assertion
-    /// `docs/usdc-cross-chain-settlement.md` calls for, and it is what
-    /// keeps a stale `decimals = 18` from loading as if it were honoured
-    /// (ADR 0009).
+    /// connector settles). See [`SettlementConfig`]'s module docs for why
+    /// nothing scales by this value -- it is honoured as a startup *check*
+    /// against the deployed token's own `decimals()` instead (issue #564).
     pub fn decimals(&self) -> u8 {
         self.decimals
     }
@@ -118,6 +167,70 @@ impl SettlementConfig {
     /// Where this backend's signing key material lives.
     pub fn key(&self) -> &SecretLocation {
         &self.key
+    }
+}
+
+/// A fully validated `[settlement.solana]` table: which deployed
+/// `connector-settlement-solana-program` instance this backend would drive,
+/// where its RPC endpoint is, and where its signing key material lives.
+/// Parses today (issue #628); nothing constructs one yet (epic #627's
+/// children finish that).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolanaSettlementConfig {
+    rpc_url: String,
+    program_id: String,
+    token_address: String,
+    decimals: u8,
+    key: SecretLocation,
+}
+
+impl SolanaSettlementConfig {
+    /// The RPC endpoint this backend connects through.
+    pub fn rpc_url(&self) -> &str {
+        &self.rpc_url
+    }
+
+    /// The deployed `connector-settlement-solana-program` instance this
+    /// backend would drive, base58-encoded.
+    pub fn program_id(&self) -> &str {
+        &self.program_id
+    }
+
+    /// The SPL token mint every channel this backend opens would settle in,
+    /// base58-encoded.
+    pub fn token_address(&self) -> &str {
+        &self.token_address
+    }
+
+    /// The settlement asset's decimal precision.
+    pub fn decimals(&self) -> u8 {
+        self.decimals
+    }
+
+    /// Where this backend's signing key material lives.
+    pub fn key(&self) -> &SecretLocation {
+        &self.key
+    }
+}
+
+/// One fully validated per-chain settlement table -- typed by chain (issue
+/// #628), since an EVM table and a Solana table name genuinely different
+/// on-chain facts (a `TokenNetworkRegistry` address vs. a program id) and a
+/// single shared shape would either force one to fake fields it does not
+/// have or erase which chain a value came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementConfig {
+    Evm(EvmSettlementConfig),
+    Solana(SolanaSettlementConfig),
+}
+
+impl SettlementConfig {
+    /// The chain this settlement backend talks to.
+    pub fn chain(&self) -> SettlementChain {
+        match self {
+            SettlementConfig::Evm(_) => SettlementChain::Evm,
+            SettlementConfig::Solana(_) => SettlementChain::Solana,
+        }
     }
 }
 
@@ -163,65 +276,151 @@ fn resolve_settlement_key(raw: RawSettlementKeyConfig) -> Result<SecretLocation,
     }
 }
 
-/// Validate an optional `[settlement]` section. Presence configures a real
-/// settlement backend (issue #542); absence means channel operations keep
-/// degrading exactly as they did before this section existed --
-/// `ChannelOperationError::NoSettlementBackend`, the same "not started at
-/// all" shape an absent `[operator]` section already has.
-pub(crate) fn resolve_settlement(
-    raw: Option<RawSettlementConfig>,
-) -> Result<Option<SettlementConfig>, ConfigError> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-
-    let chain = match raw.chain.as_str() {
-        "evm" => SettlementChain::Evm,
-        other => {
-            return Err(ConfigError::SettlementUnknownChain {
-                value: other.to_string(),
-            })
-        }
-    };
-
-    if raw.rpc_url.trim().is_empty() {
+/// Shared rpc_url validation between the EVM and Solana tables (and the
+/// legacy shape): non-empty, a well-formed URL, and http(s) -- none of this
+/// is chain-specific.
+fn resolve_rpc_url(rpc_url: String) -> Result<String, ConfigError> {
+    if rpc_url.trim().is_empty() {
         return Err(ConfigError::SettlementMissingRpcUrl);
     }
-    let url = Url::parse(&raw.rpc_url).map_err(|source| ConfigError::SettlementInvalidRpcUrl {
-        value: raw.rpc_url.clone(),
+    let url = Url::parse(&rpc_url).map_err(|source| ConfigError::SettlementInvalidRpcUrl {
+        value: rpc_url.clone(),
         source,
     })?;
     if url.scheme() != "http" && url.scheme() != "https" {
-        return Err(ConfigError::SettlementUnsupportedRpcScheme {
-            value: raw.rpc_url.clone(),
-        });
+        return Err(ConfigError::SettlementUnsupportedRpcScheme { value: rpc_url });
     }
+    Ok(rpc_url)
+}
 
-    let contract_address = parse_evm_address(&raw.contract_address).ok_or_else(|| {
+fn resolve_evm_fields(
+    rpc_url: String,
+    contract_address: String,
+    token_address: String,
+    decimals: u8,
+    key: RawSettlementKeyConfig,
+) -> Result<EvmSettlementConfig, ConfigError> {
+    let rpc_url = resolve_rpc_url(rpc_url)?;
+
+    let contract_address = parse_evm_address(&contract_address).ok_or_else(|| {
         ConfigError::SettlementInvalidContractAddress {
-            value: raw.contract_address.clone(),
+            value: contract_address.clone(),
         }
     })?;
-    let token_address = parse_evm_address(&raw.token_address).ok_or_else(|| {
+    let token_address = parse_evm_address(&token_address).ok_or_else(|| {
         ConfigError::SettlementInvalidTokenAddress {
-            value: raw.token_address.clone(),
+            value: token_address.clone(),
         }
     })?;
 
-    if raw.decimals == 0 {
+    if decimals == 0 {
         return Err(ConfigError::SettlementZeroDecimals);
     }
 
-    let key = resolve_settlement_key(raw.key)?;
+    let key = resolve_settlement_key(key)?;
 
-    Ok(Some(SettlementConfig {
-        chain,
-        rpc_url: raw.rpc_url,
+    Ok(EvmSettlementConfig {
+        rpc_url,
         contract_address,
         token_address,
-        decimals: raw.decimals,
+        decimals,
         key,
-    }))
+    })
+}
+
+fn resolve_solana_fields(
+    rpc_url: String,
+    program_id: String,
+    token_address: String,
+    decimals: u8,
+    key: RawSettlementKeyConfig,
+) -> Result<SolanaSettlementConfig, ConfigError> {
+    let rpc_url = resolve_rpc_url(rpc_url)?;
+
+    if program_id.trim().is_empty() {
+        return Err(ConfigError::SettlementMissingProgramId);
+    }
+    if token_address.trim().is_empty() {
+        return Err(ConfigError::SettlementMissingSolanaTokenAddress);
+    }
+
+    if decimals == 0 {
+        return Err(ConfigError::SettlementZeroDecimals);
+    }
+
+    let key = resolve_settlement_key(key)?;
+
+    Ok(SolanaSettlementConfig {
+        rpc_url,
+        program_id,
+        token_address,
+        decimals,
+        key,
+    })
+}
+
+/// Validate an optional `[settlement]` section, in either shape it can take
+/// (issue #628). Presence configures one or more real settlement backends
+/// (issue #542, epic #627); absence means channel operations keep degrading
+/// to `ChannelOperationError::NoSettlementBackend`, exactly as before this
+/// section existed.
+///
+/// Returns every chain the section names, each fully validated. At most one
+/// entry per [`SettlementChain`] -- the keyed shape has exactly one table per
+/// recognized chain by construction, and the legacy shape only ever names
+/// one chain at all.
+pub(crate) fn resolve_settlement(
+    raw: Option<RawSettlementSection>,
+) -> Result<Vec<SettlementConfig>, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+
+    match raw {
+        RawSettlementSection::Legacy(raw) => {
+            match raw.chain.as_str() {
+                "evm" => {}
+                other => {
+                    return Err(ConfigError::SettlementUnknownChain {
+                        value: other.to_string(),
+                    })
+                }
+            };
+            let evm = resolve_evm_fields(
+                raw.rpc_url,
+                raw.contract_address,
+                raw.token_address,
+                raw.decimals,
+                raw.key,
+            )?;
+            Ok(vec![SettlementConfig::Evm(evm)])
+        }
+        RawSettlementSection::Keyed(raw) => {
+            if raw.evm.is_none() && raw.solana.is_none() {
+                return Err(ConfigError::SettlementSectionEmpty);
+            }
+            let mut out = Vec::new();
+            if let Some(evm) = raw.evm {
+                out.push(SettlementConfig::Evm(resolve_evm_fields(
+                    evm.rpc_url,
+                    evm.contract_address,
+                    evm.token_address,
+                    evm.decimals,
+                    evm.key,
+                )?));
+            }
+            if let Some(solana) = raw.solana {
+                out.push(SettlementConfig::Solana(resolve_solana_fields(
+                    solana.rpc_url,
+                    solana.program_id,
+                    solana.token_address,
+                    solana.decimals,
+                    solana.key,
+                )?));
+            }
+            Ok(out)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -235,8 +434,8 @@ mod tests {
         token_address: &str,
         decimals: u8,
         key_file: Option<PathBuf>,
-    ) -> RawSettlementConfig {
-        RawSettlementConfig {
+    ) -> RawSettlementSection {
+        RawSettlementSection::Legacy(RawSettlementConfig {
             chain: chain.to_string(),
             rpc_url: rpc_url.to_string(),
             contract_address: contract_address.to_string(),
@@ -246,7 +445,7 @@ mod tests {
                 key_file,
                 kms_key_id: None,
             },
-        }
+        })
     }
 
     fn temp_key_file() -> tempfile::NamedTempFile {
@@ -256,10 +455,18 @@ mod tests {
     const CONTRACT: &str = "0x1234567890123456789012345678901234567890";
     const TOKEN: &str = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce";
 
+    fn expect_single_evm(settlements: Vec<SettlementConfig>) -> EvmSettlementConfig {
+        assert_eq!(settlements.len(), 1);
+        match settlements.into_iter().next().unwrap() {
+            SettlementConfig::Evm(evm) => evm,
+            SettlementConfig::Solana(_) => panic!("expected an evm settlement config"),
+        }
+    }
+
     #[test]
     fn absent_settlement_section_resolves_to_none() {
         let resolved = resolve_settlement(None).expect("resolve");
-        assert_eq!(resolved, None);
+        assert!(resolved.is_empty());
     }
 
     #[test]
@@ -273,10 +480,9 @@ mod tests {
             6,
             Some(key_file.path().to_path_buf()),
         )))
-        .expect("resolve")
-        .expect("some");
+        .expect("resolve");
+        let resolved = expect_single_evm(resolved);
 
-        assert_eq!(resolved.chain(), SettlementChain::Evm);
         assert_eq!(resolved.rpc_url(), "http://127.0.0.1:8545");
         assert_eq!(
             resolved.contract_address(),
@@ -301,8 +507,8 @@ mod tests {
             6,
             Some(key_file.path().to_path_buf()),
         )))
-        .expect("resolve")
-        .expect("some");
+        .expect("resolve");
+        let resolved = expect_single_evm(resolved);
         assert_eq!(
             resolved.contract_address(),
             parse_evm_address(CONTRACT).unwrap()
@@ -311,6 +517,26 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_chain() {
+        let key_file = temp_key_file();
+        let result = resolve_settlement(Some(raw(
+            "made-up-chain",
+            "http://127.0.0.1:8545",
+            CONTRACT,
+            TOKEN,
+            6,
+            Some(key_file.path().to_path_buf()),
+        )));
+        assert!(matches!(
+            result,
+            Err(ConfigError::SettlementUnknownChain { .. })
+        ));
+    }
+
+    /// The legacy flat shape stays frozen at `chain = "evm"` (issue #628):
+    /// `"solana"` is only reachable through the keyed `[settlement.solana]`
+    /// table below, not by teaching the old `chain` field a new value.
+    #[test]
+    fn the_legacy_flat_shape_rejects_solana() {
         let key_file = temp_key_file();
         let result = resolve_settlement(Some(raw(
             "solana",
@@ -472,6 +698,156 @@ key_file = "{}"
             key_file.path().display()
         );
         let result: Result<RawSettlementConfig, _> = toml::from_str(&text);
+        assert!(result.is_err());
+    }
+
+    // -- keyed per-chain tables (issue #628) --
+
+    fn keyed_toml(body: &str) -> RawSettlementSection {
+        toml::from_str(body).expect("valid keyed settlement toml")
+    }
+
+    #[test]
+    fn a_keyed_evm_table_resolves_the_same_as_the_legacy_shape() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "{CONTRACT}"
+token_address = "{TOKEN}"
+decimals = 6
+
+[evm.key]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        );
+        let resolved = resolve_settlement(Some(keyed_toml(&text))).expect("resolve");
+        let resolved = expect_single_evm(resolved);
+        assert_eq!(resolved.rpc_url(), "http://127.0.0.1:8545");
+        assert_eq!(
+            resolved.contract_address(),
+            parse_evm_address(CONTRACT).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_keyed_solana_table_parses_into_typed_config() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "TokenNetworkProgram11111111111111111111111"
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[solana.key]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        );
+        let resolved = resolve_settlement(Some(keyed_toml(&text))).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        match &resolved[0] {
+            SettlementConfig::Solana(solana) => {
+                assert_eq!(solana.rpc_url(), "http://127.0.0.1:8899");
+                assert_eq!(
+                    solana.program_id(),
+                    "TokenNetworkProgram11111111111111111111111"
+                );
+                assert_eq!(
+                    solana.token_address(),
+                    "SoLMint11111111111111111111111111111111111"
+                );
+                assert_eq!(solana.decimals(), 6);
+            }
+            SettlementConfig::Evm(_) => panic!("expected a solana settlement config"),
+        }
+        assert_eq!(resolved[0].chain(), SettlementChain::Solana);
+    }
+
+    #[test]
+    fn declaring_both_evm_and_solana_parses_both_as_typed_per_chain_config() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "{CONTRACT}"
+token_address = "{TOKEN}"
+decimals = 6
+
+[evm.key]
+key_file = "{key_path}"
+
+[solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "TokenNetworkProgram11111111111111111111111"
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[solana.key]
+key_file = "{key_path}"
+"#,
+            key_path = key_file.path().display()
+        );
+        let resolved = resolve_settlement(Some(keyed_toml(&text))).expect("resolve");
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.iter().any(|s| s.chain() == SettlementChain::Evm));
+        assert!(resolved
+            .iter()
+            .any(|s| s.chain() == SettlementChain::Solana));
+    }
+
+    #[test]
+    fn an_empty_keyed_settlement_section_is_rejected() {
+        let result = resolve_settlement(Some(keyed_toml("")));
+        assert!(matches!(result, Err(ConfigError::SettlementSectionEmpty)));
+    }
+
+    #[test]
+    fn a_solana_table_missing_program_id_is_rejected() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = ""
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[solana.key]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        );
+        let result = resolve_settlement(Some(keyed_toml(&text)));
+        assert!(matches!(
+            result,
+            Err(ConfigError::SettlementMissingProgramId)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_key_in_a_keyed_evm_table_is_rejected_at_parse_time() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "{CONTRACT}"
+token_address = "{TOKEN}"
+decimals = 6
+made_up_field = "oops"
+
+[evm.key]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        );
+        let result: Result<RawSettlementSection, _> = toml::from_str(&text);
         assert!(result.is_err());
     }
 }

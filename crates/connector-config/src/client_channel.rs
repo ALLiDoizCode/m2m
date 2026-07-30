@@ -22,9 +22,10 @@ pub(crate) struct RawClientChannel {
 /// identifier and addresses checked -- downstream code never re-validates
 /// any of them.
 ///
-/// EVM-only, matching `crate::SettlementChain`'s own single variant: the
-/// Rust connector settles no other chain today, and a channel it cannot
-/// settle is not one it should be accepting claims against.
+/// EVM-only: `connector-cli` constructs no non-EVM settlement backend yet
+/// (issue #628's `[settlement.solana]` parses but is not wired), and a
+/// channel it cannot settle is not one it should be accepting claims
+/// against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientChannelConfig {
     channel_id: String,

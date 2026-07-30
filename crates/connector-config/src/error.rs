@@ -203,6 +203,18 @@ pub enum ConfigError {
     SettlementKmsIdEmpty,
 
     #[error(
+        "the [settlement] section is present but names no chain at all -- add an \
+         [settlement.evm] and/or [settlement.solana] table, or remove the section"
+    )]
+    SettlementSectionEmpty,
+
+    #[error("the [settlement.solana] section's program_id is empty")]
+    SettlementMissingProgramId,
+
+    #[error("the [settlement.solana] section's token_address is empty")]
+    SettlementMissingSolanaTokenAddress,
+
+    #[error(
         "invalid [[client_channels]] channel_id '{value}': must be 64 hex characters \
          (an on-chain 32-byte channel identifier), optionally '0x'-prefixed"
     )]
