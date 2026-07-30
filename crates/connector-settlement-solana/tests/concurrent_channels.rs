@@ -7,8 +7,6 @@
 //! `&self`, so nothing at the port level stops two calls racing) do not
 //! conflict.
 
-mod support;
-
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -17,7 +15,9 @@ use connector_settlement::{ChannelStatus, Claim, SettlementBackend};
 use connector_settlement_solana::SolanaSettlementBackend;
 use solana_sdk::pubkey::Pubkey;
 
-use support::{require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID};
+use connector_settlement_solana::test_support::{
+    require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
+};
 
 #[tokio::test]
 async fn every_channel_operation_is_a_real_confirmed_transaction() {

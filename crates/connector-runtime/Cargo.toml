@@ -11,6 +11,7 @@ connector-settlement = { path = "../connector-settlement" }
 connector-signer = { path = "../connector-signer" }
 arc-swap = "1.9.2"
 async-trait = "0.1"
+bs58 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 percent-encoding = "2"
 prometheus = "0.13"

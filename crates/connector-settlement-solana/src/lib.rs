@@ -23,6 +23,8 @@
 //! backend has itself driven to `Settled` no longer exists on chain at
 //! all, and is indistinguishable from "never opened" without that memory.
 
+#[cfg(feature = "test-util")]
+pub mod test_support;
 pub mod wire;
 
 use std::collections::HashSet;
@@ -101,15 +103,31 @@ impl SolanaSettlementBackend {
     ///
     /// Refuses -- naming the address -- if `program_id` names no
     /// executable account, or `token_mint` is not owned by the SPL Token
-    /// program: the coarse, "did I misconfigure this entirely" check this
-    /// crate makes on its own; issue #630 (a later, separate issue) is
-    /// where a fuller "does the fleet's own identity match what's
-    /// deployed" fail-closed check belongs.
+    /// program: the coarse, "did I misconfigure this entirely" check issue
+    /// #567 made on its own. Executable alone is not identity -- a typo'd
+    /// `program_id` naming any *other* real program (SPL Token itself,
+    /// say) would pass it and fail lazily at the first settle -- so
+    /// `connect` also proves the program actually behaves like the
+    /// deployed payment-channel program before this node serves traffic
+    /// ([`Self::verify_program_identity`]), the Solana twin of
+    /// `EvmSettlementBackend::connect` proving its contract by calling
+    /// `get_token_network` on it (issue #630's review).
+    ///
+    /// `expected_decimals` is the scale the operator wrote down
+    /// (`[settlement.solana] decimals`), the Solana twin of
+    /// `EvmSettlementBackend::connect`'s own `expected_decimals` (issue
+    /// #564): nothing here scales by it -- every amount this backend moves
+    /// is already in the mint's own base units -- so it is checked rather
+    /// than applied. `connect` reads the mint's own `decimals` field and
+    /// refuses, naming both values, when they disagree (issue #630, ADR
+    /// 0009): the fuller "does the fleet's own identity match what's
+    /// deployed" check issue #567 deferred here.
     pub async fn connect(
         rpc_url: &str,
         payer_seed: &[u8; 32],
         program_id: Pubkey,
         token_mint: Pubkey,
+        expected_decimals: u8,
     ) -> Result<Self, SettlementError> {
         let payer = solana_sdk::signer::keypair::keypair_from_seed(payer_seed)
             .map_err(|error| SettlementError::Backend(error.to_string()))?;
@@ -128,6 +146,14 @@ impl SolanaSettlementBackend {
                 "settlement token_address {token_mint} is not owned by the SPL Token program"
             )));
         }
+        let mint = spl_token::state::Mint::unpack(&mint_account.data).map_err(backend_error)?;
+        if mint.decimals != expected_decimals {
+            return Err(SettlementError::Backend(format!(
+                "[settlement.solana] decimals is {expected_decimals}, but mint {token_mint} \
+                 reports decimals = {}",
+                mint.decimals
+            )));
+        }
 
         let backend = Self {
             rpc,
@@ -137,12 +163,85 @@ impl SolanaSettlementBackend {
             counterparty_signers: Vec::new(),
             settled: Mutex::new(HashSet::new()),
         };
+        // Ordered after `ensure_own_ata_exists`, which already proves the
+        // payer holds real lamports by submitting a transaction -- so a
+        // probe failure below means program identity, never an unfunded
+        // payer reported as the wrong program.
         backend.ensure_own_ata_exists().await?;
+        backend.verify_program_identity().await?;
         Ok(backend)
     }
 
+    /// Prove the account at `program_id` actually implements the deployed
+    /// payment-channel program, not merely that *something* executable
+    /// lives there (issue #630's review, finding 2): simulate -- never
+    /// submit -- an `InitializeChannel` against a freshly generated,
+    /// throwaway counterparty, whose channel PDA therefore cannot exist,
+    /// and require the simulation to succeed. Only the real program
+    /// accepts that instruction: it must recognize the discriminator,
+    /// derive the same `["channel", ..]`/`["vault", ..]` PDAs from the
+    /// same seeds, and drive the create-account and SPL-token CPIs to
+    /// completion -- any other executable program (SPL Token itself, say)
+    /// rejects the instruction data or its accounts. The counterparty is
+    /// random rather than fixed so nobody can pre-create the probe's PDA
+    /// on a public cluster and wedge this node's startup.
+    ///
+    /// Refusing here, at connect, is the point: the alternative is a node
+    /// that starts clean against a typo'd `program_id` and discovers it at
+    /// its first settle, hours later, with claims already accepted (the
+    /// `#564` fail-closed pattern, ADR 0009).
+    async fn verify_program_identity(&self) -> Result<(), SettlementError> {
+        let own = self.payer.pubkey();
+        let probe_counterparty = Keypair::new().pubkey();
+        let (channel, _bump) = wire::channel_pda(
+            &own,
+            &probe_counterparty,
+            &self.token_mint,
+            &self.program_id,
+        );
+        let (vault, _bump) = wire::vault_pda(&channel, &self.program_id);
+        let instruction = Instruction::new_with_bytes(
+            self.program_id,
+            &wire::pack_initialize_channel(3600),
+            wire::Accounts::initialize_channel(
+                &own,
+                &own,
+                &probe_counterparty,
+                &self.token_mint,
+                &channel,
+                &vault,
+            ),
+        );
+        let recent_blockhash = self
+            .rpc
+            .get_latest_blockhash()
+            .await
+            .map_err(backend_error)?;
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&own),
+            &[&self.payer],
+            recent_blockhash,
+        );
+        let simulation = self
+            .rpc
+            .simulate_transaction(&transaction)
+            .await
+            .map_err(backend_error)?;
+        if let Some(error) = simulation.value.err {
+            return Err(SettlementError::Backend(format!(
+                "settlement program_id {} is executable but rejected a simulated \
+                 payment-channel InitializeChannel ({error}) -- it does not behave like the \
+                 deployed packages/solana-program payment-channel program, so this node \
+                 refuses to start rather than fail at its first settlement",
+                self.program_id
+            )));
+        }
+        Ok(())
+    }
+
     /// Bind to `program_id` (already loaded into the target validator's
-    /// genesis -- see this crate's `tests/support/mod.rs`), creating a
+    /// genesis -- see this crate's `test_support` module), creating a
     /// fresh mock SPL mint and airdropping and funding this backend's own
     /// identity and two privately-held counterparty identities (see
     /// [`counterparty_signers`](Self::counterparty_signers)'s doc for why
@@ -736,7 +835,7 @@ impl SettlementBackend for SolanaSettlementBackend {
         // wall clock agrees with far more closely than it would with, say,
         // an `anvil`-style artificially warped chain clock -- Solana has
         // no equivalent time-travel RPC method this backend's own tests
-        // need to account for (see `tests/support/mod.rs`: a zero-length
+        // need to account for (see the `test_support` harness: a zero-length
         // challenge period is simply already due).
         let available_at = account
             .close_timestamp

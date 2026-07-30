@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
-use connector_config::StaticRoute;
+use connector_config::{SettlementChain, StaticRoute};
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
     is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse, Prepare,
@@ -67,6 +67,23 @@ pub enum LeaseRouteError {
 pub enum ChannelOperationError {
     #[error("no settlement backend is configured for this node")]
     NoSettlementBackend,
+    /// This node settles on at least one chain, just not the one this
+    /// operation needs: the channel id (or the caller's explicit `chain`)
+    /// named a chain no `[settlement.<chain>]` table configured a backend
+    /// for. Distinct from [`NoSettlementBackend`] so a both-surfaces
+    /// operator error names the actual gap ("no solana backend") rather
+    /// than denying the backends the node does have.
+    ///
+    /// [`NoSettlementBackend`]: ChannelOperationError::NoSettlementBackend
+    #[error("no {0} settlement backend is configured for this node")]
+    NoSettlementBackendForChain(SettlementChain),
+    /// [`Connector::open_channel`] was called without naming a chain on a
+    /// node that settles on more than one, where "the configured backend"
+    /// denotes nothing (issue #630's review: a node with both
+    /// `[settlement.evm]` and `[settlement.solana]` must not silently
+    /// pick one).
+    #[error("this node settles on more than one chain -- name which chain to open the channel on")]
+    AmbiguousSettlementChain,
     /// [`Connector::redeem_latest_claim`] or [`Connector::cooperative_close`]
     /// was asked to redeem a channel this node has never accepted an
     /// inbound claim on (issue #425) -- distinct from
@@ -218,18 +235,24 @@ pub struct Connector {
     peer_transport: Arc<dyn PeerTransport>,
     clock: Arc<dyn Clock>,
     metrics: Arc<Metrics>,
-    /// A real chain's settlement backend (issue #459), or `None` on a node
-    /// that hasn't configured one -- channel operations fail with
+    /// The real chains' settlement backends (issue #459), keyed by the
+    /// chain each one settles on (issue #630: a node with both
+    /// `[settlement.evm]` and `[settlement.solana]` holds *both* -- a
+    /// single slot would leave whichever attached first silently
+    /// unreachable while the node kept accepting its claims). At most one
+    /// backend per chain, in attachment (= config) order; empty on a node
+    /// that configured none, where channel operations fail with
     /// [`ChannelOperationError::NoSettlementBackend`] rather than being
     /// unreachable, matching how `leased_routes` degrades to "just empty"
     /// rather than a distinct construction path.
-    settlement: Option<Arc<dyn SettlementBackend>>,
-    /// Every channel id this node has itself opened, in the order opened.
+    settlements: Vec<(SettlementChain, Arc<dyn SettlementBackend>)>,
+    /// Every channel this node has itself opened, in the order opened,
+    /// each remembering the chain it was opened on.
     /// `SettlementBackend` has no "list every channel" method (a real
     /// chain has no such index either) -- this is the one thing
     /// `Connector` itself has to remember so `channels()` knows which ids
-    /// to ask the backend to report on.
-    known_channels: RwLock<Vec<ChannelId>>,
+    /// to ask which backend to report on.
+    known_channels: RwLock<Vec<(SettlementChain, ChannelId)>>,
     /// Claims owed to and received from every peering relation (ADR 0004,
     /// ADR 0005, issue #423): signing an outbound claim on fulfilment,
     /// verifying and watermarking an inbound one. Empty and signer-less
@@ -299,7 +322,7 @@ impl Connector {
             peer_transport,
             clock,
             metrics: Arc::new(Metrics::new()),
-            settlement: None,
+            settlements: Vec::new(),
             known_channels: RwLock::new(Vec::new()),
             claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
             identity_signer: None,
@@ -384,13 +407,29 @@ impl Connector {
     }
 
     /// Configure the settlement backend a node's channel-lifecycle writes
-    /// (issue #459) are driven against. A builder rather than a
-    /// [`Connector::new`] parameter deliberately -- most of this crate's
-    /// own tests, and every other crate constructing a bare `Connector`
-    /// today, have no settlement backend at all and shouldn't need to
-    /// thread one through just to keep compiling.
-    pub fn with_settlement(mut self, settlement: Arc<dyn SettlementBackend>) -> Self {
-        self.settlement = Some(settlement);
+    /// (issue #459) are driven against on `chain` -- callable once per
+    /// chain (issue #630), so a node with both `[settlement.evm]` and
+    /// `[settlement.solana]` holds both backends rather than whichever
+    /// attached last. Attaching a second backend for the same chain
+    /// replaces the first, matching how config load already refuses two
+    /// tables for one chain. A builder rather than a [`Connector::new`]
+    /// parameter deliberately -- most of this crate's own tests, and every
+    /// other crate constructing a bare `Connector` today, have no
+    /// settlement backend at all and shouldn't need to thread one through
+    /// just to keep compiling.
+    pub fn with_settlement(
+        mut self,
+        chain: SettlementChain,
+        settlement: Arc<dyn SettlementBackend>,
+    ) -> Self {
+        match self
+            .settlements
+            .iter_mut()
+            .find(|(existing, _)| *existing == chain)
+        {
+            Some((_, slot)) => *slot = settlement,
+            None => self.settlements.push((chain, settlement)),
+        }
         self
     }
 
@@ -1034,21 +1073,25 @@ impl Connector {
     }
 
     /// This node's payment channels (issue #459) -- every channel this
-    /// node has itself opened, each reported fresh from the configured
-    /// settlement backend. Empty on a node with no settlement backend
-    /// configured, or with no channels opened yet, exactly like every
-    /// other still-unpopulated operator view above.
+    /// node has itself opened, each reported fresh from the settlement
+    /// backend that opened it (issue #630: on a node settling on more
+    /// than one chain, each channel is asked about on its own chain, not
+    /// whichever backend attached last). Empty on a node with no
+    /// settlement backend configured, or with no channels opened yet,
+    /// exactly like every other still-unpopulated operator view above.
     pub async fn channels(&self) -> Vec<ChannelView> {
-        let Some(settlement) = &self.settlement else {
-            return Vec::new();
-        };
-        let ids = self
+        let known = self
             .known_channels
             .read()
             .expect("known channels lock poisoned")
             .clone();
-        let mut views = Vec::with_capacity(ids.len());
-        for id in ids {
+        let mut views = Vec::with_capacity(known.len());
+        for (chain, id) in known {
+            // A known channel was opened through `chain`'s backend, so the
+            // lookup cannot fail while `with_settlement` is construction-only.
+            let Ok(settlement) = self.settlement_on(chain) else {
+                continue;
+            };
             if let Ok(state) = settlement.channel_state(&id).await {
                 views.push(ChannelView::from(state));
             }
@@ -1056,69 +1099,147 @@ impl Connector {
         views
     }
 
-    /// The configured settlement backend, or
-    /// [`ChannelOperationError::NoSettlementBackend`] on a node that hasn't
-    /// set one -- every channel operation below checks this first.
-    fn settlement(&self) -> Result<&Arc<dyn SettlementBackend>, ChannelOperationError> {
-        self.settlement
-            .as_ref()
-            .ok_or(ChannelOperationError::NoSettlementBackend)
+    /// The settlement backend configured for `chain`.
+    /// [`ChannelOperationError::NoSettlementBackend`] on a node with no
+    /// backend at all; [`ChannelOperationError::NoSettlementBackendForChain`]
+    /// on a node that settles, just not there -- so the refusal names the
+    /// actual gap.
+    fn settlement_on(
+        &self,
+        chain: SettlementChain,
+    ) -> Result<&Arc<dyn SettlementBackend>, ChannelOperationError> {
+        if self.settlements.is_empty() {
+            return Err(ChannelOperationError::NoSettlementBackend);
+        }
+        self.settlements
+            .iter()
+            .find(|(configured, _)| *configured == chain)
+            .map(|(_, settlement)| settlement)
+            .ok_or(ChannelOperationError::NoSettlementBackendForChain(chain))
     }
 
-    /// Open a new channel to `counterparty` (issue #459), remembering its
-    /// id so a future [`Connector::channels`] call reports on it. The
-    /// counterparty and settlement-timeout semantics are exactly the
-    /// configured [`SettlementBackend`]'s own -- this method adds nothing
-    /// beyond bookkeeping.
+    /// Which chain's namespace `channel_id` belongs to, decided by the
+    /// id's own shape: an EVM channel id is the `TokenNetwork`'s `bytes32`
+    /// as (`0x`-optional) 64-character hex, a Solana one is a channel
+    /// PDA's base58 32-byte account address -- the same two namespaces the
+    /// client edge's `ClientChannelRegistry` already keeps separate ("a
+    /// `channelId` and a `channelAccount` are different kinds of thing and
+    /// can never satisfy each other"), and provably disjoint: 64 base58
+    /// characters decode to ~47 bytes, never 32, and a 32-byte account is
+    /// at most 44 base58 characters, never 64. `None` for an id in
+    /// neither namespace.
+    fn channel_id_chain(channel_id: &str) -> Option<SettlementChain> {
+        let hex = channel_id.strip_prefix("0x").unwrap_or(channel_id);
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(SettlementChain::Evm);
+        }
+        if bs58::decode(channel_id)
+            .into_vec()
+            .is_ok_and(|bytes| bytes.len() == 32)
+        {
+            return Some(SettlementChain::Solana);
+        }
+        None
+    }
+
+    /// The settlement backend `channel_id`'s own chain names (issue #630)
+    /// -- how every per-channel operation below picks a backend. A node
+    /// with a single backend routes every id to it, keeping the port's
+    /// "ids are opaque" promise where there is nothing to disambiguate (and
+    /// keeping non-chain-shaped ids, like the in-memory backend's counters,
+    /// working); only a node settling on several chains reads the id's
+    /// namespace ([`Self::channel_id_chain`]). An id in no known namespace
+    /// is [`SettlementError::ChannelNotFound`], exactly as each backend
+    /// already answers for a malformed id ("a malformed id and one nothing
+    /// was ever opened at mean the same thing").
+    fn settlement_for_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<&Arc<dyn SettlementBackend>, ChannelOperationError> {
+        match self.settlements.as_slice() {
+            [] => Err(ChannelOperationError::NoSettlementBackend),
+            [(_, settlement)] => Ok(settlement),
+            _ => {
+                let chain = Self::channel_id_chain(channel_id).ok_or_else(|| {
+                    ChannelOperationError::Settlement(SettlementError::ChannelNotFound(ChannelId(
+                        channel_id.to_string(),
+                    )))
+                })?;
+                self.settlement_on(chain)
+            }
+        }
+    }
+
+    /// Open a new channel to `counterparty` on `chain` (issue #459),
+    /// remembering its id -- and the chain it lives on -- so a future
+    /// [`Connector::channels`] call reports on it from the right backend.
+    /// `None` means "the configured backend" and is accepted exactly when
+    /// that denotes something: a node with several backends refuses with
+    /// [`ChannelOperationError::AmbiguousSettlementChain`] rather than
+    /// silently picking one (issue #630). The counterparty and
+    /// settlement-timeout semantics are exactly the chosen
+    /// [`SettlementBackend`]'s own -- this method adds nothing beyond
+    /// bookkeeping.
     pub async fn open_channel(
         &self,
+        chain: Option<SettlementChain>,
         counterparty: Vec<u8>,
         settlement_timeout: Duration,
     ) -> Result<ChannelView, ChannelOperationError> {
-        let settlement = self.settlement()?;
+        let (chain, settlement) = match chain {
+            Some(chain) => (chain, self.settlement_on(chain)?),
+            None => match self.settlements.as_slice() {
+                [] => return Err(ChannelOperationError::NoSettlementBackend),
+                [(chain, settlement)] => (*chain, settlement),
+                _ => return Err(ChannelOperationError::AmbiguousSettlementChain),
+            },
+        };
         let id = settlement.open(counterparty, settlement_timeout).await?;
         self.known_channels
             .write()
             .expect("known channels lock poisoned")
-            .push(id.clone());
+            .push((chain, id.clone()));
         let state = settlement.channel_state(&id).await?;
         Ok(ChannelView::from(state))
     }
 
-    /// Deposit `amount` into `channel_id` (issue #459).
+    /// Deposit `amount` into `channel_id` (issue #459), on whichever chain
+    /// the id itself names ([`Self::settlement_for_channel`]).
     pub async fn fund_channel(
         &self,
         channel_id: &str,
         amount: u128,
     ) -> Result<ChannelView, ChannelOperationError> {
         let state = self
-            .settlement()?
+            .settlement_for_channel(channel_id)?
             .fund(&ChannelId(channel_id.to_string()), amount)
             .await?;
         Ok(ChannelView::from(state))
     }
 
-    /// Redeem `claim` against `channel_id` (issue #459).
+    /// Redeem `claim` against `channel_id` (issue #459), on whichever chain
+    /// the id itself names ([`Self::settlement_for_channel`]).
     pub async fn redeem_channel(
         &self,
         channel_id: &str,
         claim: Claim,
     ) -> Result<ChannelView, ChannelOperationError> {
         let state = self
-            .settlement()?
+            .settlement_for_channel(channel_id)?
             .redeem(&ChannelId(channel_id.to_string()), claim)
             .await?;
         Ok(ChannelView::from(state))
     }
 
-    /// Close `channel_id` (issue #459): no further funding or redemption is
-    /// possible against it afterward.
+    /// Close `channel_id` (issue #459), on whichever chain the id itself
+    /// names ([`Self::settlement_for_channel`]): no further funding or
+    /// redemption is possible against it afterward.
     pub async fn close_channel(
         &self,
         channel_id: &str,
     ) -> Result<ChannelView, ChannelOperationError> {
         let state = self
-            .settlement()?
+            .settlement_for_channel(channel_id)?
             .close(&ChannelId(channel_id.to_string()))
             .await?;
         Ok(ChannelView::from(state))
@@ -1145,7 +1266,7 @@ impl Connector {
             .latest_inbound_claim(channel_id)
             .ok_or(ChannelOperationError::NoClaimToRedeem)?;
         let state = self
-            .settlement()?
+            .settlement_for_channel(channel_id)?
             .redeem(&ChannelId(channel_id.to_string()), claim)
             .await?;
         Ok(ChannelView::from(state))
@@ -1168,7 +1289,7 @@ impl Connector {
         &self,
         channel_id: &str,
     ) -> Result<ChannelView, ChannelOperationError> {
-        let settlement = self.settlement()?;
+        let settlement = self.settlement_for_channel(channel_id)?;
         let id = ChannelId(channel_id.to_string());
         if let Some(claim) = self.claims.latest_inbound_claim(channel_id) {
             match settlement.redeem(&id, claim).await {
@@ -2696,6 +2817,279 @@ mod tests {
     /// real chain (ADR 0007). The real-chain requirement itself lives in
     /// `connector-operator`'s operator-surface test and
     /// `connector-settlement-evm`'s own integration tests.
+    /// Issue #630's review finding: a node settling on more than one chain
+    /// holds every configured backend, and each operator channel op reaches
+    /// the backend its chain (or its channel id's namespace) names -- never
+    /// whichever backend happened to attach last. Driven with a
+    /// chain-tagged fake (ADR 0007) whose every answer names which slot it
+    /// was registered under, so a misroute is a failed string assertion
+    /// rather than an invisible wrong-chain transaction; the same routing
+    /// against real chains is `connector-cli`'s
+    /// `a_both_chains_config_attaches_and_routes_both_backends`.
+    mod settlement_routing {
+        use super::*;
+        use connector_settlement::{ChannelState, InMemorySettlementBackend};
+
+        /// A valid base58 32-byte account address -- the Solana channel-id
+        /// namespace's shape.
+        const SOLANA_CHANNEL: &str = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+        /// A valid `0x`-prefixed 64-hex-character `bytes32` -- the EVM
+        /// channel-id namespace's shape.
+        const EVM_CHANNEL: &str =
+            "0xabababababababababababababababababababababababababababababababab";
+
+        /// Answers every port method with an error naming the chain slot
+        /// it was registered under, so a test can assert exactly which
+        /// backend an operation reached.
+        struct TaggedBackend(&'static str);
+
+        #[async_trait]
+        impl SettlementBackend for TaggedBackend {
+            async fn open(
+                &self,
+                _counterparty: Vec<u8>,
+                _settlement_timeout: Duration,
+            ) -> Result<ChannelId, SettlementError> {
+                Err(SettlementError::Backend(format!("{}: open", self.0)))
+            }
+
+            async fn fund(
+                &self,
+                _channel: &ChannelId,
+                _amount: u128,
+            ) -> Result<ChannelState, SettlementError> {
+                Err(SettlementError::Backend(format!("{}: fund", self.0)))
+            }
+
+            async fn redeem(
+                &self,
+                _channel: &ChannelId,
+                _claim: Claim,
+            ) -> Result<ChannelState, SettlementError> {
+                Err(SettlementError::Backend(format!("{}: redeem", self.0)))
+            }
+
+            async fn close(&self, _channel: &ChannelId) -> Result<ChannelState, SettlementError> {
+                Err(SettlementError::Backend(format!("{}: close", self.0)))
+            }
+
+            async fn settle(&self, _channel: &ChannelId) -> Result<ChannelState, SettlementError> {
+                Err(SettlementError::Backend(format!("{}: settle", self.0)))
+            }
+
+            async fn channel_state(
+                &self,
+                _channel: &ChannelId,
+            ) -> Result<ChannelState, SettlementError> {
+                Err(SettlementError::Backend(format!(
+                    "{}: channel_state",
+                    self.0
+                )))
+            }
+        }
+
+        fn bare_connector() -> Connector {
+            Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+        }
+
+        fn both_chains_connector() -> Connector {
+            bare_connector()
+                .with_settlement(SettlementChain::Evm, Arc::new(TaggedBackend("evm")))
+                .with_settlement(SettlementChain::Solana, Arc::new(TaggedBackend("solana")))
+        }
+
+        fn backend_reached(result: Result<ChannelView, ChannelOperationError>) -> String {
+            match result {
+                Err(ChannelOperationError::Settlement(SettlementError::Backend(tag))) => tag,
+                other => panic!("expected the tagged backend's own answer, got {other:?}"),
+            }
+        }
+
+        /// The regression test for the last-one-wins slot: with EVM
+        /// attached first and Solana second (config resolution order), an
+        /// op on an EVM-namespace channel id must still reach the EVM
+        /// backend -- and the Solana twin its own.
+        #[tokio::test]
+        async fn a_channel_op_on_a_both_chains_node_reaches_the_ids_own_backend() {
+            let connector = both_chains_connector();
+
+            assert_eq!(
+                backend_reached(connector.fund_channel(EVM_CHANNEL, 5).await),
+                "evm: fund"
+            );
+            assert_eq!(
+                backend_reached(connector.close_channel(SOLANA_CHANNEL).await),
+                "solana: close"
+            );
+            // A bare (un-`0x`-prefixed) hex id is the same EVM namespace,
+            // exactly as `EvmSettlementBackend::parse_channel_id` accepts.
+            assert_eq!(
+                backend_reached(
+                    connector
+                        .fund_channel(EVM_CHANNEL.trim_start_matches("0x"), 5)
+                        .await
+                ),
+                "evm: fund"
+            );
+        }
+
+        /// Opening names its chain explicitly; on a node with several
+        /// backends, declining to name one is refused rather than
+        /// silently resolved to whichever backend attached last.
+        #[tokio::test]
+        async fn opening_routes_by_the_named_chain_and_refuses_ambiguity() {
+            let connector = both_chains_connector();
+
+            assert_eq!(
+                backend_reached(
+                    connector
+                        .open_channel(
+                            Some(SettlementChain::Solana),
+                            b"peer".to_vec(),
+                            Duration::seconds(60)
+                        )
+                        .await
+                ),
+                "solana: open"
+            );
+            assert!(matches!(
+                connector
+                    .open_channel(None, b"peer".to_vec(), Duration::seconds(60))
+                    .await,
+                Err(ChannelOperationError::AmbiguousSettlementChain)
+            ));
+        }
+
+        /// A single-backend node keeps the port's "ids are opaque"
+        /// promise: every id -- including one shaped like nothing any real
+        /// chain assigns, e.g. the in-memory backend's decimal counters --
+        /// routes to the one backend there is, and an unnamed chain on
+        /// `open_channel` denotes it unambiguously.
+        #[tokio::test]
+        async fn a_single_backend_node_routes_every_id_to_it() {
+            let connector = bare_connector()
+                .with_settlement(SettlementChain::Evm, Arc::new(TaggedBackend("evm")));
+
+            assert_eq!(
+                backend_reached(connector.fund_channel("7", 5).await),
+                "evm: fund"
+            );
+            assert_eq!(
+                backend_reached(connector.fund_channel(SOLANA_CHANNEL, 5).await),
+                "evm: fund"
+            );
+            assert_eq!(
+                backend_reached(
+                    connector
+                        .open_channel(None, b"peer".to_vec(), Duration::seconds(60))
+                        .await
+                ),
+                "evm: open"
+            );
+        }
+
+        /// A chain this node holds no backend for is refused naming the
+        /// actual gap -- "no solana settlement backend", not "no
+        /// settlement backend is configured for this node".
+        #[tokio::test]
+        async fn a_chain_with_no_backend_is_refused_naming_the_gap() {
+            let connector = bare_connector()
+                .with_settlement(SettlementChain::Evm, Arc::new(TaggedBackend("evm")));
+
+            let result = connector
+                .open_channel(
+                    Some(SettlementChain::Solana),
+                    b"peer".to_vec(),
+                    Duration::seconds(60),
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(ChannelOperationError::NoSettlementBackendForChain(
+                    SettlementChain::Solana
+                ))
+            ));
+        }
+
+        /// An id in no known namespace, on a node where the namespace is
+        /// what routes, is "no channel to operate on" -- the same answer
+        /// every backend already gives a malformed id.
+        #[tokio::test]
+        async fn an_id_in_no_namespace_is_not_found_on_a_both_chains_node() {
+            let connector = both_chains_connector();
+
+            let result = connector.fund_channel("not-any-chains-shape", 5).await;
+            assert!(matches!(
+                result,
+                Err(ChannelOperationError::Settlement(
+                    SettlementError::ChannelNotFound(_)
+                ))
+            ));
+        }
+
+        /// `channels()` reports each opened channel from the backend that
+        /// opened it: two in-memory backends both assign the id "0", so a
+        /// misrouted report would answer with the other chain's
+        /// counterparty.
+        #[tokio::test]
+        async fn channels_reports_each_channel_from_its_own_chains_backend() {
+            let connector = bare_connector()
+                .with_settlement(
+                    SettlementChain::Evm,
+                    Arc::new(InMemorySettlementBackend::new()),
+                )
+                .with_settlement(
+                    SettlementChain::Solana,
+                    Arc::new(InMemorySettlementBackend::new()),
+                );
+
+            connector
+                .open_channel(
+                    Some(SettlementChain::Evm),
+                    b"evm-peer".to_vec(),
+                    Duration::seconds(60),
+                )
+                .await
+                .expect("open on the EVM backend");
+            connector
+                .open_channel(
+                    Some(SettlementChain::Solana),
+                    b"sol-peer".to_vec(),
+                    Duration::seconds(60),
+                )
+                .await
+                .expect("open on the Solana backend");
+
+            let views = connector.channels().await;
+            let counterparties: Vec<&str> = views
+                .iter()
+                .map(|view| view.counterparty.as_str())
+                .collect();
+            assert_eq!(views.len(), 2);
+            assert!(
+                counterparties.contains(&to_hex(b"evm-peer").as_str())
+                    && counterparties.contains(&to_hex(b"sol-peer").as_str()),
+                "each channel must be reported by the backend that opened it: {counterparties:?}"
+            );
+        }
+
+        /// `0x`-prefixed lowercase hex -- [`ChannelView`]'s own
+        /// counterparty encoding.
+        fn to_hex(bytes: &[u8]) -> String {
+            let mut hex = String::from("0x");
+            for byte in bytes {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            hex
+        }
+    }
+
     mod redemption {
         use super::*;
         use connector_settlement::{ChannelStatus, InMemorySettlementBackend};
@@ -2713,7 +3107,7 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             )
-            .with_settlement(settlement)
+            .with_settlement(SettlementChain::Evm, settlement)
             .with_channel_verification_key(
                 channel_id,
                 derive_evm_address(&peer_signer.public_key().unwrap()),

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-util = ["dep:tempfile"]
+
 [dependencies]
 connector-settlement = { path = "../connector-settlement" }
 async-trait = "0.1"
@@ -14,8 +17,14 @@ solana-sdk = "=2.1.0"
 spl-token = { version = "=6.0.0", features = ["no-entrypoint"] }
 spl-associated-token-account = "=4.0.0"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
+# This crate itself, with `test-util` on, so the integration tests reuse
+# the one `solana-test-validator` harness `src/test_support.rs` already
+# ships to downstream crates (`connector-cli`) instead of carrying a
+# duplicated copy under `tests/support/`.
+connector-settlement-solana = { path = ".", features = ["test-util"] }
 connector-settlement = { path = "../connector-settlement", features = ["test-util"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 tempfile = "3"

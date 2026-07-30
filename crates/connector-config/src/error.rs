@@ -230,6 +230,12 @@ pub enum ConfigError {
     ClientChannelDuplicate { value: String },
 
     #[error(
+        "invalid [[client_channels]] {field} '{value}': must be base58 encoding a 32-byte \
+         Solana account"
+    )]
+    ClientChannelInvalidSolanaAccount { field: &'static str, value: String },
+
+    #[error(
         "[[client_channels]] is configured but 'state_dir' is not: this node would accept \
          claims and keep their replay watermarks only in memory, so every claim a client \
          has already spent becomes spendable again the next time this process restarts \

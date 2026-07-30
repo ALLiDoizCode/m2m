@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 use connector_domain::{PacketResponse, Prepare};
 use connector_runtime::{
     ChannelOperationError, ChannelView, ClaimView, Connector, ExposureView, LeaseRouteError,
-    LeasedRouteView, PeerView, RouteView,
+    LeasedRouteView, PeerView, RouteView, SettlementChain,
 };
 use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
@@ -329,13 +329,19 @@ async fn create_leased_route(
 
 /// A `POST /channels` request body: open a channel to `counterparty_hex`
 /// (arbitrary bytes, hex-encoded -- an EVM backend expects a 20-byte
-/// address, but the port itself takes opaque bytes) with a
-/// `settlement_timeout_seconds`-second withdrawal-safety window (issue
-/// #459, ADR 0008).
+/// address, a Solana one a 32-byte pubkey, but the port itself takes
+/// opaque bytes) with a `settlement_timeout_seconds`-second
+/// withdrawal-safety window (issue #459, ADR 0008). `chain` names which
+/// configured settlement backend opens it (`"evm"` or `"solana"`, the
+/// config file's own chain names, issue #630); omitted, it means "the
+/// configured backend", which a node settling on more than one chain
+/// refuses as ambiguous rather than resolving silently.
 #[derive(Debug, Deserialize)]
 struct OpenChannelRequest {
     counterparty_hex: String,
     settlement_timeout_seconds: i64,
+    #[serde(default)]
+    chain: Option<String>,
 }
 
 /// A `POST /channels/:id/fund` request body: deposit `amount` into the
@@ -360,13 +366,17 @@ struct RedeemChannelRequest {
 fn channel_operation_response(result: Result<ChannelView, ChannelOperationError>) -> Response {
     match result {
         Ok(view) => Json(view).into_response(),
-        Err(ChannelOperationError::NoSettlementBackend) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            ChannelOperationError::NoSettlementBackend.to_string(),
-        )
-            .into_response(),
+        // Both "no backend at all" and "no backend on that chain" are the
+        // node's own configuration lacking what the request needs -- 503,
+        // not a caller error.
         Err(
-            error @ (ChannelOperationError::NoClaimToRedeem | ChannelOperationError::Settlement(_)),
+            error @ (ChannelOperationError::NoSettlementBackend
+            | ChannelOperationError::NoSettlementBackendForChain(_)),
+        ) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+        Err(
+            error @ (ChannelOperationError::NoClaimToRedeem
+            | ChannelOperationError::AmbiguousSettlementChain
+            | ChannelOperationError::Settlement(_)),
         ) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }
@@ -409,11 +419,17 @@ async fn open_channel(
             return (StatusCode::BAD_REQUEST, "counterparty_hex must be hex").into_response()
         }
     };
+    let chain = match request.chain.as_deref().map(str::parse::<SettlementChain>) {
+        None => None,
+        Some(Ok(chain)) => Some(chain),
+        Some(Err(error)) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
 
     channel_operation_response(
         state
             .connector
             .open_channel(
+                chain,
                 counterparty,
                 chrono::Duration::seconds(request.settlement_timeout_seconds),
             )
@@ -1458,7 +1474,7 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     clock,
                 )
-                .with_settlement(Arc::new(settlement)),
+                .with_settlement(SettlementChain::Evm, Arc::new(settlement)),
             );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             let keypair = keypair();
@@ -1594,7 +1610,7 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     clock,
                 )
-                .with_settlement(Arc::new(settlement))
+                .with_settlement(SettlementChain::Evm, Arc::new(settlement))
                 .with_channel_verification_key(channel_id.0.clone(), peer_address)
                 .with_channel_domain(channel_id.0.clone(), peer_channel_domain)
                 .unwrap(),

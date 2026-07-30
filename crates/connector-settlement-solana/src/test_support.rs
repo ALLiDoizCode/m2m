@@ -1,12 +1,13 @@
-//! Shared support for connector-settlement-solana's integration tests: a
-//! `solana-test-validator` with `packages/solana-program`'s own built
-//! `payment_channel.so` loaded into its genesis, at the fixed local-test
-//! program id checked in at `crates/connector-settlement-solana/deploy/`
-//! (issue #567 -- the Solana twin of `connector-settlement-evm`'s own
-//! `tests/support/mod.rs`, and this crate's replacement for the deleted
-//! `connector-settlement-solana-program` crate's checked-in `.so`).
-
-#![allow(dead_code)]
+//! A real, disposable `solana-test-validator` harness shared by this
+//! crate's own integration tests (via a dev-dependency on itself with
+//! `test-util` on) and other crates' (issue #630): `connector-cli`'s
+//! settlement-construction tests need exactly what this crate's
+//! integration tests already stand up, and one copy of the harness is one
+//! place to fix it.
+//! Gated behind the `test-util` feature for the same reason
+//! `connector-settlement-evm`'s own `test_support` module is: a downstream
+//! crate's tests cannot see anything behind `#[cfg(test)]`, since that cfg
+//! is only active while this crate compiles its own test binary.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -14,6 +15,27 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
+
+/// Airdrop `pubkey` enough lamports to submit a handful of transactions
+/// (issue #630) -- the shared "fund a freshly connected identity" step
+/// every caller of this harness that goes on to sign real transactions
+/// needs (`connector-cli`'s settlement-construction tests,
+/// `connect_identity.rs`'s own), rather than each reimplementing the same
+/// request-airdrop-then-poll-confirm loop.
+pub async fn fund(rpc: &RpcClient, pubkey: &Pubkey) {
+    let signature = rpc
+        .request_airdrop(pubkey, 10_000_000_000)
+        .await
+        .expect("airdrop");
+    for _ in 0..200 {
+        if rpc.confirm_transaction(&signature).await.unwrap_or(false) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("airdrop did not confirm in time");
+}
 
 /// The fixed program id this crate's tests load `payment_channel.so`
 /// under -- checked in at `deploy/payment_channel-keypair.json`, distinct
@@ -73,14 +95,14 @@ pub fn solana_test_validator_available() -> bool {
         .unwrap_or(false)
 }
 
-/// The Solana twin of `connector-settlement-evm`'s `require_anvil`: a real
-/// chain is genuinely under test here (ADR 0007), so a CI run lacking
-/// either `solana-test-validator` or a buildable `payment_channel.so` must
-/// fail loudly rather than silently skip and report `passed` (issue #428,
-/// carried forward by issue #567's retarget). A local run missing either
-/// still skips, since requiring every contributor to install the Solana
-/// CLI and SBF toolchain just to run `cargo test` is a real cost this
-/// crate doesn't need to impose.
+/// The Solana twin of `connector_settlement_evm::test_support::require_anvil`:
+/// a real chain is genuinely under test here (ADR 0007), so a CI run
+/// lacking either `solana-test-validator` or a buildable
+/// `payment_channel.so` must fail loudly rather than silently skip and
+/// report `passed`. A local run missing either still skips, since
+/// requiring every contributor to install the Solana CLI and SBF toolchain
+/// just to run `cargo test` is a real cost this crate doesn't need to
+/// impose.
 ///
 /// Returns `true` when the caller should proceed with its real assertions,
 /// `false` when the caller should return early (having already skipped
@@ -120,14 +142,16 @@ static NEXT_PORT_OFFSET: AtomicU16 = AtomicU16::new(0);
 /// ports so tests spawning one concurrently don't collide.
 pub struct SolanaValidator {
     child: Child,
-    ledger: tempfile::TempDir,
+    // Never read after construction -- kept only so its directory outlives
+    // the validator process using it and is removed on drop.
+    _ledger: tempfile::TempDir,
     pub rpc_url: String,
 }
 
 impl SolanaValidator {
     pub async fn spawn() -> Self {
         let offset = NEXT_PORT_OFFSET.fetch_add(1, Ordering::SeqCst);
-        let rpc_port = 19_400u16
+        let rpc_port = 19_900u16
             .wrapping_add((std::process::id() as u16) % 500)
             .wrapping_add(offset.wrapping_mul(50));
         let rpc_url = format!("http://127.0.0.1:{rpc_port}");
@@ -177,7 +201,7 @@ impl SolanaValidator {
 
         Self {
             child,
-            ledger,
+            _ledger: ledger,
             rpc_url,
         }
     }
@@ -187,9 +211,5 @@ impl Drop for SolanaValidator {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // `ledger` is a TempDir and cleans up its directory on drop; kept
-        // as a field purely so it outlives the validator process using it,
-        // not read otherwise -- hence the `#![allow(dead_code)]` above.
-        let _ = &self.ledger;
     }
 }

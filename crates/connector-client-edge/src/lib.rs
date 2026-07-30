@@ -2198,6 +2198,177 @@ mod tests {
             );
             assert!(app_client.deliveries().is_empty());
         }
+
+        /// Issue #630's demoable slice, proven at this crate's own real
+        /// HTTP seam -- the same one
+        /// `a_fresh_plaintext_claim_lets_the_packet_reach_the_app` proves
+        /// for EVM, above: a Solana channel declared only in
+        /// [`ClientChannelRegistry`] (the `[[client_channels]]`-equivalent
+        /// -- no chain resolution, no settlement backend, matching
+        /// `ClientChannelRegistry::solana`'s own "declared records only"
+        /// doc), a genuinely Ed25519-signed claim over it, verified,
+        /// journaled and forwarded to the app.
+        #[tokio::test]
+        async fn a_declared_solana_client_channel_claim_reaches_the_app() {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine;
+            use ed25519_dalek::{Keypair as SolanaKeypair, Signer as Ed25519Signer};
+            use rand::rngs::OsRng;
+
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+
+            // The channel's counterparty must be a real Ed25519 identity
+            // able to sign a genuine balance proof (issue #558) -- generated
+            // here rather than a placeholder, since the claim below signs
+            // with it for real.
+            let counterparty_keypair = SolanaKeypair::generate(&mut OsRng);
+            let channel_account = [0x42u8; 32];
+            let channel_account_base58 = bs58::encode(channel_account).into_string();
+            let counterparty_base58 =
+                bs58::encode(counterparty_keypair.public.to_bytes()).into_string();
+
+            // Declared, not resolved from chain: `[[client_channels]]`'s
+            // own registration path (issue #630), the only source a Solana
+            // channel has today (`connector_client_edge::channels`'s own
+            // doc -- there is no Solana `ClientChannelSource` yet).
+            let mut channels = ClientChannelRegistry::new();
+            channels
+                .record_solana(&channel_account_base58, &counterparty_base58)
+                .expect("valid base58 32-byte accounts");
+
+            let nonce = 1u64;
+            let transferred_amount = 100u64;
+            let message = connector_signer::solana_balance_proof_message(
+                &channel_account,
+                nonce,
+                transferred_amount,
+            );
+            let signature = counterparty_keypair.sign(&message);
+            let signature_base64 = BASE64.encode(signature.to_bytes());
+
+            let claim_json = format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "programId": "{counterparty_base58}",
+                    "channelAccount": "{channel_account_base58}",
+                    "nonce": {nonce},
+                    "transferredAmount": "{transferred_amount}",
+                    "signature": "{signature_base64}",
+                    "signerPublicKey": "{counterparty_base58}"
+                }}"#,
+            );
+
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router_with_gate(connector, signer, None, test_gate(channels));
+
+            let request = request_with_claim_header(&prepare, CLAIM_HEADER, &claim_json);
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("decode fulfill");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// The forger of issue #558, Solana-flavored: a claim genuinely
+        /// signed, but by a key that is not the declared channel's
+        /// counterparty, and declaring itself the payer anyway. Must be
+        /// refused exactly as the equivalent EVM forgery is -- the claim's
+        /// own `signerPublicKey` is never trusted, only the registry's
+        /// declared counterparty is checked against.
+        #[tokio::test]
+        async fn a_solana_claim_forged_by_a_non_counterparty_key_is_refused() {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine;
+            use ed25519_dalek::{Keypair as SolanaKeypair, Signer as Ed25519Signer};
+            use rand::rngs::OsRng;
+
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+
+            let real_counterparty = SolanaKeypair::generate(&mut OsRng);
+            let forger = SolanaKeypair::generate(&mut OsRng);
+            let channel_account = [0x43u8; 32];
+            let channel_account_base58 = bs58::encode(channel_account).into_string();
+            let real_counterparty_base58 =
+                bs58::encode(real_counterparty.public.to_bytes()).into_string();
+            let forger_base58 = bs58::encode(forger.public.to_bytes()).into_string();
+
+            let mut channels = ClientChannelRegistry::new();
+            channels
+                .record_solana(&channel_account_base58, &real_counterparty_base58)
+                .expect("valid base58 32-byte accounts");
+
+            let nonce = 1u64;
+            let transferred_amount = 100u64;
+            let message = connector_signer::solana_balance_proof_message(
+                &channel_account,
+                nonce,
+                transferred_amount,
+            );
+            // Signed genuinely -- just by the wrong key.
+            let signature = forger.sign(&message);
+            let signature_base64 = BASE64.encode(signature.to_bytes());
+
+            let claim_json = format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "programId": "{forger_base58}",
+                    "channelAccount": "{channel_account_base58}",
+                    "nonce": {nonce},
+                    "transferredAmount": "{transferred_amount}",
+                    "signature": "{signature_base64}",
+                    "signerPublicKey": "{forger_base58}"
+                }}"#,
+            );
+
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router_with_gate(connector, signer, None, test_gate(channels));
+
+            let request = request_with_claim_header(&prepare, CLAIM_HEADER, &claim_json);
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(app_client.deliveries().is_empty());
+        }
     }
 
     /// Cost discovery at the client edge (issue #548,

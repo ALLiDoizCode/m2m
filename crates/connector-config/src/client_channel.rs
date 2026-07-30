@@ -1,40 +1,66 @@
 use serde::Deserialize;
 
 use crate::error::ConfigError;
+use crate::settlement::SettlementChain;
 
-/// One `[[client_channels]]` entry as written in the config file: a payment
-/// channel this node accepts client-edge claims on, and the counterparty
-/// whose signature it accepts them from (issue #558). `deny_unknown_fields`
-/// so a mistyped key fails config load loudly instead of being silently
-/// dropped -- a dropped `counterparty` here would be a dropped
-/// authorization decision.
+/// One `[[client_channels]]` entry as written in the config file, in either
+/// chain shape this connector accepts (issue #630): EVM
+/// ([`RawEvmClientChannel`]) or Solana ([`RawSolanaClientChannel`]).
+/// `#[serde(untagged)]` picks whichever shape matches: the EVM shape
+/// requires `channel_id`/`chain_id`/`token_network_address` and forbids
+/// `channel_account`, the Solana shape requires `channel_account` and
+/// forbids the other three -- mutually exclusive by construction (each
+/// variant is `deny_unknown_fields`), the same pattern
+/// `crate::settlement::RawSettlementSection` already uses for its own
+/// per-chain tables.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawClientChannel {
+    Evm(RawEvmClientChannel),
+    Solana(RawSolanaClientChannel),
+}
+
+/// `[[client_channels]]`'s original (and still only shipped) shape (issue
+/// #558): a payment channel this node accepts client-edge claims on, and
+/// the counterparty whose signature it accepts them from.
+/// `deny_unknown_fields` so a mistyped key fails config load loudly instead
+/// of being silently dropped -- a dropped `counterparty` here would be a
+/// dropped authorization decision.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawClientChannel {
+pub(crate) struct RawEvmClientChannel {
     channel_id: String,
     counterparty: String,
     chain_id: u64,
     token_network_address: String,
 }
 
-/// A fully validated `[[client_channels]]` entry. Constructed only by
+/// `[[client_channels]]`'s Solana shape (issue #630): the deployed
+/// `payment-channel` program's channel PDA (`channel_account`, not an
+/// EVM-style `channel_id`) and the base58 Ed25519 public key whose
+/// signature this node accepts on a claim for it. No `chain_id` or
+/// `token_network_address` -- Solana has neither an EVM-style numeric chain
+/// id nor a per-token verifying contract for a declared channel to name.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSolanaClientChannel {
+    channel_account: String,
+    counterparty: String,
+}
+
+/// A fully validated `[[client_channels]]` EVM entry. Constructed only by
 /// [`resolve_client_channels`], so a value that exists has already had its
 /// identifier and addresses checked -- downstream code never re-validates
 /// any of them.
-///
-/// EVM-only: `connector-cli` constructs no non-EVM settlement backend yet
-/// (issue #628's `[settlement.solana]` parses but is not wired), and a
-/// channel it cannot settle is not one it should be accepting claims
-/// against.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientChannelConfig {
+pub struct EvmClientChannelConfig {
     channel_id: String,
     counterparty: [u8; 20],
     chain_id: u64,
     token_network_address: [u8; 20],
 }
 
-impl ClientChannelConfig {
+impl EvmClientChannelConfig {
     /// The channel's on-chain identifier, canonicalized to lowercase
     /// `0x`-prefixed hex however the operator wrote it -- the same value a
     /// claim names the channel by.
@@ -59,6 +85,52 @@ impl ClientChannelConfig {
     /// each token gets its own `TokenNetwork` (issue #566).
     pub fn token_network_address(&self) -> [u8; 20] {
         self.token_network_address
+    }
+}
+
+/// A fully validated `[[client_channels]]` Solana entry (issue #630).
+/// Constructed only by [`resolve_client_channels`] -- both fields have
+/// already been checked to be base58-encoded 32-byte Solana accounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolanaClientChannelConfig {
+    channel_account: String,
+    counterparty: String,
+}
+
+impl SolanaClientChannelConfig {
+    /// The channel's on-chain PDA, base58-encoded -- the same value a
+    /// Solana claim names its `channelAccount` by.
+    pub fn channel_account(&self) -> &str {
+        &self.channel_account
+    }
+
+    /// The base58 Ed25519 public key whose signature this node accepts on
+    /// a claim for this channel. Never the claim's own self-declared
+    /// `signerPublicKey` (issue #558's rule, Solana-flavored).
+    pub fn counterparty(&self) -> &str {
+        &self.counterparty
+    }
+}
+
+/// One `[[client_channels]]` entry, typed by chain (issue #630) -- an EVM
+/// `channelId` and a Solana `channelAccount` name genuinely different kinds
+/// of on-chain identifier, so a single shared shape would either force one
+/// to fake fields it does not have or erase which chain a value came from.
+/// The same reason [`crate::SettlementConfig`] is an enum rather than one
+/// struct with optional fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientChannelConfig {
+    Evm(EvmClientChannelConfig),
+    Solana(SolanaClientChannelConfig),
+}
+
+impl ClientChannelConfig {
+    /// The chain this declared channel lives on.
+    pub fn chain(&self) -> SettlementChain {
+        match self {
+            ClientChannelConfig::Evm(_) => SettlementChain::Evm,
+            ClientChannelConfig::Solana(_) => SettlementChain::Solana,
+        }
     }
 }
 
@@ -93,6 +165,67 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Whether `value` is base58 encoding exactly 32 bytes -- a Solana account
+/// or Ed25519 public key's own wire shape. Only checked, never decoded into
+/// bytes and re-encoded: `record_solana`
+/// (`connector_client_edge::ClientChannelRegistry`) does the actual
+/// base58-to-bytes decoding at the point it is used, so this config crate
+/// stores exactly the string the operator wrote (already validated),
+/// matching [`EvmClientChannelConfig::channel_id`]'s own "canonicalized
+/// string, not raw bytes" shape.
+fn is_base58_32_bytes(value: &str) -> bool {
+    matches!(bs58::decode(value).into_vec(), Ok(bytes) if bytes.len() == 32)
+}
+
+fn resolve_evm_client_channel(
+    raw: RawEvmClientChannel,
+) -> Result<EvmClientChannelConfig, ConfigError> {
+    let channel_id = parse_hex_bytes::<32>(&raw.channel_id).ok_or_else(|| {
+        ConfigError::ClientChannelInvalidId {
+            value: raw.channel_id.clone(),
+        }
+    })?;
+    let counterparty = parse_evm_address(&raw.counterparty).ok_or_else(|| {
+        ConfigError::ClientChannelInvalidAddress {
+            field: "counterparty",
+            value: raw.counterparty.clone(),
+        }
+    })?;
+    let token_network_address = parse_evm_address(&raw.token_network_address).ok_or_else(|| {
+        ConfigError::ClientChannelInvalidAddress {
+            field: "token_network_address",
+            value: raw.token_network_address.clone(),
+        }
+    })?;
+    Ok(EvmClientChannelConfig {
+        channel_id: to_hex(&channel_id),
+        counterparty,
+        chain_id: raw.chain_id,
+        token_network_address,
+    })
+}
+
+fn resolve_solana_client_channel(
+    raw: RawSolanaClientChannel,
+) -> Result<SolanaClientChannelConfig, ConfigError> {
+    if !is_base58_32_bytes(&raw.channel_account) {
+        return Err(ConfigError::ClientChannelInvalidSolanaAccount {
+            field: "channel_account",
+            value: raw.channel_account,
+        });
+    }
+    if !is_base58_32_bytes(&raw.counterparty) {
+        return Err(ConfigError::ClientChannelInvalidSolanaAccount {
+            field: "counterparty",
+            value: raw.counterparty,
+        });
+    }
+    Ok(SolanaClientChannelConfig {
+        channel_account: raw.channel_account,
+        counterparty: raw.counterparty,
+    })
+}
+
 /// Validate every `[[client_channels]]` entry. An empty list is valid and
 /// means this node has a record of no channel -- every claim presented to
 /// its client edge is refused as unknown (issue #558), which is the
@@ -102,36 +235,37 @@ pub(crate) fn resolve_client_channels(
 ) -> Result<Vec<ClientChannelConfig>, ConfigError> {
     let mut channels: Vec<ClientChannelConfig> = Vec::with_capacity(raw.len());
     for entry in raw {
-        let channel_id = parse_hex_bytes::<32>(&entry.channel_id).ok_or_else(|| {
-            ConfigError::ClientChannelInvalidId {
-                value: entry.channel_id.clone(),
+        let channel = match entry {
+            RawClientChannel::Evm(evm) => {
+                ClientChannelConfig::Evm(resolve_evm_client_channel(evm)?)
             }
-        })?;
-        let counterparty = parse_evm_address(&entry.counterparty).ok_or_else(|| {
-            ConfigError::ClientChannelInvalidAddress {
-                field: "counterparty",
-                value: entry.counterparty.clone(),
+            RawClientChannel::Solana(solana) => {
+                ClientChannelConfig::Solana(resolve_solana_client_channel(solana)?)
             }
-        })?;
-        let token_network_address =
-            parse_evm_address(&entry.token_network_address).ok_or_else(|| {
-                ConfigError::ClientChannelInvalidAddress {
-                    field: "token_network_address",
-                    value: entry.token_network_address.clone(),
-                }
-            })?;
-        let channel_id = to_hex(&channel_id);
+        };
         // Two entries for one channel would mean two answers to "whose
         // signature do I accept here", with the last one silently winning.
-        if channels.iter().any(|c| c.channel_id == channel_id) {
-            return Err(ConfigError::ClientChannelDuplicate { value: channel_id });
+        // EVM and Solana are separate namespaces (issue #630, matching
+        // `connector_client_edge::ClientChannelRegistry`'s own split), so
+        // duplication is checked within a chain, never across.
+        let duplicate = match &channel {
+            ClientChannelConfig::Evm(evm) => channels
+                .iter()
+                .any(|existing| {
+                    matches!(existing, ClientChannelConfig::Evm(e) if e.channel_id == evm.channel_id)
+                })
+                .then(|| evm.channel_id.clone()),
+            ClientChannelConfig::Solana(solana) => channels
+                .iter()
+                .any(|existing| {
+                    matches!(existing, ClientChannelConfig::Solana(s) if s.channel_account == solana.channel_account)
+                })
+                .then(|| solana.channel_account.clone()),
+        };
+        if let Some(value) = duplicate {
+            return Err(ConfigError::ClientChannelDuplicate { value });
         }
-        channels.push(ClientChannelConfig {
-            channel_id,
-            counterparty,
-            chain_id: entry.chain_id,
-            token_network_address,
-        });
+        channels.push(channel);
     }
     Ok(channels)
 }
@@ -140,35 +274,52 @@ pub(crate) fn resolve_client_channels(
 mod tests {
     use super::*;
 
-    fn raw(channel_id: &str) -> RawClientChannel {
-        RawClientChannel {
+    fn raw_evm(channel_id: &str) -> RawClientChannel {
+        RawClientChannel::Evm(RawEvmClientChannel {
             channel_id: channel_id.to_string(),
             counterparty: "0x00000000000000000000000000000000000000aa".to_string(),
             chain_id: 8453,
             token_network_address: "0x00000000000000000000000000000000000000bb".to_string(),
-        }
+        })
+    }
+
+    fn raw_solana(channel_account: &str, counterparty: &str) -> RawClientChannel {
+        RawClientChannel::Solana(RawSolanaClientChannel {
+            channel_account: channel_account.to_string(),
+            counterparty: counterparty.to_string(),
+        })
+    }
+
+    /// A real base58-encoded 32-byte value -- `[1u8; 32]` -- used wherever a
+    /// test needs a well-formed Solana account without caring which one.
+    const SOME_SOLANA_ACCOUNT: &str = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+
+    #[test]
+    fn an_evm_channel_id_is_canonicalized_however_it_was_written() {
+        let channels = resolve_client_channels(vec![raw_evm(&"AB".repeat(32))]).expect("valid");
+        let ClientChannelConfig::Evm(evm) = &channels[0] else {
+            panic!("expected an EVM channel");
+        };
+        assert_eq!(evm.channel_id(), format!("0x{}", "ab".repeat(32)));
+        assert_eq!(evm.counterparty()[19], 0xaa);
+        assert_eq!(evm.token_network_address()[19], 0xbb);
+        assert_eq!(evm.chain_id(), 8453);
+        assert_eq!(channels[0].chain(), SettlementChain::Evm);
     }
 
     #[test]
-    fn a_channel_id_is_canonicalized_however_it_was_written() {
-        let channels = resolve_client_channels(vec![raw(&"AB".repeat(32))]).expect("valid");
-        assert_eq!(channels[0].channel_id(), format!("0x{}", "ab".repeat(32)));
-        assert_eq!(channels[0].counterparty()[19], 0xaa);
-        assert_eq!(channels[0].token_network_address()[19], 0xbb);
-        assert_eq!(channels[0].chain_id(), 8453);
-    }
-
-    #[test]
-    fn an_id_that_is_not_a_32_byte_channel_is_refused() {
-        let error = resolve_client_channels(vec![raw("0xdeadbeef")]).unwrap_err();
+    fn an_evm_id_that_is_not_a_32_byte_channel_is_refused() {
+        let error = resolve_client_channels(vec![raw_evm("0xdeadbeef")]).unwrap_err();
         assert!(matches!(error, ConfigError::ClientChannelInvalidId { .. }));
     }
 
     #[test]
-    fn a_counterparty_that_is_not_an_evm_address_is_refused() {
-        let mut entry = raw(&"ab".repeat(32));
+    fn an_evm_counterparty_that_is_not_an_evm_address_is_refused() {
+        let RawClientChannel::Evm(mut entry) = raw_evm(&"ab".repeat(32)) else {
+            unreachable!()
+        };
         entry.counterparty = "not-an-address".to_string();
-        let error = resolve_client_channels(vec![entry]).unwrap_err();
+        let error = resolve_client_channels(vec![RawClientChannel::Evm(entry)]).unwrap_err();
         assert!(matches!(
             error,
             ConfigError::ClientChannelInvalidAddress {
@@ -179,14 +330,109 @@ mod tests {
     }
 
     #[test]
-    fn the_same_channel_configured_twice_is_refused_never_last_one_wins() {
-        let error = resolve_client_channels(vec![raw(&"ab".repeat(32)), raw(&"AB".repeat(32))])
-            .unwrap_err();
+    fn the_same_evm_channel_configured_twice_is_refused_never_last_one_wins() {
+        let error =
+            resolve_client_channels(vec![raw_evm(&"ab".repeat(32)), raw_evm(&"AB".repeat(32))])
+                .unwrap_err();
         assert!(matches!(error, ConfigError::ClientChannelDuplicate { .. }));
     }
 
     #[test]
-    fn no_configured_channels_is_valid_and_records_nothing() {
+    fn no_client_channels_is_valid_and_records_nothing() {
         assert!(resolve_client_channels(vec![]).expect("valid").is_empty());
+    }
+
+    /// Issue #630's AC: a `[[client_channels]]` entry can declare a Solana
+    /// channel -- `channel_account`/`counterparty` rather than `channel_id`/
+    /// `chain_id`/`token_network_address` -- and parses into a distinctly
+    /// typed [`ClientChannelConfig::Solana`].
+    #[test]
+    fn a_solana_client_channel_is_declared_and_typed_distinctly_from_evm() {
+        let counterparty = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH";
+        let channels = resolve_client_channels(vec![raw_solana(SOME_SOLANA_ACCOUNT, counterparty)])
+            .expect("valid");
+        let ClientChannelConfig::Solana(solana) = &channels[0] else {
+            panic!("expected a Solana channel");
+        };
+        assert_eq!(solana.channel_account(), SOME_SOLANA_ACCOUNT);
+        assert_eq!(solana.counterparty(), counterparty);
+        assert_eq!(channels[0].chain(), SettlementChain::Solana);
+    }
+
+    #[test]
+    fn a_solana_channel_account_that_is_not_valid_base58_32_bytes_is_refused() {
+        let error = resolve_client_channels(vec![raw_solana("not-base58!!!", SOME_SOLANA_ACCOUNT)])
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::ClientChannelInvalidSolanaAccount {
+                field: "channel_account",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_solana_counterparty_that_decodes_to_the_wrong_length_is_refused() {
+        // Valid base58, but not 32 bytes once decoded.
+        let error =
+            resolve_client_channels(vec![raw_solana(SOME_SOLANA_ACCOUNT, "abc")]).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::ClientChannelInvalidSolanaAccount {
+                field: "counterparty",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_same_solana_channel_configured_twice_is_refused() {
+        let error = resolve_client_channels(vec![
+            raw_solana(SOME_SOLANA_ACCOUNT, SOME_SOLANA_ACCOUNT),
+            raw_solana(SOME_SOLANA_ACCOUNT, SOME_SOLANA_ACCOUNT),
+        ])
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::ClientChannelDuplicate { .. }));
+    }
+
+    /// EVM and Solana channels are separate namespaces (issue #630): an EVM
+    /// `channel_id` and a Solana `channel_account` can coexist, and a
+    /// duplicate check on one chain must never trip on the other's entry.
+    #[test]
+    fn evm_and_solana_client_channels_coexist_without_colliding() {
+        let channels = resolve_client_channels(vec![
+            raw_evm(&"ab".repeat(32)),
+            raw_solana(SOME_SOLANA_ACCOUNT, SOME_SOLANA_ACCOUNT),
+        ])
+        .expect("valid: distinct chains never collide");
+        assert_eq!(channels.len(), 2);
+    }
+
+    /// `#[serde(untagged)]` really does dispatch on the config file's own
+    /// shape: this is the TOML-level proof, not just the constructor-level
+    /// one above.
+    #[test]
+    fn toml_deserializes_each_shape_into_its_own_raw_variant() {
+        let raw: RawClientChannel = toml::from_str(&format!(
+            r#"
+channel_id = "0x{}"
+counterparty = "0x00000000000000000000000000000000000000aa"
+chain_id = 8453
+token_network_address = "0x00000000000000000000000000000000000000bb"
+"#,
+            "ab".repeat(32)
+        ))
+        .expect("valid EVM TOML");
+        assert!(matches!(raw, RawClientChannel::Evm(_)));
+
+        let raw: RawClientChannel = toml::from_str(&format!(
+            r#"
+channel_account = "{SOME_SOLANA_ACCOUNT}"
+counterparty = "{SOME_SOLANA_ACCOUNT}"
+"#
+        ))
+        .expect("valid Solana TOML");
+        assert!(matches!(raw, RawClientChannel::Solana(_)));
     }
 }
