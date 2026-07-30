@@ -338,6 +338,13 @@ impl SolanaSettlementBackend {
         self.token_mint
     }
 
+    /// The deployed `payment-channel` program instance this backend drives
+    /// (issue #632's greeting facts -- the Solana twin of
+    /// `EvmSettlementBackend::address`/`registry_address`).
+    pub fn program_id(&self) -> Pubkey {
+        self.program_id
+    }
+
     /// Who this backend's counterparty is on the channel at `channel_account`,
     /// as the chain itself holds it -- the Solana twin of
     /// `EvmSettlementBackend::channel_counterparty` (issue #611), and the

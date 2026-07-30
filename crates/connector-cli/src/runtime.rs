@@ -459,11 +459,18 @@ pub struct Runtime {
     /// -- `Some` exactly when `[settlement.solana]` is configured.
     pub client_channel_source_solana: Option<Arc<dyn ClientChannelSource>>,
     /// The channel-opening facts the x402 greeting carries (issue #617) --
-    /// `Some` exactly when `[settlement]` is configured, composed here in
-    /// `build` because that is the one place the config's own values and
-    /// the facts the chain connection proved (chain id, the resolved
-    /// `TokenNetwork`, the backend's signing address) are both in scope.
+    /// `Some` exactly when `[settlement.evm]` (or the legacy flat
+    /// `[settlement]`) is configured, composed here in `build` because that
+    /// is the one place the config's own values and the facts the chain
+    /// connection proved (chain id, the resolved `TokenNetwork`, the
+    /// backend's signing address) are both in scope.
     pub settlement_terms: Option<connector_client_edge::X402SettlementTerms>,
+    /// Every configured chain's channel-opening facts (issue #632), additive
+    /// beside [`settlement_terms`](Self::settlement_terms): one entry per
+    /// `[settlement.<chain>]` table this node has, so a node settling on N
+    /// chains (epic #627) advertises all N in the x402 greeting's
+    /// `extra.settlements` rather than only the EVM leg.
+    pub settlements: Vec<connector_client_edge::X402ChainSettlementTerms>,
 }
 
 /// Construct the live [`Connector`] and [`Signer`] a validated [`Config`]
@@ -509,6 +516,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
+    let mut settlements: Vec<connector_client_edge::X402ChainSettlementTerms> = Vec::new();
     for settlement in config.settlements() {
         match settlement {
             SettlementConfig::Evm(evm) => {
@@ -519,7 +527,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                 // backend; the registry, token and scale come from the very
                 // config lines `connect` just verified against that chain
                 // (issues #564/#576).
-                settlement_terms = Some(connector_client_edge::X402SettlementTerms {
+                let evm_terms = connector_client_edge::X402SettlementTerms {
                     chain: format!("evm:{}", backend.chain_id()),
                     settlement_address: format!("{:#x}", backend.own_address()),
                     token_network_registry: format!("{:#x}", backend.registry_address()),
@@ -529,7 +537,11 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                         ethers::types::Address::from(evm.token_address())
                     ),
                     decimals: evm.decimals(),
-                });
+                };
+                settlement_terms = Some(evm_terms.clone());
+                settlements.push(connector_client_edge::X402ChainSettlementTerms::Evm(
+                    evm_terms,
+                ));
                 client_channel_source_evm = Some(Arc::new(SettlementChannelSource {
                     backend: backend.clone(),
                 }));
@@ -537,20 +549,30 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                     .with_settlement(SettlementChain::Evm, backend as Arc<dyn SettlementBackend>);
             }
             SettlementConfig::Solana(solana) => {
-                // Constructed and attached exactly as the EVM leg is
-                // (issue #630) -- `SolanaSettlementBackend::connect`'s own
+                // Constructed and attached exactly as the EVM leg is (issue
+                // #630) -- `SolanaSettlementBackend::connect`'s own
                 // fail-closed identity checks (program reachable,
                 // executable and proven to behave like the deployed
                 // payment-channel program, mint owned by the SPL Token
                 // program, configured decimals agreeing with the mint's
                 // own) run before this node serves any traffic.
-                // `ClientChannelSource` now covers Solana too (issue #631);
-                // the greeting's per-chain settlement facts remain epic
-                // #627's one remaining child.
+                // `ClientChannelSource` now covers Solana too (issue #631),
+                // and the greeting's per-chain settlement facts are
+                // composed here as well (issue #632) -- epic #627's
+                // remaining children, together.
                 let backend = build_solana_settlement_backend(solana).await?;
                 client_channel_source_solana = Some(Arc::new(SolanaChannelSource {
                     backend: backend.clone(),
                 }));
+                settlements.push(connector_client_edge::X402ChainSettlementTerms::Solana(
+                    connector_client_edge::X402SolanaSettlementTerms {
+                        chain: "solana".to_string(),
+                        settlement_address: backend.own_pubkey().to_string(),
+                        program_id: backend.program_id().to_string(),
+                        token_address: backend.token_mint().to_string(),
+                        decimals: solana.decimals(),
+                    },
+                ));
                 connector = connector.with_settlement(
                     SettlementChain::Solana,
                     backend as Arc<dyn SettlementBackend>,
@@ -589,6 +611,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         client_channel_source_evm,
         client_channel_source_solana,
         settlement_terms,
+        settlements,
     })
 }
 
@@ -703,6 +726,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
             runtime.client_channel_source_solana.clone(),
         )?,
         runtime.settlement_terms.clone(),
+        runtime.settlements.clone(),
     );
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
@@ -1226,6 +1250,71 @@ key_file = "{key_path}"
             assert_eq!(opened.deposited, 0);
         }
 
+        /// Issue #632's EVM-only acceptance criterion: "EVM-only node:
+        /// greeting unchanged apart from the additive one-entry list" --
+        /// `build` composes both the legacy singular `settlement_terms` and
+        /// the new `settlements` list from the same EVM backend, and the
+        /// two agree.
+        #[tokio::test]
+        async fn an_evm_only_node_composes_the_legacy_terms_and_a_one_entry_settlements_list() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement_backend =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            let registry_address = settlement_backend.registry_address();
+            drop(settlement_backend);
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement]
+chain = "evm"
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                rpc_url = anvil.rpc_url,
+                registry_address = registry_address,
+                token = token,
+            ));
+
+            let runtime = build(&config).await.expect("build");
+            let terms = runtime
+                .settlement_terms
+                .clone()
+                .expect("an EVM settlement section composes the legacy greeting terms");
+            assert_eq!(
+                runtime.settlements,
+                vec![connector_client_edge::X402ChainSettlementTerms::Evm(terms)],
+                "an EVM-only node's settlements list is a one-entry list matching the legacy terms verbatim"
+            );
+        }
+
         /// AC (issue #564): "`decimals` is honoured: ... startup compares
         /// it with the token contract's own `decimals()` and refuses to
         /// start when the two disagree, naming both". The mock USDC
@@ -1625,6 +1714,135 @@ key_file = "{solana_key_path}"
                 ambiguous,
                 Err(connector_runtime::ChannelOperationError::AmbiguousSettlementChain)
             ));
+        }
+
+        /// Issue #632's two-chain acceptance criterion: "Two-chain node:
+        /// greeting carries both chains' entries in `settlements`; legacy
+        /// `settlement` object unchanged". Driven through the same real
+        /// anvil + solana-test-validator harness
+        /// `a_both_chains_config_attaches_and_routes_both_backends` uses,
+        /// so both chains' facts genuinely came from live `connect()` calls
+        /// rather than a fixture.
+        #[tokio::test]
+        async fn a_both_chains_config_composes_both_chains_greeting_facts() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement_backend =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            let registry_address = settlement_backend.registry_address();
+            drop(settlement_backend);
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+            let deployed = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = deployed.token_mint();
+            drop(deployed);
+
+            let seed = [17u8; 32];
+            let payer =
+                solana_sdk::signer::keypair::keypair_from_seed(&seed).expect("derive keypair");
+            let rpc = RpcClient::new_with_commitment(
+                validator.rpc_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            fund(&rpc, &payer.pubkey()).await;
+
+            let evm_key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let solana_key_path = raw_key_file(seed);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{evm_key_path}"
+
+[settlement.evm]
+rpc_url = "{evm_rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{evm_key_path}"
+
+[settlement.solana]
+rpc_url = "{solana_rpc_url}"
+program_id = "{program_id}"
+token_address = "{token_mint}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{solana_key_path}"
+"#,
+                evm_key_path = evm_key_path.display(),
+                solana_key_path = solana_key_path.display(),
+                evm_rpc_url = anvil.rpc_url,
+                solana_rpc_url = validator.rpc_url,
+                registry_address = registry_address,
+                token = token,
+            ));
+
+            let runtime = build(&config)
+                .await
+                .expect("both legs construct and attach without either refusing startup");
+
+            let evm_terms = runtime
+                .settlement_terms
+                .clone()
+                .expect("the EVM leg composes the legacy greeting terms");
+            assert_eq!(
+                evm_terms.token_address,
+                format!("{token:#x}"),
+                "the legacy settlement object names the EVM leg alone, unaffected by the Solana leg"
+            );
+
+            assert_eq!(
+                runtime.settlements.len(),
+                2,
+                "both configured chains carry an entry: {:?}",
+                runtime.settlements
+            );
+            assert!(
+                runtime.settlements.contains(
+                    &connector_client_edge::X402ChainSettlementTerms::Evm(evm_terms)
+                ),
+                "the settlements list carries the same EVM entry as the legacy object"
+            );
+            let solana_entry = runtime
+                .settlements
+                .iter()
+                .find_map(|entry| match entry {
+                    connector_client_edge::X402ChainSettlementTerms::Solana(terms) => {
+                        Some(terms.clone())
+                    }
+                    _ => None,
+                })
+                .expect("the settlements list carries a Solana entry");
+            assert_eq!(solana_entry.chain, "solana");
+            assert_eq!(solana_entry.program_id, program_id.to_string());
+            assert_eq!(solana_entry.token_address, token_mint.to_string());
+            assert_eq!(solana_entry.decimals, 6);
         }
 
         /// Issue #630's review, finding 2: a `[settlement.solana]`
