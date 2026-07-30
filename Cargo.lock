@@ -1077,6 +1077,7 @@ dependencies = [
  "connector-runtime",
  "connector-settlement",
  "connector-settlement-evm",
+ "connector-settlement-solana",
  "connector-signer",
  "ed25519-dalek",
  "ethers",
@@ -1084,6 +1085,8 @@ dependencies = [
  "libsecp256k1",
  "rand 0.7.3",
  "serde_json",
+ "solana-client",
+ "solana-sdk",
  "tempfile",
  "tokio",
  "tower",
@@ -1123,6 +1126,7 @@ dependencies = [
 name = "connector-config"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "serde",
  "tempfile",
  "thiserror 2.0.19",

@@ -17,7 +17,7 @@ mod route;
 mod secret;
 mod settlement;
 
-pub use client_channel::ClientChannelConfig;
+pub use client_channel::{ClientChannelConfig, EvmClientChannelConfig, SolanaClientChannelConfig};
 pub use config::Config;
 pub use error::ConfigError;
 pub use operator::OperatorConfig;

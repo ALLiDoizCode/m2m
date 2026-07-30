@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,14 +15,19 @@ use axum::Router;
 use connector_client_edge::{
     ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, ClientClaimGate, EvmChannel,
 };
-use connector_config::{Config, EvmSettlementConfig, SecretLocation, SettlementConfig};
+use connector_config::{
+    ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementConfig,
+    SolanaSettlementConfig,
+};
 use connector_runtime::{
     Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
     NetworkPeerTransport, PeerRoute, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_settlement_solana::SolanaSettlementBackend;
 use connector_signer::{LocalSigner, Signer, SignerError};
+use solana_sdk::pubkey::Pubkey;
 
 /// Everything that can stop a validated [`Config`] from producing a live
 /// [`Connector`]. Distinct from [`connector_config::ConfigError`]: the
@@ -66,14 +72,6 @@ pub enum RuntimeError {
     /// RPC endpoint was unreachable, or the contract address named in
     /// config has no code at it.
     Settlement(SettlementError),
-    /// A `[settlement.<chain>]` table parsed (issue #628 lets any recognized
-    /// chain reach config), but this binary does not yet construct a
-    /// backend for it -- e.g. `[settlement.solana]` before epic #627's
-    /// backend-wiring children land. Refused at construction rather than at
-    /// config load, per ADR 0009: a chain this connector cannot yet settle
-    /// on must stop the node starting, not start it with a backend nobody
-    /// asked for or silently drop the section.
-    SettlementBackendNotWired { chain: &'static str },
     /// `state_dir` names a directory this node cannot create or write a
     /// journal file in (issue #605) -- typically a read-only mount, or a
     /// directory owned by another uid than the one the container runs as.
@@ -135,12 +133,6 @@ impl fmt::Display for RuntimeError {
                     "failed to construct the configured settlement backend: {source}"
                 )
             }
-            RuntimeError::SettlementBackendNotWired { chain } => write!(
-                f,
-                "[settlement.{chain}] is configured, but this connector does not yet \
-                 construct a {chain} settlement backend -- refusing to start rather than \
-                 run with that chain silently unsettled"
-            ),
             RuntimeError::StateDirUnusable { path, source } => write!(
                 f,
                 "state_dir {} is not usable for this node's claim journals: {source} -- \
@@ -219,11 +211,13 @@ fn hex_encode_32(bytes: [u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Resolve the `[settlement.key]` section to the hex-encoded secp256k1
-/// private key `EvmSettlementBackend` signs with -- the same "32 raw bytes
-/// or 64 hex characters" key-file shape [`build_signer`] already reads for
-/// `[signer]`, since both are just secret-key pointers.
-fn read_settlement_private_key(location: &SecretLocation) -> Result<String, RuntimeError> {
+/// Resolve the `[settlement.key]` section to the raw 32-byte secret key
+/// material it points at -- the same "32 raw bytes or 64 hex characters"
+/// key-file shape [`build_signer`] already reads for `[signer]`, since both
+/// are just secret-key pointers. `EvmSettlementBackend` wants that hex
+/// encoded ([`read_settlement_private_key`]); `SolanaSettlementBackend`
+/// wants it as an ed25519 seed, raw (issue #630).
+fn read_settlement_key_bytes(location: &SecretLocation) -> Result<[u8; 32], RuntimeError> {
     match location {
         SecretLocation::File(path) => {
             let bytes = std::fs::read(path).map_err(|source| {
@@ -232,12 +226,33 @@ fn read_settlement_private_key(location: &SecretLocation) -> Result<String, Runt
                     source,
                 }
             })?;
-            let secret = decode_secret_key(&bytes)
-                .ok_or_else(|| RuntimeError::InvalidSettlementKeyMaterial { path: path.clone() })?;
-            Ok(hex_encode_32(secret))
+            decode_secret_key(&bytes)
+                .ok_or_else(|| RuntimeError::InvalidSettlementKeyMaterial { path: path.clone() })
         }
         SecretLocation::Kms { .. } => Err(RuntimeError::UnsupportedSettlementKeyLocation),
     }
+}
+
+/// Resolve the `[settlement.key]` section to the hex-encoded secp256k1
+/// private key `EvmSettlementBackend` signs with.
+fn read_settlement_private_key(location: &SecretLocation) -> Result<String, RuntimeError> {
+    read_settlement_key_bytes(location).map(hex_encode_32)
+}
+
+/// Parse a `[settlement.solana]` base58 field (`program_id` or
+/// `token_address`) into the `Pubkey` `SolanaSettlementBackend::connect`
+/// wants. Refused -- naming the field and the value -- rather than
+/// unwrapped: `connector-config` only checks these fields are non-empty
+/// (issue #628), since a value that merely fails to parse as base58 is a
+/// different failure from one that parses but names no executable program
+/// or no SPL mint, and both must refuse startup rather than panic (issue
+/// #630, ADR 0009).
+fn parse_solana_pubkey(field: &'static str, value: &str) -> Result<Pubkey, RuntimeError> {
+    Pubkey::from_str(value).map_err(|error| {
+        RuntimeError::Settlement(SettlementError::Backend(format!(
+            "[settlement.solana] {field} '{value}' is not a valid base58 Solana pubkey: {error}"
+        )))
+    })
 }
 
 /// Construct the settlement backend a `[settlement.evm]` (or legacy flat
@@ -262,6 +277,32 @@ async fn build_evm_settlement_backend(
         &private_key,
         registry_address,
         token_address,
+        settlement.decimals(),
+    )
+    .await?;
+    Ok(Arc::new(backend))
+}
+
+/// Construct the settlement backend a `[settlement.solana]` table
+/// describes, binding to the already-deployed `payment-channel` program it
+/// names (`program_id`) and settling in the SPL mint it names
+/// (`token_address`) -- the fail-closed identity checks issue #630 wires
+/// in: an unreachable RPC endpoint, a `program_id` naming no executable
+/// account, a `token_address` not owned by the SPL Token program, or a
+/// `decimals` the mint's own `decimals` field disagrees with are all a
+/// startup failure here, not a line with no effect (the `#564` pattern,
+/// Solana-flavored, ADR 0009).
+async fn build_solana_settlement_backend(
+    settlement: &SolanaSettlementConfig,
+) -> Result<Arc<SolanaSettlementBackend>, RuntimeError> {
+    let payer_seed = read_settlement_key_bytes(settlement.key())?;
+    let program_id = parse_solana_pubkey("program_id", settlement.program_id())?;
+    let token_mint = parse_solana_pubkey("token_address", settlement.token_address())?;
+    let backend = SolanaSettlementBackend::connect(
+        settlement.rpc_url(),
+        &payer_seed,
+        program_id,
+        token_mint,
         settlement.decimals(),
     )
     .await?;
@@ -427,33 +468,46 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let mut client_channel_source: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
     for settlement in config.settlements() {
-        let evm = match settlement {
-            SettlementConfig::Evm(evm) => evm,
-            // Parses (issue #628), but no backend is wired into this binary
-            // yet (epic #627's remaining children) -- fail closed rather
-            // than start with that chain silently unsettled (ADR 0009).
-            SettlementConfig::Solana(_) => {
-                return Err(RuntimeError::SettlementBackendNotWired { chain: "solana" })
+        match settlement {
+            SettlementConfig::Evm(evm) => {
+                let backend = build_evm_settlement_backend(evm).await?;
+                // The greeting's channel-opening facts (issue #617).
+                // Addresses the chain connection proved (`own_address`, the
+                // resolved `TokenNetwork`, the live chain id) come from the
+                // backend; the registry, token and scale come from the very
+                // config lines `connect` just verified against that chain
+                // (issues #564/#576).
+                settlement_terms = Some(connector_client_edge::X402SettlementTerms {
+                    chain: format!("evm:{}", backend.chain_id()),
+                    settlement_address: format!("{:#x}", backend.own_address()),
+                    token_network_registry: format!("{:#x}", backend.registry_address()),
+                    token_network: format!("{:#x}", backend.address()),
+                    token_address: format!(
+                        "{:#x}",
+                        ethers::types::Address::from(evm.token_address())
+                    ),
+                    decimals: evm.decimals(),
+                });
+                client_channel_source = Some(Arc::new(SettlementChannelSource {
+                    backend: backend.clone(),
+                }));
+                connector = connector.with_settlement(backend as Arc<dyn SettlementBackend>);
             }
-        };
-        let backend = build_evm_settlement_backend(evm).await?;
-        // The greeting's channel-opening facts (issue #617). Addresses the
-        // chain connection proved (`own_address`, the resolved
-        // `TokenNetwork`, the live chain id) come from the backend; the
-        // registry, token and scale come from the very config lines
-        // `connect` just verified against that chain (issues #564/#576).
-        settlement_terms = Some(connector_client_edge::X402SettlementTerms {
-            chain: format!("evm:{}", backend.chain_id()),
-            settlement_address: format!("{:#x}", backend.own_address()),
-            token_network_registry: format!("{:#x}", backend.registry_address()),
-            token_network: format!("{:#x}", backend.address()),
-            token_address: format!("{:#x}", ethers::types::Address::from(evm.token_address())),
-            decimals: evm.decimals(),
-        });
-        client_channel_source = Some(Arc::new(SettlementChannelSource {
-            backend: backend.clone(),
-        }));
-        connector = connector.with_settlement(backend as Arc<dyn SettlementBackend>);
+            SettlementConfig::Solana(solana) => {
+                // Constructed and attached exactly as the EVM leg is
+                // (issue #630) -- `SolanaSettlementBackend::connect`'s own
+                // fail-closed identity checks (program reachable and
+                // executable, mint owned by the SPL Token program,
+                // configured decimals agreeing with the mint's own) run
+                // before this node serves any traffic. No
+                // `ClientChannelSource`/greeting terms yet: Solana channel
+                // resolution from chain and the greeting's per-chain
+                // settlement facts are epic #627's remaining children
+                // (#629, the greeting evolution), not this issue's.
+                let backend = build_solana_settlement_backend(solana).await?;
+                connector = connector.with_settlement(backend as Arc<dyn SettlementBackend>);
+            }
+        }
     }
     // The peer wire's own claim watermarks and exposure, made durable by
     // the same `state_dir` the client edge's are (issue #605, and #556's
@@ -512,16 +566,27 @@ fn client_channels(
 ) -> ClientChannelRegistry {
     let mut channels = ClientChannelRegistry::new();
     for channel in config.client_channels() {
-        channels
-            .record_evm(
-                channel.channel_id(),
-                EvmChannel {
-                    counterparty: channel.counterparty(),
-                    chain_id: channel.chain_id(),
-                    token_network_address: channel.token_network_address(),
-                },
-            )
-            .expect("config load already validated every channel_id as a 32-byte identifier");
+        match channel {
+            ClientChannelConfig::Evm(evm) => {
+                channels
+                    .record_evm(
+                        evm.channel_id(),
+                        EvmChannel {
+                            counterparty: evm.counterparty(),
+                            chain_id: evm.chain_id(),
+                            token_network_address: evm.token_network_address(),
+                        },
+                    )
+                    .expect(
+                        "config load already validated every channel_id as a 32-byte identifier",
+                    );
+            }
+            ClientChannelConfig::Solana(solana) => {
+                channels
+                    .record_solana(solana.channel_account(), solana.counterparty())
+                    .expect("config load already validated both fields as base58 32-byte accounts");
+            }
+        }
     }
     match source {
         Some(source) => channels.with_source(source),
@@ -776,8 +841,46 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
 
         let channels = client_channels(&config, None);
         assert!(!channels.is_empty());
-        assert_eq!(config.client_channels()[0].chain_id(), 8453);
-        assert_eq!(config.client_channels()[0].counterparty()[19], 0xaa);
+        let ClientChannelConfig::Evm(evm) = &config.client_channels()[0] else {
+            panic!("expected an EVM client channel");
+        };
+        assert_eq!(evm.chain_id(), 8453);
+        assert_eq!(evm.counterparty()[19], 0xaa);
+    }
+
+    /// The Solana twin of the above (issue #630): a declared Solana channel
+    /// reaches the client edge's registry the same way a declared EVM one
+    /// does, through [`ClientChannelRegistry::record_solana`].
+    #[test]
+    fn every_configured_solana_client_channel_is_recorded() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let account = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+        let counterparty = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH";
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_account = "{account}"
+counterparty = "{counterparty}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        let channels = client_channels(&config, None);
+        assert!(!channels.is_empty());
+        let ClientChannelConfig::Solana(solana) = &config.client_channels()[0] else {
+            panic!("expected a Solana client channel");
+        };
+        assert_eq!(solana.channel_account(), account);
+        assert_eq!(solana.counterparty(), counterparty);
     }
 
     /// Issue #605's startup half: a node that names a `state_dir` gets a
@@ -957,7 +1060,14 @@ write_keys = ["{key}"]
         use connector_settlement_evm::test_support::{
             anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
         };
+        use connector_settlement_solana::test_support::{
+            require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
+        };
+        use connector_settlement_solana::SolanaSettlementBackend;
         use ethers::signers::Signer as EvmSigner;
+        use solana_client::nonblocking::rpc_client::RpcClient;
+        use solana_sdk::commitment_config::CommitmentConfig;
+        use solana_sdk::signature::{Keypair, Signer as SolanaSigner};
 
         /// This test binary's own base port for [`Anvil::spawn`] -- distinct
         /// from other test binaries' bases (`connector-settlement-evm`'s own
@@ -971,6 +1081,35 @@ write_keys = ["{key}"]
             let mut file = tempfile::NamedTempFile::new().expect("temp key file");
             file.write_all(contents.as_bytes()).expect("write key file");
             file.into_temp_path()
+        }
+
+        /// A `[settlement.solana]` (or `[settlement.solana.key]`) key file
+        /// carrying `seed` as 32 raw bytes -- the ed25519 seed
+        /// [`SolanaSettlementBackend::connect`] signs with, the Solana
+        /// twin of [`key_file_with`]'s hex-encoded secp256k1 key.
+        fn raw_key_file(seed: [u8; 32]) -> tempfile::TempPath {
+            let mut file = tempfile::NamedTempFile::new().expect("temp key file");
+            file.write_all(&seed).expect("write raw key file");
+            file.into_temp_path()
+        }
+
+        /// Airdrop `pubkey` enough lamports to pay for the transactions
+        /// `SolanaSettlementBackend::connect` (`ensure_own_ata_exists`) and
+        /// `open` submit -- a freshly connected identity needs real
+        /// lamports on any real cluster, exactly as a freshly generated
+        /// production signer would.
+        async fn fund_solana_identity(rpc: &RpcClient, pubkey: &solana_sdk::pubkey::Pubkey) {
+            let signature = rpc
+                .request_airdrop(pubkey, 10_000_000_000)
+                .await
+                .expect("airdrop");
+            for _ in 0..200 {
+                if rpc.confirm_transaction(&signature).await.unwrap_or(false) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("airdrop did not confirm in time");
         }
 
         /// AC: "`connector-cli::runtime::build` constructs the configured
@@ -1143,57 +1282,149 @@ key_file = "{}"
             ));
         }
 
-        /// AC (issue #628): "`[settlement.solana]` alone: config loads, node
-        /// startup fails closed with an explicit not-yet-wired error" --
-        /// `connector-config` accepts the table (proven in that crate's own
-        /// tests), but no `SolanaSettlementBackend` is wired into this
-        /// binary yet, so `build` must refuse to start rather than boot
-        /// with that chain silently unsettled. No anvil or Solana validator
-        /// needed: nothing here should ever try to connect to a chain.
+        /// AC (issue #630): "Node with `[settlement.solana]` starts against
+        /// the devnet validator" -- driven end to end through `build`
+        /// reading a config file (no backend injected directly), the
+        /// Solana twin of
+        /// `a_configured_settlement_section_is_constructed_and_attached`
+        /// above: a real, disposable `solana-test-validator` running the
+        /// real `packages/solana-program` artifact, and the resulting
+        /// `Connector` opens a real channel through it.
         #[tokio::test]
-        async fn a_solana_only_settlement_section_fails_closed_at_construction() {
-            let (config, _key_path) = config_with_raw_key_file(|key_path| {
-                format!(
-                    r#"
+        async fn a_solana_only_settlement_section_is_constructed_and_attached() {
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+            let deployed = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = deployed.token_mint();
+            drop(deployed);
+
+            let seed = [11u8; 32];
+            let payer =
+                solana_sdk::signer::keypair::keypair_from_seed(&seed).expect("derive keypair");
+            let rpc = RpcClient::new_with_commitment(
+                validator.rpc_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            fund_solana_identity(&rpc, &payer.pubkey()).await;
+
+            let key_path = raw_key_file(seed);
+            let config = load_config(&format!(
+                r#"
 client_edge_addr = "127.0.0.1:0"
 
 [signer]
 key_file = "{key_path}"
 
 [settlement.solana]
-rpc_url = "http://127.0.0.1:8899"
-program_id = "TokenNetworkProgram11111111111111111111111"
-token_address = "SoLMint11111111111111111111111111111111111"
+rpc_url = "{rpc_url}"
+program_id = "{program_id}"
+token_address = "{token_mint}"
 decimals = 6
 
 [settlement.solana.key]
 key_file = "{key_path}"
 "#,
-                    key_path = key_path.display()
-                )
-            });
+                key_path = key_path.display(),
+                rpc_url = validator.rpc_url,
+            ));
+
+            let runtime = build(&config).await.expect("build");
+            let connector = runtime.connector.clone();
+            // A real 32-byte Solana pubkey (issue #567's `open` accepts
+            // nothing else): a fresh identity this test holds no key for,
+            // exactly as `a_configured_settlement_section_is_constructed_and_attached`
+            // generates an arbitrary EVM counterparty above.
+            let counterparty = Keypair::new().pubkey().to_bytes().to_vec();
+            let opened = connector
+                .open_channel(counterparty, Duration::seconds(3600))
+                .await
+                .expect("a solana settlement backend was constructed and attached");
+            assert_eq!(opened.deposited, 0);
+        }
+
+        /// AC (issue #630): "... decimals/asset-scale mismatch refuses
+        /// startup with a clear error" -- the Solana twin of
+        /// `settlement_decimals_the_token_disagrees_with_refuses_to_build`
+        /// above. `deploy` mints a fresh 6-decimal SPL mint; a config file
+        /// claiming `decimals = 9` against it must fail to build rather
+        /// than load clean and settle at a scale nobody consults.
+        #[tokio::test]
+        async fn solana_decimals_the_mint_disagrees_with_refuses_to_build() {
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+            let deployed = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = deployed.token_mint();
+            drop(deployed);
+
+            let seed = [12u8; 32];
+            let payer =
+                solana_sdk::signer::keypair::keypair_from_seed(&seed).expect("derive keypair");
+            let rpc = RpcClient::new_with_commitment(
+                validator.rpc_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            fund_solana_identity(&rpc, &payer.pubkey()).await;
+
+            let key_path = raw_key_file(seed);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "{rpc_url}"
+program_id = "{program_id}"
+token_address = "{token_mint}"
+decimals = 9
+
+[settlement.solana.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                rpc_url = validator.rpc_url,
+            ));
 
             let error = build(&config)
                 .await
                 .err()
-                .expect("a [settlement.solana] section must refuse to build");
-            assert!(matches!(
-                error,
-                RuntimeError::SettlementBackendNotWired { chain: "solana" }
-            ));
+                .expect("a decimals the mint disagrees with refuses to build");
+            let message = error.to_string();
+            assert!(
+                message.contains("decimals is 9") && message.contains("decimals = 6"),
+                "the failure must name both the configured and the on-chain decimals: {message}"
+            );
         }
 
-        /// The other half of the same AC: a config naming both
-        /// `[settlement.evm]` and `[settlement.solana]` must also fail
-        /// closed rather than silently start with only the EVM chain
-        /// settled -- a node cannot vouch for a chain it has no backend
-        /// for, whether or not it also names one it does.
+        /// A config naming both `[settlement.evm]` and `[settlement.solana]`
+        /// now constructs and attaches both real backends (issue #630
+        /// finishes what #628 left as an intentional fail-closed
+        /// placeholder for the Solana leg) -- neither chain's construction
+        /// trips over the other's being configured too.
         #[tokio::test]
-        async fn evm_and_solana_together_still_fail_closed_on_the_unwired_solana_leg() {
+        async fn evm_and_solana_together_both_construct() {
             if !anvil_available() {
                 eprintln!(
                     "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
                 );
+                return;
+            }
+            if !require_solana_test_validator() {
                 return;
             }
 
@@ -1212,46 +1443,62 @@ key_file = "{key_path}"
             let registry_address = settlement_backend.registry_address();
             drop(settlement_backend);
 
-            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+            let deployed = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = deployed.token_mint();
+            drop(deployed);
+
+            let seed = [13u8; 32];
+            let payer =
+                solana_sdk::signer::keypair::keypair_from_seed(&seed).expect("derive keypair");
+            let rpc = RpcClient::new_with_commitment(
+                validator.rpc_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            fund_solana_identity(&rpc, &payer.pubkey()).await;
+
+            let evm_key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let solana_key_path = raw_key_file(seed);
             let config = load_config(&format!(
                 r#"
 client_edge_addr = "127.0.0.1:0"
 
 [signer]
-key_file = "{key_path}"
+key_file = "{evm_key_path}"
 
 [settlement.evm]
-rpc_url = "{rpc_url}"
+rpc_url = "{evm_rpc_url}"
 contract_address = "{registry_address:?}"
 token_address = "{token:?}"
 decimals = 6
 
 [settlement.evm.key]
-key_file = "{key_path}"
+key_file = "{evm_key_path}"
 
 [settlement.solana]
-rpc_url = "http://127.0.0.1:8899"
-program_id = "TokenNetworkProgram11111111111111111111111"
-token_address = "SoLMint11111111111111111111111111111111111"
+rpc_url = "{solana_rpc_url}"
+program_id = "{program_id}"
+token_address = "{token_mint}"
 decimals = 6
 
 [settlement.solana.key]
-key_file = "{key_path}"
+key_file = "{solana_key_path}"
 "#,
-                key_path = key_path.display(),
-                rpc_url = anvil.rpc_url,
+                evm_key_path = evm_key_path.display(),
+                solana_key_path = solana_key_path.display(),
+                evm_rpc_url = anvil.rpc_url,
+                solana_rpc_url = validator.rpc_url,
                 registry_address = registry_address,
                 token = token,
             ));
 
-            let error = build(&config)
+            build(&config)
                 .await
-                .err()
-                .expect("an unwired solana leg must refuse to build even with evm configured");
-            assert!(matches!(
-                error,
-                RuntimeError::SettlementBackendNotWired { chain: "solana" }
-            ));
+                .expect("both legs construct and attach without either refusing startup");
         }
     }
 }

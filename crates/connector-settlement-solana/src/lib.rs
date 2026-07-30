@@ -23,6 +23,8 @@
 //! backend has itself driven to `Settled` no longer exists on chain at
 //! all, and is indistinguishable from "never opened" without that memory.
 
+#[cfg(feature = "test-util")]
+pub mod test_support;
 pub mod wire;
 
 use std::collections::HashSet;
@@ -101,15 +103,24 @@ impl SolanaSettlementBackend {
     ///
     /// Refuses -- naming the address -- if `program_id` names no
     /// executable account, or `token_mint` is not owned by the SPL Token
-    /// program: the coarse, "did I misconfigure this entirely" check this
-    /// crate makes on its own; issue #630 (a later, separate issue) is
-    /// where a fuller "does the fleet's own identity match what's
-    /// deployed" fail-closed check belongs.
+    /// program: the coarse, "did I misconfigure this entirely" check issue
+    /// #567 made on its own.
+    ///
+    /// `expected_decimals` is the scale the operator wrote down
+    /// (`[settlement.solana] decimals`), the Solana twin of
+    /// `EvmSettlementBackend::connect`'s own `expected_decimals` (issue
+    /// #564): nothing here scales by it -- every amount this backend moves
+    /// is already in the mint's own base units -- so it is checked rather
+    /// than applied. `connect` reads the mint's own `decimals` field and
+    /// refuses, naming both values, when they disagree (issue #630, ADR
+    /// 0009): the fuller "does the fleet's own identity match what's
+    /// deployed" check issue #567 deferred here.
     pub async fn connect(
         rpc_url: &str,
         payer_seed: &[u8; 32],
         program_id: Pubkey,
         token_mint: Pubkey,
+        expected_decimals: u8,
     ) -> Result<Self, SettlementError> {
         let payer = solana_sdk::signer::keypair::keypair_from_seed(payer_seed)
             .map_err(|error| SettlementError::Backend(error.to_string()))?;
@@ -126,6 +137,14 @@ impl SolanaSettlementBackend {
         if mint_account.owner != spl_token::id() {
             return Err(SettlementError::Backend(format!(
                 "settlement token_address {token_mint} is not owned by the SPL Token program"
+            )));
+        }
+        let mint = spl_token::state::Mint::unpack(&mint_account.data).map_err(backend_error)?;
+        if mint.decimals != expected_decimals {
+            return Err(SettlementError::Backend(format!(
+                "[settlement.solana] decimals is {expected_decimals}, but mint {token_mint} \
+                 reports decimals = {}",
+                mint.decimals
             )));
         }
 

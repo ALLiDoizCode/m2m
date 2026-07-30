@@ -11,21 +11,25 @@ connector-operator = { path = "../connector-operator" }
 connector-runtime = { path = "../connector-runtime" }
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm" }
+connector-settlement-solana = { path = "../connector-settlement-solana" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
 axum = "0.6"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
+solana-sdk = "=2.1.0"
 tracing = "0.1"
 
 [dev-dependencies]
 connector-operator = { path = "../connector-operator", features = ["test-util"] }
 connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
+connector-settlement-solana = { path = "../connector-settlement-solana", features = ["test-util"] }
 chrono = "0.4"
 ed25519-dalek = "1"
 hyper = { version = "0.14", features = ["full"] }
 libsecp256k1 = "0.6"
 rand = "0.7"
 serde_json = "1"
+solana-client = "=2.1.0"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.4", features = ["util"] }
