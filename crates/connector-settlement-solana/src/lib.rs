@@ -362,7 +362,15 @@ impl SolanaSettlementBackend {
     ///   `Closed` channel still redeems during its challenge window (issue
     ///   #574), so it still answers);
     /// - neither participant is this backend's own signing address, i.e. it
-    ///   is somebody else's channel.
+    ///   is somebody else's channel;
+    /// - its `token_mint` is not the mint this backend is configured to
+    ///   settle in. The deployed program lets any payer open a channel
+    ///   with ANY mint, and the balance-proof signature does not cover the
+    ///   mint (`connector_signer::solana_balance_proof_message` signs
+    ///   channel account, nonce and amount alone), so this resolution
+    ///   check is the one place the mint is bound: without it, a claim on
+    ///   a channel funded with a worthless SPL token would buy
+    ///   USDC-priced writes.
     ///
     /// `Err` is reserved for a lookup that genuinely failed -- an
     /// unreachable endpoint, a malformed response -- so a caller can tell
@@ -374,17 +382,51 @@ impl SolanaSettlementBackend {
         let Some(account) = self.fetch_account(&channel_account).await? else {
             return Ok(None);
         };
+        Ok(Self::resolvable_counterparty(
+            &account,
+            self.payer.pubkey(),
+            self.token_mint,
+        ))
+    }
+
+    /// The pure per-account half of
+    /// [`channel_counterparty`](Self::channel_counterparty): given a parsed
+    /// channel account, decide whether it is a channel a backend with
+    /// identity `own` settling in `token_mint` can be paid on, and if so by
+    /// whom. Extracted so every refusal branch -- settled, wrong mint,
+    /// not a participant -- is unit-testable against a fabricated account
+    /// without a validator.
+    fn resolvable_counterparty(
+        account: &wire::ChannelAccount,
+        own: Pubkey,
+        token_mint: Pubkey,
+    ) -> Option<Pubkey> {
         if account.status == wire::ChannelStatus::Settled {
-            return Ok(None);
+            return None;
         }
-        let own = self.payer.pubkey();
+        if account.token_mint != token_mint {
+            return None;
+        }
         if account.participant_a == own {
-            Ok(Some(account.participant_b))
+            Some(account.participant_b)
         } else if account.participant_b == own {
-            Ok(Some(account.participant_a))
+            Some(account.participant_a)
         } else {
-            Ok(None)
+            None
         }
+    }
+
+    /// Test/dev-only accessor (issue #631's mint-binding review): the
+    /// 32-byte ed25519 seed of this backend's own signing keypair, so a
+    /// test can [`connect`](Self::connect) a second backend under the SAME
+    /// on-chain identity but a different `token_mint` -- the shape the
+    /// mint-binding check in
+    /// [`channel_counterparty`](Self::channel_counterparty) exists to
+    /// refuse.
+    pub fn test_payer_seed(&self) -> [u8; 32] {
+        self.payer.to_bytes()[..32]
+            .try_into()
+            .expect("a Keypair's first 32 bytes are its seed")
     }
 
     /// Test/dev-only accessor (issue #567): the pubkey bytes of the first
@@ -947,5 +989,138 @@ impl SettlementBackend for SolanaSettlementBackend {
                 redeemed: 0,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fabricated, well-formed channel account for exercising every
+    /// refusal branch of
+    /// [`SolanaSettlementBackend::resolvable_counterparty`] without a
+    /// validator (issue #631's mint-binding review).
+    fn account(
+        participant_a: Pubkey,
+        participant_b: Pubkey,
+        token_mint: Pubkey,
+        status: wire::ChannelStatus,
+    ) -> wire::ChannelAccount {
+        wire::ChannelAccount {
+            participant_a,
+            participant_b,
+            token_mint,
+            deposit_a: 0,
+            deposit_b: 1_000,
+            transferred_amount_a: 0,
+            transferred_amount_b: 0,
+            nonce_a: 0,
+            nonce_b: 0,
+            challenge_duration: 3_600,
+            status,
+            close_timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn an_open_channel_resolves_to_the_other_participant_from_either_side() {
+        let own = Pubkey::new_unique();
+        let counterparty = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        assert_eq!(
+            SolanaSettlementBackend::resolvable_counterparty(
+                &account(own, counterparty, mint, wire::ChannelStatus::Opened),
+                own,
+                mint,
+            ),
+            Some(counterparty),
+            "own as participant A resolves to participant B"
+        );
+        assert_eq!(
+            SolanaSettlementBackend::resolvable_counterparty(
+                &account(counterparty, own, mint, wire::ChannelStatus::Opened),
+                own,
+                mint,
+            ),
+            Some(counterparty),
+            "own as participant B resolves to participant A"
+        );
+    }
+
+    /// A merely `Closed` channel still redeems during its challenge window
+    /// (issue #574), so it still resolves.
+    #[test]
+    fn a_closed_channel_still_resolves() {
+        let own = Pubkey::new_unique();
+        let counterparty = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        assert_eq!(
+            SolanaSettlementBackend::resolvable_counterparty(
+                &account(own, counterparty, mint, wire::ChannelStatus::Closed),
+                own,
+                mint,
+            ),
+            Some(counterparty),
+        );
+    }
+
+    /// A settled channel can never be redeemed against, so honouring a
+    /// claim on one would be giving the app's work away.
+    #[test]
+    fn a_settled_channel_resolves_to_nothing() {
+        let own = Pubkey::new_unique();
+        let counterparty = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        assert_eq!(
+            SolanaSettlementBackend::resolvable_counterparty(
+                &account(own, counterparty, mint, wire::ChannelStatus::Settled),
+                own,
+                mint,
+            ),
+            None,
+        );
+    }
+
+    /// The mint binding (issue #631's security review): the deployed
+    /// program lets any payer open a channel with ANY mint, and the
+    /// balance-proof signature does not cover the mint, so a channel whose
+    /// `token_mint` is not the one this backend settles in must be an
+    /// unknown channel -- otherwise a claim funded with a worthless SPL
+    /// token would buy USDC-priced writes.
+    #[test]
+    fn a_channel_on_a_different_mint_resolves_to_nothing() {
+        let own = Pubkey::new_unique();
+        let counterparty = Pubkey::new_unique();
+        let configured_mint = Pubkey::new_unique();
+        let junk_mint = Pubkey::new_unique();
+        assert_eq!(
+            SolanaSettlementBackend::resolvable_counterparty(
+                &account(own, counterparty, junk_mint, wire::ChannelStatus::Opened),
+                own,
+                configured_mint,
+            ),
+            None,
+        );
+    }
+
+    /// Somebody else's channel -- neither participant is this backend --
+    /// is not a channel this backend can be paid on.
+    #[test]
+    fn a_channel_this_backend_is_no_participant_of_resolves_to_nothing() {
+        let own = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        assert_eq!(
+            SolanaSettlementBackend::resolvable_counterparty(
+                &account(
+                    Pubkey::new_unique(),
+                    Pubkey::new_unique(),
+                    mint,
+                    wire::ChannelStatus::Opened,
+                ),
+                own,
+                mint,
+            ),
+            None,
+        );
     }
 }

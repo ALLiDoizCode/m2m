@@ -179,9 +179,12 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     /// the counterparty's raw Ed25519 public key for the channel at
     /// `channel_account`, or `Ok(None)`/`Err` under exactly the same rules.
     /// There is no domain to report alongside it -- a Solana balance proof
-    /// is signed over the channel account and mint alone
+    /// is signed over the channel account, nonce and amount alone
     /// (`connector_signer::solana_balance_proof_message`), with no
-    /// EIP-712-style verifying-contract concept to carry.
+    /// EIP-712-style verifying-contract concept to carry. The mint is not
+    /// in the signed bytes either: binding a channel to the mint this node
+    /// settles in is the resolving backend's job (a chain-resolved channel
+    /// on any other mint must come back `Ok(None)`), not the signature's.
     async fn solana_channel(
         &self,
         channel_account: &[u8; 32],

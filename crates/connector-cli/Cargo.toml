@@ -20,6 +20,7 @@ solana-sdk = "=2.1.0"
 tracing = "0.1"
 
 [dev-dependencies]
+base64 = "0.22"
 connector-operator = { path = "../connector-operator", features = ["test-util"] }
 connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 connector-settlement-solana = { path = "../connector-settlement-solana", features = ["test-util"] }

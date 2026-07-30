@@ -1908,6 +1908,150 @@ key_file = "{key_path}"
             );
         }
 
+        /// Issue #631's security review, finding 1 (mint binding), full
+        /// stack: the deployed program lets any payer open a channel with
+        /// ANY mint, and the balance-proof signature does not cover the
+        /// mint, so without `channel_counterparty`'s mint check a claim on
+        /// a channel funded with a worthless SPL token would buy
+        /// USDC-priced writes. Here the wrong-mint channel is genuinely
+        /// opened and funded on a real validator, the claim's signature is
+        /// genuinely valid -- and the claim gate, resolving through the
+        /// same [`SolanaChannelSource`] `build` wires up, still refuses it
+        /// as an unknown channel. The control at the end accepts the
+        /// byte-identical claim through a backend configured with the
+        /// channel's own mint, proving the refusal was the mint binding
+        /// and nothing else.
+        #[tokio::test]
+        async fn a_validly_signed_claim_on_a_wrong_mint_channel_is_refused_as_unknown() {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine;
+
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+
+            // A real, open, funded channel on the junk mint, with this
+            // node's own identity as a participant.
+            let opener = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let junk_mint = opener.token_mint();
+            let counterparty = opener
+                .test_counterparty_pubkey()
+                .expect("deploy() holds a counterparty key");
+            let channel = opener
+                .open(counterparty.clone(), Duration::seconds(3600))
+                .await
+                .expect("open a channel on the junk mint");
+            opener
+                .fund(&channel, 1_000)
+                .await
+                .expect("fund the junk-mint channel with a real on-chain deposit");
+
+            // A genuinely valid claim on it, signed by the channel's real
+            // counterparty key.
+            let signature = opener
+                .test_sign_claim(&channel, 1, 100)
+                .expect("deploy() holds the counterparty key to sign with");
+            let counterparty_base58 = Pubkey::try_from(counterparty.as_slice())
+                .expect("32-byte pubkey")
+                .to_string();
+            let claim_json = format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-mallory",
+                    "programId": "{program_id}",
+                    "channelAccount": "{channel_account}",
+                    "nonce": 1,
+                    "transferredAmount": "100",
+                    "signature": "{signature}",
+                    "signerPublicKey": "{counterparty_base58}"
+                }}"#,
+                channel_account = channel.0,
+                signature = BASE64.encode(&signature),
+            );
+
+            // The node under test: the SAME on-chain identity, configured
+            // to settle in a DIFFERENT (real) mint.
+            let other = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("deploy a second backend for its fresh mint");
+            let configured_mint = other.token_mint();
+            assert_ne!(junk_mint, configured_mint);
+            drop(other);
+            let node_backend = SolanaSettlementBackend::connect(
+                &validator.rpc_url,
+                &opener.test_payer_seed(),
+                program_id,
+                configured_mint,
+                6,
+            )
+            .await
+            .expect("connect under the opener's identity, bound to the configured mint");
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            ));
+
+            let gate = client_claim_gate(
+                &config,
+                None,
+                Some(Arc::new(SolanaChannelSource {
+                    backend: Arc::new(node_backend),
+                })),
+            )
+            .expect("a config with no state_dir produces an in-memory gate");
+            let rejection = gate
+                .ingest(&claim_json, 100)
+                .await
+                .expect_err("a claim on a wrong-mint channel must be refused");
+            assert!(
+                matches!(
+                    rejection,
+                    connector_client_edge::ClaimIngestRejection::UnknownChannel
+                ),
+                "refused as an unknown channel, not any other reason: {}",
+                rejection.message()
+            );
+
+            // Control: the byte-identical claim is accepted through a
+            // backend configured with the channel's own mint.
+            let matching_backend = SolanaSettlementBackend::connect(
+                &validator.rpc_url,
+                &opener.test_payer_seed(),
+                program_id,
+                junk_mint,
+                6,
+            )
+            .await
+            .expect("connect under the opener's identity, bound to the channel's own mint");
+            let gate = client_claim_gate(
+                &config,
+                None,
+                Some(Arc::new(SolanaChannelSource {
+                    backend: Arc::new(matching_backend),
+                })),
+            )
+            .expect("a config with no state_dir produces an in-memory gate");
+            gate.ingest(&claim_json, 100)
+                .await
+                .expect("the identical claim is valid and accepted when the mint matches");
+        }
+
         /// The SPL Token program id -- a program that exists, is
         /// executable, and is definitely not the payment-channel program,
         /// on every Solana cluster including a fresh test validator.
