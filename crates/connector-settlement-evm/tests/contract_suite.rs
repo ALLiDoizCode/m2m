@@ -71,8 +71,17 @@ async fn evm_settlement_backend_upholds_the_contract() {
         let counterparty_public = PublicKey::from_secret_key(&counterparty_secret);
         let counterparty = derive_evm_address(&counterparty_public.serialize()).to_vec();
         // `other_counterparty` is only ever opened against, never redeemed
-        // from, so it needs no key this test holds.
+        // from, so it needs no key this test holds. `instant_counterparty`
+        // (the instant-settlement channel's own identity, issue #567) needs
+        // none either on this chain: `TokenNetwork.setTotalDeposit` lets the
+        // backend fund any participant from its own balance, and the one
+        // claim the suite sends that channel is the post-settlement one,
+        // rejected as `ChannelSettled` before any signature is checked.
         let other_counterparty = LocalWallet::new(&mut thread_rng())
+            .address()
+            .as_bytes()
+            .to_vec();
+        let instant_counterparty = LocalWallet::new(&mut thread_rng())
             .address()
             .as_bytes()
             .to_vec();
@@ -95,6 +104,7 @@ async fn evm_settlement_backend_upholds_the_contract() {
             backend: Arc::new(backend) as Arc<dyn SettlementBackend>,
             counterparty,
             other_counterparty,
+            instant_counterparty,
             sign: Box::new(sign),
             instant_settlement_timeout: Duration::seconds(INSTANT_SETTLEMENT_TIMEOUT_SECONDS),
             advance_past_instant_settlement_timeout: Box::new(move || {

@@ -82,8 +82,10 @@ pub(crate) struct RawEvmSettlementTable {
 
 /// `[settlement.solana]`: `contract_address` (an EVM `TokenNetworkRegistry`)
 /// has no Solana equivalent, so this table names a `program_id` instead --
-/// the deployed `connector-settlement-solana-program` instance a
-/// `SolanaSettlementBackend` would drive once epic #627 wires one in.
+/// the deployed `payment-channel` program (`packages/solana-program`,
+/// `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` on `solana:devnet`) a
+/// `SolanaSettlementBackend` drives once epic #627 wires one in (issue
+/// #630).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawSolanaSettlementTable {
@@ -171,10 +173,10 @@ impl EvmSettlementConfig {
 }
 
 /// A fully validated `[settlement.solana]` table: which deployed
-/// `connector-settlement-solana-program` instance this backend would drive,
-/// where its RPC endpoint is, and where its signing key material lives.
-/// Parses today (issue #628); nothing constructs one yet (epic #627's
-/// children finish that).
+/// `payment-channel` program instance (`packages/solana-program`) this
+/// backend would drive, where its RPC endpoint is, and where its signing
+/// key material lives. Parses today (issue #628); nothing constructs one
+/// yet (issue #630 finishes that).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolanaSettlementConfig {
     rpc_url: String,
@@ -190,8 +192,8 @@ impl SolanaSettlementConfig {
         &self.rpc_url
     }
 
-    /// The deployed `connector-settlement-solana-program` instance this
-    /// backend would drive, base58-encoded.
+    /// The deployed `payment-channel` program (`packages/solana-program`)
+    /// instance this backend would drive, base58-encoded.
     pub fn program_id(&self) -> &str {
         &self.program_id
     }

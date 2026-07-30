@@ -34,6 +34,21 @@ pub struct ContractFixture {
     /// A second, distinct counterparty identity, opened against but never
     /// redeemed from.
     pub other_counterparty: Vec<u8>,
+    /// A third, distinct counterparty identity for the instant-settlement
+    /// channel this suite drives all the way to
+    /// [`ChannelStatus::Settled`] (issue #567): the deployed Solana
+    /// `payment-channel` program holds exactly one live channel per
+    /// (participant pair, mint) -- its channel PDA is seeded
+    /// `["channel", min, max, mint]` and `InitializeChannel` rejects a
+    /// still-existing account with `ChannelAlreadyExists` -- so that
+    /// channel cannot reuse [`counterparty`](Self::counterparty) while the
+    /// first channel is still sitting in its challenge window. Like
+    /// `counterparty` (and unlike
+    /// [`other_counterparty`](Self::other_counterparty)) this channel is
+    /// funded and, post-settlement, redeemed against, so a backend whose
+    /// chain requires the depositing participant's own signature must hold
+    /// a real key for this identity too.
+    pub instant_counterparty: Vec<u8>,
     /// Produces the bytes this suite puts in a [`Claim`]'s `signature`,
     /// given the channel it redeems against and that claim's
     /// `nonce`/`cumulative_amount` (issue #576): a backend whose chain
@@ -85,6 +100,7 @@ where
         backend,
         counterparty,
         other_counterparty,
+        instant_counterparty,
         sign,
         instant_settlement_timeout,
         advance_past_instant_settlement_timeout,
@@ -247,9 +263,13 @@ where
     // actually achieved, since a chain like `TokenNetwork` cannot be asked
     // to open a channel with a shorter timeout than its own
     // `MIN_SETTLEMENT_TIMEOUT`, one hour, and this suite is not going to
-    // sleep for one).
+    // sleep for one). Opened against its own dedicated counterparty
+    // identity rather than reusing `counterparty`, whose first channel is
+    // still sitting Closed in its challenge window -- see
+    // [`ContractFixture::instant_counterparty`]'s doc for the chain that
+    // makes that reuse impossible.
     let immediate = backend
-        .open(counterparty.clone(), instant_settlement_timeout)
+        .open(instant_counterparty.clone(), instant_settlement_timeout)
         .await
         .expect("open the instant-settlement-proof channel");
     backend.fund(&immediate, 200).await.expect("fund");
@@ -310,6 +330,7 @@ mod tests {
                 backend: Arc::new(InMemorySettlementBackend::new()) as Arc<dyn SettlementBackend>,
                 counterparty: b"counterparty-a".to_vec(),
                 other_counterparty: b"counterparty-b".to_vec(),
+                instant_counterparty: b"counterparty-c".to_vec(),
                 // `InMemorySettlementBackend` never verifies a claim's
                 // signature, so any bytes suffice.
                 sign: Box::new(

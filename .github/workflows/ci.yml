@@ -195,6 +195,18 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
+      # connector-settlement-solana's test harness builds packages/solana-program with
+      # `cargo build-sbf --tools-version v1.52` when target/deploy/payment_channel.so is
+      # not already in the cached `target` dir (issue #567) -- cache the platform-tools
+      # install exactly like the solana-program job below does, so a workspace-cache miss
+      # doesn't also re-download the SBF toolchain (and hit the flaky network resolution
+      # panic, issue #105) inside a test run.
+      - name: Cache Solana platform-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: solana-platform-tools-${{ runner.os }}-v1.52
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
