@@ -9,7 +9,6 @@
 //! executable (`verify_program_identity`, this issue's review finding 2).
 
 use std::str::FromStr;
-use std::time::Duration;
 
 use connector_settlement_solana::SolanaSettlementBackend;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -18,7 +17,7 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signer;
 
 use connector_settlement_solana::test_support::{
-    require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
+    fund, require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
 };
 
 /// A funded ed25519 seed [`SolanaSettlementBackend::connect`] can sign
@@ -27,17 +26,8 @@ use connector_settlement_solana::test_support::{
 /// generated production signer would on a real cluster.
 async fn funded_seed(rpc: &RpcClient, seed: [u8; 32]) -> [u8; 32] {
     let payer = solana_sdk::signer::keypair::keypair_from_seed(&seed).expect("derive keypair");
-    let signature = rpc
-        .request_airdrop(&payer.pubkey(), 10_000_000_000)
-        .await
-        .expect("airdrop");
-    for _ in 0..200 {
-        if rpc.confirm_transaction(&signature).await.unwrap_or(false) {
-            return seed;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("airdrop did not confirm in time");
+    fund(rpc, &payer.pubkey()).await;
+    seed
 }
 
 #[tokio::test]
