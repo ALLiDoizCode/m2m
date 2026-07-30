@@ -91,6 +91,9 @@ struct ClientEdgeState {
     /// refused with [`ClaimIngestRejection::WrapUnsupported`] rather than
     /// silently accepted unwrapped or left to panic.
     wrap_receiver_secret: Option<[u8; 32]>,
+    /// This node's channel-opening facts, carried in every x402 greeting
+    /// (issue #617). `None` on a node with no settlement backend.
+    settlement_terms: Option<X402SettlementTerms>,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -149,11 +152,26 @@ pub fn router_with_gate(
     wrap_receiver_secret: Option<[u8; 32]>,
     claim_gate: ClientClaimGate,
 ) -> Router {
+    router_with_gate_and_terms(connector, signer, wrap_receiver_secret, claim_gate, None)
+}
+
+/// As [`router_with_gate`], but with the node's channel-opening facts
+/// (issue #617) to carry in every x402 greeting. `None` -- the plain
+/// [`router_with_gate`] -- is a node with no settlement backend, whose
+/// greeting keeps its pre-#617 shape exactly.
+pub fn router_with_gate_and_terms(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    claim_gate: ClientClaimGate,
+    settlement_terms: Option<X402SettlementTerms>,
+) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
         claim_gate,
         wrap_receiver_secret,
+        settlement_terms,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
@@ -298,6 +316,44 @@ struct X402ChannelExtra {
     ilp_address: String,
     endpoint: String,
     price: String,
+    /// The channel-opening facts (issue #617), present exactly when this
+    /// node has a settlement backend. `None` (and absent on the wire) on a
+    /// settlement-less node -- the terms shape is otherwise unchanged, so
+    /// a parser written before this field existed is unaffected.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    settlement: Option<X402SettlementTerms>,
+}
+
+/// What an unaffiliated buyer needs to OPEN a channel with this node,
+/// carried in the x402 greeting's `extra` (issue #617). This is ADR 0022's
+/// "answers when asked" applied to channel establishment: the TypeScript
+/// fleet distributes these same facts in a kind:10032 announce, which this
+/// fleet will never make -- the greeting is the ask that replaces it.
+///
+/// Every field is a fact the node already proved at startup:
+/// `EvmSettlementBackend::connect` resolved `token_network` through the
+/// registry and refused to boot on a `decimals` disagreement, so nothing
+/// here can drift from the deployment without the node failing to start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct X402SettlementTerms {
+    /// `evm:<chainId>`, the chain the backend read at connect time.
+    pub chain: String,
+    /// The on-chain counterparty a buyer opens a channel WITH -- the
+    /// settlement backend's own signing address.
+    #[serde(rename = "settlementAddress")]
+    pub settlement_address: String,
+    /// The stable operator-facing factory address (issue #576).
+    #[serde(rename = "tokenNetworkRegistry")]
+    pub token_network_registry: String,
+    /// The resolved `TokenNetwork` -- the EIP-712 `verifyingContract` a
+    /// claim on any of its channels is signed under.
+    #[serde(rename = "tokenNetwork")]
+    pub token_network: String,
+    #[serde(rename = "tokenAddress")]
+    pub token_address: String,
+    /// The token's own reported scale -- informational (claims are already
+    /// in base units), verified against the chain at startup (issue #564).
+    pub decimals: u8,
 }
 
 const X402_VERSION: u32 = 2;
@@ -306,8 +362,14 @@ const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 /// Answer an unpaid request to `destination`, a route this connector
 /// terminates and prices at `price`, with its terms instead of performing
 /// the app's work (client-edge-spec.md §1.4, ADR 0022) -- this changes no
-/// state and is only ever a reply to the request that asked.
-fn payment_required(destination: &str, price: u64) -> Response {
+/// state and is only ever a reply to the request that asked. `settlement`
+/// is the node's channel-opening facts (issue #617), included when it has
+/// a settlement backend.
+fn payment_required(
+    destination: &str,
+    price: u64,
+    settlement: Option<&X402SettlementTerms>,
+) -> Response {
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
         resource: X402Resource {
@@ -324,6 +386,7 @@ fn payment_required(destination: &str, price: u64) -> Response {
                 ilp_address: destination.to_string(),
                 endpoint: "/ilp".to_string(),
                 price: price.to_string(),
+                settlement: settlement.cloned(),
             },
         }],
     };
@@ -526,7 +589,7 @@ async fn handle_ilp(
         .app_route_price(&prepare.destination)
         .unwrap_or(0);
     if !has_claim_header && price > 0 {
-        return payment_required(&prepare.destination, price);
+        return payment_required(&prepare.destination, price, state.settlement_terms.as_ref());
     }
 
     // A claim header's validation failure rejects the packet before it is
@@ -1277,6 +1340,61 @@ mod tests {
         assert!(
             app_client.deliveries().is_empty(),
             "the app must never be asked to do the work an unpaid request didn't pay for"
+        );
+
+        // A node with no settlement backend keeps the pre-#617 greeting
+        // shape exactly: no `settlement` key at all, not a null one.
+        let extra = serde_json::to_value(&terms.accepts[0].extra).unwrap();
+        assert!(
+            extra.get("settlement").is_none(),
+            "a settlement-less node's greeting must not carry a settlement key: {extra}"
+        );
+    }
+
+    /// Issue #617: a node WITH a settlement backend answers the greeting
+    /// with its channel-opening facts -- the counterparty address, chain,
+    /// registry, resolved `TokenNetwork`, token and scale -- so an
+    /// unaffiliated buyer can open a channel by ASKING (ADR 0022) instead
+    /// of needing an announce this connector never makes.
+    #[tokio::test]
+    async fn an_unpaid_request_to_a_settling_node_is_answered_with_channel_opening_facts() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let terms = X402SettlementTerms {
+            chain: "evm:84532".to_string(),
+            settlement_address: "0xc0e55cd2e967a4f625627dae5d4946f54267c7ab".to_string(),
+            token_network_registry: "0xcc9079ade929b168b54145f6d25262b64fab9d5b".to_string(),
+            token_network: "0x1e95493fef46707e034b4a1945f25a8c76a1823d".to_string(),
+            token_address: "0x49bee1bca5d15fb0963117923403f9498119a9ce".to_string(),
+            decimals: 6,
+        };
+        let app = router_with_gate_and_terms(
+            connector,
+            test_signer(),
+            None,
+            test_gate(ClientChannelRegistry::new()),
+            Some(terms.clone()),
+        );
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let answered: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            answered.accepts[0].extra.settlement.as_ref(),
+            Some(&terms),
+            "the greeting must carry the node's channel-opening facts verbatim"
         );
     }
 

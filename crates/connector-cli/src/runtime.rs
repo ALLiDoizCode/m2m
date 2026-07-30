@@ -369,6 +369,12 @@ pub struct Runtime {
     /// answer. `None` leaves the client edge with only `[[client_channels]]`
     /// to go on, which is what a node with no settlement backend has.
     pub client_channel_source: Option<Arc<dyn ClientChannelSource>>,
+    /// The channel-opening facts the x402 greeting carries (issue #617) --
+    /// `Some` exactly when `[settlement]` is configured, composed here in
+    /// `build` because that is the one place the config's own values and
+    /// the facts the chain connection proved (chain id, the resolved
+    /// `TokenNetwork`, the backend's signing address) are both in scope.
+    pub settlement_terms: Option<connector_client_edge::X402SettlementTerms>,
 }
 
 /// Construct the live [`Connector`] and [`Signer`] a validated [`Config`]
@@ -410,8 +416,25 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     )
     .with_identity_signer(signer.clone());
     let mut client_channel_source: Option<Arc<dyn ClientChannelSource>> = None;
+    let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
     if let Some(settlement) = config.settlement() {
         let backend = build_settlement_backend(settlement).await?;
+        // The greeting's channel-opening facts (issue #617). Addresses the
+        // chain connection proved (`own_address`, the resolved
+        // `TokenNetwork`, the live chain id) come from the backend; the
+        // registry, token and scale come from the very config lines
+        // `connect` just verified against that chain (issues #564/#576).
+        settlement_terms = Some(connector_client_edge::X402SettlementTerms {
+            chain: format!("evm:{}", backend.chain_id()),
+            settlement_address: format!("{:#x}", backend.own_address()),
+            token_network_registry: format!("{:#x}", backend.registry_address()),
+            token_network: format!("{:#x}", backend.address()),
+            token_address: format!(
+                "{:#x}",
+                ethers::types::Address::from(settlement.token_address())
+            ),
+            decimals: settlement.decimals(),
+        });
         client_channel_source = Some(Arc::new(SettlementChannelSource {
             backend: backend.clone(),
         }));
@@ -446,6 +469,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         connector: Arc::new(connector),
         signer,
         client_channel_source,
+        settlement_terms,
     })
 }
 
@@ -533,11 +557,12 @@ fn client_claim_gate(
 pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError> {
     let connector = runtime.connector.clone();
     let signer = runtime.signer.clone();
-    let app = connector_client_edge::router_with_gate(
+    let app = connector_client_edge::router_with_gate_and_terms(
         connector.clone(),
         signer.clone(),
         None,
         client_claim_gate(config, runtime.client_channel_source.clone())?,
+        runtime.settlement_terms.clone(),
     );
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(

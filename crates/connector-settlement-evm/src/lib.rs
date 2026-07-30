@@ -253,6 +253,14 @@ impl EvmSettlementBackend {
         self.chain_id
     }
 
+    /// This backend's own signing address -- the on-chain participant a
+    /// buyer opens a channel WITH. Issue #617: the x402 terms carry this so
+    /// an unaffiliated buyer can learn the counterparty by asking (ADR
+    /// 0022) instead of from an announce this connector never makes.
+    pub fn own_address(&self) -> Address {
+        self.own_address
+    }
+
     /// Who this backend's counterparty is on `channel_id`, as the chain
     /// itself holds it -- the client edge's own channel record (issue
     /// #556), so that a claim can be verified against the party who
