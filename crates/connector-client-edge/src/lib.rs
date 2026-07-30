@@ -345,8 +345,8 @@ struct X402ChannelExtra {
     /// `settlement` already carries verbatim. Absent -- not an empty array
     /// -- on a node with no settlement backend at all, so the pre-#632
     /// shape (and the pre-#617 shape beneath it) stays byte-identical for a
-    /// settlement-less node; the client 0.24.0 parser, which knows neither
-    /// field, is unaffected either way.
+    /// settlement-less node; a parser written before either field existed
+    /// is unaffected either way.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     settlements: Vec<X402ChainSettlementTerms>,
 }
@@ -385,9 +385,12 @@ pub struct X402SettlementTerms {
 
 /// One configured chain's entry in the x402 greeting's `extra.settlements`
 /// list (issue #632, epic #627's per-chain expansion of the single EVM
-/// [`X402SettlementTerms`] issue #617 shipped). Untagged: each variant's own
-/// `chain` field already self-identifies (`"evm:<chainId>"`, `"solana"`), so
-/// nothing else needs to distinguish them on the wire.
+/// [`X402SettlementTerms`] issue #617 shipped). Untagged: serde tries each
+/// variant in declaration order and keeps the first one whose required
+/// fields all deserialize, so as long as every variant has at least one
+/// field the others lack -- `tokenNetworkRegistry` for EVM, `programId` for
+/// Solana -- that structural mismatch alone disambiguates them; no explicit
+/// tag is needed on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum X402ChainSettlementTerms {
