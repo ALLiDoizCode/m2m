@@ -9,7 +9,7 @@ use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{resolve_peers, PeerConfig, RawPeer};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
-use crate::settlement::{resolve_settlement, RawSettlementConfig, SettlementConfig};
+use crate::settlement::{resolve_settlement, RawSettlementSection, SettlementConfig};
 
 /// The config file's shape exactly as written -- convenience forms
 /// (`children`) intact, nothing yet validated. `deny_unknown_fields`
@@ -40,12 +40,12 @@ struct RawConfig {
     /// ticket actually needed it end to end; this is that ticket.
     #[serde(default)]
     peers: Vec<RawPeer>,
-    /// A real settlement backend to construct at startup (issue #542).
-    /// Absent means channel operations keep degrading to
-    /// `ChannelOperationError::NoSettlementBackend`, same as before this
-    /// section existed.
+    /// One or more real settlement backends to construct at startup (issue
+    /// #542; per-chain tables, issue #628). Absent means channel operations
+    /// keep degrading to `ChannelOperationError::NoSettlementBackend`, same
+    /// as before this section existed.
     #[serde(default)]
-    settlement: Option<RawSettlementConfig>,
+    settlement: Option<RawSettlementSection>,
     /// The payment channels this node accepts client-edge claims on, and
     /// the counterparty whose signature it accepts on each (issue #558).
     /// Absent -- or empty -- means this node has a record of no channel,
@@ -78,7 +78,7 @@ pub struct Config {
     peers: Vec<PeerConfig>,
     peer_wire_addr: Option<SocketAddr>,
     operator: Option<OperatorConfig>,
-    settlement: Option<SettlementConfig>,
+    settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
     state_dir: Option<PathBuf>,
 }
@@ -132,7 +132,7 @@ impl Config {
             })
             .transpose()?;
         let operator = resolve_operator(raw.operator)?;
-        let settlement = resolve_settlement(raw.settlement)?;
+        let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
         let state_dir = raw.state_dir.map(PathBuf::from);
 
@@ -164,7 +164,7 @@ impl Config {
             peers,
             peer_wire_addr,
             operator,
-            settlement,
+            settlements,
             client_channels,
             state_dir,
         })
@@ -216,14 +216,14 @@ impl Config {
         self.operator.as_ref()
     }
 
-    /// A configured settlement backend, if the `[settlement]` section is
-    /// present (issue #542). `None` means no backend is constructed at
-    /// startup and every channel operation answers
-    /// `ChannelOperationError::NoSettlementBackend` -- the same "not
-    /// started at all" degradation an absent `[operator]` section already
-    /// has.
-    pub fn settlement(&self) -> Option<&SettlementConfig> {
-        self.settlement.as_ref()
+    /// Every settlement backend the `[settlement]` section configures (issue
+    /// #542; per-chain tables, issue #628) -- one node can name more than
+    /// one chain. Empty means no backend is constructed at startup and every
+    /// channel operation answers `ChannelOperationError::NoSettlementBackend`
+    /// -- the same "not started at all" degradation an absent `[operator]`
+    /// section already has. At most one entry per [`SettlementChain`].
+    pub fn settlements(&self) -> &[SettlementConfig] {
+        &self.settlements
     }
 
     /// The payment channels this node accepts client-edge claims on, and
@@ -632,7 +632,7 @@ key_file = "{}"
         })
         .expect("load");
 
-        assert_eq!(config.settlement(), None);
+        assert!(config.settlements().is_empty());
     }
 
     #[test]
@@ -661,10 +661,125 @@ key_file = "{}"
         })
         .expect("load");
 
-        let settlement = config.settlement().expect("settlement config");
+        assert_eq!(config.settlements().len(), 1);
+        let settlement = &config.settlements()[0];
         assert_eq!(settlement.chain(), crate::SettlementChain::Evm);
-        assert_eq!(settlement.rpc_url(), "http://127.0.0.1:8545");
-        assert_eq!(settlement.decimals(), 6);
+        let crate::SettlementConfig::Evm(evm) = settlement else {
+            panic!("expected an evm settlement config");
+        };
+        assert_eq!(evm.rpc_url(), "http://127.0.0.1:8545");
+        assert_eq!(evm.decimals(), 6);
+    }
+
+    /// The new keyed shape (issue #628): `[settlement.evm]` alone resolves
+    /// the same facts the legacy flat shape does.
+    #[test]
+    fn a_keyed_evm_settlement_table_loads() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{}"
+"#,
+                key_path.display(),
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.settlements().len(), 1);
+        assert_eq!(config.settlements()[0].chain(), crate::SettlementChain::Evm);
+    }
+
+    /// AC: "A config declaring both [settlement.evm] and [settlement.solana]
+    /// parses into typed per-chain settlement config".
+    #[test]
+    fn declaring_both_evm_and_solana_settlement_tables_loads_both() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117893403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "TokenNetworkProgram11111111111111111111111"
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.settlements().len(), 2);
+        assert!(config
+            .settlements()
+            .iter()
+            .any(|s| s.chain() == crate::SettlementChain::Evm));
+        assert!(config
+            .settlements()
+            .iter()
+            .any(|s| s.chain() == crate::SettlementChain::Solana));
+    }
+
+    /// AC: "[settlement.solana] alone: config loads" -- construction refusal
+    /// is `connector-cli`'s to enforce (epic #627's fail-closed-per-chain),
+    /// not config load's.
+    #[test]
+    fn a_solana_only_settlement_section_still_loads() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "TokenNetworkProgram11111111111111111111111"
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.settlements().len(), 1);
+        assert_eq!(
+            config.settlements()[0].chain(),
+            crate::SettlementChain::Solana
+        );
     }
 
     #[test]

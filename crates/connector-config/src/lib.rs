@@ -24,4 +24,6 @@ pub use operator::OperatorConfig;
 pub use peer::PeerConfig;
 pub use route::{PeerRouteConfig, StaticRoute};
 pub use secret::SecretLocation;
-pub use settlement::{SettlementChain, SettlementConfig};
+pub use settlement::{
+    EvmSettlementConfig, SettlementChain, SettlementConfig, SolanaSettlementConfig,
+};

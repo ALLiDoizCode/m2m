@@ -14,7 +14,7 @@ use axum::Router;
 use connector_client_edge::{
     ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, ClientClaimGate, EvmChannel,
 };
-use connector_config::{Config, SecretLocation, SettlementChain, SettlementConfig};
+use connector_config::{Config, EvmSettlementConfig, SecretLocation, SettlementConfig};
 use connector_runtime::{
     Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
     NetworkPeerTransport, PeerRoute, SystemClock,
@@ -66,6 +66,14 @@ pub enum RuntimeError {
     /// RPC endpoint was unreachable, or the contract address named in
     /// config has no code at it.
     Settlement(SettlementError),
+    /// A `[settlement.<chain>]` table parsed (issue #628 lets any recognized
+    /// chain reach config), but this binary does not yet construct a
+    /// backend for it -- e.g. `[settlement.solana]` before epic #627's
+    /// backend-wiring children land. Refused at construction rather than at
+    /// config load, per ADR 0009: a chain this connector cannot yet settle
+    /// on must stop the node starting, not start it with a backend nobody
+    /// asked for or silently drop the section.
+    SettlementBackendNotWired { chain: &'static str },
     /// `state_dir` names a directory this node cannot create or write a
     /// journal file in (issue #605) -- typically a read-only mount, or a
     /// directory owned by another uid than the one the container runs as.
@@ -127,6 +135,12 @@ impl fmt::Display for RuntimeError {
                     "failed to construct the configured settlement backend: {source}"
                 )
             }
+            RuntimeError::SettlementBackendNotWired { chain } => write!(
+                f,
+                "[settlement.{chain}] is configured, but this connector does not yet \
+                 construct a {chain} settlement backend -- refusing to start rather than \
+                 run with that chain silently unsettled"
+            ),
             RuntimeError::StateDirUnusable { path, source } => write!(
                 f,
                 "state_dir {} is not usable for this node's claim journals: {source} -- \
@@ -226,37 +240,32 @@ fn read_settlement_private_key(location: &SecretLocation) -> Result<String, Runt
     }
 }
 
-/// Construct the settlement backend a `[settlement]` section describes,
-/// connecting to the already-deployed `TokenNetworkRegistry` it names
-/// (issue #576) -- `contract_address` -- and resolving the `TokenNetwork`
-/// it actually drives through `token_address`, rather than deploying a
-/// fresh one (issue #542) -- only [`SettlementChain::Evm`] is constructible
-/// today, matching the one chain `connector-config` accepts at load time.
+/// Construct the settlement backend a `[settlement.evm]` (or legacy flat
+/// `[settlement]`) table describes, connecting to the already-deployed
+/// `TokenNetworkRegistry` it names (issue #576) -- `contract_address` -- and
+/// resolving the `TokenNetwork` it actually drives through `token_address`,
+/// rather than deploying a fresh one (issue #542).
 ///
-/// Every field of the section reaches the chain here: `decimals` is handed
-/// to [`EvmSettlementBackend::connect`], which refuses to connect when the
+/// Every field of the table reaches the chain here: `decimals` is handed to
+/// [`EvmSettlementBackend::connect`], which refuses to connect when the
 /// configured scale and the token's own `decimals()` disagree (issue #564).
-/// A `[settlement]` section that names a scale the deployed token does not
-/// agree with is a startup failure, not a line with no effect (ADR 0009).
-async fn build_settlement_backend(
-    settlement: &SettlementConfig,
+/// An EVM table that names a scale the deployed token does not agree with is
+/// a startup failure, not a line with no effect (ADR 0009).
+async fn build_evm_settlement_backend(
+    settlement: &EvmSettlementConfig,
 ) -> Result<Arc<EvmSettlementBackend>, RuntimeError> {
-    match settlement.chain() {
-        SettlementChain::Evm => {
-            let private_key = read_settlement_private_key(settlement.key())?;
-            let registry_address = ethers::types::Address::from(settlement.contract_address());
-            let token_address = ethers::types::Address::from(settlement.token_address());
-            let backend = EvmSettlementBackend::connect(
-                settlement.rpc_url(),
-                &private_key,
-                registry_address,
-                token_address,
-                settlement.decimals(),
-            )
-            .await?;
-            Ok(Arc::new(backend))
-        }
-    }
+    let private_key = read_settlement_private_key(settlement.key())?;
+    let registry_address = ethers::types::Address::from(settlement.contract_address());
+    let token_address = ethers::types::Address::from(settlement.token_address());
+    let backend = EvmSettlementBackend::connect(
+        settlement.rpc_url(),
+        &private_key,
+        registry_address,
+        token_address,
+        settlement.decimals(),
+    )
+    .await?;
+    Ok(Arc::new(backend))
 }
 
 /// The client edge's channel records, read from the same deployed
@@ -417,8 +426,17 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     .with_identity_signer(signer.clone());
     let mut client_channel_source: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
-    if let Some(settlement) = config.settlement() {
-        let backend = build_settlement_backend(settlement).await?;
+    for settlement in config.settlements() {
+        let evm = match settlement {
+            SettlementConfig::Evm(evm) => evm,
+            // Parses (issue #628), but no backend is wired into this binary
+            // yet (epic #627's remaining children) -- fail closed rather
+            // than start with that chain silently unsettled (ADR 0009).
+            SettlementConfig::Solana(_) => {
+                return Err(RuntimeError::SettlementBackendNotWired { chain: "solana" })
+            }
+        };
+        let backend = build_evm_settlement_backend(evm).await?;
         // The greeting's channel-opening facts (issue #617). Addresses the
         // chain connection proved (`own_address`, the resolved
         // `TokenNetwork`, the live chain id) come from the backend; the
@@ -429,11 +447,8 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             settlement_address: format!("{:#x}", backend.own_address()),
             token_network_registry: format!("{:#x}", backend.registry_address()),
             token_network: format!("{:#x}", backend.address()),
-            token_address: format!(
-                "{:#x}",
-                ethers::types::Address::from(settlement.token_address())
-            ),
-            decimals: settlement.decimals(),
+            token_address: format!("{:#x}", ethers::types::Address::from(evm.token_address())),
+            decimals: evm.decimals(),
         });
         client_channel_source = Some(Arc::new(SettlementChannelSource {
             backend: backend.clone(),
@@ -1125,6 +1140,117 @@ key_file = "{}"
             assert!(matches!(
                 result,
                 Err(connector_runtime::ChannelOperationError::NoSettlementBackend)
+            ));
+        }
+
+        /// AC (issue #628): "`[settlement.solana]` alone: config loads, node
+        /// startup fails closed with an explicit not-yet-wired error" --
+        /// `connector-config` accepts the table (proven in that crate's own
+        /// tests), but no `SolanaSettlementBackend` is wired into this
+        /// binary yet, so `build` must refuse to start rather than boot
+        /// with that chain silently unsettled. No anvil or Solana validator
+        /// needed: nothing here should ever try to connect to a chain.
+        #[tokio::test]
+        async fn a_solana_only_settlement_section_fails_closed_at_construction() {
+            let (config, _key_path) = config_with_raw_key_file(|key_path| {
+                format!(
+                    r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "TokenNetworkProgram11111111111111111111111"
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+"#,
+                    key_path = key_path.display()
+                )
+            });
+
+            let error = build(&config)
+                .await
+                .err()
+                .expect("a [settlement.solana] section must refuse to build");
+            assert!(matches!(
+                error,
+                RuntimeError::SettlementBackendNotWired { chain: "solana" }
+            ));
+        }
+
+        /// The other half of the same AC: a config naming both
+        /// `[settlement.evm]` and `[settlement.solana]` must also fail
+        /// closed rather than silently start with only the EVM chain
+        /// settled -- a node cannot vouch for a chain it has no backend
+        /// for, whether or not it also names one it does.
+        #[tokio::test]
+        async fn evm_and_solana_together_still_fail_closed_on_the_unwired_solana_leg() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement_backend =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            let registry_address = settlement_backend.registry_address();
+            drop(settlement_backend);
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "TokenNetworkProgram11111111111111111111111"
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+                rpc_url = anvil.rpc_url,
+                registry_address = registry_address,
+                token = token,
+            ));
+
+            let error = build(&config)
+                .await
+                .err()
+                .expect("an unwired solana leg must refuse to build even with evm configured");
+            assert!(matches!(
+                error,
+                RuntimeError::SettlementBackendNotWired { chain: "solana" }
             ));
         }
     }
