@@ -89,3 +89,20 @@ comment asserting the connector "takes no path from the packet" -- true of the b
 before #492, but never true of `target`, which this issue closes the gap on. Both comments are
 corrected to describe what the connector now actually does: `target` is confined beneath the
 configured handler path rather than taking no path at all.
+
+## Amendment (issue #621): the literal restatement of the handler's own path is accepted
+
+"No production client constructs an envelope yet" stopped being true when the published rig CLI
+(`@toon-protocol/rig`, via `@toon-protocol/client`) began uploading git objects through the Rust
+edge with the TypeScript fleet's convention: an envelope target of `'/store'` addressed at a route
+whose handler is configured at that same `/store` path. Refusing it defended nothing -- a target
+that restates `handler_url.path()` character for character cannot name anything the route does not
+already serve -- while breaking every deployed uploader against the store leg (#600).
+
+So `resolve_target_under_handler` accepts exactly one absolute form: the literal,
+character-for-character restatement of the handler's own configured path, which resolves to that
+path -- the same meaning as `""` and `"/"`. Everything else this decision refuses stays refused:
+any other absolute path, `..`/`.` segments, schemes, authorities, backslashes, and every
+percent-encoded spelling INCLUDING the encoded form of the handler's own path (`%2Fstore` is an
+escape probe, not a restatement). The invariant this ADR exists for is unchanged: resolution can
+never produce a URL the route's configuration does not already name.

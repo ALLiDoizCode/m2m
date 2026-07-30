@@ -16,15 +16,26 @@
 //! `127.0.0.1:0` for the same reason), and `state_dir` (a container path
 //! this host cannot create -- but the line itself must still be there,
 //! issue #605). Nothing semantic is touched: no
-//! prefix, no route, no peer, no `price`, and in particular no
-//! `[settlement]` value. This is the property a reader assumes this file
-//! provides, and the only case that catches a committed config which cannot
-//! start. Exactly that happened: a `[settlement]` section naming the zero
-//! address made both files exit 1 on startup, because
-//! `EvmSettlementBackend::connect` resolves a `TokenNetwork` through the
-//! configured `TokenNetworkRegistry` and there is no contract at that one
-//! (issue #542, issue #576). Both files now ship that section commented
-//! out.
+//! prefix, no route, no peer, no `price`. This is the property a reader
+//! assumes this file provides, and the only case that catches a committed
+//! config which cannot start. Exactly that happened: a `[settlement]`
+//! section naming the zero address made both files exit 1 on startup,
+//! because `EvmSettlementBackend::connect` resolves a `TokenNetwork`
+//! through the configured `TokenNetworkRegistry` and there is no contract
+//! at that one (issue #542, issue #576).
+//!
+//! One more substitution joined that list when the apex file's
+//! `[settlement]` section went LIVE against Base Sepolia (#577; the store
+//! file still ships the commented template): a committed live section
+//! means the node cannot start without reaching that chain -- the
+//! fail-closed behaviour ADR 0009 asks for, and exactly the network
+//! dependency a test must not have. So the verbatim case boots the apex
+//! file with its live `[settlement]` tail STRIPPED
+//! ([`without_live_settlement`]), and the section itself is proven by the
+//! anvil-backed case below, which boots the very same committed lines
+//! retargeted at a disposable local chain. This was module-doc'd here as
+//! "a decision to revisit deliberately" before #577 shipped; this is that
+//! decision.
 //!
 //! The verbatim case also drives one claimless request at each file's own
 //! terminating route and asserts it is answered with the x402 greeting
@@ -34,21 +45,14 @@
 //! because the price is read off the committed text like everything else
 //! here, this fails again if either file ever silently returns to zero.
 //!
-//! **Template** (`*_devnet_settlement_template_boots_against_a_deployed_contract`)
-//! takes the commented-out `[settlement]` block each file carries between
-//! its `BEGIN`/`END` template markers, uncomments it, points `rpc_url` and
-//! `contract_address` at a freshly deployed contract on a disposable local
-//! `anvil`, and boots that. Documented config shapes rot; this keeps the
-//! shape an operator is told to fill in one that demonstrably works, and
-//! keeps `runtime::build`'s settlement construction path covered end to end
-//! by the real binary. It is skipped when no `anvil` is on `PATH`.
-//!
-//! If a real `TokenNetworkRegistry` is ever deployed and its address
-//! recorded in these files, the verbatim case starts requiring a reachable
-//! chain in order to pass. That is a decision to revisit here deliberately, not an
-//! accident to paper over: a committed `[settlement]` section means the node
-//! cannot start without that chain, which is the fail-closed behaviour
-//! ADR 0009 asks for.
+//! **Template/section** (`*_devnet_settlement_*_boots_against_a_deployed_contract`)
+//! points each file's `[settlement]` shape -- the store file's commented
+//! `BEGIN`/`END` template, uncommented; the apex file's live section,
+//! as committed -- at a freshly deployed contract on a disposable local
+//! `anvil`, and boots that. Documented config shapes rot; this keeps them
+//! demonstrably working and keeps `runtime::build`'s settlement
+//! construction path covered end to end by the real binary. It is skipped
+//! when no `anvil` is on `PATH`.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -149,6 +153,20 @@ fn with_sandbox_paths(
 /// test failure: either the template was deleted (and this case has nothing
 /// left to prove) or a real `[settlement]` section was committed (and the
 /// verbatim case is the one that covers it).
+/// Strip the apex file's LIVE `[settlement]` tail (section plus its
+/// `[settlement.key]`) for the verbatim boot -- see the module docs: a
+/// committed live section is a startup-blocking chain dependency by
+/// design (ADR 0009), and the section itself is proven by the anvil case.
+/// Panics when there is no live section to strip, so this cannot silently
+/// weaken the verbatim case if the file ever loses it.
+fn without_live_settlement(raw: &str) -> String {
+    let marker = "\n[settlement]\n";
+    let index = raw
+        .find(marker)
+        .expect("expected a live (uncommented) [settlement] section to strip");
+    raw[..index].to_string()
+}
+
 fn uncomment_settlement_template(raw: &str) -> String {
     let mut out = String::new();
     let mut inside = false;
@@ -190,6 +208,7 @@ fn uncomment_settlement_template(raw: &str) -> String {
 fn with_anvil_settlement(
     raw: &str,
     anvil_rpc_url: &str,
+    committed_contract_address: &str,
     contract_address: ethers::types::Address,
     token_address: ethers::types::Address,
 ) -> String {
@@ -200,7 +219,7 @@ fn with_anvil_settlement(
     );
     let replaced = replace_expecting_a_match(
         &replaced,
-        "contract_address = \"0x0000000000000000000000000000000000000000\"",
+        &format!("contract_address = \"{committed_contract_address}\""),
         &format!("contract_address = \"{contract_address:?}\""),
     );
     replace_expecting_a_match(
@@ -334,17 +353,34 @@ async fn assert_answered_with_x402_greeting(client_edge_addr: &str, destination:
 async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
     assert!(APEX_CONFIG.contains("g.toon.relay"));
     assert!(APEX_CONFIG.contains("g.toon.store"));
+    assert!(APEX_CONFIG.contains("g.toon.ario"));
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    // No peer_wire_addr in this file (the apex only dials out) -- only the
-    // client edge is expected to log a listen line.
+    // No peer_wire_addr in this file (the apex serves no peer wire since
+    // #600 terminated the store leg here) -- only the client edge is
+    // expected to log a listen line. The live [settlement] tail is
+    // stripped for hermeticity (module docs); the anvil-backed case below
+    // boots it.
     let connector = boot(
-        &with_sandbox_paths(APEX_CONFIG, key_file.path(), state_dir.path()),
+        &with_sandbox_paths(
+            &without_live_settlement(APEX_CONFIG),
+            key_file.path(),
+            state_dir.path(),
+        ),
         false,
     );
 
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.relay").await;
+    // The store leg (#600): `g.toon.ario` -- the destination the TS fleet's
+    // kind:10032 announce names as `routes.store`, i.e. what rig actually
+    // dials -- and this fleet's own `g.toon.store` alias are BOTH priced,
+    // claim-gated terminated routes on this apex. A peer-forwarded route
+    // would greet nothing and charge nothing (the free-gateway gap #620
+    // tracks), so these greetings are the regression guard that the store
+    // leg stays on the paid path.
+    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.ario").await;
+    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.store").await;
 }
 
 #[tokio::test]
@@ -380,8 +416,14 @@ async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers:
     (anvil, registry_address, token)
 }
 
+/// The registry the apex file's LIVE `[settlement]` section names -- the
+/// deployed Base Sepolia `TokenNetworkRegistry` (#576, #577). The anvil
+/// case replaces exactly this committed value, so it doubles as the guard
+/// that the committed section keeps naming it.
+const APEX_LIVE_REGISTRY: &str = "0xcC9079adE929b168B54145f6d25262b64FAB9D5b";
+
 #[tokio::test]
-async fn the_apex_devnet_settlement_template_boots_against_a_deployed_contract() {
+async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() {
     if !require_anvil() {
         return;
     }
@@ -389,8 +431,23 @@ async fn the_apex_devnet_settlement_template_boots_against_a_deployed_contract()
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let text = uncomment_settlement_template(APEX_CONFIG);
-    let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
+    // The apex section is LIVE as committed -- no template to uncomment.
+    // Its [settlement.key] names its own file (/app/data/settlement.key,
+    // distinct from the signer's -- the live box mounts the funded
+    // settlement account there), so that path is substituted like the
+    // signer key's is.
+    let text = with_anvil_settlement(
+        APEX_CONFIG,
+        &anvil.rpc_url,
+        APEX_LIVE_REGISTRY,
+        contract_address,
+        token,
+    );
+    let text = replace_expecting_a_match(
+        &text,
+        "key_file = \"/app/data/settlement.key\"",
+        &format!("key_file = \"{}\"", key_file.path().display()),
+    );
     let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
     drop(boot(&text, false));
@@ -406,7 +463,13 @@ async fn the_store_devnet_settlement_template_boots_against_a_deployed_contract(
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let text = uncomment_settlement_template(STORE_CONFIG);
-    let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
+    let text = with_anvil_settlement(
+        &text,
+        &anvil.rpc_url,
+        "0x0000000000000000000000000000000000000000",
+        contract_address,
+        token,
+    );
     let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
     drop(boot(&text, true));

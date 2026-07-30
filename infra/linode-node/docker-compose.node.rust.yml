@@ -20,9 +20,9 @@
 #   - ports:  4000 only (client edge + operator + /metrics — one port, unlike
 #             the TypeScript node's three), no collision with the TypeScript
 #             node's 3000/8080/8081. No 4001 published: ./connector-rust.toml
-#             sets no peer_wire_addr on this box (the apex only dials out to
-#             the store side; a container needs no published port to make an
-#             outbound connection) — see that file's own [[peers]] comment.
+#             serves no peer wire at all since #600 — the store leg is a
+#             TERMINATED route over the boxes' WireGuard segment (see that
+#             file's header; the paid peer wire is #620's work).
 #   - data:   ./signer-rust.key, a path distinct from the TypeScript node's
 #             `connector_data` volume
 #   - state:  ./connector-rust.toml sets state_dir = "/app/state", the
@@ -78,7 +78,7 @@ services:
     # re-pinned to an image built from #605 or later BEFORE (or in the same
     # `up -d` as) that file reaches a box. An older image reads `state_dir`
     # as an unknown top-level key and exits 1 on config load.
-    image: ghcr.io/toon-protocol/connector-rust:sha-4fca005
+    image: ghcr.io/toon-protocol/connector-rust:sha-2880ee5
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
