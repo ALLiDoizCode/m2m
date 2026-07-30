@@ -14,19 +14,22 @@
 // there is no separate diff inlining here to guard. The prompt can no longer be
 // blown up by a large PR; a reduced view says so in the prompt itself.
 //
-// STANDALONE-REVIEW CAVEAT (verify on first run)
-// ----------------------------------------------
+// STANDALONE-REVIEW: FIRST-LIVE-RUN OUTCOME (2026-07-30, PR #634)
+// ---------------------------------------------------------------
 // Sandcastle 0.12.0 exercises the reviewer only INSIDE the parallel loop's
 // Phase 2, on a fresh `sandcastle/issue-*` branch it just created. Driving the
 // same reviewer standalone against an already-existing PR head branch is our
-// interpretation, not a documented engine feature. Two things to confirm on the
-// first live run:
-//   1. createSandbox({ branch: <existing PR head> }) checks out the EXISTING
-//      branch (rather than failing because the ref already exists / creating a
-//      divergent one). The workflow checks out the PR head first to help this.
-//   2. The built-in {{TARGET_BRANCH}} inside review-prompt.md resolves to `main`
-//      for a standalone sandbox. If the diff comes back empty, the base may be
-//      resolving wrong — check the reviewer's logged `git diff` command.
+// interpretation, not a documented engine feature. What the first live run
+// established:
+//   1. createSandbox({ branch: <existing PR head> }) DOES check out the
+//      existing branch — but in its own worktree under .sandcastle/worktrees/,
+//      so the HOST working tree must NOT have that branch checked out (git
+//      refuses one branch in two worktrees). The workflow therefore checks out
+//      `main`, never the PR head.
+//   2. Still unconfirmed: the built-in {{TARGET_BRANCH}} inside
+//      review-prompt.md resolves to `main` for a standalone sandbox. If the
+//      diff comes back empty, the base may be resolving wrong — check the
+//      reviewer's logged `git diff` command.
 //
 // Required env:
 //   SANDCASTLE_PR_NUMBER      the PR to review (github.event.pull_request.number)
