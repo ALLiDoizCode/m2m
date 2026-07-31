@@ -474,7 +474,7 @@ endpoints)
     "faucetUrl": "https://faucet.${DOMAIN}",
     "ilpAddress": "g.proxy.relay",
     "settlementAddresses": {
-      "evm": "0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab",
+      "evm": "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF",
       "solana": "A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK",
       "mina": "B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq"
     },
@@ -487,7 +487,7 @@ endpoints)
     "relayHopAddress": "g.proxy.relay.store",
     "dvmKinds": [5094],
     "settlementAddresses": {
-      "evm": "0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab",
+      "evm": "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF",
       "solana": "A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK",
       "mina": "B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq"
     },

@@ -87,8 +87,8 @@ routes:
     ilpAddress: g.toon.relay
     settlementAddresses:
       # Derived from TOON_MNEMONIC (account index 0) — update if mnemonic changes.
-      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      evm: '0xF29fD62C4848B9573C9b90adbF61b664F386d9CF'
+      solana: 'HgNmgJYrZFrx9DZgMopKa9971zGXW3hPL32Wsc6KzF6'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
   # Store forwards. `g.toon.relay.ario` MUST be listed (it is more specific than
@@ -104,8 +104,8 @@ routes:
       - mina
     ilpAddress: g.toon.relay.ario
     settlementAddresses:
-      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      evm: '0xF29fD62C4848B9573C9b90adbF61b664F386d9CF'
+      solana: 'HgNmgJYrZFrx9DZgMopKa9971zGXW3hPL32Wsc6KzF6'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
   - prefix: g.toon.ario
@@ -117,8 +117,8 @@ routes:
       - mina
     ilpAddress: g.toon.ario
     settlementAddresses:
-      evm: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
-      solana: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+      evm: '0xF29fD62C4848B9573C9b90adbF61b664F386d9CF'
+      solana: 'HgNmgJYrZFrx9DZgMopKa9971zGXW3hPL32Wsc6KzF6'
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
 # ── Self-announce (kind:10032 IlpPeerInfo) — relay#37 / store#22 / toon-meta#69 ──

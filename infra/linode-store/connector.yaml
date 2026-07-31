@@ -117,7 +117,7 @@ chainProviders:
 # DISTINCT SETTLEMENT IDENTITY: set in .env (devnet):
 #   TOON_MNEMONIC="portion symbol pencil track twenty vault love raccoon rigid gravity glide aerobic"
 #   → EVM 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e (NIP-06 path m/44'/1237'/0'/0/0)
-# Distinct from the relay-connector/apex (0xC0E55…), so the channel doesn't self-pay.
+# Distinct from the relay-connector/apex (0xF29fD…), so the channel doesn't self-pay.
 peers:
   - id: relay-connector
     url: wss://proxy.devnet.toonprotocol.dev:443
@@ -133,8 +133,8 @@ peers:
     # apex's own committed config, which advertises the same account for every
     # store route (infra/linode-node/connector.yaml `settlementAddresses.solana`).
     # Its EVM counterpart, if this peer is ever moved back, is
-    # 0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab (both reuse the demo apex seed).
-    settlementAddress: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
+    # 0xF29fD62C4848B9573C9b90adbF61b664F386d9CF (both reuse the demo apex seed).
+    settlementAddress: 'HgNmgJYrZFrx9DZgMopKa9971zGXW3hPL32Wsc6KzF6'
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 # This box TERMINATES both paths to the same Arweave DVM (store:3300, POST /store):
