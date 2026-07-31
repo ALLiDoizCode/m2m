@@ -246,4 +246,13 @@ pub enum ConfigError {
 
     #[error("state_dir '{path}' exists but is not a directory")]
     StateDirNotADirectory { path: PathBuf },
+
+    #[error(
+        "channel_liveness_ttl_secs is 0: this node would re-read the chain for every channel \
+         on every packet rather than caching a resolution at all, which is a way to exhaust \
+         an RPC endpoint's request budget and take the node's own paid writes down with it \
+         (issue #649). Omit the field for the default, or set the number of seconds a \
+         resolved channel's liveness may be believed for"
+    )]
+    ZeroChannelLivenessTtl,
 }

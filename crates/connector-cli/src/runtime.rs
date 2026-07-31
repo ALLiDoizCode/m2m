@@ -709,6 +709,13 @@ fn client_channels(
     if let Some(source) = solana_source {
         channels = channels.with_solana_source(source);
     }
+    // The one liveness knob a config file turns (issue #649): how long a
+    // chain-resolved channel's mutable facts may be believed before they
+    // are re-read. Absent leaves the client edge's own default, which is
+    // what every node that has not thought about it should have.
+    if let Some(ttl) = config.channel_liveness_ttl() {
+        channels = channels.with_liveness_ttl(ttl);
+    }
     channels
 }
 
@@ -914,6 +921,33 @@ key_file = "{}"
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The one narrowing in this crate that guards a false-accept boundary
+    /// (issue #646): an on-chain deposit is a `uint256` and a claim's
+    /// cumulative amount is a `u64`, so the deposit has to be narrowed to
+    /// be compared -- and narrowing the wrong way round would turn a huge
+    /// deposit into a tiny cap (refusing good claims) or, far worse, a
+    /// wrapped small number into a huge one. `ethers`' own `U256::as_u64`
+    /// panics above the range; this clamps, which is sound *only* because
+    /// the value is an upper bound on a `u64`: no `u64` can exceed
+    /// `u64::MAX`, so a deposit wider than that and a deposit of exactly
+    /// `u64::MAX` cap identically.
+    #[test]
+    fn a_deposit_wider_than_u64_clamps_rather_than_wrapping_or_panicking() {
+        assert_eq!(saturating_u64(U256::zero()), 0);
+        assert_eq!(saturating_u64(U256::from(1_000u64)), 1_000);
+        assert_eq!(saturating_u64(U256::from(u64::MAX)), u64::MAX);
+        assert_eq!(
+            saturating_u64(U256::from(u64::MAX) + U256::one()),
+            u64::MAX,
+            "one past the boundary clamps rather than wrapping to 0"
+        );
+        assert_eq!(
+            saturating_u64(U256::MAX),
+            u64::MAX,
+            "a deposit no u64 claim could ever exceed caps at the largest one that could"
+        );
     }
 
     /// A node with no `[[client_channels]]` has a record of no channel, so
@@ -2224,9 +2258,42 @@ key_file = "{key_path}"
                 .expect("a real second setTotalDeposit");
             assert_eq!(topped_up.deposited, 1_001);
 
-            gate.ingest(&claim_json(1, 1_001), 100)
-                .await
-                .expect("the identical claim is good once the chain says it can be redeemed");
+            // The identical claim, at the identical nonce, once the chain
+            // says it can be redeemed.
+            accepted_within_the_reattempt_interval(&gate, &claim_json(1, 1_001), 100).await;
+        }
+
+        /// Present `claim_json` until it is accepted, or give up.
+        ///
+        /// A refused undercollateralized claim is expected to become good
+        /// once the deposit lands, but not necessarily on the very next
+        /// submission: the re-read that notices the deposit is rate-limited
+        /// per channel (`ChannelLivenessPolicy::min_reattempt_interval`),
+        /// because a refusal that consumes no nonce could otherwise be
+        /// re-presented as an unlimited free chain read. Retrying here is
+        /// the point rather than a workaround -- it is what proves the
+        /// interval is a delay of seconds and not a wall, under the very
+        /// policy a production node runs.
+        async fn accepted_within_the_reattempt_interval(
+            gate: &ClientClaimGate,
+            claim_json: &str,
+            price: u64,
+        ) {
+            for _ in 0..40 {
+                match gate.ingest(claim_json, price).await {
+                    Ok(_) => return,
+                    Err(connector_client_edge::ClaimIngestRejection::Undercollateralized {
+                        ..
+                    }) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                    Err(other) => panic!("unexpected refusal: {}", other.message()),
+                }
+            }
+            panic!(
+                "the deposit landed on chain, so the identical claim must become good once the \
+                 per-channel re-attempt interval has passed -- it never did"
+            );
         }
 
         /// A Solana claim JSON on `channel`, signed by the channel's real
@@ -2359,10 +2426,10 @@ key_file = "{key_path}"
                 .expect("deposit real SPL value into the channel vault");
             assert_eq!(funded.deposited, 6_000);
 
-            gate.ingest(&claim_json, 100).await.expect(
-                "the byte-identical claim redeems now, so the gate accepts it now -- the \
-                 memoised floor was a lower bound and the breach re-read it",
-            );
+            // The byte-identical claim redeems now, so the gate accepts it
+            // now: the memoised floor was a lower bound and the breach
+            // re-read it.
+            accepted_within_the_reattempt_interval(&gate, &claim_json, 100).await;
         }
 
         /// Issue #649 against a real validator: a channel resolved while it
@@ -2419,7 +2486,14 @@ key_file = "{key_path}"
                     .with_solana_source(Arc::new(SolanaChannelSource {
                         backend: Arc::new(node_backend),
                     }))
-                    .with_liveness_ttl(std::time::Duration::ZERO),
+                    // Re-verify on every lookup, so the settlement below is
+                    // noticed without this test waiting out a refresh
+                    // interval. What is under test is that the settled
+                    // channel stops resolving at all, not how long that
+                    // takes.
+                    .with_liveness_policy(
+                        connector_client_edge::ChannelLivenessPolicy::reverify_every_lookup(),
+                    ),
                 Arc::new(InMemoryJournal::new()),
             )
             .expect("a fresh in-memory journal has nothing to replay");

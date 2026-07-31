@@ -120,27 +120,62 @@
 //!   resolving from cache forever, and this connector would go on accepting
 //!   claims that can never be redeemed -- precisely what the resolving
 //!   backends' settled-channel branches exist to refuse. So a resolved
-//!   entry's liveness has an expiry ([`DEFAULT_LIVENESS_TTL`], overridable
-//!   with [`ClientChannelRegistry::with_liveness_ttl`]): once it is older
-//!   than that, the next lookup re-asks the chain through the same refresh
-//!   path the deposit floor uses, and a channel that has since settled (or
-//!   changed mint) is dropped from the cache and refused. That costs at
-//!   most one read per channel per TTL window, and only while the channel
-//!   is actively paying.
+//!   entry's liveness ages out, on the schedule
+//!   [`ChannelLivenessPolicy`] sets: past `refresh_after` the next lookup
+//!   re-asks the chain through the same refresh path the deposit floor
+//!   uses, and a channel that has since settled (or changed mint) is
+//!   dropped from the cache and refused.
+//!
+//! # Ageing out without a thundering herd
+//!
+//! An expiry is only as good as what it does when the chain is *not*
+//! answering, and the naive version of it -- refuse the claim, leave the
+//! entry expired -- is strictly worse than no expiry at all: the next
+//! packet finds the same expired entry and re-runs the same failing lookup,
+//! so a resolved channel that cost one read per minute costs one read *per
+//! packet* for as long as the outage lasts, which on a rate-limited
+//! endpoint is a loop that sustains its own 429s. [`ChannelLivenessPolicy`]
+//! is therefore three durations rather than one, and every one of them
+//! exists to bound work rather than to bound staleness:
+//!
+//! * `refresh_after` -- when a memoised entry stops being served without
+//!   asking the chain. The staleness bound in the happy case.
+//! * `serve_stale_until` -- how long past that an entry may still be
+//!   *served* when the chain cannot be reached. Serve-stale-while-
+//!   revalidate: a lookup failure falls back to the last reading this
+//!   connector actually got, loudly, instead of refusing a paying client
+//!   because an RPC endpoint blipped. Outage behaviour is then no worse
+//!   than a memo with no expiry at all, which is what shipped before.
+//!   Past this bound there is no fallback and the claim is refused.
+//! * `min_reattempt_interval` -- the floor on how often one channel may
+//!   provoke a lookup, applied to *both* triggers (an aged-out entry and a
+//!   deposit-floor breach). This is what turns "per packet" into "per
+//!   interval" for an outage, and what stops a client re-presenting one
+//!   undercollateralized claim from re-provoking a chain read every time:
+//!   that refusal deliberately consumes nothing, so without this the same
+//!   claim is an unlimited free amplifier.
+//!
+//! A resolution in flight is also marked as such, so N packets arriving on
+//! one aged-out channel cost one lookup and not N. The marker is cleared by
+//! a `Drop` guard rather than on the success path, because an HTTP handler's
+//! future is dropped outright when its client disconnects, and a marker that
+//! survived that would wedge the channel until its stale window ran out.
 //!
 //! What is *not* memoised at all is any answer that could change to a
 //! *better* one: a lookup failure, and a "no such channel". A buyer who
 //! opens a channel and pays a second later has to be payable on their next
 //! attempt rather than after a TTL, which is exactly the registration-free
 //! path #502 asks for. The cost is that a sender naming channels that do
-//! not exist can make this connector perform one `eth_call` each. Two
-//! things bound it: a resolution is a single `TokenNetwork.channels(id)`
-//! read plus the one `participants(id, counterparty)` read the deposit
-//! needs, rather than the three-call `SettlementBackend::channel_state`
-//! path, and the lookup is the claim gate's *last* stage, so a claim must
-//! already be structurally valid, fresh and value-covering to reach it at
-//! all (issue #544's ordering). Rate-limiting it is deliberately left out
-//! of this change -- see the PR description.
+//! not exist can make this connector perform one `eth_call` each -- the one
+//! case the interval above cannot bound, since there is no entry to hang it
+//! on. Two things bound it instead: a resolution is a single
+//! `TokenNetwork.channels(id)` read plus the one
+//! `participants(id, counterparty)` read the deposit needs, rather than the
+//! three-call `SettlementBackend::channel_state` path, and the lookup is the
+//! claim gate's *last* stage, so a claim must already be structurally
+//! valid, fresh and value-covering to reach it at all (issue #544's
+//! ordering). Rate-limiting *that* is deliberately left out of this change
+//! -- see the PR description.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -160,6 +195,75 @@ use connector_signer::Address;
 /// TTL on the *record* -- the counterparty and domain never expire, and a
 /// refresh that succeeds re-uses the same entry.
 pub const DEFAULT_LIVENESS_TTL: Duration = Duration::from_secs(60);
+
+/// How long past [`DEFAULT_LIVENESS_TTL`] a memoised channel may still be
+/// *served* while the chain cannot be reached at all.
+///
+/// Ten minutes, and the number is chosen against the threat model rather
+/// than for comfort: what the expiry defends is a channel that settles on
+/// chain, and settling one takes a close, a challenge period and then a
+/// settle. A worst-case ten minutes of staleness -- reached only while this
+/// connector's RPC endpoint is down, and logged at `warn` every time it is
+/// used -- sits far inside that, while the alternative (refusing) turns
+/// somebody else's outage into this node's own refusal to serve paying
+/// clients.
+pub const DEFAULT_SERVE_STALE_UNTIL: Duration = Duration::from_secs(600);
+
+/// The floor on how often one channel may provoke a chain lookup.
+///
+/// Two seconds: long enough that a client re-presenting one claim, or a
+/// packet stream on an aged-out channel, cannot turn into a per-packet read
+/// on an endpoint with a request budget; short enough that a channel which
+/// has genuinely settled stops being paid on within a beat of
+/// `refresh_after`, and that a counterparty who deposits to clear a refusal
+/// is not left waiting.
+pub const DEFAULT_MIN_REATTEMPT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// When a memoised resolution stops being believed, how long it may still
+/// be leaned on while the chain is unreachable, and how often one channel
+/// may ask (issue #649, and the availability review of #654).
+///
+/// See this module's own doc for what each duration is for. The defaults
+/// are [`DEFAULT_LIVENESS_TTL`], [`DEFAULT_SERVE_STALE_UNTIL`] and
+/// [`DEFAULT_MIN_REATTEMPT_INTERVAL`]; a node overrides `refresh_after`
+/// from its config file (`channel_liveness_ttl_secs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelLivenessPolicy {
+    /// Past this, a memoised entry is re-verified before it is trusted.
+    pub refresh_after: Duration,
+    /// Past `refresh_after`, how long an entry may still be served when
+    /// the re-verification itself fails. Measured from the last *successful*
+    /// reading, so it is an absolute staleness ceiling and not a rolling
+    /// one.
+    pub serve_stale_until: Duration,
+    /// The minimum gap between two lookups provoked by the same channel,
+    /// however they were provoked.
+    pub min_reattempt_interval: Duration,
+}
+
+impl Default for ChannelLivenessPolicy {
+    fn default() -> ChannelLivenessPolicy {
+        ChannelLivenessPolicy {
+            refresh_after: DEFAULT_LIVENESS_TTL,
+            serve_stale_until: DEFAULT_SERVE_STALE_UNTIL,
+            min_reattempt_interval: DEFAULT_MIN_REATTEMPT_INTERVAL,
+        }
+    }
+}
+
+impl ChannelLivenessPolicy {
+    /// Re-verify on every lookup, never serve a stale reading, never
+    /// suppress an attempt. Correct, and one chain read per packet, so it
+    /// is for a test that needs every re-verification to be observable --
+    /// never for a production node.
+    pub fn reverify_every_lookup() -> ChannelLivenessPolicy {
+        ChannelLivenessPolicy {
+            refresh_after: Duration::ZERO,
+            serve_stale_until: Duration::ZERO,
+            min_reattempt_interval: Duration::ZERO,
+        }
+    }
+}
 
 /// What a channel's counterparty has demonstrably put on chain, as far as
 /// this connector knows: the ceiling a claim's cumulative amount may not
@@ -393,26 +497,114 @@ pub struct ClientChannelRegistry {
     /// since a resolved Solana answer is a [`SolanaChannel`], not an
     /// [`EvmChannel`].
     resolved_solana: RwLock<HashMap<[u8; 32], Resolved<SolanaChannel>>>,
-    /// How long a [`Resolved`] entry's liveness may be believed before the
-    /// chain is asked again (issue #649). See [`DEFAULT_LIVENESS_TTL`].
-    liveness_ttl: Duration,
+    /// When a memoised entry stops being believed, how long it may be
+    /// leaned on anyway while the chain is unreachable, and how often one
+    /// channel may ask (issue #649).
+    liveness: ChannelLivenessPolicy,
 }
 
-/// A memoised resolution and the moment the chain last confirmed it. The
-/// timestamp is what bounds how long a `Settled` channel can keep being
-/// answered for out of this cache (issue #649).
+/// A memoised resolution, when the chain last *confirmed* it, and when this
+/// connector last *tried* to -- two different clocks, and the difference
+/// between them is the whole availability story. `confirmed_at` bounds
+/// staleness (issue #649); `attempted_at` bounds work, so a chain that is
+/// refusing to answer cannot be asked once per packet.
 #[derive(Debug, Clone, Copy)]
 struct Resolved<T> {
     channel: T,
     confirmed_at: Instant,
+    attempted_at: Instant,
+    /// A lookup for this channel is running right now, so another packet
+    /// arriving must lean on `channel` rather than start a second one.
+    /// Cleared by [`InFlight`]'s `Drop`, so a handler future that is
+    /// dropped mid-lookup -- what axum does when a client disconnects --
+    /// cannot wedge the channel.
+    in_flight: bool,
 }
 
-impl<T: Copy> Resolved<T> {
-    /// The memoised channel, or `None` if its liveness has expired and the
-    /// chain has to be asked again.
-    fn fresh_for(&self, ttl: Duration) -> Option<T> {
-        (self.confirmed_at.elapsed() < ttl).then_some(self.channel)
+/// What a lookup should do about a channel, decided under the memo's own
+/// lock and before any I/O.
+enum Plan<T> {
+    /// Answer from the memo and touch no chain.
+    Serve(T),
+    /// Ask the chain. `fallback` is the memoised reading to fall back on if
+    /// the lookup fails -- `None` once staleness has passed
+    /// `serve_stale_until`, or when there was nothing memoised to begin
+    /// with, in which case a failure is a refusal.
+    Ask { fallback: Option<T> },
+}
+
+/// Clears a [`Resolved::in_flight`] marker however the attempt it belongs
+/// to ends: a return, an error, a panic, or the whole future being dropped.
+/// The last is not hypothetical -- a client disconnecting is enough.
+struct InFlight<'a, T> {
+    memo: &'a RwLock<HashMap<[u8; 32], Resolved<T>>>,
+    key: [u8; 32],
+}
+
+impl<T> Drop for InFlight<'_, T> {
+    fn drop(&mut self) {
+        if let Ok(mut memo) = self.memo.write() {
+            if let Some(entry) = memo.get_mut(&self.key) {
+                entry.in_flight = false;
+            }
+        }
     }
+}
+
+/// Why a lookup is being considered -- the one thing the two triggers
+/// disagree about is whether a *young* entry is good enough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// A packet arrived and the entry may have aged out. A young entry is
+    /// exactly what the memo is for, so it is served untouched.
+    Age,
+    /// A claim breached the memoised deposit floor. Age is beside the
+    /// point: the floor is a lower bound and the reason to look again is
+    /// that it is too low, not that it is old.
+    Breach,
+}
+
+/// Decide what to do about `key`, marking the entry as being worked on if
+/// the answer is [`Plan::Ask`]. Shared by both chains and both triggers:
+/// the policy is about an entry's age and how recently it asked, and
+/// neither chain's entry ages differently.
+///
+/// Takes the write lock because deciding to ask *is* a mutation -- the
+/// attempt is recorded before it happens, which is what makes the interval
+/// and the in-flight marker bind concurrent callers rather than merely
+/// describe them. The guard is released before the caller's `.await`.
+fn plan<T: Copy>(
+    memo: &RwLock<HashMap<[u8; 32], Resolved<T>>>,
+    key: &[u8; 32],
+    liveness: ChannelLivenessPolicy,
+    trigger: Trigger,
+) -> Plan<T> {
+    let mut memo = memo
+        .write()
+        .expect("resolved client channels lock poisoned");
+    let Some(entry) = memo.get_mut(key) else {
+        return Plan::Ask { fallback: None };
+    };
+    if trigger == Trigger::Age && entry.confirmed_at.elapsed() < liveness.refresh_after {
+        return Plan::Serve(entry.channel);
+    }
+    let fallback =
+        (entry.confirmed_at.elapsed() < liveness.serve_stale_until).then_some(entry.channel);
+    // Someone else is already asking, or somebody asked a moment ago: do
+    // not add another read. Leaning on the last good reading is right here
+    // for the same reason it is right on a failed lookup -- it is the most
+    // recent thing the chain actually said.
+    if entry.in_flight || entry.attempted_at.elapsed() < liveness.min_reattempt_interval {
+        if let Some(channel) = fallback {
+            return Plan::Serve(channel);
+        }
+        // Past the stale window there is nothing safe to serve, so the
+        // lookup has to happen however recently one was tried: refusing on
+        // a timer would refuse a channel that is perfectly fine.
+    }
+    entry.attempted_at = Instant::now();
+    entry.in_flight = true;
+    Plan::Ask { fallback }
 }
 
 impl Default for ClientChannelRegistry {
@@ -424,9 +616,9 @@ impl Default for ClientChannelRegistry {
             resolved: RwLock::new(HashMap::new()),
             resolved_solana: RwLock::new(HashMap::new()),
             // Hand-written rather than derived precisely for this field: a
-            // derived `Default` would give `Duration::ZERO`, i.e. re-read
+            // derived `Default` would give all-zero durations, i.e. re-read
             // the chain on every packet.
-            liveness_ttl: DEFAULT_LIVENESS_TTL,
+            liveness: ChannelLivenessPolicy::default(),
         }
     }
 }
@@ -439,13 +631,29 @@ impl ClientChannelRegistry {
         ClientChannelRegistry::default()
     }
 
-    /// Believe a resolved channel's liveness for `ttl` rather than
-    /// [`DEFAULT_LIVENESS_TTL`] (issue #649). `Duration::ZERO` re-verifies
-    /// on every lookup -- correct, and one chain read per packet, so it is
-    /// for a test that needs the refresh to be observable rather than for a
-    /// production node.
-    pub fn with_liveness_ttl(mut self, ttl: Duration) -> ClientChannelRegistry {
-        self.liveness_ttl = ttl;
+    /// Re-verify a resolved channel after `ttl` rather than after
+    /// [`DEFAULT_LIVENESS_TTL`] (issue #649), leaving the rest of
+    /// [`ChannelLivenessPolicy`] at its defaults. This is the knob a node's
+    /// config file turns (`channel_liveness_ttl_secs`): an operator whose
+    /// RPC endpoint is expensive or rate-limited can lengthen it, and one
+    /// who wants a settled channel noticed sooner can shorten it.
+    pub fn with_liveness_ttl(self, ttl: Duration) -> ClientChannelRegistry {
+        self.with_liveness_policy(ChannelLivenessPolicy {
+            refresh_after: ttl,
+            ..ChannelLivenessPolicy::default()
+        })
+    }
+
+    /// Set the whole [`ChannelLivenessPolicy`], including how long a stale
+    /// reading may be leaned on during an outage and how often one channel
+    /// may provoke a lookup. `with_liveness_ttl` is the only part of it a
+    /// config file exposes; this exists for a test that needs to observe
+    /// every re-verification, or to suppress none.
+    pub fn with_liveness_policy(
+        mut self,
+        liveness: ChannelLivenessPolicy,
+    ) -> ClientChannelRegistry {
+        self.liveness = liveness;
         self
     }
 
@@ -545,34 +753,30 @@ impl ClientChannelRegistry {
         if let Some(channel) = self.evm.get(channel_id) {
             return Ok(Some(*channel));
         }
-        // Scoped so the read guard is released before the `.await` below:
-        // a `std::sync::RwLock` guard held across a suspension point is
-        // both non-`Send` and a way to stall every other packet in flight.
-        {
-            let resolved = self
-                .resolved
-                .read()
-                .expect("resolved client channels lock poisoned");
-            if let Some(channel) = resolved
-                .get(channel_id)
-                .and_then(|entry| entry.fresh_for(self.liveness_ttl))
-            {
-                return Ok(Some(channel));
-            }
+        // The guard `plan` takes is released before the `.await` below: a
+        // `std::sync::RwLock` guard held across a suspension point is both
+        // non-`Send` and a way to stall every other packet in flight.
+        match plan(&self.resolved, channel_id, self.liveness, Trigger::Age) {
+            Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Ask { fallback } => self.resolve_evm(channel_id, fallback).await,
         }
-        self.resolve_evm(channel_id).await
     }
 
     /// Ask the chain about `channel_id` again, whatever is memoised for it
     /// (issues #646, #649), and answer from that fresh reading.
     ///
-    /// Two callers, one mechanism. The claim gate calls this when a claim
-    /// **breaches** the memoised deposit floor: the floor is a lower bound,
-    /// so a breach is not yet a refusal, it is a reason to look again --
-    /// and a counterparty who topped up gets their claim honoured on the
-    /// same submission rather than after a restart. [`Self::evm`] calls it
-    /// when an entry's liveness has expired, which is what stops a channel
-    /// that has since `Settled` being answered for out of cache forever.
+    /// The claim gate calls this when a claim **breaches** the memoised
+    /// deposit floor: the floor is a lower bound, so a breach is not yet a
+    /// refusal, it is a reason to look again -- and a counterparty who
+    /// topped up gets their claim honoured on the same submission rather
+    /// than after a restart.
+    ///
+    /// It is the same [`plan`] the ageing path uses, so a breach obeys the
+    /// same re-attempt interval: without that, a client re-presenting one
+    /// undercollateralized claim would provoke a chain read every single
+    /// time, since refusing it deliberately consumes no nonce. Suppressed
+    /// or not, the answer is the memoised floor, which is exactly what the
+    /// gate needs to refuse against.
     ///
     /// A channel the chain no longer vouches for -- settled, wrong mint,
     /// gone -- is **removed** from the memo and answered `Ok(None)`, so the
@@ -587,34 +791,67 @@ impl ClientChannelRegistry {
         if let Some(channel) = self.evm.get(channel_id) {
             return Ok(Some(*channel));
         }
-        self.resolve_evm(channel_id).await
+        match plan(&self.resolved, channel_id, self.liveness, Trigger::Breach) {
+            Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Ask { fallback } => self.resolve_evm(channel_id, fallback).await,
+        }
     }
 
     /// The one place [`Self::sources`]'s EVM entry is consulted, and the
-    /// one place [`Self::resolved`] is written.
+    /// one place [`Self::resolved`] is written. `fallback` is the memoised
+    /// reading to answer with if the lookup fails -- see [`Plan::Ask`].
     async fn resolve_evm(
         &self,
         channel_id: &[u8; 32],
+        fallback: Option<EvmChannel>,
     ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
         let Some(source) = self.sources.get(&ClaimChain::Evm) else {
             return Ok(None);
         };
-        // A failed lookup says nothing about the channel, so it must not be
-        // allowed to say anything about the memo either: whatever was
-        // cached stays cached, and the claim that provoked this is refused
-        // as a lookup failure.
-        let resolved = source.evm_channel(channel_id).await?;
+        let _in_flight = InFlight {
+            memo: &self.resolved,
+            key: *channel_id,
+        };
+        let resolved = match source.evm_channel(channel_id).await {
+            Ok(resolved) => resolved,
+            // A failed lookup says nothing about the channel, so it must
+            // not be allowed to say anything about the memo either --
+            // neither evicting the entry nor, crucially, refusing a client
+            // whose channel this connector read perfectly well a minute
+            // ago. Serving the last good reading makes an outage no worse
+            // than the memo-with-no-expiry this replaced; past
+            // `serve_stale_until` there is no fallback and the claim is
+            // refused for what it is.
+            Err(failure) => {
+                return match fallback {
+                    Some(channel) => {
+                        tracing::warn!(
+                            channel_id = %hex::encode(channel_id),
+                            error = %failure,
+                            "serving a client channel from a stale resolution: the chain could \
+                             not be re-read, so its liveness and deposit are older than this \
+                             node's refresh interval"
+                        );
+                        Ok(Some(channel))
+                    }
+                    None => Err(failure),
+                };
+            }
+        };
         let mut memo = self
             .resolved
             .write()
             .expect("resolved client channels lock poisoned");
         match resolved {
             Some(channel) => {
+                let now = Instant::now();
                 memo.insert(
                     *channel_id,
                     Resolved {
                         channel,
-                        confirmed_at: Instant::now(),
+                        confirmed_at: now,
+                        attempted_at: now,
+                        in_flight: false,
                     },
                 );
                 Ok(Some(channel))
@@ -647,25 +884,21 @@ impl ClientChannelRegistry {
         if let Some(channel) = self.solana.get(channel_account) {
             return Ok(Some(*channel));
         }
-        // Scoped so the read guard is released before the `.await` below --
+        // The guard `plan` takes is released before the `.await` below --
         // see `Self::evm`'s own comment on the same shape.
-        {
-            let resolved = self
-                .resolved_solana
-                .read()
-                .expect("resolved client channels lock poisoned");
-            if let Some(channel) = resolved
-                .get(channel_account)
-                .and_then(|entry| entry.fresh_for(self.liveness_ttl))
-            {
-                return Ok(Some(channel));
-            }
+        match plan(
+            &self.resolved_solana,
+            channel_account,
+            self.liveness,
+            Trigger::Age,
+        ) {
+            Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Ask { fallback } => self.resolve_solana(channel_account, fallback).await,
         }
-        self.resolve_solana(channel_account).await
     }
 
     /// The Solana twin of [`Self::refresh_evm`] (issues #646, #649), with
-    /// the same two callers and the same rules.
+    /// the same caller and the same rules.
     pub(crate) async fn refresh_solana(
         &self,
         channel_account: &[u8; 32],
@@ -673,29 +906,64 @@ impl ClientChannelRegistry {
         if let Some(channel) = self.solana.get(channel_account) {
             return Ok(Some(*channel));
         }
-        self.resolve_solana(channel_account).await
+        match plan(
+            &self.resolved_solana,
+            channel_account,
+            self.liveness,
+            Trigger::Breach,
+        ) {
+            Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Ask { fallback } => self.resolve_solana(channel_account, fallback).await,
+        }
     }
 
     /// The Solana twin of [`Self::resolve_evm`].
     async fn resolve_solana(
         &self,
         channel_account: &[u8; 32],
+        fallback: Option<SolanaChannel>,
     ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
         let Some(source) = self.sources.get(&ClaimChain::Solana) else {
             return Ok(None);
         };
-        let resolved = source.solana_channel(channel_account).await?;
+        let _in_flight = InFlight {
+            memo: &self.resolved_solana,
+            key: *channel_account,
+        };
+        let resolved = match source.solana_channel(channel_account).await {
+            Ok(resolved) => resolved,
+            // Serve-stale-while-revalidate -- see `Self::resolve_evm`'s own
+            // comment for why an outage must not become this node's refusal.
+            Err(failure) => {
+                return match fallback {
+                    Some(channel) => {
+                        tracing::warn!(
+                            channel_account = %bs58::encode(channel_account).into_string(),
+                            error = %failure,
+                            "serving a client channel from a stale resolution: the chain could \
+                             not be re-read, so its liveness and deposit are older than this \
+                             node's refresh interval"
+                        );
+                        Ok(Some(channel))
+                    }
+                    None => Err(failure),
+                };
+            }
+        };
         let mut memo = self
             .resolved_solana
             .write()
             .expect("resolved client channels lock poisoned");
         match resolved {
             Some(channel) => {
+                let now = Instant::now();
                 memo.insert(
                     *channel_account,
                     Resolved {
                         channel,
-                        confirmed_at: Instant::now(),
+                        confirmed_at: now,
+                        attempted_at: now,
+                        in_flight: false,
                     },
                 );
                 Ok(Some(channel))
@@ -744,7 +1012,16 @@ pub(crate) mod test_source {
         /// subject of the refresh path and cannot be expressed by a source
         /// fixed at construction.
         channels: Mutex<HashMap<[u8; 32], EvmChannel>>,
-        failure: Option<String>,
+        /// `Some` once the chain has stopped answering -- and settable
+        /// after construction, because an outage that a *resolved* channel
+        /// lives through is the whole subject of the availability tests and
+        /// cannot be expressed by a source that failed from the start.
+        failure: Mutex<Option<String>>,
+        /// How long a lookup takes. Non-zero lets a test put several
+        /// lookups genuinely in flight at once, which is what a stampede
+        /// is; zero would let each future complete before the next is
+        /// polled and prove nothing about single-flight.
+        latency: Duration,
         lookups: AtomicUsize,
     }
 
@@ -752,7 +1029,8 @@ pub(crate) mod test_source {
         pub(crate) fn knowing(channels: Vec<([u8; 32], EvmChannel)>) -> FakeChannelSource {
             FakeChannelSource {
                 channels: Mutex::new(channels.into_iter().collect()),
-                failure: None,
+                failure: Mutex::new(None),
+                latency: Duration::ZERO,
                 lookups: AtomicUsize::new(0),
             }
         }
@@ -760,9 +1038,23 @@ pub(crate) mod test_source {
         pub(crate) fn unreachable(reason: &str) -> FakeChannelSource {
             FakeChannelSource {
                 channels: Mutex::new(HashMap::new()),
-                failure: Some(reason.to_string()),
+                failure: Mutex::new(Some(reason.to_string())),
+                latency: Duration::ZERO,
                 lookups: AtomicUsize::new(0),
             }
+        }
+
+        /// Every lookup from now on takes `latency` -- see the field's own
+        /// doc.
+        pub(crate) fn taking(mut self, latency: Duration) -> FakeChannelSource {
+            self.latency = latency;
+            self
+        }
+
+        /// The chain stops answering (`Some`), or starts again (`None`).
+        pub(crate) fn now_fails(&self, reason: Option<&str>) {
+            *self.failure.lock().expect("fake source lock poisoned") =
+                reason.map(|reason| reason.to_string());
         }
 
         /// What the chain says about `channel_id` from now on: `Some` for a
@@ -789,8 +1081,16 @@ pub(crate) mod test_source {
             channel_id: &[u8; 32],
         ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
             self.lookups.fetch_add(1, Ordering::SeqCst);
-            if let Some(reason) = &self.failure {
-                return Err(ChannelLookupFailed(reason.clone()));
+            if !self.latency.is_zero() {
+                tokio::time::sleep(self.latency).await;
+            }
+            if let Some(reason) = self
+                .failure
+                .lock()
+                .expect("fake source lock poisoned")
+                .clone()
+            {
+                return Err(ChannelLookupFailed(reason));
             }
             Ok(self
                 .channels
@@ -810,7 +1110,8 @@ pub(crate) mod test_source {
     pub(crate) struct FakeSolanaChannelSource {
         /// Behind a lock for the same reason [`FakeChannelSource`]'s is.
         channels: Mutex<HashMap<[u8; 32], SolanaChannel>>,
-        failure: Option<String>,
+        /// See [`FakeChannelSource::failure`].
+        failure: Mutex<Option<String>>,
         lookups: AtomicUsize,
     }
 
@@ -818,7 +1119,7 @@ pub(crate) mod test_source {
         pub(crate) fn knowing(channels: Vec<([u8; 32], SolanaChannel)>) -> FakeSolanaChannelSource {
             FakeSolanaChannelSource {
                 channels: Mutex::new(channels.into_iter().collect()),
-                failure: None,
+                failure: Mutex::new(None),
                 lookups: AtomicUsize::new(0),
             }
         }
@@ -826,9 +1127,15 @@ pub(crate) mod test_source {
         pub(crate) fn unreachable(reason: &str) -> FakeSolanaChannelSource {
             FakeSolanaChannelSource {
                 channels: Mutex::new(HashMap::new()),
-                failure: Some(reason.to_string()),
+                failure: Mutex::new(Some(reason.to_string())),
                 lookups: AtomicUsize::new(0),
             }
+        }
+
+        /// The Solana twin of [`FakeChannelSource::now_fails`].
+        pub(crate) fn now_fails(&self, reason: Option<&str>) {
+            *self.failure.lock().expect("fake source lock poisoned") =
+                reason.map(|reason| reason.to_string());
         }
 
         /// The Solana twin of [`FakeChannelSource::now_says`].
@@ -852,8 +1159,13 @@ pub(crate) mod test_source {
             channel_account: &[u8; 32],
         ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
             self.lookups.fetch_add(1, Ordering::SeqCst);
-            if let Some(reason) = &self.failure {
-                return Err(ChannelLookupFailed(reason.clone()));
+            if let Some(reason) = self
+                .failure
+                .lock()
+                .expect("fake source lock poisoned")
+                .clone()
+            {
+                return Err(ChannelLookupFailed(reason));
             }
             Ok(self
                 .channels
@@ -1229,7 +1541,14 @@ mod tests {
             [0x07; 32],
             evm_channel_depositing(DepositFloor::AtLeast(1_000)),
         )]));
-        let registry = ClientChannelRegistry::new().with_source(source.clone());
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            // The subject here is the refresh itself, so nothing suppresses
+            // it; the interval that would is measured on its own below.
+            .with_liveness_policy(ChannelLivenessPolicy {
+                min_reattempt_interval: Duration::ZERO,
+                ..ChannelLivenessPolicy::default()
+            });
 
         assert_eq!(
             registry
@@ -1296,7 +1615,7 @@ mod tests {
         )]));
         let registry = ClientChannelRegistry::new()
             .with_source(source.clone())
-            .with_liveness_ttl(Duration::ZERO);
+            .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup());
 
         assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
         source.now_says([0x07; 32], None);
@@ -1317,7 +1636,7 @@ mod tests {
         ]));
         let registry = ClientChannelRegistry::new()
             .with_solana_source(source.clone())
-            .with_liveness_ttl(Duration::ZERO);
+            .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup());
 
         assert_eq!(
             registry.solana(&[0x07; 32]).await,
@@ -1355,7 +1674,12 @@ mod tests {
             [0x07; 32],
             evm_channel(),
         )]));
-        let registry = ClientChannelRegistry::new().with_source(source.clone());
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                min_reattempt_interval: Duration::ZERO,
+                ..ChannelLivenessPolicy::default()
+            });
 
         assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
         source.now_says([0x07; 32], None);
@@ -1394,27 +1718,273 @@ mod tests {
     }
 
     /// A refresh whose lookup fails says nothing about the channel, so it
-    /// must not evict what was memoised: the claim that provoked it is
-    /// refused as a lookup failure, and a node whose RPC endpoint blips
-    /// does not lose every channel it had resolved.
+    /// must not evict what was memoised: a node whose RPC endpoint blips
+    /// does not lose every channel it had resolved, and the client whose
+    /// claim provoked the failed read is answered from the last reading
+    /// this connector actually got rather than refused.
+    ///
+    /// The channel is resolved for real first and the chain fails
+    /// afterwards -- the entry under test has to be one that genuinely
+    /// came from a lookup, or this proves nothing about the path a real
+    /// outage takes.
     #[tokio::test]
     async fn a_failed_refresh_leaves_the_memo_alone() {
-        let source = Arc::new(FakeChannelSource::unreachable("connection refused"));
-        let registry = ClientChannelRegistry::new().with_source(source.clone());
-        // Seed the memo by hand: this fake fails every lookup, which is
-        // exactly the point -- the entry must survive one.
-        registry.resolved.write().unwrap().insert(
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
             [0x07; 32],
-            Resolved {
-                channel: evm_channel(),
-                confirmed_at: Instant::now(),
-            },
-        );
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
 
+        source.now_fails(Some("connection refused"));
         assert_eq!(
             registry.refresh_evm(&[0x07; 32]).await,
-            Err(ChannelLookupFailed("connection refused".to_string()))
+            Ok(Some(evm_channel())),
+            "the last good reading, not a refusal"
         );
         assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+    }
+
+    // -- Ageing out without a thundering herd (the availability review of
+    // #654; see this module's own doc) --
+
+    /// A resolved entry that has aged out, on a chain that has stopped
+    /// answering, must not turn one channel's packet stream into one chain
+    /// read per packet. Before the fix this measured 26 lookups for 25
+    /// packets -- an outage that *raised* this node's RPC load, on the
+    /// endpoint that was already failing.
+    ///
+    /// Note what is asserted besides the count: the packets are still
+    /// **served**. Refusing them would make somebody else's outage into
+    /// this node's own refusal to take money, which is strictly worse than
+    /// the memo-with-no-expiry that shipped before the expiry existed.
+    #[tokio::test]
+    async fn an_outage_on_an_aged_out_channel_costs_one_lookup_not_one_per_packet() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                // Aged out immediately, so every one of the packets below
+                // is a re-verification attempt...
+                refresh_after: Duration::ZERO,
+                serve_stale_until: Duration::from_secs(600),
+                // ...and the interval is the only thing bounding them. Long
+                // enough that the whole burst is inside one of them however
+                // slow the machine running this is: the assertion below is
+                // about work per interval, and it must not become an
+                // assertion about how fast a loop ran.
+                min_reattempt_interval: Duration::from_secs(600),
+            });
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(source.lookups(), 1, "the initial resolution");
+        source.now_fails(Some("429 Too Many Requests"));
+
+        for packet in 0..25 {
+            assert_eq!(
+                registry.evm(&[0x07; 32]).await,
+                Ok(Some(evm_channel())),
+                "packet {packet} is served from the last good reading"
+            );
+        }
+        assert_eq!(
+            source.lookups(),
+            1,
+            "25 packets inside one interval add no reads at all"
+        );
+    }
+
+    /// ...and the interval is a bound on work, not a decision to stop
+    /// trying: one packet past it re-attempts, exactly once. A single
+    /// packet rather than a burst, so this measures the re-attempt and
+    /// cannot accidentally measure how long a loop took.
+    #[tokio::test]
+    async fn a_packet_past_the_interval_re_attempts_once() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::ZERO,
+                serve_stale_until: Duration::from_secs(600),
+                min_reattempt_interval: Duration::from_millis(20),
+            });
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        source.now_fails(Some("429 Too Many Requests"));
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(source.lookups(), 2, "one re-attempt, and it was made");
+    }
+
+    /// The Solana twin: the same measurement on the chain whose public RPC
+    /// has the tighter per-method budget.
+    #[tokio::test]
+    async fn an_outage_on_an_aged_out_solana_channel_costs_one_lookup_not_one_per_packet() {
+        let source = Arc::new(super::test_source::FakeSolanaChannelSource::knowing(vec![
+            ([0x07; 32], solana_channel()),
+        ]));
+        let registry = ClientChannelRegistry::new()
+            .with_solana_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::ZERO,
+                serve_stale_until: Duration::from_secs(600),
+                min_reattempt_interval: Duration::from_secs(600),
+            });
+
+        assert_eq!(
+            registry.solana(&[0x07; 32]).await,
+            Ok(Some(solana_channel()))
+        );
+        source.now_fails(Some("429 Too Many Requests"));
+        for _ in 0..25 {
+            assert_eq!(
+                registry.solana(&[0x07; 32]).await,
+                Ok(Some(solana_channel()))
+            );
+        }
+        assert_eq!(source.lookups(), 1);
+    }
+
+    /// Past `serve_stale_until` there is nothing safe to lean on, so the
+    /// refusal comes back -- the stale window is a bounded grace period,
+    /// not a way to never re-verify. This is what keeps #649 true even
+    /// through an outage: a channel that settles can be served stale for
+    /// the window and no longer.
+    #[tokio::test]
+    async fn past_the_stale_window_an_unreachable_chain_refuses() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::ZERO,
+                serve_stale_until: Duration::ZERO,
+                min_reattempt_interval: Duration::from_secs(2),
+            });
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        source.now_fails(Some("connection refused"));
+
+        assert_eq!(
+            registry.evm(&[0x07; 32]).await,
+            Err(ChannelLookupFailed("connection refused".to_string()))
+        );
+    }
+
+    /// N packets arriving on one aged-out channel cost one lookup between
+    /// them, not N: the entry is marked in-flight under the memo's own lock
+    /// before the await, so the other 31 lean on the last good reading
+    /// instead of piling onto the endpoint. This stampede is what produces
+    /// the first 429 in the first place.
+    #[tokio::test]
+    async fn concurrent_packets_after_an_expiry_share_one_lookup() {
+        let source = Arc::new(
+            FakeChannelSource::knowing(vec![([0x07; 32], evm_channel())])
+                // Long enough that all 32 futures are genuinely in flight
+                // together on any machine; with an instant source each
+                // would finish before the next was polled and the test
+                // would prove nothing.
+                .taking(Duration::from_millis(300)),
+        );
+        let registry = Arc::new(
+            ClientChannelRegistry::new()
+                .with_source(source.clone())
+                .with_liveness_policy(ChannelLivenessPolicy {
+                    refresh_after: Duration::ZERO,
+                    serve_stale_until: Duration::from_secs(600),
+                    // Zero, so nothing but the in-flight marker itself is
+                    // holding the herd back.
+                    min_reattempt_interval: Duration::ZERO,
+                }),
+        );
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(source.lookups(), 1);
+
+        let mut packets = Vec::new();
+        for _ in 0..32 {
+            let registry = registry.clone();
+            packets.push(tokio::spawn(async move { registry.evm(&[0x07; 32]).await }));
+        }
+        for packet in packets {
+            assert_eq!(packet.await.unwrap(), Ok(Some(evm_channel())));
+        }
+
+        assert_eq!(
+            source.lookups(),
+            2,
+            "one resolution and one re-verification between 32 concurrent packets"
+        );
+    }
+
+    /// The intermediate boundary the ZERO-and-default tests never touch:
+    /// an entry is served without a lookup while it is young, and
+    /// re-verified once it is not. Real durations, so `refresh_after` is
+    /// exercised as a comparison rather than as a degenerate `0`.
+    #[tokio::test]
+    async fn an_entry_is_re_verified_only_once_it_is_older_than_refresh_after() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::from_millis(500),
+                serve_stale_until: Duration::from_secs(600),
+                min_reattempt_interval: Duration::ZERO,
+            });
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        // Well inside the window: answered from the memo.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(source.lookups(), 1);
+
+        // Past it: re-verified, and the channel is dropped if the chain has
+        // stopped vouching for it in the meantime.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        source.now_says([0x07; 32], None);
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
+        assert_eq!(source.lookups(), 2);
+    }
+
+    /// A lookup that fails does not reset the staleness clock: the entry
+    /// keeps ageing towards `serve_stale_until` from the last *successful*
+    /// reading, so a chain that is down for longer than the window stops
+    /// being papered over rather than being served stale forever.
+    #[tokio::test]
+    async fn a_failed_attempt_does_not_count_as_a_confirmation() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::ZERO,
+                serve_stale_until: Duration::from_millis(500),
+                min_reattempt_interval: Duration::ZERO,
+            });
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        source.now_fails(Some("connection refused"));
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            registry.evm(&[0x07; 32]).await,
+            Err(ChannelLookupFailed("connection refused".to_string())),
+            "the stale window is measured from the last confirmation, not the last attempt"
+        );
     }
 }

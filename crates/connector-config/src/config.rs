@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -59,6 +60,19 @@ struct RawConfig {
     /// since a watermark held only in memory is not a replay defence.
     #[serde(default)]
     state_dir: Option<String>,
+    /// How long this node may believe a chain-resolved channel's *mutable*
+    /// facts -- that it has not settled, and that its token still matches
+    /// -- before re-reading them (issue #649). Absent means the client
+    /// edge's own default.
+    ///
+    /// An operator knob rather than a constant because the trade it makes
+    /// is a deployment's to make: a node on a rate-limited public RPC
+    /// endpoint wants it longer, and one that wants a settled channel
+    /// noticed sooner wants it shorter. `0` re-verifies on every packet,
+    /// which is correct and expensive, so it is refused at load rather
+    /// than silently accepted as a way to melt an endpoint.
+    #[serde(default)]
+    channel_liveness_ttl_secs: Option<u64>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -81,6 +95,7 @@ pub struct Config {
     settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
     state_dir: Option<PathBuf>,
+    channel_liveness_ttl: Option<Duration>,
 }
 
 impl Config {
@@ -135,6 +150,10 @@ impl Config {
         let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
         let state_dir = raw.state_dir.map(PathBuf::from);
+        let channel_liveness_ttl = match raw.channel_liveness_ttl_secs {
+            Some(0) => return Err(ConfigError::ZeroChannelLivenessTtl),
+            other => other.map(Duration::from_secs),
+        };
 
         // A node that can accept a claim must be able to remember having
         // accepted it (issue #605). Refused here, at load, rather than at
@@ -167,7 +186,15 @@ impl Config {
             settlements,
             client_channels,
             state_dir,
+            channel_liveness_ttl,
         })
+    }
+
+    /// How long a chain-resolved client channel's liveness may be believed
+    /// before it is re-read (issue #649), or `None` to use the client
+    /// edge's own default.
+    pub fn channel_liveness_ttl(&self) -> Option<Duration> {
+        self.channel_liveness_ttl
     }
 
     /// The socket address the client edge binds.
@@ -1099,6 +1126,75 @@ key_file = "{}"
         .expect("load");
 
         assert_eq!(config.state_dir(), None);
+    }
+
+    /// Issue #649: how long a chain-resolved channel's liveness may be
+    /// believed is an operator knob, because the trade it makes -- RPC
+    /// load against how quickly a settled channel stops being paid on --
+    /// belongs to a deployment and not to a constant in this repository.
+    #[test]
+    fn a_channel_liveness_ttl_is_read_from_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+channel_liveness_ttl_secs = 15
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming a liveness ttl loads");
+
+        assert_eq!(
+            config.channel_liveness_ttl(),
+            Some(std::time::Duration::from_secs(15))
+        );
+    }
+
+    /// Absent means "whatever the client edge's own default is" -- not
+    /// zero, which is the one value that would turn every packet into a
+    /// chain read.
+    #[test]
+    fn an_absent_channel_liveness_ttl_is_the_edges_own_default() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming no liveness ttl loads");
+
+        assert_eq!(config.channel_liveness_ttl(), None);
+    }
+
+    /// Zero is refused rather than obeyed: it reads as "always fresh" and
+    /// behaves as "one chain read per packet", which is how an operator
+    /// exhausts an RPC endpoint's budget and takes their own paid writes
+    /// down with it.
+    #[test]
+    fn a_zero_channel_liveness_ttl_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+channel_liveness_ttl_secs = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::ZeroChannelLivenessTtl)));
     }
 
     /// `state_dir` pointing at something that is not a directory is a

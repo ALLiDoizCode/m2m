@@ -441,7 +441,7 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
     // A real on-chain top-up of one base unit. The memoised floor is now
     // stale *low*, which is the only direction it can be stale in -- and
     // the identical claim, at the identical nonce, is honoured on
-    // resubmission because the breach provokes one re-read rather than a
+    // resubmission because the breach provokes a re-read rather than a
     // permanent refusal.
     let topped_up = backend
         .fund(&channel, 1)
@@ -449,10 +449,31 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
         .expect("a real second setTotalDeposit");
     assert_eq!(topped_up.deposited, 1_001);
 
-    let (status, bytes) = post_claim_to(app, signer, &over).await;
-    assert_eq!(status, StatusCode::OK);
-    Fulfill::decode(&bytes)
-        .expect("the identical claim redeems now, so it is accepted now -- no restart needed");
+    // Under the policy a production node actually runs, and deliberately:
+    // the re-read that notices the deposit is rate-limited per channel, so
+    // a refusal that consumes no nonce cannot be re-presented as an
+    // unlimited free chain read. Retrying is the point -- it is what shows
+    // the interval is a delay of seconds rather than a wall, without this
+    // test reaching for a policy no operator would run.
+    let mut fulfilled = false;
+    for _ in 0..40 {
+        let (status, bytes) = post_claim_to(app.clone(), signer.clone(), &over).await;
+        assert_eq!(status, StatusCode::OK);
+        if Fulfill::decode(&bytes).is_ok() {
+            fulfilled = true;
+            break;
+        }
+        assert_eq!(
+            Reject::decode(&bytes).expect("decode reject").code.as_str(),
+            "F03",
+            "still the same refusal, for the same reason, until the re-read happens"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        fulfilled,
+        "the identical claim redeems now, so it is accepted now -- no restart needed"
+    );
     assert_eq!(app_client.deliveries().len(), 1);
 }
 

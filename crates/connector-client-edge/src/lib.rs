@@ -65,8 +65,9 @@ use connector_signer::{PublicKeyBytes, Signer};
 mod channels;
 mod claim_gate;
 pub use channels::{
-    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, DepositFloor, EvmChannel,
-    InvalidChannelIdentifier, SolanaChannel, DEFAULT_LIVENESS_TTL,
+    ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
+    DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel, DEFAULT_LIVENESS_TTL,
+    DEFAULT_MIN_REATTEMPT_INTERVAL, DEFAULT_SERVE_STALE_UNTIL,
 };
 pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 

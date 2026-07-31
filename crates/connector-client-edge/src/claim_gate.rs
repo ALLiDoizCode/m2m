@@ -368,7 +368,7 @@ impl ClientClaimGate {
         // rather than relative to the watermark, and a deposit only ever
         // grows, so no concurrent claim can turn an amount that fitted into
         // one that does not.
-        check_collateral(&self.channels, &claim, verified.deposit_floor).await?;
+        check_collateral(&self.channels, &claim, &verified).await?;
 
         let mut watermarks = self
             .watermarks
@@ -526,10 +526,26 @@ async fn verify_claim_signature(
 }
 
 /// What survives [`verify_claim_signature`]: the signature the journal
-/// records, and what the channel it was checked against can pay.
+/// records, what the channel it was checked against can pay, and the
+/// already-decoded on-chain key that channel was found under.
+///
+/// The key is carried rather than re-derived because it has *already* been
+/// decoded, once, to perform the lookup the signature was checked against.
+/// Decoding it a second time in [`check_collateral`] would mean writing a
+/// failure branch for a case that cannot arise, which is worse than useless:
+/// it is untestable, and it invites a reader to believe it can happen.
 struct VerifiedClaim {
     signature: Vec<u8>,
     deposit_floor: DepositFloor,
+    channel: ResolvedChannelKey,
+}
+
+/// The on-chain identifier a verified claim's channel was resolved under,
+/// already decoded and already known to name a channel this connector can
+/// be paid on.
+enum ResolvedChannelKey {
+    Evm([u8; 32]),
+    Solana([u8; 32]),
 }
 
 /// client-edge-spec.md §1.3 step 5, *collateral binding* (issue #646): the
@@ -556,44 +572,49 @@ struct VerifiedClaim {
 /// of this check -- *"a participant who intends to spend more can deposit
 /// first and resubmit the claim, since a rejected claim leaves the stored
 /// nonce untouched"*.
+///
+/// That property is also why the re-read is rate-limited rather than
+/// unconditional (`ChannelLivenessPolicy::min_reattempt_interval`): a claim
+/// that consumes nothing can be re-presented forever, so an unconditional
+/// re-read would make one undercollateralized claim an unlimited free chain
+/// read for whoever holds an underfunded channel. Inside the interval the
+/// memoised floor answers instead, which refuses exactly the same claim for
+/// exactly the same reason; the only cost is that a counterparty who
+/// deposits mid-interval waits it out before their resubmission is
+/// honoured, seconds rather than a restart.
 async fn check_collateral(
     channels: &ClientChannelRegistry,
     claim: &ClientClaim,
-    floor: DepositFloor,
+    verified: &VerifiedClaim,
 ) -> Result<(), ClaimIngestRejection> {
     let claimed = claim.transferred_amount();
-    if floor.covers(claimed) {
+    if verified.deposit_floor.covers(claimed) {
         return Ok(());
     }
 
-    let refreshed = match claim {
-        ClientClaim::Evm(claim) => {
-            let Some(channel_id) = decode_hex_bytes::<32>(&claim.channel_id) else {
-                return Err(ClaimIngestRejection::UnknownChannel);
-            };
-            channels
-                .refresh_evm(&channel_id)
-                .await
-                .map(|channel| channel.map(|channel| channel.deposit_floor))
-        }
-        ClientClaim::Solana(claim) => {
-            let Some(channel_account) = decode_base58_bytes::<32>(&claim.channel_account) else {
-                return Err(ClaimIngestRejection::UnknownChannel);
-            };
-            channels
-                .refresh_solana(&channel_account)
-                .await
-                .map(|channel| channel.map(|channel| channel.deposit_floor))
-        }
+    let refreshed = match &verified.channel {
+        ResolvedChannelKey::Evm(channel_id) => channels
+            .refresh_evm(channel_id)
+            .await
+            .map(|channel| channel.map(|channel| channel.deposit_floor)),
+        ResolvedChannelKey::Solana(channel_account) => channels
+            .refresh_solana(channel_account)
+            .await
+            .map(|channel| channel.map(|channel| channel.deposit_floor)),
     };
 
     match refreshed {
         Ok(Some(floor)) if floor.covers(claimed) => Ok(()),
         Ok(Some(floor)) => Err(ClaimIngestRejection::Undercollateralized {
             claimed,
-            // `Unknown` covers everything, so it was handled above: a
-            // floor that failed to cover is always a number.
-            deposited: floor.deposit().unwrap_or(0),
+            // `Unknown` covers every amount, so a floor that reached this
+            // arm is always a number. Asserted rather than defaulted: a
+            // refusal that quoted a deposit of `0` it had not read would be
+            // telling a payer something untrue about their own channel, and
+            // there is no honest fallback value to print instead.
+            deposited: floor
+                .deposit()
+                .expect("a deposit floor that failed to cover an amount is never Unknown"),
         }),
         Ok(None) => Err(ClaimIngestRejection::UnknownChannel),
         Err(failure) => {
@@ -664,6 +685,7 @@ async fn verify_evm_claim_signature(
         Ok(VerifiedClaim {
             signature: signature.to_vec(),
             deposit_floor: channel.deposit_floor,
+            channel: ResolvedChannelKey::Evm(channel_id),
         })
     } else {
         Err(ClaimIngestRejection::SignatureInvalid)
@@ -716,6 +738,7 @@ async fn verify_solana_claim_signature(
         Ok(VerifiedClaim {
             signature,
             deposit_floor: channel.deposit_floor,
+            channel: ResolvedChannelKey::Solana(channel_account),
         })
     } else {
         Err(ClaimIngestRejection::SignatureInvalid)
@@ -1681,7 +1704,7 @@ mod tests {
     mod collateral {
         use super::*;
         use crate::channels::test_source::FakeSolanaChannelSource;
-        use crate::channels::{DepositFloor, SolanaChannel};
+        use crate::channels::{ChannelLivenessPolicy, DepositFloor, SolanaChannel};
         use std::time::Duration;
 
         /// A gate over a chain-resolved EVM channel whose counterparty has
@@ -1699,8 +1722,26 @@ mod tests {
                     deposit_floor: DepositFloor::AtLeast(deposit),
                 },
             )]));
-            let gate = gate_over(ClientChannelRegistry::new().with_source(source.clone()));
+            // Nothing suppresses a re-read here: what these tests are
+            // about is the cap and the refresh, and the interval that
+            // bounds how often one may run is measured on its own in
+            // `a_replayed_undercollateralized_claim_is_not_a_free_chain_read`
+            // below.
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(source.clone())
+                    .with_liveness_policy(unsuppressed()),
+            );
             (source, gate)
+        }
+
+        /// The default policy with the re-attempt interval removed -- see
+        /// [`chain_resolved`].
+        fn unsuppressed() -> ChannelLivenessPolicy {
+            ChannelLivenessPolicy {
+                min_reattempt_interval: Duration::ZERO,
+                ..ChannelLivenessPolicy::default()
+            }
         }
 
         fn resolved_channel_id() -> [u8; 32] {
@@ -1856,6 +1897,116 @@ mod tests {
             assert_eq!(source.lookups(), 2, "exactly one re-read on the breach");
         }
 
+        /// The amplifier this cap would otherwise hand out (the
+        /// availability review of #654): refusing an undercollateralized
+        /// claim deliberately consumes nothing -- no nonce, no watermark --
+        /// which is what makes "deposit and resubmit" true, and also means
+        /// the identical claim re-passes freshness and signature every
+        /// time. Without a floor on how often one channel may ask, each
+        /// resubmission would be a fresh chain read that costs its sender
+        /// nothing: on EVM two `eth_call`s per replay, from exactly the
+        /// population this check exists to refuse.
+        ///
+        /// Measured before the fix at 21 lookups for 20 replays. The
+        /// refusal itself must be unchanged, and the watermark must still
+        /// be untouched -- the bound is on this connector's work, never on
+        /// the sender's ability to correct their claim.
+        #[tokio::test]
+        async fn a_replayed_undercollateralized_claim_is_not_a_free_chain_read() {
+            let (_secret, address) = evm_signer();
+            let source = Arc::new(FakeChannelSource::knowing(vec![(
+                resolved_channel_id(),
+                EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(1_000),
+                },
+            )]));
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(source.clone())
+                    .with_liveness_policy(ChannelLivenessPolicy {
+                        refresh_after: Duration::from_secs(600),
+                        serve_stale_until: Duration::from_secs(600),
+                        // Long enough that all 20 replays are inside one
+                        // interval however slow the machine running this
+                        // is: what is measured is work per interval, not
+                        // how fast a loop ran.
+                        min_reattempt_interval: Duration::from_secs(600),
+                    }),
+            );
+
+            for replay in 0..20 {
+                assert_eq!(
+                    gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 1_001), 100)
+                        .await,
+                    Err(ClaimIngestRejection::Undercollateralized {
+                        claimed: 1_001,
+                        deposited: 1_000,
+                    }),
+                    "replay {replay} is refused for exactly what it is"
+                );
+            }
+
+            assert_eq!(
+                source.lookups(),
+                1,
+                "one resolution across 20 replays, not one each"
+            );
+            assert_eq!(
+                gate.watermark(&format!("evm:{}", unrecorded_channel_id())),
+                None,
+                "and the sender's nonce is still theirs to correct"
+            );
+        }
+
+        /// ...and the interval is a bound on work, not a wall: a
+        /// counterparty who deposits is honoured on their next attempt past
+        /// it, without a restart. One attempt after the interval rather
+        /// than a burst, so this measures the re-read and not a loop's
+        /// speed.
+        #[tokio::test]
+        async fn a_deposit_is_honoured_on_the_first_attempt_past_the_interval() {
+            let (_secret, address) = evm_signer();
+            let source = Arc::new(FakeChannelSource::knowing(vec![(
+                resolved_channel_id(),
+                EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(1_000),
+                },
+            )]));
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(source.clone())
+                    .with_liveness_policy(ChannelLivenessPolicy {
+                        refresh_after: Duration::from_secs(600),
+                        serve_stale_until: Duration::from_secs(600),
+                        min_reattempt_interval: Duration::from_millis(20),
+                    }),
+            );
+
+            gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 1_001), 100)
+                .await
+                .unwrap_err();
+            source.now_says(
+                resolved_channel_id(),
+                Some(EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(2_000),
+                }),
+            );
+
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 1_001), 100)
+                .await
+                .expect("the deposit landed, so the same claim is good");
+        }
+
         /// The deliberate exemption: an operator-declared channel names a
         /// counterparty and a domain and never a deposit, and a node with
         /// no settlement backend has no chain to ask. Hand-declaring a
@@ -1884,7 +2035,11 @@ mod tests {
                     deposit_floor: DepositFloor::AtLeast(0),
                 },
             )]));
-            let gate = gate_over(ClientChannelRegistry::new().with_solana_source(source.clone()));
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_solana_source(source.clone())
+                    .with_liveness_policy(unsuppressed()),
+            );
 
             assert_eq!(
                 gate.ingest(&genuine_solana_claim_json(&account, 1, 6_000), 0)
@@ -1930,7 +2085,7 @@ mod tests {
             let gate = gate_over(
                 ClientChannelRegistry::new()
                     .with_source(source.clone())
-                    .with_liveness_ttl(Duration::ZERO),
+                    .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup()),
             );
 
             gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 100), 100)

@@ -225,6 +225,31 @@ afterwards keeps buying writes for the life of the process, with the settled-cha
 (step 4) silently bypassed. Re-verification and the deposit re-read above are one mechanism: a
 refresh reports liveness and deposit together.
 
+A **declared** channel is outside this too, and for the same reason it is outside the cap: config,
+not the chain, is its authority, and a node with no settlement backend has no chain to ask. The
+consequence is worth stating plainly rather than leaving to be discovered — an operator who both
+runs a settlement backend **and** hand-declares a channel in `[[client_channels]]` gets a channel
+that is exempt from the deposit cap _and_ never re-verified, so it keeps being paid on after it
+settles on chain. That is the same credit decision the exemption above describes, extended in time:
+declaring a channel says "I vouch for this one", and a connector cannot both take that at its word
+and second-guess it. An operator who wants the chain consulted should not declare the channel — a
+node with a settlement backend resolves it anyway (§1.2), which is the path both this step and the
+cap apply to.
+
+**Re-verification must not become a per-packet read.** The expiry above is a bound on staleness, and
+a connector that implements it naively converts it into a bound on nothing: if a re-verification
+that _fails_ leaves the entry expired and refuses the claim, then every subsequent packet on that
+channel retries the same failing read, so an unreachable or rate-limited endpoint turns one read per
+interval into one read per packet — a load pattern that sustains its own failure, on the endpoint
+already failing. A connector MUST therefore bound the work as well as the staleness: it SHOULD serve
+the last successfully-read resolution while a re-verification is failing, up to a hard staleness
+ceiling past which it refuses, and it MUST NOT allow one channel to provoke unbounded lookups —
+neither by arrival rate (many packets, one aged-out entry) nor by concurrency (many packets at once)
+nor by resubmission (one undercollateralized claim, re-presented, which by design consumes nothing).
+Serving a stale resolution is a deliberate, logged degradation, and it is bounded: it is strictly
+better than refusing a paying client because a third party's endpoint is down, and the ceiling keeps
+it far inside the close-challenge-settle window the expiry defends against.
+
 **A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
 it compares against survives a restart: a connector that forgets a channel's watermark compares
 against nothing, and `None` accepts every nonce, so every claim the client already spent becomes
