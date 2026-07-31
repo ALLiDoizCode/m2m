@@ -123,9 +123,18 @@ peers:
     url: wss://proxy.devnet.toonprotocol.dev:443
     relation: peer
     authToken: ''
-    chain: evm:84532
-    # The relay-connector/apex settlement address (reuses the demo apex seed).
-    settlementAddress: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
+    # SOLANA, not EVM. Reconciled from the live box 2026-07-31 (#657): the box
+    # was moved onto its Solana leg on 2026-07-20 alongside the image bump
+    # below, and the repo was never followed. This pair settles over a real
+    # Solana devnet channel today (5z6znXjHP1aw…, adopted per #381), so this is
+    # the running value, not an aspiration.
+    chain: solana:devnet
+    # The relay-connector/apex settlement address on that chain. Matches the
+    # apex's own committed config, which advertises the same account for every
+    # store route (infra/linode-node/connector.yaml `settlementAddresses.solana`).
+    # Its EVM counterpart, if this peer is ever moved back, is
+    # 0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab (both reuse the demo apex seed).
+    settlementAddress: 'CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY'
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 # This box TERMINATES both paths to the same Arweave DVM (store:3300, POST /store):

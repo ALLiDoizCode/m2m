@@ -9,7 +9,16 @@
 
 services:
   connector:
-    image: ghcr.io/toon-protocol/connector:3.36.1
+    # Reconciled from the live box 2026-07-31 (#657). This is a PRERELEASE, and
+    # deliberately so: it was built from the #381 branch head (c449a66e) on
+    # 2026-07-20 to put "open the channel on the peer's chain + adopt the
+    # existing per-pair Solana channel" onto this box, and rolled out in the
+    # same edit that moved the apex peer above to `chain: solana:devnet`. The
+    # box has run it ever since. That fix later shipped stable in v3.40.1+, so
+    # this pin can be promoted to a release tag — but promoting it means
+    # restarting the store leg, which is a deployment decision, not a
+    # drift-reconciliation one. Until someone makes it, this is what runs.
+    image: ghcr.io/toon-protocol/connector:3.36.3-solchan.0
     environment:
       CONFIG_FILE: /app/config/connector.yaml
       TOON_MNEMONIC: ${TOON_MNEMONIC}
