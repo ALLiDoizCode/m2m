@@ -73,6 +73,20 @@ struct RawConfig {
     /// than silently accepted as a way to melt an endpoint.
     #[serde(default)]
     channel_liveness_ttl_secs: Option<u64>,
+    /// How long past `channel_liveness_ttl_secs` a channel's last good
+    /// reading may still be *served* while the chain cannot be reached
+    /// (issue #649). Absent means the client edge's own default; `0` means
+    /// never -- a coherent fail-closed choice, unlike a zero TTL, since
+    /// nothing about it costs an extra chain read.
+    #[serde(default)]
+    channel_serve_stale_secs: Option<u64>,
+    /// The floor on how often one channel may provoke a chain lookup, in
+    /// milliseconds. Absent means the client edge's own default. This is
+    /// the knob an operator on a rate-limited endpoint reaches for, and
+    /// `0` is refused for the same reason a zero TTL is: it is how one
+    /// packet becomes one RPC.
+    #[serde(default)]
+    channel_reattempt_interval_ms: Option<u64>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -96,6 +110,8 @@ pub struct Config {
     client_channels: Vec<ClientChannelConfig>,
     state_dir: Option<PathBuf>,
     channel_liveness_ttl: Option<Duration>,
+    channel_serve_stale: Option<Duration>,
+    channel_reattempt_interval: Option<Duration>,
 }
 
 impl Config {
@@ -154,6 +170,29 @@ impl Config {
             Some(0) => return Err(ConfigError::ZeroChannelLivenessTtl),
             other => other.map(Duration::from_secs),
         };
+        // Zero is allowed here and refused above, and the asymmetry is the
+        // point: a zero TTL means "re-read on every packet", which is how
+        // an endpoint's budget is exhausted, while a zero stale window
+        // means "never serve a reading I could not confirm", which costs
+        // nothing extra and is a defensible thing to want.
+        let channel_serve_stale = raw.channel_serve_stale_secs.map(Duration::from_secs);
+        let channel_reattempt_interval = match raw.channel_reattempt_interval_ms {
+            Some(0) => return Err(ConfigError::ZeroChannelReattemptInterval),
+            other => other.map(Duration::from_millis),
+        };
+        // A stale window shorter than the TTL is not a stricter setting,
+        // it is an incoherent one: an entry would pass out of "believed"
+        // and out of "servable" at the same moment, so the window it names
+        // could never be used. Refused rather than silently behaving as
+        // zero, since an operator who wrote it meant something.
+        if let (Some(ttl), Some(stale)) = (channel_liveness_ttl, channel_serve_stale) {
+            if stale > Duration::ZERO && stale < ttl {
+                return Err(ConfigError::ServeStaleShorterThanLivenessTtl {
+                    serve_stale_secs: stale.as_secs(),
+                    ttl_secs: ttl.as_secs(),
+                });
+            }
+        }
 
         // A node that can accept a claim must be able to remember having
         // accepted it (issue #605). Refused here, at load, rather than at
@@ -187,6 +226,8 @@ impl Config {
             client_channels,
             state_dir,
             channel_liveness_ttl,
+            channel_serve_stale,
+            channel_reattempt_interval,
         })
     }
 
@@ -195,6 +236,19 @@ impl Config {
     /// edge's own default.
     pub fn channel_liveness_ttl(&self) -> Option<Duration> {
         self.channel_liveness_ttl
+    }
+
+    /// How long past [`Self::channel_liveness_ttl`] a channel's last good
+    /// reading may still be served while the chain is unreachable, or
+    /// `None` to use the client edge's own default.
+    pub fn channel_serve_stale(&self) -> Option<Duration> {
+        self.channel_serve_stale
+    }
+
+    /// The floor on how often one channel may provoke a chain lookup, or
+    /// `None` to use the client edge's own default.
+    pub fn channel_reattempt_interval(&self) -> Option<Duration> {
+        self.channel_reattempt_interval
     }
 
     /// The socket address the client edge binds.
@@ -1195,6 +1249,121 @@ key_file = "{key_path}"
         });
 
         assert!(matches!(result, Err(ConfigError::ZeroChannelLivenessTtl)));
+    }
+
+    /// The other two liveness knobs (the availability review of #654): an
+    /// operator on a rate-limited public RPC endpoint is exactly who needs
+    /// to widen the stale window and the re-attempt floor, and before this
+    /// they had no lever short of a rebuild.
+    #[test]
+    fn the_stale_window_and_reattempt_interval_are_read_from_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+channel_liveness_ttl_secs = 30
+channel_serve_stale_secs = 1800
+channel_reattempt_interval_ms = 5000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming all three liveness knobs loads");
+
+        assert_eq!(
+            config.channel_liveness_ttl(),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            config.channel_serve_stale(),
+            Some(std::time::Duration::from_secs(1800))
+        );
+        assert_eq!(
+            config.channel_reattempt_interval(),
+            Some(std::time::Duration::from_millis(5000))
+        );
+    }
+
+    /// Zero is refused for the re-attempt floor for the same reason it is
+    /// refused for the ttl: it is the value that turns one packet into one
+    /// RPC request.
+    #[test]
+    fn a_zero_reattempt_interval_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+channel_reattempt_interval_ms = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::ZeroChannelReattemptInterval)
+        ));
+    }
+
+    /// ...but zero *is* allowed for the stale window, and the asymmetry is
+    /// deliberate: "never serve a reading I could not confirm" is a
+    /// defensible fail-closed choice that costs no extra chain read, which
+    /// is precisely what a zero ttl or a zero interval would not be.
+    #[test]
+    fn a_zero_stale_window_is_allowed_because_it_costs_nothing() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+channel_serve_stale_secs = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("never serving a stale reading is a choice an operator may make");
+
+        assert_eq!(
+            config.channel_serve_stale(),
+            Some(std::time::Duration::ZERO)
+        );
+    }
+
+    /// A stale window shorter than the ttl names a window that could never
+    /// be used -- an entry would stop being believed and stop being
+    /// servable at the same moment. Refused rather than silently treated
+    /// as zero, since whoever wrote it meant something else.
+    #[test]
+    fn a_stale_window_shorter_than_the_ttl_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+channel_liveness_ttl_secs = 60
+channel_serve_stale_secs = 30
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::ServeStaleShorterThanLivenessTtl {
+                serve_stale_secs: 30,
+                ttl_secs: 60,
+            })
+        ));
     }
 
     /// `state_dir` pointing at something that is not a directory is a

@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use axum::Router;
 
 use connector_client_edge::{
-    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, ClientClaimGate, DepositFloor,
-    EvmChannel, SolanaChannel,
+    ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
+    ClientClaimGate, DepositFloor, EvmChannel, SolanaChannel,
 };
 use connector_config::{
     ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementChain,
@@ -709,13 +709,26 @@ fn client_channels(
     if let Some(source) = solana_source {
         channels = channels.with_solana_source(source);
     }
-    // The one liveness knob a config file turns (issue #649): how long a
-    // chain-resolved channel's mutable facts may be believed before they
-    // are re-read. Absent leaves the client edge's own default, which is
-    // what every node that has not thought about it should have.
-    if let Some(ttl) = config.channel_liveness_ttl() {
-        channels = channels.with_liveness_ttl(ttl);
-    }
+    // The liveness knobs a config file turns (issue #649): how long a
+    // chain-resolved channel's mutable facts may be believed, how long its
+    // last good reading may still be served while the chain is
+    // unreachable, and how often one channel may make this node read the
+    // chain at all. Each absent field leaves the client edge's own
+    // default, which is what every node that has not thought about it
+    // should have -- an operator whose RPC endpoint is rate-limited is the
+    // one who needs the levers, and they now have them without a rebuild.
+    let defaults = ChannelLivenessPolicy::default();
+    channels = channels.with_liveness_policy(ChannelLivenessPolicy {
+        refresh_after: config
+            .channel_liveness_ttl()
+            .unwrap_or(defaults.refresh_after),
+        serve_stale_until: config
+            .channel_serve_stale()
+            .unwrap_or(defaults.serve_stale_until),
+        min_reattempt_interval: config
+            .channel_reattempt_interval()
+            .unwrap_or(defaults.min_reattempt_interval),
+    });
     channels
 }
 
@@ -968,6 +981,96 @@ key_file = "{}"
         });
 
         assert!(client_channels(&config, None, None).is_empty());
+    }
+
+    /// The liveness knobs reach the registry rather than stopping at the
+    /// config struct (issue #649, and the availability review of #654):
+    /// an operator who widens the re-attempt floor because their RPC
+    /// endpoint is rate-limited has to actually get a widened floor.
+    ///
+    /// Asserted through behaviour rather than a getter, since the registry
+    /// deliberately exposes none: with the interval set to ten minutes, a
+    /// second lookup on the same channel inside that window must not reach
+    /// the source at all.
+    #[tokio::test]
+    async fn the_configured_liveness_knobs_reach_the_registry() {
+        use connector_client_edge::{ChannelLookupFailed, DepositFloor, EvmChannel};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug, Default)]
+        struct CountingSource {
+            lookups: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ClientChannelSource for CountingSource {
+            async fn evm_channel(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(EvmChannel {
+                    counterparty: [0x11; 20],
+                    chain_id: 8453,
+                    token_network_address: [0x42; 20],
+                    deposit_floor: DepositFloor::AtLeast(1_000),
+                }))
+            }
+        }
+
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+channel_liveness_ttl_secs = 1
+channel_serve_stale_secs = 600
+channel_reattempt_interval_ms = 600000
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        let source = Arc::new(CountingSource::default());
+        let channels = client_channels(&config, Some(source.clone()), None);
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        // Two claims on the same channel, either side of the one-second
+        // ttl. Both are refused for their signature -- what matters is how
+        // many times the source was consulted.
+        let claim = |nonce: u64| {
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "evm",
+                    "messageId": "msg-{nonce}",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "channelId": "0x{id}",
+                    "nonce": {nonce},
+                    "transferredAmount": "10",
+                    "lockedAmount": "0",
+                    "locksRoot": "0x{zeros}",
+                    "signature": "0x{sig}",
+                    "signerAddress": "0x1111111111111111111111111111111111111111"
+                }}"#,
+                id = "ab".repeat(32),
+                zeros = "0".repeat(64),
+                sig = "cd".repeat(65),
+            )
+        };
+        let _ = gate.ingest(&claim(1), 0).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let _ = gate.ingest(&claim(2), 0).await;
+
+        assert_eq!(
+            source.lookups.load(Ordering::SeqCst),
+            1,
+            "the entry aged out, but the configured ten-minute re-attempt floor still binds"
+        );
     }
 
     /// Every configured channel reaches the client edge's registry, so a

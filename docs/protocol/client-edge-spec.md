@@ -250,6 +250,24 @@ Serving a stale resolution is a deliberate, logged degradation, and it is bounde
 better than refusing a paying client because a third party's endpoint is down, and the ceiling keeps
 it far inside the close-challenge-settle window the expiry defends against.
 
+The bound on work MUST hold **past the staleness ceiling too**, and this is the part that is easy to
+get wrong in the direction of good intentions. Past the ceiling there is nothing left to serve, so it
+reads as the moment to try hardest — but reaching it means the chain has already been failing for the
+entire stale window, and a connector that waives its own rate limit there reinstates exactly the
+per-packet storm described above, merely later, against an endpoint that has by then been failing for
+the whole window. The claim is refused either way once nothing can be served; the only question is
+whether each refusal also costs a chain read, and it must not. A connector that has to refuse SHOULD
+say which refusal it is — "the chain answered and said no" is an operator's problem to fix, "I am
+backing off from asking" is the same operator's endpoint already being known-bad — since the two lead
+to different actions.
+
+The three durations this implies (when a reading stops being believed, how long past that it may
+still be served, and how often one channel may provoke a lookup) are a **deployment** choice, not a
+protocol constant: a node on a metered or rate-limited endpoint needs them longer, and a node that
+wants a settled channel noticed sooner needs the first shorter. A connector SHOULD make them
+configurable and SHOULD refuse, at load, values that read as strictness but behave as a per-packet
+read — a zero re-verification interval, or a zero floor on lookups per channel.
+
 **A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
 it compares against survives a restart: a connector that forgets a channel's watermark compares
 against nothing, and `None` accepts every nonce, so every claim the client already spent becomes

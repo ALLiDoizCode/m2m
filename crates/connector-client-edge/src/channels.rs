@@ -155,6 +155,15 @@
 //!   that refusal deliberately consumes nothing, so without this the same
 //!   claim is an unlimited free amplifier.
 //!
+//! The interval binds **past `serve_stale_until` as well**, where there is
+//! nothing left to serve and the claim is refused either way. That case is
+//! the easy one to get wrong: it looks like the moment to try hardest, and
+//! it is in fact the moment a storm is least affordable, because reaching
+//! it means the chain has already been failing for the whole stale window.
+//! A refusal there costs an RPC or does not; the claim is refused
+//! regardless, and at worst a channel that has just come back stays refused
+//! for one more interval.
+//!
 //! A resolution in flight is also marked as such, so N packets arriving on
 //! one aged-out channel cost one lookup and not N. The marker is cleared by
 //! a `Drop` guard rather than on the success path, because an HTTP handler's
@@ -531,6 +540,11 @@ enum Plan<T> {
     /// `serve_stale_until`, or when there was nothing memoised to begin
     /// with, in which case a failure is a refusal.
     Ask { fallback: Option<T> },
+    /// Refuse without touching the chain: there is nothing safe left to
+    /// serve, *and* this channel has already provoked a lookup too
+    /// recently (or has one in flight) to be allowed another. The refusal
+    /// this connector would have produced anyway, minus the RPC.
+    Refuse(ChannelLookupFailed),
 }
 
 /// Clears a [`Resolved::in_flight`] marker however the attempt it belongs
@@ -595,12 +609,29 @@ fn plan<T: Copy>(
     // for the same reason it is right on a failed lookup -- it is the most
     // recent thing the chain actually said.
     if entry.in_flight || entry.attempted_at.elapsed() < liveness.min_reattempt_interval {
-        if let Some(channel) = fallback {
-            return Plan::Serve(channel);
-        }
-        // Past the stale window there is nothing safe to serve, so the
-        // lookup has to happen however recently one was tried: refusing on
-        // a timer would refuse a channel that is perfectly fine.
+        return match fallback {
+            Some(channel) => Plan::Serve(channel),
+            // Past the stale window there is nothing safe to serve -- and
+            // that is precisely why the interval must still bind here
+            // rather than be waived. Waiving it was this function's one
+            // remaining hole: a channel whose chain had been failing for
+            // longer than `serve_stale_until` fell through to `Ask` on
+            // *every* packet, so the per-packet storm the interval exists
+            // to prevent came back, ten minutes late, against an endpoint
+            // that had been failing for ten minutes.
+            //
+            // Refusing on a timer here costs nothing that was not already
+            // lost: with no fallback, a lookup that fails refuses this
+            // claim anyway, so the only difference is whether the refusal
+            // costs an RPC. At worst a channel that has just come back
+            // stays refused for one more `min_reattempt_interval`.
+            None => Plan::Refuse(ChannelLookupFailed(format!(
+                "this connector's last reading of the channel is older than its \
+                 serve-stale window and it is backing off from re-reading -- its chain \
+                 endpoint has been failing; retry in up to {} ms",
+                liveness.min_reattempt_interval.as_millis()
+            ))),
+        };
     }
     entry.attempted_at = Instant::now();
     entry.in_flight = true;
@@ -758,6 +789,7 @@ impl ClientChannelRegistry {
         // non-`Send` and a way to stall every other packet in flight.
         match plan(&self.resolved, channel_id, self.liveness, Trigger::Age) {
             Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Refuse(failure) => Err(failure),
             Plan::Ask { fallback } => self.resolve_evm(channel_id, fallback).await,
         }
     }
@@ -793,6 +825,7 @@ impl ClientChannelRegistry {
         }
         match plan(&self.resolved, channel_id, self.liveness, Trigger::Breach) {
             Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Refuse(failure) => Err(failure),
             Plan::Ask { fallback } => self.resolve_evm(channel_id, fallback).await,
         }
     }
@@ -893,6 +926,7 @@ impl ClientChannelRegistry {
             Trigger::Age,
         ) {
             Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Refuse(failure) => Err(failure),
             Plan::Ask { fallback } => self.resolve_solana(channel_account, fallback).await,
         }
     }
@@ -913,6 +947,7 @@ impl ClientChannelRegistry {
             Trigger::Breach,
         ) {
             Plan::Serve(channel) => Ok(Some(channel)),
+            Plan::Refuse(failure) => Err(failure),
             Plan::Ask { fallback } => self.resolve_solana(channel_account, fallback).await,
         }
     }
@@ -1868,7 +1903,11 @@ mod tests {
             .with_liveness_policy(ChannelLivenessPolicy {
                 refresh_after: Duration::ZERO,
                 serve_stale_until: Duration::ZERO,
-                min_reattempt_interval: Duration::from_secs(2),
+                // Nothing suppresses the attempt, so the refusal below is
+                // the chain's own answer rather than this node backing off
+                // -- which is the case the two tests after this one are
+                // about.
+                min_reattempt_interval: Duration::ZERO,
             });
 
         assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
@@ -1877,6 +1916,107 @@ mod tests {
         assert_eq!(
             registry.evm(&[0x07; 32]).await,
             Err(ChannelLookupFailed("connection refused".to_string()))
+        );
+    }
+
+    /// Past `serve_stale_until` the interval must **still** bind, and this
+    /// is the case it is easiest to talk oneself out of: there is nothing
+    /// left to serve, so it looks like the moment to try hardest. It is the
+    /// opposite. Reaching this state means the chain has already been
+    /// failing for the whole stale window, and waiving the interval here
+    /// reinstated exactly the per-packet storm the interval exists to
+    /// remove -- measured at 25 lookups for 25 packets, ten minutes into an
+    /// outage, against an endpoint that had been failing for ten minutes.
+    ///
+    /// The claim is refused either way. The only question is whether the
+    /// refusal costs an RPC.
+    #[tokio::test]
+    async fn past_the_stale_window_a_burst_still_costs_one_lookup_not_one_per_packet() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::ZERO,
+                // Nothing may be served stale...
+                serve_stale_until: Duration::ZERO,
+                // ...and the whole burst is inside one interval, however
+                // slow the machine running it.
+                min_reattempt_interval: Duration::from_secs(600),
+            });
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        source.now_fails(Some("429 Too Many Requests"));
+
+        for packet in 0..25 {
+            assert!(
+                registry.evm(&[0x07; 32]).await.is_err(),
+                "packet {packet} is refused -- there is nothing safe to serve"
+            );
+        }
+        assert_eq!(
+            source.lookups(),
+            1,
+            "the initial resolution and nothing else: a refusal must not cost an RPC each"
+        );
+
+        // And it says which refusal it is, so an operator reading a log can
+        // tell "my endpoint is down" from "my node is backing off".
+        let Err(failure) = registry.evm(&[0x07; 32]).await else {
+            panic!("expected a refusal");
+        };
+        assert!(failure.0.contains("backing off"), "{failure}");
+    }
+
+    /// The concurrency half of the same hole: 32 packets arriving together
+    /// past the stale window cost one lookup between them, not 32. The
+    /// in-flight marker has to bind here too -- it was bypassed along with
+    /// the interval.
+    #[tokio::test]
+    async fn past_the_stale_window_concurrent_packets_still_share_one_lookup() {
+        let source = Arc::new(
+            FakeChannelSource::knowing(vec![([0x07; 32], evm_channel())])
+                .taking(Duration::from_millis(300)),
+        );
+        let registry = Arc::new(
+            ClientChannelRegistry::new()
+                .with_source(source.clone())
+                .with_liveness_policy(ChannelLivenessPolicy {
+                    refresh_after: Duration::ZERO,
+                    serve_stale_until: Duration::ZERO,
+                    // Zero, so the in-flight marker is the only thing
+                    // holding the herd back -- the interval is measured on
+                    // its own above.
+                    min_reattempt_interval: Duration::ZERO,
+                }),
+        );
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        source.now_fails(Some("429 Too Many Requests"));
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
+        let mut packets = Vec::new();
+        for _ in 0..32 {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            packets.push(tokio::spawn(async move {
+                // Released only once all 32 are spawned and waiting, so
+                // this is a genuine simultaneous arrival rather than a
+                // hope about scheduling.
+                barrier.wait().await;
+                registry.evm(&[0x07; 32]).await
+            }));
+        }
+        for packet in packets {
+            assert!(packet.await.unwrap().is_err());
+        }
+
+        assert_eq!(
+            source.lookups(),
+            2,
+            "one resolution and one re-read between 32 simultaneous packets"
         );
     }
 
@@ -1889,10 +2029,11 @@ mod tests {
     async fn concurrent_packets_after_an_expiry_share_one_lookup() {
         let source = Arc::new(
             FakeChannelSource::knowing(vec![([0x07; 32], evm_channel())])
-                // Long enough that all 32 futures are genuinely in flight
-                // together on any machine; with an instant source each
-                // would finish before the next was polled and the test
-                // would prove nothing.
+                // The barrier below guarantees the 32 packets *arrive*
+                // together; this guarantees they are still in flight
+                // together, since an instantaneous source would let each
+                // lookup finish -- clearing the in-flight marker -- before
+                // the next task is polled.
                 .taking(Duration::from_millis(300)),
         );
         let registry = Arc::new(
@@ -1910,10 +2051,19 @@ mod tests {
         assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
         assert_eq!(source.lookups(), 1);
 
+        // A barrier rather than a slow source: every task is released only
+        // once all 32 exist and are waiting, so this is a genuine
+        // simultaneous arrival rather than a hope about how a runner
+        // schedules them.
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
         let mut packets = Vec::new();
         for _ in 0..32 {
             let registry = registry.clone();
-            packets.push(tokio::spawn(async move { registry.evm(&[0x07; 32]).await }));
+            let barrier = barrier.clone();
+            packets.push(tokio::spawn(async move {
+                barrier.wait().await;
+                registry.evm(&[0x07; 32]).await
+            }));
         }
         for packet in packets {
             assert_eq!(packet.await.unwrap(), Ok(Some(evm_channel())));
