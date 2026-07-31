@@ -65,8 +65,9 @@ use connector_signer::{PublicKeyBytes, Signer};
 mod channels;
 mod claim_gate;
 pub use channels::{
-    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, EvmChannel,
-    InvalidChannelIdentifier,
+    ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
+    DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel, DEFAULT_LIVENESS_TTL,
+    DEFAULT_MIN_REATTEMPT_INTERVAL, DEFAULT_SERVE_STALE_UNTIL,
 };
 pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 
@@ -625,8 +626,17 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
     // record the claim, the claim itself is fine, and a sender told F01
     // would conclude its perfectly good claim was invalid rather than
     // retry it.
+    //
+    // An undercollateralized claim (issue #646) is F03 too -- it is a
+    // refusal about an amount, and a sender who parses codes rather than
+    // English should see that much -- but it reports `accumulated_cost: 0`,
+    // unlike an underpayment: the route's price *was* covered, so the
+    // figure this claim failed against is the channel's on-chain deposit,
+    // not a price, and #548's price disclosure is not what this refusal is
+    // about. The deposit it must cover is in the message.
     let (code, accumulated_cost) = match rejection {
         ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
+        ClaimIngestRejection::Undercollateralized { .. } => (RejectCode::f03_invalid_amount(), 0),
         ClaimIngestRejection::NotDurable => (RejectCode::t00_internal_error(), 0),
         _ => (RejectCode::f01_invalid_packet(), 0),
     };
@@ -1677,6 +1687,9 @@ mod tests {
                         counterparty,
                         chain_id: EVM_CHAIN_ID,
                         token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                        // Declared, so exempt from the collateral cap
+                        // (issue #646) exactly as config records are.
+                        deposit_floor: crate::DepositFloor::Unknown,
                     },
                 )
                 .expect("a 32-byte hex channel id");
@@ -2304,6 +2317,7 @@ mod tests {
                         counterparty,
                         chain_id: EVM_CHAIN_ID,
                         token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                        deposit_floor: crate::DepositFloor::AtLeast(1_000_000),
                     },
                 )]),
             ));
@@ -2580,7 +2594,10 @@ mod tests {
             let channels = ClientChannelRegistry::new().with_solana_source(Arc::new(
                 crate::channels::test_source::FakeSolanaChannelSource::knowing(vec![(
                     channel_account,
-                    counterparty_keypair.public.to_bytes(),
+                    crate::SolanaChannel {
+                        counterparty: counterparty_keypair.public.to_bytes(),
+                        deposit_floor: crate::DepositFloor::AtLeast(1_000_000),
+                    },
                 )]),
             ));
             assert!(

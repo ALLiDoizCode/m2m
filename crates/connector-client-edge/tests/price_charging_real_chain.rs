@@ -25,7 +25,9 @@ use tower::ServiceExt;
 
 use libsecp256k1::{Message, PublicKey, SecretKey};
 
-use connector_client_edge::{router_with_gate, ClientChannelRegistry, ClientClaimGate, EvmChannel};
+use connector_client_edge::{
+    router_with_gate, ClientChannelRegistry, ClientClaimGate, DepositFloor, EvmChannel,
+};
 use connector_config::StaticRoute;
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
@@ -106,6 +108,26 @@ fn counterparty_address() -> [u8; 20] {
 /// (issue #558) -- a forged or unsigned claim would be refused before ever
 /// reaching the price check this file exists to prove.
 fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) -> String {
+    evm_claim_json_under(
+        channel_id_hex,
+        nonce,
+        transferred_amount,
+        CHAIN_ID,
+        TOKEN_NETWORK_ADDRESS,
+    )
+}
+
+/// [`evm_claim_json`] under a caller-chosen EIP-712 domain -- what a claim
+/// on a channel **resolved from the chain** has to be signed under, since
+/// the resolution reports the real deployment's own `chainId` and
+/// `verifyingContract` rather than this file's synthetic pair.
+fn evm_claim_json_under(
+    channel_id_hex: &str,
+    nonce: u64,
+    transferred_amount: u128,
+    chain_id: u64,
+    token_network: [u8; 20],
+) -> String {
     let secret = counterparty_secret();
     let address = counterparty_address();
 
@@ -119,8 +141,8 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
         transferred_amount,
         locked_amount: 0,
         locks_root: [0u8; 32],
-        chain_id: CHAIN_ID,
-        token_network_address: TOKEN_NETWORK_ADDRESS,
+        chain_id,
+        token_network_address: token_network,
     };
     let signature = sign_evm(&secret, &evm_balance_proof_digest(&proof));
 
@@ -138,13 +160,13 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
             "locksRoot": "0x{zeros}",
             "signature": "0x{signature}",
             "signerAddress": "{address}",
-            "chainId": {CHAIN_ID},
+            "chainId": {chain_id},
             "tokenNetworkAddress": "{token_network_address}"
         }}"#,
         zeros = "0".repeat(64),
         signature = hex_encode(&signature),
         address = to_hex(&address),
-        token_network_address = to_hex(&TOKEN_NETWORK_ADDRESS),
+        token_network_address = to_hex(&token_network),
     )
 }
 
@@ -195,6 +217,7 @@ fn channels_recording(channel_id: &str, counterparty: &[u8]) -> ClientChannelReg
                 counterparty: address,
                 chain_id: CHAIN_ID,
                 token_network_address: TOKEN_NETWORK_ADDRESS,
+                deposit_floor: DepositFloor::Unknown,
             },
         )
         .expect("a real on-chain channel id is a 32-byte hex identifier");
@@ -207,7 +230,6 @@ async fn post_claim(
     claim_json: &str,
     channels: ClientChannelRegistry,
 ) -> (StatusCode, Bytes) {
-    let prepare = sealed_sample_prepare(&signer.public_key().unwrap());
     // An in-memory journal: this test drives one process, and what a
     // watermark does across a *restart* is `claim_gate`'s own durability
     // module (issue #605).
@@ -216,7 +238,31 @@ async fn post_claim(
         Arc::new(connector_runtime::InMemoryJournal::new()),
     )
     .expect("a fresh in-memory journal has nothing to replay");
-    let app = router_with_gate(connector, signer, None, gate);
+    post_claim_through(connector, signer, claim_json, gate).await
+}
+
+/// [`post_claim`], but against a router the caller keeps -- so two requests
+/// can hit the *same* registry, which is the only way a memoised deposit
+/// floor and its refresh (issue #646) are observable at all. A `Router` is
+/// cheap to clone and `oneshot` consumes one, so the caller clones per
+/// request rather than rebuilding the gate (which would resolve the channel
+/// afresh and prove nothing about the memo).
+async fn post_claim_through(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    claim_json: &str,
+    gate: ClientClaimGate,
+) -> (StatusCode, Bytes) {
+    let app = router_with_gate(connector, signer.clone(), None, gate);
+    post_claim_to(app, signer, claim_json).await
+}
+
+async fn post_claim_to(
+    app: axum::Router,
+    signer: Arc<dyn Signer>,
+    claim_json: &str,
+) -> (StatusCode, Bytes) {
+    let prepare = sealed_sample_prepare(&signer.public_key().unwrap());
     let request = Request::builder()
         .method("POST")
         .uri("/ilp")
@@ -309,4 +355,163 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let reject = Reject::decode(&bytes_two).expect("decode reject");
     assert_eq!(reject.code.as_str(), "F03");
     assert!(app_client_two.deliveries().is_empty());
+}
+
+/// Issue #646, against a real chain: a claim naming more than its channel's
+/// counterparty has genuinely deposited buys nothing, and the very same
+/// claim becomes good once a real `setTotalDeposit` covers it.
+///
+/// The claim above already built its amount to *equal* the deposited value,
+/// honouring an invariant nothing enforced. This is that invariant enforced:
+/// `TokenNetwork.claimFromChannel` reverts `InsufficientChannelBalance`
+/// (`TokenNetwork.sol:316-318`) for exactly this claim, so accepting it
+/// would be work the operator could provably never redeem.
+///
+/// The channel is resolved **from the chain**, not declared: a declared
+/// `[[client_channels]]` record carries no deposit and is deliberately
+/// exempt, so the registry here is the anonymous-buyer path (#502) where the
+/// cap actually applies.
+#[tokio::test]
+async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit_covers_it() {
+    if !require_anvil() {
+        return;
+    }
+
+    let anvil = Anvil::spawn().await;
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
+    let backend = Arc::new(
+        EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+            .await
+            .expect("deploy a TokenNetwork through a fresh registry"),
+    );
+
+    let channel = backend
+        .open(counterparty_address().to_vec(), Duration::hours(1))
+        .await
+        .expect("open a real channel");
+    let state = backend
+        .fund(&channel, 1_000)
+        .await
+        .expect("fund the channel with real ERC-20 value");
+    assert_eq!(state.deposited, 1_000);
+
+    // The claim is signed under the chain's *own* EIP-712 domain, since
+    // that is what the resolution reports -- a synthetic domain would fail
+    // the signature check long before the collateral one.
+    let chain_id = backend.chain_id();
+    let token_network = backend.address().to_fixed_bytes();
+    let route = StaticRoute::new_priced("g.example.app", HANDLER_URL, 100).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let signer = test_signer();
+    let connector = deliverable_connector(route, app_client.clone(), signer.clone());
+    let gate = ClientClaimGate::restore(
+        ClientChannelRegistry::new().with_source(Arc::new(BackendChannelSource {
+            backend: backend.clone(),
+        })),
+        Arc::new(connector_runtime::InMemoryJournal::new()),
+    )
+    .expect("a fresh in-memory journal has nothing to replay");
+    let app = router_with_gate(connector, signer.clone(), None, gate);
+
+    // One base unit above what the chain holds: fresh, well-formed,
+    // correctly signed, and covering the route's price of 100 -- refused
+    // purely because it could never be redeemed.
+    let over = evm_claim_json_under(&channel.0, 1, 1_001, chain_id, token_network);
+    let (status, bytes) = post_claim_to(app.clone(), signer.clone(), &over).await;
+    assert_eq!(status, StatusCode::OK);
+    let reject = Reject::decode(&bytes).expect("decode reject");
+    assert_eq!(reject.code.as_str(), "F03");
+    assert!(
+        reject.message.contains("deposited on chain"),
+        "the refusal must say what it is: {}",
+        reject.message
+    );
+    assert_eq!(
+        reject.accumulated_cost, 0,
+        "the route's price was covered -- this refusal is not about a price"
+    );
+    assert!(
+        app_client.deliveries().is_empty(),
+        "an unredeemable claim buys no work from the app"
+    );
+
+    // A real on-chain top-up of one base unit. The memoised floor is now
+    // stale *low*, which is the only direction it can be stale in -- and
+    // the identical claim, at the identical nonce, is honoured on
+    // resubmission because the breach provokes a re-read rather than a
+    // permanent refusal.
+    let topped_up = backend
+        .fund(&channel, 1)
+        .await
+        .expect("a real second setTotalDeposit");
+    assert_eq!(topped_up.deposited, 1_001);
+
+    // Under the policy a production node actually runs, and deliberately:
+    // the re-read that notices the deposit is rate-limited per channel, so
+    // a refusal that consumes no nonce cannot be re-presented as an
+    // unlimited free chain read. Retrying is the point -- it is what shows
+    // the interval is a delay of seconds rather than a wall, without this
+    // test reaching for a policy no operator would run.
+    let mut fulfilled = false;
+    for _ in 0..40 {
+        let (status, bytes) = post_claim_to(app.clone(), signer.clone(), &over).await;
+        assert_eq!(status, StatusCode::OK);
+        if Fulfill::decode(&bytes).is_ok() {
+            fulfilled = true;
+            break;
+        }
+        assert_eq!(
+            Reject::decode(&bytes).expect("decode reject").code.as_str(),
+            "F03",
+            "still the same refusal, for the same reason, until the re-read happens"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        fulfilled,
+        "the identical claim redeems now, so it is accepted now -- no restart needed"
+    );
+    assert_eq!(app_client.deliveries().len(), 1);
+}
+
+/// The client edge's chain-resolution port over a real
+/// [`EvmSettlementBackend`] -- `connector-cli`'s own `SettlementChannelSource`,
+/// restated here because this crate cannot depend on `connector-cli` (it is
+/// the other way round). The two make the same two reads.
+struct BackendChannelSource {
+    backend: Arc<EvmSettlementBackend>,
+}
+
+/// Hand-written for the same reason `connector-cli`'s is: an
+/// [`EvmSettlementBackend`] holds contract handles and a signing client
+/// that are not `Debug`.
+impl std::fmt::Debug for BackendChannelSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackendChannelSource")
+            .field("token_network", &self.backend.address())
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl connector_client_edge::ClientChannelSource for BackendChannelSource {
+    async fn evm_channel(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, connector_client_edge::ChannelLookupFailed> {
+        let resolved = self
+            .backend
+            .channel_counterparty_deposit(*channel_id)
+            .await
+            .map_err(|error| connector_client_edge::ChannelLookupFailed(error.to_string()))?;
+        Ok(resolved.map(|(counterparty, deposit)| EvmChannel {
+            counterparty: counterparty.to_fixed_bytes(),
+            chain_id: self.backend.chain_id(),
+            token_network_address: self.backend.address().to_fixed_bytes(),
+            deposit_floor: DepositFloor::AtLeast(deposit.as_u64()),
+        }))
+    }
 }

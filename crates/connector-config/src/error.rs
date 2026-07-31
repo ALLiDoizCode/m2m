@@ -246,4 +246,33 @@ pub enum ConfigError {
 
     #[error("state_dir '{path}' exists but is not a directory")]
     StateDirNotADirectory { path: PathBuf },
+
+    #[error(
+        "channel_liveness_ttl_secs is 0: this node would re-read the chain for every channel \
+         on every packet rather than caching a resolution at all, which is a way to exhaust \
+         an RPC endpoint's request budget and take the node's own paid writes down with it \
+         (issue #649). Omit the field for the default, or set the number of seconds a \
+         resolved channel's liveness may be believed for"
+    )]
+    ZeroChannelLivenessTtl,
+
+    #[error(
+        "channel_reattempt_interval_ms is 0: this node would put no floor at all on how often \
+         one channel can make it read the chain, so a single client -- by sending packets, by \
+         sending them at once, or by re-presenting one claim its channel cannot cover -- \
+         becomes one RPC request each (issue #649). Omit the field for the default, or set the \
+         milliseconds one channel must wait between lookups"
+    )]
+    ZeroChannelReattemptInterval,
+
+    #[error(
+        "channel_serve_stale_secs is {serve_stale_secs}s but channel_liveness_ttl_secs is \
+         {ttl_secs}s: a resolved channel would stop being believed and stop being servable at \
+         the same moment, so the stale window could never be used. Set it to at least the ttl, \
+         or to 0 to never serve a reading this node could not confirm"
+    )]
+    ServeStaleShorterThanLivenessTtl {
+        serve_stale_secs: u64,
+        ttl_secs: u64,
+    },
 }

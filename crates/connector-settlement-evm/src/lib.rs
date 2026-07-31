@@ -309,6 +309,39 @@ impl EvmSettlementBackend {
         }
     }
 
+    /// [`channel_counterparty`](Self::channel_counterparty), plus that
+    /// counterparty's own `ParticipantState.deposit` -- the bound
+    /// `claimFromChannel` enforces at redemption (`TokenNetwork.sol:316-318`,
+    /// `InsufficientChannelBalance`), and therefore the most a claim this
+    /// backend resolves can ever be worth (issue #646).
+    ///
+    /// **One `eth_call` more than [`channel_counterparty`](Self::channel_counterparty)**,
+    /// and it is unavoidable: the deposit is not in `channels(id)` at all,
+    /// it lives in `participants[channelId][counterparty]`
+    /// (`TokenNetwork.sol:73-77`). It is the same second read
+    /// [`read_state`](Self::read_state) already makes, and the client edge
+    /// memoises the answer per channel, so it costs one extra call the
+    /// first time a channel is seen and none on any later packet.
+    ///
+    /// `U256`, not `u128`/`u64`: the caller decides how to narrow it. A
+    /// deposit larger than the width a claim's cumulative amount is carried
+    /// in cannot be exceeded by one, so saturating there is sound.
+    pub async fn channel_counterparty_deposit(
+        &self,
+        channel_id: [u8; 32],
+    ) -> Result<Option<(Address, U256)>, SettlementError> {
+        let Some(counterparty) = self.channel_counterparty(channel_id).await? else {
+            return Ok(None);
+        };
+        let (deposit, _nonce, _transferred_amount) = self
+            .contract
+            .participants(channel_id, counterparty)
+            .call()
+            .await
+            .map_err(backend_error)?;
+        Ok(Some((counterparty, deposit)))
+    }
+
     /// Resolve `channel` to the on-chain id it names and confirm a channel
     /// actually exists there (`TokenNetwork.channels(id).state !=
     /// NonExistent`) -- [`SettlementError::ChannelNotFound`] either because

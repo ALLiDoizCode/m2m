@@ -184,8 +184,89 @@ never reaches the terminating app:
    naming channels at random, and a legitimate payer has to be told to retry rather than told they
    do not exist.
 
+5. **Collateral binding** — the claim's cumulative `transferredAmount` MUST NOT exceed the
+   **on-chain deposit of the channel's counterparty**
+   ([issue #646](https://github.com/toon-protocol/connector/issues/646)). This is not a credit
+   policy a connector invents: both settlement contracts already refuse an over-deposit claim at
+   redemption (`TokenNetwork.claimFromChannel` reverts `InsufficientChannelBalance`;
+   `packages/solana-program`'s claim handler returns `TransferredAmountExceedsDeposit`), so a claim
+   above the deposit is not value at risk — it is provably unredeemable, and serving it is work the
+   operator can never be paid for. Evaluating it here makes the accept rule agree with the redeem
+   rule. It is checked **after** cryptographic verification, so only a claim that is already fresh,
+   value-covering and correctly signed can provoke the chain read it may need.
+
+   The refusal is its own reason, distinguishable from an underpayment: this claim _does_ cover the
+   route's price, and it consumes nothing — no watermark advances and nothing is recorded — so the
+   remedy is the one both contracts already document: **deposit more and resubmit the same claim,
+   at the same nonce**.
+
+   Deposits are monotonically non-decreasing while a channel is open or closed on both chains
+   (`setTotalDeposit` reverts on a decrease; the Solana `Deposit` handler only `checked_add`s), so a
+   deposit a connector read earlier is a permanent _lower bound_. A connector MAY therefore cache it
+   and compare against the cached value, provided a claim that breaches it triggers a fresh read
+   before being refused — the bound can only ever produce a false refusal, never a false accept, and
+   one re-read repairs it.
+
+   **The exemption is deliberate.** A `[[client_channels]]` record declares a counterparty and a
+   signing domain and never an amount, and a node with no settlement backend has no chain to ask, so
+   a declared channel is not subject to this step. An operator hand-declaring a channel _is_ the
+   credit decision, correctly located in config and theirs to make; an anonymous buyer resolved from
+   chain (§1.2) never made any such deal, and gets the check.
+
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
+
+**A resolved channel's mutable facts expire.** The counterparty and signing domain a resolution
+reports are immutable on chain, but the same resolution also asserts two things that are not — that
+the channel has not `Settled`, and that its token/mint is the one this node settles in
+([issue #649](https://github.com/toon-protocol/connector/issues/649)). A connector that memoises a
+resolution therefore MUST re-verify it periodically, or a channel resolved while open and settled
+afterwards keeps buying writes for the life of the process, with the settled-channel refusal
+(step 4) silently bypassed. Re-verification and the deposit re-read above are one mechanism: a
+refresh reports liveness and deposit together.
+
+A **declared** channel is outside this too, and for the same reason it is outside the cap: config,
+not the chain, is its authority, and a node with no settlement backend has no chain to ask. The
+consequence is worth stating plainly rather than leaving to be discovered — an operator who both
+runs a settlement backend **and** hand-declares a channel in `[[client_channels]]` gets a channel
+that is exempt from the deposit cap _and_ never re-verified, so it keeps being paid on after it
+settles on chain. That is the same credit decision the exemption above describes, extended in time:
+declaring a channel says "I vouch for this one", and a connector cannot both take that at its word
+and second-guess it. An operator who wants the chain consulted should not declare the channel — a
+node with a settlement backend resolves it anyway (§1.2), which is the path both this step and the
+cap apply to.
+
+**Re-verification must not become a per-packet read.** The expiry above is a bound on staleness, and
+a connector that implements it naively converts it into a bound on nothing: if a re-verification
+that _fails_ leaves the entry expired and refuses the claim, then every subsequent packet on that
+channel retries the same failing read, so an unreachable or rate-limited endpoint turns one read per
+interval into one read per packet — a load pattern that sustains its own failure, on the endpoint
+already failing. A connector MUST therefore bound the work as well as the staleness: it SHOULD serve
+the last successfully-read resolution while a re-verification is failing, up to a hard staleness
+ceiling past which it refuses, and it MUST NOT allow one channel to provoke unbounded lookups —
+neither by arrival rate (many packets, one aged-out entry) nor by concurrency (many packets at once)
+nor by resubmission (one undercollateralized claim, re-presented, which by design consumes nothing).
+Serving a stale resolution is a deliberate, logged degradation, and it is bounded: it is strictly
+better than refusing a paying client because a third party's endpoint is down, and the ceiling keeps
+it far inside the close-challenge-settle window the expiry defends against.
+
+The bound on work MUST hold **past the staleness ceiling too**, and this is the part that is easy to
+get wrong in the direction of good intentions. Past the ceiling there is nothing left to serve, so it
+reads as the moment to try hardest — but reaching it means the chain has already been failing for the
+entire stale window, and a connector that waives its own rate limit there reinstates exactly the
+per-packet storm described above, merely later, against an endpoint that has by then been failing for
+the whole window. The claim is refused either way once nothing can be served; the only question is
+whether each refusal also costs a chain read, and it must not. A connector that has to refuse SHOULD
+say which refusal it is — "the chain answered and said no" is an operator's problem to fix, "I am
+backing off from asking" is the same operator's endpoint already being known-bad — since the two lead
+to different actions.
+
+The three durations this implies (when a reading stops being believed, how long past that it may
+still be served, and how often one channel may provoke a lookup) are a **deployment** choice, not a
+protocol constant: a node on a metered or rate-limited endpoint needs them longer, and a node that
+wants a settled channel noticed sooner needs the first shorter. A connector SHOULD make them
+configurable and SHOULD refuse, at load, values that read as strictness but behave as a per-packet
+read — a zero re-verification interval, or a zero floor on lookups per channel.
 
 **A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
 it compares against survives a restart: a connector that forgets a channel's watermark compares
@@ -331,7 +412,7 @@ rejected at ingress with `403` (a status this subsection adds to §1.1's table, 
 the sender may be perfectly well authenticated and is simply not authorized to probe) without being
 forwarded. A `403` carries no OER body, per §1.1's rule that a non-2xx status never does.
 
-The claim on a probe **identifies rather than pays**: it is validated in full (§1.3's four steps)
+The claim on a probe **identifies rather than pays**: it is validated in full (§1.3's five steps)
 against a price of `0`, so possession of the channel is proven and a replay is still refused, but
 no value need advance — a sender probes by reissuing at the same cumulative amount with a fresh
 nonce. A connector recognizes a channel once a claim on it has cleared §1.3's gate at this edge.

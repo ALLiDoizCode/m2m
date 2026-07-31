@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use axum::Router;
 
 use connector_client_edge::{
-    ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, ClientClaimGate, EvmChannel,
+    ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
+    ClientClaimGate, DepositFloor, EvmChannel, SolanaChannel,
 };
 use connector_config::{
     ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementChain,
@@ -27,6 +28,7 @@ use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
 use connector_settlement_solana::SolanaSettlementBackend;
 use connector_signer::{LocalSigner, Signer, SignerError};
+use ethers::types::U256;
 use solana_sdk::pubkey::Pubkey;
 
 /// Everything that can stop a validated [`Config`] from producing a live
@@ -349,9 +351,9 @@ impl ClientChannelSource for SettlementChannelSource {
         &self,
         channel_id: &[u8; 32],
     ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
-        let counterparty = self
+        let resolved = self
             .backend
-            .channel_counterparty(*channel_id)
+            .channel_counterparty_deposit(*channel_id)
             .await
             .map_err(|error| ChannelLookupFailed(error.to_string()))?;
         // The signing domain comes from the same deployment the
@@ -360,11 +362,33 @@ impl ClientChannelSource for SettlementChannelSource {
         // domain separator is built from `block.chainid` and
         // `address(this)`, so a per-entry config field for either could
         // only ever restate -- or contradict -- what the chain says.
-        Ok(counterparty.map(|counterparty| EvmChannel {
+        //
+        // The deposit rides along for issue #646: a claim above what the
+        // counterparty has actually deposited could never be redeemed
+        // (`TokenNetwork.sol`'s `InsufficientChannelBalance`), so the
+        // client edge refuses it rather than doing work it cannot be paid
+        // for. `as_u64` saturates deliberately -- a deposit wider than a
+        // claim's `u64` cumulative amount can never be exceeded by one, so
+        // clamping to `u64::MAX` errs in the safe direction.
+        Ok(resolved.map(|(counterparty, deposit)| EvmChannel {
             counterparty: counterparty.to_fixed_bytes(),
             chain_id: self.backend.chain_id(),
             token_network_address: self.backend.address().to_fixed_bytes(),
+            deposit_floor: DepositFloor::AtLeast(saturating_u64(deposit)),
         }))
+    }
+}
+
+/// A `U256` narrowed to `u64`, clamped rather than wrapped or panicking
+/// (`ethers`' own `U256::as_u64` panics on overflow). Only ever used for a
+/// deposit that bounds a `u64` claim amount from above, where clamping to
+/// `u64::MAX` is indistinguishable from the true value: no `u64` cumulative
+/// amount can exceed either.
+fn saturating_u64(value: U256) -> u64 {
+    if value > U256::from(u64::MAX) {
+        u64::MAX
+    } else {
+        value.as_u64()
     }
 }
 
@@ -393,13 +417,20 @@ impl ClientChannelSource for SolanaChannelSource {
     async fn solana_channel(
         &self,
         channel_account: &[u8; 32],
-    ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
-        let counterparty = self
+    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
+        // The deposit costs nothing extra here (issue #646): it is decoded
+        // out of the very same channel account the counterparty comes from,
+        // on the one `getAccountInfo` this lookup already performs -- it
+        // was simply thrown away before.
+        let resolved = self
             .backend
-            .channel_counterparty(Pubkey::new_from_array(*channel_account))
+            .channel_counterparty_deposit(Pubkey::new_from_array(*channel_account))
             .await
             .map_err(|error| ChannelLookupFailed(error.to_string()))?;
-        Ok(counterparty.map(|counterparty| counterparty.to_bytes()))
+        Ok(resolved.map(|(counterparty, deposit)| SolanaChannel {
+            counterparty: counterparty.to_bytes(),
+            deposit_floor: DepositFloor::AtLeast(deposit),
+        }))
     }
 }
 
@@ -650,6 +681,15 @@ fn client_channels(
                             counterparty: evm.counterparty(),
                             chain_id: evm.chain_id(),
                             token_network_address: evm.token_network_address(),
+                            // `[[client_channels]]` declares a
+                            // counterparty and a domain, never an amount,
+                            // and a node with no settlement backend has no
+                            // chain to ask -- so a declared channel is
+                            // exempt from the collateral cap (issue #646),
+                            // deliberately: hand-declaring a channel is
+                            // itself the operator's policy decision,
+                            // correctly located in config.
+                            deposit_floor: DepositFloor::Unknown,
                         },
                     )
                     .expect(
@@ -669,6 +709,26 @@ fn client_channels(
     if let Some(source) = solana_source {
         channels = channels.with_solana_source(source);
     }
+    // The liveness knobs a config file turns (issue #649): how long a
+    // chain-resolved channel's mutable facts may be believed, how long its
+    // last good reading may still be served while the chain is
+    // unreachable, and how often one channel may make this node read the
+    // chain at all. Each absent field leaves the client edge's own
+    // default, which is what every node that has not thought about it
+    // should have -- an operator whose RPC endpoint is rate-limited is the
+    // one who needs the levers, and they now have them without a rebuild.
+    let defaults = ChannelLivenessPolicy::default();
+    channels = channels.with_liveness_policy(ChannelLivenessPolicy {
+        refresh_after: config
+            .channel_liveness_ttl()
+            .unwrap_or(defaults.refresh_after),
+        serve_stale_until: config
+            .channel_serve_stale()
+            .unwrap_or(defaults.serve_stale_until),
+        min_reattempt_interval: config
+            .channel_reattempt_interval()
+            .unwrap_or(defaults.min_reattempt_interval),
+    });
     channels
 }
 
@@ -876,6 +936,33 @@ key_file = "{}"
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The one narrowing in this crate that guards a false-accept boundary
+    /// (issue #646): an on-chain deposit is a `uint256` and a claim's
+    /// cumulative amount is a `u64`, so the deposit has to be narrowed to
+    /// be compared -- and narrowing the wrong way round would turn a huge
+    /// deposit into a tiny cap (refusing good claims) or, far worse, a
+    /// wrapped small number into a huge one. `ethers`' own `U256::as_u64`
+    /// panics above the range; this clamps, which is sound *only* because
+    /// the value is an upper bound on a `u64`: no `u64` can exceed
+    /// `u64::MAX`, so a deposit wider than that and a deposit of exactly
+    /// `u64::MAX` cap identically.
+    #[test]
+    fn a_deposit_wider_than_u64_clamps_rather_than_wrapping_or_panicking() {
+        assert_eq!(saturating_u64(U256::zero()), 0);
+        assert_eq!(saturating_u64(U256::from(1_000u64)), 1_000);
+        assert_eq!(saturating_u64(U256::from(u64::MAX)), u64::MAX);
+        assert_eq!(
+            saturating_u64(U256::from(u64::MAX) + U256::one()),
+            u64::MAX,
+            "one past the boundary clamps rather than wrapping to 0"
+        );
+        assert_eq!(
+            saturating_u64(U256::MAX),
+            u64::MAX,
+            "a deposit no u64 claim could ever exceed caps at the largest one that could"
+        );
+    }
+
     /// A node with no `[[client_channels]]` has a record of no channel, so
     /// its client edge refuses every claim rather than trusting a claim's
     /// own declared signer (issue #558).
@@ -894,6 +981,96 @@ key_file = "{}"
         });
 
         assert!(client_channels(&config, None, None).is_empty());
+    }
+
+    /// The liveness knobs reach the registry rather than stopping at the
+    /// config struct (issue #649, and the availability review of #654):
+    /// an operator who widens the re-attempt floor because their RPC
+    /// endpoint is rate-limited has to actually get a widened floor.
+    ///
+    /// Asserted through behaviour rather than a getter, since the registry
+    /// deliberately exposes none: with the interval set to ten minutes, a
+    /// second lookup on the same channel inside that window must not reach
+    /// the source at all.
+    #[tokio::test]
+    async fn the_configured_liveness_knobs_reach_the_registry() {
+        use connector_client_edge::{ChannelLookupFailed, DepositFloor, EvmChannel};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug, Default)]
+        struct CountingSource {
+            lookups: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ClientChannelSource for CountingSource {
+            async fn evm_channel(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(EvmChannel {
+                    counterparty: [0x11; 20],
+                    chain_id: 8453,
+                    token_network_address: [0x42; 20],
+                    deposit_floor: DepositFloor::AtLeast(1_000),
+                }))
+            }
+        }
+
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+channel_liveness_ttl_secs = 1
+channel_serve_stale_secs = 600
+channel_reattempt_interval_ms = 600000
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        let source = Arc::new(CountingSource::default());
+        let channels = client_channels(&config, Some(source.clone()), None);
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        // Two claims on the same channel, either side of the one-second
+        // ttl. Both are refused for their signature -- what matters is how
+        // many times the source was consulted.
+        let claim = |nonce: u64| {
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "evm",
+                    "messageId": "msg-{nonce}",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "channelId": "0x{id}",
+                    "nonce": {nonce},
+                    "transferredAmount": "10",
+                    "lockedAmount": "0",
+                    "locksRoot": "0x{zeros}",
+                    "signature": "0x{sig}",
+                    "signerAddress": "0x1111111111111111111111111111111111111111"
+                }}"#,
+                id = "ab".repeat(32),
+                zeros = "0".repeat(64),
+                sig = "cd".repeat(65),
+            )
+        };
+        let _ = gate.ingest(&claim(1), 0).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let _ = gate.ingest(&claim(2), 0).await;
+
+        assert_eq!(
+            source.lookups.load(Ordering::SeqCst),
+            1,
+            "the entry aged out, but the configured ten-minute re-attempt floor still binds"
+        );
     }
 
     /// Every configured channel reaches the client edge's registry, so a
@@ -2050,6 +2227,406 @@ key_file = "{key_path}"
             gate.ingest(&claim_json, 100)
                 .await
                 .expect("the identical claim is valid and accepted when the mint matches");
+        }
+
+        /// Issue #646's EVM half, through the same [`SettlementChannelSource`]
+        /// `build` wires up: the deposit is not in `channels(id)` at all
+        /// (`TokenNetwork.sol:73-77` keeps it in
+        /// `participants[channelId][counterparty]`), so this is the one
+        /// extra `eth_call` the cap costs -- paid once, when the channel is
+        /// first seen, and memoised after.
+        ///
+        /// A claim one base unit above a genuinely deposited 1_000 is
+        /// refused, and the byte-identical claim is honoured after a real
+        /// `setTotalDeposit` covers it.
+        #[tokio::test]
+        async fn a_claim_above_an_evm_channels_on_chain_deposit_is_refused_until_it_is_funded() {
+            use connector_settlement_evm::test_support::DEPLOYER_PRIVATE_KEY as EVM_DEPLOYER;
+            use connector_signer::{
+                derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof,
+            };
+            use libsecp256k1::{Message, PublicKey, SecretKey};
+
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token =
+                EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, EVM_DEPLOYER, 1_000_000)
+                    .await
+                    .expect("deploy mock USDC");
+            let backend = Arc::new(
+                EvmSettlementBackend::deploy(&anvil.rpc_url, EVM_DEPLOYER, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry"),
+            );
+
+            // A real counterparty whose key this test holds, so the claim
+            // below is one `TokenNetwork.claimFromChannel` would recover.
+            let secret = SecretKey::parse(&[11u8; 32]).expect("valid secret key");
+            let counterparty = derive_evm_address(&PublicKey::from_secret_key(&secret).serialize());
+            let channel = backend
+                .open(counterparty.to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open a real channel");
+            let state = backend
+                .fund(&channel, 1_000)
+                .await
+                .expect("fund the channel with real ERC-20 value");
+            assert_eq!(state.deposited, 1_000);
+
+            let claim_json = |nonce: u64, transferred_amount: u64| {
+                let digits = channel.0.trim_start_matches("0x");
+                let mut channel_id = [0u8; 32];
+                for (i, byte) in channel_id.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
+                        .expect("a channel id is 0x-prefixed 64-hex");
+                }
+                let proof = EvmBalanceProof {
+                    channel_id,
+                    nonce,
+                    transferred_amount: u128::from(transferred_amount),
+                    locked_amount: 0,
+                    locks_root: [0u8; 32],
+                    chain_id: backend.chain_id(),
+                    token_network_address: backend.address().to_fixed_bytes(),
+                };
+                let message = Message::parse(&evm_balance_proof_digest(&proof));
+                let (signature, recovery_id) = libsecp256k1::sign(&message, &secret);
+                let mut bytes = signature.serialize().to_vec();
+                let recovery_byte: u8 = recovery_id.into();
+                bytes.push(recovery_byte + 27);
+                format!(
+                    r#"{{
+                        "version": "1.0",
+                        "blockchain": "evm",
+                        "messageId": "msg-{nonce}",
+                        "timestamp": "2026-02-02T12:00:00.000Z",
+                        "senderId": "peer-mallory",
+                        "channelId": "{channel_id_hex}",
+                        "nonce": {nonce},
+                        "transferredAmount": "{transferred_amount}",
+                        "lockedAmount": "0",
+                        "locksRoot": "0x{zeros}",
+                        "signature": "0x{signature}",
+                        "signerAddress": "{signer}"
+                    }}"#,
+                    channel_id_hex = channel.0,
+                    zeros = "0".repeat(64),
+                    signature = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    signer = to_hex(&counterparty),
+                )
+            };
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            ));
+            let gate = client_claim_gate(
+                &config,
+                Some(Arc::new(SettlementChannelSource {
+                    backend: backend.clone(),
+                })),
+                None,
+            )
+            .expect("a config with no state_dir produces an in-memory gate");
+
+            let rejection = gate
+                .ingest(&claim_json(1, 1_001), 100)
+                .await
+                .expect_err("a claim above the on-chain deposit must be refused");
+            assert_eq!(
+                rejection,
+                connector_client_edge::ClaimIngestRejection::Undercollateralized {
+                    claimed: 1_001,
+                    deposited: 1_000,
+                },
+                "{}",
+                rejection.message()
+            );
+
+            let topped_up = backend
+                .fund(&channel, 1)
+                .await
+                .expect("a real second setTotalDeposit");
+            assert_eq!(topped_up.deposited, 1_001);
+
+            // The identical claim, at the identical nonce, once the chain
+            // says it can be redeemed.
+            accepted_within_the_reattempt_interval(&gate, &claim_json(1, 1_001), 100).await;
+        }
+
+        /// Present `claim_json` until it is accepted, or give up.
+        ///
+        /// A refused undercollateralized claim is expected to become good
+        /// once the deposit lands, but not necessarily on the very next
+        /// submission: the re-read that notices the deposit is rate-limited
+        /// per channel (`ChannelLivenessPolicy::min_reattempt_interval`),
+        /// because a refusal that consumes no nonce could otherwise be
+        /// re-presented as an unlimited free chain read. Retrying here is
+        /// the point rather than a workaround -- it is what proves the
+        /// interval is a delay of seconds and not a wall, under the very
+        /// policy a production node runs.
+        async fn accepted_within_the_reattempt_interval(
+            gate: &ClientClaimGate,
+            claim_json: &str,
+            price: u64,
+        ) {
+            for _ in 0..40 {
+                match gate.ingest(claim_json, price).await {
+                    Ok(_) => return,
+                    Err(connector_client_edge::ClaimIngestRejection::Undercollateralized {
+                        ..
+                    }) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                    Err(other) => panic!("unexpected refusal: {}", other.message()),
+                }
+            }
+            panic!(
+                "the deposit landed on chain, so the identical claim must become good once the \
+                 per-channel re-attempt interval has passed -- it never did"
+            );
+        }
+
+        /// A Solana claim JSON on `channel`, signed by the channel's real
+        /// on-chain counterparty through `opener`'s held key -- the same
+        /// shape the wrong-mint test above builds by hand, factored out
+        /// because the collateral tests below need several.
+        fn solana_claim_json(
+            opener: &SolanaSettlementBackend,
+            channel: &connector_settlement::ChannelId,
+            program_id: Pubkey,
+            counterparty: &[u8],
+            nonce: u64,
+            transferred_amount: u64,
+        ) -> String {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine;
+
+            let signature = opener
+                .test_sign_claim(channel, nonce, u128::from(transferred_amount))
+                .expect("deploy() holds the counterparty key to sign with");
+            let counterparty_base58 = Pubkey::try_from(counterparty)
+                .expect("32-byte pubkey")
+                .to_string();
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-{nonce}",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-mallory",
+                    "programId": "{program_id}",
+                    "channelAccount": "{channel_account}",
+                    "nonce": {nonce},
+                    "transferredAmount": "{transferred_amount}",
+                    "signature": "{signature}",
+                    "signerPublicKey": "{counterparty_base58}"
+                }}"#,
+                channel_account = channel.0,
+                signature = BASE64.encode(&signature),
+            )
+        }
+
+        /// Issue #646 on the chain it was actually observed on, end to end
+        /// through the same [`SolanaChannelSource`] `build` wires up: the
+        /// literal #633 scenario is a real channel PDA opened with a **zero**
+        /// USDC deposit, whose validly-signed claims the connector accepted
+        /// (nonce 6, 6000 base units) against a vault holding nothing. Every
+        /// one of those claims would have reverted
+        /// `TransferredAmountExceedsDeposit` at redemption
+        /// (`packages/solana-program/src/processor.rs:781-788`).
+        ///
+        /// The second half proves the refusal is a bound and not a wall: a
+        /// real on-chain `Deposit` makes the byte-identical claim, at the
+        /// identical nonce, good -- which is exactly what that program's own
+        /// comment promises ("a participant who intends to spend more can
+        /// deposit first and resubmit the claim").
+        #[tokio::test]
+        async fn a_claim_above_a_solana_channels_zero_deposit_is_refused_until_it_is_funded() {
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+
+            let opener = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = opener.token_mint();
+            let counterparty = opener
+                .test_counterparty_pubkey()
+                .expect("deploy() holds a counterparty key");
+            // Opened and never funded -- the #633 channel exactly.
+            let channel = opener
+                .open(counterparty.clone(), Duration::seconds(3600))
+                .await
+                .expect("open a channel with no deposit at all");
+
+            let node_backend = SolanaSettlementBackend::connect(
+                &validator.rpc_url,
+                &opener.test_payer_seed(),
+                program_id,
+                token_mint,
+                6,
+            )
+            .await
+            .expect("connect under the opener's identity, bound to the channel's own mint");
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            ));
+            let gate = client_claim_gate(
+                &config,
+                None,
+                Some(Arc::new(SolanaChannelSource {
+                    backend: Arc::new(node_backend),
+                })),
+            )
+            .expect("a config with no state_dir produces an in-memory gate");
+
+            let claim_json =
+                solana_claim_json(&opener, &channel, program_id, &counterparty, 6, 6_000);
+            let rejection = gate
+                .ingest(&claim_json, 100)
+                .await
+                .expect_err("an uncollateralized claim must be refused");
+            assert_eq!(
+                rejection,
+                connector_client_edge::ClaimIngestRejection::Undercollateralized {
+                    claimed: 6_000,
+                    deposited: 0,
+                },
+                "refused for what it is, not as a bad signature or an underpayment: {}",
+                rejection.message()
+            );
+
+            // A real deposit, from the counterparty's own key, into the
+            // channel's own vault.
+            let funded = opener
+                .fund(&channel, 6_000)
+                .await
+                .expect("deposit real SPL value into the channel vault");
+            assert_eq!(funded.deposited, 6_000);
+
+            // The byte-identical claim redeems now, so the gate accepts it
+            // now: the memoised floor was a lower bound and the breach
+            // re-read it.
+            accepted_within_the_reattempt_interval(&gate, &claim_json, 100).await;
+        }
+
+        /// Issue #649 against a real validator: a channel resolved while it
+        /// was payable, then genuinely closed and settled on chain, must
+        /// stop buying writes. The deployed program zeroes the channel PDA
+        /// on settlement (`processor.rs:635-647`), so the chain's answer
+        /// afterwards is "no such channel" -- but a resolution cache that is
+        /// never invalidated goes on answering from the reading it took
+        /// while the channel was open, for the life of the process.
+        ///
+        /// The registry re-verifies liveness on expiry through the same
+        /// refresh path the deposit floor uses; `Duration::ZERO` here makes
+        /// that observable without the test sleeping.
+        #[tokio::test]
+        async fn a_solana_channel_settled_after_resolution_stops_being_accepted() {
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+
+            let opener = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = opener.token_mint();
+            let counterparty = opener
+                .test_counterparty_pubkey()
+                .expect("deploy() holds a counterparty key");
+            // A zero-length challenge period, so this test can settle the
+            // channel for real without waiting one out.
+            let channel = opener
+                .open(counterparty.clone(), Duration::zero())
+                .await
+                .expect("open an instantly-settleable channel");
+            opener
+                .fund(&channel, 1_000)
+                .await
+                .expect("a real on-chain deposit, so the claim below is genuinely collateralized");
+
+            let node_backend = SolanaSettlementBackend::connect(
+                &validator.rpc_url,
+                &opener.test_payer_seed(),
+                program_id,
+                token_mint,
+                6,
+            )
+            .await
+            .expect("connect under the opener's identity, bound to the channel's own mint");
+
+            let gate = ClientClaimGate::restore(
+                ClientChannelRegistry::new()
+                    .with_solana_source(Arc::new(SolanaChannelSource {
+                        backend: Arc::new(node_backend),
+                    }))
+                    // Re-verify on every lookup, so the settlement below is
+                    // noticed without this test waiting out a refresh
+                    // interval. What is under test is that the settled
+                    // channel stops resolving at all, not how long that
+                    // takes.
+                    .with_liveness_policy(
+                        connector_client_edge::ChannelLivenessPolicy::reverify_every_lookup(),
+                    ),
+                Arc::new(InMemoryJournal::new()),
+            )
+            .expect("a fresh in-memory journal has nothing to replay");
+
+            gate.ingest(
+                &solana_claim_json(&opener, &channel, program_id, &counterparty, 1, 100),
+                100,
+            )
+            .await
+            .expect("payable while the channel is open and funded");
+
+            // Genuinely settled on chain: closed, then settled, which the
+            // program completes by zeroing the channel account.
+            opener.close(&channel).await.expect("close the channel");
+            let settled = opener.settle(&channel).await.expect("settle the channel");
+            assert_eq!(settled.status, connector_settlement::ChannelStatus::Settled);
+
+            let rejection = gate
+                .ingest(
+                    &solana_claim_json(&opener, &channel, program_id, &counterparty, 2, 200),
+                    100,
+                )
+                .await
+                .expect_err("a claim on a settled channel can never be redeemed");
+            assert_eq!(
+                rejection,
+                connector_client_edge::ClaimIngestRejection::UnknownChannel,
+                "the settled-channel refusal must not be bypassed by a stale cache: {}",
+                rejection.message()
+            );
         }
 
         /// The SPL Token program id -- a program that exists, is
