@@ -729,8 +729,8 @@ fn client_channels(
             .channel_reattempt_interval()
             .unwrap_or(defaults.min_reattempt_interval),
     });
-    // The bound on lookups for channels that never resolve (issue #613) --
-    // the one the liveness knobs above structurally cannot provide, since
+    // The shaper on lookups for channels that never resolve (issue #613) --
+    // the bound the liveness knobs above structurally cannot provide, since
     // each of them reads a memo entry and an unresolvable channel leaves
     // none. Same shape as the knobs above and for the same reason: what a
     // node can afford to spend discovering channels that turn out not to
@@ -743,6 +743,9 @@ fn client_channels(
             .unwrap_or(budget.per_signer),
         total: config.unresolvable_lookups_total().unwrap_or(budget.total),
         window: config.unresolvable_lookup_window().unwrap_or(budget.window),
+        max_wait: config
+            .unresolvable_lookup_max_wait()
+            .unwrap_or(budget.max_wait),
     });
     channels
 }
@@ -826,6 +829,31 @@ mod tests {
         let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
         write!(config_file, "{text}").expect("write config file");
         Config::load(config_file.path()).expect("load config")
+    }
+
+    /// Load a minimal config with `extra` spliced in at the top level, and
+    /// hand back the *result* rather than unwrapping it -- for a test whose
+    /// subject is whether a configuration loads at all.
+    fn raw_config_result(extra: &str) -> Result<Config, connector_config::ConfigError> {
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(&[7u8; 32])
+            .expect("write raw 32-byte key");
+        let key_path = key_file.into_temp_path();
+        let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+        write!(
+            config_file,
+            r#"
+client_edge_addr = "127.0.0.1:0"
+{extra}
+
+[signer]
+key_file = "{}"
+"#,
+            key_path.display()
+        )
+        .expect("write config file");
+        Config::load(config_file.path())
     }
 
     /// Returns the loaded [`Config`] together with the [`tempfile::TempPath`]
@@ -1123,6 +1151,7 @@ client_edge_addr = "127.0.0.1:0"
 unresolvable_lookup_budget_per_signer = 2
 unresolvable_lookup_budget_total = 2
 unresolvable_lookup_budget_window_secs = 600
+unresolvable_lookup_budget_max_wait_ms = 1
 
 [signer]
 key_file = "{}"
@@ -1178,6 +1207,52 @@ key_file = "{}"
             budgeted, 18,
             "and every claim past it says why it was refused"
         );
+    }
+
+    /// `connector-config` restates the client edge's own budget defaults so
+    /// that it can validate a one-sided configuration against the values
+    /// that will actually be in force (issue #613's review). Restating them
+    /// is only safe if they cannot drift, and this is the only crate that
+    /// can see both.
+    #[test]
+    fn the_config_layers_budget_defaults_match_the_client_edges() {
+        let edge = UnresolvableLookupBudgetPolicy::default();
+
+        // A configuration naming *only* the node-wide rate, set to exactly
+        // the client edge's own default per-signer rate. If the config
+        // layer's copy of that default agrees, this is coherent and loads;
+        // if the two had drifted in either direction, one of the four
+        // assertions here would fail.
+        assert!(
+            raw_config_result(&format!(
+                "unresolvable_lookup_budget_total = {}",
+                edge.per_signer
+            ))
+            .is_ok(),
+            "per_signer == total is coherent, so the config layer's default per-signer rate is \
+             not above {}",
+            edge.per_signer
+        );
+        assert!(
+            raw_config_result(&format!(
+                "unresolvable_lookup_budget_total = {}",
+                edge.per_signer - 1
+            ))
+            .is_err(),
+            "...and not below it either"
+        );
+
+        // The node-wide default, checked from the other side.
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_per_signer = {}",
+            edge.total
+        ))
+        .is_ok());
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_per_signer = {}",
+            edge.total + 1
+        ))
+        .is_err());
     }
 
     /// Every configured channel reaches the client edge's registry, so a

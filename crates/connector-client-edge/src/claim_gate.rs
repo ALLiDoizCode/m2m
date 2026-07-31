@@ -107,6 +107,7 @@ use crate::channels::{
     decode_base58_bytes, decode_hex_bytes, ChannelResolutionError, ClientChannelRegistry,
     DepositFloor,
 };
+use crate::lookup_budget::LookupBudgetBound;
 
 /// Why the gate refused a claim. [`ClaimIngestRejection::Mina`] and
 /// [`ClaimIngestRejection::Malformed`] are kept distinct on purpose: the
@@ -167,12 +168,13 @@ pub enum ClaimIngestRejection {
     /// window somebody else spent is told to wait rather than told their
     /// channel does not exist.
     LookupBudgetExhausted {
-        /// `"signer"` or `"node"` -- which allowance was hit. Carried as
-        /// text rather than the enum so this type stays a plain description
-        /// of a refusal, the way every other variant here is.
-        bound: &'static str,
+        /// Which axis was saturated -- the enum rather than its `&str`
+        /// spelling, so a caller matching on this cannot mistype a bound
+        /// that does not exist.
+        bound: LookupBudgetBound,
         allowance: u32,
         window_secs: u64,
+        max_wait_ms: u64,
     },
     SignatureInvalid,
     /// The claim is fresh, well-formed, correctly signed and covers the
@@ -244,11 +246,14 @@ impl ClaimIngestRejection {
                 bound,
                 allowance,
                 window_secs,
+                max_wait_ms,
             } => format!(
-                "claim rejected: this connector has no record of the channel and is not looking \
-                 it up right now -- its {bound} budget of {allowance} chain lookups per \
-                 {window_secs} s for channels that do not resolve is spent. Nothing is wrong with \
-                 the claim; retry within {window_secs} s"
+                "claim rejected: this connector has no record of the channel and could not look \
+                 it up in time -- its {} discovery drain of {allowance} lookups per \
+                 {window_secs} s for channels that do not resolve is saturated, and the queue for \
+                 it is longer than the {max_wait_ms} ms it will hold a lookup for. Nothing is \
+                 wrong with the claim; retry",
+                bound.as_str()
             ),
             ClaimIngestRejection::SignatureInvalid => "claim rejected: signature does not \
                  verify against this channel's recorded counterparty"
@@ -595,9 +600,10 @@ fn resolution_refusal(error: ChannelResolutionError) -> ClaimIngestRejection {
         }
         ChannelResolutionError::Budgeted(exhausted) => {
             ClaimIngestRejection::LookupBudgetExhausted {
-                bound: exhausted.bound.as_str(),
+                bound: exhausted.bound,
                 allowance: exhausted.allowance,
                 window_secs: exhausted.window.as_secs(),
+                max_wait_ms: exhausted.max_wait.as_millis() as u64,
             }
         }
     }
@@ -2946,6 +2952,7 @@ mod tests {
     /// apart from the two refusals either side of it.
     mod lookup_budget {
         use super::*;
+        use crate::lookup_budget::LookupBudgetBound;
         use crate::UnresolvableLookupBudgetPolicy;
         use std::time::Duration;
 
@@ -2961,6 +2968,11 @@ mod tests {
                         per_signer: allowance,
                         total: allowance,
                         window: Duration::from_secs(600),
+                        // Zero, so a refusal is observable immediately
+                        // rather than as a sleep -- the waiting is
+                        // `crate::lookup_budget`'s own subject, and these
+                        // tests are about what a *sender* is told.
+                        max_wait: Duration::ZERO,
                     }),
             )
         }
@@ -2997,9 +3009,10 @@ mod tests {
             assert_eq!(
                 budgeted,
                 ClaimIngestRejection::LookupBudgetExhausted {
-                    bound: "node",
+                    bound: LookupBudgetBound::Node,
                     allowance: 1,
                     window_secs: 600,
+                    max_wait_ms: 0,
                 }
             );
             assert_ne!(budgeted, ClaimIngestRejection::UnknownChannel);
@@ -3012,11 +3025,14 @@ mod tests {
             // what was withheld and how long to wait, and never that their
             // channel does not exist.
             let message = budgeted.message();
-            assert!(message.contains("budget"), "{message}");
-            assert!(message.contains("retry within 600 s"), "{message}");
+            assert!(message.contains("discovery drain"), "{message}");
             assert!(
-                !message.contains("no record of the channel, so there is no counterparty"),
-                "a budget refusal must not read as an unknown channel: {message}"
+                message.contains("Nothing is wrong with the claim"),
+                "{message}"
+            );
+            assert!(
+                !message.contains("no counterparty to verify"),
+                "a shaped refusal must not read as an unknown channel: {message}"
             );
         }
 
@@ -3035,6 +3051,7 @@ mod tests {
                         per_signer: 4,
                         total: 4,
                         window: Duration::from_secs(600),
+                        max_wait: Duration::ZERO,
                     }),
             );
             let (_, payer) = evm_signer();
@@ -3047,53 +3064,39 @@ mod tests {
             );
         }
 
-        /// Two senders declaring different payers get different budgets, so
-        /// one sender walking the id space does not refuse the next
-        /// claimant through the door.
+        /// Each sender reaches its own bucket -- i.e. the gate really does
+        /// pass the claim's declared signer down to the shaper rather than
+        /// budgeting everything as one caller.
         ///
-        /// It is worth being plain about what this does and does not buy:
-        /// the declared signer is read, not verified, so the sender who
-        /// exhausts one budget can simply declare another. That is why the
-        /// node-wide ceiling exists, and why it -- rather than this -- is
-        /// the bound. What this buys is that a *non-adaptive* sender is cut
-        /// off early, and that under contention one loud identity cannot
-        /// take the whole remaining window from many quiet ones.
+        /// What that buys is deliberately understated here, because the
+        /// declared signer is read and not verified: a sender who exhausts
+        /// one bucket can simply declare another. The node-wide drain is
+        /// what actually bounds them, and the per-signer split is measured
+        /// against an exact clock in
+        /// `crate::lookup_budget::two_signers_have_independent_allowances`,
+        /// where the queueing band it lives in can be reproduced without a
+        /// race.
         #[tokio::test]
-        async fn two_declared_senders_get_separate_budgets() {
-            let gate = gate_over(
-                ClientChannelRegistry::new()
-                    .with_source(Arc::new(FakeChannelSource::knowing(vec![])))
-                    .with_lookup_budget(UnresolvableLookupBudgetPolicy {
-                        per_signer: 2,
-                        total: 8,
-                        window: Duration::from_secs(600),
-                    }),
-            );
-            let loud: Address = [0xaa; 20];
-            let quiet: Address = [0xbb; 20];
-
-            for nonce in 1..=4 {
-                assert_eq!(
-                    gate.ingest(&claim_from(&loud, nonce), 0).await,
-                    Err(ClaimIngestRejection::UnknownChannel),
-                    "the chain is asked about the loud sender's channel {nonce}"
-                );
-            }
-            assert!(
-                matches!(
-                    gate.ingest(&claim_from(&loud, 5), 0).await,
-                    Err(ClaimIngestRejection::LookupBudgetExhausted {
-                        bound: "signer",
-                        ..
-                    })
-                ),
-                "the loud sender is over its share of a contended window"
-            );
+        async fn each_declared_sender_reaches_its_own_bucket() {
+            let gate = gate_allowing(2);
+            let first: Address = [0xaa; 20];
+            let second: Address = [0xbb; 20];
 
             assert_eq!(
-                gate.ingest(&claim_from(&quiet, 6), 0).await,
+                gate.ingest(&claim_from(&first, 1), 0).await,
+                Err(ClaimIngestRejection::UnknownChannel)
+            );
+            assert_eq!(
+                gate.ingest(&claim_from(&second, 2), 0).await,
                 Err(ClaimIngestRejection::UnknownChannel),
-                "a second sender's channel is still looked up for"
+                "a second declared sender is looked up for on its own account"
+            );
+            assert!(
+                matches!(
+                    gate.ingest(&claim_from(&second, 3), 0).await,
+                    Err(ClaimIngestRejection::LookupBudgetExhausted { .. })
+                ),
+                "and the node-wide drain is what stops them both"
             );
         }
     }

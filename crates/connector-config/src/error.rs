@@ -301,4 +301,14 @@ pub enum ConfigError {
          to at most the total (issue #613)"
     )]
     UnresolvableLookupPerSignerAboveTotal { per_signer: u32, total: u32 },
+
+    #[error(
+        "unresolvable_lookup_budget_max_wait_ms is 0: this node would refuse a lookup outright \
+         the moment its discovery drain saturated, rather than holding it for a slot. That hands \
+         any sender able to sustain unresolvable_lookup_budget_total requests per window a switch \
+         that turns the registration-free path of issue #611 off for every new buyer -- a worse \
+         failure than the RPC spend the bound exists to prevent (issue #613). Omit the field for \
+         the default, or set the milliseconds a lookup may wait for its turn"
+    )]
+    ZeroUnresolvableLookupMaxWait,
 }
