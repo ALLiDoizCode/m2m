@@ -1042,6 +1042,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "connector-cli",
+ "connector-config",
  "connector-domain",
  "connector-operator",
  "connector-runtime",
