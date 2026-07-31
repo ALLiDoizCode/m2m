@@ -115,7 +115,7 @@ chainProviders:
 # bilateral settlement accounting.
 #
 # DISTINCT SETTLEMENT IDENTITY: set in .env (devnet):
-#   TOON_MNEMONIC="portion symbol pencil track twenty vault love raccoon rigid gravity glide aerobic"
+#   TOON_MNEMONIC="<12-word BIP-39 phrase; lives only in .env on the box>"
 #   → EVM 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e (NIP-06 path m/44'/1237'/0'/0/0)
 # Distinct from the relay-connector/apex (0xF29fD…), so the channel doesn't self-pay.
 peers:

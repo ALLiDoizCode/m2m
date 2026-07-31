@@ -14,12 +14,28 @@ target/
 coverage/
 *.lcov
 
-# Environment variables
+# Environment variables. The bare `.env` rule only matches that exact name, so
+# operator copies like `.env.bak-20260718-214722` or `.env.20260719` slipped
+# through and got committed. Match every `.env*` variant instead, and re-allow
+# the checked-in templates explicitly.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
 .env.dev  # Development environment variables (local overrides)
 .env.production  # Production environment variables (NEVER commit)
+
+# Editor/operator snapshot copies. These are point-in-time scratch artefacts
+# from live-box edits, never configuration the repo should carry; committing
+# them leaves stale copies of real deployment values behind forever.
+*.bak
+*.bak-*
+*.bak.*
+*.orig
+*.rej
+*.stale-drift-bak-*
+*.pre-*.bak
 
 # Deployer wallet (NEVER commit private keys)
 deployer-wallet.json
