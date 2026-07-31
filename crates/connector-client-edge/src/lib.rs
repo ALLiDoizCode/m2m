@@ -1494,7 +1494,7 @@ mod tests {
         ));
         let terms = X402SettlementTerms {
             chain: "evm:84532".to_string(),
-            settlement_address: "0xc0e55cd2e967a4f625627dae5d4946f54267c7ab".to_string(),
+            settlement_address: "0xf29fd62c4848b9573c9b90adbf61b664f386d9cf".to_string(),
             token_network_registry: "0xcc9079ade929b168b54145f6d25262b64fab9d5b".to_string(),
             token_network: "0x1e95493fef46707e034b4a1945f25a8c76a1823d".to_string(),
             token_address: "0x49bee1bca5d15fb0963117923403f9498119a9ce".to_string(),
@@ -1553,7 +1553,7 @@ mod tests {
         ));
         let evm_terms = X402SettlementTerms {
             chain: "evm:84532".to_string(),
-            settlement_address: "0xc0e55cd2e967a4f625627dae5d4946f54267c7ab".to_string(),
+            settlement_address: "0xf29fd62c4848b9573c9b90adbf61b664f386d9cf".to_string(),
             token_network_registry: "0xcc9079ade929b168b54145f6d25262b64fab9d5b".to_string(),
             token_network: "0x1e95493fef46707e034b4a1945f25a8c76a1823d".to_string(),
             token_address: "0x49bee1bca5d15fb0963117923403f9498119a9ce".to_string(),
