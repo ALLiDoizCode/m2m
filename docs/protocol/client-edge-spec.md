@@ -134,6 +134,21 @@ never reaches the terminating app:
 2. **Freshness** — the claim's nonce MUST strictly advance this connector's last-verified
    watermark for the (peer, blockchain, channel) tuple; a non-advancing nonce is rejected without
    spending a cryptographic verification on it.
+
+   The **channel** in that tuple is the channel, not the text the claim spelled it with ([issue
+   #643](https://github.com/toon-protocol/connector/issues/643)). A connector MUST identify a
+   channel's watermark by a canonical form of the id, applied before the watermark is written or
+   read. For `evm` that form is exactly `0x` followed by the `channelId`'s 32 bytes as 64
+   **lower-case** hex characters — one spelling, not a family of accepted ones, since a canonical
+   form that admitted alternatives would be the same ambiguity again. For `solana` it is the
+   `channelAccount` as it arrives: base58 of an exact 32-byte decode already has only one
+   spelling, and base58 is case-_sensitive_, so normalising it would merge distinct accounts.
+   Hex is case-insensitive and everything else about a claim already treats
+   the spellings as one channel — the counterparty record is looked up by the decoded bytes, and
+   the EIP-712 digest is computed over them — so a connector that keyed a watermark by the literal
+   text would grant a fresh, empty watermark per spelling, and `None` accepts every nonce: one
+   signed claim would buy a write once per casing it was retyped in.
+
 3. **Value binding** (for a locally-terminated, priced route) — the claim's cumulative amount
    MUST advance by at least the route's configured flat price, so a minimal fresh claim cannot pay
    for an expensive route. This compares the claim's plaintext `transferredAmount` directly.

@@ -84,11 +84,18 @@ impl ClientClaim {
     /// The channel this claim's freshness/watermark is judged against,
     /// namespaced by chain so an EVM `channelId` and a Solana
     /// `channelAccount` can never collide even in the (practically
-    /// impossible, since their alphabets differ) case of equal text.
+    /// impossible, since their alphabets differ) case of equal text, and
+    /// **canonical** within that namespace (issue #643) -- see
+    /// [`canonical_channel_key`] for why the second is a security property
+    /// rather than tidiness.
     pub fn channel_key(&self) -> String {
         match self {
-            ClientClaim::Evm(claim) => format!("evm:{}", claim.channel_id),
-            ClientClaim::Solana(claim) => format!("solana:{}", claim.channel_account),
+            ClientClaim::Evm(claim) => {
+                format!("{EVM_NAMESPACE}:{}", canonical_evm_id(&claim.channel_id))
+            }
+            ClientClaim::Solana(claim) => {
+                format!("{SOLANA_NAMESPACE}:{}", claim.channel_account)
+            }
         }
     }
 
@@ -111,6 +118,100 @@ impl ClientClaim {
             ClientClaim::Evm(claim) => &claim.common,
             ClientClaim::Solana(claim) => &claim.common,
         }
+    }
+}
+
+/// The chain namespace [`ClientClaim::channel_key`] prefixes an EVM
+/// `channelId` with.
+pub const EVM_NAMESPACE: &str = "evm";
+
+/// The chain namespace [`ClientClaim::channel_key`] prefixes a Solana
+/// `channelAccount` with.
+pub const SOLANA_NAMESPACE: &str = "solana";
+
+/// The canonical form of an already-namespaced channel key -- the key a
+/// watermark is filed under, and the only form a lookup of one may be
+/// made in (issue #643).
+///
+/// # Why this exists
+///
+/// A watermark keyed by the literal text a claim arrived with is not a
+/// replay defence, because one channel has many literal texts. `channelId`
+/// is `bytes32` hex, and hex has no case: `0xAB..` and `0xab..` name the
+/// same 32 bytes, and every downstream consumer already agrees they do --
+/// the client edge's `ClientChannelRegistry` resolves the counterparty by
+/// the *decoded* bytes, and the EIP-712 digest a claim's signature recovers
+/// under is computed over those same bytes, so a claim re-presented with
+/// its `channelId` recased verifies identically. Only the watermark key
+/// disagreed, which handed a client 2^64 fresh, empty watermarks per
+/// channel: `validate_claim(None, ..)` accepts any nonce, so one signed
+/// claim bought a write once per casing it was retyped in.
+///
+/// So: the key is canonicalized here, once, and both the write and the
+/// read of a watermark go through it. Two claims this connector would
+/// verify against the same channel record are keyed the same, by
+/// construction rather than by every call site remembering to lowercase.
+///
+/// # What canonical means, per namespace
+///
+/// * `evm:` -- `0x` followed by 64 lowercase hex characters, whenever the
+///   id is 64 hex characters with or without that prefix (i.e. exactly
+///   the shape that decodes to a 32-byte `channelId`). Exactly one
+///   spelling, and it names the same bytes as every other spelling of it,
+///   without this crate taking a hex dependency and without the key
+///   ceasing to be greppable in a journal line.
+///
+///   **The `0x` is kept, and that is a compatibility requirement rather
+///   than taste.** A pre-#643 build derived this key as
+///   `format!("evm:{}", claim.channel_id)`, and [`parse_evm`] only ever
+///   admitted a `0x`-prefixed `channelId`, so every key already on disk
+///   is `evm:0x<hex>`. For the universal case -- a client sending
+///   lowercase `0x` hex -- the canonical key is therefore **byte-identical
+///   to the legacy one**, which is what makes rolling a node's image back
+///   to a pre-#643 build a no-op instead of a catastrophe: an older binary
+///   replaying a journal this build wrote derives the same key for the
+///   next claim, finds the watermark, and refuses the replay. Stripping
+///   the prefix would leave that older binary computing `evm:0x<hex>`
+///   against a journal folded under `evm:<hex>`, getting `None`, and
+///   `validate_claim(None, ..)` re-accepting the client's entire spend
+///   history. The deploy model is baked image tags on boxes where rolling
+///   a tag back is routine, so that is a live path, not a hypothetical.
+/// * `solana:` -- identity. Base58 of an exact 32-byte decode already has
+///   exactly one spelling (a differently-spelled string decodes to a
+///   different, non-32-byte value), so there is nothing to normalise and
+///   normalising anyway would only risk merging two ids that are not the
+///   same account.
+/// * anything else -- identity, byte for byte. A key in no namespace this
+///   function knows is left exactly as it was found rather than guessed
+///   at: a journal's entry alphabet is shared with the peer wire, whose
+///   channel ids carry no namespace prefix at all, and quietly rewriting
+///   one of those would be inventing a channel.
+///
+/// # Injectivity
+///
+/// Canonicalisation only ever *merges* spellings of one channel; it never
+/// merges two channels. Within `evm:`, the canonical form is `0x` plus 64
+/// lowercase hex characters -- and any string of that shape is itself
+/// always canonicalised rather than falling through, so the identity
+/// fallback can never emit one and collide with it. Across namespaces
+/// nothing can collide: the prefix is preserved.
+pub fn canonical_channel_key(key: &str) -> String {
+    match key.split_once(':') {
+        Some((EVM_NAMESPACE, id)) => format!("{EVM_NAMESPACE}:{}", canonical_evm_id(id)),
+        _ => key.to_string(),
+    }
+}
+
+/// The canonical spelling of an EVM `channelId`: see
+/// [`canonical_channel_key`]'s "What canonical means" for the rule and why
+/// an id that is not 64 hex characters is returned untouched rather than
+/// coerced.
+fn canonical_evm_id(channel_id: &str) -> String {
+    let hex = channel_id.strip_prefix("0x").unwrap_or(channel_id);
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        format!("0x{}", hex.to_ascii_lowercase())
+    } else {
+        channel_id.to_string()
     }
 }
 
@@ -475,6 +576,136 @@ mod tests {
     fn channel_key_is_namespaced_by_chain() {
         let claim = parse_client_claim(solana_claim_json()).expect("parses");
         assert!(claim.channel_key().starts_with("solana:"));
+    }
+
+    // -- Canonical channel keys (issue #643) --
+
+    /// The defect itself: hex has no case, so the same signed claim
+    /// retyped in a different casing must not be a different channel. On a
+    /// tree without this fix the two keys differ, each gets its own empty
+    /// watermark, and `validate_claim(None, ..)` accepts the replay.
+    #[test]
+    fn an_evm_channel_key_is_the_same_whatever_case_its_hex_arrived_in() {
+        let lower = evm_claim_json();
+        let upper = lower.replace(&"ab".repeat(32), &"AB".repeat(32));
+        assert_ne!(lower, upper, "the two spellings must actually differ");
+
+        let lower_key = parse_client_claim(&lower).expect("parses").channel_key();
+        let upper_key = parse_client_claim(&upper).expect("parses").channel_key();
+
+        assert_eq!(lower_key, upper_key);
+        assert_eq!(lower_key, format!("evm:0x{}", "ab".repeat(32)));
+    }
+
+    /// Mixed casing -- the shape a real attacker would reach for, since it
+    /// looks least like a deliberate probe -- collapses the same way.
+    #[test]
+    fn an_evm_channel_key_is_the_same_for_mixed_case_hex() {
+        let mixed = evm_claim_json().replace(&"ab".repeat(32), &"aB".repeat(32));
+        assert_eq!(
+            parse_client_claim(&mixed).expect("parses").channel_key(),
+            format!("evm:0x{}", "ab".repeat(32))
+        );
+    }
+
+    /// The prefix variant. Today's parser requires the `0x` prefix, so a
+    /// bare-hex `channelId` never reaches a watermark at all -- but the
+    /// client edge's `decode_hex_bytes` strips the prefix when it resolves
+    /// the channel record, so the two *would* be one channel the moment
+    /// step 1 were loosened. The key is canonical over both spellings now,
+    /// so loosening the parser can never reopen this hole.
+    #[test]
+    fn a_bare_hex_channel_id_is_refused_today_and_canonicalises_to_the_prefixed_key_anyway() {
+        let bare = evm_claim_json().replace(&format!("0x{}", "ab".repeat(32)), &"ab".repeat(32));
+        assert!(
+            matches!(
+                parse_client_claim(&bare),
+                Err(ClientClaimError::Malformed(_))
+            ),
+            "a bare-hex channelId is a structural failure today"
+        );
+
+        assert_eq!(
+            canonical_channel_key(&format!("evm:{}", "AB".repeat(32))),
+            canonical_channel_key(&format!("evm:0x{}", "ab".repeat(32)))
+        );
+    }
+
+    /// **The rollback contract.** For the universal case -- a client
+    /// sending the lowercase `0x` hex `parse_evm` has always required --
+    /// the canonical key must be *byte-identical* to the key a pre-#643
+    /// build derived, or rolling a node's image back to one of those
+    /// builds orphans every watermark this build wrote and re-accepts the
+    /// client's whole spend history. The legacy formula is reproduced
+    /// here rather than called: it no longer exists in this tree, and
+    /// this test is the contract with a binary that is not this one.
+    #[test]
+    fn the_canonical_key_is_byte_identical_to_the_key_a_pre_643_build_derived() {
+        let claim = parse_client_claim(&evm_claim_json()).expect("parses");
+        let ClientClaim::Evm(evm) = &claim else {
+            panic!("expected an EVM claim");
+        };
+
+        // Exactly `ClientClaim::channel_key` as it stood before #643.
+        let legacy_key = format!("evm:{}", evm.channel_id);
+
+        assert_eq!(
+            claim.channel_key(),
+            legacy_key,
+            "a rolled-back binary must derive the same key this build files under"
+        );
+        assert_eq!(claim.channel_key(), format!("evm:0x{}", "ab".repeat(32)));
+    }
+
+    /// Canonicalising a key that is already canonical changes nothing --
+    /// what makes it safe to apply on both the write and the read of a
+    /// watermark, and on a journal entry written by either build.
+    #[test]
+    fn canonicalising_a_canonical_key_is_a_no_op() {
+        let key = format!("evm:0x{}", "ab".repeat(32));
+        assert_eq!(canonical_channel_key(&key), key);
+        assert_eq!(canonical_channel_key(&canonical_channel_key(&key)), key);
+    }
+
+    /// Solana ids are canonical as they arrive: base58 of an exact 32-byte
+    /// decode has one spelling, and case is *significant* in base58 -- so
+    /// this must leave them strictly alone, or it would merge two accounts
+    /// that are genuinely different.
+    #[test]
+    fn a_solana_channel_key_is_left_exactly_as_it_arrived() {
+        let account = "So11111111111111111111111111111111111111112";
+        assert_eq!(
+            canonical_channel_key(&format!("solana:{account}")),
+            format!("solana:{account}")
+        );
+        assert_ne!(
+            canonical_channel_key(&format!("solana:{}", account.to_lowercase())),
+            format!("solana:{account}"),
+            "base58 is case-sensitive: these are different accounts"
+        );
+    }
+
+    /// A key in no namespace this function knows -- a peer-wire channel id
+    /// sharing the journal's entry alphabet, say -- is returned byte for
+    /// byte. Rewriting one would be inventing a channel.
+    #[test]
+    fn a_key_in_no_known_namespace_is_returned_untouched() {
+        for key in ["channel-a", "0xABCDEF", "", "mina:B62qFoo", "evm"] {
+            assert_eq!(canonical_channel_key(key), key);
+        }
+    }
+
+    /// Canonicalisation merges spellings of one channel, never two
+    /// channels: an EVM id that is not 64 hex characters is left as it was
+    /// and still cannot collide with one that was canonicalised.
+    #[test]
+    fn canonicalisation_never_merges_two_different_evm_channels() {
+        let a = canonical_channel_key(&format!("evm:0x{}", "ab".repeat(32)));
+        let b = canonical_channel_key(&format!("evm:0x{}", "cd".repeat(32)));
+        let short = canonical_channel_key("evm:0xabcd");
+        assert_ne!(a, b);
+        assert_ne!(a, short);
+        assert_eq!(short, "evm:0xabcd");
     }
 
     #[test]
