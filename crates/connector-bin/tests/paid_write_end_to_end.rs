@@ -689,7 +689,7 @@ async fn an_unaffiliated_solana_buyer_pays_for_a_write_with_no_client_channels_c
     };
     use connector_settlement_solana::wire;
     use connector_settlement_solana::SolanaSettlementBackend;
-    use solana_client::nonblocking::rpc_client::RpcClient;
+    use solana_rpc_client::nonblocking::rpc_client::RpcClient;
     use solana_sdk::commitment_config::CommitmentConfig;
     use solana_sdk::instruction::Instruction;
     use solana_sdk::program_pack::Pack;

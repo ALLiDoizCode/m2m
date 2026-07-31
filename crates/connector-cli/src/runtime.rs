@@ -1149,7 +1149,7 @@ write_keys = ["{key}"]
         };
         use connector_settlement_solana::SolanaSettlementBackend;
         use ethers::signers::Signer as EvmSigner;
-        use solana_client::nonblocking::rpc_client::RpcClient;
+        use solana_rpc_client::nonblocking::rpc_client::RpcClient;
         use solana_sdk::commitment_config::CommitmentConfig;
         use solana_sdk::signature::{Keypair, Signer as SolanaSigner};
 

@@ -29,7 +29,9 @@ connector-settlement-solana = { path = "../connector-settlement-solana", feature
 connector-operator = { path = "../connector-operator", features = ["test-util"] }
 connector-runtime = { path = "../connector-runtime" }
 solana-sdk = "=2.1.0"
-solana-client = "=2.1.0"
+# solana-rpc-client, not the solana-client meta-crate -- see
+# crates/connector-settlement-solana/Cargo.toml for why.
+solana-rpc-client = "=2.1.0"
 spl-token = { version = "=6.0.0", features = ["no-entrypoint"] }
 spl-associated-token-account = "=4.0.0"
 chrono = "0.4"

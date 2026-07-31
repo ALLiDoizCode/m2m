@@ -11,7 +11,7 @@
 use std::str::FromStr;
 
 use connector_settlement_solana::SolanaSettlementBackend;
-use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signer;
