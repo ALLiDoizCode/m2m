@@ -116,7 +116,7 @@ chainProviders:
 #
 # DISTINCT SETTLEMENT IDENTITY: set in .env (devnet):
 #   TOON_MNEMONIC="<12-word BIP-39 phrase; lives only in .env on the box>"
-#   → EVM 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e (NIP-06 path m/44'/1237'/0'/0/0)
+#   → EVM 0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff (NIP-06 path m/44'/1237'/0'/0/0)
 # Distinct from the relay-connector/apex (0xF29fD…), so the channel doesn't self-pay.
 peers:
   - id: relay-connector
@@ -156,9 +156,9 @@ routes:
       - mina
     ilpAddress: g.toon.ario
     settlementAddresses:
-      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
-      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
-      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
+      evm: '0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff'
+      solana: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV'
+      mina: 'B62qkWSoKW4ewE2Wn7ibgtXz6TV72L22YVGoz2bL5x3yu4FsUipdQG8'
 
   - prefix: g.toon.relay.ario
     nextHop: connector
@@ -170,9 +170,9 @@ routes:
       - mina
     ilpAddress: g.toon.relay.ario
     settlementAddresses:
-      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
-      solana: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
-      mina: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
+      evm: '0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff'
+      solana: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV'
+      mina: 'B62qkWSoKW4ewE2Wn7ibgtXz6TV72L22YVGoz2bL5x3yu4FsUipdQG8'
 
   # ── FORWARD route to the apex relay (OUTBOUND ONLY) ─────────────────────────
   # This route exists SOLELY so this box can publish its OWN kind:10032
@@ -203,7 +203,7 @@ routes:
 # (+ relay#37). The connector periodically builds, signs (its NIP-06 key, derived
 # from TOON_MNEMONIC — NO new secret), and republishes a fresh kind:10032
 # announcement DERIVED FROM THIS BOX'S OWN CONFIG: its terminated routes'
-# `ilpAddress` + `settlementAddresses` (g.toon.ario → 0x1f4E12…), chain info, and
+# `ilpAddress` + `settlementAddresses` (g.toon.ario → 0x6B6c2D…), chain info, and
 # the public endpoints below. The result advertises THIS box's own g.toon.ario
 # settlement address, so the store route is discoverable from its OWNING node — not
 # only as advertised by the apex.

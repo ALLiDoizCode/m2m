@@ -163,7 +163,7 @@ price = 1000
 # fail-closed at startup by design (ADR 0009), so it is one more live chain
 # this node must reach before it will boot, plus a second funded key file
 # to provision on a box that today has neither. The store-forward Solana
-# address `4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt` is funded and
+# address `W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV` is funded and
 # stays available if that ever changes; symmetry with the apex is not on
 # its own a reason to spend it here.
 #
