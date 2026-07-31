@@ -182,7 +182,9 @@ never reaches the terminating app:
    the claim under a third, separate reason. It never degrades to accepting the claim, and it is
    never reported as "no such channel": an operator has to be able to tell an outage from a sender
    naming channels at random, and a legitimate payer has to be told to retry rather than told they
-   do not exist.
+   do not exist. A resolution the connector **declined to perform**, because its budget for lookups
+   that do not resolve is spent, is a fourth reason again — see "A lookup that resolves nothing must
+   be bounded too" below.
 
 5. **Collateral binding** — the claim's cumulative `transferredAmount` MUST NOT exceed the
    **on-chain deposit of the channel's counterparty**
@@ -267,6 +269,76 @@ protocol constant: a node on a metered or rate-limited endpoint needs them longe
 wants a settled channel noticed sooner needs the first shorter. A connector SHOULD make them
 configurable and SHOULD refuse, at load, values that read as strictness but behave as a per-packet
 read — a zero re-verification interval, or a zero floor on lookups per channel.
+
+**A lookup that resolves nothing must be bounded too, and none of the above bounds it.**
+Every bound in the paragraphs above is keyed to a channel the connector has resolved at least once —
+it is an interval on _that entry_, a stale window measured from _that reading_. A channel that never
+resolves has no entry, so a sender naming a fresh nonexistent channel id on every request provokes
+one chain read per request, indefinitely
+([issue #613](https://github.com/toon-protocol/connector/issues/613)). Every one of those claims is
+refused, nothing is paid and nothing is delivered — which is what makes it worth doing: the sender
+spends a packet, and the connector spends a unit of its own metered settlement-RPC budget, on an
+anonymous request's say-so. A connector MUST therefore bound how many lookups that do not resolve it
+will perform.
+
+The bound MUST NOT be a negative cache, and this is the whole difficulty. Remembering "no such
+channel" for a while is the obvious answer and it breaks the exact buyer §1.2's registration-free
+path exists for — the one who opens a channel and writes a second later, whose own first attempt
+would then poison the next N seconds of their own attempts. A connector MUST NOT memoise a negative
+answer; the thing that is metered is the _asking_, not the answer. Three properties follow, and each
+of them is a way of keeping the intended user working:
+
+- **A lookup that resolves the channel MUST NOT count against the bound.** Otherwise a node
+  onboarding real anonymous buyers throttles itself for doing the thing the path is for. Charging
+  before the chain is read (which is necessary — the point is to prevent the read, not to notice
+  it afterwards) and giving the charge back on a resolution satisfies this.
+- **A lookup that _fails_ MAY count**, since the request was spent either way and an endpoint that
+  is down must not keep being paid to say so. It MUST still be reported as an outage while there is
+  allowance to discover one: the refusals a genuine outage produces are lookup failures naming the
+  endpoint's own error, and only once the allowance is gone does the refusal become the budget's.
+- **Exhaustion MUST be its own refusal**, distinct from both "no such channel" and "the lookup
+  failed", and it SHOULD be **temporary** rather than final — nothing is wrong with the claim, and a
+  sender told otherwise would stop rather than wait out the window. The three lead an operator to
+  three different actions (nothing; fix the endpoint; look at who is spending the window), and a
+  sender to two (this channel is wrong; retry shortly), so reporting any of them as another sends
+  somebody to fix the wrong thing.
+
+**What identity such a budget is keyed to is genuinely hard, and a connector SHOULD be honest about
+what it buys.** A probe (§1.6) is budgeted per recognized channel; a lookup that does not resolve has
+no recognized channel by definition. The transport source address is the obvious fallback and is
+worth little: a connector deployed behind a reverse proxy sees the proxy's address, so every
+anonymous buyer shares one bucket with the attacker, and the remedy — trusting a forwarded-for header
+— is trusting attacker-supplied text. The claim's own declared signer is available before any lookup
+and costs nothing to read, but it is **not a credential**: for EVM the EIP-712 digest needs the
+channel's own domain, which is precisely what has not been resolved yet, so nothing about the
+declared signer can be verified at this point without either trusting the claim's self-declared
+domain (which proves only that the sender can run one `ecrecover`) or spending elliptic-curve work on
+every anonymous request — trading an RPC-spend amplifier for a CPU-spend one.
+
+A connector that budgets per declared signer therefore MUST NOT present it as a bound: a keypair is
+free, so an adaptive sender declares a fresh one per request. Such a connector MUST also keep a
+**node-wide** ceiling, which is the only part an adaptive sender cannot route around, and SHOULD
+accept its consequence plainly — while that ceiling is spent, a genuinely new anonymous buyer's first
+resolution is refused too. That consequence is bounded to _first_ resolutions: a declared channel is
+never resolved and an already-resolved one is served from the memo, so nobody already paying is
+affected.
+
+One further hazard follows from the identity being unverified, and a connector SHOULD design it out
+rather than document it: because anyone may declare anyone's address, a per-signer allowance enforced
+unconditionally is a cheap targeted denial of service against a _known_ buyer — spend their allowance
+with a handful of nonsense ids and their genuine first write is refused. That is the negative
+cache's failure mode reached by another road. Enforcing the per-signer allowance only once the
+node-wide window is already contended removes the aim: below contention nobody is refused for their
+identity at all, and above it capacity is genuinely scarce, somebody must be refused, and the
+identity that has taken the most of the window is the right one.
+
+The allowances and their window are a **deployment** choice for the same reason the three durations
+above are — what a node can afford to spend discovering channels that do not exist depends on the
+settlement endpoint it pays for. A connector SHOULD make them configurable and SHOULD refuse, at
+load, a zero allowance (which switches §1.2's registration-free path off entirely, silently, under a
+number that reads as a tightening) and a zero window (which restarts on every request, so every
+allowance is spendable in full by every request and the budget bounds nothing while appearing to be
+configured).
 
 **A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
 it compares against survives a restart: a connector that forgets a channel's watermark compares

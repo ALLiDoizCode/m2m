@@ -14,7 +14,7 @@ use axum::Router;
 
 use connector_client_edge::{
     ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
-    ClientClaimGate, DepositFloor, EvmChannel, SolanaChannel,
+    ClientClaimGate, DepositFloor, EvmChannel, SolanaChannel, UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
     ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementChain,
@@ -729,6 +729,21 @@ fn client_channels(
             .channel_reattempt_interval()
             .unwrap_or(defaults.min_reattempt_interval),
     });
+    // The bound on lookups for channels that never resolve (issue #613) --
+    // the one the liveness knobs above structurally cannot provide, since
+    // each of them reads a memo entry and an unresolvable channel leaves
+    // none. Same shape as the knobs above and for the same reason: what a
+    // node can afford to spend discovering channels that turn out not to
+    // exist depends on the settlement endpoint it is paying for, which is a
+    // deployment fact rather than a protocol constant.
+    let budget = UnresolvableLookupBudgetPolicy::default();
+    channels = channels.with_lookup_budget(UnresolvableLookupBudgetPolicy {
+        per_signer: config
+            .unresolvable_lookups_per_signer()
+            .unwrap_or(budget.per_signer),
+        total: config.unresolvable_lookups_total().unwrap_or(budget.total),
+        window: config.unresolvable_lookup_window().unwrap_or(budget.window),
+    });
     channels
 }
 
@@ -1070,6 +1085,98 @@ key_file = "{}"
             source.lookups.load(Ordering::SeqCst),
             1,
             "the entry aged out, but the configured ten-minute re-attempt floor still binds"
+        );
+    }
+
+    /// The unresolvable-lookup budget's knobs reach the registry too
+    /// (issue #613). Asserted through behaviour for the same reason as
+    /// above: with a node-wide allowance of two, a sender walking channel
+    /// ids reaches the source twice and no more, however many claims they
+    /// present.
+    #[tokio::test]
+    async fn the_configured_lookup_budget_reaches_the_registry() {
+        use connector_client_edge::{ChannelLookupFailed, EvmChannel};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A chain that knows about no channel at all -- which is what a
+        /// walk of the id space looks like from the connector's side.
+        #[derive(Debug, Default)]
+        struct EmptyCountingSource {
+            lookups: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ClientChannelSource for EmptyCountingSource {
+            async fn evm_channel(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            }
+        }
+
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+unresolvable_lookup_budget_per_signer = 2
+unresolvable_lookup_budget_total = 2
+unresolvable_lookup_budget_window_secs = 600
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        let source = Arc::new(EmptyCountingSource::default());
+        let channels = client_channels(&config, Some(source.clone()), None);
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        // A fresh channel id per claim, which is the whole shape of the
+        // attack: nothing this connector has ever seen, and nothing it ever
+        // will resolve.
+        let claim = |nonce: u64| {
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "evm",
+                    "messageId": "msg-{nonce}",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "channelId": "0x{nonce:064x}",
+                    "nonce": {nonce},
+                    "transferredAmount": "10",
+                    "lockedAmount": "0",
+                    "locksRoot": "0x{zeros}",
+                    "signature": "0x{sig}",
+                    "signerAddress": "0x1111111111111111111111111111111111111111"
+                }}"#,
+                zeros = "0".repeat(64),
+                sig = "cd".repeat(65),
+            )
+        };
+        let mut budgeted = 0;
+        for nonce in 1..=20 {
+            if matches!(
+                gate.ingest(&claim(nonce), 0).await,
+                Err(connector_client_edge::ClaimIngestRejection::LookupBudgetExhausted { .. })
+            ) {
+                budgeted += 1;
+            }
+        }
+
+        assert_eq!(
+            source.lookups.load(Ordering::SeqCst),
+            2,
+            "twenty claims on twenty channels cost the configured allowance and no more"
+        );
+        assert_eq!(
+            budgeted, 18,
+            "and every claim past it says why it was refused"
         );
     }
 

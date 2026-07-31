@@ -87,6 +87,30 @@ struct RawConfig {
     /// packet becomes one RPC.
     #[serde(default)]
     channel_reattempt_interval_ms: Option<u64>,
+    /// How many chain lookups for channels that do not resolve one
+    /// self-declared signer may cause per window, once the node-wide
+    /// allowance below is contended (issue #613). Absent means the client
+    /// edge's own default; `0` is refused, since it would refuse every
+    /// unaffiliated buyer the moment the node got busy -- i.e. switch off
+    /// the registration-free path #611 exists to provide, silently and only
+    /// under load.
+    #[serde(default)]
+    unresolvable_lookup_budget_per_signer: Option<u32>,
+    /// How many chain lookups for channels that do not resolve this node
+    /// will perform per window in total, whoever asks (issue #613). This is
+    /// the one an attacker cannot get around by declaring a different
+    /// signer, so it is the one an operator on a metered settlement
+    /// endpoint actually sets. Absent means the client edge's own default;
+    /// `0` is refused for the same reason as above.
+    #[serde(default)]
+    unresolvable_lookup_budget_total: Option<u32>,
+    /// The window both allowances above are counted over. Absent means the
+    /// client edge's own default; `0` is refused, and it is the sharpest
+    /// footgun of the three: a zero-length window restarts on every request,
+    /// so both allowances are spendable in full by every request and the
+    /// budget bounds nothing at all while looking like it does.
+    #[serde(default)]
+    unresolvable_lookup_budget_window_secs: Option<u64>,
 }
 
 /// A fully loaded, fully validated, immutable connector configuration.
@@ -112,6 +136,9 @@ pub struct Config {
     channel_liveness_ttl: Option<Duration>,
     channel_serve_stale: Option<Duration>,
     channel_reattempt_interval: Option<Duration>,
+    unresolvable_lookups_per_signer: Option<u32>,
+    unresolvable_lookups_total: Option<u32>,
+    unresolvable_lookup_window: Option<Duration>,
 }
 
 impl Config {
@@ -194,6 +221,46 @@ impl Config {
             }
         }
 
+        // The unresolvable-lookup budget (issue #613). Every one of these
+        // is refused at zero, unlike `channel_serve_stale_secs` above:
+        // there, zero names a coherent fail-closed choice that costs
+        // nothing extra; here, each zero either switches the
+        // registration-free path off entirely or switches the budget off
+        // while leaving it configured, and neither is a thing an operator
+        // could mean by writing a number down.
+        let unresolvable_lookups_per_signer = match raw.unresolvable_lookup_budget_per_signer {
+            Some(0) => {
+                return Err(ConfigError::ZeroUnresolvableLookupBudget {
+                    field: "per_signer",
+                })
+            }
+            other => other,
+        };
+        let unresolvable_lookups_total = match raw.unresolvable_lookup_budget_total {
+            Some(0) => return Err(ConfigError::ZeroUnresolvableLookupBudget { field: "total" }),
+            other => other,
+        };
+        let unresolvable_lookup_window = match raw.unresolvable_lookup_budget_window_secs {
+            Some(0) => return Err(ConfigError::ZeroUnresolvableLookupWindow),
+            other => other.map(Duration::from_secs),
+        };
+        // A per-signer allowance above the node-wide one is not a stricter
+        // setting, it is an inert one: the node-wide ceiling would refuse
+        // first, every time, so the number written for the per-signer bound
+        // could never be reached. Refused rather than silently ignored, on
+        // the same principle as the stale-window check above -- an operator
+        // who wrote it meant something by it.
+        if let (Some(per_signer), Some(total)) =
+            (unresolvable_lookups_per_signer, unresolvable_lookups_total)
+        {
+            if per_signer > total {
+                return Err(ConfigError::UnresolvableLookupPerSignerAboveTotal {
+                    per_signer,
+                    total,
+                });
+            }
+        }
+
         // A node that can accept a claim must be able to remember having
         // accepted it (issue #605). Refused here, at load, rather than at
         // the first claim: a node whose watermarks live only in memory
@@ -228,6 +295,9 @@ impl Config {
             channel_liveness_ttl,
             channel_serve_stale,
             channel_reattempt_interval,
+            unresolvable_lookups_per_signer,
+            unresolvable_lookups_total,
+            unresolvable_lookup_window,
         })
     }
 
@@ -249,6 +319,26 @@ impl Config {
     /// `None` to use the client edge's own default.
     pub fn channel_reattempt_interval(&self) -> Option<Duration> {
         self.channel_reattempt_interval
+    }
+
+    /// How many chain lookups for channels that do not resolve one declared
+    /// signer may cause per window once this node's window is contended
+    /// (issue #613), or `None` to use the client edge's own default.
+    pub fn unresolvable_lookups_per_signer(&self) -> Option<u32> {
+        self.unresolvable_lookups_per_signer
+    }
+
+    /// How many chain lookups for channels that do not resolve this node
+    /// will perform per window in total, or `None` to use the client edge's
+    /// own default.
+    pub fn unresolvable_lookups_total(&self) -> Option<u32> {
+        self.unresolvable_lookups_total
+    }
+
+    /// The window the two allowances above are counted over, or `None` to
+    /// use the client edge's own default.
+    pub fn unresolvable_lookup_window(&self) -> Option<Duration> {
+        self.unresolvable_lookup_window
     }
 
     /// The socket address the client edge binds.
@@ -1285,6 +1375,143 @@ key_file = "{key_path}"
             config.channel_reattempt_interval(),
             Some(std::time::Duration::from_millis(5000))
         );
+    }
+
+    /// The unresolvable-lookup budget (issue #613): what a node will spend
+    /// discovering channels that turn out not to exist, per declared signer
+    /// and in total. An operator on a metered settlement endpoint is
+    /// exactly who needs to set the second one.
+    #[test]
+    fn the_unresolvable_lookup_budget_is_read_from_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_per_signer = 3
+unresolvable_lookup_budget_total = 20
+unresolvable_lookup_budget_window_secs = 30
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming all three budget knobs loads");
+
+        assert_eq!(config.unresolvable_lookups_per_signer(), Some(3));
+        assert_eq!(config.unresolvable_lookups_total(), Some(20));
+        assert_eq!(
+            config.unresolvable_lookup_window(),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    /// Absent means the client edge's own default, the same as every other
+    /// knob here -- a node that has not thought about this should get a
+    /// bound rather than none.
+    #[test]
+    fn an_absent_unresolvable_lookup_budget_is_the_edges_own_default() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming no budget loads");
+
+        assert_eq!(config.unresolvable_lookups_per_signer(), None);
+        assert_eq!(config.unresolvable_lookups_total(), None);
+        assert_eq!(config.unresolvable_lookup_window(), None);
+    }
+
+    /// Zero allowances are refused, and the reason is the mirror image of
+    /// the zero ttl above: that one reads as strictness and melts an
+    /// endpoint, this one reads as strictness and silently switches off the
+    /// registration-free path #611 exists to provide.
+    #[test]
+    fn a_zero_unresolvable_lookup_allowance_is_refused_at_load() {
+        for field in ["per_signer", "total"] {
+            let result = with_key_file(|key_path| {
+                format!(
+                    r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_{field} = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                    key_path = key_path.display(),
+                )
+            });
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::ZeroUnresolvableLookupBudget { .. })
+                ),
+                "unresolvable_lookup_budget_{field} = 0 must not load"
+            );
+        }
+    }
+
+    /// A zero-length window is the sharpest of the three footguns: it
+    /// restarts on every request, so both allowances are spendable in full
+    /// by every request and the budget bounds nothing while looking like it
+    /// is configured.
+    #[test]
+    fn a_zero_unresolvable_lookup_window_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_window_secs = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::ZeroUnresolvableLookupWindow)
+        ));
+    }
+
+    /// A per-signer allowance above the node-wide one is inert rather than
+    /// dangerous -- the ceiling would refuse first every time -- and is
+    /// refused for the same reason a stale window shorter than the ttl is:
+    /// an operator who wrote a number meant something by it.
+    #[test]
+    fn a_per_signer_allowance_above_the_node_wide_one_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_per_signer = 100
+unresolvable_lookup_budget_total = 10
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnresolvableLookupPerSignerAboveTotal {
+                per_signer: 100,
+                total: 10
+            })
+        ));
     }
 
     /// Zero is refused for the re-attempt floor for the same reason it is

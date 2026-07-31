@@ -64,12 +64,18 @@ use connector_signer::{PublicKeyBytes, Signer};
 
 mod channels;
 mod claim_gate;
+mod lookup_budget;
 pub use channels::{
-    ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
-    DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel, DEFAULT_LIVENESS_TTL,
-    DEFAULT_MIN_REATTEMPT_INTERVAL, DEFAULT_SERVE_STALE_UNTIL,
+    ChannelLivenessPolicy, ChannelLookupFailed, ChannelResolutionError, ClientChannelRegistry,
+    ClientChannelSource, DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel,
+    DEFAULT_LIVENESS_TTL, DEFAULT_MIN_REATTEMPT_INTERVAL, DEFAULT_SERVE_STALE_UNTIL,
 };
 pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
+pub use lookup_budget::{
+    LookupBudgetBound, LookupBudgetExhausted, UnresolvableLookupBudget,
+    UnresolvableLookupBudgetPolicy, DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER,
+    DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL, DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW,
+};
 
 const OCTET_STREAM: &str = "application/octet-stream";
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
@@ -634,10 +640,21 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
     // figure this claim failed against is the channel's on-chain deposit,
     // not a price, and #548's price disclosure is not what this refusal is
     // about. The deposit it must cover is in the message.
+    //
+    // A withheld channel lookup (issue #613) is T05: Rate Limited -- the
+    // fourth code here and the second *temporary* one, and both halves of
+    // that matter. Temporary, because nothing is wrong with the claim: a
+    // sender told F01 would conclude their claim was invalid and stop,
+    // where the honest answer is "wait out the window". And T05 rather than
+    // T00, because this connector did not fail at anything -- it declined
+    // to do free work, which is the one thing RFC-0027 has that code for,
+    // and a sender that parses codes rather than English can tell "retry
+    // now, the node hiccupped" from "back off, you are being metered".
     let (code, accumulated_cost) = match rejection {
         ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
         ClaimIngestRejection::Undercollateralized { .. } => (RejectCode::f03_invalid_amount(), 0),
         ClaimIngestRejection::NotDurable => (RejectCode::t00_internal_error(), 0),
+        ClaimIngestRejection::LookupBudgetExhausted { .. } => (RejectCode::t05_rate_limited(), 0),
         _ => (RejectCode::f01_invalid_packet(), 0),
     };
     packet_response(PacketResponse::Reject(Reject {

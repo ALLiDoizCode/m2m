@@ -119,6 +119,38 @@ impl ClientClaim {
             ClientClaim::Solana(claim) => &claim.common,
         }
     }
+
+    /// The key whose signature this claim *says* it carries, namespaced by
+    /// chain the same way [`ClientClaim::channel_key`] namespaces the
+    /// channel: `evm:0x<40 lower-case hex>` or `solana:<base58>`.
+    ///
+    /// **This is a self-declared value and it is not authority for
+    /// anything.** Whose signature a claim is checked against comes from
+    /// the connector's own per-channel record and never from here (issue
+    /// #558) -- see `connector_client_edge::ClientChannelRegistry`. It
+    /// exists for one narrower purpose: to be the identity an *unresolvable*
+    /// channel lookup is budgeted against (issue #613), where by definition
+    /// there is no recognized channel to budget against instead, and where
+    /// the alternative identities are worse. It is therefore a label for
+    /// grouping and attribution, not a credential.
+    ///
+    /// Canonicalised for exactly the reason
+    /// [`canonical_channel_key`] canonicalises an id: hex has no case, so a
+    /// budget keyed by the literal text would hand one sender a fresh
+    /// allowance per recasing of their own address. Solana's base58 is
+    /// case-*sensitive* and a 32-byte key has one spelling, so it is left
+    /// alone for the same reason the Solana channel namespace is.
+    pub fn signer_key(&self) -> String {
+        match self {
+            ClientClaim::Evm(claim) => format!(
+                "{EVM_NAMESPACE}:{}",
+                claim.signer_address.to_ascii_lowercase()
+            ),
+            ClientClaim::Solana(claim) => {
+                format!("{SOLANA_NAMESPACE}:{}", claim.signer_public_key)
+            }
+        }
+    }
 }
 
 /// The chain namespace [`ClientClaim::channel_key`] prefixes an EVM
@@ -576,6 +608,45 @@ mod tests {
     fn channel_key_is_namespaced_by_chain() {
         let claim = parse_client_claim(solana_claim_json()).expect("parses");
         assert!(claim.channel_key().starts_with("solana:"));
+    }
+
+    /// Issue #613: the identity an unresolvable lookup is budgeted against
+    /// is namespaced by chain for the same reason the channel key is -- an
+    /// EVM address and a Solana public key are different kinds of thing,
+    /// and one budget must never be spendable from the other's namespace.
+    #[test]
+    fn a_signer_key_is_namespaced_by_chain() {
+        assert!(parse_client_claim(&evm_claim_json())
+            .expect("parses")
+            .signer_key()
+            .starts_with("evm:"));
+        assert!(parse_client_claim(solana_claim_json())
+            .expect("parses")
+            .signer_key()
+            .starts_with("solana:"));
+    }
+
+    /// An address's casing is notation, not identity (the same rule #643
+    /// established for a `channelId`). A budget keyed by the literal text
+    /// would hand one sender 2^40 fresh allowances for the price of
+    /// re-typing their own checksummed address, which is not a budget.
+    #[test]
+    fn an_evm_signer_key_is_the_same_whatever_case_its_hex_arrived_in() {
+        let checksummed = parse_client_claim(&evm_claim_json())
+            .expect("parses")
+            .signer_key();
+        let lower = parse_client_claim(&evm_claim_json().replace(
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1",
+            "0x742d35cc6634c0532925a3b844bc9e7595f0beb1",
+        ))
+        .expect("parses")
+        .signer_key();
+
+        assert_eq!(checksummed, lower);
+        assert_eq!(
+            checksummed,
+            "evm:0x742d35cc6634c0532925a3b844bc9e7595f0beb1"
+        );
     }
 
     // -- Canonical channel keys (issue #643) --

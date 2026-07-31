@@ -207,6 +207,17 @@ impl RejectCode {
         RejectCode("T04".to_string())
     }
 
+    /// T05: Rate Limited -- this connector is deliberately withholding free
+    /// work from the sender rather than failing at it (issue #613,
+    /// RFC-0027's own gloss: "the connector is rate limiting the sender").
+    /// Retryable, and the distinction from `T00` is the whole point: `T00`
+    /// says this connector tried and could not, `T05` says it declined to
+    /// try, and a sender told the first would retry immediately while a
+    /// sender told the second should wait out a window.
+    pub fn t05_rate_limited() -> RejectCode {
+        RejectCode("T05".to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -454,6 +465,7 @@ mod tests {
         assert_eq!(RejectCode::f99_application_error().as_str(), "F99");
         assert_eq!(RejectCode::t01_peer_unreachable().as_str(), "T01");
         assert_eq!(RejectCode::t04_insufficient_liquidity().as_str(), "T04");
+        assert_eq!(RejectCode::t05_rate_limited().as_str(), "T05");
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
         assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
