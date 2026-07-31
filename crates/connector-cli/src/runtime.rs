@@ -1216,6 +1216,8 @@ key_file = "{}"
     /// can see both.
     #[test]
     fn the_config_layers_budget_defaults_match_the_client_edges() {
+        use connector_client_edge::MAX_UNRESOLVABLE_LOOKUP_WINDOW;
+
         let edge = UnresolvableLookupBudgetPolicy::default();
 
         // A configuration naming *only* the node-wide rate, set to exactly
@@ -1251,6 +1253,33 @@ key_file = "{}"
         assert!(raw_config_result(&format!(
             "unresolvable_lookup_budget_per_signer = {}",
             edge.total + 1
+        ))
+        .is_err());
+
+        // ...and the window and wait ceiling, by the same trick: a ceiling
+        // exactly equal to the default window is coherent, one millisecond
+        // past it is not.
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_max_wait_ms = {}",
+            edge.window.as_millis()
+        ))
+        .is_ok());
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_max_wait_ms = {}",
+            edge.window.as_millis() + 1
+        ))
+        .is_err());
+
+        // And the cap the client edge clamps a window to is the one the
+        // config layer refuses above.
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_window_secs = {}",
+            MAX_UNRESOLVABLE_LOOKUP_WINDOW.as_secs()
+        ))
+        .is_ok());
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_window_secs = {}",
+            MAX_UNRESOLVABLE_LOOKUP_WINDOW.as_secs() + 1
         ))
         .is_err());
     }

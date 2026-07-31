@@ -587,13 +587,21 @@ pub struct ClientChannelRegistry {
     /// bound `liveness` structurally cannot provide, since a channel that
     /// never resolved leaves no entry for any of its intervals to hang on.
     lookup_budget: UnresolvableLookupBudget,
-    /// How the most recently *completed* lookup went -- `Some` if it
-    /// failed, `None` if it succeeded or none has completed yet (issue
-    /// #613). Read only when the shaper refuses, to keep an outage
-    /// reportable as an outage: an unreachable endpoint saturates the drain
-    /// within seconds, and a refusal reported as a budget would send an
-    /// operator hunting an attacker who is not there.
-    last_failure: RwLock<Option<ChannelLookupFailed>>,
+    /// How the most recently *completed* lookup went, **per chain** -- an
+    /// entry if that chain's last lookup failed, none if it succeeded or
+    /// none has completed yet (issue #613). Read only when the shaper
+    /// refuses, to keep an outage reportable as an outage: an unreachable
+    /// endpoint saturates the drain within seconds, and a refusal reported
+    /// as a budget would send an operator hunting an attacker who is not
+    /// there.
+    ///
+    /// Keyed by chain rather than kept as one slot, because a node with
+    /// both `[settlement.evm]` and `[settlement.solana]` has two endpoints
+    /// that fail independently: a single slot would make an EVM refusal
+    /// quote the Solana endpoint's error, which is a worse diagnosis than
+    /// the one it replaced -- it names a real outage that has nothing to do
+    /// with the claim being refused.
+    last_failure: RwLock<HashMap<ClaimChain, ChannelLookupFailed>>,
 }
 
 /// A memoised resolution, when the chain last *confirmed* it, and when this
@@ -753,7 +761,7 @@ impl Default for ClientChannelRegistry {
             // allowance of zero -- a node that refuses to resolve any
             // channel at all, i.e. #611 switched off.
             lookup_budget: UnresolvableLookupBudget::default(),
-            last_failure: RwLock::new(None),
+            last_failure: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -995,7 +1003,9 @@ impl ClientChannelRegistry {
         // -- which matters here precisely because an unseen channel has no
         // memo entry for the in-flight marker to be written on.
         let reservation = self
-            .reserve_lookup(unseen, requester, || hex::encode(channel_id))
+            .reserve_lookup(ClaimChain::Evm, unseen, requester, || {
+                hex::encode(channel_id)
+            })
             .await?;
         let _in_flight = InFlight {
             memo: &self.resolved,
@@ -1003,7 +1013,7 @@ impl ClientChannelRegistry {
         };
         let resolved = match source.evm_channel(channel_id).await {
             Ok(resolved) => {
-                self.record_lookup_outcome(None);
+                self.record_lookup_outcome(ClaimChain::Evm, None);
                 resolved
             }
             // A failed lookup says nothing about the channel, so it must
@@ -1015,7 +1025,7 @@ impl ClientChannelRegistry {
             // `serve_stale_until` there is no fallback and the claim is
             // refused for what it is.
             Err(failure) => {
-                self.record_lookup_outcome(Some(&failure));
+                self.record_lookup_outcome(ClaimChain::Evm, Some(&failure));
                 return match fallback {
                     Some(channel) => {
                         tracing::warn!(
@@ -1143,6 +1153,7 @@ impl ClientChannelRegistry {
     /// on the path it defends.
     async fn reserve_lookup(
         &self,
+        chain: ClaimChain,
         unseen: bool,
         requester: &str,
         channel: impl FnOnce() -> String,
@@ -1166,7 +1177,7 @@ impl ClientChannelRegistry {
         // came back a failure, that failure is what a refusal reports.
         // Cleared by the next lookup that succeeds, so it cannot outlive
         // the outage that set it.
-        if let Some(failure) = self.last_lookup_failure() {
+        if let Some(failure) = self.last_lookup_failure(chain) {
             tracing::warn!(
                 signer = %requester,
                 channel = %channel(),
@@ -1196,24 +1207,31 @@ impl ClientChannelRegistry {
         Err(ChannelResolutionError::Budgeted(exhausted))
     }
 
-    /// The failure the most recently *completed* lookup came back with, if
-    /// it came back with one. `None` once any lookup has succeeded since.
-    fn last_lookup_failure(&self) -> Option<ChannelLookupFailed> {
+    /// The failure `chain`'s most recently *completed* lookup came back
+    /// with, if it came back with one. `None` once one of that chain's
+    /// lookups has succeeded since -- and never affected by the other
+    /// chain's endpoint, which fails on its own schedule.
+    fn last_lookup_failure(&self, chain: ClaimChain) -> Option<ChannelLookupFailed> {
         self.last_failure
             .read()
             .expect("last lookup outcome lock poisoned")
-            .clone()
+            .get(&chain)
+            .cloned()
     }
 
-    /// Record how a completed lookup went, for [`Self::last_lookup_failure`].
-    /// Called on every lookup that reaches an answer, and only there: a
-    /// lookup that was never made says nothing about the endpoint.
-    fn record_lookup_outcome(&self, failure: Option<&ChannelLookupFailed>) {
+    /// Record how one of `chain`'s completed lookups went, for
+    /// [`Self::last_lookup_failure`]. Called on every lookup that reaches an
+    /// answer, and only there: a lookup that was never made says nothing
+    /// about the endpoint.
+    fn record_lookup_outcome(&self, chain: ClaimChain, failure: Option<&ChannelLookupFailed>) {
         let mut last = self
             .last_failure
             .write()
             .expect("last lookup outcome lock poisoned");
-        *last = failure.cloned();
+        match failure {
+            Some(failure) => last.insert(chain, failure.clone()),
+            None => last.remove(&chain),
+        };
     }
 
     /// The Solana twin of [`Self::resolve_evm`].
@@ -1232,7 +1250,7 @@ impl ClientChannelRegistry {
         // read rather than two, which makes the attack cheaper for this
         // connector to absorb and not one bit less unbounded.
         let reservation = self
-            .reserve_lookup(unseen, requester, || {
+            .reserve_lookup(ClaimChain::Solana, unseen, requester, || {
                 bs58::encode(channel_account).into_string()
             })
             .await?;
@@ -1242,13 +1260,13 @@ impl ClientChannelRegistry {
         };
         let resolved = match source.solana_channel(channel_account).await {
             Ok(resolved) => {
-                self.record_lookup_outcome(None);
+                self.record_lookup_outcome(ClaimChain::Solana, None);
                 resolved
             }
             // Serve-stale-while-revalidate -- see `Self::resolve_evm`'s own
             // comment for why an outage must not become this node's refusal.
             Err(failure) => {
-                self.record_lookup_outcome(Some(&failure));
+                self.record_lookup_outcome(ClaimChain::Solana, Some(&failure));
                 return match fallback {
                     Some(channel) => {
                         tracing::warn!(
@@ -2902,6 +2920,100 @@ mod tests {
             3,
             "and the shaper still did its job: the dead endpoint was not re-asked 40 times"
         );
+    }
+
+    /// Issue #613's review, finding F: a node with both `[settlement.evm]`
+    /// and `[settlement.solana]` has two endpoints that fail independently,
+    /// so the outage precedence above must be keyed by chain. With one slot
+    /// shared between them, a Solana outage made an *EVM* refusal quote the
+    /// Solana endpoint's error -- a worse diagnosis than the one it
+    /// replaced, because it names a real outage that has nothing to do with
+    /// the claim being refused.
+    #[tokio::test]
+    async fn one_chains_outage_does_not_explain_the_other_chains_refusal() {
+        let evm = Arc::new(FakeChannelSource::knowing(vec![]));
+        let solana = Arc::new(super::test_source::FakeSolanaChannelSource::unreachable(
+            "solana rpc: connection refused",
+        ));
+        let registry = ClientChannelRegistry::new()
+            .with_source(evm.clone())
+            .with_solana_source(solana.clone())
+            .with_lookup_budget(shaped(2, 2));
+        let buyer = "evm:0xdddddddddddddddddddddddddddddddddddddddd";
+
+        // Solana's endpoint is down, and says so.
+        assert_eq!(
+            registry.solana(&[0x01; 32], buyer).await,
+            Err(ChannelLookupFailed("solana rpc: connection refused".to_string()).into())
+        );
+        // EVM's is fine -- it simply has no such channel. That spends the
+        // rest of the shared node-wide drain.
+        assert_eq!(registry.evm(&[0x02; 32], buyer).await, Ok(None));
+
+        // Now the drain is saturated. The EVM refusal must be a budget: EVM
+        // is not the chain that is down.
+        assert!(
+            matches!(
+                registry.evm(&[0x03; 32], buyer).await,
+                Err(ChannelResolutionError::Budgeted(_))
+            ),
+            "an EVM refusal must not borrow the Solana endpoint's outage"
+        );
+        // ...and the Solana refusal still is the outage, because Solana is.
+        assert_eq!(
+            registry.solana(&[0x04; 32], buyer).await,
+            Err(ChannelLookupFailed("solana rpc: connection refused".to_string()).into())
+        );
+    }
+
+    /// The hold, end to end through the registry rather than through the
+    /// shaper alone: a lookup past the burst is *held* and then reaches the
+    /// chain, which is what makes "delayed, not denied" a fact about the
+    /// packet path rather than about a number.
+    ///
+    /// `start_paused`, so the hold is real and instant -- and so this also
+    /// stands as the proof that mounting this crate needs a time-enabled
+    /// runtime.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_lookup_still_reaches_the_chain() {
+        let honest_channel = [0x77; 32];
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            honest_channel,
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            // One slot a second, and a two-second ceiling, so the arrival
+            // after the burst is held rather than refused.
+            .with_lookup_budget(UnresolvableLookupBudgetPolicy {
+                per_signer: u32::MAX,
+                total: 60,
+                window: Duration::from_secs(60),
+                max_wait: Duration::from_secs(2),
+            });
+
+        for request in 0..60 {
+            assert_eq!(
+                registry
+                    .evm(&a_nonexistent_channel(request), "evm:0xflood")
+                    .await,
+                Ok(None),
+                "burst request {request}"
+            );
+        }
+
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            registry.evm(&honest_channel, A_BUYER).await,
+            Ok(Some(evm_channel())),
+            "the honest buyer is held for a slot and then served"
+        );
+        let waited = tokio::time::Instant::now().duration_since(started);
+        assert!(
+            waited >= Duration::from_millis(900),
+            "and the hold really happened: {waited:?}"
+        );
+        assert_eq!(source.lookups(), 61, "the held lookup did reach the chain");
     }
 
     /// ...and once the endpoint comes back, a refusal is a budget again.

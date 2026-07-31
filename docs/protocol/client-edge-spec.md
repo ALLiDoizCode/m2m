@@ -298,9 +298,14 @@ by side: with no bound at all, a flooder costs the connector one chain read per 
 feature keeps working**; with a dropping bound, the same flooder costs the connector nothing and the
 feature is entirely off. A connector's overflow behaviour SHOULD therefore be to **hold the lookup
 for a slot** — a leaky bucket, drained at the configured rate — and to refuse only a lookup whose
-slot is further out than a bounded wait it will hold one for. The chain still sees at most the
-configured rate, which is the only thing the bound was ever for; a legitimate buyer arriving during a
-flood is delayed rather than denied, and a client that retries gets through.
+slot is further out than a bounded wait it will hold one for. The chain sees the configured rate,
+which is the only thing the bound was ever for; a legitimate buyer arriving during a flood is
+delayed rather than denied, and a client that retries gets through.
+
+Stated precisely, since it is the figure an operator sizes an endpoint against: the **sustained**
+rate is the configured one, and any single window may see up to the burst *plus* a window's drain —
+roughly twice it — when a flood arrives at an idle connector. That is inherent to tolerating a burst
+at all, and a connector SHOULD document it rather than quote the sustained figure alone.
 
 Three further properties follow, and each is a way of keeping the intended user working:
 
@@ -367,10 +372,20 @@ signer is the best that can be done:
 The rates and the wait are a **deployment** choice for the same reason the three durations above are
 — what a connector can afford to spend discovering channels that do not exist depends on the
 settlement endpoint it pays for, and it should be derived from that endpoint's real capacity rather
-than picked for tidiness. A connector SHOULD make them configurable and SHOULD refuse, at load, a
-zero rate (which switches §1.2's path off entirely, silently, under a number that reads as a
-tightening), a zero window (which makes every rate infinite and the bound nothing), and a zero wait
-(which converts the shaper back into the dropper this section rejects).
+than picked for tidiness. The arithmetic is worth doing rather than eyeballing: at a common metered
+schedule of 26 compute units per `eth_call`, ten lookups a second sustained is 864,000 lookups and
+about 22.5M CU a day — over a 300M/month allowance in a fortnight, on discovery traffic alone and
+before the connector's own settlement work. **An operator on a metered endpoint should therefore set
+this rate well below what a self-hosted one would carry**, and lowering it costs an honest buyer
+nothing, since a lookup that resolves returns its slot.
+
+A connector SHOULD make them configurable and SHOULD refuse, at load: a zero rate (which switches
+§1.2's path off entirely, silently, under a number that reads as a tightening); a zero window (which
+makes every rate infinite and the bound nothing); a zero wait (which converts the shaper back into
+the dropper this section rejects); and a wait longer than the window — the wait is not a timeout but
+the **size of the waiting room**, since a room drained at the configured rate and holding a lookup
+for that long parks more than a whole window's worth of them, which is more memory than the bound is
+worth and a delay no packet's own deadline would survive.
 
 **A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
 it compares against survives a restart: a connector that forgets a channel's watermark compares

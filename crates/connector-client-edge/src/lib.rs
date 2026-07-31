@@ -74,7 +74,8 @@ pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 pub use lookup_budget::{
     LookupBudgetBound, LookupBudgetExhausted, UnresolvableLookupBudget,
     UnresolvableLookupBudgetPolicy, DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER,
-    DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL, DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW,
+    DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL, DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT,
+    DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
 
 const OCTET_STREAM: &str = "application/octet-stream";

@@ -311,4 +311,22 @@ pub enum ConfigError {
          the default, or set the milliseconds a lookup may wait for its turn"
     )]
     ZeroUnresolvableLookupMaxWait,
+
+    #[error(
+        "unresolvable_lookup_budget_max_wait_ms is {max_wait_ms} but \
+         unresolvable_lookup_budget_window_secs is {window_secs} (either as written or by \
+         default): the wait ceiling is the size of the waiting room, not just a timeout -- a \
+         room drained at the configured rate and holding a lookup for {max_wait_ms} ms parks \
+         more than a whole window's worth of them, which is more memory than the bound is worth \
+         and a wait no packet's own deadline would survive (issue #613). Set it to at most the \
+         window"
+    )]
+    UnresolvableLookupMaxWaitAboveWindow { max_wait_ms: u64, window_secs: u64 },
+
+    #[error(
+        "unresolvable_lookup_budget_window_secs is {window_secs}, above the {max_secs} s this \
+         node will honour: a rate limit whose window outlives the process running it is not a \
+         rate limit, and the arithmetic over it stops fitting an instant (issue #613)"
+    )]
+    UnresolvableLookupWindowTooLong { window_secs: u64, max_secs: u64 },
 }

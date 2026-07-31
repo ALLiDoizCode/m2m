@@ -138,6 +138,13 @@ struct RawConfig {
 /// runtime, so the two cannot drift unnoticed.
 const DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER: u32 = 20;
 const DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL: u32 = 600;
+const DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW_SECS: u64 = 60;
+const DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT_MS: u64 = 2_000;
+
+/// The longest window the client edge will honour -- a day. Restated here
+/// for the same reason the rates are, and pinned to
+/// `MAX_UNRESOLVABLE_LOOKUP_WINDOW` by the same `connector-cli` test.
+const MAX_UNRESOLVABLE_LOOKUP_WINDOW_SECS: u64 = 86_400;
 
 /// A fully loaded, fully validated, immutable connector configuration.
 ///
@@ -267,14 +274,43 @@ impl Config {
             Some(0) => return Err(ConfigError::ZeroUnresolvableLookupBudget { field: "total" }),
             other => other,
         };
-        let unresolvable_lookup_window = match raw.unresolvable_lookup_budget_window_secs {
+        let unresolvable_lookup_window_secs = match raw.unresolvable_lookup_budget_window_secs {
             Some(0) => return Err(ConfigError::ZeroUnresolvableLookupWindow),
-            other => other.map(Duration::from_secs),
+            Some(secs) if secs > MAX_UNRESOLVABLE_LOOKUP_WINDOW_SECS => {
+                return Err(ConfigError::UnresolvableLookupWindowTooLong {
+                    window_secs: secs,
+                    max_secs: MAX_UNRESOLVABLE_LOOKUP_WINDOW_SECS,
+                })
+            }
+            other => other,
         };
-        let unresolvable_lookup_max_wait = match raw.unresolvable_lookup_budget_max_wait_ms {
+        let unresolvable_lookup_window = unresolvable_lookup_window_secs.map(Duration::from_secs);
+        let unresolvable_lookup_max_wait_ms = match raw.unresolvable_lookup_budget_max_wait_ms {
             Some(0) => return Err(ConfigError::ZeroUnresolvableLookupMaxWait),
-            other => other.map(Duration::from_millis),
+            other => other,
         };
+        // The wait ceiling is not just a timeout: it *is* the size of the
+        // waiting room, since a room drained at `total / window` and holding
+        // requests for `max_wait` parks `max_wait * total / window` of them.
+        // A ceiling longer than the window therefore parks more than a whole
+        // window's worth of drain, which is both more memory than the bound
+        // is worth and a wait no packet's own deadline could survive. It is
+        // the one budget knob with a coherence rule rather than only a zero
+        // check, and it needs one for exactly the reason the others do:
+        // nothing else in the file would tell an operator they had written
+        // a room ten thousand deep.
+        let effective_window_secs =
+            unresolvable_lookup_window_secs.unwrap_or(DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW_SECS);
+        let effective_max_wait_ms =
+            unresolvable_lookup_max_wait_ms.unwrap_or(DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT_MS);
+        if effective_max_wait_ms > effective_window_secs.saturating_mul(1_000) {
+            return Err(ConfigError::UnresolvableLookupMaxWaitAboveWindow {
+                max_wait_ms: effective_max_wait_ms,
+                window_secs: effective_window_secs,
+            });
+        }
+        let unresolvable_lookup_max_wait =
+            unresolvable_lookup_max_wait_ms.map(Duration::from_millis);
         // A per-signer rate above the node-wide one is not a stricter
         // setting, it is an inert one: the node-wide drain saturates first,
         // every time, so the number written for the per-signer axis could
@@ -1560,6 +1596,96 @@ key_file = "{key_path}"
             result,
             Err(ConfigError::ZeroUnresolvableLookupMaxWait)
         ));
+    }
+
+    /// The wait ceiling is the size of the waiting room, not a timeout, so
+    /// it needs a coherence rule and not only a zero check: a ceiling
+    /// longer than the window parks more than a whole window's worth of
+    /// drain. Issue #613's review, finding C -- it was the one budget knob
+    /// with nothing but a zero check, and nothing else in the file would
+    /// have told an operator they had written a room thousands deep.
+    #[test]
+    fn a_wait_ceiling_longer_than_the_window_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_window_secs = 60
+unresolvable_lookup_budget_max_wait_ms = 600000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnresolvableLookupMaxWaitAboveWindow {
+                max_wait_ms: 600_000,
+                window_secs: 60
+            })
+        ));
+    }
+
+    /// ...and against the *defaults* when only one side is written, for the
+    /// same reason the rates are: a ceiling above the default window is the
+    /// same incoherence spelled one-sidedly.
+    #[test]
+    fn a_one_sided_wait_ceiling_is_validated_against_the_default_window() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_max_wait_ms = 90000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnresolvableLookupMaxWaitAboveWindow { .. })
+        ));
+    }
+
+    /// A window longer than the client edge will honour is refused rather
+    /// than silently clamped: a rate limit whose window outlives the
+    /// process is not a rate limit, and past a point the arithmetic over it
+    /// stops fitting an instant. (The client edge clamps as well, since its
+    /// policy struct is public and reachable without this check -- but a
+    /// value that reached here was *written down*, and silently obeying
+    /// something other than what an operator wrote is what this whole file
+    /// exists not to do.)
+    #[test]
+    fn an_absurdly_long_unresolvable_lookup_window_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_window_secs = 9000000000000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::UnresolvableLookupWindowTooLong {
+                    max_secs: 86_400,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
     }
 
     /// A per-signer rate above the node-wide one is inert rather than

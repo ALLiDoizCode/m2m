@@ -45,15 +45,24 @@
 //!
 //! So the node-wide bound **shapes**: it is a leaky bucket, and a lookup
 //! that arrives with the bucket in arrears **waits for its slot** rather
-//! than being refused. The chain still sees at most
-//! [`UnresolvableLookupBudgetPolicy::total`] reads per
-//! [`window`](UnresolvableLookupBudgetPolicy::window) -- the RPC protection
-//! is unchanged, and that is the only thing the bound was ever for -- but a
-//! legitimate buyer arriving during a flood is *delayed*, not denied. Only
-//! a request whose slot is further out than
-//! [`max_wait`](UnresolvableLookupBudgetPolicy::max_wait) is refused, which
-//! is what keeps the waiting room bounded and keeps a packet's own deadline
-//! reachable.
+//! than being refused. The RPC protection is unchanged, and that is the only
+//! thing the bound was ever for -- but a legitimate buyer arriving during a
+//! flood is *delayed*, not denied. Only a request whose slot is further out
+//! than [`max_wait`](UnresolvableLookupBudgetPolicy::max_wait) is refused,
+//! which is what keeps the waiting room bounded and keeps a packet's own
+//! deadline reachable.
+//!
+//! What "the RPC protection is unchanged" means exactly, since it is the
+//! number an operator sizes an endpoint against: the **sustained** rate is
+//! [`total`](UnresolvableLookupBudgetPolicy::total) per
+//! [`window`](UnresolvableLookupBudgetPolicy::window), and any *single*
+//! window can see up to **`total` burst plus `total` drain**, i.e. roughly
+//! twice the rate, when a flood arrives at an idle node. That is inherent
+//! to tolerating a burst at all -- an idle node has to serve an arriving
+//! crowd immediately or the shaper would be a throttle on ordinary traffic
+//! -- and it is what `a_flood_still_costs_the_chain_only_the_drain_rate`
+//! allows for. Size an endpoint against the sustained figure and expect one
+//! window of twice it.
 //!
 //! # What #654 already bounds, and why it cannot bound this
 //!
@@ -182,22 +191,43 @@ pub const DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER: u32 = 20;
 /// How many unresolvable lookups this connector will perform per window in
 /// total, whoever asks.
 ///
-/// Six hundred a minute -- ten a second sustained -- and the number is
-/// derived from what a settlement endpoint can absorb rather than from
-/// tidiness, because it decides both how much RPC a hostile sender can
-/// spend and how hard they must work to make anybody wait.
+/// Six hundred a minute -- ten a second sustained -- which is the right
+/// default for the endpoint this connector is actually deployed against,
+/// and **too high for a metered plan**. Both halves of that matter, so here
+/// is the arithmetic rather than an adjective.
 ///
-/// Ten `eth_call`s a second is about 260 compute units a second on
-/// Alchemy's published schedule (26 CU for an `eth_call`), inside even the
-/// free tier's throughput cap, and about 0.9M CU a day against a 300M a
-/// month allowance -- so a node whose discovery traffic is *entirely*
-/// hostile, all day, spends single-digit percent of a free plan on it. A
-/// self-hosted endpoint, which is what the devnet boxes run, does not
-/// notice it at all. The first draft of this constant was sixty a minute,
-/// which protected an endpoint nobody was worried about while letting one
-/// request a second put every new buyer in a queue; ten times that raises
-/// the rate a sender must sustain by the same factor, for RPC protection
-/// that is in practice identical.
+/// Ten `eth_call`s a second is 260 compute units a second on Alchemy's
+/// published schedule (26 CU for an `eth_call`). Sustained for a day that
+/// is 864,000 lookups, i.e. **22.5M CU a day, or 674M CU a month** --
+/// against a 300M/month free allowance, **225% of the plan**, on discovery
+/// traffic alone and before the node's own settlement work. On throughput
+/// it is 260 CU/s against a free-tier cap around 330 CU/s: 79% of it, again
+/// leaving little for anything else. (An earlier version of this paragraph
+/// quoted 864,000 as *compute units* rather than lookups and concluded
+/// "single-digit percent of a free plan". It was wrong by a factor of 26,
+/// in the direction that flatters the default, which is the direction a
+/// number like this must never be wrong in.)
+///
+/// The default is nonetheless 600, because the endpoint that matters here
+/// is a **self-hosted** one -- what the devnet boxes run, and what any
+/// operator serious about a paid write path ends up running -- where ten
+/// reads a second is free and the shaping is worth having. What follows for
+/// everyone else is not a caveat but an instruction:
+///
+/// **On a metered plan, lower `unresolvable_lookup_budget_total`.** Staying
+/// inside a 300M CU/month allowance on `eth_call` alone means at most
+/// `300M / 30 / 24 / 60 / 26` ~= **267 a minute**, and that is the whole
+/// allowance; a node that also settles from the same plan wants a fraction
+/// of it. Lowering it costs nothing an honest buyer notices -- a resolution
+/// that succeeds returns its slot, so the drain is only ever spent on
+/// discovery that found nothing -- and it lowers the rate a flooder must
+/// sustain to make anyone wait by the same factor.
+///
+/// The first draft of this constant was sixty a minute, which protected an
+/// endpoint nobody was worried about while letting one request a second put
+/// every new buyer in a queue. Ten times that raises the rate a sender must
+/// sustain by the same factor; what it does not do, and did not do at
+/// sixty, is make the number safe to ignore on a plan that bills.
 pub const DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL: u32 = 600;
 
 /// The window both rates are expressed over -- a minute, matching
@@ -216,6 +246,17 @@ pub const DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW: Duration = Duration::from_secs(60)
 /// turns the shaper back into the dropper this module's doc describes, and
 /// which the config layer refuses.
 pub const DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT: Duration = Duration::from_millis(2_000);
+
+/// The longest window this shaper will honour, whatever it is handed.
+///
+/// A day. Nothing sensible is expressed over longer -- a rate limit whose
+/// window outlives the process it runs in is not a rate limit -- and the
+/// clamp is defensive rather than a policy: [`UnresolvableLookupBudgetPolicy`]
+/// is public, so a caller that is not the config layer (which refuses
+/// anything above this outright) can hand over a window whose arithmetic
+/// overflows an `Instant`. The config layer's refusal is the real answer;
+/// this is the guard for everybody who did not go through it.
+pub const MAX_UNRESOLVABLE_LOOKUP_WINDOW: Duration = Duration::from_secs(86_400);
 
 /// How many unresolvable channel lookups this connector will perform per
 /// window, per declared signer and in total, and how long one may wait for
@@ -259,6 +300,16 @@ impl Default for UnresolvableLookupBudgetPolicy {
 }
 
 impl UnresolvableLookupBudgetPolicy {
+    /// The window every derived figure is computed from, clamped into a
+    /// range whose arithmetic cannot overflow an [`Instant`] -- see
+    /// [`MAX_UNRESOLVABLE_LOOKUP_WINDOW`], and the same reasoning as the
+    /// rate flooring below: this struct is public, and a public struct's
+    /// fields are inputs.
+    fn effective_window(&self) -> Duration {
+        self.window
+            .clamp(Duration::from_millis(1), MAX_UNRESOLVABLE_LOOKUP_WINDOW)
+    }
+
     /// The gap between two node-wide admissions in the steady state.
     ///
     /// `total` is floored at one rather than trusted: this struct is
@@ -266,13 +317,13 @@ impl UnresolvableLookupBudgetPolicy {
     /// zero) can still construct one, and a rate of zero per window is a
     /// division by zero rather than a policy.
     fn node_interval(&self) -> Duration {
-        self.window / self.total.max(1)
+        self.effective_window() / self.total.max(1)
     }
 
     /// The per-signer twin of [`Self::node_interval`], floored for the same
     /// reason.
     fn signer_interval(&self) -> Duration {
-        self.window / self.per_signer.max(1)
+        self.effective_window() / self.per_signer.max(1)
     }
 
     /// The arrears a bucket serves without making anybody wait -- one
@@ -281,7 +332,7 @@ impl UnresolvableLookupBudgetPolicy {
     /// One window flat would admit `rate + 1`, which is harmless and
     /// confusing; a knob documented as "600 per minute" should admit 600.
     fn tolerance(&self, interval: Duration) -> Duration {
-        self.window.saturating_sub(interval)
+        self.effective_window().saturating_sub(interval)
     }
 }
 
@@ -411,8 +462,15 @@ impl Bucket {
     }
 
     /// Claim a slot, advancing the bucket by one emission interval.
+    ///
+    /// `checked_add` rather than `+`: `Instant + Duration` panics on
+    /// overflow, and a bucket is advanced once per admitted lookup for the
+    /// life of the process. Saturating leaves the bucket where it already
+    /// was, which reads as "no further arrears" -- the only safe direction,
+    /// since the alternative is a panic on the packet path.
     fn take(&mut self, now: Instant, interval: Duration) {
-        self.admit_at = self.admit_at.max(now) + interval;
+        let from = self.admit_at.max(now);
+        self.admit_at = from.checked_add(interval).unwrap_or(from);
     }
 
     /// Give a slot back, never rewinding further than `tolerance` before
@@ -970,6 +1028,75 @@ mod tests {
         assert_ne!(node.to_string(), signer.to_string());
         assert_eq!(LookupBudgetBound::Node.as_str(), "node");
         assert_eq!(LookupBudgetBound::Signer.as_str(), "signer");
+    }
+
+    /// The hold itself, end to end through [`UnresolvableLookupBudget::reserve`]
+    /// rather than through `admit` -- so the one genuinely new runtime
+    /// behaviour this module introduces is exercised rather than worked
+    /// around.
+    ///
+    /// Two things are proven here and nowhere else. That a lookup past the
+    /// burst really does *wait* its slot out and then proceed, rather than
+    /// the wait being a number nobody acts on; and that this crate needs a
+    /// **time-enabled tokio runtime**, since `reserve` sleeps -- a fact that
+    /// would otherwise surface as a panic in whatever process first mounted
+    /// this crate's router on a runtime built without `enable_time`.
+    ///
+    /// `start_paused` rather than a real second of wall time: tokio
+    /// auto-advances its own clock when the runtime is idle, so the sleep is
+    /// real, its length is asserted exactly, and the test takes microseconds.
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_past_the_burst_is_held_for_its_slot_and_then_proceeds() {
+        // Sixty per sixty seconds is one a second, so the first arrival past
+        // the burst waits exactly one second.
+        let budget = UnresolvableLookupBudget::new(policy(1_000, 60));
+        for request in 0..60 {
+            let _ = budget
+                .reserve("evm:0xaaaa")
+                .await
+                .unwrap_or_else(|_| panic!("burst request {request}"));
+        }
+
+        let started = tokio::time::Instant::now();
+        let _held = budget
+            .reserve("evm:0xaaaa")
+            .await
+            .expect("held for a slot, not refused");
+        let waited = tokio::time::Instant::now().duration_since(started);
+
+        assert!(
+            waited >= Duration::from_millis(900),
+            "the lookup was supposed to be held for about a second: {waited:?}"
+        );
+        assert!(
+            waited <= Duration::from_millis(1_100),
+            "...and for about a second, not for the whole window: {waited:?}"
+        );
+    }
+
+    /// ...and a hold that would exceed the ceiling is refused rather than
+    /// served late, which is what keeps the waiting room bounded. The pair
+    /// of tests is the whole contract of the wait ceiling.
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_past_the_wait_ceiling_is_refused_rather_than_held() {
+        let budget = UnresolvableLookupBudget::new(UnresolvableLookupBudgetPolicy {
+            per_signer: 1_000,
+            total: 60,
+            window: Duration::from_secs(60),
+            // One interval's grace, so the second arrival past the burst is
+            // already too far out.
+            max_wait: Duration::from_millis(1_100),
+        });
+        for _ in 0..60 {
+            let _ = budget.reserve("evm:0xaaaa").await.expect("the burst");
+        }
+        let _held = budget.reserve("evm:0xaaaa").await.expect("one second out");
+
+        let refused = budget
+            .reserve("evm:0xaaaa")
+            .await
+            .expect_err("two seconds out is past the ceiling");
+        assert_eq!(refused.bound, LookupBudgetBound::Node);
     }
 
     /// A policy built by hand rather than by the config layer -- which
