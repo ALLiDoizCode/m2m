@@ -60,6 +60,17 @@
 //!   decode, is an error out of [`ClientClaimGate::restore`] -- the node
 //!   refuses to start rather than starting from zero, since starting from
 //!   zero is precisely the defect.
+//! * Every watermark -- live and journaled -- is filed under the
+//!   *canonical* channel key `connector_domain::client_claim::canonical_channel_key`
+//!   produces, never the literal text a claim happened to arrive with
+//!   (issue #643). One channel has many spellings (`channelId` is
+//!   case-insensitive hex), every other stage of this gate already treats
+//!   them as one channel, and a watermark that did not would hand a
+//!   client a fresh empty watermark per spelling -- one signed claim,
+//!   accepted once per casing. [`replay_watermarks`] canonicalises on the
+//!   way *out* of the journal too, so a node upgrading onto this build
+//!   recovers the watermarks its existing journal already holds instead
+//!   of orphaning them at a key nothing looks up any more.
 //! * A claim whose acceptance cannot be made durable is **refused**
 //!   ([`ClaimIngestRejection::NotDurable`]) and advances nothing, rather
 //!   than accepted against an in-memory watermark a crash would erase. The
@@ -75,7 +86,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use connector_domain::client_claim::{
-    parse_client_claim, ClientClaim, ClientClaimError, EvmClientClaim, SolanaClientClaim,
+    canonical_channel_key, parse_client_claim, ClientClaim, ClientClaimError, EvmClientClaim,
+    SolanaClientClaim,
 };
 use connector_domain::{
     advance_watermark, validate_claim, validate_price, ClaimError, JournalEntry, Watermark,
@@ -242,11 +254,16 @@ impl ClientClaimGate {
     /// chain-namespaced key `ClientClaim::channel_key` produces), or `None`
     /// if it has never accepted a claim on that channel. Read-only: the
     /// only thing that advances a watermark is a fully accepted claim.
+    ///
+    /// Canonicalised on the way in (issue #643), so asking for a channel
+    /// in one spelling and having been paid on it in another cannot answer
+    /// `None` -- the same rule the write side files under, applied to the
+    /// read.
     pub fn watermark(&self, channel_key: &str) -> Option<Watermark> {
         self.watermarks
             .read()
             .expect("client claim watermarks lock poisoned")
-            .get(channel_key)
+            .get(&canonical_channel_key(channel_key))
             .copied()
     }
 
@@ -398,6 +415,24 @@ fn check_freshness_and_value(
 /// Entries of other kinds are ignored rather than refused: the entry
 /// alphabet is shared with the peer wire, and this gate is only the
 /// authority on the ones it writes.
+///
+/// **Every key is canonicalised as it is folded** (issue #643), which is
+/// what makes that fix safe to deploy onto a node whose journal already
+/// has entries in it. Nothing on disk is rewritten and no entry is
+/// migrated: the file stays append-only, exactly as ADR 0005 has it, and
+/// an old line still decodes. It is the *fold* that normalises, so a
+/// watermark written under a pre-#643 build is recovered under the key
+/// this build files it by, rather than orphaned at a spelling nothing
+/// looks up any more -- and an orphaned watermark is worse than the bug
+/// it was meant to fix, since a channel recovered at `None` accepts every
+/// nonce its client already spent.
+///
+/// The componentwise `max` above is what makes the merge sound in the one
+/// case where a pre-#643 journal holds *several* spellings of one
+/// channel -- i.e. a journal where the defect was actually exercised. They
+/// collapse into one key at the highest nonce and amount either of them
+/// ever reached, so the upgrade can only ever tighten what this gate will
+/// accept next, never loosen it.
 fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, Watermark> {
     let mut watermarks: HashMap<String, Watermark> = HashMap::new();
     for entry in entries {
@@ -410,10 +445,12 @@ fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, Watermark> {
         else {
             continue;
         };
-        let watermark = watermarks.entry(channel_id.clone()).or_insert(Watermark {
-            nonce: 0,
-            cumulative_amount: 0,
-        });
+        let watermark = watermarks
+            .entry(canonical_channel_key(channel_id))
+            .or_insert(Watermark {
+                nonce: 0,
+                cumulative_amount: 0,
+            });
         watermark.nonce = watermark.nonce.max(*nonce);
         watermark.cumulative_amount = watermark.cumulative_amount.max(*cumulative_amount);
     }
@@ -1057,10 +1094,10 @@ mod tests {
             .ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 100), 100)
             .await
             .expect("a channel the chain knows about is payable without a config edit");
-        assert_eq!(
-            accepted.channel_key(),
-            format!("evm:{}", unrecorded_channel_id())
-        );
+        // The canonical key (issue #643): the namespace, then the id's
+        // 32 bytes as lower-case hex with no `0x` -- not the literal text
+        // the claim spelled its `channelId` with.
+        assert_eq!(accepted.channel_key(), format!("evm:{}", "ef".repeat(32)));
     }
 
     /// The forger rule survives the new source: a claim signed by a key
@@ -1500,6 +1537,160 @@ mod tests {
 
     // -- Watermark durability across a restart (issue #605) --
 
+    /// Issue #643: a watermark is filed under the channel, not under the
+    /// text a claim spelled the channel with. Every stage of this gate
+    /// except the watermark already agreed that `0xAB..` and `0xab..` are
+    /// one channel -- the registry resolves the counterparty from the
+    /// decoded bytes, and the EIP-712 digest is computed over those same
+    /// bytes, so a recased claim carries a signature that still verifies.
+    /// The watermark disagreeing was worth one free write per casing.
+    mod canonical_channel_ids {
+        use super::*;
+
+        /// The same `channel_id()` an accepted claim named, retyped in
+        /// upper case. Byte-for-byte a different string; the same 32-byte
+        /// channel.
+        fn upper_cased_channel_id() -> String {
+            format!("0x{}", "AB".repeat(32))
+        }
+
+        fn mixed_case_channel_id() -> String {
+            format!("0x{}", "aB".repeat(32))
+        }
+
+        /// The defect, exactly as issue #643 states it: one signed claim,
+        /// presented twice, differing only in the casing of its
+        /// `channelId`. On a tree without the fix the second presentation
+        /// lands on a fresh, empty watermark and is **accepted** -- the
+        /// client is served twice for one claim.
+        #[tokio::test]
+        async fn the_same_claim_re_presented_in_a_different_hex_casing_is_refused_as_stale() {
+            let gate = gate();
+            gate.ingest(&evm_claim_json(&channel_id(), 5, 500), 0)
+                .await
+                .expect("the first presentation is a genuine fresh claim");
+
+            assert_eq!(
+                gate.ingest(&evm_claim_json(&upper_cased_channel_id(), 5, 500), 0)
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+            assert_eq!(
+                gate.ingest(&evm_claim_json(&mixed_case_channel_id(), 5, 500), 0)
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+        }
+
+        /// N presentations do not buy N writes: after one claim at nonce
+        /// 5, *nothing* at or below 5 is accepted in any spelling, which
+        /// is the property "a fresh watermark per casing" destroyed.
+        #[tokio::test]
+        async fn a_recased_channel_id_does_not_open_a_second_watermark() {
+            let gate = gate();
+            gate.ingest(&evm_claim_json(&channel_id(), 5, 500), 0)
+                .await
+                .expect("first claim accepted");
+
+            for nonce in 1..=5 {
+                assert_eq!(
+                    gate.ingest(&evm_claim_json(&upper_cased_channel_id(), nonce, 500), 0)
+                        .await,
+                    Err(ClaimIngestRejection::NonceNotAdvancing),
+                    "nonce {nonce} in a different casing must not be a fresh channel"
+                );
+            }
+        }
+
+        /// The fix normalises a key; it does not refuse a spelling. A
+        /// client that has always sent upper-case hex is still a paying
+        /// client -- its claim resolves the same channel record and
+        /// verifies under the same digest -- and simply advances the same
+        /// watermark a lower-case one would.
+        #[tokio::test]
+        async fn an_upper_cased_channel_id_is_still_a_perfectly_good_claim() {
+            let gate = gate();
+            gate.ingest(&evm_claim_json(&upper_cased_channel_id(), 1, 100), 100)
+                .await
+                .expect("casing is not a validity question");
+
+            // ... and it advanced the one watermark, so the lower-case
+            // spelling of the same channel is now judged against it.
+            assert_eq!(
+                gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+        }
+
+        /// The read side agrees with the write side: a watermark reached
+        /// through one spelling is visible through the other, so nothing
+        /// downstream can conclude a paid channel has never been paid on.
+        #[tokio::test]
+        async fn a_watermark_reads_back_the_same_whichever_spelling_asks_for_it() {
+            let gate = gate();
+            gate.ingest(&evm_claim_json(&channel_id(), 7, 700), 0)
+                .await
+                .expect("accepted");
+
+            let expected = Some(Watermark {
+                nonce: 7,
+                cumulative_amount: 700,
+            });
+            assert_eq!(gate.watermark(&format!("evm:{}", channel_id())), expected);
+            assert_eq!(
+                gate.watermark(&format!("evm:{}", upper_cased_channel_id())),
+                expected
+            );
+            assert_eq!(
+                gate.watermark(&format!("evm:{}", "ab".repeat(32))),
+                expected,
+                "the 0x-stripped spelling names the same channel too"
+            );
+        }
+
+        /// Recasing does not merge two channels either: a genuinely
+        /// different channel still gets its own watermark, so the fix
+        /// closes a replay hole without inventing a shared one.
+        #[tokio::test]
+        async fn two_genuinely_different_channels_still_have_independent_watermarks() {
+            let gate = gate();
+            gate.ingest(&evm_claim_json(&upper_cased_channel_id(), 9, 900), 0)
+                .await
+                .expect("first channel");
+
+            assert!(gate
+                .ingest(&evm_claim_json(&second_channel_id(), 1, 10), 0)
+                .await
+                .is_ok());
+        }
+
+        /// Solana is untouched, and must stay untouched: base58 is
+        /// case-*sensitive*, so lower-casing a `channelAccount` would name
+        /// a different account. This is here to fail loudly if the EVM
+        /// rule is ever generalised across namespaces.
+        #[tokio::test]
+        async fn a_solana_claim_is_unaffected_by_the_evm_canonicalisation() {
+            let gate = gate();
+            gate.ingest(
+                &genuine_solana_claim_json(&SOLANA_CHANNEL_ACCOUNT, 4, 400),
+                0,
+            )
+            .await
+            .expect("accepted");
+
+            assert_eq!(
+                gate.watermark(&format!(
+                    "solana:{}",
+                    base58_encode(&SOLANA_CHANNEL_ACCOUNT)
+                )),
+                Some(Watermark {
+                    nonce: 4,
+                    cumulative_amount: 400
+                })
+            );
+        }
+    }
+
     mod durability {
         use super::*;
 
@@ -1697,6 +1888,149 @@ mod tests {
                 .is_ok());
         }
 
+        /// Issue #643's *upgrade* case, and the one that decides whether
+        /// that fix is safe to ship to the live fleet: a devnet node's
+        /// journal already holds watermarks written by a pre-#643 build,
+        /// under whatever spelling the paying client happened to use. If
+        /// changing the key format orphaned those, every live node's
+        /// watermarks would silently come back `None` on the first
+        /// restart, and `validate_claim(None, ..)` accepts every nonce the
+        /// client already spent -- reopening, fleet-wide and all at once,
+        /// exactly the hole #643 closes.
+        ///
+        /// It does not, because [`replay_watermarks`] canonicalises as it
+        /// folds: the legacy line is read exactly as written and lands
+        /// under the key this build files by.
+        #[tokio::test]
+        async fn a_legacy_spelled_watermark_still_refuses_a_replay_after_the_upgrade() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+            let legacy_key = format!("evm:0x{}", "AB".repeat(32));
+
+            // Exactly what a pre-#643 build wrote: the claim's own literal
+            // `channelId`, namespaced. Written through `FileJournal` so
+            // this is the real on-disk encoding, not a hand-rolled line.
+            {
+                let journal = FileJournal::open(&path).expect("open the journal file");
+                journal
+                    .append(&JournalEntry::InboundClaimAccepted {
+                        channel_id: legacy_key.clone(),
+                        nonce: 12,
+                        cumulative_amount: 1200,
+                        signature: vec![0xde, 0xad, 0xbe, 0xef],
+                    })
+                    .expect("append a legacy entry");
+            }
+
+            let upgraded = file_gate(&path);
+
+            // The watermark survived the upgrade, under the canonical key.
+            assert_eq!(
+                upgraded.watermark(&format!("evm:{}", channel_id())),
+                Some(Watermark {
+                    nonce: 12,
+                    cumulative_amount: 1200
+                }),
+                "a pre-#643 watermark must not be orphaned by the upgrade"
+            );
+
+            // And it is still enforced: the client's already-spent claim
+            // is refused in the spelling it was spent in *and* in the one
+            // it was recorded in.
+            assert_eq!(
+                upgraded
+                    .ingest(&evm_claim_json(&channel_id(), 12, 1200), 0)
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+            assert_eq!(
+                upgraded
+                    .ingest(
+                        &evm_claim_json(&format!("0x{}", "AB".repeat(32)), 12, 1200),
+                        0
+                    )
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+
+            // A genuinely advancing claim still pays, so the upgrade cost
+            // the honest client nothing.
+            assert!(upgraded
+                .ingest(&evm_claim_json(&channel_id(), 13, 1300), 0)
+                .await
+                .is_ok());
+        }
+
+        /// The other shape a live journal can be in: one written by a
+        /// pre-#643 build that was *actually exploited*, so it carries
+        /// several spellings of one channel, each with its own watermark.
+        /// The fold merges them at the componentwise maximum -- the
+        /// highest nonce and amount anyone ever reached on that channel --
+        /// so the upgrade strictly tightens what comes next. It never
+        /// resumes at the lower of the two, which would hand the client
+        /// back the gap between them.
+        #[tokio::test]
+        async fn several_legacy_spellings_of_one_channel_merge_at_the_highest_watermark() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+
+            {
+                let journal = FileJournal::open(&path).expect("open the journal file");
+                for (spelling, nonce, amount) in [
+                    (format!("evm:0x{}", "ab".repeat(32)), 4u64, 400u64),
+                    (format!("evm:0x{}", "AB".repeat(32)), 9, 900),
+                    (format!("evm:0x{}", "aB".repeat(32)), 6, 600),
+                ] {
+                    journal
+                        .append(&JournalEntry::InboundClaimAccepted {
+                            channel_id: spelling,
+                            nonce,
+                            cumulative_amount: amount,
+                            signature: vec![0x01],
+                        })
+                        .expect("append a legacy entry");
+                }
+            }
+
+            let upgraded = file_gate(&path);
+            assert_eq!(
+                upgraded.watermark(&format!("evm:{}", channel_id())),
+                Some(Watermark {
+                    nonce: 9,
+                    cumulative_amount: 900
+                })
+            );
+            assert_eq!(
+                upgraded
+                    .ingest(&evm_claim_json(&channel_id(), 9, 900), 0)
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing)
+            );
+        }
+
+        /// A journal entry whose channel is in no namespace this build
+        /// canonicalises -- the peer wire shares the entry alphabet -- is
+        /// folded byte for byte. Canonicalisation must never invent a
+        /// channel out of a key it does not recognise.
+        #[test]
+        fn a_journal_entry_in_no_known_namespace_folds_under_its_own_key() {
+            let replayed = replay_watermarks(&[JournalEntry::InboundClaimAccepted {
+                channel_id: "channel-a".to_string(),
+                nonce: 3,
+                cumulative_amount: 30,
+                signature: Vec::new(),
+            }]);
+
+            assert_eq!(
+                replayed.get("channel-a"),
+                Some(&Watermark {
+                    nonce: 3,
+                    cumulative_amount: 30
+                })
+            );
+            assert_eq!(replayed.len(), 1);
+        }
+
         /// A claim this connector cannot durably record is refused, not
         /// accepted against a watermark that only exists in this process
         /// -- accepting it would be exactly the defect, one restart later.
@@ -1840,7 +2174,10 @@ mod tests {
             else {
                 panic!("expected an accepted-claim entry, got {:?}", entries[0]);
             };
-            assert_eq!(channel_id, &format!("evm:{}", super::channel_id()));
+            // Journaled under the canonical key (issue #643), so a
+            // replay of this file files the watermark exactly where a
+            // live acceptance would have.
+            assert_eq!(channel_id, &format!("evm:{}", "ab".repeat(32)));
             assert_eq!(*nonce, 3);
             assert_eq!(*cumulative_amount, 300);
             assert_eq!(
