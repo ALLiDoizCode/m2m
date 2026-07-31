@@ -73,7 +73,7 @@ peers:
     relation: peer
     authToken: ''
     chain: evm:84532
-    settlementAddress: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+    settlementAddress: '0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff'
 
 routes:
   - prefix: g.toon.relay

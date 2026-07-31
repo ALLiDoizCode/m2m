@@ -73,9 +73,9 @@ services:
       # connector's distinct identity (STORE_TOON_MNEMONIC acct 0).
       RELAY_PUBLISH_DEST: g.toon.relay
       PUBLIC_BTP_ENDPOINT: wss://proxy.store.devnet.toonprotocol.dev:443
-      SETTLE_EVM: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
-      SETTLE_SOL: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
-      SETTLE_MINA: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
+      SETTLE_EVM: '0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff'
+      SETTLE_SOL: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV'
+      SETTLE_MINA: 'B62qkWSoKW4ewE2Wn7ibgtXz6TV72L22YVGoz2bL5x3yu4FsUipdQG8'
       # NOTE (Stage 5): the DVM advertises per-byte pricing (basePricePerByte,
       # default 10 µUSDC/byte) while the connector route pins a flat price '1000'.
       # Reconcile these — set FEE_PER_JOB / KIND_PRICING_5094 here to match the
