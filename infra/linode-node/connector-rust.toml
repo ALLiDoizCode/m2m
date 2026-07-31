@@ -180,8 +180,7 @@ price = 1000
 # watermark is journaled under `state_dir` like a declared channel's
 # (issue #605).
 
-[settlement]
-chain = "evm"
+[settlement.evm]
 # The same known-good public endpoint ./connector.yaml already uses.
 rpc_url = "https://base-sepolia-rpc.publicnode.com"
 # The deployed `TokenNetworkRegistry` (issue #566) — a factory, not a
@@ -195,7 +194,7 @@ token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 # own `decimals()` and refuses to boot on disagreement (issue #564).
 decimals = 6
 
-[settlement.key]
+[settlement.evm.key]
 # Deliberately NOT the [signer] key above: the signer key is per-box
 # random material with no funds, while settlement signs transactions that
 # spend real testnet value. This file holds the fleet's funded settlement
@@ -204,3 +203,22 @@ decimals = 6
 # mounted read-only exactly like ./signer-rust.key — including its
 # `chown 10001:10001`.
 key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+# Solana devnet public RPC -- the cluster the deployed payment-channel
+# program below lives on.
+rpc_url = "https://api.devnet.solana.com"
+# The deployed `payment-channel` program (`packages/solana-program`) on
+# solana:devnet -- the same instance the TS fleet already drives.
+program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+# 6-decimal devnet USDC mint (ADR 0010) -- the fleet-wide settlement asset.
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+decimals = 6
+
+[settlement.solana.key]
+# The fleet's funded Solana settlement account: the TS fleet's
+# mnemonic-index-0 account CVZRVzvRppQQ5n6UW4rNAG4sX4wPdDQoW6bZtVXfPnzY,
+# provisioned on the box as ./settlement-solana-rust.key (a 32-byte ed25519
+# seed as 64 hex chars, same shape as ./settlement-rust.key) and mounted
+# read-only. Solana settlement wired end to end in connector#633.
+key_file = "/app/data/settlement-solana.key"

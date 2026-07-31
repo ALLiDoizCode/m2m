@@ -8,7 +8,7 @@
 # CONFIG_FILE"; this takes a TOML path as argv. Swapping what a tag means in
 # place is the one shape that cutover design rules out.
 #
-# Published to GHCR as ghcr.io/toon-protocol/connector-rust by
+# Published to GHCR as ghcr.io/toon-protocol/connector (rust-* tags) by
 # .github/workflows/publish-connector-rust-image.yml (issue #487), tagged by
 # content (`sha-<short-sha>`) rather than by version — no crate under crates/
 # has a release process yet (every Cargo.toml is still 0.1.0), so a semver tag
