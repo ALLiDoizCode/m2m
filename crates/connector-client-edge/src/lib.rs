@@ -66,7 +66,7 @@ mod channels;
 mod claim_gate;
 pub use channels::{
     ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource, DepositFloor, EvmChannel,
-    InvalidChannelIdentifier, SolanaChannel,
+    InvalidChannelIdentifier, SolanaChannel, DEFAULT_LIVENESS_TTL,
 };
 pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
 

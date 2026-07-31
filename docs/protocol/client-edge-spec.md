@@ -216,6 +216,15 @@ never reaches the terminating app:
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
 
+**A resolved channel's mutable facts expire.** The counterparty and signing domain a resolution
+reports are immutable on chain, but the same resolution also asserts two things that are not — that
+the channel has not `Settled`, and that its token/mint is the one this node settles in
+([issue #649](https://github.com/toon-protocol/connector/issues/649)). A connector that memoises a
+resolution therefore MUST re-verify it periodically, or a channel resolved while open and settled
+afterwards keeps buying writes for the life of the process, with the settled-channel refusal
+(step 4) silently bypassed. Re-verification and the deposit re-read above are one mechanism: a
+refresh reports liveness and deposit together.
+
 **A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
 it compares against survives a restart: a connector that forgets a channel's watermark compares
 against nothing, and `None` accepts every nonce, so every claim the client already spent becomes

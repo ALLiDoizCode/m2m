@@ -2365,6 +2365,93 @@ key_file = "{key_path}"
             );
         }
 
+        /// Issue #649 against a real validator: a channel resolved while it
+        /// was payable, then genuinely closed and settled on chain, must
+        /// stop buying writes. The deployed program zeroes the channel PDA
+        /// on settlement (`processor.rs:635-647`), so the chain's answer
+        /// afterwards is "no such channel" -- but a resolution cache that is
+        /// never invalidated goes on answering from the reading it took
+        /// while the channel was open, for the life of the process.
+        ///
+        /// The registry re-verifies liveness on expiry through the same
+        /// refresh path the deposit floor uses; `Duration::ZERO` here makes
+        /// that observable without the test sleeping.
+        #[tokio::test]
+        async fn a_solana_channel_settled_after_resolution_stops_being_accepted() {
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+
+            let opener = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = opener.token_mint();
+            let counterparty = opener
+                .test_counterparty_pubkey()
+                .expect("deploy() holds a counterparty key");
+            // A zero-length challenge period, so this test can settle the
+            // channel for real without waiting one out.
+            let channel = opener
+                .open(counterparty.clone(), Duration::zero())
+                .await
+                .expect("open an instantly-settleable channel");
+            opener
+                .fund(&channel, 1_000)
+                .await
+                .expect("a real on-chain deposit, so the claim below is genuinely collateralized");
+
+            let node_backend = SolanaSettlementBackend::connect(
+                &validator.rpc_url,
+                &opener.test_payer_seed(),
+                program_id,
+                token_mint,
+                6,
+            )
+            .await
+            .expect("connect under the opener's identity, bound to the channel's own mint");
+
+            let gate = ClientClaimGate::restore(
+                ClientChannelRegistry::new()
+                    .with_solana_source(Arc::new(SolanaChannelSource {
+                        backend: Arc::new(node_backend),
+                    }))
+                    .with_liveness_ttl(std::time::Duration::ZERO),
+                Arc::new(InMemoryJournal::new()),
+            )
+            .expect("a fresh in-memory journal has nothing to replay");
+
+            gate.ingest(
+                &solana_claim_json(&opener, &channel, program_id, &counterparty, 1, 100),
+                100,
+            )
+            .await
+            .expect("payable while the channel is open and funded");
+
+            // Genuinely settled on chain: closed, then settled, which the
+            // program completes by zeroing the channel account.
+            opener.close(&channel).await.expect("close the channel");
+            let settled = opener.settle(&channel).await.expect("settle the channel");
+            assert_eq!(settled.status, connector_settlement::ChannelStatus::Settled);
+
+            let rejection = gate
+                .ingest(
+                    &solana_claim_json(&opener, &channel, program_id, &counterparty, 2, 200),
+                    100,
+                )
+                .await
+                .expect_err("a claim on a settled channel can never be redeemed");
+            assert_eq!(
+                rejection,
+                connector_client_edge::ClaimIngestRejection::UnknownChannel,
+                "the settled-channel refusal must not be bypassed by a stale cache: {}",
+                rejection.message()
+            );
+        }
+
         /// The SPL Token program id -- a program that exists, is
         /// executable, and is definitely not the payment-channel program,
         /// on every Solana cluster including a fresh test validator.

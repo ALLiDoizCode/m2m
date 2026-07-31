@@ -115,9 +115,18 @@
 //!   client that funded once and is spending down) costs zero refreshes.
 //! * **Mutable in both directions.** That the channel is not `Settled`, and
 //!   that its mint is the one this node settles in. A memoised *positive*
-//!   answer encodes both, and neither is immutable -- so this memo can
-//!   still answer for a channel that has settled since it was read. That is
-//!   issue #649, tracked separately and fixed on top of this refresh path.
+//!   answer encodes both, and neither is immutable (issue #649): a channel
+//!   resolved while `Opened` that later settles would otherwise keep
+//!   resolving from cache forever, and this connector would go on accepting
+//!   claims that can never be redeemed -- precisely what the resolving
+//!   backends' settled-channel branches exist to refuse. So a resolved
+//!   entry's liveness has an expiry ([`DEFAULT_LIVENESS_TTL`], overridable
+//!   with [`ClientChannelRegistry::with_liveness_ttl`]): once it is older
+//!   than that, the next lookup re-asks the chain through the same refresh
+//!   path the deposit floor uses, and a channel that has since settled (or
+//!   changed mint) is dropped from the cache and refused. That costs at
+//!   most one read per channel per TTL window, and only while the channel
+//!   is actively paying.
 //!
 //! What is *not* memoised at all is any answer that could change to a
 //! *better* one: a lookup failure, and a "no such channel". A buyer who
@@ -135,9 +144,22 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use connector_signer::Address;
+
+/// How long a resolved channel's *mutable* facts -- that it has not
+/// `Settled`, and that its mint is still the one this node settles in --
+/// may be believed without re-reading them from the chain (issue #649).
+///
+/// A minute rather than a process lifetime: settlement is a deliberate,
+/// slow, on-chain act (a close, a challenge period, then a settle), so a
+/// window this size cannot be raced into by an attacker, while one read per
+/// actively-paying channel per minute is not a hot path cost. It is not a
+/// TTL on the *record* -- the counterparty and domain never expire, and a
+/// refresh that succeeds re-uses the same entry.
+pub const DEFAULT_LIVENESS_TTL: Duration = Duration::from_secs(60);
 
 /// What a channel's counterparty has demonstrably put on chain, as far as
 /// this connector knows: the ceiling a claim's cumulative amount may not
@@ -353,7 +375,7 @@ enum ClaimChain {
 ///
 /// See this module's own doc for the two sources a record comes from, and
 /// for why the resolution cache is never invalidated.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClientChannelRegistry {
     evm: HashMap<[u8; 32], EvmChannel>,
     solana: HashMap<[u8; 32], SolanaChannel>,
@@ -363,13 +385,50 @@ pub struct ClientChannelRegistry {
     /// node with no settlement backend: it accepts claims on exactly what
     /// its config file declares, and on nothing else.
     sources: HashMap<ClaimChain, Arc<dyn ClientChannelSource>>,
-    /// Memoised answers from [`Self::sources`] -- see this module's doc for
-    /// which of the facts in one of these entries can go stale.
-    resolved: RwLock<HashMap<[u8; 32], EvmChannel>>,
+    /// Memoised answers from [`Self::sources`], each stamped with when the
+    /// chain last confirmed it -- see this module's doc for which of the
+    /// facts in one of these entries expire and which never do.
+    resolved: RwLock<HashMap<[u8; 32], Resolved<EvmChannel>>>,
     /// The Solana twin of [`Self::resolved`] (issue #631) -- a separate map
     /// since a resolved Solana answer is a [`SolanaChannel`], not an
     /// [`EvmChannel`].
-    resolved_solana: RwLock<HashMap<[u8; 32], SolanaChannel>>,
+    resolved_solana: RwLock<HashMap<[u8; 32], Resolved<SolanaChannel>>>,
+    /// How long a [`Resolved`] entry's liveness may be believed before the
+    /// chain is asked again (issue #649). See [`DEFAULT_LIVENESS_TTL`].
+    liveness_ttl: Duration,
+}
+
+/// A memoised resolution and the moment the chain last confirmed it. The
+/// timestamp is what bounds how long a `Settled` channel can keep being
+/// answered for out of this cache (issue #649).
+#[derive(Debug, Clone, Copy)]
+struct Resolved<T> {
+    channel: T,
+    confirmed_at: Instant,
+}
+
+impl<T: Copy> Resolved<T> {
+    /// The memoised channel, or `None` if its liveness has expired and the
+    /// chain has to be asked again.
+    fn fresh_for(&self, ttl: Duration) -> Option<T> {
+        (self.confirmed_at.elapsed() < ttl).then_some(self.channel)
+    }
+}
+
+impl Default for ClientChannelRegistry {
+    fn default() -> ClientChannelRegistry {
+        ClientChannelRegistry {
+            evm: HashMap::new(),
+            solana: HashMap::new(),
+            sources: HashMap::new(),
+            resolved: RwLock::new(HashMap::new()),
+            resolved_solana: RwLock::new(HashMap::new()),
+            // Hand-written rather than derived precisely for this field: a
+            // derived `Default` would give `Duration::ZERO`, i.e. re-read
+            // the chain on every packet.
+            liveness_ttl: DEFAULT_LIVENESS_TTL,
+        }
+    }
 }
 
 impl ClientChannelRegistry {
@@ -378,6 +437,16 @@ impl ClientChannelRegistry {
     /// this module's own doc comment.
     pub fn new() -> ClientChannelRegistry {
         ClientChannelRegistry::default()
+    }
+
+    /// Believe a resolved channel's liveness for `ttl` rather than
+    /// [`DEFAULT_LIVENESS_TTL`] (issue #649). `Duration::ZERO` re-verifies
+    /// on every lookup -- correct, and one chain read per packet, so it is
+    /// for a test that needs the refresh to be observable rather than for a
+    /// production node.
+    pub fn with_liveness_ttl(mut self, ttl: Duration) -> ClientChannelRegistry {
+        self.liveness_ttl = ttl;
+        self
     }
 
     /// Consult `source` for any EVM channel this registry has no declared
@@ -484,8 +553,11 @@ impl ClientChannelRegistry {
                 .resolved
                 .read()
                 .expect("resolved client channels lock poisoned");
-            if let Some(channel) = resolved.get(channel_id) {
-                return Ok(Some(*channel));
+            if let Some(channel) = resolved
+                .get(channel_id)
+                .and_then(|entry| entry.fresh_for(self.liveness_ttl))
+            {
+                return Ok(Some(channel));
             }
         }
         self.resolve_evm(channel_id).await
@@ -494,12 +566,17 @@ impl ClientChannelRegistry {
     /// Ask the chain about `channel_id` again, whatever is memoised for it
     /// (issues #646, #649), and answer from that fresh reading.
     ///
-    /// The claim gate calls this when a claim **breaches** the memoised
-    /// deposit floor: the floor is a lower bound, so a breach is not yet a
-    /// refusal, it is a reason to look again -- and a counterparty who
-    /// topped up gets their claim honoured on the same submission rather
-    /// than after a restart.
+    /// Two callers, one mechanism. The claim gate calls this when a claim
+    /// **breaches** the memoised deposit floor: the floor is a lower bound,
+    /// so a breach is not yet a refusal, it is a reason to look again --
+    /// and a counterparty who topped up gets their claim honoured on the
+    /// same submission rather than after a restart. [`Self::evm`] calls it
+    /// when an entry's liveness has expired, which is what stops a channel
+    /// that has since `Settled` being answered for out of cache forever.
     ///
+    /// A channel the chain no longer vouches for -- settled, wrong mint,
+    /// gone -- is **removed** from the memo and answered `Ok(None)`, so the
+    /// stale positive cannot be served again by the next packet either.
     /// A declared channel has nothing to refresh: config, not the chain, is
     /// its authority, and it is answered from config exactly as
     /// [`Self::evm`] would.
@@ -533,12 +610,22 @@ impl ClientChannelRegistry {
             .expect("resolved client channels lock poisoned");
         match resolved {
             Some(channel) => {
-                memo.insert(*channel_id, channel);
+                memo.insert(
+                    *channel_id,
+                    Resolved {
+                        channel,
+                        confirmed_at: Instant::now(),
+                    },
+                );
                 Ok(Some(channel))
             }
             None => {
-                // Deliberately not memoised: a channel opened a second
-                // from now must be payable on that sender's next attempt.
+                // "No such channel this connector can be paid on" is
+                // deliberately not memoised as a negative -- a channel
+                // opened a second from now must be payable on that
+                // sender's next attempt -- but a previously *positive*
+                // answer that has become this one is dropped (issue #649).
+                memo.remove(channel_id);
                 Ok(None)
             }
         }
@@ -567,8 +654,11 @@ impl ClientChannelRegistry {
                 .resolved_solana
                 .read()
                 .expect("resolved client channels lock poisoned");
-            if let Some(channel) = resolved.get(channel_account) {
-                return Ok(Some(*channel));
+            if let Some(channel) = resolved
+                .get(channel_account)
+                .and_then(|entry| entry.fresh_for(self.liveness_ttl))
+            {
+                return Ok(Some(channel));
             }
         }
         self.resolve_solana(channel_account).await
@@ -601,10 +691,19 @@ impl ClientChannelRegistry {
             .expect("resolved client channels lock poisoned");
         match resolved {
             Some(channel) => {
-                memo.insert(*channel_account, channel);
+                memo.insert(
+                    *channel_account,
+                    Resolved {
+                        channel,
+                        confirmed_at: Instant::now(),
+                    },
+                );
                 Ok(Some(channel))
             }
-            None => Ok(None),
+            None => {
+                memo.remove(channel_account);
+                Ok(None)
+            }
         }
     }
 }
@@ -641,8 +740,9 @@ pub(crate) mod test_source {
     pub(crate) struct FakeChannelSource {
         /// Behind a lock so a test can play the part of a chain that
         /// *changed* -- a counterparty topping up their deposit (issue
-        /// #646) -- which is the whole subject of the refresh path and
-        /// cannot be expressed by a source fixed at construction.
+        /// #646), or a channel settling (issue #649) -- which is the whole
+        /// subject of the refresh path and cannot be expressed by a source
+        /// fixed at construction.
         channels: Mutex<HashMap<[u8; 32], EvmChannel>>,
         failure: Option<String>,
         lookups: AtomicUsize,
@@ -1183,6 +1283,89 @@ mod tests {
         assert_eq!(source.lookups(), 2);
     }
 
+    /// Issue #649: a channel resolved while it was payable, which the chain
+    /// later stops vouching for -- it settled, or its mint changed -- must
+    /// stop being answered for out of the memo. On a cache that is never
+    /// invalidated this returns the stale positive forever, and the
+    /// connector goes on accepting claims that can never be redeemed.
+    #[tokio::test]
+    async fn a_channel_the_chain_stops_vouching_for_stops_resolving() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_ttl(Duration::ZERO);
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        source.now_says([0x07; 32], None);
+
+        assert_eq!(
+            registry.evm(&[0x07; 32]).await,
+            Ok(None),
+            "a settled channel is not answered for out of a cache that predates the settlement"
+        );
+    }
+
+    /// The Solana twin of the above -- the chain #646 was actually observed
+    /// on, and where a settled channel's PDA is closed outright.
+    #[tokio::test]
+    async fn a_solana_channel_the_chain_stops_vouching_for_stops_resolving() {
+        let source = Arc::new(super::test_source::FakeSolanaChannelSource::knowing(vec![
+            ([0x07; 32], solana_channel()),
+        ]));
+        let registry = ClientChannelRegistry::new()
+            .with_solana_source(source.clone())
+            .with_liveness_ttl(Duration::ZERO);
+
+        assert_eq!(
+            registry.solana(&[0x07; 32]).await,
+            Ok(Some(solana_channel()))
+        );
+        source.now_says([0x07; 32], None);
+
+        assert_eq!(registry.solana(&[0x07; 32]).await, Ok(None));
+    }
+
+    /// Liveness expiry is what bounds how long the stale positive above can
+    /// survive, and the default is a real cache rather than a per-packet
+    /// read: within the window the chain is asked exactly once.
+    #[tokio::test]
+    async fn within_the_liveness_window_the_chain_is_asked_once() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+
+        for _ in 0..5 {
+            assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        }
+        assert_eq!(source.lookups(), 1);
+        assert!(DEFAULT_LIVENESS_TTL > Duration::ZERO);
+    }
+
+    /// A channel that has stopped resolving is *removed* from the memo, not
+    /// merely skipped once: the next packet must not find the stale
+    /// positive sitting there again.
+    #[tokio::test]
+    async fn a_dropped_channel_is_not_still_in_the_memo() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        source.now_says([0x07; 32], None);
+        assert_eq!(registry.refresh_evm(&[0x07; 32]).await, Ok(None));
+
+        // The default TTL has not expired, so this reads the memo -- which
+        // must no longer hold the channel.
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
+    }
+
     /// A declared channel has nothing to refresh: config is its authority,
     /// and a refresh must not turn into the chain lookup #556 promised
     /// declared channels would never need.
@@ -1220,11 +1403,13 @@ mod tests {
         let registry = ClientChannelRegistry::new().with_source(source.clone());
         // Seed the memo by hand: this fake fails every lookup, which is
         // exactly the point -- the entry must survive one.
-        registry
-            .resolved
-            .write()
-            .unwrap()
-            .insert([0x07; 32], evm_channel());
+        registry.resolved.write().unwrap().insert(
+            [0x07; 32],
+            Resolved {
+                channel: evm_channel(),
+                confirmed_at: Instant::now(),
+            },
+        );
 
         assert_eq!(
             registry.refresh_evm(&[0x07; 32]).await,

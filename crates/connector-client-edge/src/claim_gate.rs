@@ -1682,6 +1682,7 @@ mod tests {
         use super::*;
         use crate::channels::test_source::FakeSolanaChannelSource;
         use crate::channels::{DepositFloor, SolanaChannel};
+        use std::time::Duration;
 
         /// A gate over a chain-resolved EVM channel whose counterparty has
         /// `deposit` on chain -- the shape every test here needs, and the
@@ -1907,6 +1908,46 @@ mod tests {
                 .ingest(&genuine_solana_claim_json(&account, 1, 6_000), 0)
                 .await
                 .is_ok());
+        }
+
+        /// Issue #649, at the gate: a channel resolved while it was
+        /// payable, settled on chain afterwards, must stop buying writes.
+        /// On a cache that is never invalidated the claim below is accepted
+        /// -- the settled-channel branch of the resolving backend is
+        /// bypassed for the whole life of the process.
+        #[tokio::test]
+        async fn a_channel_that_settles_after_it_was_resolved_stops_being_accepted() {
+            let (_secret, address) = evm_signer();
+            let source = Arc::new(FakeChannelSource::knowing(vec![(
+                resolved_channel_id(),
+                EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(10_000),
+                },
+            )]));
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(source.clone())
+                    .with_liveness_ttl(Duration::ZERO),
+            );
+
+            gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 100), 100)
+                .await
+                .expect("payable while the channel is open");
+
+            // Settled: the resolving backend now answers "not a channel
+            // this connector can be paid on" -- the same answer it gives
+            // for a wrong-mint or nonexistent channel.
+            source.now_says(resolved_channel_id(), None);
+
+            assert_eq!(
+                gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 2, 200), 100)
+                    .await,
+                Err(ClaimIngestRejection::UnknownChannel),
+                "a claim on a settled channel can never be redeemed, so it buys nothing"
+            );
         }
     }
 
