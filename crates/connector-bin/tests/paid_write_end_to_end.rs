@@ -68,6 +68,12 @@ const ANVIL_BASE_PORT: u16 = 19_000;
 /// the price" claim below is easy to read.
 const ROUTE_PRICE: u128 = 100;
 
+/// The Solana twin of [`ROUTE_PRICE`] -- `u64` because
+/// `packages/solana-program`'s own wire (`SolanaClientClaim::transferred_amount`,
+/// `wire::pack_deposit`) moves value in `u64` SPL-token base units, never
+/// `u128`.
+const SOLANA_ROUTE_PRICE: u64 = 100;
+
 /// Sign `digest` exactly the way the production signing path does
 /// (`connector_signer::crypto::sign_digest`): a 65-byte `r || s || v`
 /// signature with `v` in libsecp256k1's raw `{0, 1}` range, not the
@@ -149,6 +155,35 @@ fn evm_claim_json(
         token_network_address = to_hex(&token_network_address),
     );
     (json, signature)
+}
+
+/// A Solana claim's JSON wire shape (`connector_domain::client_claim::SolanaClientClaim`),
+/// the Solana twin of [`evm_claim_json`] -- `signature_base64` and
+/// `signer_public_key_base58` are supplied rather than derived here, since
+/// a genuine claim and a forged one differ only in which key signs, not in
+/// how the JSON is shaped.
+fn solana_claim_json(
+    channel_account_base58: &str,
+    nonce: u64,
+    transferred_amount: u64,
+    signature_base64: &str,
+    signer_public_key_base58: &str,
+) -> String {
+    format!(
+        r#"{{
+            "version": "1.0",
+            "blockchain": "solana",
+            "messageId": "msg-{nonce}",
+            "timestamp": "2026-02-02T12:00:00.000Z",
+            "senderId": "buyer",
+            "programId": "{signer_public_key_base58}",
+            "channelAccount": "{channel_account_base58}",
+            "nonce": {nonce},
+            "transferredAmount": "{transferred_amount}",
+            "signature": "{signature_base64}",
+            "signerPublicKey": "{signer_public_key_base58}"
+        }}"#
+    )
 }
 
 /// A real, independently queryable app: a genuine `axum` HTTP server bound
@@ -614,6 +649,317 @@ price = {ROUTE_PRICE}
         &forged_claim,
         &forged_prepare,
         "POST /ilp: forged write",
+    )
+    .await;
+    let reject = Reject::decode(&body).expect("decode reject");
+    assert_eq!(reject.code.as_str(), "F01");
+
+    let after_forged = recorded.lock().expect("recorded lock").clone();
+    assert_eq!(
+        after_forged.len(),
+        1,
+        "the forged claim never reached the app -- still exactly the one genuine write"
+    );
+}
+
+/// Issue #631, the Solana twin of
+/// `an_unaffiliated_buyer_pays_for_a_write_with_no_client_channels_configured`
+/// above: a buyer holding only Solana devnet assets pays a write through
+/// the official Rust edge with zero operator config. Everything about this
+/// test is the EVM one minus the chain: a real, disposable
+/// `solana-test-validator` running the real `packages/solana-program`
+/// artifact, a real SPL mint, a real channel opened by the connector's own
+/// on-chain identity naming an unaffiliated buyer as counterparty, and a
+/// real deposit the buyer signs for themselves (the deployed program's
+/// `Deposit` instruction requires the depositing participant's own
+/// signature, unlike `TokenNetwork.setTotalDeposit`'s permissionless
+/// EVM twin -- so this test cannot reuse `EvmSettlementBackend::fund`'s
+/// shape and instead submits that one instruction directly).
+///
+/// On a tree without issue #631 this test fails: the connector holds a
+/// record of no channel, refuses the claim F01 "no record of", and the app
+/// records nothing. The second half proves the guarantee issue #558
+/// established carries over to Solana: a claim on the same, genuinely
+/// on-chain channel, signed by somebody who is not its counterparty, is
+/// still refused.
+#[tokio::test]
+async fn an_unaffiliated_solana_buyer_pays_for_a_write_with_no_client_channels_configured() {
+    use connector_settlement_solana::test_support::{
+        fund, require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
+    };
+    use connector_settlement_solana::wire;
+    use connector_settlement_solana::SolanaSettlementBackend;
+    use solana_client::nonblocking::rpc_client::RpcClient;
+    use solana_sdk::commitment_config::CommitmentConfig;
+    use solana_sdk::instruction::Instruction;
+    use solana_sdk::program_pack::Pack;
+    use solana_sdk::pubkey::Pubkey;
+    use solana_sdk::signature::{Keypair as SolanaSdkKeypair, Signer as SolanaSdkSigner};
+    use solana_sdk::transaction::Transaction;
+    use std::str::FromStr;
+
+    // AC5's own policy, Solana-flavored: fail loudly in CI when the chain
+    // this test needs is unavailable, never silently skip and report
+    // success.
+    if !require_solana_test_validator() {
+        return;
+    }
+
+    let validator = SolanaValidator::spawn().await;
+    let program_id = Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+    let rpc =
+        RpcClient::new_with_commitment(validator.rpc_url.clone(), CommitmentConfig::confirmed());
+
+    // Three real identities: this test's own mint-authority admin role, the
+    // buyer -- an identity the operator has never heard of -- and the
+    // connector's own on-chain identity, known ahead of time (a raw 32-byte
+    // seed) so it can be reused as `[settlement.solana].key`'s key file
+    // below and produce the exact same signing address.
+    let mint_authority = SolanaSdkKeypair::new();
+    let buyer = SolanaSdkKeypair::new();
+    let production_seed = [61u8; 32];
+    let production_payer = solana_sdk::signer::keypair::keypair_from_seed(&production_seed)
+        .expect("derive the production identity from its seed");
+    for pubkey in [
+        mint_authority.pubkey(),
+        buyer.pubkey(),
+        production_payer.pubkey(),
+    ] {
+        fund(&rpc, &pubkey).await;
+    }
+
+    // A fresh 6-decimal SPL mint, matching every token this fleet settles
+    // in (`docs/usdc-cross-chain-settlement.md`) -- never assumed
+    // pre-funded.
+    let mint = SolanaSdkKeypair::new();
+    let rent = rpc
+        .get_minimum_balance_for_rent_exemption(spl_token::state::Mint::LEN)
+        .await
+        .expect("rent exemption for a mint account");
+    let create_mint_account = solana_sdk::system_instruction::create_account(
+        &mint_authority.pubkey(),
+        &mint.pubkey(),
+        rent,
+        spl_token::state::Mint::LEN as u64,
+        &spl_token::id(),
+    );
+    let initialize_mint = spl_token::instruction::initialize_mint2(
+        &spl_token::id(),
+        &mint.pubkey(),
+        &mint_authority.pubkey(),
+        None,
+        6,
+    )
+    .expect("pack initialize_mint2");
+    let recent_blockhash = rpc.get_latest_blockhash().await.expect("recent blockhash");
+    let create_mint_tx = Transaction::new_signed_with_payer(
+        &[create_mint_account, initialize_mint],
+        Some(&mint_authority.pubkey()),
+        &[&mint_authority, &mint],
+        recent_blockhash,
+    );
+    rpc.send_and_confirm_transaction(&create_mint_tx)
+        .await
+        .expect("create and initialize the mint");
+
+    // The buyer's own associated token account, genuinely minted into --
+    // exactly what a buyer who already holds this asset would have before
+    // ever talking to this connector.
+    let buyer_ata =
+        spl_associated_token_account::get_associated_token_address(&buyer.pubkey(), &mint.pubkey());
+    let create_buyer_ata =
+        spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+            &mint_authority.pubkey(),
+            &buyer.pubkey(),
+            &mint.pubkey(),
+            &spl_token::id(),
+        );
+    let mint_to_buyer = spl_token::instruction::mint_to(
+        &spl_token::id(),
+        &mint.pubkey(),
+        &buyer_ata,
+        &mint_authority.pubkey(),
+        &[],
+        1_000_000_000,
+    )
+    .expect("pack mint_to");
+    let recent_blockhash = rpc.get_latest_blockhash().await.expect("recent blockhash");
+    let fund_buyer_tx = Transaction::new_signed_with_payer(
+        &[create_buyer_ata, mint_to_buyer],
+        Some(&mint_authority.pubkey()),
+        &[&mint_authority],
+        recent_blockhash,
+    );
+    rpc.send_and_confirm_transaction(&fund_buyer_tx)
+        .await
+        .expect("mint real SPL-token value into the buyer's own account");
+
+    // The connector's own settlement identity opens the channel -- the
+    // production-shaped path (`InitializeChannel` needs only this side's
+    // signature), naming the buyer as counterparty. This is exactly the
+    // `SolanaSettlementBackend::connect` the spawned binary below builds
+    // from config, sharing its seed, so the channel proven against here is
+    // the one the running node will recognise as its own.
+    let production_side = SolanaSettlementBackend::connect(
+        &validator.rpc_url,
+        &production_seed,
+        program_id,
+        mint.pubkey(),
+        6,
+    )
+    .await
+    .expect("connect the production-shaped identity");
+    let channel = production_side
+        .open(buyer.pubkey().to_bytes().to_vec(), ChronoDuration::hours(1))
+        .await
+        .expect("the connector opens a real channel naming the buyer as counterparty");
+
+    // The buyer deposits real SPL-token value into their own side, signed
+    // by themselves: `packages/solana-program`'s `Deposit` instruction
+    // requires the depositing participant's own signature, so this is
+    // exactly what a real buyer's wallet would submit -- never something
+    // the connector could do on their behalf.
+    let channel_pubkey = Pubkey::from_str(&channel.0).expect("channel id is a Solana pubkey");
+    let (vault, _bump) = wire::vault_pda(&channel_pubkey, &program_id);
+    let deposit_amount: u64 = 10 * SOLANA_ROUTE_PRICE;
+    let deposit_instruction = Instruction::new_with_bytes(
+        program_id,
+        &wire::pack_deposit(deposit_amount),
+        wire::Accounts::deposit(&buyer.pubkey(), &buyer_ata, &vault, &channel_pubkey),
+    );
+    let recent_blockhash = rpc.get_latest_blockhash().await.expect("recent blockhash");
+    let deposit_tx = Transaction::new_signed_with_payer(
+        &[deposit_instruction],
+        Some(&buyer.pubkey()),
+        &[&buyer],
+        recent_blockhash,
+    );
+    rpc.send_and_confirm_transaction(&deposit_tx)
+        .await
+        .expect("the buyer funds their own deposit with a real confirmed transaction");
+
+    let state = production_side
+        .channel_state(&channel)
+        .await
+        .expect("read the funded channel back from the chain");
+    assert_eq!(
+        state.deposited,
+        u128::from(deposit_amount),
+        "a real transaction genuinely moved this value on chain"
+    );
+    drop(production_side);
+
+    // A real app: its own socket, its own process-independent record of
+    // what it received.
+    let (app_addr, recorded) = spawn_recording_app().await;
+
+    // A real, spawned, compiled `connector` binary, started from a config
+    // file naming no `[[client_channels]]` at all -- the only possible
+    // record of the buyer's channel is what this node resolves live from
+    // the chain named in `[settlement.solana]`.
+    let key_file = write_raw_key_file(60);
+    let solana_key_file = write_raw_key_file(61);
+    let config = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.solana]
+rpc_url = "{rpc_url}"
+program_id = "{program_id}"
+token_address = "{token_mint}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{solana_key_file}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://{app_addr}"
+price = {SOLANA_ROUTE_PRICE}
+
+# Deliberately no `[[client_channels]]`: nothing in this file names the
+# buyer, their channel, or its counterparty. Everything the claim is
+# checked against is read from the chain named above.
+"#,
+        key_file = key_file.path().display(),
+        solana_key_file = solana_key_file.path().display(),
+        rpc_url = validator.rpc_url,
+        token_mint = mint.pubkey(),
+    ));
+    let connector = spawn_connector(config.path());
+    let connector_identity = identity_from_key_seed(60);
+
+    let client = reqwest::Client::new();
+    let (data, shared_secret) =
+        sealed_prepare_data(b"unaffiliated solana write", &connector_identity);
+    let prepare = sample_prepare("g.example.app", data, &shared_secret);
+
+    let channel_bytes = channel_pubkey.to_bytes();
+    let genuine_nonce = 1u64;
+    let genuine_message = connector_signer::solana_balance_proof_message(
+        &channel_bytes,
+        genuine_nonce,
+        SOLANA_ROUTE_PRICE,
+    );
+    let genuine_signature = buyer.sign_message(&genuine_message);
+    let claim = solana_claim_json(
+        &channel.0,
+        genuine_nonce,
+        SOLANA_ROUTE_PRICE,
+        &base64_encode(genuine_signature.as_ref()),
+        &buyer.pubkey().to_string(),
+    );
+    let body = post_ilp_packet(
+        &client,
+        &connector.client_edge_addr,
+        &claim,
+        &prepare,
+        "POST /ilp: unaffiliated solana write",
+    )
+    .await;
+    Fulfill::decode(&body).expect(
+        "a Solana buyer whose channel exists only on chain pays without the operator editing \
+         config",
+    );
+
+    let after_paid = recorded.lock().expect("recorded lock").clone();
+    assert_eq!(
+        after_paid.len(),
+        1,
+        "the app recorded the unaffiliated buyer's write"
+    );
+    assert_eq!(after_paid[0].as_ref(), b"unaffiliated solana write");
+
+    // And the guarantee issue #558 established is intact: a claim on the
+    // same, genuinely on-chain channel, signed by somebody who is not its
+    // counterparty, is still refused. Reading the record from a chain
+    // changed where the counterparty comes from, not whether one is
+    // required.
+    let forger = SolanaSdkKeypair::new();
+    let (forged_data, forged_shared) =
+        sealed_prepare_data(b"forged solana write attempt", &connector_identity);
+    let forged_prepare = sample_prepare("g.example.app", forged_data, &forged_shared);
+    let forged_nonce = 2u64;
+    let forged_amount = 2 * SOLANA_ROUTE_PRICE;
+    let forged_message =
+        connector_signer::solana_balance_proof_message(&channel_bytes, forged_nonce, forged_amount);
+    let forged_signature = forger.sign_message(&forged_message);
+    let forged_claim = solana_claim_json(
+        &channel.0,
+        forged_nonce,
+        forged_amount,
+        &base64_encode(forged_signature.as_ref()),
+        &forger.pubkey().to_string(),
+    );
+    let body = post_ilp_packet(
+        &client,
+        &connector.client_edge_addr,
+        &forged_claim,
+        &forged_prepare,
+        "POST /ilp: forged solana write",
     )
     .await;
     let reject = Reject::decode(&body).expect("decode reject");

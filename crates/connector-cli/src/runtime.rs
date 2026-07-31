@@ -368,6 +368,41 @@ impl ClientChannelSource for SettlementChannelSource {
     }
 }
 
+/// The Solana twin of [`SettlementChannelSource`] (issue #631): the client
+/// edge's channel records for a Solana channel nothing was declared for,
+/// read from the same deployed payment-channel program the
+/// `[settlement.solana]` section already names. Epic #627's remaining
+/// piece from #630's own note -- "Solana channel resolution from chain ...
+/// [is] epic #627's remaining children" -- this is that child.
+struct SolanaChannelSource {
+    backend: Arc<SolanaSettlementBackend>,
+}
+
+/// Hand-written for the same reason [`SettlementChannelSource`]'s is:
+/// [`SolanaSettlementBackend`] holds an RPC client that is not `Debug`.
+impl fmt::Debug for SolanaChannelSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SolanaChannelSource")
+            .field("own_pubkey", &self.backend.own_pubkey())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl ClientChannelSource for SolanaChannelSource {
+    async fn solana_channel(
+        &self,
+        channel_account: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
+        let counterparty = self
+            .backend
+            .channel_counterparty(Pubkey::new_from_array(*channel_account))
+            .await
+            .map_err(|error| ChannelLookupFailed(error.to_string()))?;
+        Ok(counterparty.map(|counterparty| counterparty.to_bytes()))
+    }
+}
+
 /// The two journal files a node keeps under its `state_dir` (issue #605).
 /// Two files rather than one because they are two different books --
 /// `ClaimBook`'s channel ids are peer-wire channels, the client edge's are
@@ -413,12 +448,16 @@ fn open_journal(state_dir: &Path, name: &str) -> Result<Arc<dyn Journal>, Runtim
 pub struct Runtime {
     pub connector: Arc<Connector>,
     pub signer: Arc<dyn Signer>,
-    /// Where the client edge resolves a payment channel nothing declared
-    /// (issue #556) -- `Some` exactly when `[settlement]` is configured,
-    /// since the deployed `TokenNetwork` it names is what holds the
-    /// answer. `None` leaves the client edge with only `[[client_channels]]`
-    /// to go on, which is what a node with no settlement backend has.
-    pub client_channel_source: Option<Arc<dyn ClientChannelSource>>,
+    /// Where the client edge resolves an undeclared EVM payment channel
+    /// (issue #556) -- `Some` exactly when `[settlement.evm]` (or the
+    /// legacy `[settlement] chain = "evm"`) is configured, since the
+    /// deployed `TokenNetwork` it names is what holds the answer. `None`
+    /// leaves the client edge with only `[[client_channels]]` to go on for
+    /// EVM claims, which is what a node with no EVM settlement backend has.
+    pub client_channel_source_evm: Option<Arc<dyn ClientChannelSource>>,
+    /// The Solana twin of [`Self::client_channel_source_evm`] (issue #631)
+    /// -- `Some` exactly when `[settlement.solana]` is configured.
+    pub client_channel_source_solana: Option<Arc<dyn ClientChannelSource>>,
     /// The channel-opening facts the x402 greeting carries (issue #617) --
     /// `Some` exactly when `[settlement.evm]` (or the legacy flat
     /// `[settlement]`) is configured, composed here in `build` because that
@@ -474,7 +513,8 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         Arc::new(SystemClock),
     )
     .with_identity_signer(signer.clone());
-    let mut client_channel_source: Option<Arc<dyn ClientChannelSource>> = None;
+    let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
+    let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
     let mut settlements: Vec<connector_client_edge::X402ChainSettlementTerms> = Vec::new();
     for settlement in config.settlements() {
@@ -502,7 +542,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                 settlements.push(connector_client_edge::X402ChainSettlementTerms::Evm(
                     evm_terms,
                 ));
-                client_channel_source = Some(Arc::new(SettlementChannelSource {
+                client_channel_source_evm = Some(Arc::new(SettlementChannelSource {
                     backend: backend.clone(),
                 }));
                 connector = connector
@@ -515,12 +555,15 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                 // executable and proven to behave like the deployed
                 // payment-channel program, mint owned by the SPL Token
                 // program, configured decimals agreeing with the mint's
-                // own) run before this node serves any traffic. No
-                // `ClientChannelSource` yet -- Solana channel resolution
-                // from chain (undeclared channels) is epic #627's #629,
-                // separate from the greeting's per-chain facts this issue
-                // (#632) adds.
+                // own) run before this node serves any traffic.
+                // `ClientChannelSource` now covers Solana too (issue #631),
+                // and the greeting's per-chain settlement facts are
+                // composed here as well (issue #632) -- epic #627's
+                // remaining children, together.
                 let backend = build_solana_settlement_backend(solana).await?;
+                client_channel_source_solana = Some(Arc::new(SolanaChannelSource {
+                    backend: backend.clone(),
+                }));
                 settlements.push(connector_client_edge::X402ChainSettlementTerms::Solana(
                     connector_client_edge::X402SolanaSettlementTerms {
                         chain: "solana".to_string(),
@@ -565,7 +608,8 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     Ok(Runtime {
         connector: Arc::new(connector),
         signer,
-        client_channel_source,
+        client_channel_source_evm,
+        client_channel_source_solana,
         settlement_terms,
         settlements,
     })
@@ -573,17 +617,18 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
 
 /// The channels this node accepts client-edge claims on, and whose
 /// counterparty each claim's signature must recover to (issues #558,
-/// #556): everything `[[client_channels]]` declares, plus -- when
-/// `[settlement]` is configured -- the deployed `TokenNetwork` itself, for
-/// any channel the config file does not mention.
+/// #556, #631): everything `[[client_channels]]` declares, plus -- when
+/// `[settlement.evm]`/`[settlement.solana]` is configured -- that chain's
+/// own deployed contract/program, for any channel the config file does not
+/// mention.
 ///
 /// The two compose rather than replace each other. A declared channel is
 /// still answered from config without touching a chain, so a node with no
 /// settlement backend still declares its channels and a node whose RPC
-/// endpoint is down still serves the channels it wrote down. What the
-/// source adds is the case `[[client_channels]]` cannot express: a buyer
-/// this operator has never heard of, who opened a channel on chain and
-/// wants to pay for a write (issue #502).
+/// endpoint is down still serves the channels it wrote down. What a source
+/// adds is the case `[[client_channels]]` cannot express: a buyer this
+/// operator has never heard of, who opened a channel on chain and wants to
+/// pay for a write (issue #502).
 ///
 /// A node with neither still has a record of no channel and refuses every
 /// claim -- deliberately, since the only alternative to "no record of this
@@ -591,7 +636,8 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
 /// exactly the hole #558 closes.
 fn client_channels(
     config: &Config,
-    source: Option<Arc<dyn ClientChannelSource>>,
+    evm_source: Option<Arc<dyn ClientChannelSource>>,
+    solana_source: Option<Arc<dyn ClientChannelSource>>,
 ) -> ClientChannelRegistry {
     let mut channels = ClientChannelRegistry::new();
     for channel in config.client_channels() {
@@ -617,10 +663,13 @@ fn client_channels(
             }
         }
     }
-    match source {
-        Some(source) => channels.with_source(source),
-        None => channels,
+    if let Some(source) = evm_source {
+        channels = channels.with_source(source);
     }
+    if let Some(source) = solana_source {
+        channels = channels.with_solana_source(source);
+    }
+    channels
 }
 
 /// The client edge's claim gate: the channels this node accepts claims on,
@@ -631,14 +680,15 @@ fn client_channels(
 /// omits `state_dir` and configures a channel to accept claims on: such a
 /// gate refuses every claim as unknown, so it has no watermark to lose.
 ///
-/// `source` is threaded straight through to [`client_channels`] (issue
-/// #556): a gate resolves an undeclared channel from the chain and
-/// journals its watermark like any other, so the unaffiliated buyer's
-/// claims are exactly as replay-proof across a restart as a declared
-/// buyer's are.
+/// `evm_source`/`solana_source` are threaded straight through to
+/// [`client_channels`] (issues #556, #631): a gate resolves an undeclared
+/// channel from the chain and journals its watermark like any other, so
+/// the unaffiliated buyer's claims are exactly as replay-proof across a
+/// restart as a declared buyer's are.
 fn client_claim_gate(
     config: &Config,
-    source: Option<Arc<dyn ClientChannelSource>>,
+    evm_source: Option<Arc<dyn ClientChannelSource>>,
+    solana_source: Option<Arc<dyn ClientChannelSource>>,
 ) -> Result<ClientClaimGate, RuntimeError> {
     let (journal, path) = match config.state_dir() {
         Some(state_dir) => (
@@ -650,7 +700,7 @@ fn client_claim_gate(
             PathBuf::from(CLIENT_EDGE_JOURNAL),
         ),
     };
-    ClientClaimGate::restore(client_channels(config, source), journal)
+    ClientClaimGate::restore(client_channels(config, evm_source, solana_source), journal)
         .map_err(|source| RuntimeError::JournalUnreplayable { path, source })
 }
 
@@ -670,7 +720,11 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
         connector.clone(),
         signer.clone(),
         None,
-        client_claim_gate(config, runtime.client_channel_source.clone())?,
+        client_claim_gate(
+            config,
+            runtime.client_channel_source_evm.clone(),
+            runtime.client_channel_source_solana.clone(),
+        )?,
         runtime.settlement_terms.clone(),
         runtime.settlements.clone(),
     );
@@ -839,7 +893,7 @@ key_file = "{}"
             )
         });
 
-        assert!(client_channels(&config, None).is_empty());
+        assert!(client_channels(&config, None, None).is_empty());
     }
 
     /// Every configured channel reaches the client edge's registry, so a
@@ -869,7 +923,7 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
             )
         });
 
-        let channels = client_channels(&config, None);
+        let channels = client_channels(&config, None, None);
         assert!(!channels.is_empty());
         let ClientChannelConfig::Evm(evm) = &config.client_channels()[0] else {
             panic!("expected an EVM client channel");
@@ -904,7 +958,7 @@ counterparty = "{counterparty}"
             )
         });
 
-        let channels = client_channels(&config, None);
+        let channels = client_channels(&config, None, None);
         assert!(!channels.is_empty());
         let ClientChannelConfig::Solana(solana) = &config.client_channels()[0] else {
             panic!("expected a Solana client channel");
@@ -934,7 +988,7 @@ key_file = "{key_path}"
             )
         });
 
-        client_claim_gate(&config, None).expect("a writable state_dir produces a gate");
+        client_claim_gate(&config, None, None).expect("a writable state_dir produces a gate");
         assert!(
             state_dir.path().join(CLIENT_EDGE_JOURNAL).exists(),
             "the journal file is created at startup, not lazily at the first claim"
@@ -965,7 +1019,7 @@ key_file = "{key_path}"
             )
         });
 
-        let Err(error) = client_claim_gate(&config, None) else {
+        let Err(error) = client_claim_gate(&config, None, None) else {
             panic!("an unusable state_dir must not produce a gate");
         };
         assert!(matches!(error, RuntimeError::StateDirUnusable { .. }));
@@ -1001,7 +1055,7 @@ key_file = "{key_path}"
             )
         });
 
-        let Err(error) = client_claim_gate(&config, None) else {
+        let Err(error) = client_claim_gate(&config, None, None) else {
             panic!("a corrupt journal must not produce a gate");
         };
         assert!(matches!(error, RuntimeError::JournalUnreplayable { .. }));
@@ -1852,6 +1906,150 @@ key_file = "{key_path}"
                 message.contains(&wrong_program_id.to_string()),
                 "the failure must name the configured program id: {message}"
             );
+        }
+
+        /// Issue #631's security review, finding 1 (mint binding), full
+        /// stack: the deployed program lets any payer open a channel with
+        /// ANY mint, and the balance-proof signature does not cover the
+        /// mint, so without `channel_counterparty`'s mint check a claim on
+        /// a channel funded with a worthless SPL token would buy
+        /// USDC-priced writes. Here the wrong-mint channel is genuinely
+        /// opened and funded on a real validator, the claim's signature is
+        /// genuinely valid -- and the claim gate, resolving through the
+        /// same [`SolanaChannelSource`] `build` wires up, still refuses it
+        /// as an unknown channel. The control at the end accepts the
+        /// byte-identical claim through a backend configured with the
+        /// channel's own mint, proving the refusal was the mint binding
+        /// and nothing else.
+        #[tokio::test]
+        async fn a_validly_signed_claim_on_a_wrong_mint_channel_is_refused_as_unknown() {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine;
+
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+
+            // A real, open, funded channel on the junk mint, with this
+            // node's own identity as a participant.
+            let opener = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let junk_mint = opener.token_mint();
+            let counterparty = opener
+                .test_counterparty_pubkey()
+                .expect("deploy() holds a counterparty key");
+            let channel = opener
+                .open(counterparty.clone(), Duration::seconds(3600))
+                .await
+                .expect("open a channel on the junk mint");
+            opener
+                .fund(&channel, 1_000)
+                .await
+                .expect("fund the junk-mint channel with a real on-chain deposit");
+
+            // A genuinely valid claim on it, signed by the channel's real
+            // counterparty key.
+            let signature = opener
+                .test_sign_claim(&channel, 1, 100)
+                .expect("deploy() holds the counterparty key to sign with");
+            let counterparty_base58 = Pubkey::try_from(counterparty.as_slice())
+                .expect("32-byte pubkey")
+                .to_string();
+            let claim_json = format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-mallory",
+                    "programId": "{program_id}",
+                    "channelAccount": "{channel_account}",
+                    "nonce": 1,
+                    "transferredAmount": "100",
+                    "signature": "{signature}",
+                    "signerPublicKey": "{counterparty_base58}"
+                }}"#,
+                channel_account = channel.0,
+                signature = BASE64.encode(&signature),
+            );
+
+            // The node under test: the SAME on-chain identity, configured
+            // to settle in a DIFFERENT (real) mint.
+            let other = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("deploy a second backend for its fresh mint");
+            let configured_mint = other.token_mint();
+            assert_ne!(junk_mint, configured_mint);
+            drop(other);
+            let node_backend = SolanaSettlementBackend::connect(
+                &validator.rpc_url,
+                &opener.test_payer_seed(),
+                program_id,
+                configured_mint,
+                6,
+            )
+            .await
+            .expect("connect under the opener's identity, bound to the configured mint");
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            ));
+
+            let gate = client_claim_gate(
+                &config,
+                None,
+                Some(Arc::new(SolanaChannelSource {
+                    backend: Arc::new(node_backend),
+                })),
+            )
+            .expect("a config with no state_dir produces an in-memory gate");
+            let rejection = gate
+                .ingest(&claim_json, 100)
+                .await
+                .expect_err("a claim on a wrong-mint channel must be refused");
+            assert!(
+                matches!(
+                    rejection,
+                    connector_client_edge::ClaimIngestRejection::UnknownChannel
+                ),
+                "refused as an unknown channel, not any other reason: {}",
+                rejection.message()
+            );
+
+            // Control: the byte-identical claim is accepted through a
+            // backend configured with the channel's own mint.
+            let matching_backend = SolanaSettlementBackend::connect(
+                &validator.rpc_url,
+                &opener.test_payer_seed(),
+                program_id,
+                junk_mint,
+                6,
+            )
+            .await
+            .expect("connect under the opener's identity, bound to the channel's own mint");
+            let gate = client_claim_gate(
+                &config,
+                None,
+                Some(Arc::new(SolanaChannelSource {
+                    backend: Arc::new(matching_backend),
+                })),
+            )
+            .expect("a config with no state_dir produces an in-memory gate");
+            gate.ingest(&claim_json, 100)
+                .await
+                .expect("the identical claim is valid and accepted when the mint matches");
         }
 
         /// The SPL Token program id -- a program that exists, is

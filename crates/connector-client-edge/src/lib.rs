@@ -2408,9 +2408,10 @@ mod tests {
                 bs58::encode(counterparty_keypair.public.to_bytes()).into_string();
 
             // Declared, not resolved from chain: `[[client_channels]]`'s
-            // own registration path (issue #630), the only source a Solana
-            // channel has today (`connector_client_edge::channels`'s own
-            // doc -- there is no Solana `ClientChannelSource` yet).
+            // own registration path (issue #630). The chain-resolved twin
+            // of this test, for a channel nothing declared, is issue
+            // #631's `a_solana_claim_on_a_channel_only_the_chain_knows_about_reaches_the_app`
+            // below.
             let mut channels = ClientChannelRegistry::new();
             channels
                 .record_solana(&channel_account_base58, &counterparty_base58)
@@ -2534,6 +2535,167 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let reject = Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code.as_str(), "F01");
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// Issue #631, the Solana twin of
+        /// `a_claim_on_a_channel_only_the_chain_knows_about_reaches_the_app`
+        /// above: a buyer this operator has never heard of -- no
+        /// `[[client_channels]]` entry, nothing declared for their channel
+        /// at all -- pays and the write lands, because the connector
+        /// resolves the channel's counterparty from the deployed Solana
+        /// payment-channel program the channel was opened on.
+        #[tokio::test]
+        async fn a_solana_claim_on_a_channel_only_the_chain_knows_about_reaches_the_app() {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine;
+            use ed25519_dalek::{Keypair as SolanaKeypair, Signer as Ed25519Signer};
+            use rand::rngs::OsRng;
+
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+
+            // Nothing declared. The source stands in for
+            // `SolanaSettlementBackend::channel_counterparty`, which is
+            // what names the buyer as this channel's counterparty.
+            let counterparty_keypair = SolanaKeypair::generate(&mut OsRng);
+            let channel_account = [0x44u8; 32];
+            let channel_account_base58 = bs58::encode(channel_account).into_string();
+            let counterparty_base58 =
+                bs58::encode(counterparty_keypair.public.to_bytes()).into_string();
+
+            let channels = ClientChannelRegistry::new().with_solana_source(Arc::new(
+                crate::channels::test_source::FakeSolanaChannelSource::knowing(vec![(
+                    channel_account,
+                    counterparty_keypair.public.to_bytes(),
+                )]),
+            ));
+            assert!(
+                !channels.is_empty(),
+                "a registry with a source can vouch for channels nobody wrote down"
+            );
+
+            let nonce = 1u64;
+            let transferred_amount = 100u64;
+            let message = connector_signer::solana_balance_proof_message(
+                &channel_account,
+                nonce,
+                transferred_amount,
+            );
+            let signature = counterparty_keypair.sign(&message);
+            let signature_base64 = BASE64.encode(signature.to_bytes());
+
+            let claim_json = format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "programId": "{counterparty_base58}",
+                    "channelAccount": "{channel_account_base58}",
+                    "nonce": {nonce},
+                    "transferredAmount": "{transferred_amount}",
+                    "signature": "{signature_base64}",
+                    "signerPublicKey": "{counterparty_base58}"
+                }}"#,
+            );
+
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router_with_gate(connector, signer, None, test_gate(channels));
+
+            let request = request_with_claim_header(&prepare, CLAIM_HEADER, &claim_json);
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect(
+                "an unaffiliated Solana buyer's on-chain channel is payable without a config edit",
+            );
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// The Solana twin of `a_claim_whose_channel_lookup_fails_never_reaches_the_app`:
+        /// a lookup this connector could not complete refuses the claim
+        /// rather than believing what it says about its own signer.
+        #[tokio::test]
+        async fn a_solana_claim_whose_channel_lookup_fails_never_reaches_the_app() {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine;
+            use ed25519_dalek::{Keypair as SolanaKeypair, Signer as Ed25519Signer};
+            use rand::rngs::OsRng;
+
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let channels = ClientChannelRegistry::new().with_solana_source(Arc::new(
+                crate::channels::test_source::FakeSolanaChannelSource::unreachable(
+                    "connection refused",
+                ),
+            ));
+            let app = router_with_gate(connector, signer.clone(), None, test_gate(channels));
+
+            let keypair = SolanaKeypair::generate(&mut OsRng);
+            let channel_account = [0x45u8; 32];
+            let channel_account_base58 = bs58::encode(channel_account).into_string();
+            let signer_base58 = bs58::encode(keypair.public.to_bytes()).into_string();
+            let message = connector_signer::solana_balance_proof_message(&channel_account, 1, 100);
+            let signature_base64 = BASE64.encode(keypair.sign(&message).to_bytes());
+
+            let claim_json = format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "programId": "{signer_base58}",
+                    "channelAccount": "{channel_account_base58}",
+                    "nonce": 1,
+                    "transferredAmount": "100",
+                    "signature": "{signature_base64}",
+                    "signerPublicKey": "{signer_base58}"
+                }}"#,
+            );
+
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let request = request_with_claim_header(&prepare, CLAIM_HEADER, &claim_json);
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F01");
+            assert!(
+                reject.message.contains("could not look up"),
+                "an unreachable chain is reported as such, not as an unknown channel: {}",
+                reject.message
+            );
             assert!(app_client.deliveries().is_empty());
         }
     }

@@ -33,14 +33,16 @@
 //!    this way, and a declared channel is authoritative: it is answered
 //!    from memory and never resolved.
 //! 2. **Resolved from chain** -- a [`ClientChannelSource`] registered per
-//!    chain ([`ClientChannelRegistry::with_source`]), asked only about a
-//!    channel nothing was declared for. `connector-cli` builds one over the
-//!    `[settlement]` section's own `TokenNetwork`, so a client that has
-//!    opened a channel with this connector on chain can pay without the
-//!    operator hand-editing config and restarting. EVM is the only chain
-//!    with a registered source today (issue #611); the source is now
-//!    keyed by chain (issue #629) so a Solana source can compose
-//!    alongside it later without restructuring this registry again.
+//!    chain ([`ClientChannelRegistry::with_source`] for EVM,
+//!    [`ClientChannelRegistry::with_solana_source`] for Solana), asked only
+//!    about a channel nothing was declared for. `connector-cli` builds one
+//!    over the `[settlement.evm]` section's own `TokenNetwork` (issue
+//!    #611) and one over the `[settlement.solana]` section's own deployed
+//!    payment-channel program (issue #631), so a client that has opened a
+//!    channel with this connector on chain can pay without the operator
+//!    hand-editing config and restarting. The source is keyed by chain
+//!    (issue #629), so an EVM source is never consulted for a Solana
+//!    lookup or vice versa.
 //!
 //! The second is what makes issue #502's *"anonymity is a first-class
 //! path, not a fallback: it is how an unaffiliated buyer pays for a
@@ -136,13 +138,25 @@ impl std::error::Error for ChannelLookupFailed {}
 
 /// Where a channel nothing was declared for is looked up -- in production
 /// the deployed `TokenNetwork` the `[settlement]` section already names
-/// (`connector-cli`'s `SettlementChannelSource`). Kept a port rather than a
-/// direct dependency on `connector-settlement-evm` so this crate stays
-/// chain-agnostic, and so a test can substitute a source without a chain.
+/// (`connector-cli`'s `SettlementChannelSource`), or the deployed Solana
+/// payment-channel program `[settlement.solana]` names (issue #631). Kept a
+/// port rather than a direct dependency on `connector-settlement-evm` or
+/// `connector-settlement-solana` so this crate stays chain-agnostic, and so
+/// a test can substitute a source without a chain.
 ///
 /// An implementation MUST report the counterparty **as the chain itself
 /// holds it**, never anything derived from a claim: this trait exists
 /// precisely so that a claim has no say in what it is checked against.
+///
+/// Both methods default to answering `Ok(None)` -- "this source knows
+/// nothing about that chain's channels" -- rather than being required,
+/// since [`ClientChannelRegistry`] already keeps EVM and Solana sources in
+/// separate [`ClaimChain`]-keyed slots and only ever calls a source's
+/// method for the chain it was registered under: an EVM-only source (say,
+/// `connector-cli`'s `SettlementChannelSource`) never has `solana_channel`
+/// invoked, so it has nothing useful to say there and the default is never
+/// exercised in practice, only spared from being restated by every
+/// implementation.
 #[async_trait]
 pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     /// The record for `channel_id`, or `Ok(None)` if that is not a channel
@@ -156,7 +170,28 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     async fn evm_channel(
         &self,
         channel_id: &[u8; 32],
-    ) -> Result<Option<EvmChannel>, ChannelLookupFailed>;
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        let _ = channel_id;
+        Ok(None)
+    }
+
+    /// The Solana twin of [`evm_channel`](Self::evm_channel) (issue #631):
+    /// the counterparty's raw Ed25519 public key for the channel at
+    /// `channel_account`, or `Ok(None)`/`Err` under exactly the same rules.
+    /// There is no domain to report alongside it -- a Solana balance proof
+    /// is signed over the channel account, nonce and amount alone
+    /// (`connector_signer::solana_balance_proof_message`), with no
+    /// EIP-712-style verifying-contract concept to carry. The mint is not
+    /// in the signed bytes either: binding a channel to the mint this node
+    /// settles in is the resolving backend's job (a chain-resolved channel
+    /// on any other mint must come back `Ok(None)`), not the signature's.
+    async fn solana_channel(
+        &self,
+        channel_account: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
+        let _ = channel_account;
+        Ok(None)
+    }
 }
 
 /// Everything this connector needs to verify an EVM claim on one channel
@@ -181,14 +216,14 @@ pub struct EvmChannel {
 /// [`ClientChannelSource`] is registered under in
 /// [`ClientChannelRegistry`], so resolving an undeclared channel dispatches
 /// on the claim's own chain through a registry rather than a single
-/// hardcoded slot. EVM is the only chain with a registered source today
-/// (issue #611); a Solana source (a future `ClientChannelSource`
-/// implementation over the Solana settlement backend) composes by
-/// registering a second entry under `ClaimChain::Solana`, not by
-/// restructuring this type again (issue #629).
+/// hardcoded slot. EVM was the first chain with a registered source (issue
+/// #611); Solana composes as a second entry under `ClaimChain::Solana`
+/// (issue #631), exactly as issue #629's prefactor anticipated, rather than
+/// by restructuring this type again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ClaimChain {
     Evm,
+    Solana,
 }
 
 /// The channels this connector has a record of, and the counterparty it
@@ -213,6 +248,10 @@ pub struct ClientChannelRegistry {
     /// Memoised answers from [`Self::sources`]. Never invalidated -- see
     /// this module's doc.
     resolved: RwLock<HashMap<[u8; 32], EvmChannel>>,
+    /// The Solana twin of [`Self::resolved`] (issue #631) -- a separate map
+    /// since a resolved Solana answer is a bare counterparty key, not an
+    /// [`EvmChannel`].
+    resolved_solana: RwLock<HashMap<[u8; 32], [u8; 32]>>,
 }
 
 impl ClientChannelRegistry {
@@ -229,11 +268,26 @@ impl ClientChannelRegistry {
     /// `[[client_channels]]` keeps working exactly as it did -- and keeps
     /// working when the chain is unreachable.
     ///
-    /// Registers `source` under [`ClaimChain::Evm`] -- the only chain a
-    /// [`ClientChannelSource`] can speak for today, since the trait exposes
-    /// only [`ClientChannelSource::evm_channel`].
+    /// Registers `source` under [`ClaimChain::Evm`], so it is consulted for
+    /// an EVM lookup and never a Solana one -- see
+    /// [`with_solana_source`](Self::with_solana_source) for that twin.
     pub fn with_source(mut self, source: Arc<dyn ClientChannelSource>) -> ClientChannelRegistry {
         self.sources.insert(ClaimChain::Evm, source);
+        self
+    }
+
+    /// The Solana twin of [`with_source`](Self::with_source) (issue #631):
+    /// consult `source` for any Solana channel this registry has no
+    /// declared record of, registering it under [`ClaimChain::Solana`] so
+    /// an EVM source never answers a Solana lookup or vice versa (issue
+    /// #629). Additive in exactly the same way: everything
+    /// `[[client_channels]]` already declared stays authoritative and
+    /// answered from memory without a lookup.
+    pub fn with_solana_source(
+        mut self,
+        source: Arc<dyn ClientChannelSource>,
+    ) -> ClientChannelRegistry {
+        self.sources.insert(ClaimChain::Solana, source);
         self
     }
 
@@ -323,13 +377,45 @@ impl ClientChannelRegistry {
         Ok(Some(channel))
     }
 
-    /// The counterparty recorded for a Solana channel. Declared records
-    /// only: this connector has no Solana settlement backend to resolve
-    /// one from (`connector-settlement-solana` implements no client-edge
-    /// source yet), so a Solana channel is payable exactly when
-    /// `[[client_channels]]`-equivalent configuration names it.
-    pub(crate) fn solana(&self, channel_account: &[u8; 32]) -> Option<[u8; 32]> {
-        self.solana.get(channel_account).copied()
+    /// The counterparty for a Solana channel: declared first, then already
+    /// resolved, then -- once per channel -- the [`ClaimChain::Solana`]
+    /// entry of [`Self::sources`], if one is registered (issue #631, the
+    /// Solana twin of [`Self::evm`]). A claim on a chain with no registered
+    /// entry resolves nothing here, same as [`Self::evm`].
+    ///
+    /// `Ok(None)` is "no such channel this connector can be paid on"; `Err`
+    /// is "the lookup failed, so the answer is unknown". Both refuse the
+    /// claim; they are kept apart so the refusal can say which.
+    pub(crate) async fn solana(
+        &self,
+        channel_account: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
+        if let Some(counterparty) = self.solana.get(channel_account) {
+            return Ok(Some(*counterparty));
+        }
+        // Scoped so the read guard is released before the `.await` below --
+        // see `Self::evm`'s own comment on the same shape.
+        {
+            let resolved = self
+                .resolved_solana
+                .read()
+                .expect("resolved client channels lock poisoned");
+            if let Some(counterparty) = resolved.get(channel_account) {
+                return Ok(Some(*counterparty));
+            }
+        }
+        let Some(source) = self.sources.get(&ClaimChain::Solana) else {
+            return Ok(None);
+        };
+        let Some(counterparty) = source.solana_channel(channel_account).await? else {
+            // Deliberately not memoised -- see `Self::evm`'s own comment.
+            return Ok(None);
+        };
+        self.resolved_solana
+            .write()
+            .expect("resolved client channels lock poisoned")
+            .insert(*channel_account, counterparty);
+        Ok(Some(counterparty))
     }
 }
 
@@ -402,6 +488,54 @@ pub(crate) mod test_source {
             Ok(self.channels.get(channel_id).copied())
         }
     }
+
+    /// The Solana twin of [`FakeChannelSource`] (issue #631): a stand-in
+    /// for `connector-cli`'s adapter over `SolanaSettlementBackend`, kept a
+    /// separate type rather than a second field on [`FakeChannelSource`] so
+    /// an EVM-only test's `lookups()` count can never be perturbed by a
+    /// Solana lookup or vice versa.
+    #[derive(Debug)]
+    pub(crate) struct FakeSolanaChannelSource {
+        channels: HashMap<[u8; 32], [u8; 32]>,
+        failure: Option<String>,
+        lookups: AtomicUsize,
+    }
+
+    impl FakeSolanaChannelSource {
+        pub(crate) fn knowing(channels: Vec<([u8; 32], [u8; 32])>) -> FakeSolanaChannelSource {
+            FakeSolanaChannelSource {
+                channels: channels.into_iter().collect(),
+                failure: None,
+                lookups: AtomicUsize::new(0),
+            }
+        }
+
+        pub(crate) fn unreachable(reason: &str) -> FakeSolanaChannelSource {
+            FakeSolanaChannelSource {
+                channels: HashMap::new(),
+                failure: Some(reason.to_string()),
+                lookups: AtomicUsize::new(0),
+            }
+        }
+
+        pub(crate) fn lookups(&self) -> usize {
+            self.lookups.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ClientChannelSource for FakeSolanaChannelSource {
+        async fn solana_channel(
+            &self,
+            channel_account: &[u8; 32],
+        ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            if let Some(reason) = &self.failure {
+                return Err(ChannelLookupFailed(reason.clone()));
+            }
+            Ok(self.channels.get(channel_account).copied())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -470,11 +604,11 @@ mod tests {
         let registry = ClientChannelRegistry::new().with_source(source);
 
         assert_eq!(registry.evm(&[0x09; 32]).await, Ok(Some(evm_channel())));
-        assert_eq!(registry.solana(&[0x09; 32]), None);
+        assert_eq!(registry.solana(&[0x09; 32]).await, Ok(None));
     }
 
-    #[test]
-    fn a_recorded_solana_channel_is_found_under_the_account_it_was_recorded_by() {
+    #[tokio::test]
+    async fn a_recorded_solana_channel_is_found_under_the_account_it_was_recorded_by() {
         let mut registry = ClientChannelRegistry::new();
         let account = bs58::encode([3u8; 32]).into_string();
         let counterparty = bs58::encode([7u8; 32]).into_string();
@@ -482,11 +616,11 @@ mod tests {
             .record_solana(&account, &counterparty)
             .expect("a 32-byte base58 account");
 
-        assert_eq!(registry.solana(&[3u8; 32]), Some([7u8; 32]));
+        assert_eq!(registry.solana(&[3u8; 32]).await, Ok(Some([7u8; 32])));
     }
 
-    #[test]
-    fn evm_and_solana_channels_are_separate_namespaces() {
+    #[tokio::test]
+    async fn evm_and_solana_channels_are_separate_namespaces() {
         let mut registry = ClientChannelRegistry::new();
         registry
             .record_evm(&"03".repeat(32), evm_channel())
@@ -494,7 +628,7 @@ mod tests {
 
         // The same 32 bytes, presented as a Solana account, is not that
         // channel: an EVM record can never answer for a Solana claim.
-        assert_eq!(registry.solana(&[3u8; 32]), None);
+        assert_eq!(registry.solana(&[3u8; 32]).await, Ok(None));
     }
 
     #[test]
@@ -590,5 +724,87 @@ mod tests {
         let registry =
             ClientChannelRegistry::new().with_source(Arc::new(FakeChannelSource::knowing(vec![])));
         assert!(!registry.is_empty());
+    }
+
+    /// Issue #631: the Solana twin of
+    /// `a_channel_only_the_source_knows_about_is_resolved` above -- a
+    /// Solana channel nothing declared, that the chain knows about, is
+    /// answered for through a registered [`ClaimChain::Solana`] source.
+    #[tokio::test]
+    async fn a_solana_channel_only_the_source_knows_about_is_resolved() {
+        let registry = ClientChannelRegistry::new().with_solana_source(Arc::new(
+            super::test_source::FakeSolanaChannelSource::knowing(vec![([0x07; 32], [0x09; 32])]),
+        ));
+
+        assert_eq!(registry.solana(&[0x07; 32]).await, Ok(Some([0x09; 32])));
+    }
+
+    /// The Solana twin of `a_resolved_channel_is_answered_from_memory_the_second_time`:
+    /// a second claim on the same Solana channel costs no second lookup.
+    #[tokio::test]
+    async fn a_resolved_solana_channel_is_answered_from_memory_the_second_time() {
+        let source = Arc::new(super::test_source::FakeSolanaChannelSource::knowing(vec![
+            ([0x07; 32], [0x09; 32]),
+        ]));
+        let registry = ClientChannelRegistry::new().with_solana_source(source.clone());
+
+        for _ in 0..5 {
+            assert_eq!(registry.solana(&[0x07; 32]).await, Ok(Some([0x09; 32])));
+        }
+        assert_eq!(
+            source.lookups(),
+            1,
+            "the chain is asked once per channel, not once per packet"
+        );
+    }
+
+    /// A declared Solana channel is authoritative: the source is never
+    /// consulted for it, so a node whose config names its channels keeps
+    /// accepting their claims while the RPC endpoint is down (the Solana
+    /// twin of `a_declared_channel_is_never_looked_up`).
+    #[tokio::test]
+    async fn a_declared_solana_channel_is_never_looked_up() {
+        let source = Arc::new(super::test_source::FakeSolanaChannelSource::unreachable(
+            "connection refused",
+        ));
+        let account = bs58::encode([7u8; 32]).into_string();
+        let counterparty = bs58::encode([9u8; 32]).into_string();
+        let mut registry = ClientChannelRegistry::new();
+        registry
+            .record_solana(&account, &counterparty)
+            .expect("a 32-byte base58 account");
+        let registry = registry.with_solana_source(source.clone());
+
+        assert_eq!(registry.solana(&[7u8; 32]).await, Ok(Some([9u8; 32])));
+        assert_eq!(source.lookups(), 0);
+    }
+
+    /// A lookup failure on the Solana source is reported as a failure, not
+    /// silently absorbed into "no such channel" (the Solana twin of
+    /// `a_lookup_failure_is_reported_as_a_failure`).
+    #[tokio::test]
+    async fn a_solana_lookup_failure_is_reported_as_a_failure() {
+        let registry = ClientChannelRegistry::new().with_solana_source(Arc::new(
+            super::test_source::FakeSolanaChannelSource::unreachable("connection refused"),
+        ));
+
+        assert_eq!(
+            registry.solana(&[0x07; 32]).await,
+            Err(ChannelLookupFailed("connection refused".to_string()))
+        );
+    }
+
+    /// A Solana source registered under `ClaimChain::Solana` must never
+    /// answer an EVM lookup for the same bytes -- the Solana-first twin of
+    /// `an_evm_source_never_answers_a_solana_lookup_for_the_same_bytes`.
+    #[tokio::test]
+    async fn a_solana_source_never_answers_an_evm_lookup_for_the_same_bytes() {
+        let source = Arc::new(super::test_source::FakeSolanaChannelSource::knowing(vec![
+            ([0x09; 32], [0x11; 32]),
+        ]));
+        let registry = ClientChannelRegistry::new().with_solana_source(source);
+
+        assert_eq!(registry.solana(&[0x09; 32]).await, Ok(Some([0x11; 32])));
+        assert_eq!(registry.evm(&[0x09; 32]).await, Ok(None));
     }
 }

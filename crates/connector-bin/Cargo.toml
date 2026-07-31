@@ -25,8 +25,13 @@ connector-domain = { path = "../connector-domain" }
 connector-signer = { path = "../connector-signer" }
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
+connector-settlement-solana = { path = "../connector-settlement-solana", features = ["test-util"] }
 connector-operator = { path = "../connector-operator", features = ["test-util"] }
 connector-runtime = { path = "../connector-runtime" }
+solana-sdk = "=2.1.0"
+solana-client = "=2.1.0"
+spl-token = { version = "=6.0.0", features = ["no-entrypoint"] }
+spl-associated-token-account = "=4.0.0"
 chrono = "0.4"
 ed25519-dalek = "1"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
