@@ -30,7 +30,9 @@ hyper = { version = "0.14", features = ["full"] }
 libsecp256k1 = "0.6"
 rand = "0.7"
 serde_json = "1"
-solana-client = "=2.1.0"
+# solana-rpc-client, not the solana-client meta-crate -- see
+# crates/connector-settlement-solana/Cargo.toml for why.
+solana-rpc-client = "=2.1.0"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.4", features = ["util"] }
