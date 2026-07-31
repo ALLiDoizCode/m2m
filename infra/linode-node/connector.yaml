@@ -72,8 +72,14 @@ peers:
     url: wss://proxy.store.devnet.toonprotocol.dev:443
     relation: peer
     authToken: ''
-    chain: evm:84532
-    settlementAddress: '0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff'
+    # solana:devnet, NOT evm — the live apex has settled this leg on Solana
+    # since the store box moved to it; the repo said evm:84532 for months
+    # while the box did not, so applying this file verbatim would have moved
+    # the leg back to EVM and orphaned the open Solana channel. Confirmed
+    # against chain: channel 2jvyMck3nzDXHurDDkaBghASb42Qj9e7wcoo3mFEDjox
+    # names apex HgNmgJYr… ↔ store W6yK72j3… with 2.0 USDC deposited.
+    chain: solana:devnet
+    settlementAddress: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV'
 
 routes:
   - prefix: g.toon.relay
