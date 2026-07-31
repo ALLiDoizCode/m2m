@@ -21,6 +21,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 tempfile = "3"
+# `devnet_configs_load.rs` only: the committed devnet configs' keyed
+# `[settlement.<chain>]` legs are asserted by loading them through the real
+# `Config::load` (issue #628's typed per-chain tables), which is the only
+# way to cover a leg no test can boot without reaching a public cluster.
+connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
 connector-signer = { path = "../connector-signer" }
 connector-settlement = { path = "../connector-settlement" }
