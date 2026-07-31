@@ -1095,9 +1095,9 @@ mod tests {
             .await
             .expect("a channel the chain knows about is payable without a config edit");
         // The canonical key (issue #643): the namespace, then the id's
-        // 32 bytes as lower-case hex with no `0x` -- not the literal text
-        // the claim spelled its `channelId` with.
-        assert_eq!(accepted.channel_key(), format!("evm:{}", "ef".repeat(32)));
+        // 32 bytes as `0x` plus lower-case hex -- not the literal text the
+        // claim spelled its `channelId` with.
+        assert_eq!(accepted.channel_key(), format!("evm:0x{}", "ef".repeat(32)));
     }
 
     /// The forger rule survives the new source: a claim signed by a key
@@ -1644,7 +1644,7 @@ mod tests {
             assert_eq!(
                 gate.watermark(&format!("evm:{}", "ab".repeat(32))),
                 expected,
-                "the 0x-stripped spelling names the same channel too"
+                "the bare-hex spelling names the same channel too"
             );
         }
 
@@ -1961,6 +1961,72 @@ mod tests {
                 .is_ok());
         }
 
+        /// The **rollback** direction, which the upgrade test above says
+        /// nothing about: a box running this build writes a journal, and
+        /// its image tag is then rolled back to a pre-#643 binary --
+        /// routine, since the deploy model is baked image tags. That older
+        /// binary folds the journal *without* canonicalising and derives
+        /// its lookup key as `format!("evm:{}", claim.channel_id)`. If the
+        /// two formats did not coincide it would find `None`, and
+        /// `validate_claim(None, ..)` would re-accept the client's entire
+        /// spend history -- strictly worse than the bug #643 fixes.
+        ///
+        /// They coincide because the canonical key keeps the `0x`: for the
+        /// lowercase hex `parse_evm` has always required, the key this
+        /// build writes is byte-identical to the one the old build reads.
+        /// Both halves of the old build are reproduced literally here,
+        /// since neither exists in this tree any more.
+        #[tokio::test]
+        async fn a_journal_this_build_writes_is_still_understood_by_a_rolled_back_binary() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+
+            // This build serves a paying client and journals it.
+            {
+                let gate = file_gate(&path);
+                gate.ingest(&evm_claim_json(&channel_id(), 12, 1200), 0)
+                    .await
+                    .expect("a genuine claim is accepted");
+            }
+
+            let entries = FileJournal::open(&path)
+                .expect("open the journal file")
+                .read_all()
+                .expect("a journal this build wrote replays");
+
+            // The pre-#643 replay: every key folded verbatim, no
+            // canonicalisation anywhere.
+            let mut legacy_watermarks: HashMap<String, Watermark> = HashMap::new();
+            for entry in &entries {
+                if let JournalEntry::InboundClaimAccepted {
+                    channel_id,
+                    nonce,
+                    cumulative_amount,
+                    ..
+                } = entry
+                {
+                    legacy_watermarks.insert(
+                        channel_id.clone(),
+                        advance_watermark(*nonce, *cumulative_amount),
+                    );
+                }
+            }
+
+            // The pre-#643 key for the client's next claim: its own
+            // `channelId`, namespaced, verbatim.
+            let legacy_key = format!("evm:{}", channel_id());
+
+            assert_eq!(
+                legacy_watermarks.get(&legacy_key),
+                Some(&Watermark {
+                    nonce: 12,
+                    cumulative_amount: 1200
+                }),
+                "a rolled-back binary must find the watermark this build wrote, \
+                 or every spent nonce becomes spendable again"
+            );
+        }
+
         /// The other shape a live journal can be in: one written by a
         /// pre-#643 build that was *actually exploited*, so it carries
         /// several spellings of one channel, each with its own watermark.
@@ -2176,8 +2242,10 @@ mod tests {
             };
             // Journaled under the canonical key (issue #643), so a
             // replay of this file files the watermark exactly where a
-            // live acceptance would have.
-            assert_eq!(channel_id, &format!("evm:{}", "ab".repeat(32)));
+            // live acceptance would have -- and, since the canonical key
+            // keeps the `0x`, exactly where a *pre*-#643 build would have
+            // too, which is what makes an image rollback a no-op.
+            assert_eq!(channel_id, &format!("evm:0x{}", "ab".repeat(32)));
             assert_eq!(*nonce, 3);
             assert_eq!(*cumulative_amount, 300);
             assert_eq!(
