@@ -96,5 +96,11 @@ deploy/connector-rust/operator.pem
 infra/linode-node/signer-rust.key
 infra/linode-store/signer-rust.key
 
+# Store-box gas-station Solana fee-payer — real key material (128-char hex
+# Ed25519), never committed. Was tracked until the rotation that removed it;
+# the pre-rotation key remains in git history, so the ROTATION (not this
+# ignore rule) is what closed that exposure.
+infra/linode-store/gas-station-solana.key
+
 # Local operator scratch notes — working files, never part of the repo.
 .connector-*-runbook.md
