@@ -1738,3 +1738,129 @@ async fn test_post_timeout_settle_by_non_participant_succeeds() {
     assert_eq!(token_balance(&mut context, &a_ata).await, 7500);
     assert_eq!(token_balance(&mut context, &b_ata).await, 12_500);
 }
+
+// ============================================================================
+// Refusing an over-deposit claim is not terminal: a top-up makes the very same
+// claim redeemable
+//
+// The deposit bound is evaluated against the deposit recorded *at claim time*,
+// so a participant who legitimately intends to spend more than it has funded so
+// far is not locked out — it deposits and resubmits. That only works because a
+// refused claim is refused atomically: the instruction returns before touching
+// `nonce_x` / `transferred_amount_x`, so the nonce it was signed for is still
+// unused and the already-signed proof stays submittable verbatim. Were the
+// nonce consumed on refusal, "reject at claim time" would quietly become
+// "burn the proof", which is the thing the bound exists to avoid.
+// ============================================================================
+
+#[tokio::test]
+async fn test_claim_refused_over_deposit_is_accepted_after_a_top_up() {
+    let mut context = program_test().start_with_context().await;
+    let (participant_a, participant_b) = sorted_participants();
+    let mint_authority = Keypair::new();
+
+    let (channel_pda, vault_pda, token_mint, _ta_a, _ta_b) = setup_funded_channel(
+        &mut context,
+        &participant_a,
+        &participant_b,
+        &mint_authority,
+        10_000,
+        10_000,
+    )
+    .await;
+
+    // A signs for more than it has funded. Refused, with the named error.
+    let result = submit_claim(&mut context, &participant_a, &channel_pda, 1, 15_000).await;
+    let err_str = format!(
+        "{:?}",
+        result.expect_err("claim above the deposit is refused")
+    );
+    assert!(
+        err_str.contains("Custom(13)") || err_str.contains("TransferredAmountExceedsDeposit"),
+        "Expected TransferredAmountExceedsDeposit (Custom(13)), got: {}",
+        err_str
+    );
+
+    // Nonce 1 is still unconsumed, so the signed proof is still usable.
+    let account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 0);
+    assert_eq!(read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET), 0);
+    assert_eq!(read_u64_at(&account.data, DEPOSIT_A_OFFSET), 10_000);
+
+    // A tops the channel up to 15_000, from a second funded token account
+    // (`setup_funded_channel` deposited the whole of the first one).
+    let top_up_source = create_and_fund_token_account(
+        &mut context,
+        &token_mint,
+        &participant_a.pubkey(),
+        &mint_authority,
+        5_000,
+    )
+    .await;
+    let deposit_ix = build_deposit_instruction(
+        &participant_a.pubkey(),
+        &top_up_source,
+        &vault_pda,
+        &channel_pda,
+        5_000,
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &participant_a],
+        recent,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    // The identical (nonce, transferred_amount) now clears the bound.
+    submit_claim(&mut context, &participant_a, &channel_pda, 1, 15_000)
+        .await
+        .expect("the same claim must be accepted once the deposit covers it");
+
+    let account = context
+        .banks_client
+        .get_account(channel_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_u64_at(&account.data, NONCE_A_OFFSET), 1);
+    assert_eq!(
+        read_u64_at(&account.data, TRANSFERRED_AMOUNT_A_OFFSET),
+        15_000
+    );
+    assert_eq!(read_u64_at(&account.data, DEPOSIT_A_OFFSET), 15_000);
+
+    // And the channel settles: A spent its whole deposit, B collects it.
+    close_and_expire_challenge(&mut context, &participant_a, &channel_pda).await;
+    let a_ata = create_ata(&mut context, &participant_a.pubkey(), &token_mint).await;
+    let b_ata = create_ata(&mut context, &participant_b.pubkey(), &token_mint).await;
+    let settle_ix = build_settle_channel_instruction(
+        &context.payer.pubkey(),
+        &channel_pda,
+        &vault_pda,
+        &a_ata,
+        &b_ata,
+        &context.payer.pubkey(),
+    );
+    let recent = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[settle_ix],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        recent,
+    );
+    context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("a channel that took the topped-up claim must still settle");
+
+    assert_eq!(token_balance(&mut context, &a_ata).await, 0);
+    assert_eq!(token_balance(&mut context, &b_ata).await, 25_000);
+}
