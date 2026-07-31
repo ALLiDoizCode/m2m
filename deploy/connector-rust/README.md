@@ -10,19 +10,22 @@ All commands below run from the repository root.
 ## Pulling the published image
 
 `.github/workflows/publish-connector-rust-image.yml` publishes this image to
-`ghcr.io/toon-protocol/connector-rust` on every push to `main` that touches
+`ghcr.io/toon-protocol/connector` on every push to `main` that touches
 `crates/**`, `Cargo.toml`/`Cargo.lock`, `packages/solana-program/**`, or this
-Dockerfile (also runnable manually via `workflow_dispatch`). It is a
-**separate image from `ghcr.io/toon-protocol/connector`** — see the Dockerfile
-header for why — and the package is public, so no registry login is required
-to pull it.
+Dockerfile (also runnable manually via `workflow_dispatch`). The package is
+public, so no registry login is required to pull it.
+
+It shares the `connector` package with the retired TypeScript node (last tag
+`4.0.0`, no longer published); the `rust-` tag prefix keeps the two disjoint.
+This is a reversal of #487's original `connector-rust` package — see the
+workflow header for why the Rust binary reclaimed the canonical name.
 
 Tags:
 
-| Tag               | Meaning                                                                                                                                              |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay). |
-| `main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                 |
+| Tag                    | Meaning                                                                                                                                              |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rust-sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay). |
+| `rust-main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                 |
 
 There is no semver tag series here: no crate under `crates/` has a release
 process yet, and inventing one for the image alone would claim a stability
@@ -33,7 +36,7 @@ image is no longer published (4.0.0), and this one does not (yet) carry an
 equivalent contract.
 
 ```bash
-docker pull ghcr.io/toon-protocol/connector-rust:sha-<short-sha>
+docker pull ghcr.io/toon-protocol/connector:rust-sha-<short-sha>
 ```
 
 For a **whole stack** on one machine rather than a single node — connector,

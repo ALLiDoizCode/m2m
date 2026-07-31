@@ -1,22 +1,20 @@
 name: Publish connector-rust image
 
 # Publishes the Rust connector (crates/connector-bin, built via
-# deploy/connector-rust/Dockerfile) to GHCR under its OWN name -- issue #487,
-# ADR 0013's parallel-fleet cutover. Nothing published this image before:
-# #429 added the Dockerfile, #465 explicitly left "whether and how this gets
-# published to GHCR" to this ticket.
+# deploy/connector-rust/Dockerfile) to GHCR as ghcr.io/toon-protocol/connector,
+# tagged `rust-sha-<short-sha>` (immutable, content-pinned) and `rust-main`
+# (floating). #429 added the Dockerfile, #465 left publishing to #487.
 #
-# `ghcr.io/toon-protocol/connector:X.Y.Z` means "the TypeScript node,
-# YAML/CONFIG_FILE"; this binary takes a TOML path as argv and has no semver
-# release process of its own (every crate under crates/ is still 0.1.0). So
-# this ships as ghcr.io/toon-protocol/connector-rust, tagged by content
-# (sha-<short-sha>) rather than by an invented version -- exactly what a
-# deployment pinning an exact build needs (#490), without asserting a
-# stability contract this binary hasn't earned. See the Dockerfile header
-# and deploy/connector-rust/README.md for the full reasoning.
-#
-# ghcr.io/toon-protocol/connector is untouched by this workflow: no new
-# tags, no change to what :latest points at.
+# NAME HISTORY (reversal, connector#633): #487 originally shipped this as a
+# SEPARATE package `connector-rust`, to avoid colliding with the TypeScript
+# node that owned `connector:X.Y.Z` (semver + cosign, CONNECTOR_RELEASE_CONTRACT.md).
+# That TS image is retired (last tag 4.0.0, no longer published), so the Rust
+# binary -- now the only connector there is -- reclaims the canonical
+# `connector` package name. The `rust-` tag prefix keeps these builds disjoint
+# from any lingering TS-node tag (X.Y.Z / latest / main), and the binary still
+# has no semver of its own (crates/ are 0.1.0), so it is tagged by content, not
+# by an invented version. See the Dockerfile header and
+# deploy/connector-rust/README.md for the full reasoning.
 
 on:
   push:
@@ -46,7 +44,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/connector-rust
+  IMAGE: ghcr.io/${{ github.repository_owner }}/connector
 
 jobs:
   build-and-push:
@@ -78,9 +76,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # `rust-` prefix keeps these disjoint from any TS-node tag that ever
+          # lived in this package (semver X.Y.Z, latest, main). See header.
           tags: |
-            type=raw,value=sha-${{ steps.sha.outputs.short }}
-            type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=rust-sha-${{ steps.sha.outputs.short }}
+            type=raw,value=rust-main,enable={{is_default_branch}}
 
       - name: Build and push connector-rust image
         uses: docker/build-push-action@v5
@@ -121,7 +121,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method PATCH \
-            "/orgs/${{ github.repository_owner }}/packages/container/connector-rust" \
+            "/orgs/${{ github.repository_owner }}/packages/container/connector" \
             -f visibility=public \
             && echo "✓ Package visibility set to public" \
             || echo "::warning::Could not set package visibility — may need manual fix in GHCR UI"
@@ -135,7 +135,7 @@ jobs:
       - name: Verify image refuses to start without a valid config (ADR 0009)
         run: |
           set +e
-          OUTPUT=$(docker run --rm "${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}" 2>&1)
+          OUTPUT=$(docker run --rm "${{ env.IMAGE }}:rust-sha-${{ steps.sha.outputs.short }}" 2>&1)
           STATUS=$?
           set -e
           echo "----- container output -----"
@@ -150,7 +150,7 @@ jobs:
       - name: Publish summary
         run: |
           {
-            echo "## connector-rust image published"
+            echo "## connector (rust) image published"
             echo ""
             echo "**Image:** \`${{ env.IMAGE }}\`"
             echo ""

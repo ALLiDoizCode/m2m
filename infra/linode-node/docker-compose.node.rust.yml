@@ -15,8 +15,9 @@
 #                   -f infra/linode-node/docker-compose.node.rust.yml up -d
 #
 # Distinct from the TypeScript node in every way ADR 0013 requires:
-#   - image:  connector-rust (issue #487), pinned to an exact sha- tag, never
-#             `connector` or a floating tag
+#   - image:  the connector package's rust-* tags (issue #487 reversed in
+#             connector#633 now the TS node is retired), pinned to an exact
+#             rust-sha- tag, never a floating tag
 #   - ports:  4000 only (client edge + operator + /metrics — one port, unlike
 #             the TypeScript node's three), no collision with the TypeScript
 #             node's 3000/8080/8081. No 4001 published: ./connector-rust.toml
@@ -78,13 +79,14 @@ services:
     # re-pinned to an image built from #605 or later BEFORE (or in the same
     # `up -d` as) that file reaches a box. An older image reads `state_dir`
     # as an unknown top-level key and exits 1 on config load.
-    image: ghcr.io/toon-protocol/connector-rust:sha-16887ba
+    image: ghcr.io/toon-protocol/connector:rust-sha-18413d9
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
       # The funded settlement account ([settlement.key] in the config) --
       # separate material from the per-box signer key, same handling.
       - ./settlement-rust.key:/app/data/settlement.key:ro
+      - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
       # Durable claim watermarks (issue #605) -- see the header.
       - connector_rust_state:/app/state
     ports:
