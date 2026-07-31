@@ -150,9 +150,32 @@ price = 1000
 # template that actually works. #577 tracks actually shipping this section
 # filled in against the live Base Sepolia deployment.
 #
+# ── Why the template is EVM-only (issue #648) ────────────────────────────
+# The apex carries BOTH `[settlement.evm]` and `[settlement.solana]`
+# (infra/linode-node/connector-rust.toml) because it is where buyers open
+# and pay channels: it terminates `g.toon.relay`, `g.toon.ario` and
+# `g.toon.store` for the whole fleet, on whichever chain a payer chose.
+# This box is the other end of that -- ADR 0013's payment-OBLIVIOUS store
+# app behind a route that TERMINATES, not a counterparty to anyone's
+# channel -- and since #600 the store leg's client-facing hop is the apex's
+# own terminated route, not this one. A `[settlement.solana]` here would
+# buy nothing and cost something real: a PRESENT settlement table is
+# fail-closed at startup by design (ADR 0009), so it is one more live chain
+# this node must reach before it will boot, plus a second funded key file
+# to provision on a box that today has neither. The store-forward Solana
+# address `4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt` is funded and
+# stays available if that ever changes; symmetry with the apex is not on
+# its own a reason to spend it here.
+#
+# The shape below is issue #628's KEYED per-chain form, `[settlement.evm]`,
+# matching the apex. The legacy flat `[settlement]` + `chain = "evm"` this
+# template used to carry still parses (`RawSettlementSection` accepts both
+# shapes untagged), so this is not a fix for a broken template -- it is the
+# documented fill-in landing an operator on the one shape the fleet writes
+# now, and the only shape that can grow a second chain without a rewrite.
+#
 # --- BEGIN settlement template (uncomment when a contract is deployed) ---
-# [settlement]
-# chain = "evm"
+# [settlement.evm]
 # rpc_url = "https://base-sepolia-rpc.publicnode.com"
 # # REPLACE the zero address with the deployed `TokenNetworkRegistry` address.
 # contract_address = "0x0000000000000000000000000000000000000000"
@@ -163,6 +186,6 @@ price = 1000
 # # #564), so a stale value here is a refusal to start, not a silent no-op.
 # decimals = 6
 #
-# [settlement.key]
+# [settlement.evm.key]
 # key_file = "/app/data/signer.key"
 # --- END settlement template ---

@@ -61,7 +61,11 @@
 //! points each file's EVM settlement shape -- the store file's commented
 //! `BEGIN`/`END` template, uncommented; the apex file's live
 //! `[settlement.evm]`, as committed -- at a freshly deployed contract on a
-//! disposable local `anvil`, and boots that. Documented config shapes rot;
+//! disposable local `anvil`, and boots that. Both are on issue #628's keyed
+//! shape now: the store template followed the apex there in issue #648, and
+//! the store case asserts it rather than trusting a reader's eye, because
+//! the legacy flat table it left behind still parses and so a slide back
+//! would otherwise be silent. Documented config shapes rot;
 //! this keeps them demonstrably working and keeps `runtime::build`'s
 //! settlement construction path covered end to end by the real binary. It
 //! is skipped when no `anvil` is on `PATH`.
@@ -346,8 +350,8 @@ fn uncomment_settlement_template(raw: &str) -> String {
     out
 }
 
-/// Point an uncommented `[settlement]` block at a real, disposable, freshly
-/// deployed local chain. `chain`, `decimals` and the key location stay the
+/// Point an uncommented `[settlement.evm]` block at a real, disposable,
+/// freshly deployed local chain. `decimals` and the key location stay the
 /// literal committed content.
 fn with_anvil_settlement(
     raw: &str,
@@ -700,6 +704,26 @@ async fn the_store_devnet_settlement_template_boots_against_a_deployed_contract(
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let text = uncomment_settlement_template(STORE_CONFIG);
+    // Issue #648: the store template followed the apex onto issue #628's
+    // KEYED shape. The legacy flat `[settlement]` + `chain = "evm"` it used
+    // to carry still parses, so nothing below would fail if the template
+    // slid back to it -- it would just quietly go on documenting a shape
+    // the fleet no longer writes, and one that cannot grow a second chain.
+    // Asserted here rather than left to a reader's eye.
+    assert!(
+        text.contains("[settlement.evm]") && text.contains("[settlement.evm.key]"),
+        "the store settlement template must stay on the keyed \
+         `[settlement.<chain>]` shape (issue #628, #648), not the legacy \
+         flat `[settlement]` table"
+    );
+    // Line-anchored: the prose above the template is free to *name* the
+    // legacy `chain = "evm"` key while explaining why it is gone, so only
+    // an actual uncommented assignment counts.
+    assert!(
+        !text.lines().any(|line| line.starts_with("chain = ")),
+        "`chain` is the legacy flat shape's discriminator -- a keyed table \
+         names its chain by its own key"
+    );
     let text = with_anvil_settlement(
         &text,
         &anvil.rpc_url,

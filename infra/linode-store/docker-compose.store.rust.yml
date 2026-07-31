@@ -20,6 +20,16 @@
 #     wanted: node↔node links are public, like the TS fleet's BTP-over-wss.
 # When #620 + #623 land, STORE_PEER_WIRE_BIND's whole containment story
 # below should be revisited against the transport they choose.
+#
+# Re-confirmed on the box during #648 (2026-07-31): `root@45.79.173.113`
+# has neither this file nor ./connector-rust.toml on it and runs no
+# `connector-rust` container -- only the TypeScript fleet
+# (`connector:3.36.3-solchan.0`, `store`, `nginx`, `certbot`). So the image
+# tag below is a REPO-ONLY pin: nothing consumes it until #620 and #623
+# close, and re-pinning it deploys nothing. Standing this overlay up today
+# would open a second, unpriced write path onto the same store app beside
+# the apex's paid one -- which is why #648 re-pinned the tag and left the
+# overlay down.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ═══════════════════════════════════════════════════════════════════════════
 # TOON devnet — Rust connector overlay, store side (issue #490, ADR 0013's
@@ -94,12 +104,24 @@
 
 services:
   connector-rust:
-    # ORDERING (issue #605): ./connector-rust.toml now sets `state_dir`, and
+    # PACKAGE (issue #648): the Rust image is published to the `connector`
+    # package under `rust-*` tags, NOT to `connector-rust`. That package was
+    # retired when #645 moved publishing (`.github/workflows/
+    # publish-connector-rust-image.yml`'s `IMAGE`), so the old
+    # `ghcr.io/toon-protocol/connector-rust:sha-16887ba` this line used to
+    # carry can never receive another build -- that package is frozen at
+    # `sha-b908454`, the last commit before the cutover. Pinned to an exact
+    # `rust-sha-` tag, never the floating `rust-main`, matching
+    # infra/linode-node/docker-compose.node.rust.yml.
+    #
+    # ORDERING (issue #605): ./connector-rust.toml sets `state_dir`, and
     # `RawConfig` is `deny_unknown_fields` -- so the tag below MUST be
     # re-pinned to an image built from #605 or later BEFORE (or in the same
     # `up -d` as) that file reaches a box. An older image reads `state_dir`
-    # as an unknown top-level key and exits 1 on config load.
-    image: ghcr.io/toon-protocol/connector-rust:sha-16887ba
+    # as an unknown top-level key and exits 1 on config load. Every
+    # `rust-sha-` tag is well past #605, so this is a constraint on rolling
+    # BACK, not on rolling forward.
+    image: ghcr.io/toon-protocol/connector:rust-sha-20e2969
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
