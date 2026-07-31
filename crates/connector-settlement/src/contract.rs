@@ -209,6 +209,32 @@ where
         }
     );
 
+    // ...and that rejection is retryable, not terminal (issue #662). The
+    // refusal must leave the channel exactly as it found it -- in
+    // particular the nonce the refused claim was signed for must still be
+    // unused -- so that funding the channel up past the claimed amount
+    // makes the *identical* claim redeemable. Both real chains rely on
+    // this: `TokenNetwork.claimFromChannel` reverts before writing
+    // `participants[.][signer].nonce`, and `packages/solana-program`'s
+    // `ClaimFromChannel` returns `TransferredAmountExceedsDeposit` before
+    // writing `nonce_x`. If either consumed the nonce on refusal, bounding
+    // a claim by the deposit would burn an honest, already-signed proof
+    // rather than merely deferring it.
+    let state = backend.fund(&channel, 900).await.expect("fund");
+    assert_eq!(state.deposited, 1_050);
+    let state = backend
+        .redeem(
+            &channel,
+            Claim {
+                nonce: 3,
+                cumulative_amount: 1_000,
+                signature: sign(&channel, 3, 1_000),
+            },
+        )
+        .await
+        .expect("the refused claim redeems once the deposit covers it");
+    assert_eq!(state.redeemed, 1_000);
+
     // Closing a channel starts its challenge period (issue #574): its own
     // state reports Closed, that status is durable when queried back
     // separately, funding is refused, and it cannot be closed a second
@@ -237,13 +263,13 @@ where
             &channel,
             Claim {
                 nonce: 4,
-                cumulative_amount: 121,
-                signature: sign(&channel, 4, 121),
+                cumulative_amount: 1_001,
+                signature: sign(&channel, 4, 1_001),
             },
         )
         .await
         .expect("redeem during the challenge window");
-    assert_eq!(state.redeemed, 121);
+    assert_eq!(state.redeemed, 1_001);
 
     let err = backend.close(&channel).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));

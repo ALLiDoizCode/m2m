@@ -779,6 +779,14 @@ fn process_claim_from_channel(
     // The bound is against the deposit recorded *now*; a participant who intends
     // to spend more can deposit first and resubmit the claim, since a rejected
     // claim leaves the stored nonce untouched.
+    //
+    // Checking against the deposit at claim time is enough to make the stored
+    // state permanently settleable, because a live channel's deposit never
+    // shrinks: Deposit only adds (and only while Opened), and the sole
+    // instructions that move tokens out of the vault -- SettleChannel, reached
+    // directly or via ForceCloseExpired -- close the channel out entirely rather
+    // than returning it to a claimable state. So no later instruction can pull
+    // the deposit back below a transferred_amount this check already admitted.
     let participant_deposit = if is_participant_a {
         channel.deposit_a
     } else {
