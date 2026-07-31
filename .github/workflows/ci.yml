@@ -220,6 +220,16 @@ jobs:
         # instead of silently skipping when the chain binary isn't on PATH -- see
         # crates/connector-settlement-evm/tests/support/mod.rs and
         # crates/connector-settlement-solana/tests/support/mod.rs.
+        #
+        # `shell: bash` is LOAD-BEARING, not style (issue #652). The default for a
+        # `run:` block is `bash -e {0}` -- no `pipefail` -- so this pipeline's exit
+        # status was `tee`'s, always 0, and cargo test's failure was discarded. The
+        # gate reported SUCCESS over `test result: FAILED` for as long as the pipe
+        # existed (proven on #645). `shell: bash` runs `bash --noprofile --norc -eo
+        # pipefail {0}`, so the pipe keeps feeding the empty-harness check below
+        # (#471) while a test failure actually fails the job. Do not drop it, and do
+        # not "simplify" this back to a bare `run:` with a pipe.
+        shell: bash
         run: cargo test --workspace --exclude payment-channel 2>&1 | tee /tmp/cargo-test.log
 
       - name: Assert no integration-test harness executed zero tests
