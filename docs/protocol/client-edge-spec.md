@@ -303,7 +303,7 @@ which is the only thing the bound was ever for; a legitimate buyer arriving duri
 delayed rather than denied, and a client that retries gets through.
 
 Stated precisely, since it is the figure an operator sizes an endpoint against: the **sustained**
-rate is the configured one, and any single window may see up to the burst *plus* a window's drain —
+rate is the configured one, and any single window may see up to the burst _plus_ a window's drain —
 roughly twice it — when a flood arrives at an idle connector. That is inherent to tolerating a burst
 at all, and a connector SHOULD document it rather than quote the sustained figure alone.
 
