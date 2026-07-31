@@ -15,6 +15,10 @@ bs58 = "0.5"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `time` alone: the unresolvable-lookup shaper (issue #613) holds a lookup
+# for its slot rather than refusing it, and that hold is a `sleep`. This
+# crate's own runtime comes from whoever mounts its router.
+tokio = { version = "1", features = ["time"] }
 tracing = "0.1"
 
 [dev-dependencies]
@@ -24,7 +28,11 @@ connector-settlement-evm = { path = "../connector-settlement-evm" }
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 chrono = "0.4"
 ed25519-dalek = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `test-util` for `#[tokio::test(start_paused = true)]`: the shaper of issue
+# #613 holds a lookup for its slot, and the only way to exercise that hold
+# end-to-end -- rather than working around it with a zero wait ceiling -- is
+# a runtime whose clock a test can advance.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 tower = { version = "0.4", features = ["util"] }
 hyper = { version = "0.14", features = ["full"] }
 libsecp256k1 = "0.6"

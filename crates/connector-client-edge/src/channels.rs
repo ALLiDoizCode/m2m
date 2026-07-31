@@ -174,17 +174,42 @@
 //! *better* one: a lookup failure, and a "no such channel". A buyer who
 //! opens a channel and pays a second later has to be payable on their next
 //! attempt rather than after a TTL, which is exactly the registration-free
-//! path #502 asks for. The cost is that a sender naming channels that do
-//! not exist can make this connector perform one `eth_call` each -- the one
-//! case the interval above cannot bound, since there is no entry to hang it
-//! on. Two things bound it instead: a resolution is a single
-//! `TokenNetwork.channels(id)` read plus the one
+//! path #502 asks for.
+//!
+//! # Bounding the unresolvable lookup (issue #613)
+//!
+//! The cost of not memoising a negative is that a sender naming channels
+//! that do not exist can make this connector perform one `eth_call` each --
+//! the one case [`ChannelLivenessPolicy`] cannot bound, since **there is no
+//! entry to hang it on**. Every one of its protections (`refresh_after`,
+//! `serve_stale_until`, `min_reattempt_interval`, the in-flight marker)
+//! reads a [`Resolved`] entry, and a channel that never resolved never gets
+//! one: [`ClientChannelRegistry::resolve_evm`] inserts on `Some` and
+//! `remove`s on `None`. So an unresolvable lookup takes [`plan`]'s very
+//! first branch -- `Plan::Ask { fallback: None, unseen: true }` -- and goes
+//! to the chain, every time, however recently the last one went. That is
+//! not an oversight in #654 either: an interval keyed by *channel* could
+//! never bind an attack whose shape is a fresh channel id per request.
+//! `unresolvable_lookups_are_not_bounded_by_the_liveness_policy` below
+//! measures the gap rather than asserting it.
+//!
+//! Two things already made the attack less attractive than it sounds: a
+//! resolution is a single `TokenNetwork.channels(id)` read plus the one
 //! `participants(id, counterparty)` read the deposit needs, rather than the
-//! three-call `SettlementBackend::channel_state` path, and the lookup is the
-//! claim gate's *last* stage, so a claim must already be structurally
-//! valid, fresh and value-covering to reach it at all (issue #544's
-//! ordering). Rate-limiting *that* is deliberately left out of this change
-//! -- see the PR description.
+//! three-call `SettlementBackend::channel_state` path; and the lookup is
+//! the claim gate's *last* stage, so a claim must be structurally valid,
+//! fresh and value-covering to reach it at all (issue #544's ordering).
+//! Neither is a bound. The bound is [`UnresolvableLookupBudget`]: a lookup
+//! for a channel with no entry is charged against the claim's declared
+//! signer *and* against a node-wide ceiling before the chain is touched,
+//! and refunded if the channel resolves -- so a legitimate buyer's
+//! onboarding costs nothing and a walk of the id space stops. See that
+//! module's own doc for what the identity is worth and what it is not.
+//!
+//! Exhaustion is its own answer, [`ChannelResolutionError::Budgeted`],
+//! never a [`ChannelLookupFailed`] and never an absent channel: "the chain
+//! said no", "the chain did not answer" and "I declined to ask" are three
+//! different things an operator has to act on differently.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -192,6 +217,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use connector_signer::Address;
+
+use crate::lookup_budget::{
+    LookupBudgetExhausted, LookupReservation, UnresolvableLookupBudget,
+    UnresolvableLookupBudgetPolicy,
+};
 
 /// How long a resolved channel's *mutable* facts -- that it has not
 /// `Settled`, and that its mint is still the one this node settles in --
@@ -364,6 +394,48 @@ impl std::fmt::Display for ChannelLookupFailed {
 
 impl std::error::Error for ChannelLookupFailed {}
 
+/// Why a channel could not be resolved -- the two refusals a lookup can
+/// produce, kept apart because they are not the same event (issue #613).
+///
+/// [`ChannelResolutionError::LookupFailed`] is a failure: this connector
+/// asked and did not get an answer. [`ChannelResolutionError::Budgeted`] is
+/// a decision: this connector declined to ask, because the sender (or the
+/// node as a whole) has already spent its allowance of lookups for channels
+/// that turn out not to exist. Both refuse the claim; conflating them would
+/// tell an operator whose endpoint is down to go looking for an attacker,
+/// and an operator being walked to go looking at their endpoint.
+///
+/// Both are also distinct from `Ok(None)` -- "there is no such channel" --
+/// which is a fact about the world rather than about this connector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelResolutionError {
+    LookupFailed(ChannelLookupFailed),
+    Budgeted(LookupBudgetExhausted),
+}
+
+impl From<ChannelLookupFailed> for ChannelResolutionError {
+    fn from(failure: ChannelLookupFailed) -> ChannelResolutionError {
+        ChannelResolutionError::LookupFailed(failure)
+    }
+}
+
+impl From<LookupBudgetExhausted> for ChannelResolutionError {
+    fn from(exhausted: LookupBudgetExhausted) -> ChannelResolutionError {
+        ChannelResolutionError::Budgeted(exhausted)
+    }
+}
+
+impl std::fmt::Display for ChannelResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChannelResolutionError::LookupFailed(failure) => write!(f, "{failure}"),
+            ChannelResolutionError::Budgeted(exhausted) => write!(f, "{exhausted}"),
+        }
+    }
+}
+
+impl std::error::Error for ChannelResolutionError {}
+
 /// Where a channel nothing was declared for is looked up -- in production
 /// the deployed `TokenNetwork` the `[settlement]` section already names
 /// (`connector-cli`'s `SettlementChannelSource`), or the deployed Solana
@@ -510,6 +582,26 @@ pub struct ClientChannelRegistry {
     /// leaned on anyway while the chain is unreachable, and how often one
     /// channel may ask (issue #649).
     liveness: ChannelLivenessPolicy,
+    /// How many lookups for channels this registry has never resolved it
+    /// will perform, per declared signer and in total (issue #613). The
+    /// bound `liveness` structurally cannot provide, since a channel that
+    /// never resolved leaves no entry for any of its intervals to hang on.
+    lookup_budget: UnresolvableLookupBudget,
+    /// How the most recently *completed* lookup went, **per chain** -- an
+    /// entry if that chain's last lookup failed, none if it succeeded or
+    /// none has completed yet (issue #613). Read only when the shaper
+    /// refuses, to keep an outage reportable as an outage: an unreachable
+    /// endpoint saturates the drain within seconds, and a refusal reported
+    /// as a budget would send an operator hunting an attacker who is not
+    /// there.
+    ///
+    /// Keyed by chain rather than kept as one slot, because a node with
+    /// both `[settlement.evm]` and `[settlement.solana]` has two endpoints
+    /// that fail independently: a single slot would make an EVM refusal
+    /// quote the Solana endpoint's error, which is a worse diagnosis than
+    /// the one it replaced -- it names a real outage that has nothing to do
+    /// with the claim being refused.
+    last_failure: RwLock<HashMap<ClaimChain, ChannelLookupFailed>>,
 }
 
 /// A memoised resolution, when the chain last *confirmed* it, and when this
@@ -539,7 +631,16 @@ enum Plan<T> {
     /// the lookup fails -- `None` once staleness has passed
     /// `serve_stale_until`, or when there was nothing memoised to begin
     /// with, in which case a failure is a refusal.
-    Ask { fallback: Option<T> },
+    ///
+    /// `unseen` is the second of those two cases specifically: **this
+    /// registry holds no entry for the channel at all**, so none of
+    /// [`ChannelLivenessPolicy`]'s bounds could apply to it and the
+    /// unresolvable-lookup budget is the only thing that can (issue #613).
+    /// It is not the same as `fallback.is_none()`: an entry aged past
+    /// `serve_stale_until` also has no fallback, and that one is already
+    /// bounded by `min_reattempt_interval` because there is an entry to
+    /// record the attempt on.
+    Ask { fallback: Option<T>, unseen: bool },
     /// Refuse without touching the chain: there is nothing safe left to
     /// serve, *and* this channel has already provoked a lookup too
     /// recently (or has one in flight) to be allowed another. The refusal
@@ -597,7 +698,10 @@ fn plan<T: Copy>(
         .write()
         .expect("resolved client channels lock poisoned");
     let Some(entry) = memo.get_mut(key) else {
-        return Plan::Ask { fallback: None };
+        return Plan::Ask {
+            fallback: None,
+            unseen: true,
+        };
     };
     if trigger == Trigger::Age && entry.confirmed_at.elapsed() < liveness.refresh_after {
         return Plan::Serve(entry.channel);
@@ -635,7 +739,10 @@ fn plan<T: Copy>(
     }
     entry.attempted_at = Instant::now();
     entry.in_flight = true;
-    Plan::Ask { fallback }
+    Plan::Ask {
+        fallback,
+        unseen: false,
+    }
 }
 
 impl Default for ClientChannelRegistry {
@@ -650,6 +757,11 @@ impl Default for ClientChannelRegistry {
             // derived `Default` would give all-zero durations, i.e. re-read
             // the chain on every packet.
             liveness: ChannelLivenessPolicy::default(),
+            // And for this one, where a derived `Default` would give an
+            // allowance of zero -- a node that refuses to resolve any
+            // channel at all, i.e. #611 switched off.
+            lookup_budget: UnresolvableLookupBudget::default(),
+            last_failure: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -686,6 +798,31 @@ impl ClientChannelRegistry {
     ) -> ClientChannelRegistry {
         self.liveness = liveness;
         self
+    }
+
+    /// Set how many lookups for channels this registry has never resolved
+    /// it will perform per window, per declared signer and in total (issue
+    /// #613). The knobs a node's config file turns
+    /// (`unresolvable_lookup_budget_per_signer`,
+    /// `unresolvable_lookup_budget_total`,
+    /// `unresolvable_lookup_budget_window_secs`): an operator whose
+    /// settlement endpoint is metered wants them tighter, and one running a
+    /// busy public edge where new anonymous buyers arrive in bursts wants
+    /// them looser.
+    pub fn with_lookup_budget(
+        mut self,
+        budget: UnresolvableLookupBudgetPolicy,
+    ) -> ClientChannelRegistry {
+        self.lookup_budget = UnresolvableLookupBudget::new(budget);
+        self
+    }
+
+    /// How long a lookup for a channel this registry has never resolved
+    /// would currently wait for its slot -- zero on a node whose discovery
+    /// drain is not saturated. For a log line or a test, never for a
+    /// decision.
+    pub fn unresolvable_lookups_queued_for(&self) -> Duration {
+        self.lookup_budget.queued_for()
     }
 
     /// Consult `source` for any EVM channel this registry has no declared
@@ -775,12 +912,20 @@ impl ClientChannelRegistry {
     /// no source at all (issue #629).
     ///
     /// `Ok(None)` is "no such channel this connector can be paid on";
-    /// `Err` is "the lookup failed, so the answer is unknown". Both refuse
-    /// the claim; they are kept apart so the refusal can say which.
+    /// `Err` is "the lookup failed, or this connector declined to make it".
+    /// All three refuse the claim; they are kept apart so the refusal can
+    /// say which.
+    ///
+    /// `requester` is the identity a lookup for a channel with no record at
+    /// all is budgeted against (issue #613) -- the claim's declared signer,
+    /// `ClientClaim::signer_key`. It is never consulted for a declared or
+    /// already-resolved channel, and never for anything but the budget: it
+    /// is not authority for who signed anything.
     pub(crate) async fn evm(
         &self,
         channel_id: &[u8; 32],
-    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        requester: &str,
+    ) -> Result<Option<EvmChannel>, ChannelResolutionError> {
         if let Some(channel) = self.evm.get(channel_id) {
             return Ok(Some(*channel));
         }
@@ -789,8 +934,11 @@ impl ClientChannelRegistry {
         // non-`Send` and a way to stall every other packet in flight.
         match plan(&self.resolved, channel_id, self.liveness, Trigger::Age) {
             Plan::Serve(channel) => Ok(Some(channel)),
-            Plan::Refuse(failure) => Err(failure),
-            Plan::Ask { fallback } => self.resolve_evm(channel_id, fallback).await,
+            Plan::Refuse(failure) => Err(failure.into()),
+            Plan::Ask { fallback, unseen } => {
+                self.resolve_evm(channel_id, fallback, unseen, requester)
+                    .await
+            }
         }
     }
 
@@ -819,34 +967,55 @@ impl ClientChannelRegistry {
     pub(crate) async fn refresh_evm(
         &self,
         channel_id: &[u8; 32],
-    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        requester: &str,
+    ) -> Result<Option<EvmChannel>, ChannelResolutionError> {
         if let Some(channel) = self.evm.get(channel_id) {
             return Ok(Some(*channel));
         }
         match plan(&self.resolved, channel_id, self.liveness, Trigger::Breach) {
             Plan::Serve(channel) => Ok(Some(channel)),
-            Plan::Refuse(failure) => Err(failure),
-            Plan::Ask { fallback } => self.resolve_evm(channel_id, fallback).await,
+            Plan::Refuse(failure) => Err(failure.into()),
+            Plan::Ask { fallback, unseen } => {
+                self.resolve_evm(channel_id, fallback, unseen, requester)
+                    .await
+            }
         }
     }
 
     /// The one place [`Self::sources`]'s EVM entry is consulted, and the
     /// one place [`Self::resolved`] is written. `fallback` is the memoised
-    /// reading to answer with if the lookup fails -- see [`Plan::Ask`].
+    /// reading to answer with if the lookup fails, and `unseen` says this
+    /// registry held no entry for the channel at all -- see [`Plan::Ask`]
+    /// for why the two are not the same thing.
     async fn resolve_evm(
         &self,
         channel_id: &[u8; 32],
         fallback: Option<EvmChannel>,
-    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        unseen: bool,
+        requester: &str,
+    ) -> Result<Option<EvmChannel>, ChannelResolutionError> {
         let Some(source) = self.sources.get(&ClaimChain::Evm) else {
             return Ok(None);
         };
+        // Before the chain is touched, not after: the point is to prevent
+        // the read (issue #613). Charged under the budget's own lock, so a
+        // burst arriving at once is bound by the same number a sequence is
+        // -- which matters here precisely because an unseen channel has no
+        // memo entry for the in-flight marker to be written on.
+        let reservation = self
+            .reserve_lookup(ClaimChain::Evm, unseen, requester, || {
+                hex::encode(channel_id)
+            })
+            .await?;
         let _in_flight = InFlight {
             memo: &self.resolved,
             key: *channel_id,
         };
         let resolved = match source.evm_channel(channel_id).await {
-            Ok(resolved) => resolved,
+            Ok(resolved) => {
+                self.record_lookup_outcome(ClaimChain::Evm, None);
+                resolved
+            }
             // A failed lookup says nothing about the channel, so it must
             // not be allowed to say anything about the memo either --
             // neither evicting the entry nor, crucially, refusing a client
@@ -856,6 +1025,7 @@ impl ClientChannelRegistry {
             // `serve_stale_until` there is no fallback and the claim is
             // refused for what it is.
             Err(failure) => {
+                self.record_lookup_outcome(ClaimChain::Evm, Some(&failure));
                 return match fallback {
                     Some(channel) => {
                         tracing::warn!(
@@ -867,10 +1037,18 @@ impl ClientChannelRegistry {
                         );
                         Ok(Some(channel))
                     }
-                    None => Err(failure),
+                    None => Err(failure.into()),
                 };
             }
         };
+        // The lookup found a channel, so it was not an unresolvable one and
+        // must not be charged for -- otherwise a node onboarding real
+        // anonymous buyers throttles itself for doing exactly what #611
+        // built this path to do. Given back before the memo's own lock is
+        // taken, so the two locks are never held at once.
+        if let (Some(reservation), Some(_)) = (reservation, &resolved) {
+            self.lookup_budget.refund(reservation);
+        }
         let mut memo = self
             .resolved
             .write()
@@ -913,7 +1091,8 @@ impl ClientChannelRegistry {
     pub(crate) async fn solana(
         &self,
         channel_account: &[u8; 32],
-    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
+        requester: &str,
+    ) -> Result<Option<SolanaChannel>, ChannelResolutionError> {
         if let Some(channel) = self.solana.get(channel_account) {
             return Ok(Some(*channel));
         }
@@ -926,8 +1105,11 @@ impl ClientChannelRegistry {
             Trigger::Age,
         ) {
             Plan::Serve(channel) => Ok(Some(channel)),
-            Plan::Refuse(failure) => Err(failure),
-            Plan::Ask { fallback } => self.resolve_solana(channel_account, fallback).await,
+            Plan::Refuse(failure) => Err(failure.into()),
+            Plan::Ask { fallback, unseen } => {
+                self.resolve_solana(channel_account, fallback, unseen, requester)
+                    .await
+            }
         }
     }
 
@@ -936,7 +1118,8 @@ impl ClientChannelRegistry {
     pub(crate) async fn refresh_solana(
         &self,
         channel_account: &[u8; 32],
-    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
+        requester: &str,
+    ) -> Result<Option<SolanaChannel>, ChannelResolutionError> {
         if let Some(channel) = self.solana.get(channel_account) {
             return Ok(Some(*channel));
         }
@@ -947,9 +1130,108 @@ impl ClientChannelRegistry {
             Trigger::Breach,
         ) {
             Plan::Serve(channel) => Ok(Some(channel)),
-            Plan::Refuse(failure) => Err(failure),
-            Plan::Ask { fallback } => self.resolve_solana(channel_account, fallback).await,
+            Plan::Refuse(failure) => Err(failure.into()),
+            Plan::Ask { fallback, unseen } => {
+                self.resolve_solana(channel_account, fallback, unseen, requester)
+                    .await
+            }
         }
+    }
+
+    /// Claim a slot for a lookup on a channel this registry has never
+    /// resolved, waiting for it if the drain is in arrears (issue #613).
+    /// `Ok(None)` -- no reservation, nothing to refund -- for a lookup that
+    /// is *not* the unbounded kind: there is an entry for the channel, so
+    /// [`ChannelLivenessPolicy`] already bounds it, and shaping it as well
+    /// would only make an already-paying client's re-verification queue
+    /// behind a stranger's first one.
+    ///
+    /// `channel` is a closure rather than a string because it is only ever
+    /// formatted for the refusal's log line, and a refusal is the rare
+    /// case: hex-encoding 32 bytes on every admitted lookup to describe the
+    /// ones that are not admitted would be paying the cost of the defence
+    /// on the path it defends.
+    async fn reserve_lookup(
+        &self,
+        chain: ClaimChain,
+        unseen: bool,
+        requester: &str,
+        channel: impl FnOnce() -> String,
+    ) -> Result<Option<LookupReservation>, ChannelResolutionError> {
+        if !unseen {
+            return Ok(None);
+        }
+        let exhausted = match self.lookup_budget.reserve(requester).await {
+            Ok(reservation) => return Ok(Some(reservation)),
+            Err(exhausted) => exhausted,
+        };
+
+        // An outage outranks a shaper. A node whose settlement endpoint is
+        // unreachable fails every lookup it makes, and a failed lookup
+        // consumes its slot, so the drain saturates within seconds of the
+        // endpoint going down -- at which point a refusal reported as a
+        // budget would tell an operator they are being walked when in fact
+        // their RPC is dead. That is exactly the diagnosis issue #613 asks
+        // to keep possible ("degrades loudly rather than looking like an
+        // attack"), so while the last lookup this node actually completed
+        // came back a failure, that failure is what a refusal reports.
+        // Cleared by the next lookup that succeeds, so it cannot outlive
+        // the outage that set it.
+        if let Some(failure) = self.last_lookup_failure(chain) {
+            tracing::warn!(
+                signer = %requester,
+                channel = %channel(),
+                error = %failure,
+                "refusing a client claim without a lookup: this node's discovery drain is \
+                 saturated, and every lookup it has completed recently has failed -- its chain \
+                 endpoint is down"
+            );
+            return Err(ChannelResolutionError::LookupFailed(failure));
+        }
+
+        // `warn`, and every field an operator needs to act on it: which
+        // axis was saturated (an attributable sender, or the node-wide
+        // drain that says nothing about who), who declared themselves the
+        // payer, and which channel they were asking about. Deliberately
+        // not `error` -- the node is doing what it was configured to do.
+        tracing::warn!(
+            bound = exhausted.bound.as_str(),
+            allowance = exhausted.allowance,
+            window_secs = exhausted.window.as_secs(),
+            max_wait_ms = exhausted.max_wait.as_millis(),
+            signer = %requester,
+            channel = %channel(),
+            "declining to resolve an unknown channel from chain: this node's discovery drain is \
+             saturated and its queue is full"
+        );
+        Err(ChannelResolutionError::Budgeted(exhausted))
+    }
+
+    /// The failure `chain`'s most recently *completed* lookup came back
+    /// with, if it came back with one. `None` once one of that chain's
+    /// lookups has succeeded since -- and never affected by the other
+    /// chain's endpoint, which fails on its own schedule.
+    fn last_lookup_failure(&self, chain: ClaimChain) -> Option<ChannelLookupFailed> {
+        self.last_failure
+            .read()
+            .expect("last lookup outcome lock poisoned")
+            .get(&chain)
+            .cloned()
+    }
+
+    /// Record how one of `chain`'s completed lookups went, for
+    /// [`Self::last_lookup_failure`]. Called on every lookup that reaches an
+    /// answer, and only there: a lookup that was never made says nothing
+    /// about the endpoint.
+    fn record_lookup_outcome(&self, chain: ClaimChain, failure: Option<&ChannelLookupFailed>) {
+        let mut last = self
+            .last_failure
+            .write()
+            .expect("last lookup outcome lock poisoned");
+        match failure {
+            Some(failure) => last.insert(chain, failure.clone()),
+            None => last.remove(&chain),
+        };
     }
 
     /// The Solana twin of [`Self::resolve_evm`].
@@ -957,19 +1239,34 @@ impl ClientChannelRegistry {
         &self,
         channel_account: &[u8; 32],
         fallback: Option<SolanaChannel>,
-    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
+        unseen: bool,
+        requester: &str,
+    ) -> Result<Option<SolanaChannel>, ChannelResolutionError> {
         let Some(source) = self.sources.get(&ClaimChain::Solana) else {
             return Ok(None);
         };
+        // See `Self::resolve_evm` for why this is charged before the chain
+        // is touched (issue #613). Solana's own resolution is one account
+        // read rather than two, which makes the attack cheaper for this
+        // connector to absorb and not one bit less unbounded.
+        let reservation = self
+            .reserve_lookup(ClaimChain::Solana, unseen, requester, || {
+                bs58::encode(channel_account).into_string()
+            })
+            .await?;
         let _in_flight = InFlight {
             memo: &self.resolved_solana,
             key: *channel_account,
         };
         let resolved = match source.solana_channel(channel_account).await {
-            Ok(resolved) => resolved,
+            Ok(resolved) => {
+                self.record_lookup_outcome(ClaimChain::Solana, None);
+                resolved
+            }
             // Serve-stale-while-revalidate -- see `Self::resolve_evm`'s own
             // comment for why an outage must not become this node's refusal.
             Err(failure) => {
+                self.record_lookup_outcome(ClaimChain::Solana, Some(&failure));
                 return match fallback {
                     Some(channel) => {
                         tracing::warn!(
@@ -981,10 +1278,15 @@ impl ClientChannelRegistry {
                         );
                         Ok(Some(channel))
                     }
-                    None => Err(failure),
+                    None => Err(failure.into()),
                 };
             }
         };
+        // See `Self::resolve_evm`: a resolution that succeeded is not an
+        // unresolvable lookup and gives its charge back.
+        if let (Some(reservation), Some(_)) = (reservation, &resolved) {
+            self.lookup_budget.refund(reservation);
+        }
         let mut memo = self
             .resolved_solana
             .write()
@@ -1216,6 +1518,15 @@ pub(crate) mod test_source {
 mod tests {
     use super::test_source::FakeChannelSource;
     use super::*;
+    use crate::lookup_budget::LookupBudgetBound;
+
+    /// The identity an unresolvable lookup is budgeted against (issue
+    /// #613): the signer a claim declared for itself, as
+    /// `ClientClaim::signer_key` spells it. Most of the tests below are
+    /// about a channel that resolves, where it is never consulted at all --
+    /// the ones it is the subject of are gathered at the end of this
+    /// module and name their own senders.
+    const A_BUYER: &str = "evm:0x1111111111111111111111111111111111111111";
 
     fn evm_channel() -> EvmChannel {
         evm_channel_depositing(DepositFloor::AtLeast(1_000))
@@ -1246,7 +1557,7 @@ mod tests {
             .expect("a 32-byte hex channel id");
 
         let key = decode_hex_bytes::<32>(&channel_id).unwrap();
-        assert_eq!(registry.evm(&key).await, Ok(Some(evm_channel())));
+        assert_eq!(registry.evm(&key, A_BUYER).await, Ok(Some(evm_channel())));
     }
 
     #[tokio::test]
@@ -1259,7 +1570,7 @@ mod tests {
         // A claim naming the same channel with the `0x` prefix names the
         // same channel -- the prefix is notation, not identity.
         let key = decode_hex_bytes::<32>(&format!("0x{}", "ab".repeat(32))).unwrap();
-        assert_eq!(registry.evm(&key).await, Ok(Some(evm_channel())));
+        assert_eq!(registry.evm(&key, A_BUYER).await, Ok(Some(evm_channel())));
     }
 
     #[test]
@@ -1289,8 +1600,11 @@ mod tests {
         )]));
         let registry = ClientChannelRegistry::new().with_source(source);
 
-        assert_eq!(registry.evm(&[0x09; 32]).await, Ok(Some(evm_channel())));
-        assert_eq!(registry.solana(&[0x09; 32]).await, Ok(None));
+        assert_eq!(
+            registry.evm(&[0x09; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
+        assert_eq!(registry.solana(&[0x09; 32], A_BUYER).await, Ok(None));
     }
 
     #[tokio::test]
@@ -1303,7 +1617,7 @@ mod tests {
             .expect("a 32-byte base58 account");
 
         assert_eq!(
-            registry.solana(&[3u8; 32]).await,
+            registry.solana(&[3u8; 32], A_BUYER).await,
             Ok(Some(SolanaChannel {
                 counterparty: [7u8; 32],
                 deposit_floor: DepositFloor::Unknown,
@@ -1320,7 +1634,7 @@ mod tests {
 
         // The same 32 bytes, presented as a Solana account, is not that
         // channel: an EVM record can never answer for a Solana claim.
-        assert_eq!(registry.solana(&[3u8; 32]).await, Ok(None));
+        assert_eq!(registry.solana(&[3u8; 32], A_BUYER).await, Ok(None));
     }
 
     #[test]
@@ -1338,7 +1652,10 @@ mod tests {
             FakeChannelSource::knowing(vec![([0x07; 32], evm_channel())]),
         ));
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
     }
 
     /// The cache: a second claim on the same channel costs no second
@@ -1352,7 +1669,10 @@ mod tests {
         let registry = ClientChannelRegistry::new().with_source(source.clone());
 
         for _ in 0..5 {
-            assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+            assert_eq!(
+                registry.evm(&[0x07; 32], A_BUYER).await,
+                Ok(Some(evm_channel()))
+            );
         }
         assert_eq!(
             source.lookups(),
@@ -1373,7 +1693,10 @@ mod tests {
             .expect("a 32-byte hex channel id");
         let registry = registry.with_source(source.clone());
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         assert_eq!(source.lookups(), 0);
     }
 
@@ -1385,8 +1708,8 @@ mod tests {
         let source = Arc::new(FakeChannelSource::knowing(vec![]));
         let registry = ClientChannelRegistry::new().with_source(source.clone());
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
+        assert_eq!(registry.evm(&[0x07; 32], A_BUYER).await, Ok(None));
+        assert_eq!(registry.evm(&[0x07; 32], A_BUYER).await, Ok(None));
         assert_eq!(
             source.lookups(),
             2,
@@ -1404,8 +1727,8 @@ mod tests {
         ));
 
         assert_eq!(
-            registry.evm(&[0x07; 32]).await,
-            Err(ChannelLookupFailed("connection refused".to_string()))
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Err(ChannelLookupFailed("connection refused".to_string()).into())
         );
     }
 
@@ -1432,7 +1755,7 @@ mod tests {
         ));
 
         assert_eq!(
-            registry.solana(&[0x07; 32]).await,
+            registry.solana(&[0x07; 32], A_BUYER).await,
             Ok(Some(solana_channel()))
         );
     }
@@ -1448,7 +1771,7 @@ mod tests {
 
         for _ in 0..5 {
             assert_eq!(
-                registry.solana(&[0x07; 32]).await,
+                registry.solana(&[0x07; 32], A_BUYER).await,
                 Ok(Some(solana_channel()))
             );
         }
@@ -1477,7 +1800,7 @@ mod tests {
         let registry = registry.with_solana_source(source.clone());
 
         assert_eq!(
-            registry.solana(&[7u8; 32]).await,
+            registry.solana(&[7u8; 32], A_BUYER).await,
             Ok(Some(SolanaChannel {
                 counterparty: [9u8; 32],
                 deposit_floor: DepositFloor::Unknown,
@@ -1496,8 +1819,8 @@ mod tests {
         ));
 
         assert_eq!(
-            registry.solana(&[0x07; 32]).await,
-            Err(ChannelLookupFailed("connection refused".to_string()))
+            registry.solana(&[0x07; 32], A_BUYER).await,
+            Err(ChannelLookupFailed("connection refused".to_string()).into())
         );
     }
 
@@ -1512,10 +1835,10 @@ mod tests {
         let registry = ClientChannelRegistry::new().with_solana_source(source);
 
         assert_eq!(
-            registry.solana(&[0x09; 32]).await,
+            registry.solana(&[0x09; 32], A_BUYER).await,
             Ok(Some(solana_channel()))
         );
-        assert_eq!(registry.evm(&[0x09; 32]).await, Ok(None));
+        assert_eq!(registry.evm(&[0x09; 32], A_BUYER).await, Ok(None));
     }
 
     // -- The deposit floor and its refresh (issues #646, #649) --
@@ -1539,11 +1862,11 @@ mod tests {
             )
             .expect("a 32-byte base58 account");
 
-        let evm = registry.evm(&[0xab; 32]).await.unwrap().unwrap();
+        let evm = registry.evm(&[0xab; 32], A_BUYER).await.unwrap().unwrap();
         assert_eq!(evm.deposit_floor, DepositFloor::Unknown);
         assert!(evm.deposit_floor.covers(u64::MAX));
 
-        let solana = registry.solana(&[3u8; 32]).await.unwrap().unwrap();
+        let solana = registry.solana(&[3u8; 32], A_BUYER).await.unwrap().unwrap();
         assert_eq!(solana.deposit_floor, DepositFloor::Unknown);
     }
 
@@ -1561,7 +1884,7 @@ mod tests {
         let registry = ClientChannelRegistry::new().with_source(source.clone());
 
         for _ in 0..5 {
-            let channel = registry.evm(&[0x07; 32]).await.unwrap().unwrap();
+            let channel = registry.evm(&[0x07; 32], A_BUYER).await.unwrap().unwrap();
             assert_eq!(channel.deposit_floor, DepositFloor::AtLeast(1_000));
         }
         assert_eq!(source.lookups(), 1);
@@ -1587,7 +1910,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .evm(&[0x07; 32])
+                .evm(&[0x07; 32], A_BUYER)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1603,7 +1926,7 @@ mod tests {
         // re-reads.
         assert_eq!(
             registry
-                .evm(&[0x07; 32])
+                .evm(&[0x07; 32], A_BUYER)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1614,7 +1937,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .refresh_evm(&[0x07; 32])
+                .refresh_evm(&[0x07; 32], A_BUYER)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1627,7 +1950,7 @@ mod tests {
         // a refresh writes through the memo rather than around it.
         assert_eq!(
             registry
-                .evm(&[0x07; 32])
+                .evm(&[0x07; 32], A_BUYER)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1652,11 +1975,14 @@ mod tests {
             .with_source(source.clone())
             .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup());
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         source.now_says([0x07; 32], None);
 
         assert_eq!(
-            registry.evm(&[0x07; 32]).await,
+            registry.evm(&[0x07; 32], A_BUYER).await,
             Ok(None),
             "a settled channel is not answered for out of a cache that predates the settlement"
         );
@@ -1674,12 +2000,12 @@ mod tests {
             .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup());
 
         assert_eq!(
-            registry.solana(&[0x07; 32]).await,
+            registry.solana(&[0x07; 32], A_BUYER).await,
             Ok(Some(solana_channel()))
         );
         source.now_says([0x07; 32], None);
 
-        assert_eq!(registry.solana(&[0x07; 32]).await, Ok(None));
+        assert_eq!(registry.solana(&[0x07; 32], A_BUYER).await, Ok(None));
     }
 
     /// Liveness expiry is what bounds how long the stale positive above can
@@ -1694,7 +2020,10 @@ mod tests {
         let registry = ClientChannelRegistry::new().with_source(source.clone());
 
         for _ in 0..5 {
-            assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+            assert_eq!(
+                registry.evm(&[0x07; 32], A_BUYER).await,
+                Ok(Some(evm_channel()))
+            );
         }
         assert_eq!(source.lookups(), 1);
         assert!(DEFAULT_LIVENESS_TTL > Duration::ZERO);
@@ -1716,13 +2045,16 @@ mod tests {
                 ..ChannelLivenessPolicy::default()
             });
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         source.now_says([0x07; 32], None);
-        assert_eq!(registry.refresh_evm(&[0x07; 32]).await, Ok(None));
+        assert_eq!(registry.refresh_evm(&[0x07; 32], A_BUYER).await, Ok(None));
 
         // The default TTL has not expired, so this reads the memo -- which
         // must no longer hold the channel.
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
+        assert_eq!(registry.evm(&[0x07; 32], A_BUYER).await, Ok(None));
     }
 
     /// A declared channel has nothing to refresh: config is its authority,
@@ -1742,7 +2074,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .refresh_evm(&[0x07; 32])
+                .refresh_evm(&[0x07; 32], A_BUYER)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1769,15 +2101,21 @@ mod tests {
             evm_channel(),
         )]));
         let registry = ClientChannelRegistry::new().with_source(source.clone());
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
 
         source.now_fails(Some("connection refused"));
         assert_eq!(
-            registry.refresh_evm(&[0x07; 32]).await,
+            registry.refresh_evm(&[0x07; 32], A_BUYER).await,
             Ok(Some(evm_channel())),
             "the last good reading, not a refusal"
         );
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
     }
 
     // -- Ageing out without a thundering herd (the availability review of
@@ -1814,13 +2152,16 @@ mod tests {
                 min_reattempt_interval: Duration::from_secs(600),
             });
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         assert_eq!(source.lookups(), 1, "the initial resolution");
         source.now_fails(Some("429 Too Many Requests"));
 
         for packet in 0..25 {
             assert_eq!(
-                registry.evm(&[0x07; 32]).await,
+                registry.evm(&[0x07; 32], A_BUYER).await,
                 Ok(Some(evm_channel())),
                 "packet {packet} is served from the last good reading"
             );
@@ -1850,11 +2191,17 @@ mod tests {
                 min_reattempt_interval: Duration::from_millis(20),
             });
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         source.now_fails(Some("429 Too Many Requests"));
 
         tokio::time::sleep(Duration::from_millis(60)).await;
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         assert_eq!(source.lookups(), 2, "one re-attempt, and it was made");
     }
 
@@ -1874,13 +2221,13 @@ mod tests {
             });
 
         assert_eq!(
-            registry.solana(&[0x07; 32]).await,
+            registry.solana(&[0x07; 32], A_BUYER).await,
             Ok(Some(solana_channel()))
         );
         source.now_fails(Some("429 Too Many Requests"));
         for _ in 0..25 {
             assert_eq!(
-                registry.solana(&[0x07; 32]).await,
+                registry.solana(&[0x07; 32], A_BUYER).await,
                 Ok(Some(solana_channel()))
             );
         }
@@ -1910,12 +2257,15 @@ mod tests {
                 min_reattempt_interval: Duration::ZERO,
             });
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         source.now_fails(Some("connection refused"));
 
         assert_eq!(
-            registry.evm(&[0x07; 32]).await,
-            Err(ChannelLookupFailed("connection refused".to_string()))
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Err(ChannelLookupFailed("connection refused".to_string()).into())
         );
     }
 
@@ -1947,12 +2297,15 @@ mod tests {
                 min_reattempt_interval: Duration::from_secs(600),
             });
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         source.now_fails(Some("429 Too Many Requests"));
 
         for packet in 0..25 {
             assert!(
-                registry.evm(&[0x07; 32]).await.is_err(),
+                registry.evm(&[0x07; 32], A_BUYER).await.is_err(),
                 "packet {packet} is refused -- there is nothing safe to serve"
             );
         }
@@ -1964,8 +2317,10 @@ mod tests {
 
         // And it says which refusal it is, so an operator reading a log can
         // tell "my endpoint is down" from "my node is backing off".
-        let Err(failure) = registry.evm(&[0x07; 32]).await else {
-            panic!("expected a refusal");
+        let Err(ChannelResolutionError::LookupFailed(failure)) =
+            registry.evm(&[0x07; 32], A_BUYER).await
+        else {
+            panic!("expected a lookup failure, not a budget refusal");
         };
         assert!(failure.0.contains("backing off"), "{failure}");
     }
@@ -1993,7 +2348,10 @@ mod tests {
                 }),
         );
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         source.now_fails(Some("429 Too Many Requests"));
 
         let barrier = Arc::new(tokio::sync::Barrier::new(32));
@@ -2006,7 +2364,7 @@ mod tests {
                 // this is a genuine simultaneous arrival rather than a
                 // hope about scheduling.
                 barrier.wait().await;
-                registry.evm(&[0x07; 32]).await
+                registry.evm(&[0x07; 32], A_BUYER).await
             }));
         }
         for packet in packets {
@@ -2048,7 +2406,10 @@ mod tests {
                 }),
         );
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         assert_eq!(source.lookups(), 1);
 
         // A barrier rather than a slow source: every task is released only
@@ -2062,7 +2423,7 @@ mod tests {
             let barrier = barrier.clone();
             packets.push(tokio::spawn(async move {
                 barrier.wait().await;
-                registry.evm(&[0x07; 32]).await
+                registry.evm(&[0x07; 32], A_BUYER).await
             }));
         }
         for packet in packets {
@@ -2094,17 +2455,23 @@ mod tests {
                 min_reattempt_interval: Duration::ZERO,
             });
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         // Well inside the window: answered from the memo.
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         assert_eq!(source.lookups(), 1);
 
         // Past it: re-verified, and the channel is dropped if the chain has
         // stopped vouching for it in the meantime.
         tokio::time::sleep(Duration::from_millis(600)).await;
         source.now_says([0x07; 32], None);
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(None));
+        assert_eq!(registry.evm(&[0x07; 32], A_BUYER).await, Ok(None));
         assert_eq!(source.lookups(), 2);
     }
 
@@ -2126,15 +2493,689 @@ mod tests {
                 min_reattempt_interval: Duration::ZERO,
             });
 
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
         source.now_fails(Some("connection refused"));
-        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
 
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert_eq!(
-            registry.evm(&[0x07; 32]).await,
-            Err(ChannelLookupFailed("connection refused".to_string())),
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Err(ChannelLookupFailed("connection refused".to_string()).into()),
             "the stale window is measured from the last confirmation, not the last attempt"
         );
+    }
+
+    // -- Shaping the unresolvable lookup (issue #613) --
+
+    /// A sender walking the id space: every request names a channel that
+    /// has never been seen and never will resolve.
+    fn a_nonexistent_channel(request: u32) -> [u8; 32] {
+        let mut channel_id = [0xee; 32];
+        channel_id[..4].copy_from_slice(&request.to_be_bytes());
+        channel_id
+    }
+
+    /// A policy that shapes nothing, for a test whose subject is something
+    /// else. Deliberately spelled out rather than hidden behind a
+    /// constructor: a registry with no bound is exactly what #613 is about,
+    /// and it should be conspicuous wherever it appears.
+    fn unshaped() -> UnresolvableLookupBudgetPolicy {
+        UnresolvableLookupBudgetPolicy {
+            per_signer: u32::MAX,
+            total: u32::MAX,
+            window: Duration::from_secs(600),
+            max_wait: Duration::ZERO,
+        }
+    }
+
+    /// A policy shaped tightly enough to measure, with a wait ceiling of
+    /// zero so that every decision is observable as an immediate pass or
+    /// refusal rather than as a sleep -- which is what keeps these
+    /// measurements schedule-independent.
+    ///
+    /// A consequence worth naming: with no wait ceiling there is no band in
+    /// which a lookup queues, and the per-signer axis only ever bites
+    /// *inside* that band (it is consulted only once the node-wide drain is
+    /// in arrears, and with a zero ceiling the node refuses at exactly that
+    /// point). So what these tests measure is the node-wide rate. The
+    /// per-signer split, and the queueing itself, are measured in
+    /// `crate::lookup_budget`, which can drive an exact clock.
+    fn shaped(per_signer: u32, total: u32) -> UnresolvableLookupBudgetPolicy {
+        UnresolvableLookupBudgetPolicy {
+            per_signer,
+            total,
+            window: Duration::from_secs(600),
+            max_wait: Duration::ZERO,
+        }
+    }
+
+    /// The measurement that motivates the whole change, and the evidence
+    /// that #654's machinery does **not** already cover it -- in its
+    /// hardest form.
+    ///
+    /// `ChannelLivenessPolicy` is set as tight as it goes: every entry aged
+    /// out, nothing servable stale, and a ten-minute `min_reattempt_interval`
+    /// -- the configuration that reduces 200 packets on one *resolved*
+    /// channel to a single lookup
+    /// (`past_the_stale_window_a_burst_still_costs_one_lookup_not_one_per_packet`
+    /// measures exactly that). And the sender here does not even vary the
+    /// channel: it is **the same nonexistent id, two hundred times**, which
+    /// is the case an interval keyed by channel ought to bound if anything
+    /// could. It costs two hundred chain reads, because `resolve_evm`
+    /// inserts a memo entry on `Some` and `remove`s on `None`, so there is
+    /// never an entry for the interval to be recorded on.
+    #[tokio::test]
+    async fn the_same_nonexistent_channel_is_not_bounded_by_the_liveness_policy() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::ZERO,
+                serve_stale_until: Duration::ZERO,
+                min_reattempt_interval: Duration::from_secs(600),
+            })
+            .with_lookup_budget(unshaped());
+
+        for _ in 0..200 {
+            assert_eq!(registry.evm(&[0x07; 32], A_BUYER).await, Ok(None));
+        }
+        assert_eq!(
+            source.lookups(),
+            200,
+            "the liveness policy hangs every one of its bounds off a memo entry, and a channel \
+             that resolves to nothing never gets one -- so it bounds this not at all, even for \
+             one id repeated"
+        );
+    }
+
+    /// ...and the same with a fresh id per request, which is the shape the
+    /// attack actually takes and which no per-channel interval could ever
+    /// bound.
+    #[tokio::test]
+    async fn a_walk_of_fresh_ids_is_not_bounded_by_the_liveness_policy_either() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::ZERO,
+                serve_stale_until: Duration::ZERO,
+                min_reattempt_interval: Duration::from_secs(600),
+            })
+            .with_lookup_budget(unshaped());
+
+        for request in 0..200 {
+            assert_eq!(
+                registry.evm(&a_nonexistent_channel(request), A_BUYER).await,
+                Ok(None)
+            );
+        }
+        assert_eq!(source.lookups(), 200);
+    }
+
+    /// The same walk with the shaper in place: 200 requests, and the chain
+    /// is read for the sender's own rate only.
+    ///
+    /// The liveness policy is left at ZERO across the board, so nothing but
+    /// the shaper is suppressing anything -- and the assertion is against
+    /// the configured rate rather than a wall clock, so a slow runner
+    /// cannot turn this into a race.
+    #[tokio::test]
+    async fn a_walk_of_the_channel_id_space_costs_a_bounded_number_of_lookups() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup())
+            .with_lookup_budget(shaped(4, 8));
+
+        let mut budgeted = 0;
+        for request in 0..200 {
+            match registry.evm(&a_nonexistent_channel(request), A_BUYER).await {
+                Ok(None) => {}
+                Err(ChannelResolutionError::Budgeted(_)) => budgeted += 1,
+                other => panic!("unexpected answer to request {request}: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            source.lookups(),
+            8,
+            "one sender's walk costs the node-wide rate, not 200 chain reads"
+        );
+        assert_eq!(budgeted, 192, "every request past it says so");
+    }
+
+    /// The same walk by an *adaptive* sender, who declares a fresh signer
+    /// on every request. This is the case the per-signer axis cannot touch
+    /// -- a keypair is free, and the signer is read rather than
+    /// authenticated -- and it is why there is a node-wide drain at all.
+    #[tokio::test]
+    async fn a_sybil_walk_is_bounded_by_the_node_wide_drain() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup())
+            .with_lookup_budget(shaped(4, 8));
+
+        for request in 0..200u32 {
+            let _ = registry
+                .evm(
+                    &a_nonexistent_channel(request),
+                    &format!("evm:0x{request:040x}"),
+                )
+                .await;
+        }
+
+        assert_eq!(
+            source.lookups(),
+            8,
+            "200 requests under 200 identities still cost only the node-wide rate"
+        );
+    }
+
+    /// **The property the first cut of this bound got wrong**, and the one
+    /// that matters most: a flood must not switch the feature off.
+    ///
+    /// A sender saturates the drain completely. Under a bound that refuses
+    /// at its ceiling, an honest buyer is then denied for as long as the
+    /// flood lasts -- the whole feature turned off by whoever can afford
+    /// one request per slot. Under a bound that shapes, the drain keeps
+    /// draining, so the honest buyer arriving a few slots later is served.
+    ///
+    /// The elapsed time below is asserted in the safe direction: a slow
+    /// runner drains *more*, never less, so this cannot become a race. The
+    /// exact-clock version of the same property, with no wall time at all,
+    /// is `crate::lookup_budget::a_flood_reopens_every_interval_rather_than_closing`.
+    #[tokio::test]
+    async fn a_flood_delays_an_honest_buyer_rather_than_denying_them() {
+        let honest_channel = [0x77; 32];
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            honest_channel,
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            // Ten slots per 100 ms, i.e. one every 10 ms, and a 5 ms
+            // ceiling -- so nothing here ever actually sleeps and the whole
+            // test is decided by which side of the ceiling a slot falls on.
+            .with_lookup_budget(UnresolvableLookupBudgetPolicy {
+                per_signer: u32::MAX,
+                total: 10,
+                window: Duration::from_millis(100),
+                max_wait: Duration::from_millis(5),
+            });
+
+        let mut refused = 0;
+        for request in 0..200 {
+            if registry
+                .evm(&a_nonexistent_channel(request), "evm:0xflood")
+                .await
+                .is_err()
+            {
+                refused += 1;
+            }
+        }
+        assert!(refused > 0, "the drain really is saturated");
+
+        // Five slots' worth of drain later -- the queue has moved on, which
+        // is the whole difference between shaping and dropping.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.evm(&honest_channel, A_BUYER).await,
+            Ok(Some(evm_channel())),
+            "a flood must delay this buyer, never deny them -- a bound that refused here would \
+             be the feature switched off by whoever can afford one request per slot"
+        );
+    }
+
+    /// The case a negative cache would have broken, and the reason #611
+    /// refused to build one: a buyer opens a channel and writes a second
+    /// later, so their channel does not resolve on the first attempt and
+    /// does on the second. They are served on that second attempt, with no
+    /// TTL to wait out.
+    ///
+    /// Twenty such buyers in a row, and the rate is what makes the refund
+    /// load-bearing rather than incidental. Each buyer costs one genuine
+    /// miss -- their channel really was not there yet -- plus one
+    /// resolution, which gives its slot back. So twenty buyers cost twenty
+    /// slots, not forty, and a burst of twenty-five carries all of them.
+    /// Without the refund the same twenty cost forty and the burst runs out
+    /// around the twelfth.
+    #[tokio::test]
+    async fn a_buyer_whose_channel_appears_a_moment_later_is_served_on_their_next_attempt() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(2, 25));
+
+        for buyer in 0..20 {
+            let channel_id = a_nonexistent_channel(buyer);
+            let signer = format!("evm:0x{buyer:040x}");
+
+            // Attempt one: they opened the channel a moment ago and the
+            // chain does not have it yet.
+            assert_eq!(
+                registry.evm(&channel_id, &signer).await,
+                Ok(None),
+                "buyer {buyer}'s channel is not on chain yet"
+            );
+
+            // ...and now it is. No TTL to wait out: the answer that could
+            // change to a better one was never memoised.
+            source.now_says(channel_id, Some(evm_channel()));
+            assert_eq!(
+                registry.evm(&channel_id, &signer).await,
+                Ok(Some(evm_channel())),
+                "buyer {buyer} is served on their very next attempt"
+            );
+        }
+
+        assert_eq!(source.lookups(), 40, "one miss and one resolution each");
+        assert_eq!(
+            registry.unresolvable_lookups_queued_for(),
+            Duration::ZERO,
+            "and the drain is not in arrears: every resolution gave its own slot back"
+        );
+    }
+
+    /// A node onboarding real anonymous buyers as fast as they arrive must
+    /// not throttle itself, so a lookup that *resolves* costs nothing.
+    /// Fifty distinct channels against a rate of one: every one is served,
+    /// because every one gives its slot back.
+    #[tokio::test]
+    async fn resolving_real_channels_never_spends_the_budget() {
+        let channels: Vec<([u8; 32], EvmChannel)> = (0..50)
+            .map(|buyer| (a_nonexistent_channel(buyer), evm_channel()))
+            .collect();
+        let source = Arc::new(FakeChannelSource::knowing(channels));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(1, 1));
+
+        for buyer in 0..50 {
+            assert_eq!(
+                registry
+                    .evm(
+                        &a_nonexistent_channel(buyer),
+                        &format!("evm:0x{buyer:040x}")
+                    )
+                    .await,
+                Ok(Some(evm_channel())),
+                "buyer {buyer} resolves, and a resolution is not an unresolvable lookup"
+            );
+        }
+        assert_eq!(source.lookups(), 50);
+        assert_eq!(registry.unresolvable_lookups_queued_for(), Duration::ZERO);
+    }
+
+    /// Two senders' rates are independent, and the split is measured with
+    /// an exact clock in `crate::lookup_budget`'s
+    /// `two_signers_have_independent_allowances` rather than here: the
+    /// per-signer axis only bites inside the queueing band (see `shaped`),
+    /// and reproducing that band against a real clock would be a race
+    /// rather than a measurement. What is asserted here is the seam --
+    /// that the registry passes each claim's own declared signer through,
+    /// so two senders reach two different buckets at all.
+    #[tokio::test]
+    async fn each_sender_reaches_its_own_bucket() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(1, 2));
+
+        // Two senders, one node-wide slot each.
+        assert_eq!(
+            registry
+                .evm(&a_nonexistent_channel(0), "evm:0xaaaaaaaa")
+                .await,
+            Ok(None)
+        );
+        assert_eq!(
+            registry
+                .evm(&a_nonexistent_channel(1), "evm:0xbbbbbbbb")
+                .await,
+            Ok(None)
+        );
+        assert_eq!(source.lookups(), 2);
+    }
+
+    /// Exhaustion is its own answer. `Ok(None)`, a `LookupFailed` and a
+    /// `Budgeted` all refuse the claim above this, and an operator has to
+    /// be able to tell them apart -- "there is no such channel" needs
+    /// nothing done, "the chain did not answer" needs an endpoint fixed,
+    /// and "I declined to ask" needs somebody looked at.
+    #[tokio::test]
+    async fn an_exhausted_budget_is_neither_an_absent_channel_nor_a_lookup_failure() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(1, 1));
+
+        // "No such channel", which spends the whole burst.
+        assert_eq!(registry.evm(&[0x07; 32], A_BUYER).await, Ok(None));
+
+        let budgeted = registry
+            .evm(&[0x08; 32], A_BUYER)
+            .await
+            .expect_err("the drain is saturated");
+        assert!(
+            matches!(
+                budgeted,
+                ChannelResolutionError::Budgeted(LookupBudgetExhausted {
+                    bound: LookupBudgetBound::Node,
+                    allowance: 1,
+                    ..
+                })
+            ),
+            "{budgeted:?}"
+        );
+        assert_eq!(
+            source.lookups(),
+            1,
+            "the refusal cost no chain read -- that is the whole point of it"
+        );
+    }
+
+    /// **Issue #613's own acceptance criterion**: a node whose settlement
+    /// endpoint is genuinely unreachable must degrade *loudly* rather than
+    /// looking like an attack.
+    ///
+    /// That is not automatic, and getting it wrong is easy: a failed lookup
+    /// consumes its slot, so an outage saturates the drain within seconds
+    /// and every refusal after that would read as a budget. So while the
+    /// last lookup this node actually completed came back a failure, that
+    /// failure is what a refusal reports -- for as long as the outage
+    /// lasts, however saturated the drain is.
+    #[tokio::test]
+    async fn an_unreachable_chain_never_reads_as_a_budget() {
+        let source = Arc::new(FakeChannelSource::unreachable("connection refused"));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(3, 3));
+
+        for request in 0..3 {
+            assert_eq!(
+                registry.evm(&a_nonexistent_channel(request), A_BUYER).await,
+                Err(ChannelLookupFailed("connection refused".to_string()).into()),
+                "request {request} reports the outage, in the endpoint's own words"
+            );
+        }
+
+        // The drain is saturated now -- and every refusal still names the
+        // outage, because the outage is what is actually wrong.
+        for request in 3..40 {
+            assert_eq!(
+                registry.evm(&a_nonexistent_channel(request), A_BUYER).await,
+                Err(ChannelLookupFailed("connection refused".to_string()).into()),
+                "request {request} must not read as rate-limiting while the chain is down"
+            );
+        }
+        assert_eq!(
+            source.lookups(),
+            3,
+            "and the shaper still did its job: the dead endpoint was not re-asked 40 times"
+        );
+    }
+
+    /// Issue #613's review, finding F: a node with both `[settlement.evm]`
+    /// and `[settlement.solana]` has two endpoints that fail independently,
+    /// so the outage precedence above must be keyed by chain. With one slot
+    /// shared between them, a Solana outage made an *EVM* refusal quote the
+    /// Solana endpoint's error -- a worse diagnosis than the one it
+    /// replaced, because it names a real outage that has nothing to do with
+    /// the claim being refused.
+    #[tokio::test]
+    async fn one_chains_outage_does_not_explain_the_other_chains_refusal() {
+        let evm = Arc::new(FakeChannelSource::knowing(vec![]));
+        let solana = Arc::new(super::test_source::FakeSolanaChannelSource::unreachable(
+            "solana rpc: connection refused",
+        ));
+        let registry = ClientChannelRegistry::new()
+            .with_source(evm.clone())
+            .with_solana_source(solana.clone())
+            .with_lookup_budget(shaped(2, 2));
+        let buyer = "evm:0xdddddddddddddddddddddddddddddddddddddddd";
+
+        // Solana's endpoint is down, and says so.
+        assert_eq!(
+            registry.solana(&[0x01; 32], buyer).await,
+            Err(ChannelLookupFailed("solana rpc: connection refused".to_string()).into())
+        );
+        // EVM's is fine -- it simply has no such channel. That spends the
+        // rest of the shared node-wide drain.
+        assert_eq!(registry.evm(&[0x02; 32], buyer).await, Ok(None));
+
+        // Now the drain is saturated. The EVM refusal must be a budget: EVM
+        // is not the chain that is down.
+        assert!(
+            matches!(
+                registry.evm(&[0x03; 32], buyer).await,
+                Err(ChannelResolutionError::Budgeted(_))
+            ),
+            "an EVM refusal must not borrow the Solana endpoint's outage"
+        );
+        // ...and the Solana refusal still is the outage, because Solana is.
+        assert_eq!(
+            registry.solana(&[0x04; 32], buyer).await,
+            Err(ChannelLookupFailed("solana rpc: connection refused".to_string()).into())
+        );
+    }
+
+    /// The hold, end to end through the registry rather than through the
+    /// shaper alone: a lookup past the burst is *held* and then reaches the
+    /// chain, which is what makes "delayed, not denied" a fact about the
+    /// packet path rather than about a number.
+    ///
+    /// `start_paused`, so the hold is real and instant -- and so this also
+    /// stands as the proof that mounting this crate needs a time-enabled
+    /// runtime.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_lookup_still_reaches_the_chain() {
+        let honest_channel = [0x77; 32];
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            honest_channel,
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            // One slot a second, and a two-second ceiling, so the arrival
+            // after the burst is held rather than refused.
+            .with_lookup_budget(UnresolvableLookupBudgetPolicy {
+                per_signer: u32::MAX,
+                total: 60,
+                window: Duration::from_secs(60),
+                max_wait: Duration::from_secs(2),
+            });
+
+        for request in 0..60 {
+            assert_eq!(
+                registry
+                    .evm(&a_nonexistent_channel(request), "evm:0xflood")
+                    .await,
+                Ok(None),
+                "burst request {request}"
+            );
+        }
+
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            registry.evm(&honest_channel, A_BUYER).await,
+            Ok(Some(evm_channel())),
+            "the honest buyer is held for a slot and then served"
+        );
+        let waited = tokio::time::Instant::now().duration_since(started);
+        assert!(
+            waited >= Duration::from_millis(900),
+            "and the hold really happened: {waited:?}"
+        );
+        assert_eq!(source.lookups(), 61, "the held lookup did reach the chain");
+    }
+
+    /// ...and once the endpoint comes back, a refusal is a budget again.
+    /// The outage precedence must not outlive the outage, or a node that
+    /// recovered would report an attack as an endpoint problem forever.
+    #[tokio::test]
+    async fn a_recovered_chain_reports_a_budget_again() {
+        let source = Arc::new(FakeChannelSource::unreachable("connection refused"));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(2, 2));
+
+        assert!(registry.evm(&[0x01; 32], A_BUYER).await.is_err());
+        source.now_fails(None);
+        assert_eq!(registry.evm(&[0x02; 32], A_BUYER).await, Ok(None));
+
+        assert!(
+            matches!(
+                registry.evm(&[0x03; 32], A_BUYER).await,
+                Err(ChannelResolutionError::Budgeted(_))
+            ),
+            "a completed, successful lookup clears the outage the refusal was deferring to"
+        );
+    }
+
+    /// A declared `[[client_channels]]` channel is answered from config and
+    /// never resolved, so it can never spend this drain -- which is what
+    /// keeps an operator's own hand-declared buyers working while a walk of
+    /// the id space is in progress.
+    #[tokio::test]
+    async fn a_declared_channel_never_spends_the_lookup_budget() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let mut registry = ClientChannelRegistry::new();
+        registry
+            .record_evm(&"07".repeat(32), evm_channel())
+            .expect("a 32-byte hex channel id");
+        let registry = registry
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(1, 1));
+
+        // Saturate the drain on a channel that does not exist...
+        assert_eq!(registry.evm(&[0x09; 32], A_BUYER).await, Ok(None));
+
+        // ...and the declared channel is unaffected, however many times it
+        // is asked for.
+        for _ in 0..10 {
+            assert_eq!(
+                registry.evm(&[0x07; 32], A_BUYER).await,
+                Ok(Some(evm_channel()))
+            );
+        }
+        assert_eq!(source.lookups(), 1);
+    }
+
+    /// An already-resolved channel is served from the memo without
+    /// consuming anything here, so a client that is already paying is not
+    /// affected by a drain somebody else saturated. This is the bound on
+    /// the blast radius.
+    #[tokio::test]
+    async fn an_already_resolved_channel_is_unaffected_by_a_saturated_drain() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_lookup_budget(shaped(1, 1));
+
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
+        // A stranger saturates the node's whole drain.
+        assert_eq!(
+            registry
+                .evm(
+                    &[0x09; 32],
+                    "evm:0xcccccccccccccccccccccccccccccccccccccccc"
+                )
+                .await,
+            Ok(None)
+        );
+
+        for _ in 0..10 {
+            assert_eq!(
+                registry.evm(&[0x07; 32], A_BUYER).await,
+                Ok(Some(evm_channel())),
+                "a channel already resolved is served from the memo, drain or no drain"
+            );
+        }
+    }
+
+    /// The Solana twin of the bound: the same walk, on the chain whose
+    /// public RPC has the tighter per-method budget and where a resolution
+    /// is one account read rather than two -- cheaper to absorb, and not
+    /// one bit less unbounded without this.
+    #[tokio::test]
+    async fn a_walk_of_the_solana_account_space_costs_a_bounded_number_of_lookups() {
+        let source = Arc::new(super::test_source::FakeSolanaChannelSource::knowing(vec![]));
+        let registry = ClientChannelRegistry::new()
+            .with_solana_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup())
+            .with_lookup_budget(shaped(4, 8));
+        let buyer = "solana:So11111111111111111111111111111111111111112";
+
+        for request in 0..200 {
+            let _ = registry
+                .solana(&a_nonexistent_channel(request), buyer)
+                .await;
+        }
+        assert_eq!(source.lookups(), 8);
+        assert!(matches!(
+            registry.solana(&a_nonexistent_channel(200), buyer).await,
+            Err(ChannelResolutionError::Budgeted(_))
+        ));
+    }
+
+    /// Concurrency does not get around the bound. The slot is claimed under
+    /// the shaper's own lock *before* the chain is touched, which matters
+    /// here more than anywhere else: an unresolvable channel has no memo
+    /// entry, so #654's in-flight marker -- the thing that holds back a
+    /// stampede on a channel that *has* resolved -- has nothing to be
+    /// written on. A hundred requests released together, and the rate still
+    /// holds.
+    #[tokio::test]
+    async fn simultaneous_unresolvable_lookups_do_not_overshoot_the_budget() {
+        let source = Arc::new(
+            FakeChannelSource::knowing(vec![])
+                // Slow, so all hundred are genuinely in flight at once
+                // rather than completing one at a time.
+                .taking(Duration::from_millis(100)),
+        );
+        let registry = Arc::new(
+            ClientChannelRegistry::new()
+                .with_source(source.clone())
+                .with_lookup_budget(shaped(8, 8)),
+        );
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(100));
+        let mut requests = Vec::new();
+        for request in 0..100 {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            requests.push(tokio::spawn(async move {
+                barrier.wait().await;
+                registry
+                    .evm(&a_nonexistent_channel(request), A_BUYER)
+                    .await
+                    .is_ok()
+            }));
+        }
+        let mut looked_up = 0;
+        for request in requests {
+            if request.await.unwrap() {
+                looked_up += 1;
+            }
+        }
+
+        assert_eq!(
+            looked_up, 8,
+            "the rate binds a burst as it binds a sequence"
+        );
+        assert_eq!(source.lookups(), 8);
     }
 }

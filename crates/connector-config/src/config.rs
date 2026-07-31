@@ -87,7 +87,64 @@ struct RawConfig {
     /// packet becomes one RPC.
     #[serde(default)]
     channel_reattempt_interval_ms: Option<u64>,
+    /// The rate one self-declared signer's lookups for channels that do not
+    /// resolve are shaped to, per window, once the node-wide drain below is
+    /// in arrears (issue #613). Absent means the client edge's own default;
+    /// `0` is refused, since a rate of nothing per window would refuse
+    /// every unaffiliated buyer the moment the node got busy -- i.e. switch
+    /// off the registration-free path #611 exists to provide, silently and
+    /// only under load.
+    #[serde(default)]
+    unresolvable_lookup_budget_per_signer: Option<u32>,
+    /// The rate this node's lookups for channels that do not resolve are
+    /// shaped to per window in total, whoever asks (issue #613). This is
+    /// the one a sender cannot raise by declaring a different signer, so it
+    /// is the figure an operator on a metered settlement endpoint actually
+    /// sets, and it should be derived from what that endpoint can absorb.
+    /// Absent means the client edge's own default; `0` is refused for the
+    /// same reason as above.
+    #[serde(default)]
+    unresolvable_lookup_budget_total: Option<u32>,
+    /// The window both rates above are expressed over, and the burst either
+    /// tolerates. Absent means the client edge's own default; `0` is
+    /// refused, and it is the sharpest footgun of the four: a zero-length
+    /// window makes both rates infinite and the bound nothing at all, while
+    /// looking configured.
+    #[serde(default)]
+    unresolvable_lookup_budget_window_secs: Option<u64>,
+    /// How long a lookup may wait for its slot before being refused
+    /// instead (issue #613). Absent means the client edge's own default;
+    /// `0` is refused, because a zero wait ceiling turns the shaper back
+    /// into a dropper -- and a dropping bound hands any sender able to
+    /// sustain `unresolvable_lookup_budget_total` requests per window a
+    /// switch that turns the registration-free path off for every new
+    /// buyer, which is a worse failure than the RPC spend it prevents.
+    #[serde(default)]
+    unresolvable_lookup_budget_max_wait_ms: Option<u64>,
 }
+
+/// The client edge's own defaults for the unresolvable-lookup shaper
+/// (issue #613), restated here so that [`Config::load`] can validate the
+/// values an operator wrote against the ones that will actually be in
+/// force.
+///
+/// Duplicating them is deliberate and is covered by a test: without them,
+/// a cross-field rule can only fire when *both* fields are present, so
+/// `unresolvable_lookup_budget_total = 5` on its own -- with the per-signer
+/// rate defaulting to something larger -- loads with exactly the incoherent
+/// configuration the rule exists to refuse. `connector-cli`'s
+/// `the_config_layers_budget_defaults_match_the_client_edges` pins them to
+/// `UnresolvableLookupBudgetPolicy::default()`, which is the authority at
+/// runtime, so the two cannot drift unnoticed.
+const DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER: u32 = 20;
+const DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL: u32 = 600;
+const DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW_SECS: u64 = 60;
+const DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT_MS: u64 = 2_000;
+
+/// The longest window the client edge will honour -- a day. Restated here
+/// for the same reason the rates are, and pinned to
+/// `MAX_UNRESOLVABLE_LOOKUP_WINDOW` by the same `connector-cli` test.
+const MAX_UNRESOLVABLE_LOOKUP_WINDOW_SECS: u64 = 86_400;
 
 /// A fully loaded, fully validated, immutable connector configuration.
 ///
@@ -112,6 +169,10 @@ pub struct Config {
     channel_liveness_ttl: Option<Duration>,
     channel_serve_stale: Option<Duration>,
     channel_reattempt_interval: Option<Duration>,
+    unresolvable_lookups_per_signer: Option<u32>,
+    unresolvable_lookups_total: Option<u32>,
+    unresolvable_lookup_window: Option<Duration>,
+    unresolvable_lookup_max_wait: Option<Duration>,
 }
 
 impl Config {
@@ -194,6 +255,85 @@ impl Config {
             }
         }
 
+        // The unresolvable-lookup budget (issue #613). Every one of these
+        // is refused at zero, unlike `channel_serve_stale_secs` above:
+        // there, zero names a coherent fail-closed choice that costs
+        // nothing extra; here, each zero either switches the
+        // registration-free path off entirely or switches the budget off
+        // while leaving it configured, and neither is a thing an operator
+        // could mean by writing a number down.
+        let unresolvable_lookups_per_signer = match raw.unresolvable_lookup_budget_per_signer {
+            Some(0) => {
+                return Err(ConfigError::ZeroUnresolvableLookupBudget {
+                    field: "per_signer",
+                })
+            }
+            other => other,
+        };
+        let unresolvable_lookups_total = match raw.unresolvable_lookup_budget_total {
+            Some(0) => return Err(ConfigError::ZeroUnresolvableLookupBudget { field: "total" }),
+            other => other,
+        };
+        let unresolvable_lookup_window_secs = match raw.unresolvable_lookup_budget_window_secs {
+            Some(0) => return Err(ConfigError::ZeroUnresolvableLookupWindow),
+            Some(secs) if secs > MAX_UNRESOLVABLE_LOOKUP_WINDOW_SECS => {
+                return Err(ConfigError::UnresolvableLookupWindowTooLong {
+                    window_secs: secs,
+                    max_secs: MAX_UNRESOLVABLE_LOOKUP_WINDOW_SECS,
+                })
+            }
+            other => other,
+        };
+        let unresolvable_lookup_window = unresolvable_lookup_window_secs.map(Duration::from_secs);
+        let unresolvable_lookup_max_wait_ms = match raw.unresolvable_lookup_budget_max_wait_ms {
+            Some(0) => return Err(ConfigError::ZeroUnresolvableLookupMaxWait),
+            other => other,
+        };
+        // The wait ceiling is not just a timeout: it *is* the size of the
+        // waiting room, since a room drained at `total / window` and holding
+        // requests for `max_wait` parks `max_wait * total / window` of them.
+        // A ceiling longer than the window therefore parks more than a whole
+        // window's worth of drain, which is both more memory than the bound
+        // is worth and a wait no packet's own deadline could survive. It is
+        // the one budget knob with a coherence rule rather than only a zero
+        // check, and it needs one for exactly the reason the others do:
+        // nothing else in the file would tell an operator they had written
+        // a room ten thousand deep.
+        let effective_window_secs =
+            unresolvable_lookup_window_secs.unwrap_or(DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW_SECS);
+        let effective_max_wait_ms =
+            unresolvable_lookup_max_wait_ms.unwrap_or(DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT_MS);
+        if effective_max_wait_ms > effective_window_secs.saturating_mul(1_000) {
+            return Err(ConfigError::UnresolvableLookupMaxWaitAboveWindow {
+                max_wait_ms: effective_max_wait_ms,
+                window_secs: effective_window_secs,
+            });
+        }
+        let unresolvable_lookup_max_wait =
+            unresolvable_lookup_max_wait_ms.map(Duration::from_millis);
+        // A per-signer rate above the node-wide one is not a stricter
+        // setting, it is an inert one: the node-wide drain saturates first,
+        // every time, so the number written for the per-signer axis could
+        // never be reached. Refused rather than silently ignored, on the
+        // same principle as the stale-window check above -- an operator who
+        // wrote it meant something by it.
+        //
+        // Compared against the values that will actually be **in force**,
+        // defaults filled in, rather than only when both were written: a
+        // rule that fires only on the both-present case leaves the two
+        // one-sided spellings of the same incoherent configuration loading
+        // quietly, which is the whole hazard it exists for.
+        let effective_per_signer =
+            unresolvable_lookups_per_signer.unwrap_or(DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER);
+        let effective_total =
+            unresolvable_lookups_total.unwrap_or(DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL);
+        if effective_per_signer > effective_total {
+            return Err(ConfigError::UnresolvableLookupPerSignerAboveTotal {
+                per_signer: effective_per_signer,
+                total: effective_total,
+            });
+        }
+
         // A node that can accept a claim must be able to remember having
         // accepted it (issue #605). Refused here, at load, rather than at
         // the first claim: a node whose watermarks live only in memory
@@ -228,6 +368,10 @@ impl Config {
             channel_liveness_ttl,
             channel_serve_stale,
             channel_reattempt_interval,
+            unresolvable_lookups_per_signer,
+            unresolvable_lookups_total,
+            unresolvable_lookup_window,
+            unresolvable_lookup_max_wait,
         })
     }
 
@@ -249,6 +393,33 @@ impl Config {
     /// `None` to use the client edge's own default.
     pub fn channel_reattempt_interval(&self) -> Option<Duration> {
         self.channel_reattempt_interval
+    }
+
+    /// How many chain lookups for channels that do not resolve one declared
+    /// signer may cause per window once this node's window is contended
+    /// (issue #613), or `None` to use the client edge's own default.
+    pub fn unresolvable_lookups_per_signer(&self) -> Option<u32> {
+        self.unresolvable_lookups_per_signer
+    }
+
+    /// How many chain lookups for channels that do not resolve this node
+    /// will perform per window in total, or `None` to use the client edge's
+    /// own default.
+    pub fn unresolvable_lookups_total(&self) -> Option<u32> {
+        self.unresolvable_lookups_total
+    }
+
+    /// The window the two allowances above are counted over, or `None` to
+    /// use the client edge's own default.
+    pub fn unresolvable_lookup_window(&self) -> Option<Duration> {
+        self.unresolvable_lookup_window
+    }
+
+    /// How long a lookup for a channel this node has never resolved may
+    /// wait for its slot before being refused instead (issue #613), or
+    /// `None` to use the client edge's own default.
+    pub fn unresolvable_lookup_max_wait(&self) -> Option<Duration> {
+        self.unresolvable_lookup_max_wait
     }
 
     /// The socket address the client edge binds.
@@ -1285,6 +1456,315 @@ key_file = "{key_path}"
             config.channel_reattempt_interval(),
             Some(std::time::Duration::from_millis(5000))
         );
+    }
+
+    /// The unresolvable-lookup budget (issue #613): what a node will spend
+    /// discovering channels that turn out not to exist, per declared signer
+    /// and in total. An operator on a metered settlement endpoint is
+    /// exactly who needs to set the second one.
+    #[test]
+    fn the_unresolvable_lookup_budget_is_read_from_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_per_signer = 3
+unresolvable_lookup_budget_total = 20
+unresolvable_lookup_budget_window_secs = 30
+unresolvable_lookup_budget_max_wait_ms = 750
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming all four budget knobs loads");
+
+        assert_eq!(config.unresolvable_lookups_per_signer(), Some(3));
+        assert_eq!(config.unresolvable_lookups_total(), Some(20));
+        assert_eq!(
+            config.unresolvable_lookup_window(),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            config.unresolvable_lookup_max_wait(),
+            Some(std::time::Duration::from_millis(750))
+        );
+    }
+
+    /// Absent means the client edge's own default, the same as every other
+    /// knob here -- a node that has not thought about this should get a
+    /// bound rather than none.
+    #[test]
+    fn an_absent_unresolvable_lookup_budget_is_the_edges_own_default() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming no budget loads");
+
+        assert_eq!(config.unresolvable_lookups_per_signer(), None);
+        assert_eq!(config.unresolvable_lookups_total(), None);
+        assert_eq!(config.unresolvable_lookup_window(), None);
+        assert_eq!(config.unresolvable_lookup_max_wait(), None);
+    }
+
+    /// Zero allowances are refused, and the reason is the mirror image of
+    /// the zero ttl above: that one reads as strictness and melts an
+    /// endpoint, this one reads as strictness and silently switches off the
+    /// registration-free path #611 exists to provide.
+    #[test]
+    fn a_zero_unresolvable_lookup_allowance_is_refused_at_load() {
+        for field in ["per_signer", "total"] {
+            let result = with_key_file(|key_path| {
+                format!(
+                    r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_{field} = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                    key_path = key_path.display(),
+                )
+            });
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::ZeroUnresolvableLookupBudget { .. })
+                ),
+                "unresolvable_lookup_budget_{field} = 0 must not load"
+            );
+        }
+    }
+
+    /// A zero-length window is the sharpest of the three footguns: it
+    /// restarts on every request, so both allowances are spendable in full
+    /// by every request and the budget bounds nothing while looking like it
+    /// is configured.
+    #[test]
+    fn a_zero_unresolvable_lookup_window_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_window_secs = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::ZeroUnresolvableLookupWindow)
+        ));
+    }
+
+    /// A zero wait ceiling is refused, and it is the one whose reason is
+    /// least obvious from the field name: it does not tighten the bound, it
+    /// converts it from a shaper into a dropper, and a dropping bound hands
+    /// a flooder a switch that turns the registration-free path off for
+    /// every new buyer.
+    #[test]
+    fn a_zero_unresolvable_lookup_wait_ceiling_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_max_wait_ms = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::ZeroUnresolvableLookupMaxWait)
+        ));
+    }
+
+    /// The wait ceiling is the size of the waiting room, not a timeout, so
+    /// it needs a coherence rule and not only a zero check: a ceiling
+    /// longer than the window parks more than a whole window's worth of
+    /// drain. Issue #613's review, finding C -- it was the one budget knob
+    /// with nothing but a zero check, and nothing else in the file would
+    /// have told an operator they had written a room thousands deep.
+    #[test]
+    fn a_wait_ceiling_longer_than_the_window_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_window_secs = 60
+unresolvable_lookup_budget_max_wait_ms = 600000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnresolvableLookupMaxWaitAboveWindow {
+                max_wait_ms: 600_000,
+                window_secs: 60
+            })
+        ));
+    }
+
+    /// ...and against the *defaults* when only one side is written, for the
+    /// same reason the rates are: a ceiling above the default window is the
+    /// same incoherence spelled one-sidedly.
+    #[test]
+    fn a_one_sided_wait_ceiling_is_validated_against_the_default_window() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_max_wait_ms = 90000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnresolvableLookupMaxWaitAboveWindow { .. })
+        ));
+    }
+
+    /// A window longer than the client edge will honour is refused rather
+    /// than silently clamped: a rate limit whose window outlives the
+    /// process is not a rate limit, and past a point the arithmetic over it
+    /// stops fitting an instant. (The client edge clamps as well, since its
+    /// policy struct is public and reachable without this check -- but a
+    /// value that reached here was *written down*, and silently obeying
+    /// something other than what an operator wrote is what this whole file
+    /// exists not to do.)
+    #[test]
+    fn an_absurdly_long_unresolvable_lookup_window_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_window_secs = 9000000000000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::UnresolvableLookupWindowTooLong {
+                    max_secs: 86_400,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    /// A per-signer rate above the node-wide one is inert rather than
+    /// dangerous -- the drain saturates first every time -- and is refused
+    /// for the same reason a stale window shorter than the ttl is: an
+    /// operator who wrote a number meant something by it.
+    #[test]
+    fn a_per_signer_allowance_above_the_node_wide_one_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_per_signer = 1000
+unresolvable_lookup_budget_total = 10
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnresolvableLookupPerSignerAboveTotal {
+                per_signer: 1000,
+                total: 10
+            })
+        ));
+    }
+
+    /// ...and the same rule fires when only *one* of the two is written,
+    /// because it is compared against the values that will actually be in
+    /// force. A rule that needed both present would let the two one-sided
+    /// spellings of the same incoherent configuration load quietly, which
+    /// is the whole hazard.
+    #[test]
+    fn a_one_sided_unresolvable_lookup_budget_is_validated_against_the_defaults() {
+        // A node-wide rate below the *default* per-signer rate.
+        let total_only = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_total = 5
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+        assert!(
+            matches!(
+                total_only,
+                Err(ConfigError::UnresolvableLookupPerSignerAboveTotal { total: 5, .. })
+            ),
+            "a total below the default per-signer rate is the same incoherence"
+        );
+
+        // ...and a per-signer rate above the *default* node-wide one.
+        let per_signer_only = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+unresolvable_lookup_budget_per_signer = 10000
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+        assert!(matches!(
+            per_signer_only,
+            Err(ConfigError::UnresolvableLookupPerSignerAboveTotal {
+                per_signer: 10000,
+                ..
+            })
+        ));
     }
 
     /// Zero is refused for the re-attempt floor for the same reason it is

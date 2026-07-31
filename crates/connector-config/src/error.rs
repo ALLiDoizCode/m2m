@@ -275,4 +275,58 @@ pub enum ConfigError {
         serve_stale_secs: u64,
         ttl_secs: u64,
     },
+
+    #[error(
+        "unresolvable_lookup_budget_{field} is 0: this node would never resolve a channel it \
+         was not explicitly configured with, so an unaffiliated buyer who opened a channel on \
+         chain could not pay it at all -- which is the registration-free path issue #611 exists \
+         to provide, switched off by a number that reads as a tightening (issue #613). Omit the \
+         field for the default, or set how many lookups for channels that do not resolve are \
+         allowed per window"
+    )]
+    ZeroUnresolvableLookupBudget { field: &'static str },
+
+    #[error(
+        "unresolvable_lookup_budget_window_secs is 0: a zero-length window restarts on every \
+         request, so both allowances are spendable in full by every request and the budget \
+         bounds nothing at all while appearing to be configured (issue #613). Omit the field for \
+         the default, or set the number of seconds the allowances are counted over"
+    )]
+    ZeroUnresolvableLookupWindow,
+
+    #[error(
+        "unresolvable_lookup_budget_per_signer is {per_signer} but \
+         unresolvable_lookup_budget_total is {total}: the node-wide allowance would refuse first \
+         every time, so the per-signer number could never be reached and means nothing. Set it \
+         to at most the total (issue #613)"
+    )]
+    UnresolvableLookupPerSignerAboveTotal { per_signer: u32, total: u32 },
+
+    #[error(
+        "unresolvable_lookup_budget_max_wait_ms is 0: this node would refuse a lookup outright \
+         the moment its discovery drain saturated, rather than holding it for a slot. That hands \
+         any sender able to sustain unresolvable_lookup_budget_total requests per window a switch \
+         that turns the registration-free path of issue #611 off for every new buyer -- a worse \
+         failure than the RPC spend the bound exists to prevent (issue #613). Omit the field for \
+         the default, or set the milliseconds a lookup may wait for its turn"
+    )]
+    ZeroUnresolvableLookupMaxWait,
+
+    #[error(
+        "unresolvable_lookup_budget_max_wait_ms is {max_wait_ms} but \
+         unresolvable_lookup_budget_window_secs is {window_secs} (either as written or by \
+         default): the wait ceiling is the size of the waiting room, not just a timeout -- a \
+         room drained at the configured rate and holding a lookup for {max_wait_ms} ms parks \
+         more than a whole window's worth of them, which is more memory than the bound is worth \
+         and a wait no packet's own deadline would survive (issue #613). Set it to at most the \
+         window"
+    )]
+    UnresolvableLookupMaxWaitAboveWindow { max_wait_ms: u64, window_secs: u64 },
+
+    #[error(
+        "unresolvable_lookup_budget_window_secs is {window_secs}, above the {max_secs} s this \
+         node will honour: a rate limit whose window outlives the process running it is not a \
+         rate limit, and the arithmetic over it stops fitting an instant (issue #613)"
+    )]
+    UnresolvableLookupWindowTooLong { window_secs: u64, max_secs: u64 },
 }

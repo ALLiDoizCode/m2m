@@ -103,7 +103,11 @@ use connector_domain::{
 use connector_runtime::{Journal, JournalError};
 use connector_signer::{verify_evm_balance_proof, verify_solana_balance_proof, EvmBalanceProof};
 
-use crate::channels::{decode_base58_bytes, decode_hex_bytes, ClientChannelRegistry, DepositFloor};
+use crate::channels::{
+    decode_base58_bytes, decode_hex_bytes, ChannelResolutionError, ClientChannelRegistry,
+    DepositFloor,
+};
+use crate::lookup_budget::LookupBudgetBound;
 
 /// Why the gate refused a claim. [`ClaimIngestRejection::Mina`] and
 /// [`ClaimIngestRejection::Malformed`] are kept distinct on purpose: the
@@ -142,6 +146,36 @@ pub enum ClaimIngestRejection {
     /// legitimate payer to go away for a reason that is not true. Both
     /// refuse the claim -- an unverifiable claim is never accepted.
     ChannelLookupFailed(String),
+    /// The claim names a channel this connector has no record of, and it
+    /// **declined to ask the chain** about it, because its budget for
+    /// lookups that do not resolve is spent (issue #613).
+    ///
+    /// Kept distinct from both of the refusals above it, and the reason is
+    /// the same one that keeps those two apart from each other: they lead
+    /// an operator to three different actions.
+    /// [`ClaimIngestRejection::UnknownChannel`] is a fact about the
+    /// channel and needs nothing done;
+    /// [`ClaimIngestRejection::ChannelLookupFailed`] says this node's
+    /// settlement endpoint is not answering and needs fixing; this one says
+    /// this node is deliberately withholding a chain read, because an
+    /// unaffiliated sender can ask for one for free and something has been
+    /// asking a great deal. Reporting any of the three as another would
+    /// send an operator, or a payer, to fix the wrong thing.
+    ///
+    /// The only *temporary* refusal here besides
+    /// [`ClaimIngestRejection::NotDurable`], and for the same reason:
+    /// nothing is wrong with the claim. A buyer caught by a node-wide
+    /// window somebody else spent is told to wait rather than told their
+    /// channel does not exist.
+    LookupBudgetExhausted {
+        /// Which axis was saturated -- the enum rather than its `&str`
+        /// spelling, so a caller matching on this cannot mistype a bound
+        /// that does not exist.
+        bound: LookupBudgetBound,
+        allowance: u32,
+        window_secs: u64,
+        max_wait_ms: u64,
+    },
     SignatureInvalid,
     /// The claim is fresh, well-formed, correctly signed and covers the
     /// route's price -- and names a cumulative amount larger than its
@@ -207,6 +241,19 @@ impl ClaimIngestRejection {
             ClaimIngestRejection::ChannelLookupFailed(reason) => format!(
                 "claim rejected: this connector could not look up the channel's counterparty, \
                  so the claim cannot be verified -- retry once the lookup succeeds: {reason}"
+            ),
+            ClaimIngestRejection::LookupBudgetExhausted {
+                bound,
+                allowance,
+                window_secs,
+                max_wait_ms,
+            } => format!(
+                "claim rejected: this connector has no record of the channel and could not look \
+                 it up in time -- its {} discovery drain of {allowance} lookups per \
+                 {window_secs} s for channels that do not resolve is saturated, and the queue for \
+                 it is longer than the {max_wait_ms} ms it will hold a lookup for. Nothing is \
+                 wrong with the claim; retry",
+                bound.as_str()
             ),
             ClaimIngestRejection::SignatureInvalid => "claim rejected: signature does not \
                  verify against this channel's recorded counterparty"
@@ -356,9 +403,18 @@ impl ClientClaimGate {
             check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
         }
 
+        // Who a lookup for a channel this connector has never resolved is
+        // budgeted against (issue #613). Read from the claim and used for
+        // nothing but that: it is the claim's *self-declared* signer, and
+        // step 4 below still reads the key it verifies against out of the
+        // registry, exactly as #558 requires. See
+        // `crate::lookup_budget` for why this identity, and what it is
+        // honestly worth.
+        let requester = claim.signer_key();
+
         // The one await, and the only work that has to happen outside the
         // lock -- so it is also the last thing that happens outside it.
-        let verified = verify_claim_signature(&self.channels, &claim).await?;
+        let verified = verify_claim_signature(&self.channels, &claim, &requester).await?;
 
         // client-edge-spec.md §1.3 step 5 (issue #646), after cryptographic
         // verification and before the write lock: only a claim that is
@@ -368,7 +424,7 @@ impl ClientClaimGate {
         // rather than relative to the watermark, and a deposit only ever
         // grows, so no concurrent claim can turn an amount that fitted into
         // one that does not.
-        check_collateral(&self.channels, &claim, &verified).await?;
+        check_collateral(&self.channels, &claim, &verified, &requester).await?;
 
         let mut watermarks = self
             .watermarks
@@ -518,10 +574,38 @@ fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, Watermark> {
 async fn verify_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &ClientClaim,
+    requester: &str,
 ) -> Result<VerifiedClaim, ClaimIngestRejection> {
     match claim {
-        ClientClaim::Evm(claim) => verify_evm_claim_signature(channels, claim).await,
-        ClientClaim::Solana(claim) => verify_solana_claim_signature(channels, claim).await,
+        ClientClaim::Evm(claim) => verify_evm_claim_signature(channels, claim, requester).await,
+        ClientClaim::Solana(claim) => {
+            verify_solana_claim_signature(channels, claim, requester).await
+        }
+    }
+}
+
+/// Report a resolution that produced neither a channel nor a definite
+/// absence, as the refusal that says which of the two things went wrong
+/// (issue #613).
+///
+/// A failed lookup and a withheld one are separate variants rather than one
+/// with a reason string, because the two are separately *countable*: an
+/// operator wants "how often is my endpoint failing" and "how often am I
+/// budgeting somebody" as different numbers, and a metric derived from a
+/// string is a metric derived from prose.
+fn resolution_refusal(error: ChannelResolutionError) -> ClaimIngestRejection {
+    match error {
+        ChannelResolutionError::LookupFailed(failure) => {
+            ClaimIngestRejection::ChannelLookupFailed(failure.0)
+        }
+        ChannelResolutionError::Budgeted(exhausted) => {
+            ClaimIngestRejection::LookupBudgetExhausted {
+                bound: exhausted.bound,
+                allowance: exhausted.allowance,
+                window_secs: exhausted.window.as_secs(),
+                max_wait_ms: exhausted.max_wait.as_millis() as u64,
+            }
+        }
     }
 }
 
@@ -586,6 +670,7 @@ async fn check_collateral(
     channels: &ClientChannelRegistry,
     claim: &ClientClaim,
     verified: &VerifiedClaim,
+    requester: &str,
 ) -> Result<(), ClaimIngestRejection> {
     let claimed = claim.transferred_amount();
     if verified.deposit_floor.covers(claimed) {
@@ -594,11 +679,11 @@ async fn check_collateral(
 
     let refreshed = match &verified.channel {
         ResolvedChannelKey::Evm(channel_id) => channels
-            .refresh_evm(channel_id)
+            .refresh_evm(channel_id, requester)
             .await
             .map(|channel| channel.map(|channel| channel.deposit_floor)),
         ResolvedChannelKey::Solana(channel_account) => channels
-            .refresh_solana(channel_account)
+            .refresh_solana(channel_account, requester)
             .await
             .map(|channel| channel.map(|channel| channel.deposit_floor)),
     };
@@ -617,13 +702,13 @@ async fn check_collateral(
                 .expect("a deposit floor that failed to cover an amount is never Unknown"),
         }),
         Ok(None) => Err(ClaimIngestRejection::UnknownChannel),
-        Err(failure) => {
+        Err(error) => {
             tracing::warn!(
                 channel = %claim.channel_key(),
-                error = %failure,
+                error = %error,
                 "refusing a client claim: could not re-read its channel's on-chain deposit"
             );
-            Err(ClaimIngestRejection::ChannelLookupFailed(failure.0))
+            Err(resolution_refusal(error))
         }
     }
 }
@@ -631,6 +716,7 @@ async fn check_collateral(
 async fn verify_evm_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &EvmClientClaim,
+    requester: &str,
 ) -> Result<VerifiedClaim, ClaimIngestRejection> {
     // An id that is not a 32-byte `channelId` cannot be a channel this
     // connector recorded, and cannot be one any chain could resolve either
@@ -639,20 +725,27 @@ async fn verify_evm_claim_signature(
     let Some(channel_id) = decode_hex_bytes::<32>(&claim.channel_id) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
-    let channel = match channels.evm(&channel_id).await {
+    let channel = match channels.evm(&channel_id, requester).await {
         Ok(Some(channel)) => channel,
         Ok(None) => return Err(ClaimIngestRejection::UnknownChannel),
         // Loud, per issue #556: an operator has to be able to tell "my
         // chain endpoint is down, so no *new* channel can be recognised"
         // apart from "someone is claiming on channels that do not exist".
         // The claim is refused either way.
-        Err(failure) => {
-            tracing::warn!(
-                channel_id = %claim.channel_id,
-                error = %failure,
-                "refusing a client claim: could not resolve its channel's counterparty"
-            );
-            return Err(ClaimIngestRejection::ChannelLookupFailed(failure.0));
+        //
+        // A lookup this connector *declined* to make (issue #613) is a
+        // third thing again, and it has already logged itself, with the
+        // signer and the allowance it hit -- so it is not logged twice
+        // here, only reported distinguishably.
+        Err(error) => {
+            if let ChannelResolutionError::LookupFailed(failure) = &error {
+                tracing::warn!(
+                    channel_id = %claim.channel_id,
+                    error = %failure,
+                    "refusing a client claim: could not resolve its channel's counterparty"
+                );
+            }
+            return Err(resolution_refusal(error));
         }
     };
 
@@ -695,6 +788,7 @@ async fn verify_evm_claim_signature(
 async fn verify_solana_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &SolanaClientClaim,
+    requester: &str,
 ) -> Result<VerifiedClaim, ClaimIngestRejection> {
     // An id that is not a 32-byte Solana account cannot be a channel this
     // connector recorded, and cannot be one any chain could resolve either
@@ -705,20 +799,24 @@ async fn verify_solana_claim_signature(
     };
     // Declared, or -- for a channel nothing declared -- resolved from the
     // chain via a registered `ClaimChain::Solana` source (issue #631).
-    let channel = match channels.solana(&channel_account).await {
+    let channel = match channels.solana(&channel_account, requester).await {
         Ok(Some(channel)) => channel,
         Ok(None) => return Err(ClaimIngestRejection::UnknownChannel),
         // Loud, per issue #556/#631: an operator has to be able to tell
         // "my chain endpoint is down, so no *new* channel can be
         // recognised" apart from "someone is claiming on channels that do
-        // not exist". The claim is refused either way.
-        Err(failure) => {
-            tracing::warn!(
-                channel_account = %claim.channel_account,
-                error = %failure,
-                "refusing a client claim: could not resolve its channel's counterparty"
-            );
-            return Err(ClaimIngestRejection::ChannelLookupFailed(failure.0));
+        // not exist". The claim is refused either way -- and a lookup this
+        // connector declined to make (issue #613) is a third thing again,
+        // already logged where it was declined.
+        Err(error) => {
+            if let ChannelResolutionError::LookupFailed(failure) = &error {
+                tracing::warn!(
+                    channel_account = %claim.channel_account,
+                    error = %failure,
+                    "refusing a client claim: could not resolve its channel's counterparty"
+                );
+            }
+            return Err(resolution_refusal(error));
         }
     };
 
@@ -2847,5 +2945,159 @@ mod tests {
             "salt": "salt"
         }"#;
         assert_eq!(gate.ingest(json, 0).await, Err(ClaimIngestRejection::Mina));
+    }
+
+    /// The gate's half of issue #613: what a sender is *told* when this
+    /// connector declines to look their channel up, and that it is told
+    /// apart from the two refusals either side of it.
+    mod lookup_budget {
+        use super::*;
+        use crate::lookup_budget::LookupBudgetBound;
+        use crate::UnresolvableLookupBudgetPolicy;
+        use std::time::Duration;
+
+        /// A gate that resolves from a chain knowing nothing at all, with
+        /// `allowance` lookups per (very long) window -- long enough that
+        /// every test below runs entirely inside one of them however slow
+        /// the machine is, so nothing here is a race against a wall clock.
+        fn gate_allowing(allowance: u32) -> ClientClaimGate {
+            gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(Arc::new(FakeChannelSource::knowing(vec![])))
+                    .with_lookup_budget(UnresolvableLookupBudgetPolicy {
+                        per_signer: allowance,
+                        total: allowance,
+                        window: Duration::from_secs(600),
+                        // Zero, so a refusal is observable immediately
+                        // rather than as a sleep -- the waiting is
+                        // `crate::lookup_budget`'s own subject, and these
+                        // tests are about what a *sender* is told.
+                        max_wait: Duration::ZERO,
+                    }),
+            )
+        }
+
+        /// A claim on a never-recorded channel, declaring `signer` as its
+        /// own payer. The signature is genuine but produced by the test
+        /// keypair rather than by `signer`, which is exactly the point: a
+        /// declared signer is not a credential, and this refusal is decided
+        /// before any signature is checked anyway.
+        fn claim_from(signer: &Address, nonce: u64) -> String {
+            let (secret, _) = evm_signer();
+            evm_claim_json_signed_by(&secret, signer, &format!("0x{:064x}", nonce), nonce, 1_000)
+        }
+
+        /// Three refusals, one gate, all distinct -- and each one sends an
+        /// operator somewhere different. Collapsing any two of them fails
+        /// here.
+        #[tokio::test]
+        async fn exhaustion_is_told_apart_from_an_unknown_channel_and_a_failed_lookup() {
+            let gate = gate_allowing(1);
+            let (_, payer) = evm_signer();
+
+            // The chain answered, and said there is no such channel.
+            assert_eq!(
+                gate.ingest(&claim_from(&payer, 1), 0).await,
+                Err(ClaimIngestRejection::UnknownChannel)
+            );
+
+            // The allowance is now spent, so the chain is not asked at all.
+            let budgeted = gate
+                .ingest(&claim_from(&payer, 2), 0)
+                .await
+                .expect_err("the allowance is spent");
+            assert_eq!(
+                budgeted,
+                ClaimIngestRejection::LookupBudgetExhausted {
+                    bound: LookupBudgetBound::Node,
+                    allowance: 1,
+                    window_secs: 600,
+                    max_wait_ms: 0,
+                }
+            );
+            assert_ne!(budgeted, ClaimIngestRejection::UnknownChannel);
+            assert_ne!(
+                budgeted,
+                ClaimIngestRejection::ChannelLookupFailed("connection refused".to_string())
+            );
+
+            // And a sender reading only the message can tell too: it says
+            // what was withheld and how long to wait, and never that their
+            // channel does not exist.
+            let message = budgeted.message();
+            assert!(message.contains("discovery drain"), "{message}");
+            assert!(
+                message.contains("Nothing is wrong with the claim"),
+                "{message}"
+            );
+            assert!(
+                !message.contains("no counterparty to verify"),
+                "a shaped refusal must not read as an unknown channel: {message}"
+            );
+        }
+
+        /// A chain that is genuinely unreachable is reported as an outage,
+        /// in the endpoint's own words, rather than as a budget -- the
+        /// acceptance criterion that a node whose RPC is down must degrade
+        /// loudly rather than look like it is under attack.
+        #[tokio::test]
+        async fn an_unreachable_chain_is_still_reported_as_a_lookup_failure() {
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(Arc::new(FakeChannelSource::unreachable(
+                        "connection refused",
+                    )))
+                    .with_lookup_budget(UnresolvableLookupBudgetPolicy {
+                        per_signer: 4,
+                        total: 4,
+                        window: Duration::from_secs(600),
+                        max_wait: Duration::ZERO,
+                    }),
+            );
+            let (_, payer) = evm_signer();
+
+            assert_eq!(
+                gate.ingest(&claim_from(&payer, 1), 0).await,
+                Err(ClaimIngestRejection::ChannelLookupFailed(
+                    "connection refused".to_string()
+                ))
+            );
+        }
+
+        /// Each sender reaches its own bucket -- i.e. the gate really does
+        /// pass the claim's declared signer down to the shaper rather than
+        /// budgeting everything as one caller.
+        ///
+        /// What that buys is deliberately understated here, because the
+        /// declared signer is read and not verified: a sender who exhausts
+        /// one bucket can simply declare another. The node-wide drain is
+        /// what actually bounds them, and the per-signer split is measured
+        /// against an exact clock in
+        /// `crate::lookup_budget::two_signers_have_independent_allowances`,
+        /// where the queueing band it lives in can be reproduced without a
+        /// race.
+        #[tokio::test]
+        async fn each_declared_sender_reaches_its_own_bucket() {
+            let gate = gate_allowing(2);
+            let first: Address = [0xaa; 20];
+            let second: Address = [0xbb; 20];
+
+            assert_eq!(
+                gate.ingest(&claim_from(&first, 1), 0).await,
+                Err(ClaimIngestRejection::UnknownChannel)
+            );
+            assert_eq!(
+                gate.ingest(&claim_from(&second, 2), 0).await,
+                Err(ClaimIngestRejection::UnknownChannel),
+                "a second declared sender is looked up for on its own account"
+            );
+            assert!(
+                matches!(
+                    gate.ingest(&claim_from(&second, 3), 0).await,
+                    Err(ClaimIngestRejection::LookupBudgetExhausted { .. })
+                ),
+                "and the node-wide drain is what stops them both"
+            );
+        }
     }
 }

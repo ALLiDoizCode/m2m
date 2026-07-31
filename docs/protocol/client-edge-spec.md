@@ -182,7 +182,9 @@ never reaches the terminating app:
    the claim under a third, separate reason. It never degrades to accepting the claim, and it is
    never reported as "no such channel": an operator has to be able to tell an outage from a sender
    naming channels at random, and a legitimate payer has to be told to retry rather than told they
-   do not exist.
+   do not exist. A resolution the connector **declined to perform**, because its budget for lookups
+   that do not resolve is spent, is a fourth reason again — see "A lookup that resolves nothing must
+   be bounded too" below.
 
 5. **Collateral binding** — the claim's cumulative `transferredAmount` MUST NOT exceed the
    **on-chain deposit of the channel's counterparty**
@@ -267,6 +269,123 @@ protocol constant: a node on a metered or rate-limited endpoint needs them longe
 wants a settled channel noticed sooner needs the first shorter. A connector SHOULD make them
 configurable and SHOULD refuse, at load, values that read as strictness but behave as a per-packet
 read — a zero re-verification interval, or a zero floor on lookups per channel.
+
+**A lookup that resolves nothing must be bounded too, and none of the above bounds it.**
+Every bound in the paragraphs above is keyed to a channel the connector has resolved at least once —
+it is an interval on _that entry_, a stale window measured from _that reading_. A channel that never
+resolves has no entry, so a sender naming nonexistent channel ids provokes one chain read per
+request, indefinitely ([issue #613](https://github.com/toon-protocol/connector/issues/613)). The gap
+is wider than "a fresh id each time escapes a per-channel interval": **even the same nonexistent id,
+repeated, escapes it**, because the entry an interval would be recorded on is never created. Every
+one of those claims is refused, nothing is paid and nothing is delivered — which is what makes it
+worth doing: the sender spends a packet, and the connector spends a unit of its own metered
+settlement-RPC budget, on an anonymous request's say-so. A connector MUST therefore bound how many
+lookups that do not resolve it will perform.
+
+**The bound MUST NOT be a negative cache, and it MUST NOT be a plain ceiling either.** Both are
+worse than the problem, and the second is the subtler one.
+
+Remembering "no such channel" for a while breaks the exact buyer §1.2's registration-free path exists
+for — the one who opens a channel and writes a second later, whose own first attempt would then
+poison the next N seconds of their own attempts. A connector MUST NOT memoise a negative answer; the
+thing that is metered is the _asking_, not the answer.
+
+Refusing outright once a ceiling of _C_ lookups per window is reached breaks the same buyer by a
+different road, and breaks them harder. It hands any sender able to sustain _C_ requests per window a
+switch that turns §1.2 off for **every** new buyer, for as long as they hold it down — needing no
+keypair, no valid signature (this step precedes step 4), and no funds. Set the two failure modes side
+by side: with no bound at all, a flooder costs the connector one chain read per request **and the
+feature keeps working**; with a dropping bound, the same flooder costs the connector nothing and the
+feature is entirely off. A connector's overflow behaviour SHOULD therefore be to **hold the lookup
+for a slot** — a leaky bucket, drained at the configured rate — and to refuse only a lookup whose
+slot is further out than a bounded wait it will hold one for. The chain sees the configured rate,
+which is the only thing the bound was ever for; a legitimate buyer arriving during a flood is
+delayed rather than denied, and a client that retries gets through.
+
+Stated precisely, since it is the figure an operator sizes an endpoint against: the **sustained**
+rate is the configured one, and any single window may see up to the burst _plus_ a window's drain —
+roughly twice it — when a flood arrives at an idle connector. That is inherent to tolerating a burst
+at all, and a connector SHOULD document it rather than quote the sustained figure alone.
+
+Three further properties follow, and each is a way of keeping the intended user working:
+
+- **A lookup that resolves the channel MUST NOT count against the bound.** Otherwise a connector
+  onboarding real anonymous buyers throttles itself for doing the thing the path is for. Claiming a
+  slot before the chain is read (which is necessary — the point is to prevent the read, not to notice
+  it afterwards) and returning it on a resolution satisfies this.
+- **A lookup that _fails_ MAY count**, since the request was spent either way and an endpoint that is
+  down must not keep being paid to say so. But a connector MUST NOT then report the resulting
+  refusals as rate-limiting: a failing endpoint saturates the drain within seconds, so a connector
+  that reported the saturation would tell its operator they were being walked when in fact their RPC
+  is dead. While the last lookup a connector actually completed came back a failure, that failure is
+  what its refusals SHOULD report.
+- **Exhaustion MUST be its own refusal**, distinct from both "no such channel" and "the lookup
+  failed", and it SHOULD be **temporary** rather than final — nothing is wrong with the claim, and a
+  sender told otherwise would stop rather than retry. So SHOULD a failed lookup be, for the same
+  reason and with more force: an unreachable endpoint is the connector's problem and not the claim's.
+  The three refusals lead an operator to three different actions (nothing; fix the endpoint; look at
+  who is saturating the drain), so reporting any of them as another sends somebody to fix the wrong
+  thing.
+
+**What identity such a bound is keyed to is genuinely hard, and a connector SHOULD be honest about
+what it buys.** A probe (§1.6) is budgeted per recognized channel; a lookup that does not resolve has
+no recognized channel by definition. The transport source address is the obvious fallback and is
+worth little: a connector deployed behind a reverse proxy sees the proxy's address, so every
+anonymous buyer shares one bucket with the attacker, and the remedy — trusting a forwarded-for header
+— is trusting attacker-supplied text. The claim's own declared signer is available before any lookup
+and costs nothing to read, but it is **not a credential**: for EVM the EIP-712 digest needs the
+channel's own domain, which is precisely what has not been resolved yet, so nothing about the
+declared signer can be verified at this point without either trusting the claim's self-declared
+domain (which proves only that the sender can run one `ecrecover`) or spending elliptic-curve work on
+every anonymous request — trading an RPC-spend amplifier for a CPU-spend one.
+
+A connector that shapes per declared signer therefore MUST NOT present it as a bound: a keypair is
+free, so an adaptive sender declares a fresh one per request. What the per-signer axis buys is that a
+sender must _become_ adaptive — a flooder rotating a handful of identities is held to the per-signer
+rate on each, so saturating the node-wide drain at all takes `total / per_signer` distinct declared
+signers, sustained, which is loud in a log and reachable by the per-address limiter below. A
+connector MUST also keep a **node-wide** rate, which is the only part an adaptive sender cannot route
+around.
+
+One hazard follows from the identity being unverified, and a connector SHOULD design it out rather
+than document it: because anyone may declare anyone's address, a per-signer bound enforced
+unconditionally is a cheap targeted denial of service against a _known_ buyer. Consulting the
+per-signer axis only once the node-wide drain is genuinely in arrears **prices** that attack at a
+whole node-wide burst before the first aimed request bites, and means an idle connector never refuses
+anyone for their declared identity. It does not _remove_ the aim, and a connector SHOULD say so
+plainly rather than claiming otherwise: a sender who sustains the flood can still spend a named
+buyer's share, at which point it is the flood, not the aim, that an operator is looking at.
+
+**Neither axis is a durable answer, and the durable answers live outside this step.** Two are worth
+naming, because a reader who has followed the paragraphs above should not conclude that a declared
+signer is the best that can be done:
+
+- **Per-address rate limiting at the reverse proxy** a connector is deployed behind. That is the only
+  sybil-resistant axis available at this layer — an address costs something, a keypair does not — and
+  it is the right place for it, since the proxy is the only component that sees the real peer.
+- **A local channel index built from the settlement contract's own `ChannelOpened` events.** A
+  connector subscribed to those logs answers "is this a channel I can be paid on?" from a local map
+  rather than an RPC round trip, at which point an unknown-channel lookup costs a hashmap probe and
+  this entire step has nothing left to bound. That is the fix that dissolves the problem rather than
+  rationing it.
+
+The rates and the wait are a **deployment** choice for the same reason the three durations above are
+— what a connector can afford to spend discovering channels that do not exist depends on the
+settlement endpoint it pays for, and it should be derived from that endpoint's real capacity rather
+than picked for tidiness. The arithmetic is worth doing rather than eyeballing: at a common metered
+schedule of 26 compute units per `eth_call`, ten lookups a second sustained is 864,000 lookups and
+about 22.5M CU a day — over a 300M/month allowance in a fortnight, on discovery traffic alone and
+before the connector's own settlement work. **An operator on a metered endpoint should therefore set
+this rate well below what a self-hosted one would carry**, and lowering it costs an honest buyer
+nothing, since a lookup that resolves returns its slot.
+
+A connector SHOULD make them configurable and SHOULD refuse, at load: a zero rate (which switches
+§1.2's path off entirely, silently, under a number that reads as a tightening); a zero window (which
+makes every rate infinite and the bound nothing); a zero wait (which converts the shaper back into
+the dropper this section rejects); and a wait longer than the window — the wait is not a timeout but
+the **size of the waiting room**, since a room drained at the configured rate and holding a lookup
+for that long parks more than a whole window's worth of them, which is more memory than the bound is
+worth and a delay no packet's own deadline would survive.
 
 **A watermark outlives the process.** Freshness (step 2) is only a replay defence if the watermark
 it compares against survives a restart: a connector that forgets a channel's watermark compares

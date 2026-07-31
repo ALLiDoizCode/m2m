@@ -14,7 +14,7 @@ use axum::Router;
 
 use connector_client_edge::{
     ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
-    ClientClaimGate, DepositFloor, EvmChannel, SolanaChannel,
+    ClientClaimGate, DepositFloor, EvmChannel, SolanaChannel, UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
     ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementChain,
@@ -729,6 +729,24 @@ fn client_channels(
             .channel_reattempt_interval()
             .unwrap_or(defaults.min_reattempt_interval),
     });
+    // The shaper on lookups for channels that never resolve (issue #613) --
+    // the bound the liveness knobs above structurally cannot provide, since
+    // each of them reads a memo entry and an unresolvable channel leaves
+    // none. Same shape as the knobs above and for the same reason: what a
+    // node can afford to spend discovering channels that turn out not to
+    // exist depends on the settlement endpoint it is paying for, which is a
+    // deployment fact rather than a protocol constant.
+    let budget = UnresolvableLookupBudgetPolicy::default();
+    channels = channels.with_lookup_budget(UnresolvableLookupBudgetPolicy {
+        per_signer: config
+            .unresolvable_lookups_per_signer()
+            .unwrap_or(budget.per_signer),
+        total: config.unresolvable_lookups_total().unwrap_or(budget.total),
+        window: config.unresolvable_lookup_window().unwrap_or(budget.window),
+        max_wait: config
+            .unresolvable_lookup_max_wait()
+            .unwrap_or(budget.max_wait),
+    });
     channels
 }
 
@@ -811,6 +829,31 @@ mod tests {
         let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
         write!(config_file, "{text}").expect("write config file");
         Config::load(config_file.path()).expect("load config")
+    }
+
+    /// Load a minimal config with `extra` spliced in at the top level, and
+    /// hand back the *result* rather than unwrapping it -- for a test whose
+    /// subject is whether a configuration loads at all.
+    fn raw_config_result(extra: &str) -> Result<Config, connector_config::ConfigError> {
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(&[7u8; 32])
+            .expect("write raw 32-byte key");
+        let key_path = key_file.into_temp_path();
+        let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+        write!(
+            config_file,
+            r#"
+client_edge_addr = "127.0.0.1:0"
+{extra}
+
+[signer]
+key_file = "{}"
+"#,
+            key_path.display()
+        )
+        .expect("write config file");
+        Config::load(config_file.path())
     }
 
     /// Returns the loaded [`Config`] together with the [`tempfile::TempPath`]
@@ -1071,6 +1114,174 @@ key_file = "{}"
             1,
             "the entry aged out, but the configured ten-minute re-attempt floor still binds"
         );
+    }
+
+    /// The unresolvable-lookup budget's knobs reach the registry too
+    /// (issue #613). Asserted through behaviour for the same reason as
+    /// above: with a node-wide allowance of two, a sender walking channel
+    /// ids reaches the source twice and no more, however many claims they
+    /// present.
+    #[tokio::test]
+    async fn the_configured_lookup_budget_reaches_the_registry() {
+        use connector_client_edge::{ChannelLookupFailed, EvmChannel};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A chain that knows about no channel at all -- which is what a
+        /// walk of the id space looks like from the connector's side.
+        #[derive(Debug, Default)]
+        struct EmptyCountingSource {
+            lookups: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ClientChannelSource for EmptyCountingSource {
+            async fn evm_channel(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            }
+        }
+
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+unresolvable_lookup_budget_per_signer = 2
+unresolvable_lookup_budget_total = 2
+unresolvable_lookup_budget_window_secs = 600
+unresolvable_lookup_budget_max_wait_ms = 1
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+
+        let source = Arc::new(EmptyCountingSource::default());
+        let channels = client_channels(&config, Some(source.clone()), None);
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        // A fresh channel id per claim, which is the whole shape of the
+        // attack: nothing this connector has ever seen, and nothing it ever
+        // will resolve.
+        let claim = |nonce: u64| {
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "evm",
+                    "messageId": "msg-{nonce}",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-bob",
+                    "channelId": "0x{nonce:064x}",
+                    "nonce": {nonce},
+                    "transferredAmount": "10",
+                    "lockedAmount": "0",
+                    "locksRoot": "0x{zeros}",
+                    "signature": "0x{sig}",
+                    "signerAddress": "0x1111111111111111111111111111111111111111"
+                }}"#,
+                zeros = "0".repeat(64),
+                sig = "cd".repeat(65),
+            )
+        };
+        let mut budgeted = 0;
+        for nonce in 1..=20 {
+            if matches!(
+                gate.ingest(&claim(nonce), 0).await,
+                Err(connector_client_edge::ClaimIngestRejection::LookupBudgetExhausted { .. })
+            ) {
+                budgeted += 1;
+            }
+        }
+
+        assert_eq!(
+            source.lookups.load(Ordering::SeqCst),
+            2,
+            "twenty claims on twenty channels cost the configured allowance and no more"
+        );
+        assert_eq!(
+            budgeted, 18,
+            "and every claim past it says why it was refused"
+        );
+    }
+
+    /// `connector-config` restates the client edge's own budget defaults so
+    /// that it can validate a one-sided configuration against the values
+    /// that will actually be in force (issue #613's review). Restating them
+    /// is only safe if they cannot drift, and this is the only crate that
+    /// can see both.
+    #[test]
+    fn the_config_layers_budget_defaults_match_the_client_edges() {
+        use connector_client_edge::MAX_UNRESOLVABLE_LOOKUP_WINDOW;
+
+        let edge = UnresolvableLookupBudgetPolicy::default();
+
+        // A configuration naming *only* the node-wide rate, set to exactly
+        // the client edge's own default per-signer rate. If the config
+        // layer's copy of that default agrees, this is coherent and loads;
+        // if the two had drifted in either direction, one of the four
+        // assertions here would fail.
+        assert!(
+            raw_config_result(&format!(
+                "unresolvable_lookup_budget_total = {}",
+                edge.per_signer
+            ))
+            .is_ok(),
+            "per_signer == total is coherent, so the config layer's default per-signer rate is \
+             not above {}",
+            edge.per_signer
+        );
+        assert!(
+            raw_config_result(&format!(
+                "unresolvable_lookup_budget_total = {}",
+                edge.per_signer - 1
+            ))
+            .is_err(),
+            "...and not below it either"
+        );
+
+        // The node-wide default, checked from the other side.
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_per_signer = {}",
+            edge.total
+        ))
+        .is_ok());
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_per_signer = {}",
+            edge.total + 1
+        ))
+        .is_err());
+
+        // ...and the window and wait ceiling, by the same trick: a ceiling
+        // exactly equal to the default window is coherent, one millisecond
+        // past it is not.
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_max_wait_ms = {}",
+            edge.window.as_millis()
+        ))
+        .is_ok());
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_max_wait_ms = {}",
+            edge.window.as_millis() + 1
+        ))
+        .is_err());
+
+        // And the cap the client edge clamps a window to is the one the
+        // config layer refuses above.
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_window_secs = {}",
+            MAX_UNRESOLVABLE_LOOKUP_WINDOW.as_secs()
+        ))
+        .is_ok());
+        assert!(raw_config_result(&format!(
+            "unresolvable_lookup_budget_window_secs = {}",
+            MAX_UNRESOLVABLE_LOOKUP_WINDOW.as_secs() + 1
+        ))
+        .is_err());
     }
 
     /// Every configured channel reaches the client edge's registry, so a
