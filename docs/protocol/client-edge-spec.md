@@ -184,6 +184,35 @@ never reaches the terminating app:
    naming channels at random, and a legitimate payer has to be told to retry rather than told they
    do not exist.
 
+5. **Collateral binding** — the claim's cumulative `transferredAmount` MUST NOT exceed the
+   **on-chain deposit of the channel's counterparty**
+   ([issue #646](https://github.com/toon-protocol/connector/issues/646)). This is not a credit
+   policy a connector invents: both settlement contracts already refuse an over-deposit claim at
+   redemption (`TokenNetwork.claimFromChannel` reverts `InsufficientChannelBalance`;
+   `packages/solana-program`'s claim handler returns `TransferredAmountExceedsDeposit`), so a claim
+   above the deposit is not value at risk — it is provably unredeemable, and serving it is work the
+   operator can never be paid for. Evaluating it here makes the accept rule agree with the redeem
+   rule. It is checked **after** cryptographic verification, so only a claim that is already fresh,
+   value-covering and correctly signed can provoke the chain read it may need.
+
+   The refusal is its own reason, distinguishable from an underpayment: this claim _does_ cover the
+   route's price, and it consumes nothing — no watermark advances and nothing is recorded — so the
+   remedy is the one both contracts already document: **deposit more and resubmit the same claim,
+   at the same nonce**.
+
+   Deposits are monotonically non-decreasing while a channel is open or closed on both chains
+   (`setTotalDeposit` reverts on a decrease; the Solana `Deposit` handler only `checked_add`s), so a
+   deposit a connector read earlier is a permanent _lower bound_. A connector MAY therefore cache it
+   and compare against the cached value, provided a claim that breaches it triggers a fresh read
+   before being refused — the bound can only ever produce a false refusal, never a false accept, and
+   one re-read repairs it.
+
+   **The exemption is deliberate.** A `[[client_channels]]` record declares a counterparty and a
+   signing domain and never an amount, and a node with no settlement backend has no chain to ask, so
+   a declared channel is not subject to this step. An operator hand-declaring a channel _is_ the
+   credit decision, correctly located in config and theirs to make; an anonymous buyer resolved from
+   chain (§1.2) never made any such deal, and gets the check.
+
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
 
@@ -331,7 +360,7 @@ rejected at ingress with `403` (a status this subsection adds to §1.1's table, 
 the sender may be perfectly well authenticated and is simply not authorized to probe) without being
 forwarded. A `403` carries no OER body, per §1.1's rule that a non-2xx status never does.
 
-The claim on a probe **identifies rather than pays**: it is validated in full (§1.3's four steps)
+The claim on a probe **identifies rather than pays**: it is validated in full (§1.3's five steps)
 against a price of `0`, so possession of the channel is proven and a replay is still refused, but
 no value need advance — a sender probes by reissuing at the same cumulative amount with a fresh
 nonce. A connector recognizes a channel once a claim on it has cleared §1.3's gate at this edge.

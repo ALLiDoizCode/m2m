@@ -379,6 +379,28 @@ impl SolanaSettlementBackend {
         &self,
         channel_account: Pubkey,
     ) -> Result<Option<Pubkey>, SettlementError> {
+        Ok(self
+            .channel_counterparty_deposit(channel_account)
+            .await?
+            .map(|(counterparty, _deposit)| counterparty))
+    }
+
+    /// [`channel_counterparty`](Self::channel_counterparty), plus the
+    /// deposit that counterparty has actually put into the channel's vault
+    /// -- the bound `packages/solana-program`'s claim handler enforces at
+    /// redemption (`processor.rs:781-788`,
+    /// `TransferredAmountExceedsDeposit`), and therefore the most a claim
+    /// this backend resolves can ever be worth (issue #646).
+    ///
+    /// **No extra RPC.** `deposit_a`/`deposit_b` are already decoded out of
+    /// the same account bytes the counterparty comes from
+    /// ([`wire::ChannelAccount::parse`]); before this they were parsed and
+    /// thrown away. The client edge asks for both together so the number is
+    /// carried through the resolution seam instead of re-read there.
+    pub async fn channel_counterparty_deposit(
+        &self,
+        channel_account: Pubkey,
+    ) -> Result<Option<(Pubkey, u64)>, SettlementError> {
         let Some(account) = self.fetch_account(&channel_account).await? else {
             return Ok(None);
         };
@@ -393,14 +415,16 @@ impl SolanaSettlementBackend {
     /// [`channel_counterparty`](Self::channel_counterparty): given a parsed
     /// channel account, decide whether it is a channel a backend with
     /// identity `own` settling in `token_mint` can be paid on, and if so by
-    /// whom. Extracted so every refusal branch -- settled, wrong mint,
+    /// whom -- and how much *they* have deposited (issue #646), which is
+    /// the side of the two-sided deposit a claim signed by them redeems
+    /// against. Extracted so every refusal branch -- settled, wrong mint,
     /// not a participant -- is unit-testable against a fabricated account
     /// without a validator.
     fn resolvable_counterparty(
         account: &wire::ChannelAccount,
         own: Pubkey,
         token_mint: Pubkey,
-    ) -> Option<Pubkey> {
+    ) -> Option<(Pubkey, u64)> {
         if account.status == wire::ChannelStatus::Settled {
             return None;
         }
@@ -408,9 +432,9 @@ impl SolanaSettlementBackend {
             return None;
         }
         if account.participant_a == own {
-            Some(account.participant_b)
+            Some((account.participant_b, account.deposit_b))
         } else if account.participant_b == own {
-            Some(account.participant_a)
+            Some((account.participant_a, account.deposit_a))
         } else {
             None
         }
@@ -1010,7 +1034,10 @@ mod tests {
             participant_a,
             participant_b,
             token_mint,
-            deposit_a: 0,
+            // Deliberately different per side: the resolution reports the
+            // *counterparty's* deposit (issue #646), and equal numbers
+            // would let a test pass while reading the wrong one.
+            deposit_a: 500,
             deposit_b: 1_000,
             transferred_amount_a: 0,
             transferred_amount_b: 0,
@@ -1033,8 +1060,8 @@ mod tests {
                 own,
                 mint,
             ),
-            Some(counterparty),
-            "own as participant A resolves to participant B"
+            Some((counterparty, 1_000)),
+            "own as participant A resolves to participant B, with B's own deposit"
         );
         assert_eq!(
             SolanaSettlementBackend::resolvable_counterparty(
@@ -1042,8 +1069,8 @@ mod tests {
                 own,
                 mint,
             ),
-            Some(counterparty),
-            "own as participant B resolves to participant A"
+            Some((counterparty, 500)),
+            "own as participant B resolves to participant A, with A's own deposit"
         );
     }
 
@@ -1060,7 +1087,7 @@ mod tests {
                 own,
                 mint,
             ),
-            Some(counterparty),
+            Some((counterparty, 1_000)),
         );
     }
 

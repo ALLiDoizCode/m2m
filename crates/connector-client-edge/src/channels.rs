@@ -59,40 +59,133 @@
 //! distinguishably and never silently. "Unverifiable" is never "accepted",
 //! by configuration, flag or build profile.
 //!
-//! # Caching, and why invalidation is a non-problem
+//! # What a resolution reports, and what a claim may spend against
+//!
+//! A record is not only "whose signature", it is also **how much that
+//! signature can be good for** (issue #646). A resolved channel carries
+//! the counterparty's on-chain deposit as a [`DepositFloor`], and the claim
+//! gate refuses a claim whose cumulative amount exceeds it. That is not a
+//! credit policy this connector invents: both settlement contracts already
+//! refuse an over-deposit claim at redemption
+//! (`TokenNetwork.sol`'s `InsufficientChannelBalance`,
+//! `packages/solana-program/src/processor.rs`'s
+//! `TransferredAmountExceedsDeposit`), so a claim above the deposit is not
+//! value at risk -- it is work this connector could never be paid for, and
+//! accepting it is giving the app away. Evaluating it here makes the
+//! accept rule agree with the redeem rule.
+//!
+//! A **declared** channel has no deposit to report: `[[client_channels]]`
+//! names a counterparty and a domain and never an amount, and a node with
+//! no settlement backend has no chain to ask. Its floor is
+//! [`DepositFloor::Unknown`], which covers everything -- the deliberate
+//! exemption of issue #646, and the ADR 0006 split done properly: an
+//! operator hand-declaring a channel *is* the policy decision, correctly
+//! located in config and theirs to make. An anonymous buyer resolved from
+//! chain never made any such deal, and gets the mechanism.
+//!
+//! # Caching, and how it is refreshed
 //!
 //! A resolution happens on the packet path, so it must not become an RPC
-//! round trip per packet. Every resolved channel is therefore memoised for
-//! the process's lifetime and **is never invalidated**, because what is
-//! memoised is immutable on chain. `TokenNetwork.openChannel`
-//! (`packages/contracts/src/TokenNetwork.sol:206-213`) assigns
-//! `participant1`/`participant2` once, when the channel is created, and no
-//! other function in that contract ever assigns either field again --
-//! `setTotalDeposit`, `claimFromChannel`, `closeChannel` and
-//! `settleChannel` mutate deposits, claimed amounts and `state` only. The
-//! EIP-712 domain is immutable for the same reason one layer up:
-//! OpenZeppelin's `EIP712("TokenNetwork", "1")` derives it from
-//! `block.chainid` and `address(this)`, and a deployed `TokenNetwork`'s
-//! address does not move.
+//! round trip per packet. Every resolved channel is therefore memoised.
+//! What is memoised divides into three kinds of fact, and the cache treats
+//! each on its own terms:
 //!
-//! What is *not* memoised is any answer that could change: a lookup
-//! failure, and a "no such channel". A buyer who opens a channel and pays
-//! a second later has to be payable on their next attempt rather than
-//! after a TTL, which is exactly the registration-free path #502 asks for.
-//! The cost is that a sender naming channels that do not exist can make
-//! this connector perform one `eth_call` each. Two things bound it: a
-//! resolution is a single `TokenNetwork.channels(id)` read rather than the
-//! three-call `SettlementBackend::channel_state` path, and the lookup is
-//! the claim gate's *last* stage, so a claim must already be structurally
-//! valid, fresh and value-covering to reach it at all (issue #544's
-//! ordering). Rate-limiting it is deliberately left out of this change --
-//! see the PR description.
+//! * **Immutable.** The participants and the EIP-712 domain.
+//!   `TokenNetwork.openChannel`
+//!   (`packages/contracts/src/TokenNetwork.sol:206-213`) assigns
+//!   `participant1`/`participant2` once, when the channel is created, and
+//!   no other function in that contract ever assigns either field again --
+//!   `setTotalDeposit`, `claimFromChannel`, `closeChannel` and
+//!   `settleChannel` mutate deposits, claimed amounts and `state` only. The
+//!   EIP-712 domain is immutable for the same reason one layer up:
+//!   OpenZeppelin's `EIP712("TokenNetwork", "1")` derives it from
+//!   `block.chainid` and `address(this)`, and a deployed `TokenNetwork`'s
+//!   address does not move. These need no invalidation at all.
+//! * **Monotone.** The deposit. Its only writer on EVM is
+//!   `setTotalDeposit`, which reverts on a decrease
+//!   (`TokenNetwork.sol:238`); its only writer on Solana is the `Deposit`
+//!   handler's `checked_add` (`processor.rs:382-388`). Neither chain has a
+//!   withdraw-while-open. A cached deposit is therefore a permanent
+//!   **lower bound**: it can only ever produce a false *refusal* (the payer
+//!   topped up since it was read), never a false accept. So it is not
+//!   re-read on the hot path at all -- only when a claim actually breaches
+//!   it, via [`ClientChannelRegistry::refresh_evm`] /
+//!   [`refresh_solana`](ClientChannelRegistry::refresh_solana), which
+//!   raises the floor and lets the same claim through. Steady state (a
+//!   client that funded once and is spending down) costs zero refreshes.
+//! * **Mutable in both directions.** That the channel is not `Settled`, and
+//!   that its mint is the one this node settles in. A memoised *positive*
+//!   answer encodes both, and neither is immutable -- so this memo can
+//!   still answer for a channel that has settled since it was read. That is
+//!   issue #649, tracked separately and fixed on top of this refresh path.
+//!
+//! What is *not* memoised at all is any answer that could change to a
+//! *better* one: a lookup failure, and a "no such channel". A buyer who
+//! opens a channel and pays a second later has to be payable on their next
+//! attempt rather than after a TTL, which is exactly the registration-free
+//! path #502 asks for. The cost is that a sender naming channels that do
+//! not exist can make this connector perform one `eth_call` each. Two
+//! things bound it: a resolution is a single `TokenNetwork.channels(id)`
+//! read plus the one `participants(id, counterparty)` read the deposit
+//! needs, rather than the three-call `SettlementBackend::channel_state`
+//! path, and the lookup is the claim gate's *last* stage, so a claim must
+//! already be structurally valid, fresh and value-covering to reach it at
+//! all (issue #544's ordering). Rate-limiting it is deliberately left out
+//! of this change -- see the PR description.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use connector_signer::Address;
+
+/// What a channel's counterparty has demonstrably put on chain, as far as
+/// this connector knows: the ceiling a claim's cumulative amount may not
+/// exceed (issue #646).
+///
+/// [`AtLeast`](DepositFloor::AtLeast) is a *lower bound*, not a reading:
+/// deposits are monotonically non-decreasing while a channel is
+/// `Opened`/`Closed` on both chains, so a value read at any point in the
+/// past can only understate the deposit today. That is what makes it safe
+/// to cache -- it can only cause a false refusal, never a false accept, and
+/// a false refusal self-heals with one re-read (see
+/// [`ClientChannelRegistry::refresh_evm`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepositFloor {
+    /// No deposit is knowable for this channel: an operator-declared
+    /// `[[client_channels]]` record names a counterparty and a domain and
+    /// never an amount. Covers every claim -- the deliberate exemption
+    /// described in this module's own doc.
+    Unknown,
+    /// The counterparty's on-chain deposit as of the last read, saturated
+    /// into `u64` from whatever width the chain holds it in. Saturation is
+    /// sound in the safe direction: a deposit above `u64::MAX` can never be
+    /// exceeded by a `u64` cumulative amount anyway.
+    AtLeast(u64),
+}
+
+impl DepositFloor {
+    /// Whether a claim whose cumulative transferred amount is `amount`
+    /// could be redeemed against this floor -- `amount <= deposit`, the
+    /// same comparison `TokenNetwork.claimFromChannel` and
+    /// `packages/solana-program`'s `Claim` handler make on redemption.
+    pub fn covers(&self, amount: u64) -> bool {
+        match self {
+            DepositFloor::Unknown => true,
+            DepositFloor::AtLeast(deposit) => amount <= *deposit,
+        }
+    }
+
+    /// The floor as a number, for a refusal that has to say what the
+    /// channel actually holds. `None` for [`DepositFloor::Unknown`], which
+    /// never refuses anything.
+    pub fn deposit(&self) -> Option<u64> {
+        match self {
+            DepositFloor::Unknown => None,
+            DepositFloor::AtLeast(deposit) => Some(*deposit),
+        }
+    }
+}
 
 /// A channel identifier that is not the on-chain value its chain's claims
 /// are signed over -- a `channelId` that is not a 32-byte `bytes32`, or a
@@ -177,9 +270,10 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
 
     /// The Solana twin of [`evm_channel`](Self::evm_channel) (issue #631):
     /// the counterparty's raw Ed25519 public key for the channel at
-    /// `channel_account`, or `Ok(None)`/`Err` under exactly the same rules.
-    /// There is no domain to report alongside it -- a Solana balance proof
-    /// is signed over the channel account, nonce and amount alone
+    /// `channel_account`, and their on-chain deposit, or `Ok(None)`/`Err`
+    /// under exactly the same rules. There is no domain to report alongside
+    /// it -- a Solana balance proof is signed over the channel account,
+    /// nonce and amount alone
     /// (`connector_signer::solana_balance_proof_message`), with no
     /// EIP-712-style verifying-contract concept to carry. The mint is not
     /// in the signed bytes either: binding a channel to the mint this node
@@ -188,7 +282,7 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     async fn solana_channel(
         &self,
         channel_account: &[u8; 32],
-    ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
+    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
         let _ = channel_account;
         Ok(None)
     }
@@ -210,6 +304,30 @@ pub struct EvmChannel {
     pub counterparty: Address,
     pub chain_id: u64,
     pub token_network_address: Address,
+    /// What that counterparty has actually deposited on chain, and
+    /// therefore the most a claim on this channel can ever redeem for
+    /// (issue #646). [`DepositFloor::Unknown`] for a declared channel --
+    /// see this module's own doc for why that exemption is deliberate.
+    pub deposit_floor: DepositFloor,
+}
+
+/// The Solana twin of [`EvmChannel`]: who this connector accepts a claim's
+/// signature from on one Solana channel, and how much that signature can be
+/// good for. A separate type rather than a bare `[u8; 32]` counterparty
+/// (which is all this was before issue #646) so that the deposit travels
+/// with the counterparty through the same seam on both chains, instead of
+/// being parsed out of the chain's own bytes and then thrown away.
+///
+/// There is no signing-domain field: a Solana balance proof is signed over
+/// the channel account, nonce and amount alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolanaChannel {
+    /// The raw Ed25519 public key whose signature this connector accepts on
+    /// a claim for this channel -- never the claim's own
+    /// `signerPublicKey`.
+    pub counterparty: [u8; 32],
+    /// See [`EvmChannel::deposit_floor`].
+    pub deposit_floor: DepositFloor,
 }
 
 /// Which chain a claim's channel lives on -- the key a
@@ -238,20 +356,20 @@ enum ClaimChain {
 #[derive(Debug, Default)]
 pub struct ClientChannelRegistry {
     evm: HashMap<[u8; 32], EvmChannel>,
-    solana: HashMap<[u8; 32], [u8; 32]>,
+    solana: HashMap<[u8; 32], SolanaChannel>,
     /// Consulted only for a channel nothing was declared for, keyed by
     /// [`ClaimChain`] so each chain's source answers for that chain alone --
     /// never, say, an EVM source consulted for a Solana lookup. Empty is a
     /// node with no settlement backend: it accepts claims on exactly what
     /// its config file declares, and on nothing else.
     sources: HashMap<ClaimChain, Arc<dyn ClientChannelSource>>,
-    /// Memoised answers from [`Self::sources`]. Never invalidated -- see
-    /// this module's doc.
+    /// Memoised answers from [`Self::sources`] -- see this module's doc for
+    /// which of the facts in one of these entries can go stale.
     resolved: RwLock<HashMap<[u8; 32], EvmChannel>>,
     /// The Solana twin of [`Self::resolved`] (issue #631) -- a separate map
-    /// since a resolved Solana answer is a bare counterparty key, not an
+    /// since a resolved Solana answer is a [`SolanaChannel`], not an
     /// [`EvmChannel`].
-    resolved_solana: RwLock<HashMap<[u8; 32], [u8; 32]>>,
+    resolved_solana: RwLock<HashMap<[u8; 32], SolanaChannel>>,
 }
 
 impl ClientChannelRegistry {
@@ -319,7 +437,15 @@ impl ClientChannelRegistry {
             .ok_or_else(|| InvalidChannelIdentifier(channel_account.to_string()))?;
         let counterparty = decode_base58_bytes::<32>(counterparty)
             .ok_or_else(|| InvalidChannelIdentifier(counterparty.to_string()))?;
-        self.solana.insert(key, counterparty);
+        self.solana.insert(
+            key,
+            SolanaChannel {
+                counterparty,
+                // Config declares a counterparty, never an amount -- see
+                // this module's doc on the declared-channel exemption.
+                deposit_floor: DepositFloor::Unknown,
+            },
+        );
         Ok(())
     }
 
@@ -362,19 +488,60 @@ impl ClientChannelRegistry {
                 return Ok(Some(*channel));
             }
         }
+        self.resolve_evm(channel_id).await
+    }
+
+    /// Ask the chain about `channel_id` again, whatever is memoised for it
+    /// (issues #646, #649), and answer from that fresh reading.
+    ///
+    /// The claim gate calls this when a claim **breaches** the memoised
+    /// deposit floor: the floor is a lower bound, so a breach is not yet a
+    /// refusal, it is a reason to look again -- and a counterparty who
+    /// topped up gets their claim honoured on the same submission rather
+    /// than after a restart.
+    ///
+    /// A declared channel has nothing to refresh: config, not the chain, is
+    /// its authority, and it is answered from config exactly as
+    /// [`Self::evm`] would.
+    pub(crate) async fn refresh_evm(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        if let Some(channel) = self.evm.get(channel_id) {
+            return Ok(Some(*channel));
+        }
+        self.resolve_evm(channel_id).await
+    }
+
+    /// The one place [`Self::sources`]'s EVM entry is consulted, and the
+    /// one place [`Self::resolved`] is written.
+    async fn resolve_evm(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
         let Some(source) = self.sources.get(&ClaimChain::Evm) else {
             return Ok(None);
         };
-        let Some(channel) = source.evm_channel(channel_id).await? else {
-            // Deliberately not memoised: a channel opened a second from
-            // now must be payable on that sender's next attempt.
-            return Ok(None);
-        };
-        self.resolved
+        // A failed lookup says nothing about the channel, so it must not be
+        // allowed to say anything about the memo either: whatever was
+        // cached stays cached, and the claim that provoked this is refused
+        // as a lookup failure.
+        let resolved = source.evm_channel(channel_id).await?;
+        let mut memo = self
+            .resolved
             .write()
-            .expect("resolved client channels lock poisoned")
-            .insert(*channel_id, channel);
-        Ok(Some(channel))
+            .expect("resolved client channels lock poisoned");
+        match resolved {
+            Some(channel) => {
+                memo.insert(*channel_id, channel);
+                Ok(Some(channel))
+            }
+            None => {
+                // Deliberately not memoised: a channel opened a second
+                // from now must be payable on that sender's next attempt.
+                Ok(None)
+            }
+        }
     }
 
     /// The counterparty for a Solana channel: declared first, then already
@@ -389,9 +556,9 @@ impl ClientChannelRegistry {
     pub(crate) async fn solana(
         &self,
         channel_account: &[u8; 32],
-    ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
-        if let Some(counterparty) = self.solana.get(channel_account) {
-            return Ok(Some(*counterparty));
+    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
+        if let Some(channel) = self.solana.get(channel_account) {
+            return Ok(Some(*channel));
         }
         // Scoped so the read guard is released before the `.await` below --
         // see `Self::evm`'s own comment on the same shape.
@@ -400,22 +567,45 @@ impl ClientChannelRegistry {
                 .resolved_solana
                 .read()
                 .expect("resolved client channels lock poisoned");
-            if let Some(counterparty) = resolved.get(channel_account) {
-                return Ok(Some(*counterparty));
+            if let Some(channel) = resolved.get(channel_account) {
+                return Ok(Some(*channel));
             }
         }
+        self.resolve_solana(channel_account).await
+    }
+
+    /// The Solana twin of [`Self::refresh_evm`] (issues #646, #649), with
+    /// the same two callers and the same rules.
+    pub(crate) async fn refresh_solana(
+        &self,
+        channel_account: &[u8; 32],
+    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
+        if let Some(channel) = self.solana.get(channel_account) {
+            return Ok(Some(*channel));
+        }
+        self.resolve_solana(channel_account).await
+    }
+
+    /// The Solana twin of [`Self::resolve_evm`].
+    async fn resolve_solana(
+        &self,
+        channel_account: &[u8; 32],
+    ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
         let Some(source) = self.sources.get(&ClaimChain::Solana) else {
             return Ok(None);
         };
-        let Some(counterparty) = source.solana_channel(channel_account).await? else {
-            // Deliberately not memoised -- see `Self::evm`'s own comment.
-            return Ok(None);
-        };
-        self.resolved_solana
+        let resolved = source.solana_channel(channel_account).await?;
+        let mut memo = self
+            .resolved_solana
             .write()
-            .expect("resolved client channels lock poisoned")
-            .insert(*channel_account, counterparty);
-        Ok(Some(counterparty))
+            .expect("resolved client channels lock poisoned");
+        match resolved {
+            Some(channel) => {
+                memo.insert(*channel_account, channel);
+                Ok(Some(channel))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -445,10 +635,15 @@ pub(crate) mod test_source {
 
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     #[derive(Debug)]
     pub(crate) struct FakeChannelSource {
-        channels: HashMap<[u8; 32], EvmChannel>,
+        /// Behind a lock so a test can play the part of a chain that
+        /// *changed* -- a counterparty topping up their deposit (issue
+        /// #646) -- which is the whole subject of the refresh path and
+        /// cannot be expressed by a source fixed at construction.
+        channels: Mutex<HashMap<[u8; 32], EvmChannel>>,
         failure: Option<String>,
         lookups: AtomicUsize,
     }
@@ -456,7 +651,7 @@ pub(crate) mod test_source {
     impl FakeChannelSource {
         pub(crate) fn knowing(channels: Vec<([u8; 32], EvmChannel)>) -> FakeChannelSource {
             FakeChannelSource {
-                channels: channels.into_iter().collect(),
+                channels: Mutex::new(channels.into_iter().collect()),
                 failure: None,
                 lookups: AtomicUsize::new(0),
             }
@@ -464,10 +659,22 @@ pub(crate) mod test_source {
 
         pub(crate) fn unreachable(reason: &str) -> FakeChannelSource {
             FakeChannelSource {
-                channels: HashMap::new(),
+                channels: Mutex::new(HashMap::new()),
                 failure: Some(reason.to_string()),
                 lookups: AtomicUsize::new(0),
             }
+        }
+
+        /// What the chain says about `channel_id` from now on: `Some` for a
+        /// channel that is (still) payable, `None` for one that has
+        /// settled, changed mint or otherwise stopped being one this
+        /// connector can be paid on.
+        pub(crate) fn now_says(&self, channel_id: [u8; 32], channel: Option<EvmChannel>) {
+            let mut channels = self.channels.lock().expect("fake source lock poisoned");
+            match channel {
+                Some(channel) => channels.insert(channel_id, channel),
+                None => channels.remove(&channel_id),
+            };
         }
 
         pub(crate) fn lookups(&self) -> usize {
@@ -485,7 +692,12 @@ pub(crate) mod test_source {
             if let Some(reason) = &self.failure {
                 return Err(ChannelLookupFailed(reason.clone()));
             }
-            Ok(self.channels.get(channel_id).copied())
+            Ok(self
+                .channels
+                .lock()
+                .expect("fake source lock poisoned")
+                .get(channel_id)
+                .copied())
         }
     }
 
@@ -496,15 +708,16 @@ pub(crate) mod test_source {
     /// Solana lookup or vice versa.
     #[derive(Debug)]
     pub(crate) struct FakeSolanaChannelSource {
-        channels: HashMap<[u8; 32], [u8; 32]>,
+        /// Behind a lock for the same reason [`FakeChannelSource`]'s is.
+        channels: Mutex<HashMap<[u8; 32], SolanaChannel>>,
         failure: Option<String>,
         lookups: AtomicUsize,
     }
 
     impl FakeSolanaChannelSource {
-        pub(crate) fn knowing(channels: Vec<([u8; 32], [u8; 32])>) -> FakeSolanaChannelSource {
+        pub(crate) fn knowing(channels: Vec<([u8; 32], SolanaChannel)>) -> FakeSolanaChannelSource {
             FakeSolanaChannelSource {
-                channels: channels.into_iter().collect(),
+                channels: Mutex::new(channels.into_iter().collect()),
                 failure: None,
                 lookups: AtomicUsize::new(0),
             }
@@ -512,10 +725,19 @@ pub(crate) mod test_source {
 
         pub(crate) fn unreachable(reason: &str) -> FakeSolanaChannelSource {
             FakeSolanaChannelSource {
-                channels: HashMap::new(),
+                channels: Mutex::new(HashMap::new()),
                 failure: Some(reason.to_string()),
                 lookups: AtomicUsize::new(0),
             }
+        }
+
+        /// The Solana twin of [`FakeChannelSource::now_says`].
+        pub(crate) fn now_says(&self, account: [u8; 32], channel: Option<SolanaChannel>) {
+            let mut channels = self.channels.lock().expect("fake source lock poisoned");
+            match channel {
+                Some(channel) => channels.insert(account, channel),
+                None => channels.remove(&account),
+            };
         }
 
         pub(crate) fn lookups(&self) -> usize {
@@ -528,12 +750,17 @@ pub(crate) mod test_source {
         async fn solana_channel(
             &self,
             channel_account: &[u8; 32],
-        ) -> Result<Option<[u8; 32]>, ChannelLookupFailed> {
+        ) -> Result<Option<SolanaChannel>, ChannelLookupFailed> {
             self.lookups.fetch_add(1, Ordering::SeqCst);
             if let Some(reason) = &self.failure {
                 return Err(ChannelLookupFailed(reason.clone()));
             }
-            Ok(self.channels.get(channel_account).copied())
+            Ok(self
+                .channels
+                .lock()
+                .expect("fake source lock poisoned")
+                .get(channel_account)
+                .copied())
         }
     }
 }
@@ -544,10 +771,22 @@ mod tests {
     use super::*;
 
     fn evm_channel() -> EvmChannel {
+        evm_channel_depositing(DepositFloor::AtLeast(1_000))
+    }
+
+    fn evm_channel_depositing(deposit_floor: DepositFloor) -> EvmChannel {
         EvmChannel {
             counterparty: [0x11; 20],
             chain_id: 8453,
             token_network_address: [0x42; 20],
+            deposit_floor,
+        }
+    }
+
+    fn solana_channel() -> SolanaChannel {
+        SolanaChannel {
+            counterparty: [0x09; 32],
+            deposit_floor: DepositFloor::AtLeast(1_000),
         }
     }
 
@@ -616,7 +855,13 @@ mod tests {
             .record_solana(&account, &counterparty)
             .expect("a 32-byte base58 account");
 
-        assert_eq!(registry.solana(&[3u8; 32]).await, Ok(Some([7u8; 32])));
+        assert_eq!(
+            registry.solana(&[3u8; 32]).await,
+            Ok(Some(SolanaChannel {
+                counterparty: [7u8; 32],
+                deposit_floor: DepositFloor::Unknown,
+            }))
+        );
     }
 
     #[tokio::test]
@@ -733,10 +978,16 @@ mod tests {
     #[tokio::test]
     async fn a_solana_channel_only_the_source_knows_about_is_resolved() {
         let registry = ClientChannelRegistry::new().with_solana_source(Arc::new(
-            super::test_source::FakeSolanaChannelSource::knowing(vec![([0x07; 32], [0x09; 32])]),
+            super::test_source::FakeSolanaChannelSource::knowing(vec![(
+                [0x07; 32],
+                solana_channel(),
+            )]),
         ));
 
-        assert_eq!(registry.solana(&[0x07; 32]).await, Ok(Some([0x09; 32])));
+        assert_eq!(
+            registry.solana(&[0x07; 32]).await,
+            Ok(Some(solana_channel()))
+        );
     }
 
     /// The Solana twin of `a_resolved_channel_is_answered_from_memory_the_second_time`:
@@ -744,12 +995,15 @@ mod tests {
     #[tokio::test]
     async fn a_resolved_solana_channel_is_answered_from_memory_the_second_time() {
         let source = Arc::new(super::test_source::FakeSolanaChannelSource::knowing(vec![
-            ([0x07; 32], [0x09; 32]),
+            ([0x07; 32], solana_channel()),
         ]));
         let registry = ClientChannelRegistry::new().with_solana_source(source.clone());
 
         for _ in 0..5 {
-            assert_eq!(registry.solana(&[0x07; 32]).await, Ok(Some([0x09; 32])));
+            assert_eq!(
+                registry.solana(&[0x07; 32]).await,
+                Ok(Some(solana_channel()))
+            );
         }
         assert_eq!(
             source.lookups(),
@@ -775,7 +1029,13 @@ mod tests {
             .expect("a 32-byte base58 account");
         let registry = registry.with_solana_source(source.clone());
 
-        assert_eq!(registry.solana(&[7u8; 32]).await, Ok(Some([9u8; 32])));
+        assert_eq!(
+            registry.solana(&[7u8; 32]).await,
+            Ok(Some(SolanaChannel {
+                counterparty: [9u8; 32],
+                deposit_floor: DepositFloor::Unknown,
+            }))
+        );
         assert_eq!(source.lookups(), 0);
     }
 
@@ -800,11 +1060,176 @@ mod tests {
     #[tokio::test]
     async fn a_solana_source_never_answers_an_evm_lookup_for_the_same_bytes() {
         let source = Arc::new(super::test_source::FakeSolanaChannelSource::knowing(vec![
-            ([0x09; 32], [0x11; 32]),
+            ([0x09; 32], solana_channel()),
         ]));
         let registry = ClientChannelRegistry::new().with_solana_source(source);
 
-        assert_eq!(registry.solana(&[0x09; 32]).await, Ok(Some([0x11; 32])));
+        assert_eq!(
+            registry.solana(&[0x09; 32]).await,
+            Ok(Some(solana_channel()))
+        );
         assert_eq!(registry.evm(&[0x09; 32]).await, Ok(None));
+    }
+
+    // -- The deposit floor and its refresh (issues #646, #649) --
+
+    /// A declared channel reports no deposit at all: config names a
+    /// counterparty and a domain and never an amount, so the collateral cap
+    /// has nothing to bind against and deliberately does not (issue #646).
+    #[tokio::test]
+    async fn a_declared_channel_has_no_knowable_deposit() {
+        let mut registry = ClientChannelRegistry::new();
+        registry
+            .record_evm(
+                &"ab".repeat(32),
+                evm_channel_depositing(DepositFloor::Unknown),
+            )
+            .expect("a 32-byte hex channel id");
+        registry
+            .record_solana(
+                &bs58::encode([3u8; 32]).into_string(),
+                &bs58::encode([7u8; 32]).into_string(),
+            )
+            .expect("a 32-byte base58 account");
+
+        let evm = registry.evm(&[0xab; 32]).await.unwrap().unwrap();
+        assert_eq!(evm.deposit_floor, DepositFloor::Unknown);
+        assert!(evm.deposit_floor.covers(u64::MAX));
+
+        let solana = registry.solana(&[3u8; 32]).await.unwrap().unwrap();
+        assert_eq!(solana.deposit_floor, DepositFloor::Unknown);
+    }
+
+    /// The performance claim of issue #646, as a test rather than a
+    /// paragraph: the deposit rides along with the resolution, so a channel
+    /// whose claims all fit under the memoised floor never asks the chain
+    /// again -- the steady state of a client that funded once and is
+    /// spending down.
+    #[tokio::test]
+    async fn a_memoised_deposit_floor_costs_no_further_lookups() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel_depositing(DepositFloor::AtLeast(1_000)),
+        )]));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+
+        for _ in 0..5 {
+            let channel = registry.evm(&[0x07; 32]).await.unwrap().unwrap();
+            assert_eq!(channel.deposit_floor, DepositFloor::AtLeast(1_000));
+        }
+        assert_eq!(source.lookups(), 1);
+    }
+
+    /// The floor is a lower bound, not a reading: a counterparty who
+    /// deposits more moves it, and one refresh -- exactly one -- is what
+    /// finds that out.
+    #[tokio::test]
+    async fn a_refresh_raises_the_floor_to_what_the_chain_now_says() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel_depositing(DepositFloor::AtLeast(1_000)),
+        )]));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+
+        assert_eq!(
+            registry
+                .evm(&[0x07; 32])
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(1_000)
+        );
+        source.now_says(
+            [0x07; 32],
+            Some(evm_channel_depositing(DepositFloor::AtLeast(5_000))),
+        );
+
+        // Still the memoised floor: nothing has breached it, so nothing
+        // re-reads.
+        assert_eq!(
+            registry
+                .evm(&[0x07; 32])
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(1_000)
+        );
+        assert_eq!(source.lookups(), 1);
+
+        assert_eq!(
+            registry
+                .refresh_evm(&[0x07; 32])
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(5_000)
+        );
+        assert_eq!(source.lookups(), 2, "exactly one re-read");
+
+        // And the raised floor is what the next lookup answers from --
+        // a refresh writes through the memo rather than around it.
+        assert_eq!(
+            registry
+                .evm(&[0x07; 32])
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(5_000)
+        );
+        assert_eq!(source.lookups(), 2);
+    }
+
+    /// A declared channel has nothing to refresh: config is its authority,
+    /// and a refresh must not turn into the chain lookup #556 promised
+    /// declared channels would never need.
+    #[tokio::test]
+    async fn refreshing_a_declared_channel_consults_no_chain() {
+        let source = Arc::new(FakeChannelSource::unreachable("connection refused"));
+        let mut registry = ClientChannelRegistry::new();
+        registry
+            .record_evm(
+                &"07".repeat(32),
+                evm_channel_depositing(DepositFloor::Unknown),
+            )
+            .expect("a 32-byte hex channel id");
+        let registry = registry.with_source(source.clone());
+
+        assert_eq!(
+            registry
+                .refresh_evm(&[0x07; 32])
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::Unknown
+        );
+        assert_eq!(source.lookups(), 0);
+    }
+
+    /// A refresh whose lookup fails says nothing about the channel, so it
+    /// must not evict what was memoised: the claim that provoked it is
+    /// refused as a lookup failure, and a node whose RPC endpoint blips
+    /// does not lose every channel it had resolved.
+    #[tokio::test]
+    async fn a_failed_refresh_leaves_the_memo_alone() {
+        let source = Arc::new(FakeChannelSource::unreachable("connection refused"));
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+        // Seed the memo by hand: this fake fails every lookup, which is
+        // exactly the point -- the entry must survive one.
+        registry
+            .resolved
+            .write()
+            .unwrap()
+            .insert([0x07; 32], evm_channel());
+
+        assert_eq!(
+            registry.refresh_evm(&[0x07; 32]).await,
+            Err(ChannelLookupFailed("connection refused".to_string()))
+        );
+        assert_eq!(registry.evm(&[0x07; 32]).await, Ok(Some(evm_channel())));
     }
 }
