@@ -6,6 +6,10 @@ not restate that decision, it sequences its execution. Written for whoever imple
 executes the migration issues, not for the general reader of the ADR. No step here is done at
 the time of writing.
 
+**Implementation issues:** Phase 1 — #676 (dual-stack transport); Phase 2 — #677 (config schema
+and discovery value alignment); Phase 3 — #678 (devnet cutover); Phase 4 — #679 (removal of the
+raw-TCP wire). #678 is additionally gated on #620's pricing fix, wherever that lands.
+
 **Fleet reality this plan starts from** (verify it still holds before executing anything): no
 production link runs on the raw-TCP peer wire. The devnet store-side overlay is marked NOT
 DEPLOYED in `infra/linode-store/connector-rust.toml`; the apex
