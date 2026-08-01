@@ -1,16 +1,33 @@
 /**
- * Publishes a signed kind:10032 event directly to a set of relay WebSocket
- * URLs — NIP-01's plain `["EVENT", <event>]` publish, awaiting `["OK", id,
- * true|false, message]`.
+ * Publishes a signed kind:10032 event to a set of relay URLs.
+ *
+ * Two URL schemes, matching the two ingress surfaces a TOON relay deploy
+ * exposes:
+ *
+ * - `ws://` / `wss://` — NIP-01's plain `["EVENT", <event>]` publish,
+ *   awaiting `["OK", id, true|false, message]`. NOTE: the production relay's
+ *   public WS gate rejects ALL external writes (`restricted: writes require
+ *   ILP payment` — events only enter through the payment terminator), so
+ *   this scheme is only useful against relays that accept free WS writes.
+ * - `http://` / `https://` — the relay's PRIVATE payment-oblivious write
+ *   ingress (`POST /write` with `{ event }`, relay `launcher/handlers/
+ *   write-handler.ts`): the surface the fronting connector itself delivers
+ *   paid events to after terminating payment. Publishing here is the
+ *   trusted-local free path — the sidecar sits on the same docker network
+ *   the connector does, upstream of the payment boundary, exactly like the
+ *   retired connector's LOCAL `announceTo` delivery (which was always free).
+ *   `/write` is appended when the URL doesn't already end with it. These
+ *   URLs are INTERNAL — set `ANNOUNCER_RELAY_PUBLIC_URL` so the advertised
+ *   `relayUrl` stays a public WS endpoint.
  *
  * This is deliberately simpler than the retired connector's publish path
  * (`discovery/self-announce-publish.ts`), which routed the write through the
  * connector's OWN ILP pipe so a REMOTE `announceTo` paid from the
  * connector's settlement channel. This sidecar is not a connector and holds
  * no channel — per the issue's re-scope, v1 only needs the LOCAL-relay case,
- * which was always free (a direct WS publish, no ILP packet involved). If a
- * future revision needs to reach a remote relay that requires payment, that
- * is a new capability, not a mode this module should silently grow.
+ * which was always free. If a future revision needs to reach a remote relay
+ * that requires payment, that is a new capability, not a mode this module
+ * should silently grow.
  *
  * Uses the platform `WebSocket` global (stable in Node >=22, this package's
  * minimum) rather than adding a `ws` dependency; `WebSocketLike` narrows to
@@ -48,9 +65,54 @@ export interface PublishOptions {
   logger: Logger;
   /** Injectable for tests; defaults to the platform `WebSocket`. */
   webSocketFactory?: WebSocketFactory;
+  /** Injectable for tests; defaults to the platform `fetch`. */
+  fetchFn?: typeof fetch;
 }
 
 const defaultFactory: WebSocketFactory = (url) => new WebSocket(url) as unknown as WebSocketLike;
+
+/**
+ * Publish `event` to the relay's payment-oblivious HTTP write ingress
+ * (`POST <url>[/write]` with `{ event }`). Never throws.
+ */
+async function publishToHttpIngress(
+  event: NostrEvent,
+  relayUrl: string,
+  opts: PublishOptions
+): Promise<RelayPublishResult> {
+  const fetchFn = opts.fetchFn ?? fetch;
+  const target = relayUrl.replace(/\/$/, '').endsWith('/write')
+    ? relayUrl
+    : `${relayUrl.replace(/\/$/, '')}/write`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  (timer as { unref?: () => void }).unref?.();
+  try {
+    const res = await fetchFn(target, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event }),
+      signal: controller.signal,
+    });
+    if (res.ok) {
+      return { relay: relayUrl, ok: true };
+    }
+    const text = await res.text().catch(() => '');
+    return {
+      relay: relayUrl,
+      ok: false,
+      detail: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}`,
+    };
+  } catch (err) {
+    return {
+      relay: relayUrl,
+      ok: false,
+      detail: controller.signal.aborted ? 'timeout waiting for write ingress' : errMsg(err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Publish `event` to a single relay, resolving once `OK`/error/timeout settles it. Never throws. */
 export function publishToRelay(
@@ -58,6 +120,9 @@ export function publishToRelay(
   relayUrl: string,
   opts: PublishOptions
 ): Promise<RelayPublishResult> {
+  if (relayUrl.startsWith('http://') || relayUrl.startsWith('https://')) {
+    return publishToHttpIngress(event, relayUrl, opts);
+  }
   const makeSocket = opts.webSocketFactory ?? defaultFactory;
   return new Promise((resolve) => {
     let settled = false;

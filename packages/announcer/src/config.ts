@@ -175,7 +175,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AnnouncerConfi
 
     httpEndpoint: env.ANNOUNCER_HTTP_ENDPOINT ?? DEFAULT_HTTP_ENDPOINT,
     btpEndpoint: env.ANNOUNCER_BTP_ENDPOINT ?? DEFAULT_BTP_ENDPOINT,
-    relayPublicUrl: env.ANNOUNCER_RELAY_PUBLIC_URL ?? relayUrls[0],
+    // Advertised for FREE READS, so it must be a public WS endpoint — never
+    // an http(s) publish entry (those are the relay's PRIVATE write ingress,
+    // see publisher.ts). Fall back to the first ws/wss publish URL only.
+    relayPublicUrl:
+      env.ANNOUNCER_RELAY_PUBLIC_URL ??
+      relayUrls.find((u) => u.startsWith('ws://') || u.startsWith('wss://')),
 
     assetCode: env.ANNOUNCER_ASSET_CODE ?? 'USDC',
     assetScale: env.ANNOUNCER_ASSET_SCALE ? Number(env.ANNOUNCER_ASSET_SCALE) : 6,

@@ -173,3 +173,65 @@ test('publishToRelays: returns an empty array (never throws) with no relays conf
   const results = await publishToRelays(EVENT, [], { timeoutMs: 1000, logger });
   assert.deepEqual(results, []);
 });
+
+// ─── HTTP write-ingress mode ────────────────────────────────────────────────
+
+function fakeFetch(
+  status: number,
+  body = ''
+): { fetchFn: typeof fetch; calls: { url: string; init: RequestInit }[] } {
+  const calls: { url: string; init: RequestInit }[] = [];
+  const fetchFn = (async (url: unknown, init?: unknown) => {
+    calls.push({ url: String(url), init: init as RequestInit });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => body,
+    } as Response;
+  }) as typeof fetch;
+  return { fetchFn, calls };
+}
+
+test('publishToRelay: http URL posts { event } to the /write ingress and resolves ok on 200', async () => {
+  const { fetchFn, calls } = fakeFetch(200);
+  const result = await publishToRelay(EVENT, 'http://relay:3100', {
+    timeoutMs: 1000,
+    logger,
+    fetchFn,
+  });
+  assert.deepEqual(result, { relay: 'http://relay:3100', ok: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://relay:3100/write');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(String(calls[0].init.body)), { event: EVENT });
+});
+
+test('publishToRelay: http URL already ending in /write is not double-suffixed', async () => {
+  const { fetchFn, calls } = fakeFetch(200);
+  await publishToRelay(EVENT, 'http://relay:3100/write', { timeoutMs: 1000, logger, fetchFn });
+  assert.equal(calls[0].url, 'http://relay:3100/write');
+});
+
+test('publishToRelay: http ingress non-2xx resolves not-ok with status detail, never throws', async () => {
+  const { fetchFn } = fakeFetch(422, '{"error":"Invalid event signature"}');
+  const result = await publishToRelay(EVENT, 'http://relay:3100', {
+    timeoutMs: 1000,
+    logger,
+    fetchFn,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.detail ?? '', /HTTP 422/);
+});
+
+test('publishToRelay: http ingress network error resolves not-ok, never throws', async () => {
+  const fetchFn = (async () => {
+    throw new Error('ECONNREFUSED');
+  }) as typeof fetch;
+  const result = await publishToRelay(EVENT, 'http://relay:3100', {
+    timeoutMs: 1000,
+    logger,
+    fetchFn,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.detail ?? '', /ECONNREFUSED/);
+});
