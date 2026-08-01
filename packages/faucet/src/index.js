@@ -239,6 +239,7 @@ app.get('/api/info', async (req, res) => {
                 sol: String(solanaFaucet.solAmount),
                 usdc: String(solanaFaucet.usdcAmount),
               },
+              cooldownHours: String(solanaFaucet.cooldownMs / 3_600_000),
               usdcMint: solanaFaucet.mint,
               rpcUrl: solanaFaucet.rpcUrl,
             }
@@ -338,8 +339,12 @@ app.post('/api/request', (req, res) => {
 // ---------------------------------------------------------------------------
 // Solana route — POST /api/solana/request { address }
 //
-// Airdrops SOL + transfers mock USDC from the devnet treasury. Returns a clear
-// 503 when Solana isn't configured for this deploy (so EVM-only still works).
+// Transfers SOL (treasury-funded, falling back to the public airdrop only if
+// the treasury transfer itself fails) + mock USDC from the devnet treasury.
+// Returns a clear 503 when Solana isn't configured for this deploy (so
+// EVM-only still works). Honours a per-address cooldown (toon-meta#258): the
+// SOL leg spends from a small, NOT self-replenishing treasury balance, so an
+// uncapped route could be drained by one address looping requests.
 // ---------------------------------------------------------------------------
 app.post('/api/solana/request', (req, res) => {
   if (!solanaFaucet) {
@@ -356,6 +361,22 @@ app.post('/api/solana/request', (req, res) => {
     return;
   }
 
+  // Per-address cooldown: claim BEFORE enqueueing (reserves the slot so
+  // concurrent requests for the same address cannot double-drip); released
+  // below if the drip fails.
+  const claim = solanaFaucet.claim(address);
+  if (!claim.allowed) {
+    res
+      .status(429)
+      .set('Retry-After', String(Math.ceil(claim.retryAfterMs / 1000)))
+      .json({
+        error: 'Solana drip rate limit',
+        message: 'This address already received a Solana drip inside the cooldown window.',
+        retryAfterMs: claim.retryAfterMs,
+      });
+    return;
+  }
+
   console.log(`💧 Solana faucet request for ${address}`);
   solanaQueue = solanaQueue
     .then(async () => {
@@ -364,6 +385,8 @@ app.post('/api/solana/request', (req, res) => {
       res.json({ success: true, chain: 'solana', address, transactions: result });
     })
     .catch((error) => {
+      // A failed drip must not burn the address's cooldown.
+      solanaFaucet.release(address);
       console.error('❌ Solana faucet request failed:', error);
       if (!res.headersSent) {
         // A wedged validator (block production halted while the RPC + /health
@@ -407,6 +430,22 @@ app.post('/api/solana/usdc-request', (req, res) => {
     return;
   }
 
+  // Same per-address cooldown as /api/solana/request: this route still spends
+  // treasury SOL (tx fee + a possible ATA-rent payment), just skips the direct
+  // SOL-transfer leg.
+  const claim = solanaFaucet.claim(address);
+  if (!claim.allowed) {
+    res
+      .status(429)
+      .set('Retry-After', String(Math.ceil(claim.retryAfterMs / 1000)))
+      .json({
+        error: 'Solana drip rate limit',
+        message: 'This address already received a Solana drip inside the cooldown window.',
+        retryAfterMs: claim.retryAfterMs,
+      });
+    return;
+  }
+
   console.log(`💧 Solana USDC-only faucet request for ${address}`);
   solanaQueue = solanaQueue
     .then(async () => {
@@ -421,6 +460,7 @@ app.post('/api/solana/usdc-request', (req, res) => {
       });
     })
     .catch((error) => {
+      solanaFaucet.release(address);
       console.error('❌ Solana USDC-only request failed:', error);
       if (!res.headersSent) {
         if (error.code === 'VALIDATOR_STALLED') {
