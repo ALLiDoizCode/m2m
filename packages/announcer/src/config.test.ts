@@ -121,6 +121,26 @@ test('loadConfig: relayPublicUrl defaults to the first ANNOUNCER_RELAY_URLS entr
   assert.deepEqual(config.relayUrls, ['wss://a', 'wss://b']);
 });
 
+test('loadConfig: relayPublicUrl never falls back to an http(s) publish entry', () => {
+  // http entries are the relay's PRIVATE write ingress — advertising one as
+  // the free-read relayUrl would leak an internal, unreachable endpoint.
+  const internalOnly = loadConfig(baseEnv({ ANNOUNCER_RELAY_URLS: 'http://relay:3100' }));
+  assert.equal(internalOnly.relayPublicUrl, undefined);
+
+  const mixed = loadConfig(
+    baseEnv({ ANNOUNCER_RELAY_URLS: 'http://relay:3100,wss://public.example' })
+  );
+  assert.equal(mixed.relayPublicUrl, 'wss://public.example');
+
+  const explicit = loadConfig(
+    baseEnv({
+      ANNOUNCER_RELAY_URLS: 'http://relay:3100',
+      ANNOUNCER_RELAY_PUBLIC_URL: 'wss://public.example',
+    })
+  );
+  assert.equal(explicit.relayPublicUrl, 'wss://public.example');
+});
+
 test('loadConfig: an explicit ANNOUNCER_TTL_SECS overrides the 2x-refresh default', () => {
   const config = loadConfig(
     baseEnv({ ANNOUNCER_REFRESH_INTERVAL_SECS: '60', ANNOUNCER_TTL_SECS: '90' })
