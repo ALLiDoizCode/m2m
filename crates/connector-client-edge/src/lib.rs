@@ -62,6 +62,7 @@ use connector_runtime::{Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
 
+mod btp;
 mod channels;
 mod claim_gate;
 mod lookup_budget;
@@ -200,6 +201,7 @@ pub fn router_with_gate_and_terms(
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
+        .route("/ilp/btp", get(btp::handle_btp_upgrade))
         .route("/ilp/probe", post(handle_probe))
         .route("/ilp/identity", get(identity))
         .route("/ilp/routes/price", get(route_price))
@@ -454,6 +456,28 @@ fn payment_required(
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
 ) -> Response {
+    let body = x402_terms_body(destination, price, settlement, settlements);
+    let header_value = BASE64.encode(&body);
+    Response::builder()
+        .status(StatusCode::PAYMENT_REQUIRED)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(PAYMENT_REQUIRED_HEADER, header_value)
+        .body(Body::from(body))
+        .expect("well-formed x402 response")
+        .into_response()
+}
+
+/// The x402 v2 terms JSON itself (§1.4), shared by both carriages: the HTTP
+/// greeting above serves it as a 402 body + `Payment-Required` header, and
+/// the BTP greeting (§1.9, `btp` module) carries the same bytes as
+/// `payment-required` protocolData on an F06 REJECT -- factored so the two
+/// can never drift.
+fn x402_terms_body(
+    destination: &str,
+    price: u64,
+    settlement: Option<&X402SettlementTerms>,
+    settlements: &[X402ChainSettlementTerms],
+) -> Vec<u8> {
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
         resource: X402Resource {
@@ -475,15 +499,7 @@ fn payment_required(
             },
         }],
     };
-    let body = serde_json::to_vec(&terms).expect("x402 terms always serialize");
-    let header_value = BASE64.encode(&body);
-    Response::builder()
-        .status(StatusCode::PAYMENT_REQUIRED)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(PAYMENT_REQUIRED_HEADER, header_value)
-        .body(Body::from(body))
-        .expect("well-formed x402 response")
-        .into_response()
+    serde_json::to_vec(&terms).expect("x402 terms always serialize")
 }
 
 /// Decode a claim header's raw (still base64-encoded) bytes into the
@@ -660,6 +676,17 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
     // has T05 for, and a sender parsing codes rather than English can tell
     // "retry, the node's endpoint hiccupped" from "back off, you are being
     // metered".
+    packet_response(PacketResponse::Reject(claim_rejection_reject(
+        rejection, price,
+    )))
+}
+
+/// The refusal itself -- `RejectCode`, `accumulated_cost` and message -- for
+/// a claim-ingest rejection, independent of carriage: `claim_rejected_response`
+/// wraps it for HTTP, the `btp` module frames it for a websocket session
+/// (§1.9), so the taxonomy the comment above reasons through stays
+/// single-sourced.
+fn claim_rejection_reject(rejection: ClaimIngestRejection, price: u64) -> Reject {
     let (code, accumulated_cost) = match rejection {
         ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
         ClaimIngestRejection::Undercollateralized { .. } => (RejectCode::f03_invalid_amount(), 0),
@@ -668,13 +695,13 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
         ClaimIngestRejection::LookupBudgetExhausted { .. } => (RejectCode::t05_rate_limited(), 0),
         _ => (RejectCode::f01_invalid_packet(), 0),
     };
-    packet_response(PacketResponse::Reject(Reject {
+    Reject {
         code,
         triggered_by: String::new(),
         message: rejection.message(),
         data: Vec::new(),
         accumulated_cost,
-    }))
+    }
 }
 
 async fn handle_ilp(

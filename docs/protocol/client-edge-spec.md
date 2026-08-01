@@ -614,6 +614,72 @@ handler path, never in place of it
 handler, one price" true in the presence of a sender-chosen `target` — a route's configured handler
 is the one thing a sender's own envelope can never override.
 
+### 1.9 Client BTP websocket transport (issue #674 family)
+
+A second carriage for exactly the pipeline §1.1–§1.6 specify over HTTP: one persistent,
+**ordered** websocket session carrying BTP-framed ILP packets and claims, so that a client
+streaming many paid writes advances its claim nonces on one socket in one order instead of racing
+parallel HTTP requests. Nothing here changes what is validated or charged — the same claim gate
+instance, watermarks, journal and refusal taxonomy serve both carriages, and a write that arrived
+over BTP is indistinguishable downstream from one that arrived over HTTP. Peers do NOT use this
+transport: connector↔connector traffic stays on the peer wire (`docs/protocol/peer-wire-spec.md`),
+so every BTP session is a client session by construction (ADR 0026).
+
+- **Method/path:** `GET /ilp/btp`, websocket upgrade. The `btp` subprotocol is selected when
+  offered; an upgrade offering no subprotocol is accepted identically.
+- **Frames:** binary websocket messages, one BTP frame per message. Text frames are ignored.
+
+**BTP frame layout** (all integers big-endian; this is the `@toon-protocol/client`
+`btp/protocol.ts` dialect, which is the deployed client wire — NOT RFC-23's full grammar; there
+are no TRANSFER frames and the ILP packet rides beside the protocolData list, not inside it):
+
+```
+frame      = type(u8) requestId(u32) body
+body       = pdCount(u8) pd* ilpLen(u32) ilpPacket[ilpLen]      ; type MESSAGE(6) / RESPONSE(1)
+pd         = nameLen(u8) name[nameLen] contentType(u16) dataLen(u32) data[dataLen]
+errorBody  = codeLen(u8) code nameLen(u8) name taLen(u8) triggeredAt dataLen(u32) data
+                                                                 ; type ERROR(2)
+```
+
+The ILP packets themselves are the same OER encodings `POST /ilp` carries (§1.1): a MESSAGE's
+`ilpPacket` is a PREPARE, a RESPONSE's is a FULFILL or REJECT. `requestId` correlates a RESPONSE
+or ERROR to the MESSAGE it answers; the server never originates a requestId.
+
+**Session flow, in order of what a frame carries:**
+
+1. **Auth**: a MESSAGE whose protocolData contains an `auth` entry (JSON `{peerId, secret}`) is
+   answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2 is not
+   yet implemented on the HTTP carriage either, and an empty `secret` is the documented
+   permissionless mirror. Authorization to _write_ comes from the claim, never the session.
+2. **Prepare + claim**: a MESSAGE with a non-empty `ilpPacket` is decoded as a PREPARE. A
+   protocolData entry named `payment-channel-claim` carries the claim as **raw UTF-8 JSON**
+   (`JSON.stringify(claim)` — no base64 layer; the base64 in §1.3's table is an HTTP-header
+   artifact). The claim runs the SAME §1.3 pipeline and the PREPARE is then routed identically to
+   `POST /ilp`; the outcome returns as a RESPONSE whose `ilpPacket` is the FULFILL or REJECT. On
+   a REJECT, `accumulated_cost` (§1.6) rides as a protocolData entry named `toon-accumulated-cost`
+   (decimal-uint64 UTF-8 text) beside the OER body — the BTP analogue of the HTTP header. The
+   privacy-wrapped carriage (§1.3's `-Wrapped` header) has no BTP protocolData equivalent yet;
+   a wrapped claim is an HTTP-only feature today.
+3. **Unpaid prepare to a priced route**: BTP cannot answer HTTP `402`, so the §1.4 greeting is a
+   RESPONSE carrying an `F06` (Unexpected Payment) REJECT, message
+   `No payment channel claim attached`, with the x402 v2 terms JSON — byte-identical to §1.4's
+   body — as a protocolData entry named `payment-required` (again mirroring the HTTP header of
+   the same name). A claimless PREPARE to an unpriced route passes through unchanged, as on HTTP.
+4. **Standalone claim**: a MESSAGE with an empty `ilpPacket` and a `payment-channel-claim` entry
+   is a fire-and-forget claim registration: it is ingested against price `0` (full validation, a
+   replay still refused, no value need advance — §1.6's identify-not-pay semantics) and answered
+   with nothing, per the client contract (`sendClaimMessage` expects no RESPONSE).
+5. **Anything else**: a MESSAGE with no auth, no claim and no `ilpPacket` is ignored. An
+   undecodable frame is answered with an ERROR frame (`code F00`, `name NotAcceptedError`, the
+   parse failure as UTF-8 `data`) when its requestId was readable, and ignored when not.
+
+**Ordering**: frames on one session are processed strictly sequentially, in arrival order — the
+next frame is not read until the previous frame's claim has been judged and its packet routed.
+This is the transport's reason to exist: claims sent in order on one socket can never race each
+other into `F01 NonceNotAdvancing`, which parallel HTTP requests can (issue #544's ordering
+promise, extended across packets). Concurrent sessions writing on the same channel still
+serialize at the gate's watermark lock, exactly as concurrent HTTP requests do.
+
 ## 2. What version 1 does not do
 
 Version 1 has no field or header identifying its own version. That is the gap §3 closes: version
