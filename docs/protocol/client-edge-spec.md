@@ -673,11 +673,18 @@ or ERROR to the MESSAGE it answers; the server never originates a requestId.
    undecodable frame is answered with an ERROR frame (`code F00`, `name NotAcceptedError`, the
    parse failure as UTF-8 `data`) when its requestId was readable, and ignored when not.
 
-**Ordering**: frames on one session are processed strictly sequentially, in arrival order — the
-next frame is not read until the previous frame's claim has been judged and its packet routed.
-This is the transport's reason to exist: claims sent in order on one socket can never race each
-other into `F01 NonceNotAdvancing`, which parallel HTTP requests can (issue #544's ordering
-promise, extended across packets). Concurrent sessions writing on the same channel still
+**Ordering** (issue #688): _claims_ on one session are judged strictly sequentially, in arrival
+order — a frame's claim is fully admitted (or refused) before the next frame's claim is looked
+at. This is the transport's reason to exist: claims sent in order on one socket can never race
+each other into `F01 NonceNotAdvancing`, which parallel HTTP requests can (issue #544's ordering
+promise, extended across packets). What is **not** serialized is a judged frame's remaining work
+— the durable record of its claim, routing its packet, sending its RESPONSE — which proceeds for
+up to a bounded number of frames concurrently (the connector's `btp_session_window`, default 16;
+when the window is full the session stops reading, so the bound is also the backpressure).
+RESPONSE/ERROR frames may therefore arrive in a different order than the MESSAGEs that provoked
+them; `requestId` is the correlation, per this section's own frame grammar, and the deployed
+client resolves responses through its pending-request map by exactly that id. A client MUST NOT
+assume responses arrive in request order. Concurrent sessions writing on the same channel still
 serialize at the gate's watermark lock, exactly as concurrent HTTP requests do.
 
 ## 2. What version 1 does not do

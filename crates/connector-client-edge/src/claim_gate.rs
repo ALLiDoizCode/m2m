@@ -427,7 +427,7 @@ impl ClientClaimGate {
     /// advanced and the entry is queued in acceptance order, but no
     /// service may be rendered for the claim until the ticket resolves --
     /// that is the boundary ADR 0005 protects.
-    async fn admit(
+    pub(crate) async fn admit(
         &self,
         claim_json: &str,
         price: u64,

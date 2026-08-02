@@ -45,6 +45,7 @@
 //! directly from this connector's own configuration and never touch
 //! [`Connector::handle_prepare`] at all.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
@@ -79,6 +80,17 @@ pub use lookup_budget::{
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
 
+/// The BTP carriage's default per-session in-flight window (issue #688):
+/// how many of one session's frames may be past claim admission at once.
+/// `16` clears the measured ~125-150 ev/s per-session wall by an order of
+/// magnitude on a ~7 ms downstream (window/latency ≈ 2 000/s) while keeping
+/// a session's queued work bounded and modest; the config file's
+/// `btp_session_window` overrides it.
+pub const DEFAULT_BTP_SESSION_WINDOW: NonZeroU32 = match NonZeroU32::new(16) {
+    Some(window) => window,
+    None => unreachable!(),
+};
+
 const OCTET_STREAM: &str = "application/octet-stream";
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
 const CLAIM_WRAPPED_HEADER: &str = "ilp-payment-channel-claim-wrapped";
@@ -107,6 +119,12 @@ struct ClientEdgeState {
     /// in `extra.settlements` beside [`settlement_terms`](Self::settlement_terms).
     /// Empty on a node with no settlement backend.
     settlements: Vec<X402ChainSettlementTerms>,
+    /// How many of one BTP session's frames may be past claim admission --
+    /// waiting out the journal's group commit, being routed downstream, or
+    /// answering -- at once (issue #688). Claims themselves are still
+    /// judged strictly in arrival order; this bounds only the overlapped
+    /// tail. See `btp::btp_session`.
+    btp_session_window: NonZeroU32,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -191,6 +209,37 @@ pub fn router_with_gate_and_terms(
     settlement_terms: Option<X402SettlementTerms>,
     settlements: Vec<X402ChainSettlementTerms>,
 ) -> Router {
+    router_with_gate_terms_and_btp_window(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        claim_gate,
+        settlement_terms,
+        settlements,
+        DEFAULT_BTP_SESSION_WINDOW,
+    )
+}
+
+/// As [`router_with_gate_and_terms`], but naming the BTP carriage's
+/// per-session in-flight window (issue #688): how many of one session's
+/// frames may be past claim admission -- waiting out the journal's group
+/// commit, being routed downstream, answering -- at once. Claims are still
+/// judged strictly in arrival order whatever the window; `1` reproduces the
+/// original lockstep session exactly. `NonZeroU32` because a window of `0`
+/// is not a slower configuration, it is a session whose first paid frame
+/// waits forever -- the config layer refuses it before this signature is
+/// ever reached (`btp_session_window = 0`), and the type refuses it here
+/// for every caller that skips the config layer.
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_gate_terms_and_btp_window(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    claim_gate: ClientClaimGate,
+    settlement_terms: Option<X402SettlementTerms>,
+    settlements: Vec<X402ChainSettlementTerms>,
+    btp_session_window: NonZeroU32,
+) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
@@ -198,6 +247,7 @@ pub fn router_with_gate_and_terms(
         wrap_receiver_secret,
         settlement_terms,
         settlements,
+        btp_session_window,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
