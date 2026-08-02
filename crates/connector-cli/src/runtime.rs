@@ -794,7 +794,7 @@ fn client_claim_gate(
 pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError> {
     let connector = runtime.connector.clone();
     let signer = runtime.signer.clone();
-    let app = connector_client_edge::router_with_gate_and_terms(
+    let app = connector_client_edge::router_with_gate_terms_and_btp_window(
         connector.clone(),
         signer.clone(),
         None,
@@ -805,6 +805,9 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
         )?,
         runtime.settlement_terms.clone(),
         runtime.settlements.clone(),
+        config
+            .btp_session_window()
+            .unwrap_or(connector_client_edge::DEFAULT_BTP_SESSION_WINDOW),
     );
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(

@@ -9,20 +9,39 @@
 //!
 //! The frame grammar is the deployed `@toon-protocol/client` dialect
 //! (`btp/protocol.ts`), NOT RFC-23's full grammar -- see §1.9 for the
-//! layout, and this module's unit vectors for the bytes. Frames on one
-//! session are processed strictly sequentially, in arrival order: the next
-//! frame is not read until the previous frame's claim has been judged and
-//! its packet routed, which is what makes in-order claims on one socket
-//! unable to race each other into `NonceNotAdvancing`.
+//! layout, and this module's unit vectors for the bytes.
+//!
+//! **Ordering** (issue #688): *claims* on one session are judged strictly
+//! sequentially, in arrival order -- the session task itself runs every
+//! frame's decoding, greeting and claim admission before touching the next
+//! frame, which is what makes in-order claims on one socket unable to race
+//! each other into `NonceNotAdvancing`, and it is the one ordering the
+//! carriage exists to provide. What is *not* serialized any more is the
+//! judged frame's remaining work -- waiting out the journal group commit's
+//! fsync (issue #686), the downstream delivery, sending the RESPONSE --
+//! which proceeds under a bounded per-session in-flight window
+//! (`btp_session_window`, default [`crate::DEFAULT_BTP_SESSION_WINDOW`]).
+//! Lockstep frame processing made every paid write cost a full downstream
+//! round-trip of session capacity, the measured ~125-150 events/s
+//! per-session admission wall. Responses therefore complete in whatever
+//! order their downstream answers; that is the dialect's own contract --
+//! `requestId` correlates a RESPONSE to its MESSAGE, and the deployed
+//! client resolves binary frames through its `pendingRequests` map by
+//! exactly that id, never by arrival order.
 
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use connector_domain::client_claim::ClientClaim;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 
+use crate::claim_gate::DurabilityTicket;
 use crate::{claim_rejection_reject, x402_terms_body, ClaimIngestRejection, ClientEdgeState};
 
 /// BTP frame types (client `btp/protocol.ts` `BTPMessageType`). The server
@@ -234,26 +253,83 @@ pub(crate) async fn handle_btp_upgrade(
         .on_upgrade(move |socket| btp_session(socket, state))
 }
 
-/// One session: read a binary frame, answer it, repeat -- strictly in
-/// order, which is the transport's contract (§1.9). Text frames are
-/// ignored; ping/pong is the websocket layer's own concern; a transport
-/// error or close ends the session. Claims judged here advance the same
-/// watermarks HTTP requests advance, so a session outliving many requests
-/// changes nothing about what any one claim must prove.
-async fn btp_session(mut socket: WebSocket, state: Arc<ClientEdgeState>) {
-    while let Some(received) = socket.recv().await {
+/// How many completed replies may queue for the socket's writer task
+/// before a finishing frame waits its turn -- burst smoothing between the
+/// out-of-order completions and the one socket, not admission control
+/// (that is the in-flight window's job).
+const REPLY_QUEUE_DEPTH: usize = 32;
+
+/// One session (issue #688): the session task reads frames and runs
+/// everything order-sensitive inline -- decoding, the greeting, and above
+/// all **claim admission**, so one socket's claims are judged strictly in
+/// arrival order, the carriage's contract (§1.9). Everything a frame owes
+/// *after* its claim is judged -- the group-commit durability wait, the
+/// downstream delivery, the RESPONSE -- runs in a task under the
+/// per-session in-flight window, so a session's throughput is bounded by
+/// `window / downstream-latency` instead of `1 / downstream-latency`. The
+/// window doubles as backpressure: when it is full, the session task
+/// blocks before reading further frames, exactly the lockstep behavior,
+/// degraded to gracefully rather than defaulted to.
+///
+/// Text frames are ignored; ping/pong is the websocket layer's own
+/// concern; a transport error or close ends the session. Claims judged
+/// here advance the same watermarks HTTP requests advance, so a session
+/// outliving many requests changes nothing about what any one claim must
+/// prove. A frame task that outlives the session finishes its durability
+/// wait and delivery normally -- the claim was accepted -- and its reply
+/// simply has nowhere to go.
+async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
+    let (sink, mut stream) = socket.split();
+    // The one writer: frame tasks complete in whatever order their
+    // downstream answers, and this channel is where those completions
+    // serialize back into socket writes.
+    let (replies, mut reply_rx) = mpsc::channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+    let writer = tokio::spawn(async move {
+        let mut sink = sink;
+        while let Some(bytes) = reply_rx.recv().await {
+            if sink.send(Message::Binary(bytes)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let window = Arc::new(Semaphore::new(state.btp_session_window.get() as usize));
+    while let Some(received) = stream.next().await {
         let frame_bytes = match received {
             Ok(Message::Binary(bytes)) => bytes,
             Ok(Message::Close(_)) => break,
             Ok(_) => continue,
             Err(_) => break,
         };
-        if let Some(reply) = answer_frame(&frame_bytes, &state).await {
-            if socket.send(Message::Binary(reply)).await.is_err() {
-                break;
-            }
+        if handle_frame(&frame_bytes, &state, &window, &replies)
+            .await
+            .is_err()
+        {
+            // The socket's send half is gone; nothing further this session
+            // reads could ever be answered.
+            break;
         }
     }
+    drop(replies);
+    let _ = writer.await;
+}
+
+/// The session's send half is gone -- the writer task exited, so no reply
+/// can ever be delivered again and the session loop should end.
+struct SessionGone;
+
+/// Queue one reply frame for the writer task.
+async fn reply(replies: &mpsc::Sender<Vec<u8>>, frame: Vec<u8>) -> Result<(), SessionGone> {
+    replies.send(frame).await.map_err(|_| SessionGone)
+}
+
+/// A slot in the session's in-flight window, holding the read loop back
+/// once `btp_session_window` frames are past admission and not yet
+/// answered.
+async fn window_slot(window: &Arc<Semaphore>) -> OwnedSemaphorePermit {
+    Arc::clone(window)
+        .acquire_owned()
+        .await
+        .expect("the session window semaphore is never closed")
 }
 
 /// A REJECT as a RESPONSE frame: the OER body as the ILP packet, the
@@ -270,25 +346,31 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
     encode_response(request_id, &protocol_data, &reject.encode())
 }
 
-/// Answer one frame, or `None` where the contract answers nothing: a
+/// Process one frame: everything order-sensitive inline (claims are judged
+/// here, in arrival order), the rest handed to a windowed task (issue
+/// #688). Nothing is queued where the contract answers nothing: a
 /// non-MESSAGE frame, a standalone claim (fire-and-forget by the client's
 /// own contract), a MESSAGE carrying neither auth nor claim nor packet,
 /// and a frame too short to even name a requestId.
-async fn answer_frame(frame_bytes: &[u8], state: &ClientEdgeState) -> Option<Vec<u8>> {
+async fn handle_frame(
+    frame_bytes: &[u8],
+    state: &Arc<ClientEdgeState>,
+    window: &Arc<Semaphore>,
+    replies: &mpsc::Sender<Vec<u8>>,
+) -> Result<(), SessionGone> {
     let frame = match decode_frame(frame_bytes) {
         Ok(frame) => frame,
-        Err(BtpDecodeError::TooShort) => return None,
+        Err(BtpDecodeError::TooShort) => return Ok(()),
         Err(BtpDecodeError::Malformed { request_id, reason }) => {
-            return Some(encode_error(
-                request_id,
-                "F00",
-                "NotAcceptedError",
-                reason.as_bytes(),
-            ));
+            return reply(
+                replies,
+                encode_error(request_id, "F00", "NotAcceptedError", reason.as_bytes()),
+            )
+            .await;
         }
     };
     if frame.frame_type != BTP_MESSAGE {
-        return None;
+        return Ok(());
     }
 
     // Auth (§1.9 step 1): acknowledged, not verified -- §1.2 is not
@@ -300,7 +382,7 @@ async fn answer_frame(frame_bytes: &[u8], state: &ClientEdgeState) -> Option<Vec
         .iter()
         .any(|pd| pd.name == AUTH_PROTOCOL)
     {
-        return Some(encode_response(frame.request_id, &[], &[]));
+        return reply(replies, encode_response(frame.request_id, &[], &[])).await;
     }
 
     let claim_json = match frame
@@ -314,24 +396,44 @@ async fn answer_frame(frame_bytes: &[u8], state: &ClientEdgeState) -> Option<Vec
                 let rejection = ClaimIngestRejection::Malformed(format!(
                     "claim protocolData is not valid UTF-8: {error}"
                 ));
-                return Some(reject_response(
-                    frame.request_id,
-                    claim_rejection_reject(rejection, 0),
-                    Vec::new(),
-                ));
+                return reply(
+                    replies,
+                    reject_response(
+                        frame.request_id,
+                        claim_rejection_reject(rejection, 0),
+                        Vec::new(),
+                    ),
+                )
+                .await;
             }
         },
         None => None,
     };
 
-    // A standalone claim (§1.9 step 4): ingested against price 0 --
+    // A standalone claim (§1.9 step 4): admitted against price 0 --
     // identify-not-pay, exactly `handle_probe`'s semantics -- and answered
     // with nothing, per the client's `sendClaimMessage` contract. A refusal
-    // here is logged, not framed: there is no response to carry it.
+    // here is logged, not framed: there is no response to carry it. The
+    // admission is inline (in claim order, like every claim); only the
+    // durability wait rides a windowed task, and a claim whose batch fails
+    // is likewise only logged.
     if frame.ilp_packet.is_empty() {
         if let Some(json) = claim_json {
-            match state.claim_gate.ingest(&json, 0).await {
-                Ok(claim) => state.connector.recognize_channel(&claim.channel_key()),
+            match state.claim_gate.admit(&json, 0).await {
+                Ok((claim, durability)) => {
+                    let permit = window_slot(window).await;
+                    let state = Arc::clone(state);
+                    tokio::spawn(async move {
+                        let _slot = permit;
+                        match durability.durable().await {
+                            Ok(()) => state.connector.recognize_channel(&claim.channel_key()),
+                            Err(rejection) => tracing::debug!(
+                                rejection = %rejection.message(),
+                                "standalone BTP claim accepted but not durably recorded"
+                            ),
+                        }
+                    });
+                }
                 Err(rejection) => {
                     tracing::debug!(
                         rejection = %rejection.message(),
@@ -340,7 +442,7 @@ async fn answer_frame(frame_bytes: &[u8], state: &ClientEdgeState) -> Option<Vec
                 }
             }
         }
-        return None;
+        return Ok(());
     }
 
     let prepare = match Prepare::decode(&frame.ilp_packet) {
@@ -348,12 +450,16 @@ async fn answer_frame(frame_bytes: &[u8], state: &ClientEdgeState) -> Option<Vec
         Err(error) => {
             // The HTTP carriage's 400 (§1.1): a transport-level answer, not
             // an ILP-level one, so an ERROR frame rather than a REJECT.
-            return Some(encode_error(
-                frame.request_id,
-                "F00",
-                "NotAcceptedError",
-                error.to_string().as_bytes(),
-            ));
+            return reply(
+                replies,
+                encode_error(
+                    frame.request_id,
+                    "F00",
+                    "NotAcceptedError",
+                    error.to_string().as_bytes(),
+                ),
+            )
+            .await;
         }
     };
 
@@ -380,39 +486,99 @@ async fn answer_frame(frame_bytes: &[u8], state: &ClientEdgeState) -> Option<Vec
             data: Vec::new(),
             accumulated_cost: 0,
         };
-        return Some(reject_response(
-            frame.request_id,
-            reject,
-            vec![ProtocolData {
-                name: PAYMENT_REQUIRED_PROTOCOL.to_string(),
-                content_type: CONTENT_TYPE_TEXT,
-                data: terms,
-            }],
-        ));
+        return reply(
+            replies,
+            reject_response(
+                frame.request_id,
+                reject,
+                vec![ProtocolData {
+                    name: PAYMENT_REQUIRED_PROTOCOL.to_string(),
+                    content_type: CONTENT_TYPE_TEXT,
+                    data: terms,
+                }],
+            ),
+        )
+        .await;
     }
 
     // §1.3, verbatim: the same gate, watermarks and refusal taxonomy as
-    // `handle_ilp` -- a claim that cleared it makes the sender eligible to
-    // probe, exactly as on HTTP (issue #548).
-    if let Some(json) = claim_json {
-        match state.claim_gate.ingest(&json, price).await {
-            Ok(claim) => state.connector.recognize_channel(&claim.channel_key()),
+    // `handle_ilp`. Admission -- the only order-sensitive step -- happens
+    // here, inline; a refusal answers immediately, and an acceptance
+    // carries its durability ticket into the windowed task below.
+    let admitted = match claim_json {
+        Some(json) => match state.claim_gate.admit(&json, price).await {
+            Ok(accepted) => Some(accepted),
             Err(rejection) => {
-                return Some(reject_response(
-                    frame.request_id,
-                    claim_rejection_reject(rejection, price),
-                    Vec::new(),
-                ));
+                return reply(
+                    replies,
+                    reject_response(
+                        frame.request_id,
+                        claim_rejection_reject(rejection, price),
+                        Vec::new(),
+                    ),
+                )
+                .await;
+            }
+        },
+        None => None,
+    };
+
+    let permit = window_slot(window).await;
+    let task = finish_frame(
+        Arc::clone(state),
+        admitted,
+        prepare,
+        price,
+        frame.request_id,
+        replies.clone(),
+    );
+    tokio::spawn(async move {
+        let _slot = permit;
+        task.await;
+    });
+    Ok(())
+}
+
+/// A judged frame's remaining, order-insensitive work (issue #688), run
+/// under one in-flight-window slot: wait for the claim's batch fsync
+/// (durable-before-service, exactly `ingest`'s own contract -- the
+/// downstream is never asked to do work whose payment a restart could
+/// forget), then route the packet and queue the RESPONSE. A claim whose
+/// batch could not be made durable answers the same `NotDurable` REJECT
+/// the HTTP carriage sends, and its packet is never routed.
+async fn finish_frame(
+    state: Arc<ClientEdgeState>,
+    admitted: Option<(ClientClaim, DurabilityTicket)>,
+    prepare: Prepare,
+    price: u64,
+    request_id: u32,
+    replies: mpsc::Sender<Vec<u8>>,
+) {
+    if let Some((claim, durability)) = admitted {
+        match durability.durable().await {
+            // A claim that cleared the gate makes the sender eligible to
+            // probe, exactly as on HTTP (issue #548) -- once durable.
+            Ok(()) => state.connector.recognize_channel(&claim.channel_key()),
+            Err(rejection) => {
+                let _ = reply(
+                    &replies,
+                    reject_response(
+                        request_id,
+                        claim_rejection_reject(rejection, price),
+                        Vec::new(),
+                    ),
+                )
+                .await;
+                return;
             }
         }
     }
 
-    Some(match state.connector.handle_prepare(prepare, 0).await {
-        PacketResponse::Fulfill(fulfill) => {
-            encode_response(frame.request_id, &[], &fulfill.encode())
-        }
-        PacketResponse::Reject(reject) => reject_response(frame.request_id, reject, Vec::new()),
-    })
+    let response = match state.connector.handle_prepare(prepare, 0).await {
+        PacketResponse::Fulfill(fulfill) => encode_response(request_id, &[], &fulfill.encode()),
+        PacketResponse::Reject(reject) => reject_response(request_id, reject, Vec::new()),
+    };
+    let _ = reply(&replies, response).await;
 }
 
 #[cfg(test)]

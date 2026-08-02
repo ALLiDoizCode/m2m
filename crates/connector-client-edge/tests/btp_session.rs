@@ -287,8 +287,12 @@ async fn send(session: &mut Session, frame: Vec<u8>) {
 /// acknowledged, and five paid writes pipelined back-to-back -- their claims
 /// sent in nonce order on the one socket, none waiting for the previous
 /// response -- all fulfil. On the HTTP carriage this exact traffic can race
-/// itself into `NonceNotAdvancing`; the ordered session is the fix, and
-/// this assertion is the transport's reason to exist.
+/// itself into `NonceNotAdvancing`; the in-order claim admission is the fix,
+/// and this assertion is the transport's reason to exist. Responses
+/// correlate by requestId and may return in any order (issue #688) -- the
+/// dialect's own contract, and what the deployed client's pendingRequests
+/// map implements -- so the assertion is on the *set* of ids answered, and
+/// on every strictly-advancing claim fulfilling, never on arrival order.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_authenticated_session_pipelines_paid_writes_in_claim_order() {
     let (addr, signer) = serve_edge().await;
@@ -318,24 +322,30 @@ async fn an_authenticated_session_pipelines_paid_writes_in_claim_order() {
         )
         .await;
     }
-    for nonce in 1..=5u64 {
+    let mut answered = std::collections::HashSet::new();
+    for _ in 1..=5u64 {
         let answer = next_answer(&mut session).await;
         assert_eq!(answer.frame_type, BTP_RESPONSE);
-        assert_eq!(
-            answer.request_id,
-            10 + nonce as u32,
-            "responses come back in the strict order the frames went in"
-        );
         let fulfill = Fulfill::decode(&answer.ilp_packet).unwrap_or_else(|_| {
             let reject = Reject::decode(&answer.ilp_packet).expect("an OER packet");
             panic!(
-                "write {nonce} was refused {} {:?} instead of fulfilling",
+                "write {} was refused {} {:?} instead of fulfilling",
+                answer.request_id,
                 reject.code.as_str(),
                 reject.message
             );
         });
         assert!(!fulfill.data.is_empty(), "a sealed answer rides home");
+        assert!(
+            answered.insert(answer.request_id),
+            "each request is answered exactly once"
+        );
     }
+    assert_eq!(
+        answered,
+        (11..=15u32).collect(),
+        "every pipelined write was answered, whatever the completion order"
+    );
 }
 
 /// §1.9 step 3: the x402 greeting, BTP-shaped -- an F06 REJECT whose
@@ -482,4 +492,148 @@ async fn a_malformed_frame_is_answered_with_an_error_and_the_session_survives() 
     let auth = next_answer(&mut session).await;
     assert_eq!(auth.frame_type, BTP_RESPONSE);
     assert_eq!(auth.request_id, 10);
+}
+
+// ─── issue #688: the pipelined session's throughput, measured for real ───
+
+/// An app that takes a fixed, real amount of time to answer -- ADR 0007's
+/// fake, not a mock: a relay POST has a round-trip, and the in-flight
+/// window exists precisely because it does. Wraps the same
+/// [`FakeAppClient`] every other test uses; the delay is the only behavior
+/// added.
+struct SlowApp {
+    inner: Arc<FakeAppClient>,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl connector_runtime::AppClient for SlowApp {
+    async fn deliver(
+        &self,
+        handler_url: &url::Url,
+        request: &connector_domain::EnvelopeRequest,
+    ) -> AppOutcome {
+        tokio::time::sleep(self.delay).await;
+        self.inner.deliver(handler_url, request).await
+    }
+}
+
+/// [`serve_edge`], with the downstream taking `delay` per delivery and the
+/// claim gate journaling to `journal` -- the two real costs (a downstream
+/// round-trip, an fsync) the lockstep session serialized per frame.
+async fn serve_slow_edge(
+    delay: std::time::Duration,
+    journal: Arc<dyn connector_runtime::Journal>,
+) -> (SocketAddr, Arc<dyn Signer>) {
+    let route = StaticRoute::new_priced("g.test.app", "http://localhost:4000", PRICE).unwrap();
+    let inner = Arc::new(FakeAppClient::new());
+    inner.respond(
+        route.handler_url(),
+        AppOutcome::Answered {
+            response: EnvelopeResponse {
+                status: 200,
+                headers: vec![],
+                body: b"app said yes".to_vec(),
+            },
+        },
+    );
+    let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("btp-throughput-test"));
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(SlowApp { inner, delay }),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        )
+        .with_identity_signer(signer.clone()),
+    );
+    let gate =
+        ClientClaimGate::restore(test_channels(), journal).expect("a fresh journal replays empty");
+    let app = connector_client_edge::router_with_gate(connector, signer.clone(), None, gate);
+    let server = axum::Server::bind(&"127.0.0.1:0".parse().unwrap()).serve(app.into_make_service());
+    let addr = server.local_addr();
+    tokio::spawn(server);
+    (addr, signer)
+}
+
+/// Issue #688's own number, demonstrated rather than estimated: with the
+/// downstream taking a real 20 ms per delivery and the journal a real
+/// fsync (a `FileJournal` on disk, group-committed per #686), one session
+/// sustains **more than 150 paid writes per second** -- the measured
+/// per-session admission wall of the lockstep loop, which at 20 ms
+/// downstream could never exceed ~40/s. 300 strictly-advancing claims are
+/// written back-to-back; the bar is 300 answers inside 2 s (= 150/s), and
+/// the whole margin comes from overlap, since 300 × (20 ms + fsync)
+/// serialized is over 6 s on any disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_single_session_sustains_more_than_150_paid_writes_per_second() {
+    const WRITES: u64 = 300;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal = connector_runtime::FileJournal::open(dir.path().join("claims.log"))
+        .expect("open the journal");
+    let (addr, signer) =
+        serve_slow_edge(std::time::Duration::from_millis(20), Arc::new(journal)).await;
+    let session = connect(addr).await;
+    let receiver = signer.public_key().unwrap();
+
+    let started = std::time::Instant::now();
+    let (mut sink, mut stream) = session.split();
+    let reader = tokio::spawn(async move {
+        let mut answered = std::collections::HashSet::new();
+        while answered.len() < WRITES as usize {
+            let message = stream
+                .next()
+                .await
+                .expect("the session stays open")
+                .expect("a websocket frame");
+            let WsMessage::Binary(bytes) = message else {
+                continue;
+            };
+            let answer = parse_answer(&bytes);
+            assert_eq!(answer.frame_type, BTP_RESPONSE);
+            let fulfill = Fulfill::decode(&answer.ilp_packet).unwrap_or_else(|_| {
+                let reject = Reject::decode(&answer.ilp_packet).expect("an OER packet");
+                panic!(
+                    "write {} was refused {} {:?} instead of fulfilling",
+                    answer.request_id,
+                    reject.code.as_str(),
+                    reject.message
+                );
+            });
+            assert!(!fulfill.data.is_empty(), "a sealed answer rides home");
+            assert!(
+                answered.insert(answer.request_id),
+                "each response correlates to exactly one request"
+            );
+        }
+        answered
+    });
+
+    for nonce in 1..=WRITES {
+        let claim = evm_claim_json(nonce, nonce * PRICE);
+        let prepare = sealed_prepare("g.test.app", &receiver);
+        sink.send(WsMessage::Binary(btp_message(
+            nonce as u32,
+            &[("payment-channel-claim", claim.as_bytes())],
+            &prepare.encode(),
+        )))
+        .await
+        .expect("the frame sends");
+    }
+
+    let answered = reader.await.expect("the reader task");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        answered,
+        (1..=WRITES as u32).collect(),
+        "every write was answered exactly once, correlated by requestId"
+    );
+    let per_second = WRITES as f64 / elapsed.as_secs_f64();
+    println!("single-session pipelined admission: {WRITES} paid writes in {elapsed:?} = {per_second:.0}/s");
+    assert!(
+        per_second > 150.0,
+        "one session admitted {per_second:.0} paid writes/s ({WRITES} in {elapsed:?}) -- at or \
+         below the ~150/s serialized wall this pipeline exists to clear"
+    );
 }

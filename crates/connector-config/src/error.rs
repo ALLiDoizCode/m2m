@@ -295,6 +295,14 @@ pub enum ConfigError {
     ZeroUnresolvableLookupWindow,
 
     #[error(
+        "btp_session_window is 0: a BTP session's first paid frame would wait forever for an \
+         in-flight slot that does not exist, hanging every client on connect (issue #688). Omit \
+         the field for the default, set 1 for the original lockstep session, or set how many of \
+         one session's frames may be past claim admission at once"
+    )]
+    ZeroBtpSessionWindow,
+
+    #[error(
         "unresolvable_lookup_budget_per_signer is {per_signer} but \
          unresolvable_lookup_budget_total is {total}: the node-wide allowance would refuse first \
          every time, so the per-signer number could never be reached and means nothing. Set it \

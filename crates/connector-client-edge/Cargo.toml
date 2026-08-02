@@ -12,6 +12,10 @@ async-trait = "0.1"
 # `ws` for the client BTP websocket carriage (client-edge-spec.md §1.9, ADR
 # 0026); pulls tokio-tungstenite 0.20, already in the lockfile.
 axum = { version = "0.6", features = ["ws"] }
+# `split` on the BTP websocket (issue #688): the session's read half admits
+# claims in order while a writer task owns the send half, so responses can
+# complete out of order. Already in the tree through axum/hyper.
+futures-util = "0.3"
 base64 = "0.22"
 bs58 = "0.5"
 hex = "0.4"
@@ -46,4 +50,7 @@ tempfile = "3"
 # real websocket session against a served router, since `tower::oneshot`
 # cannot carry an upgrade. Same 0.20 the `ws` feature above resolves to.
 tokio-tungstenite = "0.20"
-futures-util = "0.3"
+# The `AppClient` trait's `deliver` names `url::Url`; the throughput test's
+# slow-app fake (issue #688) implements it. Same `url` the runtime itself
+# uses.
+url = "2"

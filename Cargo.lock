@@ -1132,6 +1132,7 @@ dependencies = [
  "tokio-tungstenite",
  "tower",
  "tracing",
+ "url",
 ]
 
 [[package]]
