@@ -9,7 +9,9 @@ connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
-axum = "0.6"
+# `ws` for the client BTP websocket carriage (client-edge-spec.md §1.9, ADR
+# 0026); pulls tokio-tungstenite 0.20, already in the lockfile.
+axum = { version = "0.6", features = ["ws"] }
 base64 = "0.22"
 bs58 = "0.5"
 hex = "0.4"
@@ -38,3 +40,8 @@ hyper = { version = "0.14", features = ["full"] }
 libsecp256k1 = "0.6"
 rand = "0.7"
 tempfile = "3"
+# The client half of the BTP integration test (`tests/btp_session.rs`): a
+# real websocket session against a served router, since `tower::oneshot`
+# cannot carry an upgrade. Same 0.20 the `ws` feature above resolves to.
+tokio-tungstenite = "0.20"
+futures-util = "0.3"
