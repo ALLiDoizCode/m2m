@@ -1,7 +1,7 @@
 # The peer wire is redesigned freely; the client edge is versioned
 
 > **Partly superseded (2026-08-03) by
-> [ADR 0027](0027-connectors-peer-over-btp-and-the-raw-tcp-peer-wire-is-deleted.md).** The
+> [ADR 0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).** The
 > **peer-wire half** of this ADR is reversed: connectors peer over BTP (RFC-0023) on `wss://`
 > URLs and the raw-TCP wire is deleted. The premise below — _"Both ends of the peer wire are
 > operator-controlled"_ — expired when an open market (`toon-meta#262`, `#265`) made a

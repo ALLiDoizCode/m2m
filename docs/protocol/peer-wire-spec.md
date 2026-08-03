@@ -1,7 +1,7 @@
 # Peer wire specification
 
 **Status:** §1–§2 **SUPERSEDED** by
-[ADR 0027](../adr/0027-connectors-peer-over-btp-and-the-raw-tcp-peer-wire-is-deleted.md) — the
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) — the
 raw-TCP framing and packet structure they describe are being deleted, and connector↔connector
 traffic moves to BTP (RFC-0023) over `wss://`. §3–§6 remain normative as the _semantics_ the BTP
 sub-protocol entries carry; ADR 0027 tabulates which BTP frame carries each frame type here,
