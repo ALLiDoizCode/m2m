@@ -118,6 +118,20 @@ pub enum ConfigError {
     PeerRouteHasPrice { prefix: String, price: u64 },
 
     #[error(
+        "route '{prefix}' forwards to a peer and sets 'transport = \"{value}\"', which only a \
+         route terminating at a 'handler_url' can restrict (issue #701) -- a peer route always \
+         travels the peer wire, never a client transport. Remove the 'transport' field"
+    )]
+    PeerRouteHasTransport { prefix: String, value: String },
+
+    #[error(
+        "route '{prefix}' sets transport = '{value}', which this connector does not recognize \
+         -- only 'http', 'btp' or 'both' are valid (issue #701). Omit the field for the \
+         default ('both'), or set one of those three"
+    )]
+    InvalidTransportPolicy { prefix: String, value: String },
+
+    #[error(
         "handler_url '{handler_url}' is priced inconsistently: route '{first_prefix}' charges \
          {first_price} but route '{second_prefix}' charges {second_price} -- an app cannot tell \
          which request arrived under which price, so the cheaper one would always win"
@@ -293,6 +307,14 @@ pub enum ConfigError {
          the default, or set the number of seconds the allowances are counted over"
     )]
     ZeroUnresolvableLookupWindow,
+
+    #[error(
+        "btp_session_window is 0: a BTP session's first paid frame would wait forever for an \
+         in-flight slot that does not exist, hanging every client on connect (issue #688). Omit \
+         the field for the default, set 1 for the original lockstep session, or set how many of \
+         one session's frames may be past claim admission at once"
+    )]
+    ZeroBtpSessionWindow,
 
     #[error(
         "unresolvable_lookup_budget_per_signer is {per_signer} but \

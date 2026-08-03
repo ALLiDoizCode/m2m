@@ -44,7 +44,19 @@
 //! [`Connector::handle_prepare`]. `identity` and `route_price` answer
 //! directly from this connector's own configuration and never touch
 //! [`Connector::handle_prepare`] at all.
+//!
+//! As of issue #693, `POST /ilp/claim-state` (§1.10, `claim_state` module)
+//! answers a bulk, owner-authenticated read of claim state -- deposit
+//! total, cumulative claimed, available balance, nonce, last-claim time --
+//! for every channel a caller can prove it controls with a per-channel
+//! signature over a domain-separated challenge, distinct from a real
+//! claim's signature. Also purely a read against existing state
+//! ([`ClientClaimGate::watermark`], [`ClientClaimGate::channels`],
+//! [`ClientClaimGate::last_claim_time`]); it never calls `ingest`/`admit`,
+//! so it adds nothing to the packet admission path #686/#688/#690 spent
+//! this edge's history keeping cheap.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
@@ -57,14 +69,18 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use connector_config::TransportPolicy;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 use connector_runtime::{Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
 
+mod btp;
 mod channels;
 mod claim_gate;
+mod claim_state;
 mod lookup_budget;
+mod outbound_ledger;
 pub use channels::{
     ChannelLivenessPolicy, ChannelLookupFailed, ChannelResolutionError, ClientChannelRegistry,
     ClientChannelSource, DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel,
@@ -76,6 +92,18 @@ pub use lookup_budget::{
     UnresolvableLookupBudgetPolicy, DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER,
     DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL, DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT,
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
+};
+pub use outbound_ledger::ClientPayoutLedger;
+
+/// The BTP carriage's default per-session in-flight window (issue #688):
+/// how many of one session's frames may be past claim admission at once.
+/// `16` clears the measured ~125-150 ev/s per-session wall by an order of
+/// magnitude on a ~7 ms downstream (window/latency ≈ 2 000/s) while keeping
+/// a session's queued work bounded and modest; the config file's
+/// `btp_session_window` overrides it.
+pub const DEFAULT_BTP_SESSION_WINDOW: NonZeroU32 = match NonZeroU32::new(16) {
+    Some(window) => window,
+    None => unreachable!(),
 };
 
 const OCTET_STREAM: &str = "application/octet-stream";
@@ -106,6 +134,12 @@ struct ClientEdgeState {
     /// in `extra.settlements` beside [`settlement_terms`](Self::settlement_terms).
     /// Empty on a node with no settlement backend.
     settlements: Vec<X402ChainSettlementTerms>,
+    /// How many of one BTP session's frames may be past claim admission --
+    /// waiting out the journal's group commit, being routed downstream, or
+    /// answering -- at once (issue #688). Claims themselves are still
+    /// judged strictly in arrival order; this bounds only the overlapped
+    /// tail. See `btp::btp_session`.
+    btp_session_window: NonZeroU32,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -190,6 +224,37 @@ pub fn router_with_gate_and_terms(
     settlement_terms: Option<X402SettlementTerms>,
     settlements: Vec<X402ChainSettlementTerms>,
 ) -> Router {
+    router_with_gate_terms_and_btp_window(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        claim_gate,
+        settlement_terms,
+        settlements,
+        DEFAULT_BTP_SESSION_WINDOW,
+    )
+}
+
+/// As [`router_with_gate_and_terms`], but naming the BTP carriage's
+/// per-session in-flight window (issue #688): how many of one session's
+/// frames may be past claim admission -- waiting out the journal's group
+/// commit, being routed downstream, answering -- at once. Claims are still
+/// judged strictly in arrival order whatever the window; `1` reproduces the
+/// original lockstep session exactly. `NonZeroU32` because a window of `0`
+/// is not a slower configuration, it is a session whose first paid frame
+/// waits forever -- the config layer refuses it before this signature is
+/// ever reached (`btp_session_window = 0`), and the type refuses it here
+/// for every caller that skips the config layer.
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_gate_terms_and_btp_window(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    claim_gate: ClientClaimGate,
+    settlement_terms: Option<X402SettlementTerms>,
+    settlements: Vec<X402ChainSettlementTerms>,
+    btp_session_window: NonZeroU32,
+) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
@@ -197,12 +262,15 @@ pub fn router_with_gate_and_terms(
         wrap_receiver_secret,
         settlement_terms,
         settlements,
+        btp_session_window,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
+        .route("/ilp/btp", get(btp::handle_btp_upgrade))
         .route("/ilp/probe", post(handle_probe))
         .route("/ilp/identity", get(identity))
         .route("/ilp/routes/price", get(route_price))
+        .route("/ilp/claim-state", post(claim_state::claim_state))
         .with_state(state)
 }
 
@@ -231,6 +299,18 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Wall-clock unix seconds, for [`ClientClaimGate::note_claim_time`] -- the
+/// one place any handler in this crate reads the clock outside a test. Not
+/// consulted by admission itself (`ingest`/`admit` take no time input at
+/// all), only by carriers noting a claim's acceptance *after* it has
+/// already happened.
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 /// This connector's own identity (ADR 0018, ADR 0022): the uncompressed
@@ -357,6 +437,18 @@ struct X402ChannelExtra {
     /// is unaffected either way.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     settlements: Vec<X402ChainSettlementTerms>,
+    /// Present, and self-diagnosing, exactly when this greeting answers a
+    /// request that arrived over a transport its route's policy does not
+    /// accept (issue #701, toon-meta#262 decision 11): `"http"` or `"btp"`,
+    /// naming the transport the route actually requires. Absent -- not
+    /// `null` -- on every other greeting, so the pre-#701 shape is
+    /// unchanged for a route with no transport restriction.
+    #[serde(
+        rename = "requiredTransport",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    required_transport: Option<String>,
 }
 
 /// What an unaffiliated buyer needs to OPEN a channel with this node,
@@ -454,6 +546,73 @@ fn payment_required(
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
 ) -> Response {
+    x402_response(destination, price, settlement, settlements, None)
+}
+
+/// Answer a request to `destination` that arrived over a transport its
+/// route's policy does not accept (issue #701, toon-meta#262 decision 11)
+/// with the same x402-shaped terms the unpaid-request greeting above uses,
+/// rather than inventing a second self-description mechanism -- the client
+/// learns which transport the route requires from `extra.requiredTransport`
+/// (`required.name()`, e.g. `"btp"`) the same way it learns a route's price
+/// from `extra.price`. This runs whether or not the request carries a valid
+/// claim: paying over the wrong transport does not make the route
+/// reachable that way, so `handle_ilp` checks transport before it checks
+/// payment at all.
+fn wrong_transport_required(
+    destination: &str,
+    price: u64,
+    required: TransportPolicy,
+    settlement: Option<&X402SettlementTerms>,
+    settlements: &[X402ChainSettlementTerms],
+) -> Response {
+    x402_response(
+        destination,
+        price,
+        settlement,
+        settlements,
+        Some(required.name()),
+    )
+}
+
+fn x402_response(
+    destination: &str,
+    price: u64,
+    settlement: Option<&X402SettlementTerms>,
+    settlements: &[X402ChainSettlementTerms],
+    required_transport: Option<&str>,
+) -> Response {
+    let body = x402_terms_body(
+        destination,
+        price,
+        settlement,
+        settlements,
+        required_transport,
+    );
+    let header_value = BASE64.encode(&body);
+    Response::builder()
+        .status(StatusCode::PAYMENT_REQUIRED)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(PAYMENT_REQUIRED_HEADER, header_value)
+        .body(Body::from(body))
+        .expect("well-formed x402 response")
+        .into_response()
+}
+
+/// The x402 v2 terms JSON itself (§1.4), shared by both carriages: the HTTP
+/// greeting above serves it as a 402 body + `Payment-Required` header, and
+/// the BTP greeting (§1.9, `btp` module) carries the same bytes as
+/// `payment-required` protocolData on a REJECT -- factored so the two can
+/// never drift. `required_transport` (issue #701) is `None` for an ordinary
+/// unpaid-request greeting and `Some("http" | "btp")` when this same shape
+/// is reused to tell a client it used the wrong transport entirely.
+fn x402_terms_body(
+    destination: &str,
+    price: u64,
+    settlement: Option<&X402SettlementTerms>,
+    settlements: &[X402ChainSettlementTerms],
+    required_transport: Option<&str>,
+) -> Vec<u8> {
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
         resource: X402Resource {
@@ -472,18 +631,11 @@ fn payment_required(
                 price: price.to_string(),
                 settlement: settlement.cloned(),
                 settlements: settlements.to_vec(),
+                required_transport: required_transport.map(str::to_string),
             },
         }],
     };
-    let body = serde_json::to_vec(&terms).expect("x402 terms always serialize");
-    let header_value = BASE64.encode(&body);
-    Response::builder()
-        .status(StatusCode::PAYMENT_REQUIRED)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(PAYMENT_REQUIRED_HEADER, header_value)
-        .body(Body::from(body))
-        .expect("well-formed x402 response")
-        .into_response()
+    serde_json::to_vec(&terms).expect("x402 terms always serialize")
 }
 
 /// Decode a claim header's raw (still base64-encoded) bytes into the
@@ -580,7 +732,12 @@ async fn extract_and_validate_claim(
         state.wrap_receiver_secret.as_ref(),
     )?;
     let claim = state.claim_gate.ingest(&claim_json, price).await?;
-    Ok(Some(claim.channel_key()))
+    let channel_key = claim.channel_key();
+    // Best-effort liveness bookkeeping for issue #693's claim-state
+    // endpoint (`ClientClaimGate::note_claim_time`'s own doc): happens only
+    // after `ingest` has already returned durable, never inside it.
+    state.claim_gate.note_claim_time(&channel_key, now_unix());
+    Ok(Some(channel_key))
 }
 
 /// Answer an ILP-level outcome the way client-edge-spec.md §1.1 and §1.6
@@ -660,6 +817,17 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
     // has T05 for, and a sender parsing codes rather than English can tell
     // "retry, the node's endpoint hiccupped" from "back off, you are being
     // metered".
+    packet_response(PacketResponse::Reject(claim_rejection_reject(
+        rejection, price,
+    )))
+}
+
+/// The refusal itself -- `RejectCode`, `accumulated_cost` and message -- for
+/// a claim-ingest rejection, independent of carriage: `claim_rejected_response`
+/// wraps it for HTTP, the `btp` module frames it for a websocket session
+/// (§1.9), so the taxonomy the comment above reasons through stays
+/// single-sourced.
+fn claim_rejection_reject(rejection: ClaimIngestRejection, price: u64) -> Reject {
     let (code, accumulated_cost) = match rejection {
         ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
         ClaimIngestRejection::Undercollateralized { .. } => (RejectCode::f03_invalid_amount(), 0),
@@ -668,13 +836,13 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
         ClaimIngestRejection::LookupBudgetExhausted { .. } => (RejectCode::t05_rate_limited(), 0),
         _ => (RejectCode::f01_invalid_packet(), 0),
     };
-    packet_response(PacketResponse::Reject(Reject {
+    Reject {
         code,
         triggered_by: String::new(),
         message: rejection.message(),
         data: Vec::new(),
         accumulated_cost,
-    }))
+    }
 }
 
 async fn handle_ilp(
@@ -699,10 +867,30 @@ async fn handle_ilp(
         headers.contains_key(CLAIM_HEADER) || headers.contains_key(CLAIM_WRAPPED_HEADER);
     // No matching app route means nothing here is priced -- routing itself
     // (not this gate) is what refuses an unroutable destination, with F02.
-    let price = state
-        .connector
-        .app_route_price(&prepare.destination)
-        .unwrap_or(0);
+    // One lookup serves both facts (issue #701): the price and the
+    // transport policy come from the same matched route, so there is no
+    // reason to walk the route table twice for one request.
+    let app_route = state.connector.app_route(&prepare.destination);
+    let price = app_route.map_or(0, |route| route.price);
+
+    // Transport policy (issue #701, toon-meta#262 decision 11) is checked
+    // before payment is considered at all: a route restricted to BTP is
+    // unreachable over HTTP whether or not the request carries a valid
+    // claim, so a paid request over the wrong transport is refused exactly
+    // like an unpaid one. A destination matching no app route is
+    // unaffected -- `None` here, same as an unmatched destination's price.
+    if let Some(policy) = app_route.map(|route| route.transport_policy) {
+        if !policy.accepts_http() {
+            return wrong_transport_required(
+                &prepare.destination,
+                price,
+                policy,
+                state.settlement_terms.as_ref(),
+                &state.settlements,
+            );
+        }
+    }
+
     if !has_claim_header && price > 0 {
         return payment_required(
             &prepare.destination,
@@ -1477,6 +1665,85 @@ mod tests {
         );
     }
 
+    /// Issue #701 (toon-meta#262 decision 11): a route restricted to BTP
+    /// refuses an HTTP request the same way an unpaid request is refused --
+    /// terms instead of the app's work -- except here `extra` names which
+    /// transport the route actually requires; the route's price is
+    /// irrelevant to why this request was refused.
+    #[tokio::test]
+    async fn an_http_request_to_a_btp_only_route_is_answered_with_the_required_transport() {
+        let route = StaticRoute::new_priced_with_transport(
+            "g.example.relay",
+            "http://localhost:4000",
+            1000,
+            TransportPolicy::Btp,
+        )
+        .unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.relay").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            terms.accepts[0].extra.required_transport.as_deref(),
+            Some("btp"),
+            "the client should learn this route requires BTP"
+        );
+
+        assert!(
+            app_client.deliveries().is_empty(),
+            "a request over the wrong transport must never reach the app"
+        );
+    }
+
+    /// The mirror case: a route with no transport restriction (the default)
+    /// is unaffected -- its unpaid-request greeting carries no
+    /// `requiredTransport` at all, exactly the pre-#701 shape.
+    #[tokio::test]
+    async fn a_route_accepting_both_transports_never_carries_a_required_transport() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(terms.accepts[0].extra.required_transport, None);
+        let extra = serde_json::to_value(&terms.accepts[0].extra).unwrap();
+        assert!(
+            extra.get("requiredTransport").is_none(),
+            "an unrestricted route's greeting must not carry a requiredTransport key: {extra}"
+        );
+    }
+
     /// Issue #617: a node WITH a settlement backend answers the greeting
     /// with its channel-opening facts -- the counterparty address, chain,
     /// registry, resolved `TokenNetwork`, token and scale -- so an
@@ -2123,6 +2390,55 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             Fulfill::decode(&bytes).expect("decode fulfill");
             assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// Issue #701: transport policy is checked before payment is
+        /// considered at all -- a fully valid, correctly-priced claim over
+        /// HTTP does not make a BTP-only route reachable that way. The
+        /// request is refused with the same self-diagnosing terms an
+        /// unpaid request gets, and the app is never asked to do the work.
+        #[tokio::test]
+        async fn a_valid_claim_to_a_btp_only_route_is_still_refused_with_wrong_transport_terms() {
+            let route = StaticRoute::new_priced_with_transport(
+                "g.example.relay",
+                "http://localhost:4000",
+                100,
+                TransportPolicy::Btp,
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.relay", &signer.public_key().unwrap());
+            let app = router_with_gate(connector, signer, None, test_gate(test_channels()));
+
+            let request =
+                request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                terms.accepts[0].extra.required_transport.as_deref(),
+                Some("btp")
+            );
+
+            assert!(
+                app_client.deliveries().is_empty(),
+                "a valid claim over the wrong transport must never reach the app"
+            );
         }
 
         /// A claim advancing by less than a priced route's price is

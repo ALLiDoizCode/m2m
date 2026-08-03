@@ -16,6 +16,17 @@
 // The treasury keypair + USDC mint are the SAME deterministic devnet identities
 // seeded by infra/solana/create-usdc-mint.sh, so peers can hardcode them.
 //
+// SOLANA_SOL_AMOUNT default (toon-meta#258): the committed devnet treasury
+// (AEPoA5xTTJY9SR8c5CfsemFGC5TmxQBe6Xf6wewEtnYa) has observed balances as low
+// as ~0.45 SOL — it is NOT re-funded by the public airdrop (that is the whole
+// problem this fix works around), only by an operator manually topping it up.
+// A 2 SOL/drip default (the pre-#258 value) would exhaust it in ONE request
+// and 500 every drip after; 0.03 SOL/drip is enough to open + operate a
+// payment channel and gives the treasury ~15 drips before an operator needs to
+// top it up. The per-address cooldown below (mirroring the Base Sepolia /
+// Mina USDC legs) is what makes that budget last: without it, one address
+// looping the endpoint could drain the whole treasury in seconds.
+//
 // Everything here is OPTIONAL: if SOLANA_FAUCET_KEYPAIR / the RPC are not
 // configured (e.g. an EVM-only deploy), `createSolanaFaucet` returns null and
 // the route answers a clear 503 instead of crashing the whole service.
@@ -30,14 +41,22 @@ import {
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import { getOrCreateAssociatedTokenAccount, transfer } from '@solana/spl-token';
+import { createDripLimiter } from './drip-limiter.js';
 
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'http://solana-validator:8899';
 const SOLANA_USDC_MINT = process.env.SOLANA_USDC_MINT || '';
 const SOLANA_FAUCET_KEYPAIR = process.env.SOLANA_FAUCET_KEYPAIR || '/keys/usdc-authority.json';
 // 6 decimals — real-USDC standard, matches infra/solana/create-usdc-mint.sh.
 const SOLANA_USDC_DECIMALS = Number(process.env.SOLANA_USDC_DECIMALS || '6');
-const SOLANA_SOL_AMOUNT = Number(process.env.SOLANA_SOL_AMOUNT || '2'); // SOL per drip
+// Conservative default — see the treasury-balance note above (toon-meta#258).
+const SOLANA_SOL_AMOUNT = Number(process.env.SOLANA_SOL_AMOUNT || '0.03'); // SOL per drip
 const SOLANA_USDC_AMOUNT = Number(process.env.SOLANA_USDC_AMOUNT || '1000'); // USDC per drip
+// Per-address cooldown (default 24h) — protects the low-balance SOL treasury
+// from being drained by repeat requests from a single address. Mirrors
+// BASE_SEPOLIA_COOLDOWN_MS / MINA_USDC_COOLDOWN_HOURS.
+const SOLANA_DRIP_COOLDOWN_MS = Number(
+  process.env.SOLANA_DRIP_COOLDOWN_MS || String(24 * 60 * 60 * 1000)
+);
 
 // ── Wedged-validator guards (issues #277 / #348) ────────────────────────────
 // The devnet validator has a failure mode where block production HALTS while
@@ -136,10 +155,16 @@ export function createSolanaFaucet() {
 
   const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 
+  // Per-address off-chain cooldown (claim BEFORE the drip; released on
+  // failure) — see the SOLANA_SOL_AMOUNT note above for why this matters here:
+  // the treasury's SOL balance is small and NOT self-replenishing.
+  const limiter = createDripLimiter({ cooldownMs: SOLANA_DRIP_COOLDOWN_MS });
+
   console.log(`✅ Solana faucet enabled: RPC ${SOLANA_RPC_URL}`);
   console.log(`   USDC mint:   ${mint.toBase58()}`);
   console.log(`   Treasury:    ${authority.publicKey.toBase58()}`);
   console.log(`   Per drip:    ${SOLANA_SOL_AMOUNT} SOL + ${SOLANA_USDC_AMOUNT} USDC`);
+  console.log(`   Cooldown:    ${SOLANA_DRIP_COOLDOWN_MS / 3_600_000}h per address`);
 
   return {
     rpcUrl: SOLANA_RPC_URL,
@@ -147,6 +172,7 @@ export function createSolanaFaucet() {
     treasury: authority.publicKey.toBase58(),
     solAmount: SOLANA_SOL_AMOUNT,
     usdcAmount: SOLANA_USDC_AMOUNT,
+    cooldownMs: SOLANA_DRIP_COOLDOWN_MS,
 
     isValidAddress(address) {
       try {
@@ -157,6 +183,16 @@ export function createSolanaFaucet() {
       } catch {
         return false;
       }
+    },
+
+    // Per-address cooldown wrappers (route claims before enqueue, releases on
+    // failure — mirrors the Base Sepolia / Mina USDC legs). Addresses are
+    // base58 Solana pubkeys, used as-is (unlike EVM's checksum normalization).
+    claim(address) {
+      return limiter.claim(address);
+    },
+    release(address) {
+      limiter.release(address);
     },
 
     async drip(address) {

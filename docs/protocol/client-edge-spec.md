@@ -215,6 +215,25 @@ never reaches the terminating app:
    credit decision, correctly located in config and theirs to make; an anonymous buyer resolved from
    chain (§1.2) never made any such deal, and gets the check.
 
+   **The ceiling nets a channel's own outbound payout ledger too** (issue #700,
+   `toon-meta#262` decision 9). A connector that has separately signed the channel's counterparty a
+   payout claim — for example, crediting an agent for factory work it completed, per §1.9 step 6's
+   TRANSFER — raises this ceiling by that amount: the bound this step checks a claim's cumulative
+   `transferredAmount` against is `deposit + credited`, not `deposit` alone, where `credited` is the
+   running total this connector has committed to pay the same channel's counterparty back
+   (`ClientPayoutLedger::credited`), not merely what is still unacknowledged. This is what makes
+   decision 9's promise literal — an agent that has earned enough spends against its own earnings
+   directly, with no on-chain round trip and no settlement — and it is a bounded, deliberate
+   extension of trust rather than a new on-chain fact: `credited` is this connector's own signed IOU,
+   redeemable against this connector's own deposit on the same channel, never the counterparty's.
+   `credited` is read once, before this step's own chain-refresh read, so a payout recorded while an
+   admission is already in flight cannot retroactively rescue it — the same "false refusal only,
+   never a false accept" property the cached deposit above already has, since a payout ledger's
+   running total is monotonic for exactly the same reason a deposit is. A channel with no payout
+   ledger configured nets `0`, exactly this step's behaviour before issue #700. Netting is
+   per-channel and never crosses a chain: a channel's `credited` figure comes from its own recorded
+   payout ledger entry, the same one issue #629 already keys by chain for the deposit side.
+
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
 
@@ -463,6 +482,17 @@ what the code actually sets — `ilpAddress`, `endpoint`, `price` — and carrie
 longest-prefix route lookup that §1.3's value binding and §1.7's `GET /ilp/routes/price` charge
 and answer against, so this response never states a price a real request wouldn't also be charged.
 
+**Transport policy** (issue #701, `toon-meta#262` decision 11): which transport(s) a terminated
+route accepts is per-connector config, not a protocol constant — `both` by default, so no deployed
+route changes behavior until an operator opts in, or restricted to `http` or `btp` alone. A request
+over a transport its route does not accept is refused with this SAME `402` shape — before payment
+is considered at all, and whether or not the request carries a valid claim, since paying over the
+wrong transport does not make the route reachable that way — with one addition: `extra` also
+carries `requiredTransport` (`"http"` or `"btp"`), naming the transport the route actually
+requires. An ordinary unpaid-request greeting (above) never sets this field. The BTP carriage
+answers the mirror case (a route restricted to HTTP, reached over the websocket session) the same
+way; see §1.9 step 3.
+
 ### 1.5 Request-request binding (RFC 9421)
 
 **Not yet implemented.** No `requireRequestBinding` config field, `RouteTermination` type or RFC
@@ -613,6 +643,258 @@ handler path, never in place of it
 (`F00`) before the app is ever called, rather than delivered. This is what keeps ADR 0020's "one
 handler, one price" true in the presence of a sender-chosen `target` — a route's configured handler
 is the one thing a sender's own envelope can never override.
+
+### 1.9 Client BTP websocket transport (issue #674 family)
+
+A second carriage for exactly the pipeline §1.1–§1.6 specify over HTTP: one persistent,
+**ordered** websocket session carrying BTP-framed ILP packets and claims, so that a client
+streaming many paid writes advances its claim nonces on one socket in one order instead of racing
+parallel HTTP requests. Nothing here changes what is validated or charged — the same claim gate
+instance, watermarks, journal and refusal taxonomy serve both carriages, and a write that arrived
+over BTP is indistinguishable downstream from one that arrived over HTTP. Peers do NOT use this
+transport: connector↔connector traffic stays on the peer wire (`docs/protocol/peer-wire-spec.md`),
+so every BTP session is a client session by construction (ADR 0026).
+
+- **Method/path:** `GET /ilp/btp`, websocket upgrade. The `btp` subprotocol is selected when
+  offered; an upgrade offering no subprotocol is accepted identically.
+- **Frames:** binary websocket messages, one BTP frame per message. Text frames are ignored.
+
+**BTP frame layout** (all integers big-endian; this is the `@toon-protocol/client`
+`btp/protocol.ts` dialect, which is the deployed client wire, extended additively with RFC-23's
+TRANSFER as of issue #697 — the ILP packet still rides beside the protocolData list, not inside
+it, which is the one respect in which this remains not RFC-23's grammar verbatim):
+
+```
+frame        = type(u8) requestId(u32) body
+body         = pdCount(u8) pd* ilpLen(u32) ilpPacket[ilpLen]    ; type MESSAGE(6) / RESPONSE(1)
+transferBody = amount(u64) pdCount(u8) pd*                      ; type TRANSFER(7) -- no ilpPacket
+pd           = nameLen(u8) name[nameLen] contentType(u16) dataLen(u32) data[dataLen]
+errorBody    = codeLen(u8) code nameLen(u8) name taLen(u8) triggeredAt dataLen(u32) data
+                                                                 ; type ERROR(2)
+```
+
+The ILP packets themselves are the same OER encodings `POST /ilp` carries (§1.1): a MESSAGE's
+`ilpPacket` is a PREPARE, a RESPONSE's is a FULFILL or REJECT. `requestId` correlates a RESPONSE
+or ERROR to the MESSAGE or TRANSFER it answers.
+
+**Symmetric grammar (RFC-23, issue #697):** after auth, either side may originate a MESSAGE or a
+TRANSFER — this connector's own outbound requestId allocator guarantees the RFC's uniqueness
+property ("duplicate IDs are never in-flight at the same time") for whatever it originates, exactly
+as the deployed client's own allocator does for its own ids; the two id spaces are independent, so
+neither side needs to know what the other has chosen. Server origination is a foundation-only
+capability as of #697 — the mechanics (allocate, send, correlate the answer) are implemented and
+tested (`crates/connector-client-edge/src/btp.rs`), but nothing in this connector originates a
+request yet; that is the session registry and payout-ledger work `toon-meta#262` builds on top.
+Today's deployed client never sends TRANSFER and never receives a server-originated MESSAGE, and
+observes no change: steps 1–5 below (all client-originated) are preserved byte-for-byte, and an
+unsolicited RESPONSE/ERROR — the shape a server-originated request would eventually provoke — is
+silently dropped exactly as it was before TRANSFER existed.
+
+**Session flow, in order of what a frame carries:**
+
+1. **Auth**: a MESSAGE whose protocolData contains an `auth` entry (JSON `{peerId, secret}`) is
+   answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2 is not
+   yet implemented on the HTTP carriage either, and an empty `secret` is the documented
+   permissionless mirror. Authorization to _write_ comes from the claim, never the session.
+2. **Prepare + claim**: a MESSAGE with a non-empty `ilpPacket` is decoded as a PREPARE. A
+   protocolData entry named `payment-channel-claim` carries the claim as **raw UTF-8 JSON**
+   (`JSON.stringify(claim)` — no base64 layer; the base64 in §1.3's table is an HTTP-header
+   artifact). The claim runs the SAME §1.3 pipeline and the PREPARE is then routed identically to
+   `POST /ilp`; the outcome returns as a RESPONSE whose `ilpPacket` is the FULFILL or REJECT. On
+   a REJECT, `accumulated_cost` (§1.6) rides as a protocolData entry named `toon-accumulated-cost`
+   (decimal-uint64 UTF-8 text) beside the OER body — the BTP analogue of the HTTP header. The
+   privacy-wrapped carriage (§1.3's `-Wrapped` header) has no BTP protocolData equivalent yet;
+   a wrapped claim is an HTTP-only feature today.
+3. **Wrong transport** (issue #701, `toon-meta#262` decision 11): a PREPARE addressed to a route
+   whose per-connector transport policy does not accept BTP is refused before payment is
+   considered at all — checked ahead of step 4 below, and whether or not the frame carries a
+   claim, since paying over the wrong transport does not make the route reachable that way. The
+   RESPONSE carries an `F02` (Unreachable) REJECT — from this carriage's own point of view, there
+   is no route to the destination over BTP, even though one may exist over HTTP — with the SAME
+   x402-shaped terms JSON step 4 below uses, again as a `payment-required` protocolData entry, but
+   self-diagnosing via an additional `extra.requiredTransport` field (`"http"` or `"btp"`) naming
+   the transport the route actually requires. This reuses §1.4's greeting mechanism rather than
+   inventing a second one; the HTTP carriage answers the mirror case (a route restricted to BTP,
+   reached over `POST /ilp`) the same way, with `402` and the same field. A route with no
+   transport restriction (the default) is unaffected, and its greetings never carry
+   `requiredTransport`.
+4. **Unpaid prepare to a priced route**: BTP cannot answer HTTP `402`, so the §1.4 greeting is a
+   RESPONSE carrying an `F06` (Unexpected Payment) REJECT, message
+   `No payment channel claim attached`, with the x402 v2 terms JSON — byte-identical to §1.4's
+   body — as a protocolData entry named `payment-required` (again mirroring the HTTP header of
+   the same name). A claimless PREPARE to an unpriced route passes through unchanged, as on HTTP.
+5. **Standalone claim**: a MESSAGE with an empty `ilpPacket` and a `payment-channel-claim` entry
+   is a fire-and-forget claim registration: it is ingested against price `0` (full validation, a
+   replay still refused, no value need advance — §1.6's identify-not-pay semantics) and answered
+   with nothing, per the client contract (`sendClaimMessage` expects no RESPONSE).
+6. **Anything else**: a MESSAGE with no auth, no claim and no `ilpPacket` is ignored. An
+   undecodable frame is answered with an ERROR frame (`code F00`, `name NotAcceptedError`, the
+   parse failure as UTF-8 `data`) when its requestId was readable, and ignored when not.
+7. **TRANSFER** (issue #697): acknowledged with an empty RESPONSE under the same requestId — RFC-23
+   requires a responder answer every request, satisfied at the protocol level. The settlement/
+   netting accounting a TRANSFER's `amount` will eventually drive is out of scope here; that is
+   `toon-meta#262`'s payout-ledger ticket, built on this foundation.
+
+   **Update (issue #699):** the outbound half of that ledger now exists —
+   `connector_client_edge::ClientPayoutLedger` signs a cumulative claim per client channel
+   (mirroring `connector_runtime::ClaimBook`'s peer-side outbound direction), and
+   `payout_claim_protocol_data` carries it as a payout TRANSFER's `payout-claim` protocolData
+   entry, JSON like every other entry this dialect carries. This only _creates credit_ and has no
+   production caller yet: deciding when a packet's fulfillment should trigger a payout, and to
+   which channel, belongs to the session registry (connector#698) this ticket was held for.
+
+8. **A RESPONSE or ERROR whose requestId this connector itself originated** (issue #697): resolved
+   against that outbound request rather than treated as inbound traffic. One this connector never
+   originated — every RESPONSE/ERROR a deployed client sends today — is silently dropped, exactly
+   as any non-MESSAGE frame was before TRANSFER and server-origination existed.
+
+**Ordering** (issue #688): _claims_ on one session are judged strictly sequentially, in arrival
+order — a frame's claim is fully admitted (or refused) before the next frame's claim is looked
+at. This is the transport's reason to exist: claims sent in order on one socket can never race
+each other into `F01 NonceNotAdvancing`, which parallel HTTP requests can (issue #544's ordering
+promise, extended across packets). What is **not** serialized is a judged frame's remaining work
+— the durable record of its claim, routing its packet, sending its RESPONSE — which proceeds for
+up to a bounded number of frames concurrently (the connector's `btp_session_window`, default 16;
+when the window is full the session stops reading, so the bound is also the backpressure).
+RESPONSE/ERROR frames may therefore arrive in a different order than the MESSAGEs that provoked
+them; `requestId` is the correlation, per this section's own frame grammar, and the deployed
+client resolves responses through its pending-request map by exactly that id. A client MUST NOT
+assume responses arrive in request order. Concurrent sessions writing on the same channel still
+serialize at the gate's watermark lock, exactly as concurrent HTTP requests do.
+
+### 1.10 Owner-authenticated claim state: `POST /ilp/claim-state` (issue #693)
+
+A bulk, read-only answer to "what is the off-chain claim state of every channel I control?" —
+deposit total, cumulative claimed, available balance, nonce and last-claim time, for as many
+channels as one request names, each independently authenticated by a signature over that
+channel alone. Exists because the off-chain claim watermark is known only to a channel's own
+counterparty and to this connector's claim gate: an on-chain read gives deposit and channel
+existence for free, but not the watermark, and an agent whose channel has run dry cannot afford
+a paid write to report its own state (a management surface polling many agents' runway needs
+this to work precisely when an agent is broke, dead or offline).
+
+**Request.**
+
+```json
+POST /ilp/claim-state
+Content-Type: application/json
+
+{
+  "channels": [
+    {
+      "blockchain": "evm",
+      "channelId": "0x<64-char hex>",
+      "expires": 1735689600,
+      "signature": "0x<65-byte r||s||v hex>"
+    },
+    {
+      "blockchain": "solana",
+      "channelAccount": "<base58>",
+      "expires": 1735689600,
+      "signature": "<base64 64-byte Ed25519>"
+    }
+  ]
+}
+```
+
+Every entry is independent: a request MAY mix EVM and Solana channels, and a request naming
+channels controlled by different keys is answered exactly as one naming channels controlled by
+one key would be — nothing about this endpoint requires the caller to be a single identity, only
+that it can produce a valid signature per channel it asks about.
+
+**Auth: a signature per channel, not a signature over the request.** Each entry's `signature` is
+that channel's counterparty key (the same key that signs a real claim, §1.3 step 4's "the
+counterparty this connector has recorded for the channel") signing a **claim-state challenge** —
+a message distinct from a real claim's balance-proof signature, so a captured challenge can never
+be replayed as a payment or vice versa:
+
+- **evm** — EIP-712, same domain as a real claim (`EIP712Domain(name: "TokenNetwork", version:
+"1", chainId, verifyingContract)`, read from the channel's own recorded domain, never from the
+  request), a distinct typed struct:
+  ```text
+  ClaimStateChallenge(bytes32 channelId,uint256 expires)
+  ```
+- **solana** — Ed25519 over a tagged message distinct in both content and length from a real
+  claim's 48-byte balance-proof message:
+  ```text
+  message = "toon-claim-state-challenge-v1" || channelAccount(32 bytes) || expires(u64 LE)
+  ```
+
+`expires` (unix seconds) is required and is the whole of this endpoint's replay bound: a
+signature verifies for any `now <= expires`, reusably — this is a read that changes no state and
+advances no watermark, so there is nothing for a nonce to protect. A caller reissues a fresh
+`expires` (and therefore a fresh signature) whenever it wants a signature that outlives one it no
+longer wants trusted.
+
+**Response.** `200`, one result per requested channel, same order as the request:
+
+```json
+{
+  "channels": [
+    {
+      "blockchain": "evm",
+      "channelId": "0x...",
+      "ok": true,
+      "depositTotal": "1000000",
+      "cumulativeClaimed": "250000",
+      "available": "750000",
+      "nonce": 3,
+      "lastClaimTime": 1735680000
+    },
+    {
+      "blockchain": "solana",
+      "channelAccount": "...",
+      "ok": false,
+      "error": "unverified"
+    }
+  ]
+}
+```
+
+Money fields are decimal strings (matching §1.3's `transferredAmount` convention), never a bare
+JSON number — a value a JS `Number` cannot represent exactly past 2^53 is a real amount this
+endpoint reports, not a hypothetical one.
+
+- `depositTotal` — the channel's on-chain deposit, or `null` for a channel this connector only
+  has _declared_ (`[[client_channels]]`) — declaring a channel names a counterparty and never an
+  amount (§1.3's collateral-binding exemption applies here identically), so no figure exists to
+  report. A resolved (chain-backed) channel always reports a number.
+- `cumulativeClaimed` — the channel's watermark, `"0"` if this connector has never accepted a
+  claim on it.
+- `available` — `depositTotal - cumulativeClaimed + credited` (issue #700's netting: `credited` is
+  what this connector has separately committed to pay this channel's counterparty back, e.g. for
+  factory work it earned, `"0"` for a channel nothing has been paid out on) — the same spendable
+  headroom figure §1.3 step 5's collateral binding admits an inbound claim against, not a raw
+  on-chain balance. `null` exactly when `depositTotal` is.
+- `nonce` — the watermark's nonce, `0` if none yet.
+- `lastClaimTime` — unix seconds this connector last accepted a claim on this channel (over
+  **any** carrier — `POST /ilp`, `POST /ilp/probe`, or the BTP session), or `null` if it never
+  has. **Best-effort and non-durable**, unlike every other field above: a connector restart resets
+  it to `null` until the next accepted claim, deliberately — recording it durably would mean
+  stamping a wall-clock read into the claim admission path's write-lock or group-commit journal
+  (issues #686/#690), which this endpoint's own acceptance criteria forbids adding to. A consumer
+  MUST treat a `null` here as "unknown", never as "never claimed" — the deposit/cumulative/
+  available/nonce figures beside it remain exact across a restart regardless, since those still
+  come from the durable watermark.
+
+**What a failed entry reveals.** `ok: false` carries only `error`, one of:
+
+- `"expired"` — `expires` is not in the future. A fact about the request, safe to report exactly.
+- `"unverified"` — everything else: the channel does not exist, the signature does not verify, or
+  this connector's resolution of the channel from chain failed. These are deliberately collapsed
+  into one reason, unlike §1.3's claim-refusal taxonomy (which _does_ distinguish "no such
+  channel" from "bad signature" for a paying sender's benefit) — this endpoint's own acceptance
+  criteria requires that a caller learn nothing about a channel it does not control, and "channel
+  exists but your signature is wrong" already discloses existence. A caller cannot distinguish a
+  channel that has never existed from one it simply guessed the wrong key for.
+
+**Not on the admission path.** This endpoint only reads: the watermark, the channel registry
+(counterparty, deposit floor, EIP-712 domain) and the best-effort last-claim-time index above. A
+channel lookup this connector has not already resolved goes through the same budgeted resolution
+§1.3's "a lookup that resolves nothing must be bounded too" already governs for a claim, so a
+flood of fabricated channel ids against this endpoint costs no more than the same flood would
+against `POST /ilp`. Nothing here calls into claim ingestion, and no per-packet work was added to
+`handle_prepare` to build it.
 
 ## 2. What version 1 does not do
 

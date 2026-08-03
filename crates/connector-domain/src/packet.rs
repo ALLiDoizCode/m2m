@@ -165,6 +165,16 @@ impl RejectCode {
         RejectCode("F03".to_string())
     }
 
+    /// F06: Unexpected Payment -- a payment arrived without the claim that
+    /// pays for it. The client edge's BTP carriage answers a claimless
+    /// PREPARE to a priced route with this code plus the route's x402 terms
+    /// as `payment-required` protocolData (client-edge-spec.md §1.9), since
+    /// BTP cannot answer HTTP 402; the HTTP carriage answers 402 itself and
+    /// never raises this code.
+    pub fn f06_unexpected_payment() -> RejectCode {
+        RejectCode("F06".to_string())
+    }
+
     /// F99: Application Error -- the terminating app declined the delivery,
     /// or (per issue #417) supplied no fulfilment matching the execution
     /// condition it was handed.

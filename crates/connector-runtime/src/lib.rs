@@ -19,7 +19,9 @@ pub use claim::{
     ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, InvalidChannelId, WireClaim,
 };
 pub use clock::{Clock, SystemClock, TestClock};
-pub use connector::{ChannelOperationError, Connector, LeaseRouteError, ProbeDenied};
+pub use connector::{
+    AppRouteFacts, ChannelOperationError, Connector, LeaseRouteError, ProbeDenied,
+};
 // Re-exported for callers that hold a `Connector` but not a config-crate
 // dependency of their own (`connector-operator`): the chain key
 // `Connector::with_settlement` files a settlement backend under, and

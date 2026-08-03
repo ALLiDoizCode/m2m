@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
-use connector_config::{SettlementChain, StaticRoute};
+use connector_config::{SettlementChain, StaticRoute, TransportPolicy};
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
     is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse, Prepare,
@@ -202,6 +202,15 @@ fn correlation_id(execution_condition: &[u8; 32]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// An app route's price and transport policy together, as
+/// [`Connector::app_route`] returns them from a single route lookup (issue
+/// #701).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppRouteFacts {
+    pub price: u64,
+    pub transport_policy: TransportPolicy,
 }
 
 /// The connector's packet plane: a fixed set of terminated routes and peer
@@ -747,7 +756,13 @@ impl Connector {
         prepare: Prepare,
         minimum_delivery: u64,
     ) -> PacketResponse {
-        tracing::info!("packet received");
+        // Per-packet lines are debug, not info (issue #690): at huddle rates
+        // (hundreds of packets/s) every INFO here becomes per-event disk I/O
+        // through docker's json-file log driver -- the same disease as
+        // relay#87's per-write console.log. The default `info` filter keeps
+        // the hot path silent; RUST_LOG=connector_runtime=debug restores the
+        // per-packet trace without a config change on the boxes.
+        tracing::debug!("packet received");
 
         if let Some(reject) = self.reject_ineligible(&prepare) {
             return self.finish(PacketResponse::Reject(reject));
@@ -801,14 +816,14 @@ impl Connector {
 
         let peer_route = match target {
             RouteTarget::App(index) => {
-                tracing::info!(handler_url = %self.routes[index].handler_url(), "routed to app");
+                tracing::debug!(handler_url = %self.routes[index].handler_url(), "routed to app");
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
                 return self.finish(response);
             }
             RouteTarget::Peer(index) => &self.peer_routes[index],
             RouteTarget::Leased(index) => active_leased[index].as_peer_route(),
         };
-        tracing::info!(peer_id = %peer_route.peer_id(), "routed to peer");
+        tracing::debug!(peer_id = %peer_route.peer_id(), "routed to peer");
         let response = self
             .forward_via_peer_route(peer_route, prepare, minimum_delivery)
             .await;
@@ -826,7 +841,11 @@ impl Connector {
         match &response {
             PacketResponse::Fulfill(_) => {
                 self.metrics.record_fulfill();
-                tracing::info!("packet fulfilled");
+                // debug, not info: fulfilment is the per-packet common case
+                // (issue #690). Rejects below stay at info -- they are the
+                // per-error path and keep the `packet` span's correlation
+                // fields for diagnosis.
+                tracing::debug!("packet fulfilled");
             }
             PacketResponse::Reject(reject) => {
                 self.metrics.record_reject(reject.code.as_str());
@@ -1052,6 +1071,25 @@ impl Connector {
     pub fn app_route_price(&self, destination: &str) -> Option<u64> {
         self.select_app_route(destination)
             .map(|index| self.routes[index].price())
+    }
+
+    /// The transport policy of the app route `destination` would resolve
+    /// to, or `None` if no app route matches it.
+    pub fn app_route_transport_policy(&self, destination: &str) -> Option<TransportPolicy> {
+        self.select_app_route(destination)
+            .map(|index| self.routes[index].transport_policy())
+    }
+
+    /// Price and transport policy together, from one `select_app_route`
+    /// lookup, or `None` if no app route matches `destination` -- the client
+    /// edge's two carriages need both facts per request (issue #701) and
+    /// would otherwise pay the prefix scan twice, once per accessor above.
+    pub fn app_route(&self, destination: &str) -> Option<AppRouteFacts> {
+        self.select_app_route(destination)
+            .map(|index| AppRouteFacts {
+                price: self.routes[index].price(),
+                transport_policy: self.routes[index].transport_policy(),
+            })
     }
 
     /// This node's static routes, for the operator surface's read-only
@@ -1991,6 +2029,49 @@ mod tests {
         assert_eq!(connector.app_route_price("g.example.app"), Some(25));
         assert_eq!(connector.app_route_price("g.example.app.sub"), Some(25));
         assert_eq!(connector.app_route_price("g.nowhere"), None);
+    }
+
+    /// Issue #701: the client edge's two carriages ask
+    /// `app_route_transport_policy` the same way they already ask
+    /// `app_route_price`, so it needs the same longest-prefix matching and
+    /// the same `None`-for-unmatched behavior.
+    #[test]
+    fn app_route_transport_policy_reports_the_matched_routes_policy() {
+        let route = StaticRoute::new_priced_with_transport(
+            "g.example.relay",
+            "http://localhost:4000",
+            25,
+            TransportPolicy::Btp,
+        )
+        .unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![route], app_client, clock);
+
+        assert_eq!(
+            connector.app_route_transport_policy("g.example.relay"),
+            Some(TransportPolicy::Btp)
+        );
+        assert_eq!(
+            connector.app_route_transport_policy("g.example.relay.sub"),
+            Some(TransportPolicy::Btp)
+        );
+        assert_eq!(connector.app_route_transport_policy("g.nowhere"), None);
+    }
+
+    /// A route that never set `transport` reports the default -- both
+    /// transports accepted -- through the same accessor.
+    #[test]
+    fn app_route_transport_policy_defaults_to_both() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![route], app_client, clock);
+
+        assert_eq!(
+            connector.app_route_transport_policy("g.example.app"),
+            Some(TransportPolicy::Both)
+        );
     }
 
     #[tokio::test]

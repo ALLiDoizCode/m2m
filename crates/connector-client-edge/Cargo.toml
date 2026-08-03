@@ -5,28 +5,40 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
-axum = "0.6"
+# `ws` for the client BTP websocket carriage (client-edge-spec.md §1.9, ADR
+# 0026); pulls tokio-tungstenite 0.20, already in the lockfile.
+axum = { version = "0.6", features = ["ws"] }
+# `split` on the BTP websocket (issue #688): the session's read half admits
+# claims in order while a writer task owns the send half, so responses can
+# complete out of order. Already in the tree through axum/hyper.
+futures-util = "0.3"
 base64 = "0.22"
 bs58 = "0.5"
 hex = "0.4"
+# `ClientPayoutLedger` (issue #699) signs a payout claim against the same
+# clock-supplied timestamp `connector_runtime::ClaimBook::record_fulfillment`
+# takes, so `DateTime<Utc>` rides in this crate's own public API now, not
+# just its tests.
+chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `time` alone: the unresolvable-lookup shaper (issue #613) holds a lookup
-# for its slot rather than refusing it, and that hold is a `sleep`. This
-# crate's own runtime comes from whoever mounts its router.
-tokio = { version = "1", features = ["time"] }
+# `time`: the unresolvable-lookup shaper (issue #613) holds a lookup for
+# its slot rather than refusing it, and that hold is a `sleep`. `sync`: the
+# claim gate's group commit (issue #686) resolves a claim's durability
+# through a oneshot. This crate's own runtime comes from whoever mounts its
+# router.
+tokio = { version = "1", features = ["time", "sync"] }
 tracing = "0.1"
 
 [dev-dependencies]
-connector-config = { path = "../connector-config" }
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm" }
 ethers = { version = "2", default-features = false, features = ["rustls"] }
-chrono = "0.4"
 ed25519-dalek = "1"
 # `test-util` for `#[tokio::test(start_paused = true)]`: the shaper of issue
 # #613 holds a lookup for its slot, and the only way to exercise that hold
@@ -36,5 +48,17 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 tower = { version = "0.4", features = ["util"] }
 hyper = { version = "0.14", features = ["full"] }
 libsecp256k1 = "0.6"
+# Interleaved inbound/outbound netting proptests (issue #700) -- the same
+# vectors-and-proptest treatment `connector-domain`/`connector-runtime`'s own
+# claim code already gets.
+proptest = "1"
 rand = "0.7"
 tempfile = "3"
+# The client half of the BTP integration test (`tests/btp_session.rs`): a
+# real websocket session against a served router, since `tower::oneshot`
+# cannot carry an upgrade. Same 0.20 the `ws` feature above resolves to.
+tokio-tungstenite = "0.20"
+# The `AppClient` trait's `deliver` names `url::Url`; the throughput test's
+# slow-app fake (issue #688) implements it. Same `url` the runtime itself
+# uses.
+url = "2"

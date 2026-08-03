@@ -66,6 +66,14 @@ services:
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
       SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in}
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
+      # SOL per drip (toon-meta#258): the committed treasury has run as low as
+      # ~0.45 SOL and is NOT self-replenishing (the public devnet airdrop that
+      # funds it is the same rate-limited endpoint this leg exists to work
+      # around), so this must stay conservative. Backed by a 24h per-address
+      # cooldown (SOLANA_DRIP_COOLDOWN_MS, default below) — raise the amount
+      # only alongside a treasury top-up.
+      SOLANA_SOL_AMOUNT: ${SOLANA_SOL_AMOUNT:-0.03}
+      SOLANA_DRIP_COOLDOWN_MS: ${SOLANA_DRIP_COOLDOWN_MS:-86400000}
       # Mina — points at the dedicated Mina lightnet box over HTTPS
       MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
       MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://mina.${DOMAIN:-devnet.toonprotocol.dev}/graphql}
@@ -86,7 +94,13 @@ services:
       BASE_SEPOLIA_RPC_URL: ${BASE_SEPOLIA_RPC_URL:-https://sepolia.base.org}
       BASE_SEPOLIA_USDC: ${BASE_SEPOLIA_USDC:-0x49beE1Bca5d15Fb0963117923403F9498119a9Ce}
       BASE_SEPOLIA_USDC_AMOUNT: ${BASE_SEPOLIA_USDC_AMOUNT:-1000}
-      BASE_SEPOLIA_ETH_AMOUNT: ${BASE_SEPOLIA_ETH_AMOUNT:-0}
+      # Best-effort native-gas leg (toon-meta#258), same rationale as Solana
+      # above: enabled by default at a conservative amount so a fresh identity
+      # can pay its own Base Sepolia gas without a captcha-gated public faucet.
+      # executeBaseSepoliaDrip() already skips this leg (never failing the
+      # mint) when the faucet key's balance is below reserve+amount, and it
+      # shares the leg's existing 24h BASE_SEPOLIA_COOLDOWN_MS.
+      BASE_SEPOLIA_ETH_AMOUNT: ${BASE_SEPOLIA_ETH_AMOUNT:-0.001}
       BASE_SEPOLIA_ETH_RESERVE: ${BASE_SEPOLIA_ETH_RESERVE:-0.01}
     volumes:
       - /root/keys/solana-usdc-treasury.json:/keys/usdc-authority.json:ro

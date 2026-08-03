@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -121,6 +122,16 @@ struct RawConfig {
     /// buyer, which is a worse failure than the RPC spend it prevents.
     #[serde(default)]
     unresolvable_lookup_budget_max_wait_ms: Option<u64>,
+    /// How many of one BTP session's frames may be past claim admission --
+    /// waiting out the journal's group commit, being routed downstream,
+    /// answering -- at once (issue #688). Claims are judged strictly in
+    /// arrival order regardless; this bounds only the overlapped tail.
+    /// Absent means the client edge's own default; `0` is refused, since a
+    /// window of nothing is not a slower session, it is a session whose
+    /// first paid frame waits forever while the file reads as configured.
+    /// `1` is the original lockstep session.
+    #[serde(default)]
+    btp_session_window: Option<u32>,
 }
 
 /// The client edge's own defaults for the unresolvable-lookup shaper
@@ -173,6 +184,7 @@ pub struct Config {
     unresolvable_lookups_total: Option<u32>,
     unresolvable_lookup_window: Option<Duration>,
     unresolvable_lookup_max_wait: Option<Duration>,
+    btp_session_window: Option<NonZeroU32>,
 }
 
 impl Config {
@@ -311,6 +323,17 @@ impl Config {
         }
         let unresolvable_lookup_max_wait =
             unresolvable_lookup_max_wait_ms.map(Duration::from_millis);
+        // The BTP session window (issue #688) is refused at zero for the
+        // same species of reason as the budget knobs above, with a sharper
+        // edge: zero is not a stricter setting, it is a session whose
+        // first paid frame waits forever for an in-flight slot that does
+        // not exist -- every BTP client hangs on connect while the file
+        // reads as configured. (`1` is coherent: the original lockstep
+        // session.)
+        let btp_session_window = match raw.btp_session_window {
+            Some(0) => return Err(ConfigError::ZeroBtpSessionWindow),
+            other => other.and_then(NonZeroU32::new),
+        };
         // A per-signer rate above the node-wide one is not a stricter
         // setting, it is an inert one: the node-wide drain saturates first,
         // every time, so the number written for the per-signer axis could
@@ -372,6 +395,7 @@ impl Config {
             unresolvable_lookups_total,
             unresolvable_lookup_window,
             unresolvable_lookup_max_wait,
+            btp_session_window,
         })
     }
 
@@ -420,6 +444,14 @@ impl Config {
     /// `None` to use the client edge's own default.
     pub fn unresolvable_lookup_max_wait(&self) -> Option<Duration> {
         self.unresolvable_lookup_max_wait
+    }
+
+    /// How many of one BTP session's frames may be past claim admission at
+    /// once (issue #688), or `None` to use the client edge's own default.
+    /// `NonZeroU32` because zero was refused at load: the value in force is
+    /// always a working window.
+    pub fn btp_session_window(&self) -> Option<NonZeroU32> {
+        self.btp_session_window
     }
 
     /// The socket address the client edge binds.
@@ -504,6 +536,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::route::TransportPolicy;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -571,6 +604,44 @@ price = 0
         );
         let prices: Vec<u64> = config.routes().iter().map(|r| r.price()).collect();
         assert_eq!(prices, vec![25, 0]);
+    }
+
+    /// Issue #701: a route's `transport` field survives a real TOML file
+    /// through `Config::load`, and a route that omits it defaults to
+    /// accepting both -- matching the devnet shape (relay restricted to
+    /// BTP, store left at the default).
+    #[test]
+    fn loads_a_route_restricted_to_btp_alongside_one_accepting_both() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.relay"
+handler_url = "http://localhost:5000"
+price = 1000
+transport = "btp"
+
+[[routes]]
+prefix = "g.example.store"
+handler_url = "http://localhost:6000"
+price = 1000
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        let policies: Vec<TransportPolicy> = config
+            .routes()
+            .iter()
+            .map(|r| r.transport_policy())
+            .collect();
+        assert_eq!(policies, vec![TransportPolicy::Btp, TransportPolicy::Both]);
     }
 
     #[test]
@@ -1456,6 +1527,73 @@ key_file = "{key_path}"
             config.channel_reattempt_interval(),
             Some(std::time::Duration::from_millis(5000))
         );
+    }
+
+    /// The BTP session window (issue #688): how many of one session's
+    /// frames may be past claim admission at once. Read as written when
+    /// non-zero, `None` when absent (the client edge's default applies).
+    #[test]
+    fn the_btp_session_window_is_read_from_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+btp_session_window = 4
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming the window loads");
+
+        assert_eq!(
+            config.btp_session_window(),
+            std::num::NonZeroU32::new(4),
+            "the configured window is in force"
+        );
+    }
+
+    /// An absent window is `None` -- the client edge's own default applies
+    /// -- never a guessed number of this crate's own.
+    #[test]
+    fn an_absent_btp_session_window_defers_to_the_client_edge() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config not naming the window loads");
+        assert_eq!(config.btp_session_window(), None);
+    }
+
+    /// A zero window is refused at load (issue #688): it is not a slower
+    /// session, it is a session whose first paid frame waits forever for
+    /// an in-flight slot that does not exist -- every BTP client hangs on
+    /// connect while the file reads as configured.
+    #[test]
+    fn a_zero_btp_session_window_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+btp_session_window = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::ZeroBtpSessionWindow)));
     }
 
     /// The unresolvable-lookup budget (issue #613): what a node will spend
