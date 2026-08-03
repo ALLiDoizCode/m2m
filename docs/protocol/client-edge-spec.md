@@ -215,6 +215,25 @@ never reaches the terminating app:
    credit decision, correctly located in config and theirs to make; an anonymous buyer resolved from
    chain (§1.2) never made any such deal, and gets the check.
 
+   **The ceiling nets a channel's own outbound payout ledger too** (issue #700,
+   `toon-meta#262` decision 9). A connector that has separately signed the channel's counterparty a
+   payout claim — for example, crediting an agent for factory work it completed, per §1.9 step 6's
+   TRANSFER — raises this ceiling by that amount: the bound this step checks a claim's cumulative
+   `transferredAmount` against is `deposit + credited`, not `deposit` alone, where `credited` is the
+   running total this connector has committed to pay the same channel's counterparty back
+   (`ClientPayoutLedger::credited`), not merely what is still unacknowledged. This is what makes
+   decision 9's promise literal — an agent that has earned enough spends against its own earnings
+   directly, with no on-chain round trip and no settlement — and it is a bounded, deliberate
+   extension of trust rather than a new on-chain fact: `credited` is this connector's own signed IOU,
+   redeemable against this connector's own deposit on the same channel, never the counterparty's.
+   `credited` is read once, before this step's own chain-refresh read, so a payout recorded while an
+   admission is already in flight cannot retroactively rescue it — the same "false refusal only,
+   never a false accept" property the cached deposit above already has, since a payout ledger's
+   running total is monotonic for exactly the same reason a deposit is. A channel with no payout
+   ledger configured nets `0`, exactly this step's behaviour before issue #700. Netting is
+   per-channel and never crosses a chain: a channel's `credited` figure comes from its own recorded
+   payout ledger entry, the same one issue #629 already keys by chain for the deposit side.
+
 A claim that fails any check is a validation failure and the PREPARE is rejected before it
 reaches the terminating app or advances any watermark.
 
@@ -818,7 +837,11 @@ endpoint reports, not a hypothetical one.
   report. A resolved (chain-backed) channel always reports a number.
 - `cumulativeClaimed` — the channel's watermark, `"0"` if this connector has never accepted a
   claim on it.
-- `available` — `depositTotal - cumulativeClaimed`; `null` exactly when `depositTotal` is.
+- `available` — `depositTotal - cumulativeClaimed + credited` (issue #700's netting: `credited` is
+  what this connector has separately committed to pay this channel's counterparty back, e.g. for
+  factory work it earned, `"0"` for a channel nothing has been paid out on) — the same spendable
+  headroom figure §1.3 step 5's collateral binding admits an inbound claim against, not a raw
+  on-chain balance. `null` exactly when `depositTotal` is.
 - `nonce` — the watermark's nonce, `0` if none yet.
 - `lastClaimTime` — unix seconds this connector last accepted a claim on this channel (over
   **any** carrier — `POST /ilp`, `POST /ilp/probe`, or the BTP session), or `null` if it never

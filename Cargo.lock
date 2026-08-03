@@ -1124,6 +1124,7 @@ dependencies = [
  "hex",
  "hyper",
  "libsecp256k1",
+ "proptest",
  "rand 0.7.3",
  "serde",
  "serde_json",

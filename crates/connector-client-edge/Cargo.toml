@@ -48,6 +48,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 tower = { version = "0.4", features = ["util"] }
 hyper = { version = "0.14", features = ["full"] }
 libsecp256k1 = "0.6"
+# Interleaved inbound/outbound netting proptests (issue #700) -- the same
+# vectors-and-proptest treatment `connector-domain`/`connector-runtime`'s own
+# claim code already gets.
+proptest = "1"
 rand = "0.7"
 tempfile = "3"
 # The client half of the BTP integration test (`tests/btp_session.rs`): a

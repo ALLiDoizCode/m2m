@@ -79,3 +79,18 @@ still have no production caller: deciding when a job completes and which channel
 `toon-meta#262`'s session registry (connector#698), held until this ticket merged so the two do
 not collide in the same client-edge state. This ticket creates credit only — netting (whether
 that credit raises spendable headroom) is connector#700.
+
+## Update (issue #700): credit raises spendable headroom, the netting ticket
+
+`ClientClaimGate::with_payout_ledger` (`crates/connector-client-edge/src/claim_gate.rs`) binds a
+`ClientPayoutLedger` to the same channel ids the gate's own `ClientChannelRegistry` accepts an
+inbound claim on. The collateral-binding check (client-edge-spec.md §1.3 step 5) and the
+claim-state endpoint (§1.10) both net `ClientPayoutLedger::credited` against the on-chain deposit:
+a channel's spendable headroom is `deposit - owed + credited`, not `deposit` alone — decision 9 of
+`toon-meta#262`, "an inbound claim raises spendable headroom directly." `credited` is read once,
+before the collateral check's own chain-refresh await, so a payout recorded mid-admission cannot
+retroactively rescue a claim already past that snapshot (only ever a false refusal, never a false
+accept — the same direction every other staleness bound in this gate already errs in). Still no
+production caller decides _when_ to credit a channel; connector#698's session registry remains the
+next ticket that closes that gap. Solana channels net nothing yet: `ClientPayoutLedger` wraps
+`ClaimBook`, which only ever signs an EVM balance proof.

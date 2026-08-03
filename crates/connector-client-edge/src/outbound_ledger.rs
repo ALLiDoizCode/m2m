@@ -101,6 +101,20 @@ impl ClientPayoutLedger {
         self.book.pending_claim(channel_id)
     }
 
+    /// The total this connector has committed to pay the client on
+    /// `channel_id` so far -- the "credited" term in issue #700's netting
+    /// formula (`spendable = deposit - owed + credited`). Sourced from
+    /// [`ClaimBook::outbound_cumulative_amount`], which -- unlike
+    /// [`Self::pending_claim`] -- never resets on acknowledgement: this is
+    /// what this connector has signed itself to owe, not what is still
+    /// in flight, and a claim already delivered to the client is still a
+    /// commitment this connector must honour. `0` for a channel this
+    /// ledger has never paid out on, matching a channel with no signer or
+    /// no domain configured.
+    pub fn credited(&self, channel_id: &str) -> u64 {
+        self.book.outbound_cumulative_amount(channel_id)
+    }
+
     /// Record the outcome of a payout claim of `nonce` sent on
     /// `channel_id`. See [`ClaimBook::acknowledge_outbound`] for the
     /// stale-nonce-safe semantics this delegates to.
@@ -247,5 +261,39 @@ mod tests {
 
         ledger.acknowledge(&channel_id(1), claim.nonce, ClaimAckOutcome::Accepted);
         assert!(ledger.pending_claim(&channel_id(1)).is_none());
+    }
+
+    #[test]
+    fn credited_is_zero_for_a_channel_never_paid_out_on() {
+        let signer = Arc::new(LocalSigner::generate("payout-key"));
+        let ledger = ledger_with_signer(signer);
+
+        assert_eq!(ledger.credited(&channel_id(1)), 0);
+        assert_eq!(ledger.credited(&channel_id(2)), 0);
+    }
+
+    #[test]
+    fn credited_tracks_the_running_total_across_payouts() {
+        let signer = Arc::new(LocalSigner::generate("payout-key"));
+        let ledger = ledger_with_signer(signer);
+
+        ledger.record_payout(&channel_id(1), 500, now());
+        ledger.record_payout(&channel_id(1), 250, now());
+
+        assert_eq!(ledger.credited(&channel_id(1)), 750);
+    }
+
+    #[test]
+    fn credited_survives_acknowledgement_unlike_pending_claim() {
+        let signer = Arc::new(LocalSigner::generate("payout-key"));
+        let ledger = ledger_with_signer(signer);
+        let claim = ledger
+            .record_payout(&channel_id(1), 500, now())
+            .expect("payout");
+
+        ledger.acknowledge(&channel_id(1), claim.nonce, ClaimAckOutcome::Accepted);
+
+        assert!(ledger.pending_claim(&channel_id(1)).is_none());
+        assert_eq!(ledger.credited(&channel_id(1)), 500);
     }
 }

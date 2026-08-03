@@ -341,6 +341,29 @@ impl DepositFloor {
         }
     }
 
+    /// [`Self::covers`], with the ceiling raised by `credited` -- what this
+    /// connector has separately committed to pay the same channel's
+    /// counterparty back (issue #700's netting formula: spendable equals
+    /// deposit minus owed plus credited). `credited` of `0` is exactly
+    /// [`Self::covers`], so a channel with no outbound payout ledger
+    /// configured behaves exactly as it did before this method existed.
+    ///
+    /// This is a deliberate, bounded extension of trust rather than a
+    /// reading of any new on-chain fact: `credited` is this connector's own
+    /// signed IOU to the counterparty, redeemable against this connector's
+    /// own deposit on the same channel, not the counterparty's. Netting it
+    /// in here is what lets an agent's earnings raise its own spendable
+    /// headroom without an on-chain round trip (`toon-meta#262` decision
+    /// 9) -- the trade this connector is choosing to make is that it will
+    /// not also separately redeem the full, un-netted inbound claim this
+    /// check admits.
+    pub fn covers_with_credit(&self, amount: u64, credited: u64) -> bool {
+        match self {
+            DepositFloor::Unknown => true,
+            DepositFloor::AtLeast(deposit) => amount <= deposit.saturating_add(credited),
+        }
+    }
+
     /// The floor as a number, for a refusal that has to say what the
     /// channel actually holds. `None` for [`DepositFloor::Unknown`], which
     /// never refuses anything.
@@ -1546,6 +1569,41 @@ mod tests {
             counterparty: [0x09; 32],
             deposit_floor: DepositFloor::AtLeast(1_000),
         }
+    }
+
+    #[test]
+    fn covers_with_credit_at_zero_credit_agrees_with_covers() {
+        for amount in [0, 999, 1_000, 1_001, u64::MAX] {
+            assert_eq!(
+                DepositFloor::AtLeast(1_000).covers_with_credit(amount, 0),
+                DepositFloor::AtLeast(1_000).covers(amount)
+            );
+        }
+        assert_eq!(
+            DepositFloor::Unknown.covers_with_credit(u64::MAX, 0),
+            DepositFloor::Unknown.covers(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn covers_with_credit_raises_the_ceiling_by_exactly_the_credited_amount() {
+        let floor = DepositFloor::AtLeast(1_000);
+
+        assert!(!floor.covers(1_500));
+        assert!(!floor.covers_with_credit(1_500, 499));
+        assert!(floor.covers_with_credit(1_500, 500));
+        assert!(floor.covers_with_credit(1_500, 501));
+    }
+
+    #[test]
+    fn covers_with_credit_never_panics_on_overflow() {
+        let floor = DepositFloor::AtLeast(u64::MAX);
+        assert!(floor.covers_with_credit(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn unknown_deposit_floor_covers_everything_regardless_of_credit() {
+        assert!(DepositFloor::Unknown.covers_with_credit(u64::MAX, 0));
     }
 
     #[tokio::test]
