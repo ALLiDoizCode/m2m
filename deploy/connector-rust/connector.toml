@@ -90,3 +90,82 @@ bearer_token = "CHANGE-ME-generate-with-openssl-rand-hex-32"
 # to load until you replace it with a real key from README step 3 --
 # removing a key from this list and restarting is how you revoke it.
 write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STEP-3"]
+
+# ── Peering (issue #677, ADR 0027, docs/protocol/peer-carriage-spec.md) ──
+# Two independent axes. `peer_expose` says which peer carriages THIS node
+# opens a listener for; each peer's `endpoint` says which carriage this
+# node dials THAT peer on. Neither implies the other.
+#
+#   peer_expose = "btp"      open the BTP (wss://) peer listener
+#   peer_expose = "http"     open the ILP-over-HTTP peer listener
+#   peer_expose = "both"     open both
+#   peer_expose = "neither"  open none -- the default, and the right answer
+#                            for a node behind NAT, which only dials out
+#
+# A peering establishes only if at least one side dials a carriage the
+# other exposes. Where this file alone proves that impossible, config load
+# refuses: a peer with no `endpoint` on a node exposing nothing can never
+# establish, and a route forwarding to a peer this node can never originate
+# to could only ever answer T01.
+#
+# NOTE: this block is commented out because the carriages that dial it are
+# issue #676 and are not shipped yet. Uncommenting it today gives you a
+# validated peering that nothing traverses.
+#
+# peer_expose = "btp"
+#
+# [[peers]]
+# # The id a [[routes]] entry's peer_id names, and the peerId the
+# # credential JSON carries.
+# id = "store"
+#
+# # The URL this node dials to reach the peer. The SCHEME selects the
+# # carriage and nothing else does: wss:// is BTP, https:// is
+# # ILP-over-HTTP. Both are TLS-only -- a peering carries signed balance
+# # proofs -- so ws:// and http:// are refused at load. Omit `endpoint`
+# # entirely for a peering that dials IN to this node instead.
+# endpoint = "wss://store.example.net:443/btp"
+#
+# # The shared secret this peering is authenticated by. Role is decided by
+# # authentication and by nothing else: not the port, not the source
+# # address, not the carriage. An interaction that does not present this
+# # secret is a CLIENT, whatever else it looks like -- and an empty secret
+# # matches nothing, so writing `secret = ""` here is refused at load
+# # rather than becoming a peering anyone can claim.
+# credential = { secret = "CHANGE-ME-generate-with-openssl-rand-hex-32" }
+#
+# # The most unclaimed value this node will carry for this peering before
+# # refusing, in the settlement asset's smallest unit. Optional for a peer
+# # this node dials; REQUIRED for an accept-only one (no `endpoint`),
+# # because such a node cannot originate, cannot prompt a payer that has
+# # stopped sending, and has no other bound at all.
+# ceiling = 1000000
+#
+# # How often this node promises to flush a pending claim to this peer, and
+# # how long it waits for the acknowledgement and for an answer. The two
+# # timeouts default to 30000 ms each.
+# flush_interval_ms = 5000
+# claim_ack_timeout_ms = 30000
+# peer_answer_timeout_ms = 30000
+#
+# # Every peering needs at least one channel binding, or it can never take
+# # the peer role at all: the role rule needs BOTH a proven credential and
+# # a channel. This is the table whose absence left ADR 0024's peer-claim
+# # verification wired to nothing (issue #620).
+# #
+# # A channel id here must NOT also appear in [[client_channels]]: peer and
+# # client claim watermarks are separate records, and one channel in both
+# # namespaces would let the same money be counted as credit twice.
+# [[peer_channels]]
+# peer_id = "store"
+# channel_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# counterparty_key = "0x0000000000000000000000000000000000000000"
+# chain_id = 31337
+# token_network = "0x0000000000000000000000000000000000000000"
+#
+# # A route forwarding over the peering. `fee` buys carriage; a peer route
+# # never carries a `price` (that is the terminating app's work).
+# [[routes]]
+# prefix = "g.example.store"
+# peer_id = "store"
+# fee = 3

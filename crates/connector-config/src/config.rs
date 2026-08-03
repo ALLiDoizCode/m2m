@@ -8,7 +8,8 @@ use serde::Deserialize;
 use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawClientChannel};
 use crate::error::ConfigError;
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
-use crate::peer::{resolve_peers, PeerConfig, RawPeer};
+use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
+use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
 use crate::settlement::{resolve_settlement, RawSettlementSection, SettlementConfig};
@@ -40,13 +41,32 @@ struct RawConfig {
     /// matters is the one an operator reads at 3am.
     #[serde(default)]
     peer_wire_addr: Option<toml::Value>,
-    /// Peers this node peers with (issue #488). The transport that dialed
-    /// them was deleted in #679; the replacement carriages and the
-    /// `endpoint`/`credential` schema they need are ADR 0027's #676 and
-    /// #677. Until then an entry is a peer *relation* -- an id a
-    /// `[[routes]]` entry can target -- with no way to reach it.
+    /// Which peer carriages this connector opens a listener for (issue
+    /// #677, `peer-carriage-spec.md` §2.1): `"btp"`, `"http"`, `"both"` or
+    /// `"neither"`. Absent means `"neither"` -- this connector dials out
+    /// and accepts no peering, which is the NAT'd operator's case and the
+    /// safe default, since opening a peer listener should be a line
+    /// somebody wrote.
+    ///
+    /// Spelled as a top-level field rather than `[peers].expose` because
+    /// TOML cannot hold both a `[peers]` table and a `[[peers]]` array of
+    /// tables under one name; §11 leaves the spelling to this issue.
+    #[serde(default)]
+    peer_expose: Option<String>,
+    /// The peering relations this node has (issue #488; endpoint,
+    /// credential and per-relation terms, issue #677). What used to be a
+    /// dialed `SocketAddr` is now an `endpoint` URL whose **scheme**
+    /// selects the carriage -- `wss://` BTP, `https://` ILP-over-HTTP (ADR
+    /// 0027) -- or no endpoint at all, for a peering that dials in.
     #[serde(default)]
     peers: Vec<RawPeer>,
+    /// The payment channels each peering relation's claims are judged
+    /// against, and the EIP-712 domain they are signed under (issue #677,
+    /// ADR 0024). This is the table whose absence made ADR 0024's
+    /// peer-claim mechanism inert (#620 gap 3): a peering with no row here
+    /// can never take the peer role at all.
+    #[serde(default)]
+    peer_channels: Vec<RawPeerChannel>,
     /// One or more real settlement backends to construct at startup (issue
     /// #542; per-chain tables, issue #628). Absent means channel operations
     /// keep degrading to `ChannelOperationError::NoSettlementBackend`, same
@@ -177,6 +197,8 @@ pub struct Config {
     routes: Vec<StaticRoute>,
     peer_routes: Vec<PeerRouteConfig>,
     peers: Vec<PeerConfig>,
+    peer_expose: PeerExposure,
+    peer_channels: Vec<PeerChannelConfig>,
     operator: Option<OperatorConfig>,
     settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
@@ -222,12 +244,50 @@ impl Config {
 
         let signer_key = SecretLocation::resolve(raw.signer)?;
         let (routes, peer_routes) = resolve_routes(raw.apex.as_deref(), raw.routes, raw.children)?;
-        let peers = resolve_peers(raw.peers)?;
+        let peer_expose = parse_peer_exposure(raw.peer_expose)?;
+        let peers = resolve_peers(raw.peers, peer_expose)?;
+        let peer_channels = resolve_peer_channels(raw.peer_channels)?;
         for peer_route in &peer_routes {
-            if !peers.iter().any(|peer| peer.id() == peer_route.peer_id()) {
+            let Some(peer) = peers.iter().find(|peer| peer.id() == peer_route.peer_id()) else {
                 return Err(ConfigError::UnknownPeerId {
                     prefix: peer_route.prefix().to_string(),
                     peer_id: peer_route.peer_id().to_string(),
+                });
+            };
+            // The intersection rule, in the one direction this connector's
+            // own file can decide (`peer-carriage-spec.md` §2.2, §6.4(1)):
+            // a route whose next hop is a peering this connector can never
+            // originate to is a route that could only ever answer `T01`.
+            // What the *far* side exposes is not knowable from here and
+            // stays a runtime dial failure.
+            if !peer.can_originate() {
+                return Err(ConfigError::PeerRouteUndeliverable {
+                    prefix: peer_route.prefix().to_string(),
+                    peer_id: peer_route.peer_id().to_string(),
+                });
+            }
+        }
+        // Orphaned rows first, then unbound peers: a mistyped `peer_id`
+        // produces both at once, and "this row names a peer that does not
+        // exist" is the one that names the typo.
+        for channel in &peer_channels {
+            if !peers.iter().any(|peer| peer.id() == channel.peer_id()) {
+                return Err(ConfigError::PeerChannelOrphaned {
+                    peer_id: channel.peer_id().to_string(),
+                });
+            }
+        }
+        // P2 (§1.2): a peering with no channel binding can never take the
+        // peer role, so its counterparty would be admitted as an ordinary
+        // client and its claims judged in the wrong namespace. Refused at
+        // load, because the runtime symptom is silence.
+        for peer in &peers {
+            if !peer_channels
+                .iter()
+                .any(|channel| channel.peer_id() == peer.id())
+            {
+                return Err(ConfigError::PeerChannelUnbound {
+                    id: peer.id().to_string(),
                 });
             }
         }
@@ -237,6 +297,25 @@ impl Config {
         let operator = resolve_operator(raw.operator)?;
         let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
+        // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
+        // client watermarks are separate records by design, which is only
+        // safe while no channel is in both: two namespaces over one
+        // channel would let the same claim be counted as credit twice.
+        // Both sides are canonicalized lowercase `0x` hex by their own
+        // resolvers, so this compares like with like.
+        for peer_channel in &peer_channels {
+            let collides = client_channels.iter().any(|client_channel| {
+                matches!(
+                    client_channel,
+                    ClientChannelConfig::Evm(evm) if evm.channel_id() == peer_channel.channel_id()
+                )
+            });
+            if collides {
+                return Err(ConfigError::ChannelInBothNamespaces {
+                    value: peer_channel.channel_id().to_string(),
+                });
+            }
+        }
         let state_dir = raw.state_dir.map(PathBuf::from);
         let channel_liveness_ttl = match raw.channel_liveness_ttl_secs {
             Some(0) => return Err(ConfigError::ZeroChannelLivenessTtl),
@@ -374,6 +453,11 @@ impl Config {
             }
         } else if !client_channels.is_empty() {
             return Err(ConfigError::ClientChannelsWithoutStateDir);
+        } else if !peer_channels.is_empty() {
+            // The peer half of the same rule: a peer claim's watermark is
+            // no less a replay defence than a client claim's, and ADR
+            // 0024's ledger is the record that has to outlive the process.
+            return Err(ConfigError::PeerChannelsWithoutStateDir);
         }
 
         Ok(Config {
@@ -382,6 +466,8 @@ impl Config {
             routes,
             peer_routes,
             peers,
+            peer_expose,
+            peer_channels,
             operator,
             settlements,
             client_channels,
@@ -476,9 +562,42 @@ impl Config {
         &self.peer_routes
     }
 
-    /// The peers this node dials out to.
+    /// This node's peering relations. Every one is guaranteed to carry a
+    /// non-empty credential and at least one [`Config::peer_channels`] row
+    /// -- [`Config::load`] refuses to return a value where either is
+    /// missing, because a peering short of either can never take the peer
+    /// role (`peer-carriage-spec.md` §1.2).
     pub fn peers(&self) -> &[PeerConfig] {
         &self.peers
+    }
+
+    /// Which peer carriages this node opens a listener for
+    /// (`peer-carriage-spec.md` §2.1). Independent of how any one peer is
+    /// dialed: exposing BTP says nothing about how a peer is reached, and
+    /// dialing a peer over HTTP says nothing about what this node listens
+    /// on.
+    pub fn peer_expose(&self) -> PeerExposure {
+        self.peer_expose
+    }
+
+    /// The payment channels this node judges peer claims against (ADR
+    /// 0024). Every row names a configured peer, no channel appears twice,
+    /// and none of them appears in [`Config::client_channels`] either --
+    /// the peer and client watermark namespaces are disjoint by
+    /// construction (`peer-carriage-spec.md` §1.8).
+    pub fn peer_channels(&self) -> &[PeerChannelConfig] {
+        &self.peer_channels
+    }
+
+    /// The channels bound to one peering relation. Never empty for a
+    /// configured peer: an unbound peering is refused at load.
+    pub fn peer_channels_for<'a>(
+        &'a self,
+        peer_id: &'a str,
+    ) -> impl Iterator<Item = &'a PeerChannelConfig> {
+        self.peer_channels
+            .iter()
+            .filter(move |channel| channel.peer_id() == peer_id)
     }
 
     /// The operator surface's authentication, if the surface is enabled.
@@ -526,9 +645,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::PeerCarriage;
     use crate::route::TransportPolicy;
     use std::io::Write;
     use std::path::PathBuf;
+
+    /// The operator doc every peer-schema error message must name -- a
+    /// peering that does not come up produces no other evidence an
+    /// operator can read, so "which field changed, and where is that
+    /// written down" has to be in the message itself.
+    const BRINGUP_DOC: &str = "docs/operators/btp-peer-transport-bringup.md";
 
     fn with_key_file(body: impl FnOnce(&Path) -> String) -> Result<Config, ConfigError> {
         let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
@@ -655,35 +781,470 @@ handler_url = "http://localhost:5000"
         assert!(matches!(result, Err(ConfigError::RouteMissingPrice { .. })));
     }
 
-    #[test]
-    fn loads_peers_and_peer_routes() {
-        let config = with_key_file(|key_path| {
-            format!(
-                r#"
+    // -- The peer carriage config surface (issue #677,
+    // `peer-carriage-spec.md` §11) --
+
+    const PEER_CHANNEL: &str = "0xaaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff00001111";
+    const PEER_KEY: &str = "0x2222222222222222222222222222222222222222";
+    const PEER_TOKEN_NETWORK: &str = "0x3333333333333333333333333333333333333333";
+
+    /// A `[[peers]]`/`[[peer_channels]]` pair in its correct shape, the
+    /// one an operator should be able to copy. Every negative test below
+    /// spoils exactly one thing about it, so what each error is *about* is
+    /// the diff between it and this.
+    fn peering_config(key_path: &Path, state_dir: &Path, spoil: &str) -> String {
+        let base = format!(
+            r#"
 client_edge_addr = "127.0.0.1:3000"
+peer_expose = "btp"
+state_dir = "{state_dir}"
 
 [signer]
-key_file = "{}"
+key_file = "{key_file}"
 
 [[peers]]
-id = "peer-b"
+id = "store"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "shared-secret" }}
+ceiling = 1000000
+flush_interval_ms = 5000
+
+[[peer_channels]]
+peer_id = "store"
+channel_id = "{PEER_CHANNEL}"
+counterparty_key = "{PEER_KEY}"
+chain_id = 31337
+token_network = "{PEER_TOKEN_NETWORK}"
 
 [[routes]]
-prefix = "g.peer-b"
-peer_id = "peer-b"
+prefix = "g.example.store"
+peer_id = "store"
 fee = 3
 "#,
-                key_path.display()
-            )
+            state_dir = state_dir.display(),
+            key_file = key_path.display(),
+        );
+        format!("{base}{spoil}")
+    }
+
+    /// Load `peering_config` with `edit` applied to its text -- the
+    /// spoil-one-thing helper the named-error tests share.
+    fn load_peering(edit: impl Fn(String) -> String) -> Result<Config, ConfigError> {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(b"not a real key")
+            .expect("write key file");
+        let text = edit(peering_config(key_file.path(), state_dir.path(), ""));
+        Config::from_toml_str(&text, Path::new("test.toml"))
+    }
+
+    /// The whole surface round-trips from a real TOML file: the exposure
+    /// set, the endpoint and the carriage its scheme selects, the
+    /// credential, the per-relation terms and their defaults, and the
+    /// channel binding that makes the peering a peering at all.
+    #[test]
+    fn loads_the_full_peer_and_peer_channels_shape() {
+        let config = load_peering(|text| text).expect("load");
+
+        assert_eq!(config.peer_expose(), PeerExposure::Btp);
+        assert!(config.peer_expose().exposes(PeerCarriage::Btp));
+        assert!(!config.peer_expose().exposes(PeerCarriage::Http));
+
+        assert_eq!(config.peers().len(), 1);
+        let peer = &config.peers()[0];
+        assert_eq!(peer.id(), "store");
+        assert_eq!(
+            peer.endpoint().map(url::Url::as_str),
+            Some("wss://store.example/btp")
+        );
+        assert_eq!(peer.dial(), Some(PeerCarriage::Btp));
+        assert!(peer.credential().matches("shared-secret"));
+        assert!(!peer.credential().matches("wrong"));
+        assert_eq!(peer.ceiling(), Some(1_000_000));
+        assert_eq!(peer.flush_interval_ms(), Some(5_000));
+        assert_eq!(peer.claim_ack_timeout_ms(), 30_000);
+        assert_eq!(peer.peer_answer_timeout_ms(), 30_000);
+        assert!(peer.can_originate());
+
+        assert_eq!(config.peer_channels().len(), 1);
+        let channel = &config.peer_channels()[0];
+        assert_eq!(channel.peer_id(), "store");
+        assert_eq!(channel.channel_id(), PEER_CHANNEL);
+        assert_eq!(channel.counterparty_key(), [0x22u8; 20]);
+        assert_eq!(channel.chain_id(), 31_337);
+        assert_eq!(channel.token_network(), [0x33u8; 20]);
+        assert_eq!(config.peer_channels_for("store").count(), 1);
+        assert_eq!(config.peer_channels_for("nobody").count(), 0);
+
+        assert_eq!(config.peer_routes().len(), 1);
+        assert_eq!(config.peer_routes()[0].peer_id(), "store");
+        assert_eq!(config.peer_routes()[0].fee(), 3);
+    }
+
+    /// An `https://` peer rides the HTTP carriage instead -- the scheme is
+    /// the *only* thing that decides it (§2.1).
+    #[test]
+    fn an_https_endpoint_selects_the_http_carriage() {
+        let config = load_peering(|text| {
+            text.replace("wss://store.example:443/btp", "https://store.example/ilp")
         })
         .expect("load");
 
-        assert_eq!(config.peers().len(), 1);
-        assert_eq!(config.peers()[0].id(), "peer-b");
-        assert_eq!(config.peer_routes().len(), 1);
-        assert_eq!(config.peer_routes()[0].prefix(), "g.peer-b");
-        assert_eq!(config.peer_routes()[0].peer_id(), "peer-b");
-        assert_eq!(config.peer_routes()[0].fee(), 3);
+        assert_eq!(config.peers()[0].dial(), Some(PeerCarriage::Http));
+    }
+
+    /// `peer_expose = "neither"` is the NAT'd operator: it exposes nothing
+    /// and only dials, which is legal and must stay expressible.
+    #[test]
+    fn a_natd_operator_exposes_neither_carriage_and_still_loads() {
+        let config =
+            load_peering(|text| text.replace("peer_expose = \"btp\"", "peer_expose = \"neither\""))
+                .expect("load");
+
+        assert_eq!(config.peer_expose(), PeerExposure::Neither);
+        assert!(config.peer_expose().is_empty());
+        assert!(config.peers()[0].can_originate());
+    }
+
+    /// Omitting `peer_expose` entirely is the same as `"neither"`: a peer
+    /// listener is opened only by a line somebody wrote.
+    #[test]
+    fn an_omitted_peer_expose_defaults_to_neither() {
+        let config =
+            load_peering(|text| text.replace("peer_expose = \"btp\"\n", "")).expect("load");
+
+        assert_eq!(config.peer_expose(), PeerExposure::Neither);
+    }
+
+    /// §11 `PeerUndialable`: nothing to dial, and nothing to be dialed on.
+    #[test]
+    fn rejects_a_peering_that_can_never_establish() {
+        let result = load_peering(|text| {
+            text.replace("peer_expose = \"btp\"", "peer_expose = \"neither\"")
+                .replace("endpoint = \"wss://store.example:443/btp\"\n", "")
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerUndialable { id } if id == "store"),
+        );
+        assert!(
+            message.contains("can never establish") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11 `PeerEndpointScheme`: a scheme that names no carriage. `ws://`
+    /// is the interesting spelling -- it is a real websocket scheme, just
+    /// not a TLS one, and a peering carries signed balance proofs.
+    #[test]
+    fn rejects_an_endpoint_scheme_that_selects_no_carriage() {
+        for (written, scheme) in [
+            ("ws://store.example/btp", "ws"),
+            ("http://store.example/ilp", "http"),
+            ("tcp://store.example:4001", "tcp"),
+        ] {
+            let result = load_peering(|text| text.replace("wss://store.example:443/btp", written));
+
+            let message = expect_error(result, |error| {
+                matches!(error, ConfigError::PeerEndpointScheme { id, scheme: s, .. }
+                    if id == "store" && s == scheme)
+            });
+            assert!(
+                message.contains("selects no peer carriage")
+                    && message.contains("wss://")
+                    && message.contains(BRINGUP_DOC),
+                "got: {message}"
+            );
+        }
+    }
+
+    /// The old shape was a `SocketAddr`, so URL parsing is new and its
+    /// failures need a name of their own -- separate from the scheme
+    /// error, because "you wrote a host:port" and "you wrote the wrong
+    /// scheme" are different mistakes with different fixes.
+    #[test]
+    fn rejects_an_endpoint_that_is_not_a_url_at_all() {
+        let result =
+            load_peering(|text| text.replace("wss://store.example:443/btp", "127.0.0.1:4001"));
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::InvalidPeerEndpoint { id, .. } if id == "store"),
+        );
+        assert!(
+            message.contains("is a URL") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// A `wss://` URL with no host is refused as an unparseable endpoint
+    /// (the URL standard makes a host mandatory for both of our schemes),
+    /// which is the same named error and the same message as any other
+    /// malformed one.
+    #[test]
+    fn rejects_an_endpoint_with_no_host_to_dial() {
+        let result =
+            load_peering(|text| text.replace("wss://store.example:443/btp", "wss://:443/btp"));
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::InvalidPeerEndpoint { id, .. } if id == "store"),
+        );
+        assert!(message.contains("is a URL"), "got: {message}");
+    }
+
+    /// §11 `PeerCredentialMissing`, both spellings: no credential at all,
+    /// and a credential whose secret is empty. The second is the sharper
+    /// one -- an empty secret matches nothing, so the peering would look
+    /// configured and admit its counterparty as an ordinary client.
+    #[test]
+    fn rejects_a_peer_with_no_credential() {
+        let result =
+            load_peering(|text| text.replace("credential = { secret = \"shared-secret\" }\n", ""));
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerCredentialMissing { id } if id == "store"),
+        );
+        assert!(
+            message.contains("empty secret matches nothing") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_peer_whose_configured_secret_is_empty() {
+        let result = load_peering(|text| text.replace("\"shared-secret\"", "\"\""));
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "store"
+        ));
+    }
+
+    /// §11 `PeerChannelUnbound`: P2 of the role rule. This is the exact
+    /// defect that made ADR 0024 inert.
+    #[test]
+    fn rejects_a_peer_with_no_channel_binding() {
+        let result = load_peering(|text| {
+            let (head, rest) = text.split_once("[[peer_channels]]").expect("fixture");
+            let (_, routes) = rest.split_once("[[routes]]").expect("fixture");
+            format!("{head}[[routes]]{routes}")
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerChannelUnbound { id } if id == "store"),
+        );
+        assert!(
+            message.contains("both a proven credential and a channel binding")
+                && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11 `PeerChannelOrphaned`: a binding to a peering that does not
+    /// exist.
+    #[test]
+    fn rejects_a_peer_channel_naming_an_unconfigured_peer() {
+        let result = load_peering(|text| {
+            text.replace(
+                "peer_id = \"store\"\nchannel_id",
+                "peer_id = \"ghost\"\nchannel_id",
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerChannelOrphaned { peer_id } if peer_id == "ghost"),
+        );
+        assert!(
+            message.contains("no '[[peers]]' entry configures") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11 `ChannelInBothNamespaces` (§1.8): the check that stops a peer
+    /// claim and a client claim describing the same money. Written in
+    /// mixed case on one side to prove the comparison is over the
+    /// canonical form, not the operator's spelling.
+    #[test]
+    fn rejects_one_channel_configured_in_both_namespaces() {
+        let result = load_peering(|text| {
+            format!(
+                r#"{text}
+[[client_channels]]
+channel_id = "{}"
+counterparty = "{PEER_KEY}"
+chain_id = 31337
+token_network_address = "{PEER_TOKEN_NETWORK}"
+"#,
+                PEER_CHANNEL.to_uppercase().replace("0X", "0x"),
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::ChannelInBothNamespaces { value } if value == PEER_CHANNEL),
+        );
+        assert!(
+            message.contains("counted as credit twice") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11 `AcceptOnlyPeerWithoutCeiling` (§6.4(3)): the accept-only side
+    /// has no other bound, so a defaulted ceiling there is an unowned
+    /// credit decision.
+    #[test]
+    fn rejects_an_accept_only_peering_with_no_explicit_ceiling() {
+        let result = load_peering(|text| {
+            text.replace("endpoint = \"wss://store.example:443/btp\"\n", "")
+                .replace("ceiling = 1000000\n", "")
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::AcceptOnlyPeerWithoutCeiling { id } if id == "store"),
+        );
+        assert!(
+            message.contains("only real bound") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// The same accept-only peering *with* a ceiling loads.
+    #[test]
+    fn an_accept_only_peering_with_an_explicit_ceiling_loads() {
+        let config =
+            load_peering(|text| text.replace("endpoint = \"wss://store.example:443/btp\"\n", ""))
+                .expect("load");
+
+        assert_eq!(config.peers()[0].dial(), None);
+        assert_eq!(config.peers()[0].ceiling(), Some(1_000_000));
+    }
+
+    /// §11 `PeerRouteUndeliverable` (§2.2, §6.4(1)): accept-only, and this
+    /// connector exposes only HTTP, so packets can only ever flow the
+    /// other way -- the route could answer nothing but `T01`.
+    #[test]
+    fn rejects_a_route_to_a_peer_this_connector_can_never_originate_to() {
+        let result = load_peering(|text| {
+            text.replace("peer_expose = \"btp\"", "peer_expose = \"http\"")
+                .replace("endpoint = \"wss://store.example:443/btp\"\n", "")
+        });
+
+        let message = expect_error(result, |error| {
+            matches!(error, ConfigError::PeerRouteUndeliverable { prefix, peer_id }
+                if prefix == "g.example.store" && peer_id == "store")
+        });
+        assert!(
+            message.contains("can never originate to") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11 `DuplicatePeerId`.
+    #[test]
+    fn rejects_a_duplicate_peer_id() {
+        let result = load_peering(|text| {
+            text.replace(
+                "[[peer_channels]]",
+                "[[peers]]\nid = \"store\"\nendpoint = \"wss://other.example/btp\"\ncredential = { secret = \"s\" }\n\n[[peer_channels]]",
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::DuplicatePeerId { id } if id == "store"),
+        );
+        assert!(
+            message.contains("unanswerable") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11's removed-field row, `[[peers]]` half: the boxes run
+    /// bind-mounted configs that lead the repo, so a stale `addr` stops
+    /// the node and says where to read about it.
+    #[test]
+    fn rejects_a_stale_peer_entry_that_still_sets_addr() {
+        let result = load_peering(|text| {
+            text.replace(
+                "[[peers]]\nid = \"store\"\n",
+                "[[peers]]\nid = \"store\"\naddr = \"127.0.0.1:5000\"\n",
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerAddrRemoved { id } if id == "store"),
+        );
+        assert!(
+            message.contains("removed with the raw-TCP peer wire")
+                && message.contains("endpoint")
+                && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11's removed-field row, `peer_wire_addr` half. The *field* is
+    /// still live on this branch -- deleting the listener it binds is PR
+    /// #718 / issue #679's work, not this one's -- so what is asserted
+    /// here is the error identity and its message, which #718 constructs.
+    #[test]
+    fn the_removed_peer_wire_addr_error_names_the_bringup_doc() {
+        let message = ConfigError::PeerWireAddrRemoved.to_string();
+
+        assert!(
+            message.contains("peer_wire_addr")
+                && message.contains("removed with the raw-TCP peer wire")
+                && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// A peer claim's watermark is no less a replay defence than a client
+    /// claim's (issue #605).
+    #[test]
+    fn rejects_peer_channels_with_no_state_dir() {
+        let result = load_peering(|text| {
+            let start = text.find("state_dir = ").expect("fixture");
+            let end = text[start..].find('\n').expect("fixture") + start + 1;
+            format!("{}{}", &text[..start], &text[end..])
+        });
+
+        let message = expect_error(result, |error| {
+            matches!(error, ConfigError::PeerChannelsWithoutStateDir)
+        });
+        assert!(message.contains("spendable again"), "got: {message}");
+    }
+
+    #[test]
+    fn rejects_an_unrecognized_peer_expose_value() {
+        let result =
+            load_peering(|text| text.replace("peer_expose = \"btp\"", "peer_expose = \"tcp\""));
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::InvalidPeerExposure { value } if value == "tcp"),
+        );
+        assert!(message.contains("neither"), "got: {message}");
+    }
+
+    /// Assert `result` failed with the error `predicate` accepts, and hand
+    /// back its rendered message -- so every named-error test can go on to
+    /// assert what the operator actually reads, not merely that load
+    /// failed.
+    fn expect_error(
+        result: Result<Config, ConfigError>,
+        predicate: impl Fn(&ConfigError) -> bool,
+    ) -> String {
+        let error = result.expect_err("expected this config to be refused at load");
+        assert!(predicate(&error), "wrong error variant: {error:?}");
+        error.to_string()
     }
 
     #[test]
@@ -775,29 +1336,6 @@ addr = "127.0.0.1:5000"
         });
 
         assert!(matches!(result, Err(ConfigError::PeerAddrRemoved { .. })));
-    }
-
-    #[test]
-    fn rejects_a_duplicate_peer_id() {
-        let result = with_key_file(|key_path| {
-            format!(
-                r#"
-client_edge_addr = "127.0.0.1:3000"
-
-[signer]
-key_file = "{}"
-
-[[peers]]
-id = "peer-b"
-
-[[peers]]
-id = "peer-b"
-"#,
-                key_path.display()
-            )
-        });
-
-        assert!(matches!(result, Err(ConfigError::DuplicatePeerId { .. })));
     }
 
     #[test]
@@ -1305,13 +1843,24 @@ fee = 5
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
+peer_expose = "both"
 apex = "g.example"
+state_dir = "{state_dir}"
 
 [signer]
-key_file = "{}"
+key_file = "{key_file}"
 
 [[peers]]
 id = "store"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "shared-secret" }}
+
+[[peer_channels]]
+peer_id = "store"
+channel_id = "{PEER_CHANNEL}"
+counterparty_key = "{PEER_KEY}"
+chain_id = 31337
+token_network = "{PEER_TOKEN_NETWORK}"
 
 [[routes]]
 prefix = "g.example.app"
@@ -1332,7 +1881,10 @@ price = 7
 bearer_token = "operator-secret"
 write_keys = ["{key}"]
 "#,
-                key_path.display()
+                key_file = key_path.display(),
+                state_dir = std::env::temp_dir()
+                    .join("connector-config-every-section-state")
+                    .display(),
             )
         })
         .expect("load");
@@ -1340,6 +1892,8 @@ write_keys = ["{key}"]
         assert_eq!(config.routes().len(), 2);
         assert_eq!(config.peer_routes().len(), 1);
         assert_eq!(config.peers().len(), 1);
+        assert_eq!(config.peer_channels().len(), 1);
+        assert_eq!(config.peer_expose(), PeerExposure::Both);
         assert!(config.operator().is_some());
     }
 
