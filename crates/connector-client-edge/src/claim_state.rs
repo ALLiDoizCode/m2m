@@ -221,10 +221,11 @@ async fn resolve_evm(
         return unverified("evm", channel_id_text, "unverified");
     }
 
-    let channel_key = format!("evm:0x{}", hex_encode(&channel_id));
+    let channel_id_hex = format!("0x{}", hex_encode(&channel_id));
+    let channel_key = format!("evm:{channel_id_hex}");
     ChannelStateResult::Verified(verified_state(
         "evm",
-        format!("0x{}", hex_encode(&channel_id)),
+        channel_id_hex,
         state,
         &channel_key,
         channel.deposit_floor,

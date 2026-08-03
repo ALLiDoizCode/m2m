@@ -332,6 +332,20 @@ async fn window_slot(window: &Arc<Semaphore>) -> OwnedSemaphorePermit {
         .expect("the session window semaphore is never closed")
 }
 
+/// A claim's batch just cleared durability: mark its channel recognized,
+/// making the sender eligible to probe (issue #548), and note the
+/// claim-state endpoint's liveness timestamp (issue #693), same as
+/// `handle_ilp`'s HTTP carriage. Shared by both places a BTP claim can
+/// finish durable -- a standalone claim message and a claim riding a
+/// packet -- so the two stay in lockstep.
+fn record_accepted_claim(state: &ClientEdgeState, claim: &ClientClaim) {
+    let channel_key = claim.channel_key();
+    state.connector.recognize_channel(&channel_key);
+    state
+        .claim_gate
+        .note_claim_time(&channel_key, crate::now_unix());
+}
+
 /// A REJECT as a RESPONSE frame: the OER body as the ILP packet, the
 /// running cost total as `toon-accumulated-cost` protocolData (§1.6's
 /// header, carried the only way a frame can), plus whatever `extra`
@@ -426,13 +440,7 @@ async fn handle_frame(
                     tokio::spawn(async move {
                         let _slot = permit;
                         match durability.durable().await {
-                            Ok(()) => {
-                                let channel_key = claim.channel_key();
-                                state.connector.recognize_channel(&channel_key);
-                                state
-                                    .claim_gate
-                                    .note_claim_time(&channel_key, crate::now_unix());
-                            }
+                            Ok(()) => record_accepted_claim(&state, &claim),
                             Err(rejection) => tracing::debug!(
                                 rejection = %rejection.message(),
                                 "standalone BTP claim accepted but not durably recorded"
@@ -563,16 +571,9 @@ async fn finish_frame(
     if let Some((claim, durability)) = admitted {
         match durability.durable().await {
             // A claim that cleared the gate makes the sender eligible to
-            // probe, exactly as on HTTP (issue #548) -- once durable.
-            // Also notes the claim-state endpoint's liveness timestamp
-            // (issue #693), same as `handle_ilp`'s carriage.
-            Ok(()) => {
-                let channel_key = claim.channel_key();
-                state.connector.recognize_channel(&channel_key);
-                state
-                    .claim_gate
-                    .note_claim_time(&channel_key, crate::now_unix());
-            }
+            // probe and notes the claim-state endpoint's liveness
+            // timestamp -- see `record_accepted_claim`.
+            Ok(()) => record_accepted_claim(&state, &claim),
             Err(rejection) => {
                 let _ = reply(
                     &replies,
