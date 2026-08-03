@@ -64,3 +64,18 @@ dialect this ADR describes and observes no change, because it never sends TRANSF
 yet originates a request to it (that caller is the session registry `toon-meta#262`'s
 payout-ledger ticket adds next). See `docs/protocol/client-edge-spec.md` §1.9 for the current,
 normative frame grammar.
+
+## Update (issue #699): the payout ledger exists, still no production caller
+
+`crates/connector-client-edge/src/outbound_ledger.rs`'s `ClientPayoutLedger` is now the client
+edge's mirror of `connector_runtime::ClaimBook`'s outbound (peer-paying) direction: it signs a
+fresh cumulative claim per client channel against that channel's own recorded EIP-712 domain
+(ADR 0024), degrading to no claim at all absent a signer or a domain, exactly as `ClaimBook`
+already does. `btp.rs`'s `payout_claim_protocol_data` carries that claim as a TRANSFER's
+protocolData, JSON like every other entry this dialect carries rather than `WireClaim::encode`'s
+peer-wire binary shape. Both are proven end-to-end (`btp.rs`'s own test signs a claim, sends it
+over a real `BtpSessionHandle::send_transfer`, and verifies the signature on the other end) but
+still have no production caller: deciding when a job completes and which channel to credit is
+`toon-meta#262`'s session registry (connector#698), held until this ticket merged so the two do
+not collide in the same client-edge state. This ticket creates credit only — netting (whether
+that credit raises spendable headroom) is connector#700.
