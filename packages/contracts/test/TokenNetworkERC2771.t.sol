@@ -54,17 +54,17 @@ contract TokenNetworkERC2771Test is Test {
 
     // ===== Helpers =====
 
-    function _forwarderDomainSeparator() internal view returns (bytes32) {
+    function _domainSeparator(string memory name, address verifyingContract) internal view returns (bytes32) {
         bytes32 typeHash =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
         return keccak256(
-            abi.encode(
-                typeHash, keccak256("TokenNetworkForwarder"), keccak256("1"), block.chainid, address(forwarder)
-            )
+            abi.encode(typeHash, keccak256(bytes(name)), keccak256("1"), block.chainid, verifyingContract)
         );
     }
 
-    function _signForwardRequest(
+    function _signForwardRequestFor(
+        ERC2771Forwarder fwd,
+        string memory forwarderName,
         uint256 signerKey,
         address from,
         address to,
@@ -74,10 +74,11 @@ contract TokenNetworkERC2771Test is Test {
     ) internal view returns (ERC2771Forwarder.ForwardRequestData memory) {
         bytes32 structHash = keccak256(
             abi.encode(
-                FORWARD_REQUEST_TYPEHASH, from, to, uint256(0), gas, forwarder.nonces(from), deadline, keccak256(data)
+                FORWARD_REQUEST_TYPEHASH, from, to, uint256(0), gas, fwd.nonces(from), deadline, keccak256(data)
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _forwarderDomainSeparator(), structHash));
+        bytes32 digest =
+            keccak256(abi.encodePacked("\x19\x01", _domainSeparator(forwarderName, address(fwd)), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
 
         return ERC2771Forwarder.ForwardRequestData({
@@ -92,8 +93,16 @@ contract TokenNetworkERC2771Test is Test {
     }
 
     function _executeForwarded(uint256 signerKey, address from, bytes memory data) internal {
-        ERC2771Forwarder.ForwardRequestData memory request =
-            _signForwardRequest(signerKey, from, address(tokenNetwork), 500_000, uint48(block.timestamp + 1 hours), data);
+        ERC2771Forwarder.ForwardRequestData memory request = _signForwardRequestFor(
+            forwarder,
+            "TokenNetworkForwarder",
+            signerKey,
+            from,
+            address(tokenNetwork),
+            500_000,
+            uint48(block.timestamp + 1 hours),
+            data
+        );
 
         // The relayer pays gas; the signer's balance never moves.
         vm.prank(relayer);
@@ -234,35 +243,16 @@ contract TokenNetworkERC2771Test is Test {
         );
 
         bytes memory data = abi.encodeCall(TokenNetwork.openChannel, (bob, 1 hours));
-        bytes32 structHash = keccak256(
-            abi.encode(
-                FORWARD_REQUEST_TYPEHASH,
-                alice,
-                address(tokenNetwork),
-                uint256(0),
-                uint256(500_000),
-                untrustedForwarder.nonces(alice),
-                uint48(block.timestamp + 1 hours),
-                keccak256(data)
-            )
+        ERC2771Forwarder.ForwardRequestData memory request = _signForwardRequestFor(
+            untrustedForwarder,
+            "RogueForwarder",
+            alicePrivateKey,
+            alice,
+            address(tokenNetwork),
+            500_000,
+            uint48(block.timestamp + 1 hours),
+            data
         );
-        bytes32 typeHash =
-            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-        bytes32 domainSeparator = keccak256(
-            abi.encode(typeHash, keccak256("RogueForwarder"), keccak256("1"), block.chainid, address(untrustedForwarder))
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(alicePrivateKey, digest);
-
-        ERC2771Forwarder.ForwardRequestData memory request = ERC2771Forwarder.ForwardRequestData({
-            from: alice,
-            to: address(tokenNetwork),
-            value: 0,
-            gas: 500_000,
-            deadline: uint48(block.timestamp + 1 hours),
-            data: data,
-            signature: abi.encodePacked(r, s, v)
-        });
 
         vm.prank(relayer);
         vm.expectRevert(

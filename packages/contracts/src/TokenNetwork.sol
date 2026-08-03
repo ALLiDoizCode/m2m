@@ -201,6 +201,7 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable, ERC2771Cont
         return ERC2771Context._msgData();
     }
 
+    /// @dev Resolves through the trusted forwarder per ERC-2771; falls back to 0 otherwise.
     function _contextSuffixLength() internal view override(Context, ERC2771Context) returns (uint256) {
         return ERC2771Context._contextSuffixLength();
     }
