@@ -464,7 +464,12 @@ byte-for-byte, base64-encoded, in a `Payment-Required` response header:
       "payTo": "g.example.app",
       "maxTimeoutSeconds": 60,
       "httpEndpoint": "/ilp",
-      "extra": { "ilpAddress": "g.example.app", "endpoint": "/ilp", "price": "100" }
+      "extra": {
+        "ilpAddress": "g.example.app",
+        "endpoint": "/ilp",
+        "price": "100",
+        "sessionLeaseTtlMs": 120000
+      }
     }
   ]
 }
@@ -492,6 +497,22 @@ carries `requiredTransport` (`"http"` or `"btp"`), naming the transport the rout
 requires. An ordinary unpaid-request greeting (above) never sets this field. The BTP carriage
 answers the mirror case (a route restricted to HTTP, reached over the websocket session) the same
 way; see §1.9 step 3.
+
+**`extra.sessionLeaseTtlMs`** ([issue #722](https://github.com/toon-protocol/connector/issues/722),
+`toon-meta#262` decision 12): unlike every other `extra` field above, always present, on every
+greeting this connector answers — a settlement-less node still has a client session registry. The
+value is
+[`connector_client_edge::session_registry::SESSION_LEASE_BACKSTOP_TTL`](../../crates/connector-client-edge/src/session_registry.rs)
+in milliseconds, the same constant §1.9's "Session registry: the socket is the lease" section
+describes — never a second literal typed nearby, so this field cannot drift from what the registry
+actually enforces. It exists because that constant is a Rust `pub const`: nothing outside this
+crate, and nothing outside Rust at all, has any path to read it except off the wire. A consumer in
+any language — `buzz#84`'s relay-side provider-freshness window among them — reads this field
+instead of hardcoding a guessed millisecond count, satisfying the cross-plane invariant that
+freshness must never exceed this connector's own lease. Wiring `buzz#84`'s
+`providerAvailability.ts` to call this field is left to a follow-up in the `buzz` repository; this
+connector's obligation is that the value is on the wire and provably tied to the enforced constant
+(pinned by a same-crate test), not that every consumer has been updated yet.
 
 ### 1.5 Request-request binding (RFC 9421)
 
@@ -798,7 +819,9 @@ during the disagreement this connector would route paid work into a hole.
   producing frames, checked lazily on lookup rather than by a background sweep.
   **Cross-plane invariant:** `buzz#84`'s relay-side provider-freshness window must never exceed
   this value, or a buyer pays for a job advertised as routable here after this connector has
-  already given up on it — read the value from that constant rather than duplicating a guess.
+  already given up on it. `buzz#84` is TypeScript and has no path to import a Rust `pub const`
+  (issue #722) — it reads `extra.sessionLeaseTtlMs` off the §1.4 greeting instead (see §1.4), the
+  same value this constant enforces, rather than duplicating a guess.
 
 No production caller decides when to push a job to a client session yet — that is the next
 ticket's job, the same posture #697/#699 shipped their own foundations under. What this ticket
