@@ -1,7 +1,16 @@
 # Bringing up the first Rust peer link (BTP over `wss`)
 
+> **Carriage choice.** ADR 0027 gives operators two peer carriages — BTP over `wss://` and
+> ILP-over-HTTP over `https://` — selected per connector (`[peers].expose`) and per peer (the
+> `endpoint` scheme). **This bring-up uses BTP**, because it is a standing high-frequency fleet link
+> and because BTP is the only carriage a NAT'd operator can use, so it is the one worth proving
+> first. An HTTP peering follows the same gates with the header equivalents
+> (`Payment-Channel-Claim`, `Toon-Claim-Ack`, `Toon-Accumulated-Cost`) and the one difference ADR
+> 0027 names: on a peering where only one side dials, the non-dialing side cannot FLUSH and must set
+> a lower exposure ceiling instead of relying on `flushIntervalMs`.
+
 Operator runbook for
-[ADR 0027](../adr/0027-connectors-peer-over-btp-and-the-raw-tcp-peer-wire-is-deleted.md).
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
 
 > **This replaces the four-phase migration plan that used to live at
 > `btp-peer-transport-migration.md`.** That plan assumed traffic had to be drained off the raw-TCP
@@ -30,11 +39,14 @@ proven, because they are the default client edge and both ends of the only inter
 ## Preconditions
 
 - The raw-TCP transport is deleted; `PeerTransport` and `InProcessPeerTransport` remain.
-- The peer BTP sub-protocol entries and role-by-auth are specified, with canonical vectors
-  (ADR 0021): `payment-channel-claim`, `claim-ack`, `toon-minimum-delivery`,
-  `toon-accumulated-cost`.
-- `[[peers]]` accepts a `wss://` endpoint and a credential; `[[peer_channels]]` exists and wires
-  `ClaimBook`'s channel id, counterparty verification key and EIP-712 domain.
+- Both carriages' peer entries/headers and role-by-auth are specified, with **shared** canonical
+  vectors (ADR 0021): `payment-channel-claim` / `Payment-Channel-Claim`, `claim-ack` /
+  `Toon-Claim-Ack`, `toon-minimum-delivery` / `Toon-Minimum-Delivery`, `toon-accumulated-cost` /
+  `Toon-Accumulated-Cost`.
+- `[peers].expose` selects the listeners; each `[[peers]]` entry has an `endpoint` URL whose scheme
+  selects the dialed carriage, plus a credential; `[[peer_channels]]` exists and wires `ClaimBook`'s
+  channel id, counterparty verification key and EIP-712 domain. A peering with no dialable
+  intersection is a **load-time error**.
 - **Peer-forwarded routes are priced and charged (#620).** Non-negotiable: a peer-forwarded route
   that is not charged is a free-write path on `g.toon`, and claims spent for free cannot be
   recharged.
