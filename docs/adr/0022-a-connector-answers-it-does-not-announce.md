@@ -79,6 +79,13 @@ This does not disturb #492's finding about the peer wire, which stays private, p
 unauthenticated on its own segment. It is the client edge that becomes public on boxes where it is
 not, and that is a different port with different exposure.
 
+> **Superseded consequence (2026-08-03,
+> [ADR 0027](0027-connectors-peer-over-btp-and-the-raw-tcp-peer-wire-is-deleted.md)):** the peer
+> wire no longer "stays private, plaintext and unauthenticated on its own segment" — it is deleted,
+> and connector↔connector traffic becomes an authenticated, TLS-terminated BTP session on a public
+> `wss://` URL. This ADR's own decision — a connector answers, it does not announce — is unaffected,
+> and its "ask direct, pay routed" shape is unchanged.
+
 An unauthenticated public endpoint returning identity and prices is a denial-of-service surface, and
 prices stop being private. Both are accepted as the cost of selling.
 
