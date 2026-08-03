@@ -1,9 +1,22 @@
-//! Issue #572: `contracts/TokenNetwork.json` and `contracts/TokenNetworkRegistry.json` must have
-//! a reproducible origin -- a real `forge build` of `packages/contracts` -- and regenerating
-//! them against an unchanged `packages/contracts/src` must be a no-op. This is the gate that
-//! keeps the committed ABI from drifting away from the Solidity it claims to describe: if
-//! someone hand-edits either JSON file, or if `packages/contracts/src` changes without
-//! `contracts/regenerate-token-network-abi.sh` being rerun, this test fails.
+//! Issue #572 (narrowed by #719): `contracts/TokenNetwork.json` and
+//! `contracts/TokenNetworkRegistry.json` must have a reproducible origin -- a real `forge build`
+//! of `packages/contracts` -- and regenerating them against an unchanged `packages/contracts/src`
+//! must leave the ABI unchanged. This is the gate that keeps the committed ABI from drifting away
+//! from the Solidity it claims to describe: if someone hand-edits the ABI, or if
+//! `packages/contracts/src` changes without `contracts/regenerate-token-network-abi.sh` being
+//! rerun, this test fails.
+//!
+//! Only `abi` is compared against a fresh build. `bytecode`/`deployedBytecode` are deliberately
+//! excluded from the comparison: solc appends a trailing CBOR-encoded IPFS metadata hash to both
+//! (issue #719's reproduction: the two artifacts differ only 99.5% through, immediately after the
+//! CBOR marker `a2646970667358221220`), and that hash is derived from source file paths and the
+//! exact compiler settings, so it varies by build environment. `ci.yml` installs
+//! `foundry-rs/foundry-toolchain@v1` with no version pin and `contracts.yml` uses `nightly`, so a
+//! fresh local build's bytecode can differ from CI's even when the Solidity is unchanged --
+//! comparing it here would make the test unfixable by a contributor for any real Solidity change
+//! (see the superseded #707). Do not add the bytecode comparison back. The committed JSON still
+//! carries `bytecode`/`deployedBytecode`, since the crate reads them at runtime; they are simply
+//! no longer asserted against a fresh build.
 //!
 //! Builds real Solidity with a real `forge` (gated by `support::require_forge`, mirroring
 //! `support::require_anvil`'s CI-vs-local policy) -- no mocked compiler output.
@@ -23,28 +36,7 @@ fn bindings_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts")
 }
 
-/// The same trim `regenerate-token-network-abi.sh` applies: a full forge artifact carries
-/// `methodIdentifiers`/`rawMetadata`/`metadata`/`id` alongside `abi`/`bytecode`/
-/// `deployedBytecode`; only the latter three are the committed convention this crate already
-/// uses for `MockERC20.json`.
-fn trim_artifact(full: &Value) -> Value {
-    serde_json::json!({
-        "abi": full["abi"],
-        "bytecode": {
-            "object": full["bytecode"]["object"],
-            "sourceMap": full["bytecode"]["sourceMap"],
-            "linkReferences": full["bytecode"]["linkReferences"],
-        },
-        "deployedBytecode": {
-            "object": full["deployedBytecode"]["object"],
-            "sourceMap": full["deployedBytecode"]["sourceMap"],
-            "linkReferences": full["deployedBytecode"]["linkReferences"],
-            "immutableReferences": full["deployedBytecode"]["immutableReferences"],
-        },
-    })
-}
-
-fn assert_artifact_matches_committed(contract_name: &str) {
+fn assert_abi_matches_committed(contract_name: &str) {
     let forge_output = contracts_dir()
         .join("out")
         .join(format!("{contract_name}.sol"))
@@ -54,7 +46,6 @@ fn assert_artifact_matches_committed(contract_name: &str) {
             .unwrap_or_else(|e| panic!("read {}: {e}", forge_output.display())),
     )
     .unwrap_or_else(|e| panic!("parse {}: {e}", forge_output.display()));
-    let freshly_built = trim_artifact(&full);
 
     let committed_path = bindings_dir().join(format!("{contract_name}.json"));
     let committed: Value = serde_json::from_str(
@@ -64,8 +55,8 @@ fn assert_artifact_matches_committed(contract_name: &str) {
     .unwrap_or_else(|e| panic!("parse {}: {e}", committed_path.display()));
 
     assert_eq!(
-        freshly_built, committed,
-        "contracts/{contract_name}.json does not match a fresh `forge build` of \
+        full["abi"], committed["abi"],
+        "contracts/{contract_name}.json's ABI does not match a fresh `forge build` of \
          packages/contracts/src/{contract_name}.sol -- regenerate it with \
          contracts/regenerate-token-network-abi.sh and commit the result"
     );
@@ -88,6 +79,6 @@ fn token_network_and_registry_abis_match_a_fresh_forge_build() {
         contracts_dir()
     );
 
-    assert_artifact_matches_committed("TokenNetwork");
-    assert_artifact_matches_committed("TokenNetworkRegistry");
+    assert_abi_matches_committed("TokenNetwork");
+    assert_abi_matches_committed("TokenNetworkRegistry");
 }
