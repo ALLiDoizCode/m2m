@@ -79,6 +79,7 @@ mod channels;
 mod claim_gate;
 mod claim_state;
 mod lookup_budget;
+mod outbound_ledger;
 pub use channels::{
     ChannelLivenessPolicy, ChannelLookupFailed, ChannelResolutionError, ClientChannelRegistry,
     ClientChannelSource, DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel,
@@ -91,6 +92,7 @@ pub use lookup_budget::{
     DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL, DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT,
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
+pub use outbound_ledger::ClientPayoutLedger;
 
 /// The BTP carriage's default per-session in-flight window (issue #688):
 /// how many of one session's frames may be past claim admission at once.

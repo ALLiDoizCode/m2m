@@ -691,6 +691,15 @@ silently dropped exactly as it was before TRANSFER existed.
    requires a responder answer every request, satisfied at the protocol level. The settlement/
    netting accounting a TRANSFER's `amount` will eventually drive is out of scope here; that is
    `toon-meta#262`'s payout-ledger ticket, built on this foundation.
+
+   **Update (issue #699):** the outbound half of that ledger now exists —
+   `connector_client_edge::ClientPayoutLedger` signs a cumulative claim per client channel
+   (mirroring `connector_runtime::ClaimBook`'s peer-side outbound direction), and
+   `payout_claim_protocol_data` carries it as a payout TRANSFER's `payout-claim` protocolData
+   entry, JSON like every other entry this dialect carries. This only _creates credit_ and has no
+   production caller yet: deciding when a packet's fulfillment should trigger a payout, and to
+   which channel, belongs to the session registry (connector#698) this ticket was held for.
+
 7. **A RESPONSE or ERROR whose requestId this connector itself originated** (issue #697): resolved
    against that outbound request rather than treated as inbound traffic. One this connector never
    originated — every RESPONSE/ERROR a deployed client sends today — is silently dropped, exactly
