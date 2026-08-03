@@ -696,6 +696,12 @@ silently dropped exactly as it was before TRANSFER existed.
    answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2 is not
    yet implemented on the HTTP carriage either, and an empty `secret` is the documented
    permissionless mirror. Authorization to _write_ comes from the claim, never the session.
+
+   **Update (issue #698):** a non-empty `peerId` also binds this session into the client session
+   registry, keyed by that value — see "Session registry: the socket is the lease" below. Binding
+   is best-effort and never blocks the ack: a session with no usable `peerId` is simply never
+   registered.
+
 2. **Prepare + claim**: a MESSAGE with a non-empty `ilpPacket` is decoded as a PREPARE. A
    protocolData entry named `payment-channel-claim` carries the claim as **raw UTF-8 JSON**
    (`JSON.stringify(claim)` — no base64 layer; the base64 in §1.3's table is an HTTP-header
@@ -741,7 +747,12 @@ silently dropped exactly as it was before TRANSFER existed.
    `payout_claim_protocol_data` carries it as a payout TRANSFER's `payout-claim` protocolData
    entry, JSON like every other entry this dialect carries. This only _creates credit_ and has no
    production caller yet: deciding when a packet's fulfillment should trigger a payout, and to
-   which channel, belongs to the session registry (connector#698) this ticket was held for.
+   which channel, is job-dispatch work built on top of the session registry below (issue #698).
+
+   **Update (issue #698):** the session registry now exists (see "Session registry: the socket is
+   the lease" below) and `SessionRegistry::deliver` can originate a MESSAGE through it end to end,
+   fenced against a stale generation — but nothing yet decides _when_ to call it for a payout or a
+   job. That decision remains the next ticket's.
 
 8. **A RESPONSE or ERROR whose requestId this connector itself originated** (issue #697): resolved
    against that outbound request rather than treated as inbound traffic. One this connector never
@@ -761,6 +772,39 @@ them; `requestId` is the correlation, per this section's own frame grammar, and 
 client resolves responses through its pending-request map by exactly that id. A client MUST NOT
 assume responses arrive in request order. Concurrent sessions writing on the same channel still
 serialize at the gate's watermark lock, exactly as concurrent HTTP requests do.
+
+**Session registry: the socket is the lease (issue #698, `toon-meta#262` decision 12).**
+`connector_client_edge::SessionRegistry` answers, for a client-edge address, which BTP session is
+live right now — bound at step 1's auth (keyed by the declared `peerId`) and cleared when that
+same session's read loop ends. This is deliberately the only record of reachability: there is no
+separate route entry with its own TTL, because a route record and a socket can disagree, and
+during the disagreement this connector would route paid work into a hole.
+
+- **Fencing generations.** Each bind for an address is assigned the next number from one
+  monotonic counter shared by the whole registry. The highest generation for an address always
+  wins; a rebind's cleanup can never remove a binding at a generation newer than the one it names.
+  This is buzz's own fencing law (`buzz-relay-mesh/src/wire.rs`): "membership is a hint; the
+  fenced generation is the arbiter. The mesh may say 'don't dial' — it may never say 'take over.'"
+  A caller retrying a delivery across a reconnect passes the generation it last saw; if the
+  address has since moved to a higher one, the attempt is discarded rather than raced against the
+  session that superseded it.
+- **T-class rejection, never R00.** Every failure path — no live session for the address at all,
+  or one that died or timed out mid-delivery — answers `T01` (Peer Unreachable): the packet is
+  fine, there is currently no way to reach this peer, and the sender should retry. `R00` (Transfer
+  Timed Out) would wrongly imply the packet's own expiry passed.
+- **Backstop TTL.** The primary liveness signal is the socket's own read loop ending, which
+  unbinds a session immediately. `connector_client_edge::session_registry::SESSION_LEASE_BACKSTOP_TTL`
+  (120s) exists only for a socket that still looks alive at the TCP layer but has stopped
+  producing frames, checked lazily on lookup rather than by a background sweep.
+  **Cross-plane invariant:** `buzz#84`'s relay-side provider-freshness window must never exceed
+  this value, or a buyer pays for a job advertised as routable here after this connector has
+  already given up on it — read the value from that constant rather than duplicating a guess.
+
+No production caller decides when to push a job to a client session yet — that is the next
+ticket's job, the same posture #697/#699 shipped their own foundations under. What this ticket
+lands is real in production today: every BTP session's auth, per-frame liveness and close already
+run through `bind`/`touch`/`unbind`, so the registry and its fencing invariant are exercised by
+every live session, not only by tests.
 
 ### 1.10 Owner-authenticated claim state: `POST /ilp/claim-state` (issue #693)
 

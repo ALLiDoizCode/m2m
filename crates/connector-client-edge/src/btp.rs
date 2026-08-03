@@ -441,6 +441,13 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
     // inbound RESPONSE/ERROR still resolves to nothing, exactly as before
     // this table existed.
     let outbound = Arc::new(OutboundRequests::new());
+    // This session's binding in the client session registry (issue #698),
+    // if auth has named one: the address it registered as and the fencing
+    // generation that bind returned. `None` until an auth frame with a
+    // usable `peerId` arrives, and for the lifetime of a session that
+    // never sends one -- unbound, exactly as every session behaved before
+    // this registry existed.
+    let mut binding: Option<(String, u64)> = None;
     while let Some(received) = stream.next().await {
         let frame_bytes = match received {
             Ok(Message::Binary(bytes)) => bytes,
@@ -448,14 +455,27 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
             Ok(_) => continue,
             Err(_) => break,
         };
-        if handle_frame(&frame_bytes, &state, &window, &replies, &outbound)
-            .await
-            .is_err()
+        if handle_frame(
+            &frame_bytes,
+            &state,
+            &window,
+            &replies,
+            &outbound,
+            &mut binding,
+        )
+        .await
+        .is_err()
         {
             // The socket's send half is gone; nothing further this session
             // reads could ever be answered.
             break;
         }
+    }
+    // Clear this session's own binding, fenced against a reconnect that
+    // has already superseded it (issue #698's "may never say take over"):
+    // `unbind` is a no-op if `binding`'s generation is no longer current.
+    if let Some((address, generation)) = binding {
+        state.session_registry.unbind(&address, generation);
     }
     drop(replies);
     let _ = writer.await;
@@ -492,6 +512,24 @@ fn record_accepted_claim(state: &ClientEdgeState, claim: &ClientClaim) {
     state
         .claim_gate
         .note_claim_time(&channel_key, crate::now_unix());
+}
+
+/// Best-effort extraction of an auth frame's declared identity (issue
+/// #698): the same `{"peerId": ..., "secret": ...}` shape the client
+/// already sends (`auth_frame_vector` in this module's own tests), used
+/// only as the session registry's bind key -- never as authorization,
+/// which still comes solely from each frame's claim, exactly as the doc
+/// comment on the auth branch above says. `None` for anything that does
+/// not parse as JSON, carries no `peerId`, or declares an empty one; a
+/// session with no usable declared identity is simply never bound.
+fn auth_peer_id(auth_data: &[u8]) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_slice(auth_data).ok()?;
+    let peer_id = json.get("peerId")?.as_str()?;
+    if peer_id.is_empty() {
+        None
+    } else {
+        Some(peer_id.to_string())
+    }
 }
 
 /// A REJECT as a RESPONSE frame: the OER body as the ILP packet, the
@@ -552,7 +590,7 @@ const OUTBOUND_ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 /// constructs one of these (`btp_session`) so [`resolve`](Self::resolve)
 /// -- the inbound-correlation half -- is live in production even before
 /// anything calls [`reserve`](Self::reserve) to originate a request.
-struct OutboundRequests {
+pub(crate) struct OutboundRequests {
     // `#[allow(dead_code)]`: written by `new`, read only inside `reserve`
     // (no production caller yet -- see `BtpSessionHandle`'s note).
     #[allow(dead_code)]
@@ -561,7 +599,7 @@ struct OutboundRequests {
 }
 
 impl OutboundRequests {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             // Start at 1: every existing test and the deployed client both
             // treat 0 as an ordinary id, but starting there is needless
@@ -597,7 +635,7 @@ impl OutboundRequests {
     /// there. Returns whether it did -- a `false` here is ordinary: it is
     /// what every RESPONSE/ERROR this connector receives resolves to today,
     /// since nothing yet originates a request for one to answer.
-    fn resolve(&self, frame: BtpFrame) -> bool {
+    pub(crate) fn resolve(&self, frame: BtpFrame) -> bool {
         let sender = self
             .pending
             .lock()
@@ -662,7 +700,7 @@ pub(crate) struct BtpSessionHandle {
 
 #[allow(dead_code)]
 impl BtpSessionHandle {
-    fn new(replies: mpsc::Sender<Vec<u8>>, outbound: Arc<OutboundRequests>) -> Self {
+    pub(crate) fn new(replies: mpsc::Sender<Vec<u8>>, outbound: Arc<OutboundRequests>) -> Self {
         Self { replies, outbound }
     }
 
@@ -721,12 +759,18 @@ impl BtpSessionHandle {
 /// unrecognized frame type, a standalone claim (fire-and-forget by the
 /// client's own contract), a MESSAGE carrying neither auth nor claim nor
 /// packet, and a frame too short to even name a requestId.
+///
+/// `binding` is this session's own slot in the client session registry
+/// (issue #698): `None` until an auth frame installs one, updated here on
+/// auth and touched on every frame afterward so `btp_session`'s own
+/// unbind-on-close has something to fence against.
 async fn handle_frame(
     frame_bytes: &[u8],
     state: &Arc<ClientEdgeState>,
     window: &Arc<Semaphore>,
     replies: &mpsc::Sender<Vec<u8>>,
     outbound: &Arc<OutboundRequests>,
+    binding: &mut Option<(String, u64)>,
 ) -> Result<(), SessionGone> {
     let frame = match decode_frame(frame_bytes) {
         Ok(frame) => frame,
@@ -739,6 +783,14 @@ async fn handle_frame(
             .await;
         }
     };
+    // A live session is still live (issue #698 AC5's backstop TTL clock),
+    // whatever it just sent -- a no-op if `binding`'s generation has
+    // already been superseded by a reconnect on another socket.
+    if let Some((address, generation)) = binding.as_ref() {
+        state
+            .session_registry
+            .touch(address, *generation, crate::now_unix());
+    }
     // RESPONSE/ERROR answering a request *this connector* originated
     // (issue #697): correlate and stop, whether or not it matched --
     // ordinary inbound traffic that answers nothing the connector itself
@@ -766,11 +818,28 @@ async fn handle_frame(
     // implemented on the HTTP carriage either, and an empty `secret` is the
     // documented permissionless mirror. Authorization to write comes from
     // the claim on each packet, never from the session.
-    if frame
+    //
+    // Issue #698: a declared, non-empty `peerId` doubles as this session's
+    // key in the client session registry -- "the socket is the lease".
+    // Binding is best-effort and never blocks the ack: a session with no
+    // usable `peerId` (missing, empty, or the auth body not even JSON) is
+    // simply never registered, unaffected otherwise, exactly as before
+    // this registry existed. Re-auth on an already-bound session rebinds
+    // under a fresh generation, which is the correct outcome even though
+    // nothing sends a second auth today.
+    if let Some(entry) = frame
         .protocol_data
         .iter()
-        .any(|pd| pd.name == AUTH_PROTOCOL)
+        .find(|pd| pd.name == AUTH_PROTOCOL)
     {
+        if let Some(address) = auth_peer_id(&entry.data) {
+            let handle = BtpSessionHandle::new(replies.clone(), Arc::clone(outbound));
+            let generation =
+                state
+                    .session_registry
+                    .bind(address.clone(), handle, crate::now_unix());
+            *binding = Some((address, generation));
+        }
         return reply(replies, encode_response(frame.request_id, &[], &[])).await;
     }
 
