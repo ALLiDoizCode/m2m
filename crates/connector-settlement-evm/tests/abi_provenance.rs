@@ -41,7 +41,7 @@ fn assert_abi_matches_committed(contract_name: &str) {
         .join("out")
         .join(format!("{contract_name}.sol"))
         .join(format!("{contract_name}.json"));
-    let full: Value = serde_json::from_str(
+    let fresh: Value = serde_json::from_str(
         &std::fs::read_to_string(&forge_output)
             .unwrap_or_else(|e| panic!("read {}: {e}", forge_output.display())),
     )
@@ -55,7 +55,7 @@ fn assert_abi_matches_committed(contract_name: &str) {
     .unwrap_or_else(|e| panic!("parse {}: {e}", committed_path.display()));
 
     assert_eq!(
-        full["abi"], committed["abi"],
+        fresh["abi"], committed["abi"],
         "contracts/{contract_name}.json's ABI does not match a fresh `forge build` of \
          packages/contracts/src/{contract_name}.sol -- regenerate it with \
          contracts/regenerate-token-network-abi.sh and commit the result"
