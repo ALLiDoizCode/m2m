@@ -510,7 +510,7 @@ crate, and nothing outside Rust at all, has any path to read it except off the w
 any language — `buzz#84`'s relay-side provider-freshness window among them — reads this field
 instead of hardcoding a guessed millisecond count, satisfying the cross-plane invariant that
 freshness must never exceed this connector's own lease. Wiring `buzz#84`'s
-`providerAvailability.ts` to call this field is left to a follow-up in the `buzz` repository; this
+`providerAvailability.ts` to read this field is left to a follow-up in the `buzz` repository; this
 connector's obligation is that the value is on the wire and provably tied to the enforced constant
 (pinned by a same-crate test), not that every consumer has been updated yet.
 
