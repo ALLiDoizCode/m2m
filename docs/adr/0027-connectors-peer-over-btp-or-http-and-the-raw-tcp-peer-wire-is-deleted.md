@@ -211,7 +211,7 @@ loses an exposure bound.
 
 | peer-wire frame              | BTP carriage (`wss://`)                                                                                              | ILP-over-HTTP carriage (`https://`)                                                                       |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `0x01` PREPARE               | **MESSAGE**, ILP PREPARE in `ilpPacket`; claim as a `payment-channel-claim` protocolData entry (raw UTF-8 JSON)      | **POST** with the OER PREPARE as the body; claim in the `Payment-Channel-Claim` request header            |
+| `0x01` PREPARE               | **MESSAGE**, ILP PREPARE in `ilpPacket`; claim as a `payment-channel-claim` protocolData entry (raw UTF-8 JSON)      | **POST** with the OER PREPARE as the body; claim in the `ILP-Payment-Channel-Claim` request header        |
 | `0x02` FULFILL               | **RESPONSE** under the MESSAGE's `requestId`                                                                         | **200** with the OER FULFILL as the body                                                                  |
 | `0x03` REJECT                | **RESPONSE** under the MESSAGE's `requestId`                                                                         | **200** with the OER REJECT as the body                                                                   |
 | `0x04` **FLUSH**             | **TRANSFER** (type 7): `amount` = new cumulative, claim in `payment-channel-claim`, no `ilpPacket`                   | **POST with an empty ILP body** and the claim header — a standalone claim submission                      |
@@ -222,6 +222,14 @@ loses an exposure bound.
 The header/protocolData mirroring is not invented here: `client-edge-spec.md` §1.9 already describes
 each BTP protocolData entry as "the BTP analogue of the HTTP header" for exactly these fields. The
 peer side keeps that correspondence so the two carriages cannot drift, and the vectors below pin it.
+
+**Corrected: the HTTP claim header is `ILP-Payment-Channel-Claim`.** An earlier version of the table
+above wrote it `Payment-Channel-Claim`, mirroring the BTP entry name. The deployed client edge sends
+and parses `ilp-payment-channel-claim` (`crates/connector-client-edge/src/lib.rs`), and this ADR's
+own "one codec, reused verbatim" rule settles which spelling wins: a new name would need a second
+decoder on the HTTP path, which is exactly the drift the shared vectors exist to prevent.
+`docs/protocol/peer-carriage-spec.md` §3 pins the deployed name. The table above now carries it,
+because an ADR that names a header the wire does not use is a trap for whoever implements from it.
 
 **FLUSH is a TRANSFER on BTP, and that is not an approximation.** FLUSH exists because a payer that
 fulfilled a peer's last packet of the day would otherwise leave that peer's exposure unclaimed
@@ -240,18 +248,41 @@ whichever side just fulfilled, and on HTTP only the **dialing** side can origina
 - **On an HTTP peering where both sides dial each other** (both expose HTTP, both configure an
   `endpoint`), FLUSH is fully symmetric and `flushIntervalMs` bounds trailing exposure on both sides,
   exactly as on BTP.
-- **On an HTTP peering where only one side dials**, the non-dialing side **cannot flush**, and
-  `flushIntervalMs` does not bound its trailing exposure at all. Two mitigations, both required:
-  1. That side MUST set a **lower exposure ceiling** (peer-wire-spec §5.3) — the ceiling, not the
-     flush timer, becomes its real bound, and the config must make that explicit rather than leaving
-     an operator to discover it.
+- **On an HTTP peering where only one side dials**, the accept-only side cannot originate anything at
+  all, a FLUSH included. Everything this ADR requires of that side follows from that and is unchanged.
+  What changed is the reason.
+
+  **Correction, from `docs/protocol/peer-carriage-spec.md` §6.4 (recorded in its §12).** This ADR
+  previously said that side "cannot flush, and `flushIntervalMs` does not bound its trailing exposure
+  at all", which reads the asymmetry as a settlement-time loss. That is exactly true only in the
+  residual case below; in the ordinary accept-only configuration the premise is wrong. Packets flow
+  only in the dialing direction, and debt flows with packets (peer-wire-spec §3.2 — the sender owes),
+  so an accept-only side is structurally the **payee**. It has no trailing exposure of its own, and
+  therefore no flush bound to lose. The real consequence is **unidirectional packet flow**: the
+  accept-only side can never forward a packet to that peer, so a route naming it as next hop is
+  undeliverable, must be a named load-time error where detectable and must reject at runtime
+  otherwise. **The asymmetry bites at configuration time, not at settlement time** — and it is more
+  likely to surprise an operator than the flush question is.
+
+  **The conclusions are unchanged; the sharper premise strengthens them.**
+  1. That side MUST carry an **explicit exposure ceiling** (peer-wire-spec §5.3). The ceiling, not
+     the flush timer, is its only real bound — it cannot originate, so it cannot prompt a payer that
+     has simply stopped sending, and unlike BTP it has no live session to read liveness from. Its
+     absence MUST be a named load-time error, never a default: a defaulted ceiling on the one
+     configuration where the ceiling is the sole bound is an unowned credit decision.
   2. It MAY set a `Toon-Flush-Requested: <channel-id>` response header on any response, which asks
      the dialing peer to send its pending claim on its next request or immediately as a standalone
      claim POST. This is a hint, not a guarantee — the ceiling is what actually holds.
+  3. **The residual flush case survives**, and is where the original wording was right: an
+     accept-only side that nonetheless holds a pending claim for that peer — because it could dial
+     earlier and can no longer, or its configured endpoint is unreachable — cannot send the FLUSH at
+     all, and `flushIntervalMs` bounds nothing for it. The claim stays pending until it can dial
+     again, and its counterparty's protection meanwhile is that counterparty's own ceiling.
 
-Stating this plainly is the point: **the HTTP carriage trades a flush-timer bound for a ceiling
-bound in the non-dialing direction.** An operator who wants the flush timer to mean what the spec
-says should either dial as well, or use BTP.
+Stating this plainly is the point: **the accept-only direction of an HTTP peering is a payee-only
+direction, bounded by a ceiling rather than by a flush timer.** An operator who wants packets to flow
+both ways, or wants the flush timer to mean what the spec says, should either dial as well, or use
+BTP.
 
 **CLAIM_ACK becomes a field on a response both carriages already require, and this is strictly better
 than the frame it replaces.** Three properties are preserved and two defects are fixed, identically
@@ -284,6 +315,18 @@ The one honest loss is encoding-level and identical on both: CLAIM_ACK was a dis
 behaviour:** a missing `claim-ack` / `Toon-Claim-Ack` on a response answering a claim-bearing request
 means **not acknowledged** — the claim stays pending and the flush timer keeps running — never
 accepted.
+
+**And a retransmission at the current watermark MUST be re-acked `accepted`.** "Not acknowledged"
+implies retransmission — a lost ack and a lost claim are indistinguishable at the payer — but neither
+this ADR nor peer-wire-spec §3.2 said what a payee does with the byte-identical retransmission that
+follows, and §3.2's strictly-advancing rule read literally refuses it `nonce_not_advancing`, which
+wedges the peering permanently on a single lost ack. `docs/protocol/peer-carriage-spec.md` §6.3
+supplies the rule and this ADR carries it: a claim whose `(channel, nonce, cumulative, signature)` is
+byte-identical to the one already at the payee's watermark MUST be answered `{"result":"accepted"}`
+and MUST NOT be refused `nonce_not_advancing`, while a claim at the same nonce differing in any other
+field is a different claim and MUST still be refused. It records nothing and advances nothing, so it
+changes no exposure — but it is a new normative rule rather than a restatement, which is why it is
+named here and not left in the spec alone. §6.3 is where it is defined and vectored.
 
 Every row above gets canonical vectors per [ADR 0021](0021-vectors-are-normative-prose-is-not.md),
 and **the vectors are shared across carriages**: the same claim, minimum-delivery and accumulated-cost
