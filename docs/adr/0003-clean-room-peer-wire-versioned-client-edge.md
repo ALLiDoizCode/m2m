@@ -1,5 +1,14 @@
 # The peer wire is redesigned freely; the client edge is versioned
 
+> **Partly superseded (2026-08-03) by
+> [ADR 0027](0027-connectors-peer-over-btp-and-the-raw-tcp-peer-wire-is-deleted.md).** The
+> **peer-wire half** of this ADR is reversed: connectors peer over BTP (RFC-0023) on `wss://`
+> URLs and the raw-TCP wire is deleted. The premise below — _"Both ends of the peer wire are
+> operator-controlled"_ — expired when an open market (`toon-meta#262`, `#265`) made a
+> third-party connector a real participant, and raw-TCP peering cannot reach one behind NAT.
+> The **client-edge half** of this ADR — the edge is versioned, edge complexity is paid twice —
+> stands unchanged.
+
 The connector has two protocol surfaces with opposite change economics, and treating them as
 one protocol has been costing us design freedom on the half that doesn't need protecting. We
 are redesigning the peer wire from scratch and freezing nothing, while the client edge gains

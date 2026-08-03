@@ -1,5 +1,15 @@
 # Client BTP rides the client edge; peers stay on the peer wire
 
+> **Partly superseded (2026-08-03) by
+> [ADR 0027](0027-connectors-peer-over-btp-and-the-raw-tcp-peer-wire-is-deleted.md).** Peers now
+> use BTP too, so the title's second clause and the "every BTP session is a client session by
+> construction" argument below no longer hold: role is decided by authentication (a configured
+> `[[peers]]` credential **and** a `[[peer_channels]]` binding), not by transport. Everything
+> this ADR says about the **client** edge — one gate, two carriages, the ordering contract, the
+> deployed dialect and its symmetric extension — stands unchanged. Note for anyone chasing a
+> reference: an unmerged draft on branch `adr/btp-peer-transport` also carried the number 0026;
+> it was renumbered to 0027. This file keeps 0026.
+
 `crates/connector-client-edge` now serves a BTP websocket transport at `GET /ilp/btp`
 (client-edge-spec.md §1.9), mounted on the same router — and therefore the same bind address, the
 same `ClientClaimGate` instance, the same watermarks and journal — as `POST /ilp`. It is a second
