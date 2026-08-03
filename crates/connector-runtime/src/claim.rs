@@ -661,6 +661,25 @@ impl ClaimBook {
             .and_then(|ledger| ledger.pending.clone())
     }
 
+    /// The total this connector has ever signed an outbound claim for on
+    /// `peer_id` -- unlike [`ClaimBook::pending_claim`], which answers
+    /// `None` once the most recent claim has been acknowledged, this never
+    /// resets: [`ClaimBook::acknowledge_outbound`] only ever clears
+    /// `pending`, never `cumulative_amount` (issue #700's netting --
+    /// `client-edge-spec.md`'s "credited" term is what this connector has
+    /// *committed* to pay, not what is still in flight, since an
+    /// acknowledgement confirms delivery of a claim rather than undoing the
+    /// commitment it represents). `0` for a peer this book has never signed
+    /// a claim for.
+    pub fn outbound_cumulative_amount(&self, peer_id: &str) -> u64 {
+        self.outbound
+            .read()
+            .expect("outbound claims lock poisoned")
+            .get(peer_id)
+            .map(|ledger| ledger.cumulative_amount)
+            .unwrap_or(0)
+    }
+
     /// Every peer whose pending claim has waited at least `flush_interval`
     /// since it armed, as of `now` -- what a flush sweep should send
     /// (peer-wire-spec.md §3.3). Checked fresh against the injected clock,
@@ -1072,6 +1091,39 @@ mod tests {
         );
 
         assert_eq!(book.pending_claim("peer-b"), Some(claim));
+    }
+
+    #[test]
+    fn outbound_cumulative_amount_is_zero_for_a_peer_never_signed_for() {
+        let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+
+        assert_eq!(book.outbound_cumulative_amount("peer-b"), 0);
+    }
+
+    #[test]
+    fn outbound_cumulative_amount_tracks_the_running_total_across_fulfillments() {
+        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
+        let book = book_with_peer("peer-b", &channel_id(1), key);
+
+        book.record_fulfillment("peer-b", 100, now()).unwrap();
+        book.record_fulfillment("peer-b", 50, now()).unwrap();
+
+        assert_eq!(book.outbound_cumulative_amount("peer-b"), 150);
+    }
+
+    #[test]
+    fn outbound_cumulative_amount_survives_acknowledgement() {
+        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
+        let book = book_with_peer("peer-b", &channel_id(1), key);
+        let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
+
+        book.acknowledge_outbound("peer-b", claim.nonce, ClaimAckOutcome::Accepted);
+
+        // Acknowledgement clears `pending`, not the running total this
+        // connector committed to -- the whole point of issue #700's
+        // "credited" being distinct from "pending".
+        assert_eq!(book.pending_claim("peer-b"), None);
+        assert_eq!(book.outbound_cumulative_amount("peer-b"), 100);
     }
 
     #[test]

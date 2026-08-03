@@ -117,8 +117,15 @@ struct VerifiedChannelState {
     /// JS `Number` cannot represent exactly past 2^53.
     deposit_total: Option<String>,
     cumulative_claimed: String,
-    /// `depositTotal - cumulativeClaimed`; `null` exactly when
-    /// `depositTotal` is, for the same reason.
+    /// `depositTotal - cumulativeClaimed + credited` (issue #700's netting:
+    /// `credited` is what this connector has separately committed to pay
+    /// this channel's counterparty back, e.g. for factory work it earned --
+    /// `0` for a channel nothing has been paid out on). This is the same
+    /// spendable headroom figure the collateral-binding check in
+    /// `client-edge-spec.md` §1.3 step 5 admits an inbound claim against,
+    /// not a raw on-chain balance -- an agent that has earned enough sees
+    /// its own runway rise here without any settlement having happened.
+    /// `null` exactly when `depositTotal` is, for the same reason.
     available: Option<String>,
     nonce: u64,
     /// Unix seconds this connector last accepted a claim on this channel,
@@ -229,6 +236,7 @@ async fn resolve_evm(
         state,
         &channel_key,
         channel.deposit_floor,
+        state.claim_gate.credited_evm(&channel_id),
     ))
 }
 
@@ -275,21 +283,38 @@ async fn resolve_solana(
         state,
         &channel_key,
         channel.deposit_floor,
+        // `ClientPayoutLedger` only ever signs an EVM balance proof (issue
+        // #699) -- a Solana channel has no credited amount to net yet, see
+        // `ClientClaimGate::credited`'s own doc.
+        0,
     ))
 }
 
+/// `deposit_total`, `cumulativeClaimed`, `nonce` and the netted
+/// `available` this endpoint reports for one verified channel (issue
+/// #700, `client-edge-spec.md` §1.10): `available` is the same spendable
+/// headroom [`crate::claim_gate::ClientClaimGate`]'s collateral check
+/// admits against -- `deposit - owed + credited`, `owed` being
+/// `cumulative_claimed` below -- so a fleet dashboard reads one number
+/// that already reflects an agent's own earnings, not a raw on-chain
+/// balance a human would have to net by hand.
 fn verified_state(
     blockchain: &'static str,
     channel_id: String,
     state: &ClientEdgeState,
     channel_key: &str,
     deposit_floor: DepositFloor,
+    credited: u64,
 ) -> VerifiedChannelState {
     let watermark = state.claim_gate.watermark(channel_key);
     let cumulative_claimed = watermark.map(|w| w.cumulative_amount).unwrap_or(0);
     let nonce = watermark.map(|w| w.nonce).unwrap_or(0);
     let deposit_total = deposit_floor.deposit();
-    let available = deposit_total.map(|deposit| deposit.saturating_sub(cumulative_claimed));
+    let available = deposit_total.map(|deposit| {
+        deposit
+            .saturating_add(credited)
+            .saturating_sub(cumulative_claimed)
+    });
 
     VerifiedChannelState {
         blockchain,
@@ -322,7 +347,9 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::channels::test_source::FakeChannelSource;
-    use crate::{router_with_gate, ClientChannelRegistry, ClientClaimGate, EvmChannel};
+    use crate::{
+        router_with_gate, ClientChannelRegistry, ClientClaimGate, ClientPayoutLedger, EvmChannel,
+    };
 
     const EVM_CHAIN_ID: u64 = 8453;
     const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
@@ -476,6 +503,57 @@ mod tests {
         assert_eq!(entry["available"], KNOWN_DEPOSIT.to_string());
         assert_eq!(entry["nonce"], 0);
         assert!(entry["lastClaimTime"].is_null());
+    }
+
+    /// A ledger crediting `channel_id` for `amount` -- the netting
+    /// counterpart to the payments `test_channels`/`test_gate` already
+    /// simulate on the inbound side (issue #700).
+    fn payout_ledger_crediting(channel_id: &str, amount: u64) -> Arc<ClientPayoutLedger> {
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+        ledger
+            .set_channel_domain(
+                channel_id,
+                connector_runtime::ChannelDomain {
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                },
+            )
+            .expect("test channel id is valid");
+        let ledger = Arc::new(ledger);
+        ledger
+            .record_payout(
+                channel_id,
+                amount,
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )
+            .expect("signer and domain configured");
+        ledger
+    }
+
+    #[tokio::test]
+    async fn a_channel_credited_by_the_payout_ledger_reports_available_raised_by_it() {
+        let (secret, _address) = evm_signer();
+        let ledger = payout_ledger_crediting(&evm_channel_id_hex(), 300_000);
+        let gate = test_gate().with_payout_ledger(ledger);
+        let expires = far_future_expiry();
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "evm",
+                "channelId": evm_channel_id_hex(),
+                "expires": expires,
+                "signature": evm_challenge_signature(&secret, EVM_CHANNEL_ID, expires),
+            }]
+        });
+
+        let response = post_claim_state(gate, body).await;
+        let entry = &response["channels"][0];
+        assert_eq!(entry["ok"], true);
+        assert_eq!(entry["depositTotal"], KNOWN_DEPOSIT.to_string());
+        assert_eq!(entry["cumulativeClaimed"], "0");
+        // deposit - owed(0) + credited: strictly more than the raw
+        // on-chain deposit alone, which is the entire point of issue #700.
+        assert_eq!(entry["available"], (KNOWN_DEPOSIT + 300_000).to_string());
     }
 
     #[tokio::test]
