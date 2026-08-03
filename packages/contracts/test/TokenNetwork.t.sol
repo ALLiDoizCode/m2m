@@ -24,7 +24,7 @@ contract TokenNetworkTest is Test {
         token = new MockERC20("Test Token", "TEST", 18);
 
         // Deploy TokenNetwork with 1M token deposit limit
-        tokenNetwork = new TokenNetwork(address(token), 1_000_000 * 10 ** 18, 365 days);
+        tokenNetwork = new TokenNetwork(address(token), 1_000_000 * 10 ** 18, 365 days, address(0));
 
         // Create test accounts with private keys for EIP-712 signing
         alicePrivateKey = 0xA11CE;
@@ -621,7 +621,7 @@ contract TokenNetworkTest is Test {
     // Test: Deposit limit prevents excessive deposit
     function testDepositLimitPreventsExcessiveDeposit() public {
         // Deploy TokenNetwork with 1000 token deposit limit for testing
-        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days);
+        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days, address(0));
 
         // Open channel
         vm.startPrank(alice);
@@ -640,7 +640,7 @@ contract TokenNetworkTest is Test {
     // Test: Deposit limit allows multiple deposits under limit
     function testDepositLimitAllowsMultipleDepositsUnderLimit() public {
         // Deploy TokenNetwork with 1000 token deposit limit for testing
-        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days);
+        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days, address(0));
 
         // Open channel
         vm.startPrank(alice);
@@ -667,7 +667,7 @@ contract TokenNetworkTest is Test {
         MockERC20WithFee feeToken = new MockERC20WithFee("Fee Token", "FEE", 18, 10);
 
         // Deploy TokenNetwork for fee token with 1M token deposit limit
-        TokenNetwork feeTokenNetwork = new TokenNetwork(address(feeToken), 1_000_000 * 10 ** 18, 365 days);
+        TokenNetwork feeTokenNetwork = new TokenNetwork(address(feeToken), 1_000_000 * 10 ** 18, 365 days, address(0));
 
         // Mint tokens to alice
         feeToken.transfer(alice, 10000 * 10 ** 18);

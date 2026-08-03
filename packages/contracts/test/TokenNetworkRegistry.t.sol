@@ -217,6 +217,53 @@ contract TokenNetworkRegistryTest is Test {
         assertTrue(tokenNetworkAddress != address(0));
     }
 
+    // Test: trustedForwarder defaults to address(0), so existing deployments are unaffected
+    function testTrustedForwarderDefaultsToZero() public view {
+        assertEq(registry.trustedForwarder(), address(0), "trustedForwarder should default to address(0)");
+    }
+
+    // Test: setTrustedForwarder is wired through to every TokenNetwork created afterward
+    function testSetTrustedForwarderIsPassedToNewTokenNetworks() public {
+        address forwarder = address(0xF01A2);
+
+        registry.setTrustedForwarder(forwarder);
+        assertEq(registry.trustedForwarder(), forwarder, "registry should record the new forwarder");
+
+        address tokenNetworkAddress = registry.createTokenNetwork(address(token));
+        assertTrue(
+            TokenNetwork(tokenNetworkAddress).isTrustedForwarder(forwarder),
+            "the newly created TokenNetwork should trust the registry's configured forwarder"
+        );
+    }
+
+    // Test: changing trustedForwarder does not retroactively affect already-deployed TokenNetworks
+    function testSetTrustedForwarderDoesNotAffectExistingTokenNetworks() public {
+        address tokenNetworkAddress = registry.createTokenNetwork(address(token));
+
+        registry.setTrustedForwarder(address(0xF01A2));
+
+        assertFalse(
+            TokenNetwork(tokenNetworkAddress).isTrustedForwarder(address(0xF01A2)),
+            "a TokenNetwork's forwarder is immutable at its own creation time"
+        );
+    }
+
+    // Test: only owner can set the trusted forwarder
+    function testSetTrustedForwarderRevertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
+        registry.setTrustedForwarder(address(0xF01A2));
+    }
+
+    // Test: setTrustedForwarder emits TrustedForwarderUpdated
+    function testSetTrustedForwarderEmitsEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit TrustedForwarderUpdated(address(0), address(0xF01A2));
+        registry.setTrustedForwarder(address(0xF01A2));
+    }
+
+    event TrustedForwarderUpdated(address indexed previousForwarder, address indexed newForwarder);
+
     // Event declarations for testing
     event WhitelistEnabled();
     event WhitelistDisabled();
