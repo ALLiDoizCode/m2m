@@ -1,111 +1,94 @@
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STATUS (#600, 2026-07-30; amended #679, 2026-08-03): NOT DEPLOYED. The devnet store leg shipped
-# WITHOUT this overlay: the apex terminates g.toon.ario / g.toon.store at
-# the store app over this box's own PUBLIC TLS front
-# (https://proxy.store.devnet.toonprotocol.dev/store — nginx's `location
-# /store` in ./nginx/conf.d/node.conf; see
-# infra/linode-node/connector-rust.toml's header). Two findings closed
-# that door for this overlay:
-#   * the PAID forwarded path is structurally unwired (#620) — a peer
-#     route is neither priced nor charged at the client edge, a peer
-#     arrival is never charged the terminating route's price, and ADR
-#     0024's peer claims cannot be configured from any connector.toml, so
-#     deploying this today would stand up a free-write path beside a paid
-#     one; and
-#   * the raw-TCP peer wire could not carry the public inter-node link
-#     devnet topology calls for (#623) — framing nginx cannot
-#     TLS-terminate, no TLS of its own (ADR 0003), SocketAddr-only
-#     addressing. The VPC these files' comments were written for was
-#     never provisioned, and #600 settled that no private segment is
-#     wanted: node↔node links are public, like the TS fleet's BTP-over-wss.
-#
-# ADR 0027 settled it and issue #679 DELETED the raw-TCP peer wire. There
-# is no second listener to publish, so `4001` and STORE_PEER_WIRE_BIND are
-# gone from this file: peers ride the carriages the client edge already
-# serves, behind this box's existing nginx TLS front, and are told apart
-# from clients by authentication rather than by port. That leaves ONE
-# publish here, and it is still loopback-only for the #492 reason below.
-# The first real Rust peer link on devnet is #678; #620 remains the hard
-# gate on standing this overlay up at all.
-#
-# Re-confirmed on the box during #648 (2026-07-31): `root@45.79.173.113`
-# has neither this file nor ./connector-rust.toml on it and runs no
-# `connector-rust` container -- only the TypeScript fleet
-# (`connector:3.36.3-solchan.0`, `store`, `nginx`, `certbot`). So the image
-# tag below is a REPO-ONLY pin: nothing consumes it until #620 and #623
-# close, and re-pinning it deploys nothing. Standing this overlay up today
-# would open a second, unpriced write path onto the same store app beside
-# the apex's paid one -- which is why #648 re-pinned the tag and left the
-# overlay down.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ═══════════════════════════════════════════════════════════════════════════
-# TOON devnet — Rust connector overlay, store side (issue #490, ADR 0013's
-# parallel fleet)
+# TOON devnet — Rust connector overlay, STORE side
 # ═══════════════════════════════════════════════════════════════════════════
-# Mirrors infra/linode-node/docker-compose.node.rust.yml's own header.
-# ADDITIVE: adds the Rust connector alongside docker-compose.store.yml's
-# existing TypeScript fleet on this SAME box, WITHOUT editing that file.
-# Joins the same default network as `store`, so
-# `handler_url = "http://store:3300"` in ./connector-rust.toml resolves by
-# the same container-name DNS the TypeScript node already relies on. Neither
-# `store` nor any other existing service is touched here.
+# ADDITIVE: adds a Rust connector alongside docker-compose.store.yml's
+# TypeScript fleet on this SAME box, WITHOUT editing that file and WITHOUT
+# taking anything down. It is the store-box mirror of
+# infra/linode-node/docker-compose.node.rust.yml, which has run beside the
+# apex's TypeScript connector since #601.
 #
-# Run alongside the existing stack (never on its own — it has no store
-# service of its own to front):
+# Run alongside the existing stack (never on its own — it has no store service
+# of its own to front):
+#
 #   docker compose -f infra/linode-store/docker-compose.store.yml \
-#                   -f infra/linode-store/docker-compose.store.rust.yml up -d
+#                  -f infra/linode-store/docker-compose.store.rust.yml up -d
 #
-# Same distinctions as the node-side overlay: its own pinned image tag, its
-# own port (4000, not the TypeScript node's 3000/8080/8081), its own
-# data path (./signer-rust.key, no named volume) -- including that overlay's
-# note on `chown 10001:10001 signer-rust.key`, which applies identically
-# here.
+# Joining the same compose project puts `connector-rust` on the default
+# network beside `store` and `nginx`, so ./connector-rust.toml's
+# `handler_url = "http://store:3300/store"` and nginx's
+# `http://connector-rust:4000` both resolve by the container-name DNS the
+# TypeScript node already relies on.
 #
-# ── Why 4000 is bound to loopback (issue #517) ────────────────────────────
-# This client edge implements only §1.1 of docs/protocol/client-edge-spec.md.
-# Its own module doc says so: identity (§1.2), payment claims (§1.3) and the
-# x402 greeting (§1.4) are unimplemented, so "every request today is treated
-# as an unauthenticated, unpriced delivery attempt". §1.5 request-request
-# binding is absent entirely.
+# ── STATUS ────────────────────────────────────────────────────────────────
+# NOT YET DEPLOYED, but now deployable — which is the change. The previous
+# revision of this file carried a "NOT DEPLOYED, and cannot be" banner resting
+# on two findings: that a peer-forwarded store route would serve this app for
+# free (#620), and that ADR 0003's raw-TCP peer wire cannot carry the public
+# inter-node link the devnet topology needs (#623). Both are still true, and
+# neither applies any more, because this overlay no longer stands up a peer
+# wire or a forwarded route at all. It stands up a CLIENT EDGE that terminates
+# and PRICES its own routes — the same shape as the apex's Rust node.
 #
-# An unpriced connector in front of a payment-oblivious app (here, the store)
-# is a free-write gateway, and a Docker `ports:` publish is reachable from
-# the internet regardless of what ufw says -- Docker's iptables chain runs
-# ahead of it. Issue #492 made the identical call for the apex overlay's
-# client edge, for exactly this reason, and that fix lands alongside this
-# one -- infra/linode-node/docker-compose.node.rust.yml is bound in the same
-# commit. This store-side overlay was never covered by it either, and the
-# day a store box actually exists it would open the identical hole.
-# Binding the publish to 127.0.0.1 closes it here:
-# reach it with an SSH tunnel or from the box. Widen this ONLY once
-# §1.2-§1.5 are implemented and the fleet charges for a write.
+# The free-write hazard the old banner warned about is therefore gone by
+# construction: ./connector-rust.toml prices every route it terminates at
+# `1000`, exactly matching the TypeScript connector.yaml's price on the same
+# prefixes, so the two doors into `store:3300` cost the same and neither
+# undercuts the other.
 #
+# ── Why 4000 is bound to loopback ─────────────────────────────────────────
+# A Docker `ports:` publish is reachable from the internet regardless of what
+# ufw says — Docker's iptables chain runs ahead of it. Binding the publish to
+# 127.0.0.1 means the only public path to this connector is through this box's
+# nginx, under the /rust/ilp and /rust/ilp/btp locations that
+# ./nginx/conf.d/node.conf defines and rate-limits. Identical to the apex
+# overlay's own `127.0.0.1:4000:4000` (#492/#517), and for the same reason:
+# every route into the process should be one nginx can see, log and throttle.
+# Widen it only if something needs to reach this edge without TLS, which
+# nothing does.
+#
+# There is no `4001` publish because there is no peer wire to publish — see
+# ./connector-rust.toml's header. That also retires the `STORE_PEER_WIRE_BIND`
+# variable this file used to require: it was a `:?` hard failure pointing at a
+# Linode VPC address that was never provisioned, which is the single reason
+# this overlay could not be brought up even for a smoke test.
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
   connector-rust:
-    # PACKAGE (issue #648): the Rust image is published to the `connector`
-    # package under `rust-*` tags, NOT to `connector-rust`. That package was
-    # retired when #645 moved publishing (`.github/workflows/
-    # publish-connector-rust-image.yml`'s `IMAGE`), so the old
-    # `ghcr.io/toon-protocol/connector-rust:sha-16887ba` this line used to
-    # carry can never receive another build -- that package is frozen at
-    # `sha-b908454`, the last commit before the cutover. Pinned to an exact
-    # `rust-sha-` tag, never the floating `rust-main`, matching
-    # infra/linode-node/docker-compose.node.rust.yml.
+    # PACKAGE: the Rust image publishes to the `connector` package under
+    # `rust-*` tags, NOT to `connector-rust` — that package was retired when
+    # #645 moved publishing, and is frozen at `sha-b908454`.
     #
-    # ORDERING (issue #605): ./connector-rust.toml sets `state_dir`, and
-    # `RawConfig` is `deny_unknown_fields` -- so the tag below MUST be
-    # re-pinned to an image built from #605 or later BEFORE (or in the same
-    # `up -d` as) that file reaches a box. An older image reads `state_dir`
-    # as an unknown top-level key and exits 1 on config load. Every
-    # `rust-sha-` tag is well past #605, so this is a constraint on rolling
-    # BACK, not on rolling forward.
+    # Pinned to an exact `rust-sha-` tag, never the floating `rust-main`,
+    # matching infra/linode-node/docker-compose.node.rust.yml. Re-pinned
+    # 2026-08-04 during the rebase onto main from `rust-sha-380ffd1` to
+    # `rust-sha-54a967d`: #735 rolled BOTH rust pins to that tag and the apex
+    # is running it live, so this is the value that makes the fleet
+    # homogeneous. The original note here said 380ffd1 was "deliberately newer
+    # than the rust-sha-59e167f the apex currently runs" — the apex has since
+    # moved past both, so standing this box up on 380ffd1 would now be
+    # standing it up BEHIND the apex.
+    #
+    # ORDERING (#605/#614): ./connector-rust.toml sets `state_dir` and
+    # `RawConfig` is `deny_unknown_fields`, so any image predating #605 exits 1
+    # on config load, and any image predating #614 (63b8188a) cannot write the
+    # FRESH named volume below. Both are ancestors of this tag. It is a
+    # constraint on rolling BACK — do not roll this service to a tag older than
+    # `rust-sha-63b8188`.
     image: ghcr.io/toon-protocol/connector:rust-sha-54a967d
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
+      # Three distinct raw key files, all this box's own. The settlement pair
+      # must be derived from STORE_TOON_MNEMONIC so they land on the already
+      # funded identities this box advertises — see ./connector-rust.toml.
+      # They must exist and be readable by uid 10001 before the first `up -d`
+      # (`chown 10001:10001`); a missing key file is a refuse-to-start.
       - ./signer-rust.key:/app/data/signer.key:ro
-      # Durable claim watermarks (issue #605) -- see the header.
+      - ./settlement-rust.key:/app/data/settlement.key:ro
+      - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      # Durable claim watermarks (#605). Named, not bind-mounted: the replay
+      # of this journal is what stops a restart from re-accepting a spent
+      # claim, so it must outlive the container.
       - connector_rust_state:/app/state
     ports:
       # Loopback-only, deliberately — see the header. Not '4000:4000'.

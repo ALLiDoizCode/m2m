@@ -26,15 +26,23 @@
 //! at that one (issue #542, issue #576).
 //!
 //! One more substitution joined that list when the apex file's
-//! `[settlement]` section went LIVE against Base Sepolia (#577; the store
-//! file still ships the commented template): a committed live section
-//! means the node cannot start without reaching that chain -- the
-//! fail-closed behaviour ADR 0009 asks for, and exactly the network
-//! dependency a test must not have. So the verbatim case boots the apex
-//! file with its live settlement sections STRIPPED
-//! ([`without_live_settlement`]), and those sections are proven by the two
+//! `[settlement]` section went LIVE against Base Sepolia (#577), and the
+//! store file followed it live when the store box grew a Rust connector of
+//! its own: a committed live section means the node cannot start without
+//! reaching that chain -- the fail-closed behaviour ADR 0009 asks for, and
+//! exactly the network dependency a test must not have. So BOTH verbatim
+//! cases now boot with their live settlement sections STRIPPED
+//! ([`without_live_settlement`]), and those sections are proven by the
 //! cases described below. This was module-doc'd here as "a decision to
 //! revisit deliberately" before #577 shipped; this is that decision.
+//!
+//! The store file's settlement stopped being a commented template when that
+//! node became a counterparty rather than a terminus: it accepts client-edge
+//! claims of its own, on whichever chain the buyer chose, so an EVM-only
+//! node would refuse every Solana-paid write. Its section is asserted to
+//! name the SAME registry, program and mint the apex names, because a
+//! buyer's channel lives on one deployment and a node pointed elsewhere
+//! cannot resolve it.
 //!
 //! Since #645 the apex file carries issue #628's KEYED per-chain shape --
 //! `[settlement.evm]` + `[settlement.evm.key]` and `[settlement.solana]` +
@@ -57,18 +65,15 @@
 //! because the price is read off the committed text like everything else
 //! here, this fails again if either file ever silently returns to zero.
 //!
-//! **Template/section** (`*_devnet_settlement_*_boots_against_a_deployed_contract`)
-//! points each file's EVM settlement shape -- the store file's commented
-//! `BEGIN`/`END` template, uncommented; the apex file's live
-//! `[settlement.evm]`, as committed -- at a freshly deployed contract on a
-//! disposable local `anvil`, and boots that. Both are on issue #628's keyed
-//! shape now: the store template followed the apex there in issue #648, and
-//! the store case asserts it rather than trusting a reader's eye, because
-//! the legacy flat table it left behind still parses and so a slide back
-//! would otherwise be silent. Documented config shapes rot;
-//! this keeps them demonstrably working and keeps `runtime::build`'s
-//! settlement construction path covered end to end by the real binary. It
-//! is skipped when no `anvil` is on `PATH`.
+//! **Section** (`*_devnet_settlement_section_boots_against_a_deployed_contract`)
+//! points each file's live `[settlement.evm]`, as committed, at a freshly
+//! deployed contract on a disposable local `anvil`, and boots that. Both are
+//! on issue #628's keyed shape, and both cases assert it rather than trusting
+//! a reader's eye, because the legacy flat table they left behind still
+//! parses and so a slide back would otherwise be silent. Committed config
+//! shapes rot; this keeps them demonstrably working and keeps
+//! `runtime::build`'s settlement construction path covered end to end by the
+//! real binary. It is skipped when no `anvil` is on `PATH`.
 //!
 //! The apex's `[settlement.solana]` leg is deliberately NOT booted. It is
 //! stripped alongside the rest for the verbatim case and stripped again
@@ -119,12 +124,6 @@ const STORE_CONFIG: &str = include_str!("../../../infra/linode-store/connector-r
 /// concurrently under `cargo test --workspace` don't contend for the same
 /// port range.
 const ANVIL_BASE_PORT: u16 = 18_500;
-
-/// The markers each committed file wraps its commented-out `[settlement]`
-/// block in, so [`uncomment_settlement_template`] can find the block without
-/// depending on prose that is free to be reworded.
-const TEMPLATE_BEGIN: &str = "# --- BEGIN settlement template";
-const TEMPLATE_END: &str = "# --- END settlement template";
 
 /// Every LIVE (uncommented) settlement section the apex file commits, in
 /// issue #628's keyed per-chain shape as of #645 -- the sections
@@ -308,41 +307,6 @@ fn without_live_settlement(raw: &str) -> String {
     stripped
 }
 
-fn uncomment_settlement_template(raw: &str) -> String {
-    let mut out = String::new();
-    let mut inside = false;
-    let mut saw_template = false;
-    for line in raw.lines() {
-        if line.starts_with(TEMPLATE_BEGIN) {
-            inside = true;
-            saw_template = true;
-            continue;
-        }
-        if line.starts_with(TEMPLATE_END) {
-            inside = false;
-            continue;
-        }
-        if inside {
-            let uncommented = line
-                .strip_prefix("# ")
-                .or_else(|| line.strip_prefix('#'))
-                .unwrap_or_else(|| {
-                    panic!("line inside the settlement template is not a comment: {line}")
-                });
-            out.push_str(uncommented);
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    assert!(
-        saw_template && !inside,
-        "the committed config has no complete `{TEMPLATE_BEGIN}` / \
-         `{TEMPLATE_END}` block -- see this file's module docs"
-    );
-    out
-}
-
 /// Point an uncommented `[settlement.evm]` block at a real, disposable,
 /// freshly deployed local chain. `decimals` and the key location stay the
 /// literal committed content.
@@ -520,17 +484,86 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
 
 #[tokio::test]
 async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
+    // All three prefixes the store box's TypeScript connector.yaml
+    // terminates, now terminated by its Rust node at the same prices. The
+    // alias set is the assertion: a store box that answered only
+    // `g.toon.store` could not take over from the TypeScript node, which is
+    // the whole point of standing this config up.
+    assert!(STORE_CONFIG.contains("g.toon.ario"));
+    assert!(STORE_CONFIG.contains("g.toon.relay.ario"));
     assert!(STORE_CONFIG.contains("g.toon.store"));
+
+    // No peer wire: this node accepts no inbound peer connection and dials
+    // no peer, so only the client edge comes up. ADR 0003's raw-TCP wire
+    // cannot carry the public inter-node link this fleet needs (#623) and a
+    // peer-forwarded route is unpriced on both sides (#620), so the file
+    // configures neither -- see its header. When the inter-connector
+    // transport decision lands, this is the assertion that changes.
+    // Line-anchored, like the `chain = ` check further down: the header is
+    // free to *name* `peer_wire_addr` while explaining at length why it is
+    // gone, so only an actual uncommented assignment counts.
+    assert!(
+        !STORE_CONFIG
+            .lines()
+            .any(|line| line.starts_with("peer_wire_addr")),
+        "the store config must not bind ADR 0003's plaintext peer wire on a \
+         box with no private segment -- if a peering is being added, it \
+         should arrive with the transport that replaces it"
+    );
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let connector = boot(&with_sandbox_paths(
-        STORE_CONFIG,
+        &without_live_settlement(STORE_CONFIG),
         key_file.path(),
         state_dir.path(),
     ));
 
+    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.ario").await;
+    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.relay.ario").await;
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.store").await;
+}
+
+/// The two boxes' Rust configs must price the same prefix the same. They
+/// front the same store app -- the apex over this box's public nginx, the
+/// store node over the container network -- so an unequal pair is an
+/// arbitrage between two doors into one handler, and the cheaper door takes
+/// every packet. This is a guard against exactly the class of edit that
+/// produced the live apex's undocumented `g.toon.relay` price of `1` on
+/// 2026-08-03: a hand change to one connector's price with no matching
+/// change to the other.
+#[test]
+fn the_two_fleets_price_the_shared_store_prefixes_identically() {
+    for prefix in ["g.toon.ario", "g.toon.store"] {
+        assert_eq!(
+            route_price(APEX_CONFIG, prefix),
+            route_price(STORE_CONFIG, prefix),
+            "`{prefix}` must cost the same at both doors into the store app"
+        );
+    }
+}
+
+/// The `price` of the `[[routes]]` entry whose `prefix` matches, read from
+/// the committed text rather than from a loaded `Config` so this works
+/// without the settlement legs the loader would insist on reaching.
+fn route_price(raw: &str, prefix: &str) -> u64 {
+    let mut in_route = false;
+    for line in raw.lines().map(str::trim) {
+        if line == "[[routes]]" {
+            in_route = false;
+            continue;
+        }
+        if line == format!("prefix = \"{prefix}\"") {
+            in_route = true;
+            continue;
+        }
+        if in_route {
+            if let Some(value) = line.strip_prefix("price = ") {
+                return value.parse().expect("a numeric price");
+            }
+        }
+    }
+    panic!("no priced `{prefix}` route in the committed config text");
 }
 
 /// Issue #701 (toon-meta#262 decision 11): the committed apex file
@@ -720,8 +753,14 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The store box's settlement is no longer a commented template waiting on a
+/// deployment -- it is live, and it names the SAME contracts the apex names,
+/// because a claim this node accepts was written against a channel the buyer
+/// opened on the shared devnet deployment. A store node pointed at a
+/// different registry cannot resolve that channel, so this asserts the two
+/// files agree rather than merely that each parses.
 #[tokio::test]
-async fn the_store_devnet_settlement_template_boots_against_a_deployed_contract() {
+async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract() {
     if !require_anvil() {
         return;
     }
@@ -729,33 +768,58 @@ async fn the_store_devnet_settlement_template_boots_against_a_deployed_contract(
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let text = uncomment_settlement_template(STORE_CONFIG);
-    // Issue #648: the store template followed the apex onto issue #628's
-    // KEYED shape. The legacy flat `[settlement]` + `chain = "evm"` it used
-    // to carry still parses, so nothing below would fail if the template
-    // slid back to it -- it would just quietly go on documenting a shape
-    // the fleet no longer writes, and one that cannot grow a second chain.
-    // Asserted here rather than left to a reader's eye.
+    // Issue #648: the store config followed the apex onto issue #628's KEYED
+    // shape. The legacy flat `[settlement]` + `chain = "evm"` still parses,
+    // so nothing below would fail if it slid back -- it would just quietly
+    // go on writing a shape the fleet no longer uses, and one that cannot
+    // grow a second chain. Asserted here rather than left to a reader's eye.
     assert!(
-        text.contains("[settlement.evm]") && text.contains("[settlement.evm.key]"),
-        "the store settlement template must stay on the keyed \
+        STORE_CONFIG.contains("[settlement.evm]")
+            && STORE_CONFIG.contains("[settlement.evm.key]")
+            && STORE_CONFIG.contains("[settlement.solana]")
+            && STORE_CONFIG.contains("[settlement.solana.key]"),
+        "the store config must carry both legs on the keyed \
          `[settlement.<chain>]` shape (issue #628, #648), not the legacy \
-         flat `[settlement]` table"
+         flat `[settlement]` table -- an EVM-only store node refuses every \
+         Solana-paid write, and this fleet's peering settles on solana:devnet"
     );
-    // Line-anchored: the prose above the template is free to *name* the
-    // legacy `chain = "evm"` key while explaining why it is gone, so only
-    // an actual uncommented assignment counts.
+    // Line-anchored: the prose above is free to *name* the legacy
+    // `chain = "evm"` key while explaining why it is gone, so only an actual
+    // uncommented assignment counts.
     assert!(
-        !text.lines().any(|line| line.starts_with("chain = ")),
+        !STORE_CONFIG
+            .lines()
+            .any(|line| line.starts_with("chain = ")),
         "`chain` is the legacy flat shape's discriminator -- a keyed table \
          names its chain by its own key"
     );
+    assert!(
+        STORE_CONFIG.contains(APEX_LIVE_REGISTRY),
+        "the store leg must name the same deployed TokenNetworkRegistry as \
+         the apex ({APEX_LIVE_REGISTRY}) -- a buyer's channel lives on one \
+         deployment, and a node pointed elsewhere cannot resolve it"
+    );
+    assert!(
+        STORE_CONFIG.contains(APEX_SOLANA_PROGRAM_ID)
+            && STORE_CONFIG.contains(APEX_SOLANA_USDC_MINT),
+        "the store leg must name the same Solana payment-channel program and \
+         mint as the apex, for the same reason"
+    );
+
+    // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
+    // same reason the apex's is -- there is no local validator in this test.
+    let text = without_sections(STORE_CONFIG, APEX_SOLANA_SETTLEMENT_SECTIONS);
     let text = with_anvil_settlement(
         &text,
         &anvil.rpc_url,
-        "0x0000000000000000000000000000000000000000",
+        APEX_LIVE_REGISTRY,
         contract_address,
         token,
+    );
+    let text = replace_expecting_a_match(
+        &text,
+        "key_file = \"/app/data/settlement.key\"",
+        &format!("key_file = \"{}\"", key_file.path().display()),
     );
     let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
