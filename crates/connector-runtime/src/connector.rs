@@ -747,7 +747,13 @@ impl Connector {
         prepare: Prepare,
         minimum_delivery: u64,
     ) -> PacketResponse {
-        tracing::info!("packet received");
+        // Per-packet lines are debug, not info (issue #690): at huddle rates
+        // (hundreds of packets/s) every INFO here becomes per-event disk I/O
+        // through docker's json-file log driver -- the same disease as
+        // relay#87's per-write console.log. The default `info` filter keeps
+        // the hot path silent; RUST_LOG=connector_runtime=debug restores the
+        // per-packet trace without a config change on the boxes.
+        tracing::debug!("packet received");
 
         if let Some(reject) = self.reject_ineligible(&prepare) {
             return self.finish(PacketResponse::Reject(reject));
@@ -801,14 +807,14 @@ impl Connector {
 
         let peer_route = match target {
             RouteTarget::App(index) => {
-                tracing::info!(handler_url = %self.routes[index].handler_url(), "routed to app");
+                tracing::debug!(handler_url = %self.routes[index].handler_url(), "routed to app");
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
                 return self.finish(response);
             }
             RouteTarget::Peer(index) => &self.peer_routes[index],
             RouteTarget::Leased(index) => active_leased[index].as_peer_route(),
         };
-        tracing::info!(peer_id = %peer_route.peer_id(), "routed to peer");
+        tracing::debug!(peer_id = %peer_route.peer_id(), "routed to peer");
         let response = self
             .forward_via_peer_route(peer_route, prepare, minimum_delivery)
             .await;
@@ -826,7 +832,11 @@ impl Connector {
         match &response {
             PacketResponse::Fulfill(_) => {
                 self.metrics.record_fulfill();
-                tracing::info!("packet fulfilled");
+                // debug, not info: fulfilment is the per-packet common case
+                // (issue #690). Rejects below stay at info -- they are the
+                // per-error path and keep the `packet` span's correlation
+                // fields for diagnosis.
+                tracing::debug!("packet fulfilled");
             }
             PacketResponse::Reject(reject) => {
                 self.metrics.record_reject(reject.code.as_str());
