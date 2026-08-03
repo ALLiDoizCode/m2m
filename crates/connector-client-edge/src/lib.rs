@@ -992,8 +992,7 @@ mod tests {
     use connector_config::StaticRoute;
     use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Reject};
     use connector_runtime::{
-        AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, NetworkPeerTransport,
-        PeerRoute, PeerWireServer, TestClock,
+        AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, PeerRoute, TestClock,
     };
     use connector_signer::LocalSigner;
     use tower::ServiceExt;
@@ -1459,20 +1458,26 @@ mod tests {
         assert!(reject.message.contains("g.example.app"));
     }
 
-    /// Two separate connectors, forwarding over the peer wire's network
-    /// implementation (issue #416) rather than the in-process stand-in: a
-    /// client posts to the first connector's router, which has no app of
-    /// its own for this destination and forwards the packet over a real
-    /// TCP connection to the second connector's [`PeerWireServer`], which
-    /// delivers it to its app and the fulfillment travels back the same
-    /// way.
+    /// Two separate connectors: a client posts to the first connector's
+    /// router, which has no app of its own for this destination and
+    /// forwards the packet across the [`PeerTransport`] port to the second
+    /// connector, which delivers it to its app -- and the fulfillment
+    /// travels back the same way.
+    ///
+    /// This used to run over the raw-TCP peer wire's `PeerWireServer`.
+    /// ADR 0027 / issue #679 deleted that wire, so the hop is made over
+    /// the in-process transport instead; what is under test here is the
+    /// client edge handing a peer-routed packet to whatever transport is
+    /// installed, which is carriage-independent. The statement that a
+    /// *network* transport upholds the port's contract belongs to
+    /// `peer_transport.rs`'s contract suite, which #676's carriages join.
     #[tokio::test]
-    async fn a_client_packet_is_forwarded_over_the_network_transport_to_a_second_connector() {
+    async fn a_client_packet_is_forwarded_over_the_peer_transport_to_a_second_connector() {
         let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered over the network transport"),
+            answered(b"delivered over the peer transport"),
         );
         let second_hop_identity = test_signer();
         let second_hop = Arc::new(
@@ -1485,12 +1490,9 @@ mod tests {
             )
             .with_identity_signer(second_hop_identity.clone()),
         );
-        let server = PeerWireServer::bind("127.0.0.1:0".parse().unwrap(), second_hop)
-            .await
-            .unwrap();
 
-        let mut peer_transport = NetworkPeerTransport::new();
-        peer_transport.add_peer("second-hop", server.local_addr());
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Arc::new(Connector::new(
             vec![],
             vec![PeerRoute::new("g.example.app", "second-hop", 0)],
@@ -1515,7 +1517,7 @@ mod tests {
         let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
         assert_eq!(
             open_sealed_envelope(&shared_secret, &fulfill.data),
-            fulfill_envelope(b"delivered over the network transport")
+            fulfill_envelope(b"delivered over the peer transport")
         );
     }
 

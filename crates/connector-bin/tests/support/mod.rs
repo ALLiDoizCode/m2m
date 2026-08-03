@@ -1,7 +1,6 @@
-//! Shared process-spawning support for `connector-bin`'s black-box tests.
-//! Originally written for `two_connectors_and_a_stub_app.rs`; factored out
-//! so other test binaries can drive the same real, compiled
-//! `connector`/`stub-app` binaries instead of reimplementing this.
+//! Shared process-spawning support for `connector-bin`'s black-box tests:
+//! drives the real, compiled `connector`/`stub-app` binaries rather than
+//! having each test binary reimplement the spawning.
 //!
 //! Not every consumer uses every helper (`refuses_to_start.rs` still has
 //! its own smaller variant for its narrower needs), so this module is
@@ -133,7 +132,6 @@ pub fn spawn_stub_app() -> StubApp {
 pub struct ConnectorProcess {
     _process: Process,
     pub client_edge_addr: String,
-    pub peer_wire_addr: Option<String>,
 }
 
 pub fn spawn_connector(config_path: &std::path::Path) -> ConnectorProcess {
@@ -146,19 +144,14 @@ pub fn spawn_connector(config_path: &std::path::Path) -> ConnectorProcess {
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
     let process = Process { child };
 
-    // A node with no `peer_wire_addr` never logs "peer wire listening", so
-    // this can't wait for both lines in a fixed order -- read until
-    // "connector listening" is seen, remembering "peer wire listening"
-    // along the way if it comes first.
-    let mut peer_wire_addr = None;
+    // One listener since ADR 0027 / issue #679 deleted the raw-TCP peer
+    // wire's second one: read until "connector listening" is seen.
     let mut line = String::new();
     let client_edge_addr = loop {
         line.clear();
         let read = stdout.read_line(&mut line).expect("read stdout");
         assert!(read > 0, "connector exited before logging a listen address");
-        if line.contains("peer wire listening") {
-            peer_wire_addr = Some(parse_json_log_addr(&line));
-        } else if line.contains("connector listening") {
+        if line.contains("connector listening") {
             break parse_json_log_addr(&line);
         }
     };
@@ -166,6 +159,5 @@ pub fn spawn_connector(config_path: &std::path::Path) -> ConnectorProcess {
     ConnectorProcess {
         _process: process,
         client_edge_addr,
-        peer_wire_addr,
     }
 }

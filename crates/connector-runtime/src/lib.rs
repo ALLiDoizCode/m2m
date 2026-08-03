@@ -6,10 +6,8 @@ mod clock;
 mod connector;
 mod journal;
 mod metrics;
-mod network_peer_transport;
 mod operator_view;
 mod peer_transport;
-mod peer_wire;
 mod route;
 #[cfg(test)]
 mod test_support;
@@ -29,7 +27,6 @@ pub use connector::{
 pub use connector_config::{SettlementChain, UnknownSettlementChain};
 pub use journal::{FileJournal, InMemoryJournal, Journal, JournalError};
 pub use metrics::Metrics;
-pub use network_peer_transport::{NetworkPeerTransport, PeerWireServer};
 pub use operator_view::{
     ChannelView, ChannelViewStatus, ClaimDirection, ClaimView, ExposureView, LeasedRouteView,
     PeerView, RouteView,

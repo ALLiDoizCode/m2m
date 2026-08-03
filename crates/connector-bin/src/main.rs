@@ -23,14 +23,6 @@ async fn main() {
         }
     };
 
-    if let Some(addr) = node.peer_wire_addr {
-        tracing::info!(addr = %addr, "peer wire listening");
-    }
-    // Held for the process lifetime: this is the accepting side of the
-    // peer wire, if configured. Nothing here touches it beyond keeping it
-    // alive -- connector-cli already bound and started it.
-    let _peer_wire_server = node.peer_wire_server;
-
     let server = axum::Server::bind(&node.client_edge_addr).serve(node.router.into_make_service());
     tracing::info!(addr = %server.local_addr(), "connector listening");
     if let Err(err) = server.await {

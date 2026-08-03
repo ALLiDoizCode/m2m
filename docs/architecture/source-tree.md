@@ -49,7 +49,7 @@ connector-settlement-solana      real Solana backend — drives packages/solana-
 
 connector-runtime                the packet plane and its ports
   ├─ connector.rs                Connector — routing, delivery, fees, rejects
-  ├─ peer_wire.rs, peer_transport.rs, network_peer_transport.rs
+  ├─ peer_transport.rs           the peer transport port (ADR 0027's seam); the raw-TCP wire behind it was deleted in #679
   ├─ app_client.rs               the port to the app behind a terminated route
   ├─ claim.rs, journal.rs        ClaimBook, exposure and the projection (ADR 0005)
   ├─ route.rs                    leased routes; the swapped snapshot (ADR 0015)

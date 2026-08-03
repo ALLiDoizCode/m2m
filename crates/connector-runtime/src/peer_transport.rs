@@ -1,12 +1,22 @@
 //! The peer transport port: forwards a [`Prepare`] to another connector for
 //! the next hop, optionally carrying a claim (issue #423), and flushes a
 //! claim on its own when nothing else is going out (peer-wire-spec.md
-//! §3.3). See `docs/protocol/peer-wire-spec.md` §1.1 -- production peering
-//! is one persistent duplex stream per relation; [`InProcessPeerTransport`]
-//! here is the in-process stand-in that spec calls out for composing
-//! multi-connector tests without a socket. [`crate::NetworkPeerTransport`]
-//! (issue #416) is the network implementation of the same port; both are
-//! held to the contract suite in this module's `tests::contract`.
+//! §3.3).
+//!
+//! **This port is the seam ADR 0027 rests on.** The raw-TCP peer wire that
+//! used to implement it was deleted in issue #679 -- it never carried a
+//! production packet -- and the replacement carriages (BTP over `wss://`
+//! and ILP-over-HTTP over `https://`, issue #676) will be built behind this
+//! same trait. Everything above the port -- [`crate::Connector`]'s peer
+//! forwarding, [`crate::ClaimBook`], fees, routing -- is carriage-agnostic
+//! and was untouched by that deletion.
+//!
+//! Until a carriage lands, [`InProcessPeerTransport`] is the only
+//! implementation: the in-process stand-in for composing multi-connector
+//! tests without a socket, and -- registered with no peers -- what a
+//! production node holds, so a `peer_id`-targeted route answers `T01`
+//! rather than silently dropping. It is held to the contract suite in this
+//! module's `tests::contract`, which each new carriage joins.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -95,7 +105,8 @@ struct PeerLink {
     /// (issue #424) -- shared with the spawned task so
     /// [`InProcessPeerTransport::set_peer_channel`] can configure it up
     /// front, before any traffic, standing in for the identity a real
-    /// handshake would establish (#416, not yet built). Also updated by the
+    /// handshake would establish (ADR 0027, #676 -- not yet built). Also
+    /// updated by the
     /// task itself the moment any claim or flush on this link names a
     /// channel, so a link nobody pre-configured still learns its
     /// counterparty's channel rather than never checking a ceiling at all.
@@ -156,7 +167,7 @@ impl PeerLink {
 
     /// Configure the channel this link's counterparty identifies itself by,
     /// ahead of any traffic (issue #424) -- standing in for what a real
-    /// peer-wire handshake would establish (#416).
+    /// peer handshake would establish (ADR 0027, #676).
     fn set_known_channel(&self, channel_id: impl Into<String>) {
         *self
             .known_channel_id
@@ -233,7 +244,8 @@ impl InProcessPeerTransport {
     /// happens to ride a frame over it (see `PeerLink::connect`'s own
     /// doc), so the very first delivery before that point cannot be
     /// checked against a ceiling or recorded as exposure. Configuring it
-    /// up front (what a real peer-wire handshake -- #416, not yet built --
+    /// up front (what a real peer handshake -- ADR 0027, #676, not yet
+    /// built --
     /// would establish) closes that gap. Does nothing for a `peer_id` not
     /// yet registered via [`InProcessPeerTransport::add_peer`].
     pub fn set_peer_channel(&mut self, peer_id: &str, channel_id: impl Into<String>) {
@@ -500,25 +512,29 @@ mod tests {
         }
     }
 
-    /// Contract suite (ADR 0007): [`InProcessPeerTransport`] and
-    /// [`crate::NetworkPeerTransport`] uphold the same statement about the
-    /// [`PeerTransport`] port -- a registered peer's response comes back
-    /// unchanged (fulfill or reject), and an unregistered peer id produces a
-    /// `T01` reject -- so nothing above this port can tell which
-    /// implementation is in use. Issue #426: both also agree on the
-    /// `reached` signal -- `true` for any registered peer's own answer,
-    /// `false` only when this transport never delivered the PREPARE at all.
+    /// Contract suite (ADR 0007): every [`PeerTransport`] implementation
+    /// upholds the same statement about the port -- a registered peer's
+    /// response comes back unchanged (fulfill or reject), and an
+    /// unregistered peer id produces a `T01` reject -- so nothing above
+    /// this port can tell which implementation is in use. Issue #426: all
+    /// also agree on the `reached` signal -- `true` for any registered
+    /// peer's own answer, `false` only when this transport never delivered
+    /// the PREPARE at all.
+    ///
+    /// The suite is deliberately generic over how a peer is wired up even
+    /// though [`InProcessPeerTransport`] is, since issue #679 deleted the
+    /// raw-TCP wire, its only member: ADR 0027's two carriages (#676) join
+    /// it by adding an arm, and the shared statement is what stops them
+    /// drifting from each other.
     mod contract {
         use super::*;
-        use crate::network_peer_transport::{NetworkPeerTransport, PeerWireServer};
         use std::future::Future;
 
         /// `deliverer` fulfills any destination under `g.example.app`;
         /// `rejecter` has no routes at all, so it produces the same F02 a
         /// direct client would get. Both are registered with `build`, which
-        /// wires each implementation up its own way (a direct `Arc<Connector>`
-        /// for the in-process case, a bound [`PeerWireServer`] for the
-        /// network case) and returns a transport that can reach both.
+        /// wires the implementation under test up its own way and returns a
+        /// transport that can reach both.
         async fn assert_upholds_the_contract<F, Fut>(build: F)
         where
             F: FnOnce(Vec<(&'static str, Arc<Connector>)>) -> Fut,
@@ -592,25 +608,6 @@ mod tests {
                 let mut transport = InProcessPeerTransport::new();
                 for (peer_id, connector) in peers {
                     transport.add_peer(peer_id, connector);
-                }
-                Arc::new(transport) as Arc<dyn PeerTransport>
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn network_peer_transport_upholds_the_contract() {
-            assert_upholds_the_contract(|peers| async move {
-                let mut transport = NetworkPeerTransport::new();
-                for (peer_id, connector) in peers {
-                    let server = PeerWireServer::bind("127.0.0.1:0".parse().unwrap(), connector)
-                        .await
-                        .unwrap();
-                    transport.add_peer(peer_id, server.local_addr());
-                    // Detach: the accept loop and per-connection tasks are
-                    // independent tokio tasks that keep running for the
-                    // test's duration even once `server` is dropped here.
-                    drop(server);
                 }
                 Arc::new(transport) as Arc<dyn PeerTransport>
             })

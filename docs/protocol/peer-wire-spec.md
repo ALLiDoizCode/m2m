@@ -1,108 +1,50 @@
-# Peer wire specification
+# Peer semantics specification (formerly the peer wire specification)
 
-**Status:** §1–§2 **SUPERSEDED** by
-[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) — the
-raw-TCP framing and packet structure they describe are being deleted, and connector↔connector
-traffic moves to BTP (RFC-0023) over `wss://`. §3–§6 remain normative as the _semantics_ the BTP
-sub-protocol entries carry; ADR 0027 tabulates which BTP frame carries each frame type here,
-including FLUSH (a TRANSFER) and CLAIM_ACK (a `claim-ack` protocolData entry on the RESPONSE).
+**Status:** Normative for §3–§6. **§1–§2 are deleted** — superseded by
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md),
+and the implementation they described was removed in issue #679.
 Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
 **Consumers:** the Rust `connector-runtime` peer transport port and every implementation of
 it (contract-tested per [ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-no.md)); any
-future non-Rust connector that wishes to peer with this fleet.
+non-Rust connector that wishes to peer with this fleet.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). The key words MUST, MUST NOT, SHOULD and MAY
 are per RFC 2119.
 
-This document defines the protocol two connectors speak to each other — the **peer wire**. Both
-ends are operator-controlled ([ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md)),
-so nothing here is frozen by an installed base outside the fleet; a change costs a coordinated
-restart, not an outage of unbounded duration. This is a from-scratch design — it does not port
-BTP (RFC-0023) or its framing — but it reuses ILPv4's packet semantics (RFC-0027) for the
-PREPARE/FULFILL/REJECT fields themselves, since those are Interledger-network-level concepts
-this connector still speaks, not peer-wire-local ones.
+## What this document is now
 
-## 1. Framing
+This document used to define a whole protocol: a raw-TCP framing (§1), the ILPv4 packet
+structure carried on it (§2), and the peer *semantics* riding on top (§3–§6). ADR 0027 split
+those apart. Connectors peer over one of the two carriages the client edge already serves —
+**BTP (RFC-0023) over `wss://`** or **ILP-over-HTTP over `https://`** — so there is no
+peer-specific framing left to specify, and the raw-TCP wire that was the only implementation
+of §1–§2 has been deleted. It never carried a production packet.
 
-### 1.1 Transport
+**§1 Framing and §2 Packet structure are therefore gone.** What replaced them:
 
-A peering relation is one persistent, ordered, encrypted, bidirectional byte stream between two
-connectors (a `PeerTransport` port; the production implementation is TLS over TCP, the test
-implementation is an in-process duplex used to compose multi-connector tests without a socket,
-per [ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-no.md)). Traffic on the stream flows
-in both directions concurrently and independently: either side MAY forward a PREPARE to the
-other at any time, and a PREPARE's response (FULFILL or REJECT) rides the same stream, not a
-separate connection. There is no per-request connection setup after the peering relation is
-established.
+| What §1–§2 defined                        | Where it lives now                                                                                                                                   |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The stream, framing and the six frame types | ADR 0027's carriage table — each former frame is a BTP MESSAGE/RESPONSE/TRANSFER or an HTTP request/response, with the extra fields as protocolData entries or headers |
+| Session mechanics on a persistent socket    | [`client-edge-spec.md`](client-edge-spec.md) §1.9 (BTP) and §1.3 (HTTP) — one pipeline, two carriages, per ADR 0026                                    |
+| ILPv4 packet fields and their OER encoding  | `connector_domain::oer` and `vectors/wire-vectors.json`, which were never peer-specific ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md), [ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md)) |
+| Peer identity as configuration, not a handshake | Role-by-authentication (ADR 0027): a configured credential **and** a `[[peer_channels]]` entry. Config schema is issue #677; the carriages are #676 |
 
-Identity and authentication of a peering relation are configuration (each side knows the other
-by a configured peer id and verification key), not a wire handshake this spec defines. A stream
-that cannot be authenticated to a configured peer is closed; there is no anonymous peer wire
-identity, unlike the client edge.
+**§3–§6 below are unchanged and still normative.** They are the semantics *both* carriages
+carry — claim exchange, fees and minimum delivery, reject codes and accumulated cost,
+consistency — and ADR 0027 re-hosts them rather than rewriting them. Section numbering is
+deliberately left alone so that every existing citation of §3.2, §3.4, §3.5, §5.2 and §5.3 in
+the code, the ADRs and `client-edge-spec.md` still resolves. Where these sections say "frame",
+read "whatever the configured carriage frames it as"; ADR 0027's table is the mapping, and
+FLUSH (§3.3) and CLAIM_ACK (§3.4) are the two whose mapping is not obvious: on the BTP carriage
+a FLUSH is a TRANSFER, and a CLAIM_ACK is a `claim-ack` protocolData entry on the RESPONSE.
 
-**Implementation gap.** `connector_runtime::network_peer_transport` ships **plain TCP**: the
-framing (§1.2) and the lazy-redial behaviour the port's contract suite requires, and neither TLS
-nor any authentication of the far end. A `[[peers]]` entry is an address, not a verification key,
-and the config has no field for one. Everything above this paragraph is what a peer wire exposed
-outside a trusted network MUST do; until that is implemented, `peer_wire_addr` MUST be bound to a
-private interface, because the wire is unencrypted and unauthenticated and carries signed balance
-proofs.
+**The carriages themselves are specified in
+[`peer-carriage-spec.md`](peer-carriage-spec.md)** — normative for how each concept below is
+framed on BTP (`wss://`) and on ILP-over-HTTP (`https://`), and for the peer config surface.
+It sits beside §3–§6 and supersedes nothing in them.
 
-### 1.2 Frame envelope
-
-Every message on the stream is one length-prefixed frame:
-
-| Field           | Type           | Description                                                                                                                                                                     |
-| --------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `frameType`     | `uint8`        | One of the frame types in §1.3.                                                                                                                                                 |
-| `correlationId` | 16 bytes       | Generated by the sender of a PREPARE; MUST be echoed on the FULFILL or REJECT that answers it. Absent (all-zero) on frames not answering a specific PREPARE (FLUSH, CLAIM_ACK). |
-| `length`        | `uint32`       | Length in bytes of `payload`.                                                                                                                                                   |
-| `payload`       | `length` bytes | Frame-type-specific body (§1.3).                                                                                                                                                |
-
-A connector MUST reject and close the stream on a frame whose `length` exceeds a configured
-maximum (protects both sides from unbounded buffering); this is a transport-level failure, not
-an ILP-level REJECT.
-
-### 1.3 Frame types
-
-| `frameType` | Name      | Payload                                                                   |
-| ----------- | --------- | ------------------------------------------------------------------------- |
-| `0x01`      | PREPARE   | §2 packet fields + §4 fee/minimum-delivery fields + optional claim (§3.2) |
-| `0x02`      | FULFILL   | §2 packet fields                                                          |
-| `0x03`      | REJECT    | §2 packet fields + accumulated-cost field (§5.2)                          |
-| `0x04`      | FLUSH     | A claim only (§3.3), no `correlationId`                                   |
-| `0x05`      | CLAIM_ACK | Acknowledges a claim carried on a PREPARE or FLUSH (§3.4)                 |
-| `0x06`      | PING/PONG | Liveness; no payload beyond a direction bit                               |
-
-A connector that receives a `frameType` it does not recognize MUST close the stream rather than
-guess at its meaning — an unknown frame is a version mismatch, not a packet to route around.
-
-## 2. Packet structure
-
-Every PREPARE, FULFILL and REJECT frame carries an ILPv4 packet (RFC-0027), OER-encoded
-(RFC-0030). The encoder is `connector_domain::oer`; its length determinants are canonical, so a
-non-minimal, zero-length-alias or over-wide determinant is refused rather than accepted as a
-synonym ([ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md)). (This spec previously
-defined the encoding as "byte-identical to the existing `@toon-protocol/shared` encoder/decoder";
-that TypeScript package was deleted with the prototype, and `vectors/wire-vectors.json` is the
-definition now — [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md).)
-
-- **PREPARE**: `amount` (uint64, the value this hop transfers to its immediate next hop),
-  `destination` (ILP address, RFC-0015), `expiresAt`, `executionCondition` (32 bytes — see §3.1),
-  `data`. Opacity is a property of **carriage**, not of the bytes
-  ([ADR 0016](../adr/0016-payload-opacity-is-a-property-of-carriage.md)): a **forwarding** hop MUST
-  NOT interpret `data`, and structurally cannot — it is a gift wrap sealed to the terminating
-  connector's identity key ([ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)),
-  so a forwarding hop cannot see the method, target, headers or size of what crossed it. The
-  **terminating** connector opens it, and the request envelope inside is exactly what it makes of
-  the app. The `app`/`connector` boundary in `CONTEXT.md` is preserved by that asymmetry, not by a
-  blanket prohibition.
-- **FULFILL**: `fulfillment` (32-byte preimage), `data` (opaque return payload).
-- **REJECT**: `code` (RFC-0027 §3.3 three-character code), `triggeredBy` (ILP address of the
-  connector that generated the error), `message`, `data`.
-
-The peer wire adds fields alongside the ILP packet rather than inside its `data`, because `data`
-is reserved for the application payload the connector never reads. Those additional fields are
-defined in §3 (claims) and §4–§5 (fee, minimum delivery, accumulated cost).
+Everything below reuses ILPv4's packet semantics (RFC-0027) for the PREPARE/FULFILL/REJECT
+fields themselves, since those are Interledger-network-level concepts this connector still
+speaks.
 
 ## 3. Execution condition, fulfilment, and claim exchange
 
@@ -181,7 +123,7 @@ one of:
   or `unknown_channel`.
 
 A `rejected` CLAIM_ACK does not reject the PREPARE the claim was piggybacked on — that PREPARE is
-independently routed and answered per §2. It does mean the payee now holds unclaimed exposure to
+independently routed and answered as an ordinary ILPv4 packet. It does mean the payee now holds unclaimed exposure to
 the payer it cannot account for; a connector SHOULD stop forwarding further PREPAREs to a peer
 whose most recent claim was rejected until a valid claim restores the watermark (this is the same
 mechanism as the ceiling in §5.3, applied to a payer that has become unable to pay rather than
