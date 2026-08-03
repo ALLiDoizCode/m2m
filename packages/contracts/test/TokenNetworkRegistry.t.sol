@@ -262,11 +262,10 @@ contract TokenNetworkRegistryTest is Test {
         registry.setTrustedForwarder(address(0xF01A2));
     }
 
-    event TrustedForwarderUpdated(address indexed previousForwarder, address indexed newForwarder);
-
     // Event declarations for testing
     event WhitelistEnabled();
     event WhitelistDisabled();
     event TokenWhitelisted(address indexed token);
     event TokenRemovedFromWhitelist(address indexed token);
+    event TrustedForwarderUpdated(address indexed previousForwarder, address indexed newForwarder);
 }
