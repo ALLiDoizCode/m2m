@@ -835,10 +835,11 @@ async fn handle_ilp(
         headers.contains_key(CLAIM_HEADER) || headers.contains_key(CLAIM_WRAPPED_HEADER);
     // No matching app route means nothing here is priced -- routing itself
     // (not this gate) is what refuses an unroutable destination, with F02.
-    let price = state
-        .connector
-        .app_route_price(&prepare.destination)
-        .unwrap_or(0);
+    // One lookup serves both facts (issue #701): the price and the
+    // transport policy come from the same matched route, so there is no
+    // reason to walk the route table twice for one request.
+    let app_route = state.connector.app_route(&prepare.destination);
+    let price = app_route.map_or(0, |route| route.price);
 
     // Transport policy (issue #701, toon-meta#262 decision 11) is checked
     // before payment is considered at all: a route restricted to BTP is
@@ -846,10 +847,7 @@ async fn handle_ilp(
     // claim, so a paid request over the wrong transport is refused exactly
     // like an unpaid one. A destination matching no app route is
     // unaffected -- `None` here, same as an unmatched destination's price.
-    if let Some(policy) = state
-        .connector
-        .app_route_transport_policy(&prepare.destination)
-    {
+    if let Some(policy) = app_route.map(|route| route.transport_policy) {
         if !policy.accepts_http() {
             return wrong_transport_required(
                 &prepare.destination,

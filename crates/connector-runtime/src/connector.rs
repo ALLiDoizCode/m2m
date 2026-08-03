@@ -204,6 +204,15 @@ fn correlation_id(execution_condition: &[u8; 32]) -> String {
         .collect()
 }
 
+/// An app route's price and transport policy together, as
+/// [`Connector::app_route`] returns them from a single route lookup (issue
+/// #701).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppRouteFacts {
+    pub price: u64,
+    pub transport_policy: TransportPolicy,
+}
+
 /// The connector's packet plane: a fixed set of terminated routes and peer
 /// routes, an [`AppClient`] port for delivering to the apps behind
 /// terminated routes, a [`PeerTransport`] port for forwarding to the next
@@ -1065,13 +1074,22 @@ impl Connector {
     }
 
     /// The transport policy of the app route `destination` would resolve
-    /// to, or `None` if no app route matches it -- the client edge's two
-    /// carriages ask here to enforce per-route transport policy (issue
-    /// #701) the same way they already ask [`Self::app_route_price`] to
-    /// enforce pricing.
+    /// to, or `None` if no app route matches it.
     pub fn app_route_transport_policy(&self, destination: &str) -> Option<TransportPolicy> {
         self.select_app_route(destination)
             .map(|index| self.routes[index].transport_policy())
+    }
+
+    /// Price and transport policy together, from one `select_app_route`
+    /// lookup, or `None` if no app route matches `destination` -- the client
+    /// edge's two carriages need both facts per request (issue #701) and
+    /// would otherwise pay the prefix scan twice, once per accessor above.
+    pub fn app_route(&self, destination: &str) -> Option<AppRouteFacts> {
+        self.select_app_route(destination)
+            .map(|index| AppRouteFacts {
+                price: self.routes[index].price(),
+                transport_policy: self.routes[index].transport_policy(),
+            })
     }
 
     /// This node's static routes, for the operator surface's read-only

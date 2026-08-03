@@ -794,10 +794,10 @@ async fn handle_frame(
         }
     };
 
-    let price = state
-        .connector
-        .app_route_price(&prepare.destination)
-        .unwrap_or(0);
+    // One lookup serves both facts (issue #701): see `handle_ilp`'s mirror
+    // of this on the HTTP carriage.
+    let app_route = state.connector.app_route(&prepare.destination);
+    let price = app_route.map_or(0, |route| route.price);
 
     // Transport policy (issue #701, toon-meta#262 decision 11), BTP-shaped:
     // checked before payment is considered at all, exactly like the HTTP
@@ -809,10 +809,7 @@ async fn handle_frame(
     // `payment-required` protocolData slot the §1.4 greeting below uses,
     // self-diagnosing via `extra.requiredTransport` rather than a second
     // mechanism.
-    if let Some(policy) = state
-        .connector
-        .app_route_transport_policy(&prepare.destination)
-    {
+    if let Some(policy) = app_route.map(|route| route.transport_policy) {
         if !policy.accepts_btp() {
             let terms = x402_terms_body(
                 &prepare.destination,
