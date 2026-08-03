@@ -1,0 +1,983 @@
+# Peer carriage specification
+
+**Status:** Normative for the carriage mapping, in the same sense
+[`peer-wire-spec.md`](peer-wire-spec.md) §3–§6 are normative — this is an operator-to-operator
+wire, and a third-party connector has nothing else to implement against. Subject to
+[ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) where bytes are concerned: **where
+this prose and `vectors/wire-vectors.json` disagree about an encoding, the vectors are right and
+this text is the bug.** §10 enumerates the vectors that must exist for that sentence to mean
+anything.
+**Implements:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
+This document carries ADR 0027's decisions through to the wire; it does not re-decide them. Where
+it sharpens or resolves an ambiguity in that ADR it says so, in §12.
+**Consumers:** issue #676 (the two carriage implementations behind the `PeerTransport` port),
+issue #677 (the config schema), issue #678 (devnet bring-up), and any non-Rust connector that
+wishes to peer with this fleet.
+**Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). The key words MUST, MUST NOT, REQUIRED, SHALL,
+SHOULD, SHOULD NOT and MAY are per RFC 2119.
+
+---
+
+## 0. What this document is, and its relationship to the surviving spec
+
+ADR 0027 split one document into two layers.
+
+| Layer                                                                                                                                                                                           | Where it is specified                                                                         |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| **Semantics** — what a peer interaction _means_: claim exchange, flush, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost, ceilings, consistency | [`peer-wire-spec.md`](peer-wire-spec.md) **§3–§6**, unchanged and still normative             |
+| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                                                           | **this document**                                                                             |
+| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                                                | gone: `peer-wire-spec.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679 |
+
+**This document sits beside `peer-wire-spec.md` §3–§6. It supersedes nothing in them.** It does
+not restate them and MUST NOT be read as replacing them: every existing citation of §3.2, §3.3,
+§3.4, §3.5, §4, §5.1, §5.2 and §5.3 — in the code, in ADRs 0010/0011/0024, and in
+`client-edge-spec.md` — continues to resolve there, and this document cites them the same way. A
+reader implementing a peer connector needs both: §3–§6 for what to do, this document for what to
+put on the wire while doing it.
+
+Where §3–§6 say "frame", read "whatever the configured carriage frames it as". This document is
+that mapping.
+
+### 0.1 The two carriages
+
+A connector peers over one of the two carriages it already serves clients on, per ADR 0027:
+
+- **BTP** — RFC-0023 over `wss://`, the frame grammar `client-edge-spec.md` §1.9 defines, decoded
+  by the `connector-btp` crate extracted in issue #713.
+- **ILP-over-HTTP** — `POST` over `https://`, the request/response shape `client-edge-spec.md`
+  §1.1 and §1.3 define.
+
+Which of them a connector _exposes_, and which it _dials_ for a given peer, is operator policy
+(§2). Neither is a protocol constant, and a connector MAY expose both.
+
+**One pipeline, two carriages.** Downstream of the carriage there is exactly one peer pipeline:
+one route lookup, one `ClaimBook`, one journal, one fee and ceiling policy, one refusal taxonomy.
+A peer PREPARE that arrived over HTTP MUST be indistinguishable, everywhere below the
+`PeerTransport` port, from one that arrived over BTP. Any observable peer behaviour that exists on
+one carriage and not the other is a defect, not a carriage property — except where this document
+names it as one (§6.4, §7.2). §9 states the invariants that hold this, and §10 the vectors that
+enforce them mechanically.
+
+---
+
+## 1. Role is decided by authentication
+
+This is the security core of this document and the property ADR 0027 spent to get here: ADR 0026's
+proof-by-construction — "peers speak a different protocol on a different listener, so no client
+trust can leak onto a peer session and no peer trust onto a client one" — is gone, and what
+replaces it is code, on two carriages. Everything in this section is a stop-ship invariant.
+
+### 1.1 Definitions
+
+An **interaction** is either a BTP session (from its websocket upgrade to its close) or a single
+HTTP request. Every interaction has exactly one **role**: `peer` or `client`. There is no third
+role, no `unknown`, and no unroled state.
+
+### 1.2 The rule
+
+An interaction has role `peer` **if and only if both** of the following hold:
+
+- **P1 — a proven credential.** The interaction presented a credential naming a peer id `p` that
+  appears in `[[peers]]`, and the presented secret matched the secret configured for `p`. The
+  comparison MUST be constant-time. An empty configured secret MUST NOT match anything, including
+  an empty presented secret.
+- **P2 — a channel binding.** `p` has at least one `[[peer_channels]]` entry.
+
+If either fails, for any reason, the interaction has role `client`. **There is no fallthrough**:
+no degraded peer, no peer-for-routing-but-client-for-claims, no retry into peer role.
+
+### 1.3 What MUST NOT enter the decision
+
+A connector MUST NOT infer, weight or override role from any of:
+
+- the carriage (BTP vs HTTP), the listener, the port, or the bind address;
+- the source address, the TLS SNI name, or the presence of a TLS client certificate;
+- whether the `btp` websocket subprotocol was offered or selected;
+- a hostname or endpoint appearing in `[[peers]]`;
+- the shape of what the interaction sent — an inbound TRANSFER, a `toon-minimum-delivery` entry,
+  or a claim naming a channel that happens to be in `[[peer_channels]]`;
+- anything the interaction did earlier, or that another interaction from the same address did.
+
+Role is decided by the credential, or it is `client`.
+
+### 1.4 Presentation, on each carriage
+
+One credential, one JSON shape, two encodings — the same relationship `client-edge-spec.md` §1.9
+already establishes for a claim (raw JSON on BTP, base64 in an HTTP header, because base64 is a
+header artifact and nothing else).
+
+```json
+{ "peerId": "store-box", "secret": "…" }
+```
+
+| Carriage | Presentation                                                                                                                                   |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| BTP      | the `auth` protocolData entry, raw UTF-8 JSON, on the session's first MESSAGE — the same entry `client-edge-spec.md` §1.9 step 1 already reads |
+| HTTP     | the `Toon-Peer-Auth` request header (canonical lower-case `toon-peer-auth`), value `base64(JSON)` of the same object, on **every** request     |
+
+The BTP `auth` entry is unchanged in shape and unchanged in what a client sends. What changes is
+that a connector now **evaluates P1 and P2 against it** instead of accepting its contents
+unverified. `client-edge-spec.md` §1.9 step 1's "the contents are not verified" and its documented
+permissionless empty-`secret` mirror remain true **of the client role only**: an unverifiable or
+empty credential still admits a client session, exactly as today, and can never admit a peer one.
+
+Because HTTP has no session, the credential MUST be presented on every peer request. A request
+without it is a client request, whatever the previous request from the same connection carried.
+
+### 1.5 Binding, and the anti-escalation rules
+
+- **BTP: role is bound once, at auth, and is immutable for the session's lifetime.** A session
+  starts as `client` and becomes `peer` only when an `auth` entry satisfying P1 and P2 is
+  evaluated.
+- **Frames processed before the role is bound are processed as client frames and MUST NOT be
+  retroactively reclassified.** A claim ingested as a client claim stays a client claim, and its
+  effects on client watermarks stand.
+- **A second `auth` entry on a session whose role is already bound MUST NOT be evaluated.** The
+  connector MUST answer that frame with a BTP ERROR (`code F00`, `name NotAcceptedError`) and MUST
+  leave the role unchanged. Re-authentication mid-session is the escalation path this closes.
+- **Ambiguous credentials are refused, not resolved.** More than one `auth` entry on a single BTP
+  frame, or more than one `Toon-Peer-Auth` header on a single HTTP request, MUST refuse the frame
+  or request — BTP: an ERROR frame as above; HTTP: `400`, with no ILP body. The connector MUST NOT
+  pick the first, the last, or a concatenation. This is the header-smuggling defence, and its
+  absence is how "which credential did we check?" becomes unanswerable.
+- **Role is decided before anything else happens.** A connector MUST determine role before it
+  decodes a claim, before it consults a watermark, before it routes a packet, and before any fee,
+  ceiling or journal accounting. Nothing downstream of the port may ask which carriage or which
+  credential produced the interaction; it is handed a role.
+
+### 1.6 An asserted role is not a proven one
+
+A credential that names a configured peer id but fails P1 or P2 is an **assertion**. The
+connector:
+
+- MUST treat the interaction as a client, per §1.2;
+- MUST NOT refuse it for the assertion alone — refusing would make the credential check an oracle
+  for which peer ids this connector has configured;
+- MUST NOT record, log, meter or expose it as a peer interaction anywhere (`ADR 0014`'s metric and
+  log surfaces included); and
+- MUST emit a distinguishable, rate-limited operator-visible event — `peer_auth_refused`, carrying
+  the asserted peer id and which of P1/P2 failed — because the most likely real cause is a genuine
+  peer with a mistyped secret or a missing `[[peer_channels]]` row, and a silent downgrade to
+  client role would otherwise present to an operator as "peering configured, nothing peers, no
+  error anywhere."
+
+### 1.7 What each role grants
+
+Stated as an enumeration because "peer trust" and "client trust" are otherwise undefined, and
+undefined trust is what leaks.
+
+**Peer role grants, and only these:**
+
+- claims judged against `ClaimBook` and the `[[peer_channels]]` records, advancing peer watermarks
+  and appended to the peer claim ledger;
+- being a next hop: packets from this interaction may be forwarded per the routing table, and this
+  peering relation may be a route's next hop;
+- `minimumDelivery` honoured as a sender declaration (§5, `peer-wire-spec.md` §4);
+- `accumulatedCost` relayed with this hop's own fee added (`peer-wire-spec.md` §5.2);
+- FLUSH accepted (§6);
+- exposure and ceiling accounted per peering relation (`peer-wire-spec.md` §5.3).
+
+**Peer role does NOT grant:** free carriage; a route the routing table does not have; any operator
+or admin surface (ADR 0008); any exemption from sealing (§8); any say in this connector's fees or
+a route's price; nor the ability to open the payload of a packet it forwards.
+
+**Client role does NOT grant, and a connector MUST refuse these to a client interaction even when
+it presents bytes that look like them:**
+
+- advancing a `[[peer_channels]]` watermark or writing to the peer claim ledger;
+- a `toon-minimum-delivery` / `Toon-Minimum-Delivery` field being honoured — a client
+  interaction's minimum-delivery field MUST be **ignored**, not rejected and not applied;
+- a `claim-ack` / `Toon-Claim-Ack` on a client response — a connector MUST NOT emit one on a
+  client interaction;
+- being treated as a peering relation for ceiling or flush purposes.
+
+### 1.8 Namespace disjointness
+
+Peer watermarks and client watermarks are **separate records**, keyed in separate namespaces, even
+for the same on-chain channel id. A connector MUST NOT let a claim judged in one namespace advance
+a watermark in the other.
+
+To make that safe rather than merely separate — two namespaces over one channel would otherwise
+let the same claim be counted as credit twice — **a channel id configured in `[[peer_channels]]`
+MUST NOT also appear in `[[client_channels]]`, and a configuration containing both MUST fail at
+load** (§11, `ChannelInBothNamespaces`). Disjointness is enforced in config, so the two namespaces
+can never describe the same money.
+
+### 1.9 The named regression
+
+The invariant exists because the TypeScript fleet violated it. `toon-sandbox` admitted an
+anonymous BTP session with `btp_auth … success:true mode:"no-auth"` and then treated it as a
+quasi-peer (the ingress findings ADR 0027 cites).
+
+**Both carriages MUST carry a stop-ship regression test named for it**, asserting that each of the
+following is classified `client` and reaches no peer handling whatsoever:
+
+1. an interaction presenting no credential at all;
+2. an interaction presenting a credential with an empty `secret`;
+3. an interaction presenting a _correct_ `peerId` with a wrong `secret`;
+4. an interaction presenting a correct `peerId` and correct secret for a peer with **no**
+   `[[peer_channels]]` entry (P2 alone failing);
+5. an interaction presenting a syntactically valid credential naming a peer id that is not
+   configured.
+
+"Reaches no peer handling" is testable as: no peer watermark moved, nothing was appended to the
+peer claim ledger, no peer-relation exposure changed, and no `claim-ack` was emitted.
+
+### 1.10 The dedicated-listener fallback
+
+ADR 0027 names one escape hatch, and it is bounded here so it is not invented under pressure. If
+role-by-auth cannot be shown safe on a shared listener, a connector MAY expose a **dedicated peer
+listener with mandatory authentication**. If it does:
+
+- role is **still** decided by P1 and P2 on that listener. The listener is defence in depth and
+  MUST NOT become the decider — §1.3 still holds in full;
+- an interaction on that listener that fails P1 or P2 MUST be **refused outright** (BTP: ERROR then
+  close; HTTP: `401`) rather than downgraded to client. This is the single place refusal replaces
+  downgrade, and it is safe only because a dedicated peer listener serves no clients, so there is
+  no client to downgrade to and no oracle to leak (the peer ids it protects are the ones already
+  advertised to the peer that dials it);
+- it MUST still be BTP or ILP-over-HTTP. Never a bespoke wire, never raw TCP.
+
+---
+
+## 2. Expose and dial are separate axes
+
+### 2.1 The axes
+
+- **`expose`** — which peer carriages this connector opens a listener for. A subset of
+  `{btp, http}`, including the empty set. **The empty set is legal and meaningful**: a connector
+  behind NAT exposes nothing and only dials.
+- **`dial`** — per configured peer, which carriage this connector reaches _that peer_ on.
+  Determined **solely by the scheme of that peer's configured `endpoint`**: `wss://` → BTP,
+  `https://` → HTTP. Any other scheme MUST be a load-time error. A peer with **no** `endpoint` is
+  accept-only from this connector's point of view: this connector never dials it, and it dials us.
+
+These are independent. Exposing BTP says nothing about how any peer is dialed; dialing a peer over
+HTTP says nothing about what this connector listens on.
+
+### 2.2 The intersection rule
+
+**A peering establishes only if at least one side dials a carriage the other exposes.** Two
+operators who each expose only the carriage the other cannot dial simply cannot peer, and no
+amount of retrying changes that.
+
+Where the failure is detectable from this connector's own configuration alone, it MUST be a
+**named load-time error**, never a runtime mystery (§11):
+
+- this connector exposes nothing **and** a configured peer has no `endpoint` — a declared peering
+  that can never establish (`PeerUndialable`);
+- a route names a peer as its next hop that this connector can never originate to (§2.4)
+  (`PeerRouteUndeliverable`).
+
+What is **not** locally detectable — whether the remote actually exposes what we dial — MUST
+surface as an ordinary dial failure with the peer id and the attempted endpoint named, and packets
+routed to that peer MUST reject `T01` (`peer-wire-spec.md` §5.1), never `T00` and never a silent
+drop.
+
+### 2.3 Origination
+
+**A connector can only originate a request to a peer it can dial, on HTTP.** On BTP a dialed
+session is symmetric once established: after auth, either side may originate a MESSAGE or a
+TRANSFER (`client-edge-spec.md` §1.9, "Symmetric grammar"). This is the whole of the difference
+between the carriages, and everything in §6.4 and §7.2 follows from it.
+
+| Configuration                                           | Who can originate                              |
+| ------------------------------------------------------- | ---------------------------------------------- |
+| A dials B over `wss://`                                 | both A and B, on the one session               |
+| A dials B over `https://`, B does not dial A            | A only                                         |
+| A and B each dial the other over `https://`             | both, on their own outbound connections        |
+| A dials B over `wss://`, B also dials A over `https://` | both — and the peering has two paths; see §2.5 |
+
+### 2.4 The NAT consequence, and the HTTP limit
+
+An operator behind NAT exposes nothing and must dial out. It can hold an inbound-capable session
+only over a persistent socket, so it must dial **BTP**. Therefore:
+
+> **An HTTP-only peer can neither reach nor be reached by a NAT'd peer.** The NAT'd side can only
+> dial, so it needs the counterparty to expose something; and it can only receive over a persistent
+> session, so that something must be BTP. An operator who exposes HTTP only has chosen to peer
+> exclusively with dialable counterparties.
+
+This is a property of the HTTP carriage, not a defect scheduled for repair. It is why BTP is the
+recommendation for anything resembling a fleet link (ADR 0027).
+
+### 2.5 One peering relation, however many paths
+
+`flushIntervalMs`, the fee, the ceiling, the exposure accounting, the claim watermarks and the
+claim ledger are **per peering relation, not per carriage and not per connection**. A peering that
+happens to have two paths (last row of §2.3) is still one relation with one set of watermarks. A
+connector MUST NOT maintain per-carriage exposure or per-carriage watermarks for one peer; doing
+so is a double-spend surface, since the same claim would advance two independent watermarks.
+
+Where two paths exist, a connector SHOULD prefer the BTP path for claim-bearing traffic, because
+it is the one on which claims cannot race (§7).
+
+---
+
+## 3. Frame carriage
+
+The normative mapping. Each row is a concept from `peer-wire-spec.md` §3–§6 and where its bytes
+ride on each carriage.
+
+| Concept (`peer-wire-spec.md`) | BTP carriage (`wss://`)                                                                                                                    | ILP-over-HTTP carriage (`https://`)                                                                                 |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| PREPARE (§3.1)                | **MESSAGE** (type 6), OER PREPARE in `ilpPacket`                                                                                           | **POST**, OER PREPARE as the request body                                                                           |
+| FULFILL (§3.1)                | **RESPONSE** (type 1) under the MESSAGE's `requestId`, OER FULFILL in `ilpPacket`                                                          | **200**, OER FULFILL as the response body                                                                           |
+| REJECT (§5.1)                 | **RESPONSE** under the MESSAGE's `requestId`, OER REJECT in `ilpPacket`                                                                    | **200**, OER REJECT as the response body                                                                            |
+| piggybacked claim (§3.2)      | `payment-channel-claim` protocolData entry, **raw UTF-8 JSON** (§4)                                                                        | `ILP-Payment-Channel-Claim` request header, `base64(JSON)` (§4)                                                     |
+| **FLUSH** (§3.3)              | **TRANSFER** (type 7): `amount` = the claim's new cumulative, claim in `payment-channel-claim`, no `ilpPacket`                             | **POST with an empty body** plus the claim header — the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
+| **CLAIM_ACK** (§3.4)          | `claim-ack` protocolData entry on the RESPONSE that already answers the claim-bearing frame (§5)                                           | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request (§5)                |
+| `minimumDelivery` (§4)        | `toon-minimum-delivery` protocolData entry on the MESSAGE, decimal-uint64 UTF-8 (§5.1)                                                     | `Toon-Minimum-Delivery` request header, decimal-uint64 ASCII (§5.1)                                                 |
+| `accumulatedCost` (§5.2)      | `toon-accumulated-cost` entry on the REJECT's RESPONSE, decimal-uint64 UTF-8 — **already implemented on the client edge, reused verbatim** | `Toon-Accumulated-Cost` response header — **already implemented on the client edge, reused verbatim**               |
+| peer credential (§1.4)        | `auth` protocolData entry, raw UTF-8 JSON                                                                                                  | `Toon-Peer-Auth` request header, `base64(JSON)`                                                                     |
+| flush prompt (§6.4)           | _(none — the payee can originate on BTP)_                                                                                                  | `Toon-Flush-Requested` response header, optional (§6.4)                                                             |
+
+Header names are matched case-insensitively per RFC 9110; the canonical lower-case forms are the
+ones the vectors pin.
+
+**A peer connector MUST NOT invent additional entries or headers.** A protocolData entry or header
+this document does not name MUST be ignored on receipt (never refused, so the carriage stays
+additively extensible) and MUST NOT be emitted.
+
+### 3.1 What this table does not change
+
+- **The ILP packets themselves are unchanged**, byte for byte, on both carriages: the same OER
+  encodings `POST /ilp` already carries (`client-edge-spec.md` §1.1), the same as the deleted peer
+  wire carried in its §2. `vectors/wire-vectors.json`'s existing envelope, condition and fulfilment
+  sections were never peer-specific and are not re-derived here.
+- **ADR 0024's EIP-712 `BalanceProof` digest is untouched**, on both carriages. A peer claim signs
+  exactly the digest `connector_signer::evm_balance_proof_digest` produces today, over exactly the
+  fields the deployed `TokenNetwork.sol` typehash requires, `lockedAmount`/`locksRoot` included and
+  hashed as zeros (`peer-wire-spec.md` §3.5). Only carriage moves.
+- **`peer-wire-spec.md` §5.1's reject-code table is unchanged.** In particular `F06_UNEXPECTED_PAYMENT`
+  still has no peer use: PREPAREs never carry claims to gate at PREPARE time. A connector MUST NOT
+  answer a peer-role PREPARE with the x402 greeting of `client-edge-spec.md` §1.4, nor with the
+  `payment-required` entry or header. Peer fees are bilateral configuration (`peer-wire-spec.md`
+  §4), not a negotiation, and `requiredTransport` (issue #701) is a client-edge route policy with
+  no peer analogue.
+
+### 3.2 The `WireClaim` binary encoding is not used on either carriage
+
+`connector_runtime::WireClaim::encode`'s length-prefixed binary form was the deleted peer wire's ad
+hoc encoding. Neither carriage uses it. Both carry the JSON of §4. `WireClaim` remains an in-process
+type above the `PeerTransport` port; a carriage converts to and from it and MUST NOT put its
+`encode()` bytes on a wire.
+
+---
+
+## 4. The claim on the wire
+
+One claim shape, one JSON encoding, two transfer encodings.
+
+A peer claim is the **same JSON object** `client-edge-spec.md` §1.3 defines for a client claim:
+`version: "1.0"`, discriminated by `blockchain`, with the required fields (`version`, `blockchain`,
+`messageId`, `timestamp`, `senderId`) and the chain-specific fields of that section. This is not a
+convenience: it is why one claim codec, one structural validator and one signature verifier serve
+both edges, and why a change to the claim shape cannot land on one and not the other.
+
+- **BTP**: the `payment-channel-claim` protocolData entry carries `JSON.stringify(claim)` as **raw
+  UTF-8** — no base64 layer. This is verbatim the client edge's existing convention
+  (`client-edge-spec.md` §1.9 step 2).
+- **HTTP**: the `ILP-Payment-Channel-Claim` request header carries `base64(JSON.stringify(claim))`.
+  Base64 is a header artifact and nothing more.
+
+**The privacy-wrapped carriage (`ILP-Payment-Channel-Claim-Wrapped`, NIP-59) is not part of the
+peer carriage on either wire.** A peering relation is configured on both ends by operators who know
+each other's channel identity, so the anonymity it buys has no peer use. A connector MUST ignore
+that header on a peer-role request.
+
+### 4.1 Validation
+
+A peer claim is validated by the same gate, in the same order, that
+`peer-wire-spec.md` §3.2 and §3.4 and `client-edge-spec.md` §1.3 already describe — structure,
+then freshness against the watermark, then value, then cryptography — with the peer-side
+differences that were already true and are unchanged by carriage:
+
+- the record it is checked against is the `[[peer_channels]]` entry for this peering relation
+  (§1.7, §1.8), never a client channel record and never anything the claim says about itself;
+- the channel-id canonical form of `client-edge-spec.md` §1.3 step 2 applies identically —
+  `0x` + 64 lower-case hex for `evm`, the base58 `channelAccount` as it arrives for `solana` — and
+  MUST be applied before a watermark is read or written. A connector that keyed a peer watermark by
+  literal text would grant a fresh watermark per spelling, and one signed claim would buy carriage
+  once per casing it was retyped in;
+- the four refusal reasons are `peer-wire-spec.md` §3.4's four, unchanged (§5.2).
+
+### 4.2 Recovery id
+
+Unchanged from `peer-wire-spec.md` §3.5: an `evm` signature is 65 bytes `r ‖ s ‖ v`, with `v` as
+libsecp256k1 emits it (`{0, 1}`), never the wallet `{27, 28}` convention. The one place the
+conversion happens is immediately before on-chain submission. Both carriages carry the byte
+unchanged, and the vectors pin it (§10).
+
+---
+
+## 5. Carriage-layer fields
+
+### 5.1 `minimumDelivery`
+
+`minimumDelivery` is a sender declaration, set once by the original sender and unchanged by every
+hop (`peer-wire-spec.md` §4). RFC-0027 has no field for it, so it rides the carriage:
+
+| Carriage | Field                          | Encoding                                              |
+| -------- | ------------------------------ | ----------------------------------------------------- |
+| BTP      | `toon-minimum-delivery` entry  | decimal uint64 as UTF-8 text, no sign, no leading `+` |
+| HTTP     | `Toon-Minimum-Delivery` header | decimal uint64 as ASCII, one value, no list form      |
+
+Normative handling:
+
+- **Absent means zero.** A claim-free floor is the correct default and the one the deleted wire's
+  fixed-width field expressed as `0`.
+- A **malformed** value — not decimal digits, empty, or exceeding `u64::MAX` — MUST reject the
+  PREPARE with `F01` (`peer-wire-spec.md` §5.1). It MUST NOT be silently treated as zero: zero is
+  the weakest possible floor, and quietly substituting it for an unparseable one converts a
+  framing bug into an under-delivery.
+- A forwarding hop MUST re-emit the value **unchanged** on its outbound PREPARE, on whichever
+  carriage that outbound hop uses. Crossing carriages MUST NOT alter it. This is the one
+  carriage-layer field that propagates; §8.3 states the general rule.
+- The inequality of `peer-wire-spec.md` §4 (`A' = A − fee`, reject `R01` if `A' < M`) is computed
+  identically on both carriages by the existing `connector_domain::fee::amount_after_fee`.
+- On a **client**-role interaction the field MUST be ignored (§1.7).
+
+### 5.2 `accumulatedCost`
+
+Already implemented on the client edge on both carriages and **reused verbatim** — the
+`toon-accumulated-cost` protocolData entry and the `Toon-Accumulated-Cost` response header, both
+decimal uint64 text, both already constant-named in `connector-client-edge`. The peer carriage adds
+no new encoding.
+
+The semantics are entirely `peer-wire-spec.md` §5.2's and are not restated here. Two carriage-level
+requirements:
+
+- The field rides **only** a REJECT's response. A connector MUST NOT emit it beside a FULFILL, and
+  MUST ignore it if one arrives there.
+- **Absent means zero on receipt**, and a relaying hop MUST still add its own fee to that zero
+  before passing the REJECT upstream. A hop MUST always emit the field on a REJECT it sends, even
+  when the value is `0`, so that "absent" never has to carry meaning in the direction that matters.
+
+### 5.3 Ceiling
+
+`peer-wire-spec.md` §5.3 is unchanged: exposure is tracked per peering relation, and a PREPARE that
+would push it over the configured ceiling MUST be rejected `T04`. Nothing about the ceiling is
+carriage-specific except its configuration obligation on an accept-only HTTP peering (§6.4, §11).
+
+---
+
+## 6. Claim acknowledgement
+
+### 6.1 Where it rides
+
+A `claim-ack` is a field on the response the carriage **already requires** for the claim-bearing
+frame — never a frame of its own:
+
+- **BTP**: a `claim-ack` protocolData entry on the RESPONSE under the claim-bearing MESSAGE's or
+  TRANSFER's `requestId`.
+- **HTTP**: a `Toon-Claim-Ack` response header on the response to the claim-bearing request.
+
+The body in both cases is the same JSON, raw UTF-8 on BTP and `base64(JSON)` in the HTTP header:
+
+```json
+{ "result": "accepted" }
+{ "result": "rejected", "reason": "signature_invalid" }
+```
+
+`reason` is exactly one of `peer-wire-spec.md` §3.4's four, unchanged and not extensible without a
+spec change: `signature_invalid`, `nonce_not_advancing`, `amount_not_advancing`, `unknown_channel`.
+These are the wire spellings of `connector_runtime::ClaimRejectReason`'s four variants; a fifth
+variant added to that enum without a corresponding change here and to the vectors is a wire break.
+
+### 6.2 Independence of the two verdicts
+
+**Preserved exactly, on both carriages.** `peer-wire-spec.md` §3.4 is explicit that a `rejected`
+claim does not reject the PREPARE the claim rode on. On the wire:
+
+- BTP: one RESPONSE carries **two independent answers** — `ilpPacket` answers the packet, the
+  `claim-ack` entry answers the claim.
+- HTTP: the response body answers the packet, the `Toon-Claim-Ack` header answers the claim, and
+  the **status is `200` regardless of the claim verdict**.
+
+Therefore, normatively:
+
+- A rejected claim MUST NOT be expressed as a BTP ERROR frame. ERROR remains reserved for
+  undecodable frames (`client-edge-spec.md` §1.9 step 6).
+- A rejected claim MUST NOT be expressed as a non-`200` HTTP status. `4xx`/`5xx` remain reserved
+  for a malformed request or a connector fault, i.e. cases where there is no ILP answer at all.
+- A rejected claim MUST NOT change the packet's own outcome, its `accumulatedCost`, or its fee
+  accounting.
+- The **consequence** is unchanged and is policy above the carriage: the payee now holds unclaimed
+  exposure it cannot account for, and SHOULD stop forwarding to that peer until a valid claim
+  restores the watermark (`peer-wire-spec.md` §3.4, §5.3).
+
+A `claim-ack` MUST NOT appear on a response answering a frame that carried no claim. If one
+arrives there it MUST be ignored.
+
+### 6.3 Absence, timeout, and retransmission
+
+The one honest loss of moving CLAIM_ACK from a frame type to a field: as an entry or a header it is
+**omissible**, where a distinct frame type made "the peer sent no ack" inexpressible. The
+compensating rules are the sharpest new requirements in this document.
+
+**Absence.** A response answering a claim-bearing request that carries **no** `claim-ack` /
+`Toon-Claim-Ack` means **NOT ACKNOWLEDGED**. Never accepted, never rejected, never inferred from
+the packet's verdict. The claim stays pending, the flush timer keeps running, and the payer's own
+exposure accounting is unchanged. A malformed ack — undecodable JSON, an unknown `result`, an
+unknown `reason`, a `rejected` with no `reason` — is likewise **not acknowledged**, and MUST NOT be
+read as either verdict.
+
+**Timeout.** The deleted wire had no timeout on an ack that never arrived, so a pending claim could
+hang forever. Both carriages now bound it structurally, because RFC-0023 requires a responder to
+answer every request and HTTP always answers. The deadline:
+
+| What was sent                              | Ack deadline                                                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| a claim riding a PREPARE (either carriage) | the same deadline as the packet's own answer: the PREPARE's `expiresAt`, capped by `peerAnswerTimeoutMs` |
+| a FLUSH (BTP TRANSFER)                     | `claimAckTimeoutMs`                                                                                      |
+| a FLUSH (HTTP standalone claim POST)       | `claimAckTimeoutMs`, applied to the HTTP response                                                        |
+
+`peerAnswerTimeoutMs` and `claimAckTimeoutMs` are per peering relation, both defaulting to
+**30 000 ms** — the value `connector-btp`'s existing `OUTBOUND_ANSWER_TIMEOUT` already uses, adopted
+rather than re-derived. `claimAckTimeoutMs` SHOULD be less than or equal to `flushIntervalMs`, so
+that a timed-out flush is superseded by the next flush tick rather than overlapping it; a
+configuration where it is greater MUST at least be a load-time warning.
+
+On expiry: the claim is **not acknowledged** (as above). A connector MUST NOT tear down a peering
+on a single ack timeout, MUST NOT retry by signing a _new_ claim at a higher nonce for the same
+cumulative, and MUST continue to count the packet's value in its own owed projection.
+
+**Retransmission and the idempotent re-ack.** A lost ack and a lost claim are indistinguishable at
+the payer, so retransmission is required and must be safe:
+
+- A payer whose claim was not acknowledged MUST retransmit the **latest pending claim** for that
+  channel — byte-identical if nothing has changed, or the newer, higher-nonce, higher-cumulative
+  claim if further fulfilments have occurred since (`peer-wire-spec.md` §3.2 step 3, unchanged: a
+  newer claim supersedes an older pending one, and acknowledging the newer one clears both).
+- A payee that receives a claim whose `(channel, nonce, cumulative, signature)` is **byte-identical
+  to the claim already at its current watermark** MUST answer `{"result":"accepted"}`, MUST NOT
+  answer `nonce_not_advancing`, and MUST NOT advance or record anything (there is nothing to
+  advance — the exposure covered is identical).
+- A claim at the **same nonce** but differing in any other field is a _different_ claim and MUST be
+  refused `nonce_not_advancing`, exactly as §3.2's strictly-advancing rule requires.
+
+This is a strict narrowing of the strictly-advancing rule that costs nothing and is the only thing
+standing between a lost ack and a permanently wedged peering. It is derived from ADR 0027's
+"missing ack means not acknowledged" rather than stated by it; see §12.
+
+### 6.4 The HTTP asymmetry, stated exactly
+
+ADR 0027 names this as the price of the HTTP carriage. Stated mechanically:
+
+**On HTTP, only the dialing side can originate. Packets therefore flow only in the dialing
+direction; debt flows in the direction packets flow (`peer-wire-spec.md` §3.2 — the sender owes);
+therefore on a one-way-dialed HTTP peering the dialing side is structurally the payer and the
+accept-only side is structurally the payee.**
+
+Three consequences, in the order an operator meets them:
+
+1. **The peering is unidirectional for packets.** The accept-only side can never forward a packet
+   to that peer. A route naming it as next hop is undeliverable, MUST be a load-time error where
+   detectable (§11, `PeerRouteUndeliverable`) and MUST reject `T01` at runtime otherwise. **This is
+   the consequence that actually bites at configuration time**, and it is more likely to surprise
+   an operator than the flush question below.
+2. **The residual flush case.** Where an accept-only side nonetheless holds a pending claim for
+   that peer — because it could dial earlier and can no longer, or its configured endpoint is
+   unreachable — it **cannot send the FLUSH at all**, and `flushIntervalMs` bounds nothing for it.
+   The claim stays pending until it can dial again. Its counterparty's protection during that
+   window is that counterparty's own ceiling.
+3. **The ceiling is the accept-only payee's only real bound, and MUST be explicit.** The accept-only
+   side cannot originate, so it cannot prompt a payer that has simply stopped sending; and unlike
+   BTP it has no live session to read liveness from. `flushIntervalMs` remains a bilateral promise
+   that the payer will flush, but the payee has no mechanism to make it true. Therefore: **a
+   peering relation this connector cannot dial MUST carry an explicit `ceiling`, and its absence
+   MUST be a named load-time error** (§11, `AcceptOnlyPeerWithoutCeiling`) — never a default,
+   because a defaulted ceiling on the one configuration where the ceiling is the sole bound is an
+   unowned credit decision.
+
+**`Toon-Flush-Requested` — a hint, and only a hint.** A payee that cannot originate MAY set this
+response header on any response it sends to that peer:
+
+```
+Toon-Flush-Requested: 0x3f2a…    # the channel id, canonical form per §4.1
+```
+
+- It MAY appear more than once, one channel id per occurrence; a comma-separated list form MUST NOT
+  be used. A payee SHOULD NOT name the same channel more than once in one response.
+- A payer receiving it, and holding a pending claim for the named channel, SHOULD send that claim
+  on its next request to that peer, or immediately as a standalone claim POST (§3), and in any case
+  no later than its `flushIntervalMs` would have caused anyway.
+- A payer with **no** pending claim for the named channel, or that does not recognise the channel,
+  MUST ignore the header. It MUST NOT be answered, acknowledged, or error on.
+- **It creates no obligation.** A payee MUST NOT refuse traffic, reject a packet, or change any
+  accounting because a hint went unanswered. Only the ceiling does that. A payer that ignores every
+  hint is not in violation of this specification.
+- A payee MUST NOT set it on a response to a **client** interaction, and a connector MUST ignore it
+  on a client-role response.
+
+BTP has no equivalent and needs none: on BTP the payee can originate a request of its own, and a
+peering whose payee needs to prompt should be on BTP.
+
+---
+
+## 7. Ordering and concurrency
+
+### 7.1 BTP
+
+Identical to the client edge's, and for the same reason (`client-edge-spec.md` §1.9, "Ordering",
+issue #688). **Claims on one peer session are judged strictly sequentially, in arrival order** — a
+frame's claim is fully admitted or refused before the next frame's claim is looked at. Claims sent
+in order on one socket therefore cannot race each other into `nonce_not_advancing`.
+
+What is **not** serialized is a judged frame's remaining work — recording the claim, routing the
+packet, sending the RESPONSE — which proceeds for up to a bounded number of frames concurrently
+(the connector's `btp_session_window`, default 16; when the window is full the session stops
+reading, so the bound is also the backpressure). A connector MUST reuse that mechanism rather than
+re-deriving a peer-specific one.
+
+Consequently RESPONSE frames may arrive in a different order than the MESSAGEs that provoked them.
+`requestId` is the correlation. **A peer MUST NOT assume responses arrive in request order**, and
+MUST NOT infer which claim an ack answers from position — the defect §12 records as fixed.
+
+### 7.2 HTTP
+
+The race `client-edge-spec.md` §1.9 exists to remove is present on an HTTP peering and absent on a
+BTP one: parallel requests carrying nonces _n_ and _n+1_ reach the watermark lock in either order,
+and the loser is refused `nonce_not_advancing` for nothing.
+
+Normative mitigation, matching what the client edge already ships: **a connector dialing a peer
+over HTTP MUST NOT have more than one claim-bearing request in flight to that peer per channel.**
+Requests carrying no claim are unconstrained. A connector MAY instead accept the retry cost, but
+only if it treats a `nonce_not_advancing` ack on a claim it knows to be fresh as a retryable
+condition rather than an error — and it MUST NOT respond to it by minting a higher nonce for the
+same cumulative (§6.3).
+
+This is a documented property of the carriage an operator chose, not a defect. It is the second
+reason (after §2.4) that BTP is the recommendation for a fleet link.
+
+### 7.3 Correlation
+
+- **BTP**: `requestId`, per `client-edge-spec.md` §1.9's grammar. A RESPONSE or ERROR whose
+  `requestId` this connector originated resolves against that outbound request; one it never
+  originated is dropped.
+- **HTTP**: the request/response pairing itself.
+
+Neither carriage has, or needs, the deleted wire's `correlationId` field on a claim ack.
+
+---
+
+## 8. Sealing and fulfilment on a peer hop
+
+ADR 0018 (a payload is sealed to the terminating connector) and ADR 0019 (a terminating connector
+derives the fulfilment) are unchanged by carriage. What this section fixes is the distinction
+between a **peer hop** and a **termination**, because the two carriages make it easier to blur.
+
+### 8.1 A peer hop is a forwarding hop
+
+- A packet's `data` is a gift wrap sealed to the identity of the connector that **terminates** its
+  route — not to the peer it is forwarded to. A forwarding connector holds no key that opens it.
+- A forwarding connector MUST forward `data` **byte-for-byte unchanged** on whichever carriage the
+  outbound hop uses. Crossing from BTP to HTTP or back MUST NOT re-encode, re-wrap, unwrap, pad or
+  truncate it. Opacity is a property of carriage (ADR 0016) and neither carriage adds a layer.
+- A forwarding connector MUST NOT derive a fulfilment. ADR 0019's derivation is a **termination-only**
+  capability; issue #417's rule — a connector never produces a fulfilment itself — stands unchanged
+  for every forwarding hop, on both carriages.
+- A forwarding connector MUST verify `sha256(fulfillment) == executionCondition` on every FULFILL it
+  relays upstream, **before** treating the packet as fulfilled for its own claim accounting
+  (`peer-wire-spec.md` §3.1). This is what makes the far end's derivation safe to rely on without
+  opening anything: a hop is paid only against a preimage it cannot forge.
+- `peer-wire-spec.md` §3.1's other rule is unchanged on both carriages: an absent or all-zero
+  `executionCondition` is `F01`, with no derived-preimage fallback.
+
+### 8.2 A termination reached over a peering
+
+When the peer link's far end **is** the termination, ADR 0018 and ADR 0019 apply exactly as they do
+at the client edge: the terminating connector opens the wrap with its own identity key, derives the
+fulfilment from the sealed shared secret, seals its answer back under that same secret, and confines
+the envelope's `target` beneath the route's handler path (ADR 0025). That the packet arrived from a
+peer rather than from a client changes **nothing** about any of it — including the fact that the app
+supplies no preimage and there is no `TOON-Fulfillment` response header.
+
+The one thing the peer arrival _does_ change is accounting, and it is already specified: the
+terminating connector's REJECT carries that route's configured price as `accumulatedCost`
+(`peer-wire-spec.md` §5.2), and the peer hop that forwarded to it adds its own fee on the way back.
+
+### 8.3 The layering invariant
+
+> **Carriage-layer fields are never sealed, and sealed payloads are never carriage-layer fields.**
+
+The claim, the claim ack, `minimumDelivery`, `accumulatedCost` and the peer credential ride the
+carriage — protocolData entries or headers — precisely so a hop can read and judge them without
+opening a payload it has no key for. Nothing in this document ever asks a connector to look inside
+`data`, and nothing in ADR 0018's wrap is ever promoted to a protocolData entry or a header.
+
+Corollary on propagation: **a carriage-layer field is re-derived by each hop, not copied**, with
+exactly one exception. `accumulatedCost` is recomputed (`+ thisHopFee`); the claim is this hop's own
+claim on its own channel; the credential is this hop's own; the claim ack answers this hop's own
+inbound claim. Only `minimumDelivery` propagates unchanged (§5.1), because it is a declaration by
+the original sender and every hop enforces the same inequality against the same value.
+
+---
+
+## 9. The invariants that keep two carriages from drifting
+
+ADR 0026's factoring of `claim_rejection_reject` and the x402 terms builder exists because the two
+_client_ carriages drifted and caused a devnet incident. The peer side inherits that discipline as a
+requirement. Each invariant below names the structural enforcement, not a review commitment.
+
+**I1 — One semantic value, two encodings.** For every row of §3's table, the value a connector
+decodes from the BTP encoding and the value it decodes from the HTTP encoding are the same value.
+_Enforced by:_ paired vectors generated from **one** fixture set (§10), plus a test that parses both
+members of each pair and asserts equality of the decoded value — not of the bytes.
+
+**I2 — One name table.** The BTP protocolData entry name and the HTTP header name for a given
+concept are declared **once**, as a pair, in one shared module, and both carriages read them from
+it. _Enforced by:_ a single table (the entry names already live in `connector-btp` after issue
+#713; the pairing table belongs beside them or in `connector-domain`, which both carriages already
+depend on). Adding a header without its protocolData twin must be impossible to express, not merely
+noticed in review — a second `const CLAIM_PROTOCOL` declared in a peer module is exactly the fork
+issue #713 was opened to prevent.
+
+**I3 — One refusal taxonomy.** `ClaimRejectReason` → ack JSON is **one** function, called by both
+carriages, exactly as `claim_rejection_reject` is on the client edge. A fifth reason cannot appear
+on one carriage and not the other, and cannot appear on the wire without a vector.
+
+**I4 — One claim codec, one validator, one verifier.** The claim JSON of §4 is the client edge's
+claim JSON, parsed by the same structural validator and checked against the same
+`connector_signer::claim_signature` digest (ADR 0024). There is no peer claim type on the wire.
+
+**I5 — One pipeline below the port.** Route lookup, `ClaimBook`, journal, fee, ceiling and exposure
+accounting are reached only through `PeerTransport`, and none of them can observe which carriage
+delivered a packet. _Enforced by:_ the port's existing contract suite being generic over how a peer
+is wired up (kept deliberately so in issue #679), extended with one arm per carriage. A carriage
+that needs to change anything above the port is a signal the seam is wrong.
+
+**I6 — One relation, one set of watermarks.** §2.5: exposure, watermarks, ledger and
+`flushIntervalMs` are per peering relation, never per carriage or per connection.
+
+**I7 — One role decision.** §1: the same P1/P2 rule, the same downgrade behaviour and the same
+named regression test on both carriages, with the credential in one JSON shape (§1.4) so a
+carriage cannot accept a credential the other would refuse.
+
+**Any peer behaviour that exists on one carriage and not the other, other than the two this
+document names as carriage properties (§6.4's origination asymmetry and §7.2's claim race), is a
+defect.** That is ADR 0027's revisit condition, restated as an acceptance criterion.
+
+---
+
+## 10. Vectors (ADR 0021)
+
+**A new frame shape without vectors is how the dialect drifted the first time.** The deleted peer
+wire had 102 lines of codec, prose describing it, and no vectors; the divergence issue #575 found —
+`ClaimBook` signing a connector-internal SHA-256 tuple where the spec said EIP-712 — was invisible
+for exactly as long as nothing pinned the bytes. This section exists so that cannot recur across two
+carriages, where there is twice as much surface and a second copy to fall out of step with.
+
+Per ADR 0021 the vectors are normative and this prose is not. Issue #676 MUST produce every vector
+below, in `vectors/wire-vectors.json` under a new `peer_carriage` section, generated by
+`crates/connector-vectors` from **fixed literal fixtures** (hardcoded keys, channel ids, nonces,
+amounts and payloads — never values sampled per run), self-verified at generation time against the
+same functions that judge them at runtime, and gated by `cargo test -p connector-vectors` exactly as
+the existing sections are. `vectors/README.md` MUST document the new section's schema for a reader
+in another repository importing no Rust from this one.
+
+### 10.1 The pairing rule
+
+**Vectors are generated in pairs from one fixture set.** For every concept, the BTP encoding and the
+HTTP encoding are produced from the _same_ fixture struct in the same generator run, and a test
+decodes both and asserts the decoded values are equal (I1). A change to one carriage that is not
+made to the other fails CI rather than being caught in review. This pairing is the mechanical form
+of ADR 0026's anti-drift discipline and is the reason the vector set is the enforcement point rather
+than the documentation.
+
+### 10.2 What must be pinned
+
+Every item is required. An item marked _(pair)_ is one BTP vector and one HTTP vector over the same
+fixture.
+
+**Credential and role**
+
+1. `peer_auth` _(pair)_ — the credential JSON: raw UTF-8 as the BTP `auth` entry, `base64` as the
+   `Toon-Peer-Auth` header value.
+
+**Claim**
+
+2. `peer_claim_evm` _(pair)_ — the claim JSON of §4 for `blockchain: "evm"`, raw and base64,
+   including the 65-byte signature with `v ∈ {0,1}` (§4.2).
+3. `peer_claim_digest` — the EIP-712 `BalanceProof` digest for that same claim's fields, pinned
+   **unchanged** against the existing claim section of `wire-vectors.json`, demonstrating ADR 0024
+   is untouched by carriage.
+4. `peer_claim_solana` _(pair)_ — the `solana` claim JSON, marked aspirational exactly as
+   `peer-wire-spec.md` §3.5 marks that row, so the shape is pinned before an implementation exists.
+
+**Claim-bearing PREPARE**
+
+5. `peer_prepare` _(pair)_ — BTP: a complete MESSAGE frame's bytes (type, `requestId`, protocolData
+   list containing `payment-channel-claim` and `toon-minimum-delivery`, the OER PREPARE in
+   `ilpPacket`). HTTP: method, path, the full header set and the OER body.
+6. `peer_prepare_no_claim` _(pair)_ — the same PREPARE with no claim entry/header, so "claimless is
+   legal" is pinned rather than assumed.
+
+**Answers and claim-ack**
+
+7. `peer_fulfill_ack_accepted` _(pair)_ — a FULFILL answer carrying `{"result":"accepted"}`.
+8. `peer_fulfill_ack_rejected` _(pair)_ — **a rejected claim riding a fulfilled PREPARE**: a FULFILL
+   body together with a `rejected` ack. This is §6.2's independence property, and it is the single
+   most important vector in this set, because coupling the two verdicts is the failure mode that
+   would silently destroy ADR 0024's semantics.
+9. `peer_ack_rejected_<reason>` _(pair × 4)_ — one per §6.1 reason: `signature_invalid`,
+   `nonce_not_advancing`, `amount_not_advancing`, `unknown_channel`.
+10. `peer_reject_with_cost` _(pair)_ — a REJECT answer carrying `toon-accumulated-cost` /
+    `Toon-Accumulated-Cost` **and** a `claim-ack`, both on the one response.
+11. `peer_ack_absent` _(pair)_ — **a response answering a claim-bearing request with no ack at
+    all**, pinned as the "not acknowledged" case (§6.3). Vectoring an _absence_ is unusual and
+    deliberate: the encoding cannot express it, so only a pinned example makes the rule testable.
+12. `peer_ack_malformed` _(pair)_ — an ack whose JSON is undecodable or whose `result` is unknown,
+    pinned as also meaning not-acknowledged, not as an error.
+
+**Flush**
+
+13. `peer_flush` _(pair)_ — BTP: a complete TRANSFER frame with `amount` equal to the claim's new
+    cumulative, the `payment-channel-claim` entry, and **no** `ilpPacket`. HTTP: a POST with an
+    empty body and the claim header. The equality between the TRANSFER `amount` and the claim's
+    `transferredAmount` MUST be asserted by the generator, not just by the reader.
+14. `peer_flush_ack` _(pair)_ — the answer to a flush: BTP an empty RESPONSE carrying the `claim-ack`
+    entry; HTTP a `200` with an empty body and the `Toon-Claim-Ack` header.
+15. `peer_claim_retransmit` _(pair)_ — a byte-identical retransmission of an already-accepted claim
+    and its idempotent `accepted` ack (§6.3), paired with
+16. `peer_claim_same_nonce_different_bytes` _(pair)_ — the same nonce with any other field changed,
+    and its `nonce_not_advancing` ack. Together these pin the boundary that keeps a lost ack from
+    wedging a peering.
+17. `peer_flush_requested` — HTTP only: a response carrying `Toon-Flush-Requested` with a canonical
+    channel id (§6.4). No BTP counterpart exists, and the vector set MUST record that absence
+    explicitly rather than leaving the pair incomplete.
+
+**Minimum delivery**
+
+18. `peer_minimum_delivery_absent` _(pair)_ — a PREPARE with the field omitted, pinning "absent
+    means zero".
+19. `peer_minimum_delivery_malformed` _(pair)_ — a non-decimal value and the `F01` it provokes,
+    pinning that it is not silently zero.
+
+**Sealing**
+
+20. `peer_forwarded_data_unchanged` _(pair)_ — one sealed `data` payload from the existing giftwrap
+    section, carried on both carriages, with the generator asserting the bytes are identical to the
+    source. This pins §8.1's "byte-for-byte unchanged, including across a carriage change".
+
+### 10.3 What is deliberately _not_ re-vectored
+
+The OER packet encodings, the envelope, the gift wrap, the derived fulfilment and the EIP-712 claim
+digest are already pinned in `wire-vectors.json` and were never peer-specific
+(`docs/protocol/wire-vectors.md`). The peer carriage MUST reference them, not copy them; a second
+copy of the claim digest would be a second thing to keep in step.
+
+---
+
+## 11. What this specification requires of the config (issue #677)
+
+Naming below is normative for the **wire-visible** parts (carriage names `btp`/`http`, endpoint
+schemes) and for the **error identities**; the exact TOML table and field spelling is #677's to
+settle. `deny_unknown_fields` stays.
+
+Required surface:
+
+- `[peers].expose` — a set drawn from `{"btp", "http"}`; `[]` is legal and means dial-only (§2.1).
+- Per peer: `id`; optional `endpoint` (a URL whose scheme is `wss://` or `https://`, with host and
+  port, SNI-capable — omitted means accept-only); `credential` (§1.4); and the per-peering-relation
+  values `peer-wire-spec.md` §3.3, §4 and §5.3 already require: `fee`, `flush_interval_ms`,
+  `ceiling`, plus this document's `claim_ack_timeout_ms` and `peer_answer_timeout_ms` (§6.3,
+  default 30 000 each).
+- The accepting mirror: configured credentials map to peer ids and thence to their channels.
+- `[[peer_channels]]` — `peer_id`, `channel_id`, `counterparty_key`, `chain_id`, `token_network`.
+  This is the surface whose absence makes ADR 0024 inert (#620 gap 3); it MUST actually wire
+  `ClaimBook`'s signer, verification key and EIP-712 domain, with **no code-only setters left on
+  the config path**.
+
+Named load-time errors this specification requires (spelling #677's, identity ours):
+
+| Error                          | Condition                                                                                                                                                                                                     | Source     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `PeerUndialable`               | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                            | §2.2       |
+| `PeerEndpointScheme`           | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                 | §2.1       |
+| `PeerCredentialMissing`        | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                            | §1.2       |
+| `PeerChannelUnbound`           | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                               | §1.2       |
+| `PeerChannelOrphaned`          | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                         | §1.2       |
+| `ChannelInBothNamespaces`      | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                    | §1.8       |
+| `AcceptOnlyPeerWithoutCeiling` | a peering this connector cannot dial and that carries no explicit `ceiling`                                                                                                                                   | §6.4       |
+| `PeerRouteUndeliverable`       | a route naming as next hop a peer this connector can never originate to                                                                                                                                       | §2.2, §6.4 |
+| `DuplicatePeerId`              | two `[[peers]]` entries with the same `id`                                                                                                                                                                    | —          |
+| removed-field errors           | `peer_wire_addr`, or `addr` in its old `SocketAddr` shape — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027   |
+
+`claim_ack_timeout_ms > flush_interval_ms` SHOULD be a load-time warning (§6.3).
+
+**No `transport` selector.** There is no field selecting between a peer wire and a carriage: the
+raw-TCP wire is deleted, and the carriage is selected by `expose` and by each endpoint's scheme.
+
+**Discovery needs no schema change.** `kind:10032` already advertises a `wss://` `btpEndpoint` and
+an HTTP endpoint and never carried a raw-TCP endpoint; what changes is values and ownership
+(issue #678), not schema.
+
+---
+
+## 12. Where this document sharpens ADR 0027
+
+Recorded explicitly so review can accept or overturn each, rather than discovering them later.
+
+1. **The HTTP claim header is `ILP-Payment-Channel-Claim`, not `Payment-Channel-Claim`.** ADR 0027's
+   table wrote the header as `Payment-Channel-Claim`, mirroring the BTP entry name. The deployed
+   client edge's header is `ilp-payment-channel-claim`, and the ADR's own governing rule is that the
+   claim carriage is "reused verbatim" with one codec. A new header name would require a second
+   decoder on the HTTP path, which is the drift I2 exists to prevent. §3 pins the deployed name.
+2. **The peer credential's HTTP presentation is named here.** ADR 0027 requires a credential and
+   §1.4 has to say what it looks like on HTTP; `Toon-Peer-Auth: base64(JSON)` was chosen to mirror
+   the BTP `auth` entry's existing JSON exactly, so the two carriages share one credential struct.
+3. **§6.4 restates the HTTP asymmetry more precisely than the ADR does.** ADR 0027 says the
+   non-dialing side "cannot flush, and `flushIntervalMs` does not bound its trailing exposure at
+   all." That is exactly true only in the residual case §6.4(2). In the ordinary accept-only
+   configuration the non-dialing side is structurally a _payee_ — debt flows with packets, packets
+   flow only in the dialing direction — so it has no trailing exposure of its own to bound, and the
+   real loss is **unidirectional packet flow** (§6.4(1)). The ADR's _conclusions_ are unchanged and
+   are strengthened, not weakened: the ceiling is still the accept-only side's only real bound, it
+   must still be explicit, and the hint is still only a hint. This document keeps them and gives the
+   sharper reason. **ADR 0027 should absorb the correction.**
+4. **The idempotent re-ack (§6.3) is derived, not stated.** ADR 0027 fixes "missing ack means not
+   acknowledged" and requires a timeout, both of which imply retransmission; nothing in the ADR or
+   in `peer-wire-spec.md` §3.2 says what a payee does with a byte-identical retransmission. Without
+   the rule in §6.3, a lost ack permanently wedges a peering, since the payer's only honest
+   retransmission is refused `nonce_not_advancing`. The rule is a strict narrowing of §3.2 that
+   changes no exposure.
+5. **Client-role fields are ignored, not refused (§1.7).** ADR 0027 states role-by-auth but not what
+   a client interaction's peer-shaped bytes do. Ignoring is chosen over refusing so a client SDK
+   that sets an unrecognised header is not broken by a peer feature, and so no error message
+   discloses the peer surface.
+6. **`ChannelInBothNamespaces` (§1.8).** ADR 0027 requires separate roles; the double-counting risk
+   of one channel in both namespaces is not addressed there. Enforcing disjointness in config is
+   the cheapest safe answer.
+
+Nothing in this document reopens ADR 0027's decisions: not the two carriages, not FLUSH-as-TRANSFER,
+not the claim ack as a field, not role-by-auth, not the deletion of the raw-TCP wire.
+
+---
+
+## 13. Consistency
+
+This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
+client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection, settlement,
+fee, minimum delivery, probe), adding **carriage**, **expose**, **dial** and **peering relation**
+as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
+`peer-wire-spec.md` §3.3's "per peering relation".
+
+It implements [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
+and carries, without restating,
+[ADR 0004](../adr/0004-value-moves-on-fulfilment.md),
+[ADR 0005](../adr/0005-claims-are-truth-balances-are-a-projection.md),
+[ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md),
+[ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md),
+[ADR 0016](../adr/0016-payload-opacity-is-a-property-of-carriage.md),
+[ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md),
+[ADR 0019](../adr/0019-a-terminating-connector-derives-the-fulfilment.md),
+[ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md),
+[ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md),
+[ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) and
+[ADR 0025](../adr/0025-an-envelope-target-is-confined-beneath-the-handler-path.md).
+
+It does not reintroduce raw-TCP framing, a `transport` selector, a peer-specific claim encoding, a
+quoting protocol, `lockedAmount`/`locksRoot`, the derived-preimage condition path, or a
+positional claim acknowledgement.
