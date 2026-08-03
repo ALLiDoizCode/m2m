@@ -118,6 +118,20 @@ pub enum ConfigError {
     PeerRouteHasPrice { prefix: String, price: u64 },
 
     #[error(
+        "route '{prefix}' forwards to a peer and sets 'transport = \"{value}\"', which only a \
+         route terminating at a 'handler_url' can restrict (issue #701) -- a peer route always \
+         travels the peer wire, never a client transport. Remove the 'transport' field"
+    )]
+    PeerRouteHasTransport { prefix: String, value: String },
+
+    #[error(
+        "route '{prefix}' sets transport = '{value}', which this connector does not recognize \
+         -- only 'http', 'btp' or 'both' are valid (issue #701). Omit the field for the \
+         default ('both'), or set one of those three"
+    )]
+    InvalidTransportPolicy { prefix: String, value: String },
+
+    #[error(
         "handler_url '{handler_url}' is priced inconsistently: route '{first_prefix}' charges \
          {first_price} but route '{second_prefix}' charges {second_price} -- an app cannot tell \
          which request arrived under which price, so the cheaper one would always win"

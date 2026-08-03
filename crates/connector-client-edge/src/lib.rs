@@ -58,6 +58,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use connector_config::TransportPolicy;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 use connector_runtime::{Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
@@ -409,6 +410,18 @@ struct X402ChannelExtra {
     /// is unaffected either way.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     settlements: Vec<X402ChainSettlementTerms>,
+    /// Present, and self-diagnosing, exactly when this greeting answers a
+    /// request that arrived over a transport its route's policy does not
+    /// accept (issue #701, toon-meta#262 decision 11): `"http"` or `"btp"`,
+    /// naming the transport the route actually requires. Absent -- not
+    /// `null` -- on every other greeting, so the pre-#701 shape is
+    /// unchanged for a route with no transport restriction.
+    #[serde(
+        rename = "requiredTransport",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    required_transport: Option<String>,
 }
 
 /// What an unaffiliated buyer needs to OPEN a channel with this node,
@@ -506,7 +519,49 @@ fn payment_required(
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
 ) -> Response {
-    let body = x402_terms_body(destination, price, settlement, settlements);
+    x402_response(destination, price, settlement, settlements, None)
+}
+
+/// Answer a request to `destination` that arrived over a transport its
+/// route's policy does not accept (issue #701, toon-meta#262 decision 11)
+/// with the same x402-shaped terms the unpaid-request greeting above uses,
+/// rather than inventing a second self-description mechanism -- the client
+/// learns which transport the route requires from `extra.requiredTransport`
+/// (`required.name()`, e.g. `"btp"`) the same way it learns a route's price
+/// from `extra.price`. This runs whether or not the request carries a valid
+/// claim: paying over the wrong transport does not make the route
+/// reachable that way, so `handle_ilp` checks transport before it checks
+/// payment at all.
+fn wrong_transport_required(
+    destination: &str,
+    price: u64,
+    required: TransportPolicy,
+    settlement: Option<&X402SettlementTerms>,
+    settlements: &[X402ChainSettlementTerms],
+) -> Response {
+    x402_response(
+        destination,
+        price,
+        settlement,
+        settlements,
+        Some(required.name()),
+    )
+}
+
+fn x402_response(
+    destination: &str,
+    price: u64,
+    settlement: Option<&X402SettlementTerms>,
+    settlements: &[X402ChainSettlementTerms],
+    required_transport: Option<&str>,
+) -> Response {
+    let body = x402_terms_body(
+        destination,
+        price,
+        settlement,
+        settlements,
+        required_transport,
+    );
     let header_value = BASE64.encode(&body);
     Response::builder()
         .status(StatusCode::PAYMENT_REQUIRED)
@@ -520,13 +575,16 @@ fn payment_required(
 /// The x402 v2 terms JSON itself (§1.4), shared by both carriages: the HTTP
 /// greeting above serves it as a 402 body + `Payment-Required` header, and
 /// the BTP greeting (§1.9, `btp` module) carries the same bytes as
-/// `payment-required` protocolData on an F06 REJECT -- factored so the two
-/// can never drift.
+/// `payment-required` protocolData on a REJECT -- factored so the two can
+/// never drift. `required_transport` (issue #701) is `None` for an ordinary
+/// unpaid-request greeting and `Some("http" | "btp")` when this same shape
+/// is reused to tell a client it used the wrong transport entirely.
 fn x402_terms_body(
     destination: &str,
     price: u64,
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
+    required_transport: Option<&str>,
 ) -> Vec<u8> {
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
@@ -546,6 +604,7 @@ fn x402_terms_body(
                 price: price.to_string(),
                 settlement: settlement.cloned(),
                 settlements: settlements.to_vec(),
+                required_transport: required_transport.map(str::to_string),
             },
         }],
     };
@@ -780,6 +839,28 @@ async fn handle_ilp(
         .connector
         .app_route_price(&prepare.destination)
         .unwrap_or(0);
+
+    // Transport policy (issue #701, toon-meta#262 decision 11) is checked
+    // before payment is considered at all: a route restricted to BTP is
+    // unreachable over HTTP whether or not the request carries a valid
+    // claim, so a paid request over the wrong transport is refused exactly
+    // like an unpaid one. A destination matching no app route is
+    // unaffected -- `None` here, same as an unmatched destination's price.
+    if let Some(policy) = state
+        .connector
+        .app_route_transport_policy(&prepare.destination)
+    {
+        if !policy.accepts_http() {
+            return wrong_transport_required(
+                &prepare.destination,
+                price,
+                policy,
+                state.settlement_terms.as_ref(),
+                &state.settlements,
+            );
+        }
+    }
+
     if !has_claim_header && price > 0 {
         return payment_required(
             &prepare.destination,
@@ -1554,6 +1635,85 @@ mod tests {
         );
     }
 
+    /// Issue #701 (toon-meta#262 decision 11): a route restricted to BTP
+    /// refuses an HTTP request the same way an unpaid request is refused --
+    /// terms instead of the app's work -- except here `extra` names which
+    /// transport the route actually requires; the route's price is
+    /// irrelevant to why this request was refused.
+    #[tokio::test]
+    async fn an_http_request_to_a_btp_only_route_is_answered_with_the_required_transport() {
+        let route = StaticRoute::new_priced_with_transport(
+            "g.example.relay",
+            "http://localhost:4000",
+            1000,
+            TransportPolicy::Btp,
+        )
+        .unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.relay").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            terms.accepts[0].extra.required_transport.as_deref(),
+            Some("btp"),
+            "the client should learn this route requires BTP"
+        );
+
+        assert!(
+            app_client.deliveries().is_empty(),
+            "a request over the wrong transport must never reach the app"
+        );
+    }
+
+    /// The mirror case: a route with no transport restriction (the default)
+    /// is unaffected -- its unpaid-request greeting carries no
+    /// `requiredTransport` at all, exactly the pre-#701 shape.
+    #[tokio::test]
+    async fn a_route_accepting_both_transports_never_carries_a_required_transport() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(terms.accepts[0].extra.required_transport, None);
+        let extra = serde_json::to_value(&terms.accepts[0].extra).unwrap();
+        assert!(
+            extra.get("requiredTransport").is_none(),
+            "an unrestricted route's greeting must not carry a requiredTransport key: {extra}"
+        );
+    }
+
     /// Issue #617: a node WITH a settlement backend answers the greeting
     /// with its channel-opening facts -- the counterparty address, chain,
     /// registry, resolved `TokenNetwork`, token and scale -- so an
@@ -2200,6 +2360,55 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             Fulfill::decode(&bytes).expect("decode fulfill");
             assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// Issue #701: transport policy is checked before payment is
+        /// considered at all -- a fully valid, correctly-priced claim over
+        /// HTTP does not make a BTP-only route reachable that way. The
+        /// request is refused with the same self-diagnosing terms an
+        /// unpaid request gets, and the app is never asked to do the work.
+        #[tokio::test]
+        async fn a_valid_claim_to_a_btp_only_route_is_still_refused_with_wrong_transport_terms() {
+            let route = StaticRoute::new_priced_with_transport(
+                "g.example.relay",
+                "http://localhost:4000",
+                100,
+                TransportPolicy::Btp,
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.relay", &signer.public_key().unwrap());
+            let app = router_with_gate(connector, signer, None, test_gate(test_channels()));
+
+            let request =
+                request_with_claim_header(&prepare, CLAIM_HEADER, &evm_claim_json(1, 100));
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                terms.accepts[0].extra.required_transport.as_deref(),
+                Some("btp")
+            );
+
+            assert!(
+                app_client.deliveries().is_empty(),
+                "a valid claim over the wrong transport must never reach the app"
+            );
         }
 
         /// A claim advancing by less than a priced route's price is

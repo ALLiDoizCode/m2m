@@ -536,6 +536,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::route::TransportPolicy;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -603,6 +604,44 @@ price = 0
         );
         let prices: Vec<u64> = config.routes().iter().map(|r| r.price()).collect();
         assert_eq!(prices, vec![25, 0]);
+    }
+
+    /// Issue #701: a route's `transport` field survives a real TOML file
+    /// through `Config::load`, and a route that omits it defaults to
+    /// accepting both -- matching the devnet shape (relay restricted to
+    /// BTP, store left at the default).
+    #[test]
+    fn loads_a_route_restricted_to_btp_alongside_one_accepting_both() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.relay"
+handler_url = "http://localhost:5000"
+price = 1000
+transport = "btp"
+
+[[routes]]
+prefix = "g.example.store"
+handler_url = "http://localhost:6000"
+price = 1000
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        let policies: Vec<TransportPolicy> = config
+            .routes()
+            .iter()
+            .map(|r| r.transport_policy())
+            .collect();
+        assert_eq!(policies, vec![TransportPolicy::Btp, TransportPolicy::Both]);
     }
 
     #[test]

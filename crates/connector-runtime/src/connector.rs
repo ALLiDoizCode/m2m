@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
-use connector_config::{SettlementChain, StaticRoute};
+use connector_config::{SettlementChain, StaticRoute, TransportPolicy};
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
     is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse, Prepare,
@@ -1064,6 +1064,16 @@ impl Connector {
             .map(|index| self.routes[index].price())
     }
 
+    /// The transport policy of the app route `destination` would resolve
+    /// to, or `None` if no app route matches it -- the client edge's two
+    /// carriages ask here to enforce per-route transport policy (issue
+    /// #701) the same way they already ask [`Self::app_route_price`] to
+    /// enforce pricing.
+    pub fn app_route_transport_policy(&self, destination: &str) -> Option<TransportPolicy> {
+        self.select_app_route(destination)
+            .map(|index| self.routes[index].transport_policy())
+    }
+
     /// This node's static routes, for the operator surface's read-only
     /// inspection interface (issue #420).
     pub fn routes(&self) -> Vec<RouteView> {
@@ -2001,6 +2011,49 @@ mod tests {
         assert_eq!(connector.app_route_price("g.example.app"), Some(25));
         assert_eq!(connector.app_route_price("g.example.app.sub"), Some(25));
         assert_eq!(connector.app_route_price("g.nowhere"), None);
+    }
+
+    /// Issue #701: the client edge's two carriages ask
+    /// `app_route_transport_policy` the same way they already ask
+    /// `app_route_price`, so it needs the same longest-prefix matching and
+    /// the same `None`-for-unmatched behavior.
+    #[test]
+    fn app_route_transport_policy_reports_the_matched_routes_policy() {
+        let route = StaticRoute::new_priced_with_transport(
+            "g.example.relay",
+            "http://localhost:4000",
+            25,
+            TransportPolicy::Btp,
+        )
+        .unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![route], app_client, clock);
+
+        assert_eq!(
+            connector.app_route_transport_policy("g.example.relay"),
+            Some(TransportPolicy::Btp)
+        );
+        assert_eq!(
+            connector.app_route_transport_policy("g.example.relay.sub"),
+            Some(TransportPolicy::Btp)
+        );
+        assert_eq!(connector.app_route_transport_policy("g.nowhere"), None);
+    }
+
+    /// A route that never set `transport` reports the default -- both
+    /// transports accepted -- through the same accessor.
+    #[test]
+    fn app_route_transport_policy_defaults_to_both() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![route], app_client, clock);
+
+        assert_eq!(
+            connector.app_route_transport_policy("g.example.app"),
+            Some(TransportPolicy::Both)
+        );
     }
 
     #[tokio::test]

@@ -463,6 +463,17 @@ what the code actually sets — `ilpAddress`, `endpoint`, `price` — and carrie
 longest-prefix route lookup that §1.3's value binding and §1.7's `GET /ilp/routes/price` charge
 and answer against, so this response never states a price a real request wouldn't also be charged.
 
+**Transport policy** (issue #701, `toon-meta#262` decision 11): which transport(s) a terminated
+route accepts is per-connector config, not a protocol constant — `both` by default, so no deployed
+route changes behavior until an operator opts in, or restricted to `http` or `btp` alone. A request
+over a transport its route does not accept is refused with this SAME `402` shape — before payment
+is considered at all, and whether or not the request carries a valid claim, since paying over the
+wrong transport does not make the route reachable that way — with one addition: `extra` also
+carries `requiredTransport` (`"http"` or `"btp"`), naming the transport the route actually
+requires. An ordinary unpaid-request greeting (above) never sets this field. The BTP carriage
+answers the mirror case (a route restricted to HTTP, reached over the websocket session) the same
+way; see §1.9 step 3.
+
 ### 1.5 Request-request binding (RFC 9421)
 
 **Not yet implemented.** No `requireRequestBinding` config field, `RouteTermination` type or RFC
@@ -675,23 +686,36 @@ silently dropped exactly as it was before TRANSFER existed.
    (decimal-uint64 UTF-8 text) beside the OER body — the BTP analogue of the HTTP header. The
    privacy-wrapped carriage (§1.3's `-Wrapped` header) has no BTP protocolData equivalent yet;
    a wrapped claim is an HTTP-only feature today.
-3. **Unpaid prepare to a priced route**: BTP cannot answer HTTP `402`, so the §1.4 greeting is a
+3. **Wrong transport** (issue #701, `toon-meta#262` decision 11): a PREPARE addressed to a route
+   whose per-connector transport policy does not accept BTP is refused before payment is
+   considered at all — checked ahead of step 4 below, and whether or not the frame carries a
+   claim, since paying over the wrong transport does not make the route reachable that way. The
+   RESPONSE carries an `F02` (Unreachable) REJECT — from this carriage's own point of view, there
+   is no route to the destination over BTP, even though one may exist over HTTP — with the SAME
+   x402-shaped terms JSON step 4 below uses, again as a `payment-required` protocolData entry, but
+   self-diagnosing via an additional `extra.requiredTransport` field (`"http"` or `"btp"`) naming
+   the transport the route actually requires. This reuses §1.4's greeting mechanism rather than
+   inventing a second one; the HTTP carriage answers the mirror case (a route restricted to BTP,
+   reached over `POST /ilp`) the same way, with `402` and the same field. A route with no
+   transport restriction (the default) is unaffected, and its greetings never carry
+   `requiredTransport`.
+4. **Unpaid prepare to a priced route**: BTP cannot answer HTTP `402`, so the §1.4 greeting is a
    RESPONSE carrying an `F06` (Unexpected Payment) REJECT, message
    `No payment channel claim attached`, with the x402 v2 terms JSON — byte-identical to §1.4's
    body — as a protocolData entry named `payment-required` (again mirroring the HTTP header of
    the same name). A claimless PREPARE to an unpriced route passes through unchanged, as on HTTP.
-4. **Standalone claim**: a MESSAGE with an empty `ilpPacket` and a `payment-channel-claim` entry
+5. **Standalone claim**: a MESSAGE with an empty `ilpPacket` and a `payment-channel-claim` entry
    is a fire-and-forget claim registration: it is ingested against price `0` (full validation, a
    replay still refused, no value need advance — §1.6's identify-not-pay semantics) and answered
    with nothing, per the client contract (`sendClaimMessage` expects no RESPONSE).
-5. **Anything else**: a MESSAGE with no auth, no claim and no `ilpPacket` is ignored. An
+6. **Anything else**: a MESSAGE with no auth, no claim and no `ilpPacket` is ignored. An
    undecodable frame is answered with an ERROR frame (`code F00`, `name NotAcceptedError`, the
    parse failure as UTF-8 `data`) when its requestId was readable, and ignored when not.
-6. **TRANSFER** (issue #697): acknowledged with an empty RESPONSE under the same requestId — RFC-23
+7. **TRANSFER** (issue #697): acknowledged with an empty RESPONSE under the same requestId — RFC-23
    requires a responder answer every request, satisfied at the protocol level. The settlement/
    netting accounting a TRANSFER's `amount` will eventually drive is out of scope here; that is
    `toon-meta#262`'s payout-ledger ticket, built on this foundation.
-7. **A RESPONSE or ERROR whose requestId this connector itself originated** (issue #697): resolved
+8. **A RESPONSE or ERROR whose requestId this connector itself originated** (issue #697): resolved
    against that outbound request rather than treated as inbound traffic. One this connector never
    originated — every RESPONSE/ERROR a deployed client sends today — is silently dropped, exactly
    as any non-MESSAGE frame was before TRANSFER and server-origination existed.
