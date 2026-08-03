@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }
@@ -35,7 +36,6 @@ tokio = { version = "1", features = ["time", "sync"] }
 tracing = "0.1"
 
 [dev-dependencies]
-connector-config = { path = "../connector-config" }
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm" }
 ethers = { version = "2", default-features = false, features = ["rustls"] }

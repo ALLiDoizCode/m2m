@@ -478,6 +478,19 @@ fn unpaid_prepare(destination: &str) -> Prepare {
 /// greeting (HTTP 402, terms naming [`EXPECTED_PRICE`]) instead of being
 /// forwarded to the app -- the free-gateway failure mode this issue closes.
 async fn assert_answered_with_x402_greeting(client_edge_addr: &str, destination: &str) {
+    let terms = x402_terms(client_edge_addr, destination).await;
+    assert_eq!(
+        terms["accepts"][0]["amount"],
+        EXPECTED_PRICE.to_string(),
+        "greeted price must match the route's committed `price`"
+    );
+}
+
+/// The x402 terms JSON a claimless request to `destination` is answered
+/// with -- shared by [`assert_answered_with_x402_greeting`] (an ordinary
+/// unpaid-request greeting) and the transport-policy test below (issue
+/// #701), which reuses the same 402 shape for a different reason.
+async fn x402_terms(client_edge_addr: &str, destination: &str) -> serde_json::Value {
     let response = reqwest::Client::new()
         .post(format!("http://{client_edge_addr}/ilp"))
         .body(unpaid_prepare(destination).encode())
@@ -489,12 +502,7 @@ async fn assert_answered_with_x402_greeting(client_edge_addr: &str, destination:
         reqwest::StatusCode::PAYMENT_REQUIRED,
         "a claimless request to a priced route must be greeted, not served"
     );
-    let terms: serde_json::Value = response.json().await.expect("x402 JSON terms");
-    assert_eq!(
-        terms["accepts"][0]["amount"],
-        EXPECTED_PRICE.to_string(),
-        "greeted price must match the route's committed `price`"
-    );
+    response.json().await.expect("x402 JSON terms")
 }
 
 #[tokio::test]
@@ -545,6 +553,49 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
     );
 
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.store").await;
+}
+
+/// Issue #701 (toon-meta#262 decision 11): the committed apex file
+/// restricts `g.toon.relay` to BTP -- a high-frequency, always-connected
+/// carriage where a persistent session pays off -- while the store legs on
+/// the same apex, and the store box's own file, are left at the default
+/// (`both`) for the one-shot anonymous uploads `channels.rs` calls "a
+/// first-class path, not a fallback". An HTTP request to the relay is
+/// refused with terms naming `"btp"`; the store legs' greetings carry no
+/// `requiredTransport` at all.
+#[tokio::test]
+async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
+    assert!(
+        APEX_CONFIG.contains("transport = \"btp\""),
+        "the apex file must restrict a route to btp -- the relay leg, per issue #701"
+    );
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let connector = boot(
+        &with_sandbox_paths(
+            &without_live_settlement(APEX_CONFIG),
+            key_file.path(),
+            state_dir.path(),
+        ),
+        false,
+    );
+
+    let relay_terms = x402_terms(&connector.client_edge_addr, "g.toon.relay").await;
+    assert_eq!(
+        relay_terms["accepts"][0]["extra"]["requiredTransport"], "btp",
+        "the relay route must tell an HTTP client it needs BTP: {relay_terms}"
+    );
+
+    for destination in ["g.toon.ario", "g.toon.store"] {
+        let store_terms = x402_terms(&connector.client_edge_addr, destination).await;
+        assert!(
+            store_terms["accepts"][0]["extra"]
+                .get("requiredTransport")
+                .is_none(),
+            "a store leg left at the default must not carry requiredTransport: {store_terms}"
+        );
+    }
 }
 
 /// Deploy a fresh `TokenNetworkRegistry`, a `TokenNetwork` through it, and

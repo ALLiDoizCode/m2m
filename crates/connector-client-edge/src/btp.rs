@@ -852,10 +852,56 @@ async fn handle_frame(
         }
     };
 
-    let price = state
-        .connector
-        .app_route_price(&prepare.destination)
-        .unwrap_or(0);
+    // One lookup serves both facts (issue #701): see `handle_ilp`'s mirror
+    // of this on the HTTP carriage.
+    let app_route = state.connector.app_route(&prepare.destination);
+    let price = app_route.map_or(0, |route| route.price);
+
+    // Transport policy (issue #701, toon-meta#262 decision 11), BTP-shaped:
+    // checked before payment is considered at all, exactly like the HTTP
+    // carriage's `handle_ilp` -- a route restricted to HTTP is unreachable
+    // over this session whether or not the PREPARE carries a valid claim.
+    // F02 (Unreachable) is the honest code from this carriage's own point
+    // of view: there is no route to this destination reachable over BTP,
+    // even though one exists over HTTP. The terms JSON rides the same
+    // `payment-required` protocolData slot the §1.4 greeting below uses,
+    // self-diagnosing via `extra.requiredTransport` rather than a second
+    // mechanism.
+    if let Some(policy) = app_route.map(|route| route.transport_policy) {
+        if !policy.accepts_btp() {
+            let terms = x402_terms_body(
+                &prepare.destination,
+                price,
+                state.settlement_terms.as_ref(),
+                &state.settlements,
+                Some(policy.name()),
+            );
+            let reject = Reject {
+                code: RejectCode::f02_unreachable(),
+                triggered_by: String::new(),
+                message: format!(
+                    "route '{}' requires transport '{}'",
+                    prepare.destination,
+                    policy.name()
+                ),
+                data: Vec::new(),
+                accumulated_cost: 0,
+            };
+            return reply(
+                replies,
+                reject_response(
+                    frame.request_id,
+                    reject,
+                    vec![ProtocolData {
+                        name: PAYMENT_REQUIRED_PROTOCOL.to_string(),
+                        content_type: CONTENT_TYPE_TEXT,
+                        data: terms,
+                    }],
+                ),
+            )
+            .await;
+        }
+    }
 
     // The §1.4 greeting, BTP-shaped (§1.9 step 3): BTP cannot answer HTTP
     // 402, so the same terms JSON rides as protocolData on an F06 REJECT.
@@ -867,6 +913,7 @@ async fn handle_frame(
             price,
             state.settlement_terms.as_ref(),
             &state.settlements,
+            None,
         );
         let reject = Reject {
             code: RejectCode::f06_unexpected_payment(),

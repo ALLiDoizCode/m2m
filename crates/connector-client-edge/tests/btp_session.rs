@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use connector_client_edge::{ClientChannelRegistry, ClientClaimGate, DepositFloor, EvmChannel};
-use connector_config::StaticRoute;
+use connector_config::{StaticRoute, TransportPolicy};
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
 };
@@ -252,7 +252,15 @@ fn sealed_prepare(destination: &str, receiver_public: &PublicKeyBytes) -> Prepar
 /// the signer whose key prepares must seal to.
 async fn serve_edge() -> (SocketAddr, Arc<dyn Signer>) {
     let route = StaticRoute::new_priced("g.test.app", "http://localhost:4000", PRICE).unwrap();
-    let app_client = Arc::new(FakeAppClient::new());
+    serve_edge_with_route(route, Arc::new(FakeAppClient::new())).await
+}
+
+/// As [`serve_edge`], but for a caller that wants to inspect the app
+/// client's deliveries -- `AppClient::deliver` was never called, or was.
+async fn serve_edge_with_route(
+    route: StaticRoute,
+    app_client: Arc<FakeAppClient>,
+) -> (SocketAddr, Arc<dyn Signer>) {
     app_client.respond(
         route.handler_url(),
         AppOutcome::Answered {
@@ -403,6 +411,83 @@ async fn a_claimless_prepare_to_a_priced_route_is_refused_with_the_terms() {
             .expect("the terms are the §1.4 JSON");
     assert_eq!(terms["x402Version"], 2);
     assert_eq!(terms["accepts"][0]["amount"], PRICE.to_string());
+}
+
+/// Issue #701 (toon-meta#262 decision 11): a route restricted to HTTP
+/// refuses a PREPARE arriving over this BTP session -- F02 (Unreachable,
+/// from this carriage's own point of view), with the same terms JSON the
+/// F06 greeting above carries, self-diagnosing via `extra.requiredTransport`
+/// rather than a bare reject. This fires even though the PREPARE carries no
+/// claim at all -- transport is checked before payment is considered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prepare_to_an_http_only_route_is_refused_over_btp_with_the_required_transport() {
+    let route = StaticRoute::new_priced_with_transport(
+        "g.test.app",
+        "http://localhost:4000",
+        PRICE,
+        TransportPolicy::Http,
+    )
+    .unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let (addr, signer) = serve_edge_with_route(route, app_client.clone()).await;
+    let mut session = connect(addr).await;
+
+    let prepare = sealed_prepare("g.test.app", &signer.public_key().unwrap());
+    send(&mut session, btp_message(2, &[], &prepare.encode())).await;
+
+    let answer = next_answer(&mut session).await;
+    assert_eq!(answer.frame_type, BTP_RESPONSE);
+    assert_eq!(answer.request_id, 2);
+    let reject = Reject::decode(&answer.ilp_packet).expect("an OER REJECT");
+    assert_eq!(reject.code.as_str(), "F02");
+    let terms: serde_json::Value =
+        serde_json::from_slice(pd(&answer, "payment-required").expect("the terms ride along"))
+            .expect("the terms are the §1.4 JSON, reused");
+    assert_eq!(terms["accepts"][0]["extra"]["requiredTransport"], "http");
+
+    assert!(
+        app_client.deliveries().is_empty(),
+        "a request over the wrong transport must never reach the app"
+    );
+}
+
+/// The mirror case: a claim that would otherwise fully pay for the route
+/// does not make an HTTP-only route reachable over BTP either -- paying
+/// over the wrong transport does not fix it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paid_prepare_to_an_http_only_route_is_still_refused_over_btp() {
+    let route = StaticRoute::new_priced_with_transport(
+        "g.test.app",
+        "http://localhost:4000",
+        PRICE,
+        TransportPolicy::Http,
+    )
+    .unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let (addr, signer) = serve_edge_with_route(route, app_client.clone()).await;
+    let mut session = connect(addr).await;
+
+    let claim = evm_claim_json(1, PRICE);
+    let prepare = sealed_prepare("g.test.app", &signer.public_key().unwrap());
+    send(
+        &mut session,
+        btp_message(
+            2,
+            &[("payment-channel-claim", claim.as_bytes())],
+            &prepare.encode(),
+        ),
+    )
+    .await;
+
+    let answer = next_answer(&mut session).await;
+    assert_eq!(answer.frame_type, BTP_RESPONSE);
+    let reject = Reject::decode(&answer.ilp_packet).expect("an OER REJECT");
+    assert_eq!(reject.code.as_str(), "F02");
+
+    assert!(
+        app_client.deliveries().is_empty(),
+        "a valid claim over the wrong transport must never reach the app"
+    );
 }
 
 /// §1.3 over the new carriage: a non-advancing nonce is refused exactly as

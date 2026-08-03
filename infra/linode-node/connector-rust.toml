@@ -128,6 +128,14 @@ handler_url = "http://relay:3100/write"
 # devnet box started from this file was still a free gateway until this
 # was set (issue #557).
 price = 1000
+# Issue #701 (toon-meta#262 decision 11): the relay is high-frequency and
+# latency-sensitive with an always-connected client -- huddles already run
+# 49 fps over BTP, and a persistent session amortizes the handshake and
+# claim round trip that an HTTP one-shot would pay on every write. `both`
+# (the default `channels.rs` calls "a first-class path, not a fallback")
+# stays right for the store legs below: a stranger doing one upload should
+# not need a session.
+transport = "btp"
 
 [[routes]]
 prefix = "g.toon.ario"

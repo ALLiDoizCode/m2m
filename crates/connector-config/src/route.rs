@@ -30,14 +30,18 @@ fn is_valid_ilp_address(address: &str) -> bool {
 /// two must be set. `fee` is only meaningful alongside `peer_id` (ADR
 /// 0010) and defaults to zero there; `price` is only meaningful alongside
 /// `handler_url` (issue #520) and is required there -- see
-/// [`ConfigError::RouteMissingPrice`].
+/// [`ConfigError::RouteMissingPrice`]. `transport` is likewise only
+/// meaningful alongside `handler_url` (toon-meta#262 decision 11, issue
+/// #701): a peer route always travels the peer wire, never a client
+/// transport, so restricting it to `"http"` or `"btp"` means nothing.
 ///
 /// Neither field is silently ignored on the branch it does not belong to
 /// (issue #556): `fee` is an `Option` rather than a defaulted `u64`
 /// precisely so [`resolve_routes`] can tell "written as zero" from "not
 /// written", and refuse the former on a terminated route
 /// ([`ConfigError::TerminatedRouteHasFee`]) exactly as it refuses a `price`
-/// on a peer route ([`ConfigError::PeerRouteHasPrice`]). Before that, a
+/// on a peer route ([`ConfigError::PeerRouteHasPrice`]) and a `transport`
+/// on a peer route ([`ConfigError::PeerRouteHasTransport`]). Before that, a
 /// `peer_id` route with `price = 100` charged nothing and a `handler_url`
 /// route with `fee = 5` earned nothing, and neither was an error.
 ///
@@ -56,13 +60,16 @@ pub(crate) struct RawRoute {
     fee: Option<u64>,
     #[serde(default)]
     price: Option<u64>,
+    #[serde(default)]
+    transport: Option<String>,
 }
 
 /// A `[[children]]` entry: a convenience form that desugars into a
 /// [`RawRoute`] at `<apex>.<name>` once the file is loaded (mirroring the
 /// existing TypeScript `child-expander`), so the runtime never sees anything
 /// but ordinary routes. Always terminates locally, so `price` is required
-/// exactly like an explicit `[[routes]]` entry with a `handler_url`.
+/// exactly like an explicit `[[routes]]` entry with a `handler_url`, and
+/// `transport` (issue #701) is meaningful here too, for the same reason.
 ///
 /// `deny_unknown_fields` (issue #556): a child always terminates locally,
 /// so it has no `fee` field at all -- writing one used to vanish silently,
@@ -75,6 +82,72 @@ pub(crate) struct RawChild {
     handler_url: String,
     #[serde(default)]
     price: Option<u64>,
+    #[serde(default)]
+    transport: Option<String>,
+}
+
+/// Which client transport(s) a terminated route accepts a request over
+/// (toon-meta#262 decision 11, issue #701): transport is per-connector
+/// policy, not a protocol constant. The right answer depends on traffic
+/// shape -- a persistent, high-frequency relationship (huddles' 49 fps)
+/// amortizes a BTP session's handshake and claim round trip; a one-shot
+/// anonymous buyer should not need one. Defaults to [`TransportPolicy::Both`]
+/// so no deployed route changes behavior until an operator opts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportPolicy {
+    /// Only `POST /ilp` is accepted; a request over the BTP session is
+    /// refused with terms pointing the client at HTTP instead.
+    Http,
+    /// Only the BTP websocket session is accepted; a request over `POST
+    /// /ilp` is refused with terms pointing the client at BTP instead.
+    Btp,
+    /// Both transports are accepted -- the default, and the only behavior
+    /// that existed before issue #701.
+    #[default]
+    Both,
+}
+
+impl TransportPolicy {
+    /// The config-file spelling of this policy -- the one spelling this
+    /// workspace uses anywhere a transport policy is named to or by an
+    /// operator.
+    pub fn name(self) -> &'static str {
+        match self {
+            TransportPolicy::Http => "http",
+            TransportPolicy::Btp => "btp",
+            TransportPolicy::Both => "both",
+        }
+    }
+
+    /// Whether a request over `POST /ilp` is accepted under this policy.
+    pub fn accepts_http(self) -> bool {
+        matches!(self, TransportPolicy::Http | TransportPolicy::Both)
+    }
+
+    /// Whether a request over the BTP websocket session is accepted under
+    /// this policy.
+    pub fn accepts_btp(self) -> bool {
+        matches!(self, TransportPolicy::Btp | TransportPolicy::Both)
+    }
+}
+
+impl std::fmt::Display for TransportPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for TransportPolicy {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "http" => Ok(TransportPolicy::Http),
+            "btp" => Ok(TransportPolicy::Btp),
+            "both" => Ok(TransportPolicy::Both),
+            _ => Err(()),
+        }
+    }
 }
 
 /// A static route that terminates at this connector: packets matching
@@ -86,38 +159,66 @@ pub(crate) struct RawChild {
 /// operator wrote it deliberately.
 ///
 /// Constructed only by [`resolve_routes`], so a value that exists has
-/// already had its prefix, URL and price validated -- downstream code
-/// never re-checks any of them.
+/// already had its prefix, URL, price and transport policy validated --
+/// downstream code never re-checks any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticRoute {
     prefix: String,
     handler_url: Url,
     price: u64,
+    transport_policy: TransportPolicy,
 }
 
 impl StaticRoute {
     /// Construct and fully validate a single static route directly, priced
-    /// at zero -- the same validation [`resolve_routes`] applies, exposed
-    /// for a caller that already has a prefix and handler URL in hand
-    /// (tests, and any future operator-surface route creation) rather than
-    /// a whole config file. Unlike the config-file path there is no
-    /// load-time gate here to make a zero price silent, so a caller that
-    /// cares about pricing should use [`StaticRoute::new_priced`] instead.
+    /// at zero and accepting both transports -- the same validation
+    /// [`resolve_routes`] applies, exposed for a caller that already has a
+    /// prefix and handler URL in hand (tests, and any future
+    /// operator-surface route creation) rather than a whole config file.
+    /// Unlike the config-file path there is no load-time gate here to make
+    /// a zero price silent, so a caller that cares about pricing should use
+    /// [`StaticRoute::new_priced`] instead.
     pub fn new(
         prefix: impl Into<String>,
         handler_url: impl Into<String>,
     ) -> Result<StaticRoute, ConfigError> {
-        build_route(prefix.into(), handler_url.into(), Some(0))
+        build_route(
+            prefix.into(),
+            handler_url.into(),
+            Some(0),
+            TransportPolicy::Both,
+        )
     }
 
     /// Construct and fully validate a single static route with an explicit
-    /// price (issue #520).
+    /// price (issue #520), accepting both transports.
     pub fn new_priced(
         prefix: impl Into<String>,
         handler_url: impl Into<String>,
         price: u64,
     ) -> Result<StaticRoute, ConfigError> {
-        build_route(prefix.into(), handler_url.into(), Some(price))
+        build_route(
+            prefix.into(),
+            handler_url.into(),
+            Some(price),
+            TransportPolicy::Both,
+        )
+    }
+
+    /// Construct and fully validate a single static route with an explicit
+    /// price and transport policy (issue #701).
+    pub fn new_priced_with_transport(
+        prefix: impl Into<String>,
+        handler_url: impl Into<String>,
+        price: u64,
+        transport_policy: TransportPolicy,
+    ) -> Result<StaticRoute, ConfigError> {
+        build_route(
+            prefix.into(),
+            handler_url.into(),
+            Some(price),
+            transport_policy,
+        )
     }
 
     /// The destination prefix this route terminates.
@@ -137,6 +238,13 @@ impl StaticRoute {
     /// back here.
     pub fn price(&self) -> u64 {
         self.price
+    }
+
+    /// Which client transport(s) this route accepts a request over (issue
+    /// #701). Defaults to [`TransportPolicy::Both`] when the operator wrote
+    /// nothing.
+    pub fn transport_policy(&self) -> TransportPolicy {
+        self.transport_policy
     }
 }
 
@@ -188,6 +296,7 @@ fn build_route(
     prefix: String,
     handler_url: String,
     price: Option<u64>,
+    transport_policy: TransportPolicy,
 ) -> Result<StaticRoute, ConfigError> {
     let prefix = validate_prefix(prefix)?;
     let url = Url::parse(&handler_url).map_err(|source| ConfigError::InvalidHandlerUrl {
@@ -209,7 +318,29 @@ fn build_route(
         prefix,
         handler_url: url,
         price,
+        transport_policy,
     })
+}
+
+/// Parse a `[[routes]]`/`[[children]]` entry's `transport` field (issue
+/// #701), defaulting to [`TransportPolicy::Both`] when the operator wrote
+/// nothing -- a refuse-to-start error rather than a silently ignored value
+/// when the string is written but not one of the three recognized spellings
+/// (`deny_unknown_fields` already closes the mistyped-key hole; this closes
+/// the mistyped-value one).
+fn parse_transport_policy(
+    prefix: &str,
+    value: Option<String>,
+) -> Result<TransportPolicy, ConfigError> {
+    match value {
+        None => Ok(TransportPolicy::default()),
+        Some(value) => value
+            .parse()
+            .map_err(|()| ConfigError::InvalidTransportPolicy {
+                prefix: prefix.to_string(),
+                value,
+            }),
+    }
 }
 
 /// Record `route`'s `(handler_url, price)` pair, refusing a second route
@@ -292,18 +423,27 @@ pub(crate) fn resolve_routes(
                         fee,
                     });
                 }
-                let route = build_route(raw.prefix, handler_url, raw.price)?;
+                let transport_policy = parse_transport_policy(&raw.prefix, raw.transport)?;
+                let route = build_route(raw.prefix, handler_url, raw.price, transport_policy)?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 insert_consistent_handler_price(&mut handler_prices, &route)?;
                 routes.push(route);
             }
             (None, Some(peer_id)) => {
                 // Mirror image: a forwarded route has no terminating app
-                // whose work a `price` could pay for.
+                // whose work a `price` could pay for, and no client
+                // transport a `transport` restriction could mean anything
+                // against -- it always travels the peer wire (issue #701).
                 if let Some(price) = raw.price {
                     return Err(ConfigError::PeerRouteHasPrice {
                         prefix: raw.prefix,
                         price,
+                    });
+                }
+                if let Some(value) = raw.transport {
+                    return Err(ConfigError::PeerRouteHasTransport {
+                        prefix: raw.prefix,
+                        value,
                     });
                 }
                 let route = build_peer_route(raw.prefix, peer_id, raw.fee.unwrap_or(0))?;
@@ -336,7 +476,8 @@ pub(crate) fn resolve_routes(
             return Err(ConfigError::InvalidChildName { name: child.name });
         }
         let prefix = format!("{apex}.{}", child.name);
-        let route = build_route(prefix, child.handler_url, child.price)?;
+        let transport_policy = parse_transport_policy(&prefix, child.transport)?;
+        let route = build_route(prefix, child.handler_url, child.price, transport_policy)?;
         insert_unique_prefix(&mut seen, route.prefix())?;
         insert_consistent_handler_price(&mut handler_prices, &route)?;
         routes.push(route);
@@ -360,6 +501,7 @@ mod tests {
             peer_id: None,
             fee: None,
             price: Some(price),
+            transport: None,
         }
     }
 
@@ -370,6 +512,7 @@ mod tests {
             peer_id: Some(peer_id.to_string()),
             fee: Some(fee),
             price: None,
+            transport: None,
         }
     }
 
@@ -378,6 +521,7 @@ mod tests {
             name: name.to_string(),
             handler_url: handler_url.to_string(),
             price: Some(0),
+            transport: None,
         }
     }
 
@@ -424,6 +568,7 @@ mod tests {
                 peer_id: None,
                 fee: None,
                 price: None,
+                transport: None,
             }],
             vec![],
         );
@@ -443,6 +588,7 @@ mod tests {
                 peer_id: None,
                 fee: Some(5),
                 price: Some(100),
+                transport: None,
             }],
             vec![],
         );
@@ -465,6 +611,7 @@ mod tests {
                 peer_id: None,
                 fee: Some(0),
                 price: Some(100),
+                transport: None,
             }],
             vec![],
         );
@@ -486,6 +633,7 @@ mod tests {
                 peer_id: Some("store".to_string()),
                 fee: Some(3),
                 price: Some(100),
+                transport: None,
             }],
             vec![],
         );
@@ -527,6 +675,7 @@ mod tests {
                 peer_id: Some("store".to_string()),
                 fee: None,
                 price: None,
+                transport: None,
             }],
             vec![],
         )
@@ -563,6 +712,7 @@ mod tests {
                 name: "billing".to_string(),
                 handler_url: "http://localhost:4001".to_string(),
                 price: None,
+                transport: None,
             }],
         );
         assert!(matches!(result, Err(ConfigError::RouteMissingPrice { .. })));
@@ -607,6 +757,7 @@ mod tests {
                 name: "billing".to_string(),
                 handler_url: "http://localhost:4000".to_string(),
                 price: Some(20),
+                transport: None,
             }],
         );
         assert!(matches!(
@@ -638,6 +789,7 @@ mod tests {
                 peer_id: None,
                 fee: None,
                 price: None,
+                transport: None,
             }],
             vec![],
         );
@@ -657,6 +809,7 @@ mod tests {
                 peer_id: Some("peer-b".to_string()),
                 fee: None,
                 price: None,
+                transport: None,
             }],
             vec![],
         );
@@ -768,5 +921,169 @@ mod tests {
             vec![child("billing", "http://localhost:4001")],
         );
         assert!(matches!(result, Err(ConfigError::DuplicatePrefix { .. })));
+    }
+
+    /// Issue #701: an operator who writes nothing gets exactly the
+    /// pre-#701 behavior -- both transports accepted -- so no deployed
+    /// route changes until an operator opts in.
+    #[test]
+    fn a_route_with_no_transport_field_defaults_to_both() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![priced_route("g.example.app", "http://localhost:4000", 10)],
+            vec![],
+        )
+        .expect("resolve");
+        assert_eq!(routes[0].transport_policy(), TransportPolicy::Both);
+    }
+
+    #[test]
+    fn a_route_can_be_restricted_to_btp_only() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.relay".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: None,
+                price: Some(1000),
+                transport: Some("btp".to_string()),
+            }],
+            vec![],
+        )
+        .expect("resolve");
+        assert_eq!(routes[0].transport_policy(), TransportPolicy::Btp);
+    }
+
+    #[test]
+    fn a_route_can_be_restricted_to_http_only() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.app".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: None,
+                price: Some(10),
+                transport: Some("http".to_string()),
+            }],
+            vec![],
+        )
+        .expect("resolve");
+        assert_eq!(routes[0].transport_policy(), TransportPolicy::Http);
+    }
+
+    #[test]
+    fn a_route_can_write_both_explicitly() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.store".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: None,
+                price: Some(10),
+                transport: Some("both".to_string()),
+            }],
+            vec![],
+        )
+        .expect("resolve");
+        assert_eq!(routes[0].transport_policy(), TransportPolicy::Both);
+    }
+
+    /// A mistyped value (e.g. `transport = "btponly"`) is a refuse-to-start
+    /// error, not a route silently resolved to the default -- the same
+    /// principle `deny_unknown_fields` applies to keys, applied to this
+    /// field's value.
+    #[test]
+    fn an_unrecognized_transport_value_is_rejected_at_load() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.app".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: None,
+                price: Some(10),
+                transport: Some("carrier-pigeon".to_string()),
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidTransportPolicy { value, .. }) if value == "carrier-pigeon"
+        ));
+    }
+
+    /// Mirror image of `PeerRouteHasPrice`: a peer route has no client
+    /// transport to restrict, so writing one is refused rather than
+    /// silently ignored (issue #556's principle, applied by issue #701).
+    #[test]
+    fn a_peer_route_that_sets_a_transport_is_rejected_rather_than_ignored() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.store".to_string(),
+                handler_url: None,
+                peer_id: Some("store".to_string()),
+                fee: Some(3),
+                price: None,
+                transport: Some("btp".to_string()),
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerRouteHasTransport { value, .. }) if value == "btp"
+        ));
+    }
+
+    /// A child (issue #701) can restrict its transport exactly like an
+    /// explicit `[[routes]]` entry -- it always terminates locally, so the
+    /// field is meaningful there too.
+    #[test]
+    fn a_child_can_be_restricted_to_btp_only() {
+        let (routes, _) = resolve_routes(
+            Some("g.example.connector"),
+            vec![],
+            vec![RawChild {
+                name: "relay".to_string(),
+                handler_url: "http://localhost:4001".to_string(),
+                price: Some(1000),
+                transport: Some("btp".to_string()),
+            }],
+        )
+        .expect("resolve");
+        assert_eq!(routes[0].transport_policy(), TransportPolicy::Btp);
+    }
+
+    #[test]
+    fn transport_policy_accepts_predicates_match_their_name() {
+        assert!(TransportPolicy::Http.accepts_http());
+        assert!(!TransportPolicy::Http.accepts_btp());
+        assert!(TransportPolicy::Btp.accepts_btp());
+        assert!(!TransportPolicy::Btp.accepts_http());
+        assert!(TransportPolicy::Both.accepts_http());
+        assert!(TransportPolicy::Both.accepts_btp());
+    }
+
+    #[test]
+    fn static_route_new_and_new_priced_default_to_both_transports() {
+        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        assert_eq!(route.transport_policy(), TransportPolicy::Both);
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 10).unwrap();
+        assert_eq!(route.transport_policy(), TransportPolicy::Both);
+    }
+
+    #[test]
+    fn static_route_new_priced_with_transport_carries_the_given_policy() {
+        let route = StaticRoute::new_priced_with_transport(
+            "g.example.relay",
+            "http://localhost:4000",
+            1000,
+            TransportPolicy::Btp,
+        )
+        .unwrap();
+        assert_eq!(route.transport_policy(), TransportPolicy::Btp);
     }
 }
