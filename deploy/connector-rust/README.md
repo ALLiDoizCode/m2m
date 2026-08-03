@@ -126,12 +126,16 @@ ILP address and handler URL, or delete the block if this node only peers.
 `price` is required on a terminated route — write `price = 0` if free is
 deliberate, because it is never silently free.
 
-To peer, add `peer_wire_addr` and a `[[peers]]` entry, then a `[[routes]]`
-entry that names the peer's `id` instead of a `handler_url`. **Bind
-`peer_wire_addr` to a private interface**: the shipped peer transport is
-plain TCP with no TLS and no peer authentication
-(`crates/connector-runtime/src/network_peer_transport.rs`), and it carries
-signed balance proofs.
+**Peering is not available in this build.** ADR 0027 decided that connectors
+peer over the same carriages the client edge already serves — BTP over
+`wss://` or ILP-over-HTTP over `https://` — and issue #679 deleted the
+raw-TCP peer wire that preceded them, along with `peer_wire_addr` and the
+`SocketAddr`-shaped `[[peers]].addr`. A config still setting either now
+fails config load by name. A `[[peers]]` entry names a peering relation a
+`[[routes]]` entry can target, but nothing can reach it yet, so such a route
+answers `T01 peer unreachable`. The config schema that will reach one
+(`endpoint`, credential, `[[peer_channels]]`) is issue #677 and the
+carriages are #676.
 
 ## 4b. (Optional) settlement
 

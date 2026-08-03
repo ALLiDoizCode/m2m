@@ -5,8 +5,9 @@
 //! isolation (`connector-settlement-evm`'s own suite); the packet path was
 //! exercised with fakes (`connector-client-edge`'s `price_charging_real_chain.rs`
 //! uses an in-process `tower::Service` and a `FakeAppClient`); the one test
-//! that drove the real binary (`two_connectors_and_a_stub_app.rs`) used a
-//! zero-priced route and asserted delivery, never a claim.
+//! that drove the real binary (`two_connectors_and_a_stub_app.rs`, since
+//! deleted with the raw-TCP peer wire it proved -- ADR 0027, issue #679)
+//! used a zero-priced route and asserted delivery, never a claim.
 //!
 //! This test spawns a real `anvil` chain, deploys a real `TokenNetworkRegistry`/
 //! `TokenNetwork`/mock ERC-20 onto it, mints and deposits real value into a

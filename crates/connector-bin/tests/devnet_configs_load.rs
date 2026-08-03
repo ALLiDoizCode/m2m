@@ -187,9 +187,6 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
 /// on restart (issue #605). `replace_expecting_a_match` is what makes that
 /// load-bearing -- deleting the line from either config fails this test
 /// rather than silently testing a node with no durable state.
-///
-/// `peer_wire_addr` is substituted only where the file has one (the apex
-/// only dials out and sets none), so that one alone is not asserted on.
 fn with_sandbox_paths(
     raw: &str,
     key_path: &std::path::Path,
@@ -205,14 +202,10 @@ fn with_sandbox_paths(
         "client_edge_addr = \"0.0.0.0:4000\"",
         "client_edge_addr = \"127.0.0.1:0\"",
     );
-    let replaced = replace_expecting_a_match(
+    replace_expecting_a_match(
         &replaced,
         "state_dir = \"/app/state\"",
         &format!("state_dir = \"{}\"", state_dir.display()),
-    );
-    replaced.replace(
-        "peer_wire_addr = \"0.0.0.0:4001\"",
-        "peer_wire_addr = \"127.0.0.1:0\"",
     )
 }
 
@@ -386,15 +379,15 @@ fn spawn(config_path: &std::path::Path) -> Child {
         .expect("spawn connector binary")
 }
 
-/// Reads stdout lines until both `"connector listening"` and (if
-/// `expect_peer_wire`) `"peer wire listening"` have been seen, returning the
+/// Reads stdout lines until `"connector listening"` is seen, returning the
 /// client edge's actual bound address; or the process exits first -- which
 /// fails with the exit status and whatever the process printed on stderr,
 /// rather than hanging or reporting only that a pipe closed.
-fn wait_for_listen_lines(child: &mut Child, expect_peer_wire: bool) -> String {
+///
+/// There is one listen line to wait for since ADR 0027 / issue #679 deleted
+/// the raw-TCP peer wire and its separate listener.
+fn wait_for_listen_line(child: &mut Child) -> String {
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-    let mut client_edge_addr: Option<String> = None;
-    let mut saw_peer_wire = false;
     let mut line = String::new();
     loop {
         line.clear();
@@ -412,15 +405,7 @@ fn wait_for_listen_lines(child: &mut Child, expect_peer_wire: bool) -> String {
             );
         }
         if line.contains("connector listening") {
-            client_edge_addr = Some(parse_json_log_addr(&line));
-        }
-        if line.contains("peer wire listening") {
-            saw_peer_wire = true;
-        }
-        if let Some(addr) = &client_edge_addr {
-            if !expect_peer_wire || saw_peer_wire {
-                return addr.clone();
-            }
+            return parse_json_log_addr(&line);
         }
     }
 }
@@ -441,10 +426,10 @@ impl Drop for BootedConnector {
     }
 }
 
-fn boot(config_text: &str, expect_peer_wire: bool) -> BootedConnector {
+fn boot(config_text: &str) -> BootedConnector {
     let config_file = write_config(config_text);
     let mut child = spawn(config_file.path());
-    let client_edge_addr = wait_for_listen_lines(&mut child, expect_peer_wire);
+    let client_edge_addr = wait_for_listen_line(&mut child);
     BootedConnector {
         child,
         client_edge_addr,
@@ -513,19 +498,13 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    // No peer_wire_addr in this file (the apex serves no peer wire since
-    // #600 terminated the store leg here) -- only the client edge is
-    // expected to log a listen line. The live [settlement] tail is
-    // stripped for hermeticity (module docs); the anvil-backed case below
-    // boots it.
-    let connector = boot(
-        &with_sandbox_paths(
-            &without_live_settlement(APEX_CONFIG),
-            key_file.path(),
-            state_dir.path(),
-        ),
-        false,
-    );
+    // The live [settlement] tail is stripped for hermeticity (module
+    // docs); the anvil-backed case below boots it.
+    let connector = boot(&with_sandbox_paths(
+        &without_live_settlement(APEX_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+    ));
 
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.relay").await;
     // The store leg (#600): `g.toon.ario` -- the destination the TS fleet's
@@ -545,12 +524,11 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    // This file configures peer_wire_addr (it accepts the apex's
-    // connection), so both listeners must come up.
-    let connector = boot(
-        &with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path()),
-        true,
-    );
+    let connector = boot(&with_sandbox_paths(
+        STORE_CONFIG,
+        key_file.path(),
+        state_dir.path(),
+    ));
 
     assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.store").await;
 }
@@ -572,14 +550,11 @@ async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let connector = boot(
-        &with_sandbox_paths(
-            &without_live_settlement(APEX_CONFIG),
-            key_file.path(),
-            state_dir.path(),
-        ),
-        false,
-    );
+    let connector = boot(&with_sandbox_paths(
+        &without_live_settlement(APEX_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+    ));
 
     let relay_terms = x402_terms(&connector.client_edge_addr, "g.toon.relay").await;
     assert_eq!(
@@ -656,7 +631,7 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
     );
     let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
-    drop(boot(&text, false));
+    drop(boot(&text));
 }
 
 /// The apex file's Solana leg (`https://api.devnet.solana.com`) and the
@@ -784,5 +759,5 @@ async fn the_store_devnet_settlement_template_boots_against_a_deployed_contract(
     );
     let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
-    drop(boot(&text, true));
+    drop(boot(&text));
 }

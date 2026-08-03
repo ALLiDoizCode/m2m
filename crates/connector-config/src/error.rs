@@ -155,20 +155,19 @@ pub enum ConfigError {
     #[error("duplicate peer id '{id}'")]
     DuplicatePeerId { id: String },
 
-    #[error("invalid addr '{value}' for peer '{id}': {source}")]
-    InvalidPeerAddr {
-        id: String,
-        value: String,
-        #[source]
-        source: AddrParseError,
-    },
+    #[error(
+        "peer '{id}' sets 'addr', which was removed with the raw-TCP peer wire (ADR 0027, \
+         issue #679) -- a peer is reached by 'endpoint' (a wss:// or https:// URL) instead; \
+         see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerAddrRemoved { id: String },
 
-    #[error("invalid peer_wire_addr '{value}': {source}")]
-    InvalidPeerWireAddr {
-        value: String,
-        #[source]
-        source: AddrParseError,
-    },
+    #[error(
+        "'peer_wire_addr' was removed with the raw-TCP peer wire (ADR 0027, issue #679) -- \
+         peer carriages are exposed on the connector's own listeners, not a separate socket; \
+         see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerWireAddrRemoved,
 
     #[error(
         "the [settlement] section names chain '{value}', which this connector does not \

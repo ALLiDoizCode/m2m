@@ -32,14 +32,19 @@ struct RawConfig {
     children: Vec<RawChild>,
     #[serde(default)]
     operator: Option<RawOperatorConfig>,
-    /// Bind address for the accepting side of the peer wire (issue #488).
-    /// Absent means this node never accepts an inbound peer connection --
-    /// same "not started at all" degradation as an absent `[operator]`.
+    /// Removed with the raw-TCP peer wire (ADR 0027, issue #679). Still
+    /// parsed, and only so that a stale config naming it fails at boot
+    /// with [`ConfigError::PeerWireAddrRemoved`] rather than tripping the
+    /// generic `deny_unknown_fields` message: the devnet boxes run
+    /// bind-mounted configs that lead the repo copies, so the one that
+    /// matters is the one an operator reads at 3am.
     #[serde(default)]
-    peer_wire_addr: Option<String>,
-    /// Peers this node dials out to (issue #488). Peer addressing was
-    /// deferred at #416 ("still constructed directly in tests") until a
-    /// ticket actually needed it end to end; this is that ticket.
+    peer_wire_addr: Option<toml::Value>,
+    /// Peers this node peers with (issue #488). The transport that dialed
+    /// them was deleted in #679; the replacement carriages and the
+    /// `endpoint`/`credential` schema they need are ADR 0027's #676 and
+    /// #677. Until then an entry is a peer *relation* -- an id a
+    /// `[[routes]]` entry can target -- with no way to reach it.
     #[serde(default)]
     peers: Vec<RawPeer>,
     /// One or more real settlement backends to construct at startup (issue
@@ -172,7 +177,6 @@ pub struct Config {
     routes: Vec<StaticRoute>,
     peer_routes: Vec<PeerRouteConfig>,
     peers: Vec<PeerConfig>,
-    peer_wire_addr: Option<SocketAddr>,
     operator: Option<OperatorConfig>,
     settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
@@ -227,14 +231,9 @@ impl Config {
                 });
             }
         }
-        let peer_wire_addr = raw
-            .peer_wire_addr
-            .map(|value| {
-                value
-                    .parse::<SocketAddr>()
-                    .map_err(|source| ConfigError::InvalidPeerWireAddr { value, source })
-            })
-            .transpose()?;
+        if raw.peer_wire_addr.is_some() {
+            return Err(ConfigError::PeerWireAddrRemoved);
+        }
         let operator = resolve_operator(raw.operator)?;
         let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
@@ -383,7 +382,6 @@ impl Config {
             routes,
             peer_routes,
             peers,
-            peer_wire_addr,
             operator,
             settlements,
             client_channels,
@@ -481,14 +479,6 @@ impl Config {
     /// The peers this node dials out to.
     pub fn peers(&self) -> &[PeerConfig] {
         &self.peers
-    }
-
-    /// The bind address for the accepting side of the peer wire, if this
-    /// node accepts inbound peer connections at all. `None` means the peer
-    /// wire server is not started -- same "not started at all" degradation
-    /// as an absent `[operator]` section.
-    pub fn peer_wire_addr(&self) -> Option<SocketAddr> {
-        self.peer_wire_addr
     }
 
     /// The operator surface's authentication, if the surface is enabled.
@@ -671,14 +661,12 @@ handler_url = "http://localhost:5000"
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
-peer_wire_addr = "127.0.0.1:4001"
 
 [signer]
 key_file = "{}"
 
 [[peers]]
 id = "peer-b"
-addr = "127.0.0.1:5000"
 
 [[routes]]
 prefix = "g.peer-b"
@@ -690,13 +678,8 @@ fee = 3
         })
         .expect("load");
 
-        assert_eq!(
-            config.peer_wire_addr(),
-            Some("127.0.0.1:4001".parse().unwrap())
-        );
         assert_eq!(config.peers().len(), 1);
         assert_eq!(config.peers()[0].id(), "peer-b");
-        assert_eq!(config.peers()[0].addr(), "127.0.0.1:5000".parse().unwrap());
         assert_eq!(config.peer_routes().len(), 1);
         assert_eq!(config.peer_routes()[0].prefix(), "g.peer-b");
         assert_eq!(config.peer_routes()[0].peer_id(), "peer-b");
@@ -704,7 +687,7 @@ fee = 3
     }
 
     #[test]
-    fn a_config_with_no_peer_wire_addr_or_peers_has_none_and_empty() {
+    fn a_config_with_no_peers_has_an_empty_list() {
         let config = with_key_file(|key_path| {
             format!(
                 r#"
@@ -718,7 +701,6 @@ key_file = "{}"
         })
         .expect("load");
 
-        assert_eq!(config.peer_wire_addr(), None);
         assert!(config.peers().is_empty());
         assert!(config.peer_routes().is_empty());
     }
@@ -744,13 +726,18 @@ peer_id = "peer-b"
         assert!(matches!(result, Err(ConfigError::UnknownPeerId { .. })));
     }
 
+    /// ADR 0027 / issue #679: the raw-TCP peer wire is deleted, so a
+    /// config still naming its bind address must stop the node by name.
+    /// Silently ignoring it is the failure mode that matters -- the devnet
+    /// boxes run bind-mounted configs that lead the repo copies, so a
+    /// stale one would otherwise come up looking healthy and never peer.
     #[test]
-    fn rejects_an_invalid_peer_wire_addr() {
+    fn rejects_a_config_that_still_sets_peer_wire_addr() {
         let result = with_key_file(|key_path| {
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
-peer_wire_addr = "not-an-address"
+peer_wire_addr = "127.0.0.1:4001"
 
 [signer]
 key_file = "{}"
@@ -759,10 +746,35 @@ key_file = "{}"
             )
         });
 
-        assert!(matches!(
-            result,
-            Err(ConfigError::InvalidPeerWireAddr { .. })
-        ));
+        let Err(error) = result else {
+            panic!("expected a config error");
+        };
+        assert!(matches!(error, ConfigError::PeerWireAddrRemoved));
+        assert!(error
+            .to_string()
+            .contains("docs/operators/btp-peer-transport-bringup.md"));
+    }
+
+    /// The `[[peers]]` half of the same removal.
+    #[test]
+    fn rejects_a_peer_that_still_sets_a_socket_addr() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "peer-b"
+addr = "127.0.0.1:5000"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(result, Err(ConfigError::PeerAddrRemoved { .. })));
     }
 
     #[test]
@@ -777,11 +789,9 @@ key_file = "{}"
 
 [[peers]]
 id = "peer-b"
-addr = "127.0.0.1:5000"
 
 [[peers]]
 id = "peer-b"
-addr = "127.0.0.1:5001"
 "#,
                 key_path.display()
             )
@@ -1225,7 +1235,6 @@ key_file = "{}"
 
 [[peers]]
 id = "store"
-addr = "127.0.0.1:4001"
 adrr = "127.0.0.1:4002"
 "#,
                 key_path.display()
@@ -1296,7 +1305,6 @@ fee = 5
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
-peer_wire_addr = "127.0.0.1:4001"
 apex = "g.example"
 
 [signer]
@@ -1304,7 +1312,6 @@ key_file = "{}"
 
 [[peers]]
 id = "store"
-addr = "127.0.0.1:4002"
 
 [[routes]]
 prefix = "g.example.app"
@@ -1334,7 +1341,6 @@ write_keys = ["{key}"]
         assert_eq!(config.peer_routes().len(), 1);
         assert_eq!(config.peers().len(), 1);
         assert!(config.operator().is_some());
-        assert!(config.peer_wire_addr().is_some());
     }
 
     // -- state_dir (issue #605) --

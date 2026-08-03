@@ -1,25 +1,34 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STATUS (#600, 2026-07-30): NOT DEPLOYED. The devnet store leg shipped
-# WITHOUT this overlay: the apex terminates g.toon.ario / g.toon.store at
-# the store app over this box's own PUBLIC TLS front
-# (https://proxy.store.devnet.toonprotocol.dev/store — nginx's `location
-# /store` in ./nginx/conf.d/node.conf; see
+# STATUS (#600, 2026-07-30; amended #679, 2026-08-03): NOT DEPLOYED. The
+# devnet store leg shipped WITHOUT this overlay: the apex terminates
+# g.toon.ario / g.toon.store at the store app over this box's own PUBLIC TLS
+# front (https://proxy.store.devnet.toonprotocol.dev/store — nginx's
+# `location /store` in ./nginx/conf.d/node.conf; see
 # infra/linode-node/connector-rust.toml's header). Two findings closed
 # that door for this overlay:
 #   * the PAID forwarded path is structurally unwired (#620) — a peer
-#     route is neither priced nor charged at the client edge, a peer-wire
+#     route is neither priced nor charged at the client edge, a peer
 #     arrival is never charged the terminating route's price, and ADR
 #     0024's peer claims cannot be configured from any connector.toml, so
 #     deploying this today would stand up a free-write path beside a paid
 #     one; and
-#   * the peer wire cannot carry the public inter-node link devnet
-#     topology calls for (#623) — raw-TCP framing nginx cannot
+#   * the raw-TCP peer wire could not carry the public inter-node link
+#     devnet topology calls for (#623) — framing nginx cannot
 #     TLS-terminate, no TLS of its own (ADR 0003), SocketAddr-only
 #     addressing. The VPC these files' comments were written for was
 #     never provisioned, and #600 settled that no private segment is
 #     wanted: node↔node links are public, like the TS fleet's BTP-over-wss.
-# When #620 + #623 land, STORE_PEER_WIRE_BIND's whole containment story
-# below should be revisited against the transport they choose.
+#
+# ADR 0027 settled it: peers ride BTP over wss:// or ILP-over-HTTP over
+# https:// — the carriages the client edge already serves — and issue #679
+# DELETED the raw-TCP peer wire, its `peer_wire_addr` and the
+# `SocketAddr`-shaped `[[peers]].addr`. This file's peer-wire bind and the
+# whole STORE_PEER_WIRE_BIND containment story went with them; a config
+# still setting either now fails config load by name. The peer config this
+# file will grow instead (`[peers].expose`, per-peer `endpoint` +
+# credential, `[[peer_channels]]`) is #677, and the first real Rust peer
+# link on devnet is #678. #620 remains the hard gate on deploying any of
+# it.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ═══════════════════════════════════════════════════════════════════════════
 # TOON devnet — Rust connector, store side (issue #490, ADR 0013's parallel
@@ -35,27 +44,15 @@
 #
 # Terminates `g.toon.store` at the SAME running store (Arweave DVM) app this
 # box's TypeScript connector already fronts (store:3300) — payment-
-# oblivious per ADR 0013, and NOT modified by this file. Accepts the
-# node-side Rust connector's peer-wire connection (peer_wire_addr below); it
-# never dials out itself, so there is no [[peers]] section here.
+# oblivious per ADR 0013, and NOT modified by this file. It accepts the
+# node-side apex's peering rather than dialing out, so there is no
+# [[peers]] section here — and since #679 there is no peer listener to
+# configure either; ADR 0027's carriages share the client edge's own.
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Distinct from the TypeScript node's 3000/8080/8081, matching the node-side
 # connector-rust.toml's own port choice.
 client_edge_addr = "0.0.0.0:4000"
-
-# The accepting side of the peer wire — the node-side apex dials this. Port
-# matches that apex's [[peers]] entry for id = "store".
-#
-# `0.0.0.0` here is every interface *inside this container's own network
-# namespace*, which is not the same thing as every interface on the box. The
-# question of which host interface the port is reachable on is settled one
-# layer up, by docker-compose.store.rust.yml's `${STORE_PEER_WIRE_BIND}:4001`
-# publish — see that file's header for why the answer must be a VPC address
-# and never the public one (#492). Binding narrower than `0.0.0.0` here would
-# not help: the container cannot see the host's VPC interface, so the only
-# address it could bind is its own, which is what this already is.
-peer_wire_addr = "0.0.0.0:4001"
 
 # ── Durable claim state (issue #605) ──────────────────────────────────────
 # Where this node writes the claim journals whose replay is what makes a

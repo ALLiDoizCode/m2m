@@ -3,13 +3,14 @@
 //! no method beyond what the handler serializes as-is.
 //!
 //! [`PeerView`] has no fields yet because nothing in the runtime tracks
-//! that state yet: the peer wire (#416) hasn't landed. [`ChannelView`]
+//! that state yet: no peer transport has landed (ADR 0027, #676).
+//! [`ChannelView`]
 //! gained real fields in #459, once a settlement backend existed for
 //! [`Connector`] to project channel state from. [`ClaimView`] gained real
 //! fields in #423, once `crate::claim::ClaimBook` existed to report on.
 //! [`ExposureView`] gained real fields in #424, once the exposure
 //! projection existed. [`Connector`]'s accessor for the still-empty
-//! [`PeerView`] returns an empty list until #416 lands; the operator
+//! [`PeerView`] returns an empty list until #676 lands; the operator
 //! surface is already complete as an interface; that ticket only needs to
 //! start populating it.
 
@@ -39,7 +40,7 @@ pub struct LeasedRouteView {
 }
 
 /// A peer as seen by the operator surface. See the module docs: always
-/// empty until #416 (the peer wire) lands.
+/// empty until a peer transport (ADR 0027, #676) lands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerView {}
 
