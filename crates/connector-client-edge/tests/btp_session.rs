@@ -36,6 +36,7 @@ const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
 const BTP_RESPONSE: u8 = 1;
 const BTP_ERROR: u8 = 2;
 const BTP_MESSAGE: u8 = 6;
+const BTP_TRANSFER: u8 = 7;
 
 /// Serialize a MESSAGE the way `@toon-protocol/client`'s
 /// `serializeBtpMessage` does.
@@ -52,6 +53,37 @@ fn btp_message(request_id: u32, protocol_data: &[(&str, &[u8])], ilp_packet: &[u
     }
     out.extend_from_slice(&(ilp_packet.len() as u32).to_be_bytes());
     out.extend_from_slice(ilp_packet);
+    out
+}
+
+/// Serialize a TRANSFER (issue #697, RFC-0023 `Transfer ::= SEQUENCE {
+/// amount, protocolData }`): amount immediately after requestId, then the
+/// protocolData list, with no ILP-packet trailer.
+fn btp_transfer(request_id: u32, amount: u64, protocol_data: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = vec![BTP_TRANSFER];
+    out.extend_from_slice(&request_id.to_be_bytes());
+    out.extend_from_slice(&amount.to_be_bytes());
+    out.push(protocol_data.len() as u8);
+    for (name, data) in protocol_data {
+        out.push(name.len() as u8);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+/// Serialize a bare RESPONSE frame -- what a client answers a
+/// server-originated MESSAGE with. No test today drives the connector to
+/// originate one over a real socket (issue #697's session registry is a
+/// separate ticket), but a client is free to send a RESPONSE/ERROR the
+/// connector never asked for, and the session must not choke on it.
+fn btp_response(request_id: u32) -> Vec<u8> {
+    let mut out = vec![BTP_RESPONSE];
+    out.extend_from_slice(&request_id.to_be_bytes());
+    out.push(0); // no protocolData
+    out.extend_from_slice(&0u32.to_be_bytes()); // no ILP packet
     out
 }
 
@@ -492,6 +524,78 @@ async fn a_malformed_frame_is_answered_with_an_error_and_the_session_survives() 
     let auth = next_answer(&mut session).await;
     assert_eq!(auth.frame_type, BTP_RESPONSE);
     assert_eq!(auth.request_id, 10);
+}
+
+// ─── issue #697: RFC-0023's symmetric grammar -- TRANSFER, and tolerance
+// of an unsolicited RESPONSE/ERROR ───
+
+/// A client-originated TRANSFER is answered with an empty RESPONSE under
+/// the same requestId -- RFC-23's "the responder should always send back a
+/// response to a request with the same requestId", satisfied at the
+/// protocol level. The settlement/netting accounting this frame will
+/// eventually drive is a separate ticket (toon-meta#262's payout ledger);
+/// this connector acknowledges receipt today and nothing more.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_originated_transfer_is_acknowledged_with_an_empty_response() {
+    let (addr, _signer) = serve_edge().await;
+    let mut session = connect(addr).await;
+
+    send(
+        &mut session,
+        btp_transfer(1, 250_000, &[("payout-claim", b"{}")]),
+    )
+    .await;
+    let answer = next_answer(&mut session).await;
+    assert_eq!(answer.frame_type, BTP_RESPONSE);
+    assert_eq!(answer.request_id, 1);
+    assert!(answer.protocol_data.is_empty());
+    assert!(answer.ilp_packet.is_empty());
+
+    // The session survives and keeps serving ordinary traffic afterward.
+    send(
+        &mut session,
+        btp_message(2, &[("auth", br#"{"peerId":"p","secret":""}"#)], &[]),
+    )
+    .await;
+    let auth = next_answer(&mut session).await;
+    assert_eq!(auth.frame_type, BTP_RESPONSE);
+    assert_eq!(auth.request_id, 2);
+}
+
+/// A TRANSFER with no protocolData at all -- the minimal legal frame --
+/// still gets acknowledged rather than treated as malformed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_transfer_is_still_acknowledged() {
+    let (addr, _signer) = serve_edge().await;
+    let mut session = connect(addr).await;
+
+    send(&mut session, btp_transfer(7, 0, &[])).await;
+    let answer = next_answer(&mut session).await;
+    assert_eq!(answer.frame_type, BTP_RESPONSE);
+    assert_eq!(answer.request_id, 7);
+}
+
+/// A RESPONSE the connector never asked for (this dialect "never
+/// originates a requestId" today over a real socket -- issue #697's
+/// session registry is a separate, later ticket) answers nothing and does
+/// not disturb the session: byte-identical to the pre-#697 behavior where
+/// any non-MESSAGE frame was simply dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsolicited_response_is_silently_dropped_and_the_session_survives() {
+    let (addr, _signer) = serve_edge().await;
+    let mut session = connect(addr).await;
+
+    send(&mut session, btp_response(99)).await;
+    send(
+        &mut session,
+        btp_message(1, &[("auth", br#"{"peerId":"p","secret":""}"#)], &[]),
+    )
+    .await;
+    let auth = next_answer(&mut session).await;
+    assert_eq!(
+        auth.request_id, 1,
+        "the stray RESPONSE produced no answer of its own"
+    );
 }
 
 // ─── issue #688: the pipelined session's throughput, measured for real ───

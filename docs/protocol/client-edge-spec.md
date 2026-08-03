@@ -630,20 +630,35 @@ so every BTP session is a client session by construction (ADR 0026).
 - **Frames:** binary websocket messages, one BTP frame per message. Text frames are ignored.
 
 **BTP frame layout** (all integers big-endian; this is the `@toon-protocol/client`
-`btp/protocol.ts` dialect, which is the deployed client wire — NOT RFC-23's full grammar; there
-are no TRANSFER frames and the ILP packet rides beside the protocolData list, not inside it):
+`btp/protocol.ts` dialect, which is the deployed client wire, extended additively with RFC-23's
+TRANSFER as of issue #697 — the ILP packet still rides beside the protocolData list, not inside
+it, which is the one respect in which this remains not RFC-23's grammar verbatim):
 
 ```
-frame      = type(u8) requestId(u32) body
-body       = pdCount(u8) pd* ilpLen(u32) ilpPacket[ilpLen]      ; type MESSAGE(6) / RESPONSE(1)
-pd         = nameLen(u8) name[nameLen] contentType(u16) dataLen(u32) data[dataLen]
-errorBody  = codeLen(u8) code nameLen(u8) name taLen(u8) triggeredAt dataLen(u32) data
+frame        = type(u8) requestId(u32) body
+body         = pdCount(u8) pd* ilpLen(u32) ilpPacket[ilpLen]    ; type MESSAGE(6) / RESPONSE(1)
+transferBody = amount(u64) pdCount(u8) pd*                      ; type TRANSFER(7) -- no ilpPacket
+pd           = nameLen(u8) name[nameLen] contentType(u16) dataLen(u32) data[dataLen]
+errorBody    = codeLen(u8) code nameLen(u8) name taLen(u8) triggeredAt dataLen(u32) data
                                                                  ; type ERROR(2)
 ```
 
 The ILP packets themselves are the same OER encodings `POST /ilp` carries (§1.1): a MESSAGE's
 `ilpPacket` is a PREPARE, a RESPONSE's is a FULFILL or REJECT. `requestId` correlates a RESPONSE
-or ERROR to the MESSAGE it answers; the server never originates a requestId.
+or ERROR to the MESSAGE or TRANSFER it answers.
+
+**Symmetric grammar (RFC-23, issue #697):** after auth, either side may originate a MESSAGE or a
+TRANSFER — this connector's own outbound requestId allocator guarantees the RFC's uniqueness
+property ("duplicate IDs are never in-flight at the same time") for whatever it originates, exactly
+as the deployed client's own allocator does for its own ids; the two id spaces are independent, so
+neither side needs to know what the other has chosen. Server origination is a foundation-only
+capability as of #697 — the mechanics (allocate, send, correlate the answer) are implemented and
+tested (`crates/connector-client-edge/src/btp.rs`), but nothing in this connector originates a
+request yet; that is the session registry and payout-ledger work `toon-meta#262` builds on top.
+Today's deployed client never sends TRANSFER and never receives a server-originated MESSAGE, and
+observes no change: steps 1–5 below (all client-originated) are preserved byte-for-byte, and an
+unsolicited RESPONSE/ERROR — the shape a server-originated request would eventually provoke — is
+silently dropped exactly as it was before TRANSFER existed.
 
 **Session flow, in order of what a frame carries:**
 
@@ -672,6 +687,14 @@ or ERROR to the MESSAGE it answers; the server never originates a requestId.
 5. **Anything else**: a MESSAGE with no auth, no claim and no `ilpPacket` is ignored. An
    undecodable frame is answered with an ERROR frame (`code F00`, `name NotAcceptedError`, the
    parse failure as UTF-8 `data`) when its requestId was readable, and ignored when not.
+6. **TRANSFER** (issue #697): acknowledged with an empty RESPONSE under the same requestId — RFC-23
+   requires a responder answer every request, satisfied at the protocol level. The settlement/
+   netting accounting a TRANSFER's `amount` will eventually drive is out of scope here; that is
+   `toon-meta#262`'s payout-ledger ticket, built on this foundation.
+7. **A RESPONSE or ERROR whose requestId this connector itself originated** (issue #697): resolved
+   against that outbound request rather than treated as inbound traffic. One this connector never
+   originated — every RESPONSE/ERROR a deployed client sends today — is silently dropped, exactly
+   as any non-MESSAGE frame was before TRANSFER and server-origination existed.
 
 **Ordering** (issue #688): _claims_ on one session are judged strictly sequentially, in arrival
 order — a frame's claim is fully admitted (or refused) before the next frame's claim is looked

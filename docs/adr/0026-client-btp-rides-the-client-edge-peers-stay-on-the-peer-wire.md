@@ -49,3 +49,18 @@ ERROR only, no TRANSFER) is simpler than RFC-23 and is what §1.9 specifies norm
 vectors in `crates/connector-client-edge/src/btp.rs` pin it byte-for-byte against the TS
 serializer. Implementing RFC-23's full grammar would add frames no deployed client sends, to a
 transport ADR 0003 already versions behind the client edge's own discipline.
+
+## Update (issue #697): the grammar is now additively symmetric
+
+toon-meta#262 (agents earning) needs the connector to pay a client, not just be paid by one —
+which needs the other half of RFC-23: a server-originated MESSAGE and TRANSFER (type 7), the
+frame RFC-23 specifies for carrying settlement value. "No deployed client sends it" stopped being
+a reason not to add TRANSFER once a _future_ client (the paired `toon-client` ticket) needs to.
+The paragraph above is now historical: as of #697, `btp.rs` decodes/encodes TRANSFER,
+acknowledges an inbound one, and can originate a MESSAGE or TRANSFER of its own with a
+session-scoped outbound requestId allocator satisfying RFC-23's uniqueness property. This is
+additive, not a reopening of the decision above — the deployed client still speaks exactly the
+dialect this ADR describes and observes no change, because it never sends TRANSFER and nothing
+yet originates a request to it (that caller is the session registry `toon-meta#262`'s
+payout-ledger ticket adds next). See `docs/protocol/client-edge-spec.md` §1.9 for the current,
+normative frame grammar.
