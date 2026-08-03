@@ -335,18 +335,16 @@ impl DepositFloor {
     /// same comparison `TokenNetwork.claimFromChannel` and
     /// `packages/solana-program`'s `Claim` handler make on redemption.
     pub fn covers(&self, amount: u64) -> bool {
-        match self {
-            DepositFloor::Unknown => true,
-            DepositFloor::AtLeast(deposit) => amount <= *deposit,
-        }
+        self.covers_with_credit(amount, 0)
     }
 
     /// [`Self::covers`], with the ceiling raised by `credited` -- what this
     /// connector has separately committed to pay the same channel's
     /// counterparty back (issue #700's netting formula: spendable equals
     /// deposit minus owed plus credited). `credited` of `0` is exactly
-    /// [`Self::covers`], so a channel with no outbound payout ledger
-    /// configured behaves exactly as it did before this method existed.
+    /// [`Self::covers`] (which delegates here), so a channel with no
+    /// outbound payout ledger configured behaves exactly as it did before
+    /// this method existed.
     ///
     /// This is a deliberate, bounded extension of trust rather than a
     /// reading of any new on-chain fact: `credited` is this connector's own
