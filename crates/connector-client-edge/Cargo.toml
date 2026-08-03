@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# The BTP frame grammar and session framing (issue #713, ADR 0027): shared
+# with the peer carriage so neither side can fork the dialect.
+connector-btp = { path = "../connector-btp" }
 connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }

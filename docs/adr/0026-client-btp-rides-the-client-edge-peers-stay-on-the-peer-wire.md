@@ -57,8 +57,9 @@ The only BTP speakers this edge must interoperate with are `@toon-protocol/clien
 `IsomorphicBtpClient` and its consumers — the deployed wire. That dialect (fixed-width
 protocolData list, ILP packet as a trailing length-prefixed field beside it, MESSAGE/RESPONSE/
 ERROR only, no TRANSFER) is simpler than RFC-23 and is what §1.9 specifies normatively. The unit
-vectors in `crates/connector-client-edge/src/btp.rs` pin it byte-for-byte against the TS
-serializer. Implementing RFC-23's full grammar would add frames no deployed client sends, to a
+vectors pin it byte-for-byte against the TS serializer (they lived in
+`crates/connector-client-edge/src/btp.rs` when this ADR was written; issue #713 moved them, and
+the codec they pin, to `crates/connector-btp` so ADR 0027's peer carriage cannot fork them). Implementing RFC-23's full grammar would add frames no deployed client sends, to a
 transport ADR 0003 already versions behind the client edge's own discipline.
 
 ## Update (issue #697): the grammar is now additively symmetric
