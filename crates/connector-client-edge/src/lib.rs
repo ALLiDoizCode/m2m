@@ -44,6 +44,17 @@
 //! [`Connector::handle_prepare`]. `identity` and `route_price` answer
 //! directly from this connector's own configuration and never touch
 //! [`Connector::handle_prepare`] at all.
+//!
+//! As of issue #693, `POST /ilp/claim-state` (§1.10, `claim_state` module)
+//! answers a bulk, owner-authenticated read of claim state -- deposit
+//! total, cumulative claimed, available balance, nonce, last-claim time --
+//! for every channel a caller can prove it controls with a per-channel
+//! signature over a domain-separated challenge, distinct from a real
+//! claim's signature. Also purely a read against existing state
+//! ([`ClientClaimGate::watermark`], [`ClientClaimGate::channels`],
+//! [`ClientClaimGate::last_claim_time`]); it never calls `ingest`/`admit`,
+//! so it adds nothing to the packet admission path #686/#688/#690 spent
+//! this edge's history keeping cheap.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -67,7 +78,9 @@ use connector_signer::{PublicKeyBytes, Signer};
 mod btp;
 mod channels;
 mod claim_gate;
+mod claim_state;
 mod lookup_budget;
+mod outbound_ledger;
 pub use channels::{
     ChannelLivenessPolicy, ChannelLookupFailed, ChannelResolutionError, ClientChannelRegistry,
     ClientChannelSource, DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel,
@@ -80,6 +93,7 @@ pub use lookup_budget::{
     DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL, DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT,
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
+pub use outbound_ledger::ClientPayoutLedger;
 
 /// The BTP carriage's default per-session in-flight window (issue #688):
 /// how many of one session's frames may be past claim admission at once.
@@ -256,6 +270,7 @@ pub fn router_with_gate_terms_and_btp_window(
         .route("/ilp/probe", post(handle_probe))
         .route("/ilp/identity", get(identity))
         .route("/ilp/routes/price", get(route_price))
+        .route("/ilp/claim-state", post(claim_state::claim_state))
         .with_state(state)
 }
 
@@ -284,6 +299,18 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Wall-clock unix seconds, for [`ClientClaimGate::note_claim_time`] -- the
+/// one place any handler in this crate reads the clock outside a test. Not
+/// consulted by admission itself (`ingest`/`admit` take no time input at
+/// all), only by carriers noting a claim's acceptance *after* it has
+/// already happened.
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 /// This connector's own identity (ADR 0018, ADR 0022): the uncompressed
@@ -705,7 +732,12 @@ async fn extract_and_validate_claim(
         state.wrap_receiver_secret.as_ref(),
     )?;
     let claim = state.claim_gate.ingest(&claim_json, price).await?;
-    Ok(Some(claim.channel_key()))
+    let channel_key = claim.channel_key();
+    // Best-effort liveness bookkeeping for issue #693's claim-state
+    // endpoint (`ClientClaimGate::note_claim_time`'s own doc): happens only
+    // after `ingest` has already returned durable, never inside it.
+    state.claim_gate.note_claim_time(&channel_key, now_unix());
+    Ok(Some(channel_key))
 }
 
 /// Answer an ILP-level outcome the way client-edge-spec.md §1.1 and §1.6

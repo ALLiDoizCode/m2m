@@ -79,6 +79,15 @@ const CLAIM_PROTOCOL: &str = "payment-channel-claim";
 /// RESPONSE since a websocket frame has no headers.
 const PAYMENT_REQUIRED_PROTOCOL: &str = "payment-required";
 const ACCUMULATED_COST_PROTOCOL: &str = "toon-accumulated-cost";
+/// A payout TRANSFER's protocolData entry name (issue #699): the signed
+/// claim this connector owes the client on that channel. See
+/// [`payout_claim_protocol_data`].
+///
+/// `#[allow(dead_code)]`: see [`encode_message`]'s note -- no production
+/// caller until the session-registry ticket exists; proven by this
+/// module's own tests against the real production types in the meantime.
+#[allow(dead_code)]
+const PAYOUT_CLAIM_PROTOCOL: &str = "payout-claim";
 
 /// The contentType the client itself uses for its JSON claim entry (its
 /// parser never reads the field back). Emitted on every server entry for
@@ -319,6 +328,41 @@ pub(crate) fn encode_transfer(
     out
 }
 
+/// The protocolData entry a payout TRANSFER carries (issue #699): the
+/// signed cumulative claim this connector owes the client on that channel,
+/// as JSON -- `channelId`/`nonce`/`cumulativeAmount` matching
+/// `WireClaim`'s own fields, `signature` hex-encoded the same way
+/// `ClientClaimGate`'s inbound claim JSON already expects one
+/// (`0x`-prefixed 65-byte `r‖s‖recoveryId`). JSON rather than
+/// [`WireClaim::encode`]'s peer-wire binary shape, matching every other
+/// protocolData entry this dialect ever carries -- the auth secret, the
+/// inbound claim, the x402 terms, the accumulated-cost total -- all of
+/// which are raw UTF-8 text, never a second binary sub-format riding
+/// inside the frame's own binary envelope.
+///
+/// There is no `signerAddress` field: unlike a client's self-declared one
+/// (never trusted -- see `ClientClaimGate`'s own doc), this claim's signer
+/// is the channel's own recorded counterparty from the client's point of
+/// view, implicit in which channel the TRANSFER arrived on, exactly as a
+/// peer-wire [`WireClaim`] carries no signer field either.
+///
+/// `#[allow(dead_code)]`: see [`encode_message`]'s note -- no production
+/// caller until the session-registry ticket exists.
+#[allow(dead_code)]
+pub(crate) fn payout_claim_protocol_data(claim: &connector_runtime::WireClaim) -> ProtocolData {
+    let json = serde_json::json!({
+        "channelId": claim.channel_id,
+        "nonce": claim.nonce,
+        "cumulativeAmount": claim.cumulative_amount,
+        "signature": format!("0x{}", hex::encode(claim.signature.to_bytes())),
+    });
+    ProtocolData {
+        name: PAYOUT_CLAIM_PROTOCOL.to_string(),
+        content_type: CONTENT_TYPE_TEXT,
+        data: serde_json::to_vec(&json).expect("a json! object always serializes"),
+    }
+}
+
 /// Encode an ERROR frame (§1.9 step 5): `code`/`name`/`triggeredAt` as
 /// 1-byte-length-prefixed strings, then the diagnostic text as a
 /// u32-length-prefixed trailer, per the client's `parseBtpMessage` ERROR
@@ -434,6 +478,20 @@ async fn window_slot(window: &Arc<Semaphore>) -> OwnedSemaphorePermit {
         .acquire_owned()
         .await
         .expect("the session window semaphore is never closed")
+}
+
+/// A claim's batch just cleared durability: mark its channel recognized,
+/// making the sender eligible to probe (issue #548), and note the
+/// claim-state endpoint's liveness timestamp (issue #693), same as
+/// `handle_ilp`'s HTTP carriage. Shared by both places a BTP claim can
+/// finish durable -- a standalone claim message and a claim riding a
+/// packet -- so the two stay in lockstep.
+fn record_accepted_claim(state: &ClientEdgeState, claim: &ClientClaim) {
+    let channel_key = claim.channel_key();
+    state.connector.recognize_channel(&channel_key);
+    state
+        .claim_gate
+        .note_claim_time(&channel_key, crate::now_unix());
 }
 
 /// A REJECT as a RESPONSE frame: the OER body as the ILP packet, the
@@ -757,7 +815,7 @@ async fn handle_frame(
                     tokio::spawn(async move {
                         let _slot = permit;
                         match durability.durable().await {
-                            Ok(()) => state.connector.recognize_channel(&claim.channel_key()),
+                            Ok(()) => record_accepted_claim(&state, &claim),
                             Err(rejection) => tracing::debug!(
                                 rejection = %rejection.message(),
                                 "standalone BTP claim accepted but not durably recorded"
@@ -935,8 +993,9 @@ async fn finish_frame(
     if let Some((claim, durability)) = admitted {
         match durability.durable().await {
             // A claim that cleared the gate makes the sender eligible to
-            // probe, exactly as on HTTP (issue #548) -- once durable.
-            Ok(()) => state.connector.recognize_channel(&claim.channel_key()),
+            // probe and notes the claim-state endpoint's liveness
+            // timestamp -- see `record_accepted_claim`.
+            Ok(()) => record_accepted_claim(&state, &claim),
             Err(rejection) => {
                 let _ = reply(
                     &replies,
@@ -1094,6 +1153,37 @@ mod tests {
         let decoded = decode_frame(&encoded).expect("decodes");
         assert_eq!(decoded.amount, Some(0));
         assert!(decoded.protocol_data.is_empty());
+    }
+
+    /// Issue #699: a payout claim rides a TRANSFER's protocolData as JSON,
+    /// matching every other entry this dialect carries (all UTF-8 text,
+    /// never a second binary sub-format) rather than
+    /// [`connector_runtime::WireClaim::encode`]'s peer-wire bytes.
+    #[test]
+    fn payout_claim_protocol_data_encodes_the_wire_claims_fields_as_json() {
+        let claim = connector_runtime::WireClaim {
+            channel_id: format!("0x{:064x}", 1),
+            nonce: 3,
+            cumulative_amount: 750,
+            signature: connector_signer::Signature {
+                r: [0x11; 32],
+                s: [0x22; 32],
+                recovery_id: 1,
+            },
+        };
+
+        let pd = payout_claim_protocol_data(&claim);
+
+        assert_eq!(pd.name, PAYOUT_CLAIM_PROTOCOL);
+        assert_eq!(pd.content_type, CONTENT_TYPE_TEXT);
+        let json: serde_json::Value = serde_json::from_slice(&pd.data).expect("valid JSON");
+        assert_eq!(json["channelId"], claim.channel_id);
+        assert_eq!(json["nonce"], 3);
+        assert_eq!(json["cumulativeAmount"], 750);
+        assert_eq!(
+            json["signature"],
+            format!("0x{}", hex::encode(claim.signature.to_bytes()))
+        );
     }
 
     #[test]
@@ -1304,6 +1394,98 @@ mod tests {
             .await
             .expect("the peer answered before the timeout");
         assert!(answer.ilp_packet.is_empty());
+        peer.await.expect("the peer task");
+    }
+
+    /// Issue #699 end-to-end through the real production types: a
+    /// [`crate::outbound_ledger::ClientPayoutLedger`] signs a payout claim,
+    /// [`payout_claim_protocol_data`] carries it as a TRANSFER's
+    /// protocolData over [`BtpSessionHandle::send_transfer`], and a
+    /// stand-in client -- reading off the same wire `btp_session`'s writer
+    /// task would write to -- decodes the frame, parses the JSON claim
+    /// back out, and verifies its signature against the connector's own
+    /// public key. Nothing here is a fake shortcut: the ledger, the frame
+    /// codec and the origination path are exactly what a real session
+    /// would run once a caller (the session-registry ticket, `toon-meta#262`)
+    /// decides when to push a payout.
+    #[tokio::test]
+    async fn a_signed_payout_claim_is_delivered_over_transfer_and_verifies() {
+        use crate::outbound_ledger::ClientPayoutLedger;
+        use connector_runtime::ChannelDomain;
+        use connector_signer::{
+            derive_evm_address, verify_evm_balance_proof, EvmBalanceProof, LocalSigner, Signer,
+        };
+
+        let signer = Arc::new(LocalSigner::generate("payout-key"));
+        let connector_address = derive_evm_address(&signer.public_key().unwrap());
+        let domain = ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x33; 20],
+        };
+        let channel_id = format!("0x{:064x}", 7);
+
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(signer);
+        ledger
+            .set_channel_domain(channel_id.clone(), domain)
+            .expect("valid channel id");
+        let claim = ledger
+            .record_payout(&channel_id, 42_000, "2030-01-01T00:00:00Z".parse().unwrap())
+            .expect("signer and domain configured");
+
+        let (replies, mut reply_rx) = mpsc::channel::<Vec<u8>>(1);
+        let outbound = Arc::new(OutboundRequests::new());
+        let handle = BtpSessionHandle::new(replies, Arc::clone(&outbound));
+
+        let expected_channel_id = channel_id.clone();
+        let peer = tokio::spawn(async move {
+            let sent = reply_rx.recv().await.expect("the TRANSFER was written");
+            let decoded = decode_frame(&sent).expect("the connector's own encoder");
+            assert_eq!(decoded.frame_type, BTP_TRANSFER);
+            assert_eq!(decoded.amount, Some(42_000));
+
+            let pd = decoded
+                .protocol_data
+                .iter()
+                .find(|pd| pd.name == PAYOUT_CLAIM_PROTOCOL)
+                .expect("the payout claim rode the TRANSFER");
+            let json: serde_json::Value = serde_json::from_slice(&pd.data).expect("valid JSON");
+            assert_eq!(json["channelId"], expected_channel_id);
+            assert_eq!(json["nonce"], 1);
+            assert_eq!(json["cumulativeAmount"], 42_000);
+            let signature_hex = json["signature"].as_str().unwrap();
+            let signature_bytes = hex::decode(signature_hex.strip_prefix("0x").unwrap()).unwrap();
+
+            let mut on_chain_id = [0u8; 32];
+            on_chain_id[31] = 7;
+            let proof = EvmBalanceProof {
+                channel_id: on_chain_id,
+                nonce: json["nonce"].as_u64().unwrap(),
+                transferred_amount: u128::from(json["cumulativeAmount"].as_u64().unwrap()),
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: domain.chain_id,
+                token_network_address: domain.token_network_address,
+            };
+            assert!(verify_evm_balance_proof(
+                &proof,
+                &signature_bytes,
+                &connector_address
+            ));
+
+            outbound.resolve(BtpFrame {
+                frame_type: BTP_RESPONSE,
+                request_id: decoded.request_id,
+                amount: None,
+                protocol_data: Vec::new(),
+                ilp_packet: Vec::new(),
+            });
+        });
+
+        handle
+            .send_transfer(42_000, &[payout_claim_protocol_data(&claim)])
+            .await
+            .expect("the peer answered before the timeout");
         peer.await.expect("the peer task");
     }
 

@@ -20,6 +20,11 @@ futures-util = "0.3"
 base64 = "0.22"
 bs58 = "0.5"
 hex = "0.4"
+# `ClientPayoutLedger` (issue #699) signs a payout claim against the same
+# clock-supplied timestamp `connector_runtime::ClaimBook::record_fulfillment`
+# takes, so `DateTime<Utc>` rides in this crate's own public API now, not
+# just its tests.
+chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `time`: the unresolvable-lookup shaper (issue #613) holds a lookup for
@@ -34,7 +39,6 @@ tracing = "0.1"
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm" }
 ethers = { version = "2", default-features = false, features = ["rustls"] }
-chrono = "0.4"
 ed25519-dalek = "1"
 # `test-util` for `#[tokio::test(start_paused = true)]`: the shaper of issue
 # #613 holds a lookup for its slot, and the only way to exercise that hold
