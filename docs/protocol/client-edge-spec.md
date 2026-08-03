@@ -683,7 +683,7 @@ property ("duplicate IDs are never in-flight at the same time") for whatever it 
 as the deployed client's own allocator does for its own ids; the two id spaces are independent, so
 neither side needs to know what the other has chosen. Server origination is a foundation-only
 capability as of #697 — the mechanics (allocate, send, correlate the answer) are implemented and
-tested (`crates/connector-client-edge/src/btp.rs`), but nothing in this connector originates a
+tested (`crates/connector-btp/src/session.rs`), but nothing in this connector originates a
 request yet; that is the session registry and payout-ledger work `toon-meta#262` builds on top.
 Today's deployed client never sends TRANSFER and never receives a server-originated MESSAGE, and
 observes no change: steps 1–5 below (all client-originated) are preserved byte-for-byte, and an
