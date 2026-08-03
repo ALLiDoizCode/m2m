@@ -426,7 +426,13 @@ async fn handle_frame(
                     tokio::spawn(async move {
                         let _slot = permit;
                         match durability.durable().await {
-                            Ok(()) => state.connector.recognize_channel(&claim.channel_key()),
+                            Ok(()) => {
+                                let channel_key = claim.channel_key();
+                                state.connector.recognize_channel(&channel_key);
+                                state
+                                    .claim_gate
+                                    .note_claim_time(&channel_key, crate::now_unix());
+                            }
                             Err(rejection) => tracing::debug!(
                                 rejection = %rejection.message(),
                                 "standalone BTP claim accepted but not durably recorded"
@@ -558,7 +564,15 @@ async fn finish_frame(
         match durability.durable().await {
             // A claim that cleared the gate makes the sender eligible to
             // probe, exactly as on HTTP (issue #548) -- once durable.
-            Ok(()) => state.connector.recognize_channel(&claim.channel_key()),
+            // Also notes the claim-state endpoint's liveness timestamp
+            // (issue #693), same as `handle_ilp`'s carriage.
+            Ok(()) => {
+                let channel_key = claim.channel_key();
+                state.connector.recognize_channel(&channel_key);
+                state
+                    .claim_gate
+                    .note_claim_time(&channel_key, crate::now_unix());
+            }
             Err(rejection) => {
                 let _ = reply(
                     &replies,

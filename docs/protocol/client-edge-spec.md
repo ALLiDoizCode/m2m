@@ -687,6 +687,136 @@ client resolves responses through its pending-request map by exactly that id. A 
 assume responses arrive in request order. Concurrent sessions writing on the same channel still
 serialize at the gate's watermark lock, exactly as concurrent HTTP requests do.
 
+### 1.10 Owner-authenticated claim state: `POST /ilp/claim-state` (issue #693)
+
+A bulk, read-only answer to "what is the off-chain claim state of every channel I control?" —
+deposit total, cumulative claimed, available balance, nonce and last-claim time, for as many
+channels as one request names, each independently authenticated by a signature over that
+channel alone. Exists because the off-chain claim watermark is known only to a channel's own
+counterparty and to this connector's claim gate: an on-chain read gives deposit and channel
+existence for free, but not the watermark, and an agent whose channel has run dry cannot afford
+a paid write to report its own state (a management surface polling many agents' runway needs
+this to work precisely when an agent is broke, dead or offline).
+
+**Request.**
+
+```json
+POST /ilp/claim-state
+Content-Type: application/json
+
+{
+  "channels": [
+    {
+      "blockchain": "evm",
+      "channelId": "0x<64-char hex>",
+      "expires": 1735689600,
+      "signature": "0x<65-byte r||s||v hex>"
+    },
+    {
+      "blockchain": "solana",
+      "channelAccount": "<base58>",
+      "expires": 1735689600,
+      "signature": "<base64 64-byte Ed25519>"
+    }
+  ]
+}
+```
+
+Every entry is independent: a request MAY mix EVM and Solana channels, and a request naming
+channels controlled by different keys is answered exactly as one naming channels controlled by
+one key would be — nothing about this endpoint requires the caller to be a single identity, only
+that it can produce a valid signature per channel it asks about.
+
+**Auth: a signature per channel, not a signature over the request.** Each entry's `signature` is
+that channel's counterparty key (the same key that signs a real claim, §1.3 step 4's "the
+counterparty this connector has recorded for the channel") signing a **claim-state challenge** —
+a message distinct from a real claim's balance-proof signature, so a captured challenge can never
+be replayed as a payment or vice versa:
+
+- **evm** — EIP-712, same domain as a real claim (`EIP712Domain(name: "TokenNetwork", version:
+"1", chainId, verifyingContract)`, read from the channel's own recorded domain, never from the
+  request), a distinct typed struct:
+  ```text
+  ClaimStateChallenge(bytes32 channelId,uint256 expires)
+  ```
+- **solana** — Ed25519 over a tagged message distinct in both content and length from a real
+  claim's 48-byte balance-proof message:
+  ```text
+  message = "toon-claim-state-challenge-v1" || channelAccount(32 bytes) || expires(u64 LE)
+  ```
+
+`expires` (unix seconds) is required and is the whole of this endpoint's replay bound: a
+signature verifies for any `now <= expires`, reusably — this is a read that changes no state and
+advances no watermark, so there is nothing for a nonce to protect. A caller reissues a fresh
+`expires` (and therefore a fresh signature) whenever it wants a signature that outlives one it no
+longer wants trusted.
+
+**Response.** `200`, one result per requested channel, same order as the request:
+
+```json
+{
+  "channels": [
+    {
+      "blockchain": "evm",
+      "channelId": "0x...",
+      "ok": true,
+      "depositTotal": "1000000",
+      "cumulativeClaimed": "250000",
+      "available": "750000",
+      "nonce": 3,
+      "lastClaimTime": 1735680000
+    },
+    {
+      "blockchain": "solana",
+      "channelAccount": "...",
+      "ok": false,
+      "error": "unverified"
+    }
+  ]
+}
+```
+
+Money fields are decimal strings (matching §1.3's `transferredAmount` convention), never a bare
+JSON number — a value a JS `Number` cannot represent exactly past 2^53 is a real amount this
+endpoint reports, not a hypothetical one.
+
+- `depositTotal` — the channel's on-chain deposit, or `null` for a channel this connector only
+  has _declared_ (`[[client_channels]]`) — declaring a channel names a counterparty and never an
+  amount (§1.3's collateral-binding exemption applies here identically), so no figure exists to
+  report. A resolved (chain-backed) channel always reports a number.
+- `cumulativeClaimed` — the channel's watermark, `"0"` if this connector has never accepted a
+  claim on it.
+- `available` — `depositTotal - cumulativeClaimed`; `null` exactly when `depositTotal` is.
+- `nonce` — the watermark's nonce, `0` if none yet.
+- `lastClaimTime` — unix seconds this connector last accepted a claim on this channel (over
+  **any** carrier — `POST /ilp`, `POST /ilp/probe`, or the BTP session), or `null` if it never
+  has. **Best-effort and non-durable**, unlike every other field above: a connector restart resets
+  it to `null` until the next accepted claim, deliberately — recording it durably would mean
+  stamping a wall-clock read into the claim admission path's write-lock or group-commit journal
+  (issues #686/#690), which this endpoint's own acceptance criteria forbids adding to. A consumer
+  MUST treat a `null` here as "unknown", never as "never claimed" — the deposit/cumulative/
+  available/nonce figures beside it remain exact across a restart regardless, since those still
+  come from the durable watermark.
+
+**What a failed entry reveals.** `ok: false` carries only `error`, one of:
+
+- `"expired"` — `expires` is not in the future. A fact about the request, safe to report exactly.
+- `"unverified"` — everything else: the channel does not exist, the signature does not verify, or
+  this connector's resolution of the channel from chain failed. These are deliberately collapsed
+  into one reason, unlike §1.3's claim-refusal taxonomy (which _does_ distinguish "no such
+  channel" from "bad signature" for a paying sender's benefit) — this endpoint's own acceptance
+  criteria requires that a caller learn nothing about a channel it does not control, and "channel
+  exists but your signature is wrong" already discloses existence. A caller cannot distinguish a
+  channel that has never existed from one it simply guessed the wrong key for.
+
+**Not on the admission path.** This endpoint only reads: the watermark, the channel registry
+(counterparty, deposit floor, EIP-712 domain) and the best-effort last-claim-time index above. A
+channel lookup this connector has not already resolved goes through the same budgeted resolution
+§1.3's "a lookup that resolves nothing must be bounded too" already governs for a claim, so a
+flood of fabricated channel ids against this endpoint costs no more than the same flood would
+against `POST /ilp`. Nothing here calls into claim ingestion, and no per-packet work was added to
+`handle_prepare` to build it.
+
 ## 2. What version 1 does not do
 
 Version 1 has no field or header identifying its own version. That is the gap §3 closes: version
