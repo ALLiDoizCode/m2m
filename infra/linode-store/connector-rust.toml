@@ -89,28 +89,86 @@
 # devnet contracts, and a node pointed at a different registry cannot resolve
 # it.
 #
-# This reverses an earlier note here that argued for an EVM-only template on
-# the grounds that a store box is "the other end" of a payment and never a
-# counterparty. That was true while #600's topology held — the apex terminated
-# the store leg and this box's Rust node did not exist. The moment this node
-# accepts client-edge claims of its own it IS a counterparty, on whichever
-# chain the buyer chose, and the live fleet's peering already settles on
-# `solana:devnet` (both TypeScript peers carry `chain: solana:devnet`). An
-# EVM-only node would refuse every Solana-paid write that reached it.
+# DECISION (owner-confirmed 2026-08-03): this node settles on BOTH chains.
 #
-# The keys are this box's own, not the apex's, mounted read-only by the
-# overlay from ./signer-rust.key, ./settlement-rust.key and
-# ./settlement-solana-rust.key. Derive the two settlement keys from the
-# STORE_TOON_MNEMONIC this box already uses, so they land on the settlement
-# identities the fleet has already funded and already advertises in
-# connector.yaml's `settlementAddresses` —
-#   evm     0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff
-#   solana  W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV
-# — rather than minting fresh identities that would each need funding and a
-# fresh channel. A PRESENT settlement table is fail-closed at startup by
-# design (ADR 0009): a missing key file or an unreachable chain is a refusal
-# to boot, not a silent degradation. Provision both keys BEFORE the first
-# `up -d`; the runbook does this in its own step.
+# Stating that plainly because it REVERSES the argument this same header used
+# to make. The old text argued for an EVM-only template on the grounds that a
+# store box is "the other end" of a payment and never a counterparty. That
+# held only while #600's topology did — the apex terminated the store leg and
+# this box had no Rust node at all. It stopped being true the moment this file
+# gained a priced client edge: a node that accepts claims IS a counterparty,
+# on whichever chain the buyer chose, and the live fleet's peering already
+# settles on `solana:devnet` (both TypeScript peers carry
+# `chain: solana:devnet`). An EVM-only node here would refuse every
+# Solana-paid write that reached it.
+#
+# The old argument's cost is real and is accepted, not dismissed: a PRESENT
+# settlement table is fail-closed at startup by design (ADR 0009), so each leg
+# is one more chain this node must reach and one more key file to provision
+# before it will boot at all.
+#
+# If a future edit wants EVM-only again, change this comment in the same edit.
+# A header that argues the opposite of the values beneath it is not a
+# harmless stale note — the live apex's `connector-rust.toml` carries a
+# comment asserting parity at `1000` above a `price = 1`, and that
+# contradiction is exactly why a 1000x price cut sat unnoticed for twenty
+# hours. Do not reproduce it here.
+#
+# ── Key provisioning, and the mnemonic-reuse decision ──────────────────────
+# Three key files, all this box's own, mounted read-only by the overlay. They
+# are NOT provisioned the same way, and the difference is the point:
+#
+#   ./signer-rust.key             FRESH RANDOM — `openssl rand -hex 32`, per
+#                                 deploy/connector-rust/README.md step 1.
+#                                 This is the connector's own ILP signing
+#                                 identity (ADR 0012) and must NOT collide
+#                                 with the TypeScript node's. The apex does
+#                                 the same: its Rust signer resolves to
+#                                 0x8b0cb539f6b58d9fa1266faaec18555c4f8e598e,
+#                                 which is not any TypeScript settlement
+#                                 identity on that box.
+#
+#   ./settlement-rust.key         DERIVED from this box's TOON_MNEMONIC —
+#   ./settlement-solana-rust.key  deliberately reproducing the SAME addresses
+#                                 the TypeScript node already uses.
+#
+# DECISION (owner-confirmed 2026-08-03): the settlement keys are derived from
+# the existing mnemonic rather than freshly generated. Reusing the seed means
+# this node inherits settlement identities the fleet has already funded and
+# already advertises in connector.yaml's `settlementAddresses`. Fresh
+# identities would each need funding, and every client with an open channel
+# would have to open a new one against the new address.
+#
+# So for the settlement pair, matching the TypeScript node is the GOAL, not a
+# collision to avoid. Derive from `TOON_MNEMONIC` in this directory's `.env`
+# (the store box's own seed — `docker-compose.store.yml` calls it
+# STORE_TOON_MNEMONIC in prose) at **account index 0**, the index that
+# produced the addresses already in `connector.yaml`:
+#
+#   evm     m/44'/1237'/0'/0/0   → 0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff
+#   solana  m/44'/501'/0'/0'     → W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV
+#
+# The EVM path is NIP-06 `1237'`, the Nostr coin type — NOT the standard
+# `m/44'/60'`. This fleet settles with the same secp256k1 key it signs Nostr
+# events with. Deriving at `m/44'/60'/0'/0/0` yields a valid, funded-by-nobody
+# address and a node that cannot resolve a single existing channel, so verify
+# the derived addresses equal the two literals above BEFORE the first
+# `up -d` — that check, not the path string, is the real guard.
+#
+# CONSEQUENCES OF THE REUSE, both of which are accepted:
+#
+#   * Rotating this mnemonic now rotates BOTH connectors' settlement
+#     identities at once. There is no longer a way to re-key the Rust node
+#     alone, and a rotation is a fleet event requiring every counterparty
+#     channel to be re-opened. The signer key above is unaffected — it is not
+#     derived from the seed and can be rotated independently.
+#   * While both connectors run side by side (the whole additive phase, and
+#     the drain), TWO processes hold the SAME settlement private key. That is
+#     safe for accepting claims, which is a read against chain state, but two
+#     processes must never submit settlement transactions concurrently from
+#     one key — they would race the account nonce. Keep on-chain settlement
+#     driven by exactly one of the two connectors for the duration, and do not
+#     trigger a settle from the other.
 #
 # `decimals = 6` is checked against the token's own on-chain `decimals()` at
 # startup and a disagreement refuses the boot (#564), so a stale value here is

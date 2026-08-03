@@ -76,11 +76,17 @@ services:
     image: ghcr.io/toon-protocol/connector:rust-sha-54a967d
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
-      # Three distinct raw key files, all this box's own. The settlement pair
-      # must be derived from STORE_TOON_MNEMONIC so they land on the already
-      # funded identities this box advertises — see ./connector-rust.toml.
-      # They must exist and be readable by uid 10001 before the first `up -d`
-      # (`chown 10001:10001`); a missing key file is a refuse-to-start.
+      # Three raw key files, provisioned two different ways — see
+      # ./connector-rust.toml's header for the decision and the paths.
+      # In short: the signer is FRESH RANDOM (`openssl rand -hex 32`) and must
+      # not collide with the TypeScript node's identity, while the settlement
+      # pair is DERIVED from this box's TOON_MNEMONIC at account index 0 and
+      # must reproduce the addresses the TypeScript node already uses —
+      # matching there is the goal, so the Rust node inherits already-funded
+      # identities instead of needing new channels opened against it.
+      # All three must exist and be readable by uid 10001 before the first
+      # `up -d` (`chown 10001:10001`); a missing key file is a refuse-to-start,
+      # and so is an unreachable settlement chain (ADR 0009).
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
