@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use connector_domain::{Reject, RejectCode};
 
-use crate::btp::{BtpFrame, BtpSessionHandle, OriginateError, ProtocolData};
+use connector_btp::{BtpFrame, BtpSessionHandle, OriginateError, ProtocolData};
 
 /// Backstop TTL for a half-open socket (issue #698 AC5): the primary
 /// liveness signal is the socket's own read loop ending, which unbinds a
@@ -261,7 +261,7 @@ fn no_live_session_reject(address: &str) -> Reject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::btp::{decode_frame, OutboundRequests};
+    use connector_btp::{decode_frame, OutboundRequests};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
