@@ -1,188 +1,169 @@
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STATUS (#600, 2026-07-30; amended #679, 2026-08-03): NOT DEPLOYED. The
-# devnet store leg shipped WITHOUT this overlay: the apex terminates
-# g.toon.ario / g.toon.store at the store app over this box's own PUBLIC TLS
-# front (https://proxy.store.devnet.toonprotocol.dev/store — nginx's
-# `location /store` in ./nginx/conf.d/node.conf; see
-# infra/linode-node/connector-rust.toml's header). Two findings closed
-# that door for this overlay:
-#   * the PAID forwarded path is structurally unwired (#620) — a peer
-#     route is neither priced nor charged at the client edge, a peer
-#     arrival is never charged the terminating route's price, and ADR
-#     0024's peer claims cannot be configured from any connector.toml, so
-#     deploying this today would stand up a free-write path beside a paid
-#     one; and
-#   * the raw-TCP peer wire could not carry the public inter-node link
-#     devnet topology calls for (#623) — framing nginx cannot
-#     TLS-terminate, no TLS of its own (ADR 0003), SocketAddr-only
-#     addressing. The VPC these files' comments were written for was
-#     never provisioned, and #600 settled that no private segment is
-#     wanted: node↔node links are public, like the TS fleet's BTP-over-wss.
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector, STORE box (`toon-devnet-store`, 45.79.173.113,
+# DNS proxy.store.devnet.toonprotocol.dev)
+# ═══════════════════════════════════════════════════════════════════════════
+# Deployed by docker-compose.store.rust.yml as an ADDITIVE overlay beside the
+# TypeScript fleet in docker-compose.store.yml, mirroring how the apex box has
+# run both connectors side by side since #601. It is NOT a cutover: the
+# TypeScript connector keeps serving the default public edge
+# (https://proxy.store.devnet.toonprotocol.dev/ → connector:3000, including
+# its half of the live BTP peering to the apex), and this node is reachable
+# only under /rust/ilp and /rust/ilp/btp on this box's own nginx.
 #
-# ADR 0027 settled it: peers ride BTP over wss:// or ILP-over-HTTP over
-# https:// — the carriages the client edge already serves — and issue #679
-# DELETED the raw-TCP peer wire, its `peer_wire_addr` and the
-# `SocketAddr`-shaped `[[peers]].addr`. This file's peer-wire bind and the
-# whole STORE_PEER_WIRE_BIND containment story went with them; a config
-# still setting either now fails config load by name. The peer config this
-# file will grow instead (`[peers].expose`, per-peer `endpoint` +
-# credential, `[[peer_channels]]`) is #677, and the first real Rust peer
-# link on devnet is #678. #620 remains the hard gate on deploying any of
+# Why this file grew from a stub into a deployable config: the apex box has
+# run a Rust connector for weeks, the store box has never run one, and that
+# asymmetry is the hard blocker on retiring TypeScript — the store leg cannot
+# move to Rust while there is no Rust process on the store box to move it to.
+# Standing this up is step 1 of the cutover runbook, and on its own it changes
+# nothing about what serves production traffic.
+#
+# ── What this node terminates ──────────────────────────────────────────────
+# The same three prefixes this box's TypeScript connector.yaml terminates, at
+# the same prices, against the same payment-oblivious store app on :3300:
+#
+#   g.toon.ario         this box's own advertised prefix
+#   g.toon.relay.ario   the relay-hop form (client → apex → store)
+#   g.toon.store        the alias the apex's own g.toon.store route forwards
+#                       to, kept here so a client arriving at this edge
+#                       directly is priced identically
+#
+# `http://store:3300/store` resolves by the same container-name DNS the
+# TypeScript node already relies on — the overlay joins this compose project's
+# default network. The path is `/store` because that is the store app's
+# HTTP-backend endpoint (DVM_BACKEND_MODE=http, HANDLER_PORT=3300); it is also
+# what this box's nginx `location /store` hands it, so the apex's public
+# forward (https://proxy.store…/store) and this node's private one land on the
+# identical handler.
+#
+# Prices are pinned at `1000` (0.001 USDC in 6-decimal base units) to match
+# infra/linode-store/connector.yaml's `price: '1000'` on all three routes.
+# They MUST stay equal to the TypeScript values for as long as both connectors
+# front the same app: an unequal pair is an arbitrage between two doors into
+# one handler, and the cheaper door takes every packet. When the apex's
+# g.toon.relay price was hand-cut on the box from 1000 to 1 (2026-08-03 02:01,
+# undocumented) it created exactly that hazard on the other box; do not repeat
+# it here without changing both connectors in one edit.
+#
+# Transport is left at the default (`both`): a store write is a one-shot
+# request from an arbitrary buyer, so unlike the apex's relay leg — pinned
+# `transport = "btp"` for huddles' persistent 49fps sessions (#701) — there is
+# nothing here to amortize a handshake against.
+#
+# ── No `peer_wire_addr`, and no `[[peers]]`, deliberately ──────────────────
+# The previous draft of this file bound ADR 0003's raw-TCP peer wire on :4001,
+# and the compose overlay demanded a `STORE_PEER_WIRE_BIND` VPC address to
+# publish it on. Both are removed:
+#
+#   * the VPC was never provisioned, and #600 settled that none is wanted —
+#     node↔node links on this fleet are public and TLS-terminated by each
+#     box's own nginx, like the TypeScript fleet's BTP-over-wss;
+#   * the peer wire cannot carry a public link (#623): raw-TCP custom framing
+#     nginx cannot TLS-terminate, no transport security of its own by ADR
+#     0003's design, and SocketAddr-only addressing — see
+#     crates/connector-config/src/peer.rs, where a peer is `{ id, addr }` and
+#     nothing else, with nothing to hang a handshake on;
+#   * the paid forwarded path is structurally unwired (#620): a peer route is
+#     neither priced at the client edge nor charged on arrival at the
+#     terminating side, so a peer-forwarded `g.toon.store` would have served
+#     this store app FOR FREE, beside the apex's paid door.
+#
+# Binding an unauthenticated plaintext listener on a box with no private
+# segment is a hazard with no upside while all three hold, so this node
+# accepts no inbound peer connection and dials no peer. It is a
+# client-edge-only connector — which is exactly what the apex's Rust node
+# already is, and why the two are comparable.
+#
+# THE PEERING GOES HERE. When the inter-connector transport decision lands
+# (BTP over wss, or ILP-over-HTTP — not this file's call), the store leg gains
+# a peer entry below plus a route with a `peer_id` next hop, and the apex's
+# `g.toon.ario` / `g.toon.store` routes stop being plain outbound HTTPS POSTs
+# to this box's nginx and become forwards over that peering. Until then the
+# apex reaches the store app the way any client on the open internet does.
+#
+# ── Settlement ─────────────────────────────────────────────────────────────
+# Live, and deliberately identical to the apex's
+# (infra/linode-node/connector-rust.toml): the same Base Sepolia
+# `TokenNetworkRegistry` and USDC, the same Solana payment-channel program and
+# mint, both at 6 decimals. It has to be the same deployment — a claim this
+# node accepts is written against the channel the buyer opened on the shared
+# devnet contracts, and a node pointed at a different registry cannot resolve
 # it.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ═══════════════════════════════════════════════════════════════════════════
-# TOON devnet — Rust connector, store side (issue #490, ADR 0013's parallel
-# fleet)
-# ═══════════════════════════════════════════════════════════════════════════
-# Mirrors infra/linode-node/connector-rust.toml's own header for the prefix
-# reasoning: `g.toon` is the protocol's own namespace, served by this fleet
-# since it became the official implementation (2026-07-30; the parallel
-# `g.rust` prefix is historical). Runs ALONGSIDE
-# ./connector.yaml's TypeScript node on this box — see
-# docker-compose.store.rust.yml, an ADDITIVE overlay that never edits
-# docker-compose.store.yml.
 #
-# Terminates `g.toon.store` at the SAME running store (Arweave DVM) app this
-# box's TypeScript connector already fronts (store:3300) — payment-
-# oblivious per ADR 0013, and NOT modified by this file. It accepts the
-# node-side apex's peering rather than dialing out, so there is no
-# [[peers]] section here — and since #679 there is no peer listener to
-# configure either; ADR 0027's carriages share the client edge's own.
+# This reverses an earlier note here that argued for an EVM-only template on
+# the grounds that a store box is "the other end" of a payment and never a
+# counterparty. That was true while #600's topology held — the apex terminated
+# the store leg and this box's Rust node did not exist. The moment this node
+# accepts client-edge claims of its own it IS a counterparty, on whichever
+# chain the buyer chose, and the live fleet's peering already settles on
+# `solana:devnet` (both TypeScript peers carry `chain: solana:devnet`). An
+# EVM-only node would refuse every Solana-paid write that reached it.
+#
+# The keys are this box's own, not the apex's, mounted read-only by the
+# overlay from ./signer-rust.key, ./settlement-rust.key and
+# ./settlement-solana-rust.key. Derive the two settlement keys from the
+# STORE_TOON_MNEMONIC this box already uses, so they land on the settlement
+# identities the fleet has already funded and already advertises in
+# connector.yaml's `settlementAddresses` —
+#   evm     0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff
+#   solana  W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV
+# — rather than minting fresh identities that would each need funding and a
+# fresh channel. A PRESENT settlement table is fail-closed at startup by
+# design (ADR 0009): a missing key file or an unreachable chain is a refusal
+# to boot, not a silent degradation. Provision both keys BEFORE the first
+# `up -d`; the runbook does this in its own step.
+#
+# `decimals = 6` is checked against the token's own on-chain `decimals()` at
+# startup and a disagreement refuses the boot (#564), so a stale value here is
+# a loud failure rather than a mispriced route.
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Distinct from the TypeScript node's 3000/8080/8081, matching the node-side
-# connector-rust.toml's own port choice.
 client_edge_addr = "0.0.0.0:4000"
 
-# ── Durable claim state (issue #605) ──────────────────────────────────────
-# Where this node writes the claim journals whose replay is what makes a
-# replay watermark survive a restart. Without it, `ClientClaimGate` (and
-# `ClaimBook`) keep every channel's watermark in process memory only, so a
-# `docker compose up -d`, a crash or an OOM kill resets every channel to "no
-# claim ever seen" -- and a gate with no watermark accepts any nonce, which
-# makes every claim a client already spent free service again.
-#
-# This MUST be a mounted volume, not a path inside the container's writable
-# layer: a path that dies with the container is a watermark that dies with
-# the container, which is the same defect one indirection down. See
-# ./docker-compose.store.rust.yml's `connector_rust_state` volume, and note
-# the container runs as uid 10001 -- a named volume inherits that owner
-# from the image's own /app/state, a bind mount of a host directory does
-# not (`chown 10001:10001` it first).
-#
-# Config load refuses `[[client_channels]]` without this, and startup
-# refuses to boot at all if the directory cannot be written -- loudly, with
-# the path, rather than at the first claim hours later.
+# Durable claim watermarks (#605): the journals whose replay is what makes a
+# claim watermark survive a restart. Backed by the `connector_rust_state`
+# named volume in the overlay. The image MUST be built from #614 or later for
+# a FRESH volume to be writable on first mount — that commit (63b8188a) ships
+# /app/state owned by the runtime user, and this box's volume will be fresh by
+# definition. Every `rust-sha-` tag published since is well past it, so this
+# constrains rolling BACK, not rolling forward.
 state_dir = "/app/state"
 
 [signer]
-# Real key material, generated per-box, never committed — see
-# infra/linode-node/connector-rust.toml's own [signer] comment.
 key_file = "/app/data/signer.key"
+
+# ── Routes ─────────────────────────────────────────────────────────────────
+
+[[routes]]
+prefix = "g.toon.ario"
+handler_url = "http://store:3300/store"
+price = 1000
+
+[[routes]]
+prefix = "g.toon.relay.ario"
+handler_url = "http://store:3300/store"
+price = 1000
 
 [[routes]]
 prefix = "g.toon.store"
-# `/store`, not the bare origin — the same defect the node-side
-# connector-rust.toml's `g.toon.relay` route carried, for the same reason:
-# `HttpAppClient::deliver` POSTs here, and the store app serves only
-# `POST /store` and `GET /health`.
-#
-# An envelope's own `target` cannot override this path (issue #596, ADR
-# 0025): it is resolved strictly beneath `/store`, never in place of it, so
-# a sender cannot address `/health` (or anywhere else) through this route at
-# this route's price by naming it as the target.
-#
-# UNVERIFIED against a running box. #492 deployed the apex only — the store
-# box did not exist at the time — so the relay side of this pair was proven
-# live (404 → 400 once the path was added) and this side was corrected by
-# reading the store app's routes, not by driving a packet at it. Confirm it
-# when the store box comes back.
 handler_url = "http://store:3300/store"
-# Priced at parity with the TypeScript fleet's own g.toon.ario/
-# g.toon.relay.ario routes to this same store (infra/linode-node/
-# connector.yaml -- `price: '1000'`): see infra/linode-node/
-# connector-rust.toml's own comment on `price` (issue #557) for why the
-# same integer is the same real-world charge -- both fleets settle in
-# base units of 6-decimal USDC (ADR 0010). This route was still a free
-# gateway with #552's x402 greeting landed but nothing here priced above
-# zero to trigger it (issue #557).
 price = 1000
 
-# ── Operator surface (optional) ─────────────────────────────────────────
-# See infra/linode-node/connector-rust.toml's own note — omitted for the
-# same reason.
+# ── Settlement ─────────────────────────────────────────────────────────────
 
-# ── Settlement (issue #542) — DELIBERATELY NOT CONFIGURED ───────────────
-# See infra/linode-node/connector-rust.toml's own note for the full
-# reasoning. In short: an ABSENT `[settlement]` section is the supported way
-# to run without settlement (channel operations answer
-# `NoSettlementBackend`, the node starts and serves), while a section that
-# is PRESENT but names a registry with no `TokenNetwork` registered for the
-# configured token is a hard startup failure by design (ADR 0009,
-# fail-closed) — `EvmSettlementBackend::connect` resolves `token_address`
-# through `contract_address`'s `TokenNetworkRegistry.getTokenNetwork`, gets
-# the zero address back, and the process exits 1. So the zero address is
-# not a harmless placeholder here.
-#
-#
-# One further consequence, since issue #556: an absent `[settlement]`
-# section is also the absence of a client-edge channel *source*. With no
-# chain to ask, the only channels this node can accept a claim on are the
-# ones a `[[client_channels]]` section declares -- so an unaffiliated buyer
-# who opens a channel on chain cannot pay here until #577 fills the section
-# below in. The mechanism is landed; this box is not yet pointed at a
-# chain.
-# `EvmSettlementBackend` drives `packages/contracts/src/TokenNetwork.sol`,
-# reached through that registry (issue #566, issue #576) --
-# `contracts/SettlementChannel.sol`, this crate's own throwaway,
-# signature-unverified channel contract, is gone.
-#
-# The template below is the shape to fill in once this box is meant to
-# settle for real: `contract_address` names the `TokenNetworkRegistry`, not
-# a channel contract directly. Same real USDC (`./connector.yaml`'s
-# `tokenAddress`), same known-good RPC, same key file reused for settlement
-# signing. It is uncommented and booted against a freshly deployed registry
-# and `TokenNetwork` on a local anvil (the explicit test-only escape hatch)
-# by `crates/connector-bin/tests/devnet_configs_load.rs`, so it stays a
-# template that actually works. #577 tracks actually shipping this section
-# filled in against the live Base Sepolia deployment.
-#
-# ── Why the template is EVM-only (issue #648) ────────────────────────────
-# The apex carries BOTH `[settlement.evm]` and `[settlement.solana]`
-# (infra/linode-node/connector-rust.toml) because it is where buyers open
-# and pay channels: it terminates `g.toon.relay`, `g.toon.ario` and
-# `g.toon.store` for the whole fleet, on whichever chain a payer chose.
-# This box is the other end of that -- ADR 0013's payment-OBLIVIOUS store
-# app behind a route that TERMINATES, not a counterparty to anyone's
-# channel -- and since #600 the store leg's client-facing hop is the apex's
-# own terminated route, not this one. A `[settlement.solana]` here would
-# buy nothing and cost something real: a PRESENT settlement table is
-# fail-closed at startup by design (ADR 0009), so it is one more live chain
-# this node must reach before it will boot, plus a second funded key file
-# to provision on a box that today has neither. The store-forward Solana
-# address `W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV` is funded and
-# stays available if that ever changes; symmetry with the apex is not on
-# its own a reason to spend it here.
-#
-# The shape below is issue #628's KEYED per-chain form, `[settlement.evm]`,
-# matching the apex. The legacy flat `[settlement]` + `chain = "evm"` this
-# template used to carry still parses (`RawSettlementSection` accepts both
-# shapes untagged), so this is not a fix for a broken template -- it is the
-# documented fill-in landing an operator on the one shape the fleet writes
-# now, and the only shape that can grow a second chain without a rewrite.
-#
-# --- BEGIN settlement template (uncomment when a contract is deployed) ---
-# [settlement.evm]
-# rpc_url = "https://base-sepolia-rpc.publicnode.com"
-# # REPLACE the zero address with the deployed `TokenNetworkRegistry` address.
-# contract_address = "0x0000000000000000000000000000000000000000"
-# token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
-# # The scale the deployed token itself reports. Nothing scales by it --
-# # claims are already in the token's base units -- but startup reads the
-# # token's own `decimals()` and refuses to boot if the two disagree (issue
-# # #564), so a stale value here is a refusal to start, not a silent no-op.
-# decimals = 6
-#
-# [settlement.evm.key]
-# key_file = "/app/data/signer.key"
-# --- END settlement template ---
+[settlement.evm]
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0xcC9079adE929b168B54145f6d25262b64FAB9D5b"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
