@@ -383,10 +383,6 @@ client_edge_addr = "127.0.0.1:0"
 [signer]
 key_file = "{}"
 
-[[peers]]
-id = "store"
-addr = "127.0.0.1:4001"
-
 [[routes]]
 prefix = "g.example.store"
 peer_id = "store"
@@ -505,5 +501,104 @@ key_file = "{key_file}"
     assert!(
         stderr.contains("client-edge-claims.log"),
         "expected the error to name the journal it could not replay, got: {stderr}"
+    );
+}
+
+// -- The peer config surface (issue #677, peer-carriage-spec.md §11) --
+
+/// ADR 0009's "refuse to start" contract against the peer config surface:
+/// a route naming a `peer_id` no `[[peers]]` entry configures is exactly
+/// the kind of misconfigured node that must never come up quietly
+/// connected to nothing. (Moved here from
+/// `two_connectors_and_a_stub_app.rs`, which was deleted with the raw-TCP
+/// wire it proved.)
+#[test]
+fn exits_non_zero_when_a_peer_route_names_an_unconfigured_peer_id() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.b"
+peer_id = "peer-b"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("peer-b"),
+        "expected an actionable unknown-peer-id error, got: {stderr}"
+    );
+}
+
+/// The devnet boxes run bind-mounted configs that lead the repo copies, so
+/// a stale one naming the removed `[[peers]].addr` has to stop the binary
+/// and say where to read about it -- not be ignored into a node that looks
+/// healthy and never peers.
+#[test]
+fn exits_non_zero_when_a_stale_peer_entry_sets_addr() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+addr = "127.0.0.1:4001"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("store") && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
+        "expected a named removal error pointing at the bring-up doc, got: {stderr}"
+    );
+}
+
+/// A peering that names no credential can never take the peer role, so it
+/// would come up looking configured and admit its counterparty as an
+/// ordinary client. The whole point of issue #677's load-time checks is
+/// that this is loud.
+#[test]
+fn exits_non_zero_when_a_peer_configures_no_credential() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example/btp"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("credential")
+            && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
+        "expected a named missing-credential error pointing at the bring-up doc, got: {stderr}"
     );
 }

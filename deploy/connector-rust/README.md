@@ -126,12 +126,14 @@ ILP address and handler URL, or delete the block if this node only peers.
 `price` is required on a terminated route — write `price = 0` if free is
 deliberate, because it is never silently free.
 
-To peer, add `peer_wire_addr` and a `[[peers]]` entry, then a `[[routes]]`
-entry that names the peer's `id` instead of a `handler_url`. **Bind
-`peer_wire_addr` to a private interface**: the shipped peer transport is
-plain TCP with no TLS and no peer authentication
-(`crates/connector-runtime/src/network_peer_transport.rs`), and it carries
-signed balance proofs.
+To peer, set `peer_expose` (which peer carriages this node listens for),
+add a `[[peers]]` entry with a `wss://` or `https://` `endpoint` and a
+`credential`, a `[[peer_channels]]` row binding it to a channel, and a
+`[[routes]]` entry that names the peer's `id` instead of a `handler_url`.
+The template's commented peering block annotates every field. **The
+carriages that dial are not shipped yet** (issue #676): the surface
+validates today, and a packet routed to a peer is answered `T01` until they
+land. See `docs/operators/btp-peer-transport-bringup.md`.
 
 ## 4b. (Optional) settlement
 

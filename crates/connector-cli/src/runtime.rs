@@ -527,10 +527,14 @@ pub struct Runtime {
 /// keeps outlive the process exactly as the client edge's do.
 pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let signer = build_signer(config.signer_key())?;
-    let mut peer_transport = NetworkPeerTransport::new();
-    for peer in config.peers() {
-        peer_transport.add_peer(peer.id().to_string(), peer.addr());
-    }
+    // No peer transport is wired from config any more. `[[peers]].addr`
+    // was a `SocketAddr` for the raw-TCP peer wire, and ADR 0027 deleted
+    // that wire; issue #677 replaced the field with an `endpoint` URL
+    // whose scheme selects a carriage, and the carriages that dial it are
+    // issue #676's. Until one lands this node holds an empty transport, so
+    // a packet routed to a peer is answered `T01 peer unreachable` rather
+    // than silently dropped -- the same shape PR #718 leaves behind.
+    let peer_transport = NetworkPeerTransport::new();
     let peer_routes = config
         .peer_routes()
         .iter()

@@ -88,7 +88,9 @@ price       = 100
 | `[[children]]`        | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                     |
 | `[operator]`          | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                       |
 | `peer_wire_addr`      | `host:port` | no        | Absent ⇒ no inbound peer listener.                                                         |
-| `[[peers]]`           | array       | no        | `{ id, addr }` — the peers `routes.peer_id` may name.                                      |
+| `peer_expose`         | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`. |
+| `[[peers]]`           | array       | no        | `{ id, endpoint, credential, ceiling, … }` — the peerings `routes.peer_id` may name.       |
+| `[[peer_channels]]`   | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering. |
 | `[settlement]`        | table       | no        | Absent ⇒ every channel operation answers `503`.                                            |
 | `[[client_channels]]` | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.            |
 | `state_dir`           | path        | see below | Where this node writes its claim journals. Required whenever `[[client_channels]]` is set. |
@@ -96,6 +98,12 @@ price       = 100
 A `[[routes]]` entry sets **exactly one** of `handler_url` (terminate here) or `peer_id` (forward
 there). A terminated route **must** carry a `price` — write `price = 0` if free is deliberate,
 because it is never silently free. A forwarding route may carry a `fee` (default `0`).
+
+A `[[peers]]` entry's `endpoint` is a URL whose **scheme** selects the carriage — `wss://` for BTP,
+`https://` for ILP-over-HTTP (ADR 0027); the old `SocketAddr`-shaped `addr` and the top-level
+`peer_wire_addr` are refused by name. Every peering needs a `credential` and at least one
+`[[peer_channels]]` row, because role is decided by authentication *and* a channel binding. See
+[`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
 
 `[settlement]` takes `chain` (only `"evm"` is accepted today — Mina is out of scope per
 [ADR 0002](docs/adr/0002-drop-mina-from-the-rust-connector.md), and the Solana backend crate

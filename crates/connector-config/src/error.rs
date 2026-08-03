@@ -152,16 +152,158 @@ pub enum ConfigError {
     #[error("peer entry has an empty 'id'")]
     PeerIdEmpty,
 
-    #[error("duplicate peer id '{id}'")]
+    #[error(
+        "duplicate peer id '{id}': two '[[peers]]' entries name it, so which credential, \
+         endpoint and ceiling apply to it is unanswerable -- see \
+         docs/operators/btp-peer-transport-bringup.md"
+    )]
     DuplicatePeerId { id: String },
 
-    #[error("invalid addr '{value}' for peer '{id}': {source}")]
-    InvalidPeerAddr {
+    // -- The peer carriage config surface (issue #677, peer-carriage-spec
+    // §11). Every message names the bring-up doc, because a peering that
+    // does not come up produces no other evidence an operator can read.
+    #[error(
+        "invalid peer_expose value '{value}': a connector exposes 'btp', 'http', 'both' or \
+         'neither' peer carriage (peer-carriage-spec.md §2.1) -- 'neither' is the NAT'd \
+         operator, who exposes nothing and only dials out. Omit the field for the default \
+         ('neither'); see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    InvalidPeerExposure { value: String },
+
+    #[error(
+        "invalid endpoint '{value}' for peer '{id}': {source} -- a peer endpoint is a URL \
+         ('wss://host:port/path' for BTP, 'https://host:port/path' for ILP-over-HTTP), not a \
+         host:port pair; see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    InvalidPeerEndpoint {
         id: String,
         value: String,
         #[source]
-        source: AddrParseError,
+        source: url::ParseError,
     },
+
+    #[error(
+        "endpoint '{value}' for peer '{id}' has scheme '{scheme}', which selects no peer \
+         carriage: 'wss://' selects BTP and 'https://' selects ILP-over-HTTP, and there is no \
+         third one (ADR 0027 deleted the raw-TCP peer wire). Both are TLS-only because a \
+         peering carries signed balance proofs (ADR 0004), so 'ws://' and 'http://' are not \
+         accepted either; see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerEndpointScheme {
+        id: String,
+        value: String,
+        scheme: String,
+    },
+
+    #[error(
+        "peer '{id}' configures no credential, or an empty one: role is decided by \
+         authentication (peer-carriage-spec.md §1.2), and an empty secret matches nothing -- \
+         so this peering could only ever admit its counterparty as an ordinary client, \
+         silently. Add 'credential = {{ secret = \"…\" }}'; see \
+         docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerCredentialMissing { id: String },
+
+    #[error(
+        "peer '{id}' has no '[[peer_channels]]' entry: a peer role needs both a proven \
+         credential and a channel binding (peer-carriage-spec.md §1.2 P2), so without one this \
+         peering can never take the peer role and its claims would be judged as a stranger's. \
+         This is the surface whose absence made ADR 0024 inert (issue #620); see \
+         docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerChannelUnbound { id: String },
+
+    #[error(
+        "'[[peer_channels]]' names peer_id '{peer_id}', which no '[[peers]]' entry configures \
+         -- a channel bound to a peering that does not exist binds nothing; see \
+         docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerChannelOrphaned { peer_id: String },
+
+    #[error(
+        "channel '{value}' is configured in both '[[peer_channels]]' and \
+         '[[client_channels]]': peer and client claim watermarks are separate records, so one \
+         channel in both namespaces lets the same money be counted as credit twice \
+         (peer-carriage-spec.md §1.8). Keep the namespaces disjoint -- see \
+         docs/operators/btp-peer-transport-bringup.md"
+    )]
+    ChannelInBothNamespaces { value: String },
+
+    #[error(
+        "peer '{id}' is accept-only (no 'endpoint', so this connector never dials it) and sets \
+         no 'ceiling': the accept-only side cannot originate, so it cannot prompt a payer that \
+         has stopped sending, and 'flush_interval_ms' bounds nothing for it -- the ceiling is \
+         its only real bound and a defaulted one there is an unowned credit decision \
+         (peer-carriage-spec.md §6.4). Set an explicit 'ceiling'; see \
+         docs/operators/btp-peer-transport-bringup.md"
+    )]
+    AcceptOnlyPeerWithoutCeiling { id: String },
+
+    #[error(
+        "route '{prefix}' forwards to peer '{peer_id}', which this connector can never \
+         originate to: the peering configures no 'endpoint' (so this connector never dials it) \
+         and peer_expose does not include 'btp' (so it can never be reached back over a dialed \
+         session either) -- packets flow only in the dialing direction on HTTP \
+         (peer-carriage-spec.md §6.4). Give the peer a 'wss://' or 'https://' endpoint, or set \
+         peer_expose to include 'btp'; see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerRouteUndeliverable { prefix: String, peer_id: String },
+
+    #[error(
+        "peer '{id}' has no 'endpoint' and this connector's peer_expose is 'neither': it dials \
+         nothing and accepts nothing, so this peering can never establish and no amount of \
+         retrying changes that (peer-carriage-spec.md §2.2). Give it an endpoint, or expose a \
+         carriage for it to dial; see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerUndialable { id: String },
+
+    #[error(
+        "invalid [[peer_channels]] channel_id '{value}': must be 64 hex characters \
+         (an on-chain 32-byte channel identifier), optionally '0x'-prefixed"
+    )]
+    PeerChannelInvalidId { value: String },
+
+    #[error(
+        "invalid [[peer_channels]] {field} '{value}': must be 40 hex characters \
+         (a 20-byte EVM address), optionally '0x'-prefixed"
+    )]
+    PeerChannelInvalidAddress { field: &'static str, value: String },
+
+    #[error("[[peer_channels]] names channel '{value}' more than once")]
+    PeerChannelDuplicate { value: String },
+
+    #[error(
+        "[[peer_channels]] is configured but 'state_dir' is not: this node would accept peer \
+         claims and keep their replay watermarks only in memory, so every claim a peer has \
+         already spent becomes spendable again the next time this process restarts (issue \
+         #605). Set a top-level state_dir to a directory this node can write, and mount it so \
+         it outlives the container"
+    )]
+    PeerChannelsWithoutStateDir,
+
+    #[error(
+        "peer '{id}' sets 'addr', which was removed with the raw-TCP peer wire (ADR 0027, \
+         issue #679) -- a peer is reached by 'endpoint' (a wss:// or https:// URL) instead; \
+         see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerAddrRemoved { id: String },
+
+    /// The other half of §11's removed-field row, spelled and worded
+    /// exactly as PR #718 (`feat/delete-peer-wire`) spells it.
+    ///
+    /// **Defined here, constructed there.** #718 owns the deletion of the
+    /// raw-TCP peer wire itself (issue #679), including the top-level
+    /// `peer_wire_addr` field, the listener `connector-cli` binds from it
+    /// and the infra configs that still name it. This branch does not
+    /// touch that listener, so on this branch alone the field still binds
+    /// one; when the two land, #718's `if raw.peer_wire_addr.is_some()`
+    /// meets this variant and the pair is complete.
+    #[error(
+        "'peer_wire_addr' was removed with the raw-TCP peer wire (ADR 0027, issue #679) -- \
+         peer carriages are exposed on the connector's own listeners, not a separate socket; \
+         see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerWireAddrRemoved,
 
     #[error("invalid peer_wire_addr '{value}': {source}")]
     InvalidPeerWireAddr {

@@ -137,11 +137,11 @@ impl ClientChannelConfig {
 /// Parse a 20-byte EVM address written as 40 hex characters, an optional
 /// `0x`/`0X` prefix accepted -- same rule as `crate::settlement`'s own
 /// addresses, since operators write both the same way.
-fn parse_evm_address(value: &str) -> Option<[u8; 20]> {
+pub(crate) fn parse_evm_address(value: &str) -> Option<[u8; 20]> {
     parse_hex_bytes::<20>(value)
 }
 
-fn parse_hex_bytes<const N: usize>(value: &str) -> Option<[u8; N]> {
+pub(crate) fn parse_hex_bytes<const N: usize>(value: &str) -> Option<[u8; N]> {
     let hex = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -156,7 +156,7 @@ fn parse_hex_bytes<const N: usize>(value: &str) -> Option<[u8; N]> {
     Some(out)
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(2 + bytes.len() * 2);
     out.push_str("0x");
     for byte in bytes {
