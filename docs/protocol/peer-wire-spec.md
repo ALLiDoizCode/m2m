@@ -1,6 +1,12 @@
 # Peer wire specification
 
-**Status:** Normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
+**Status:** §1–§2 **SUPERSEDED** by
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) — the
+raw-TCP framing and packet structure they describe are being deleted, and connector↔connector
+traffic moves to BTP (RFC-0023) over `wss://`. §3–§6 remain normative as the _semantics_ the BTP
+sub-protocol entries carry; ADR 0027 tabulates which BTP frame carries each frame type here,
+including FLUSH (a TRANSFER) and CLAIM_ACK (a `claim-ack` protocolData entry on the RESPONSE).
+Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
 **Consumers:** the Rust `connector-runtime` peer transport port and every implementation of
 it (contract-tested per [ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-no.md)); any
 future non-Rust connector that wishes to peer with this fleet.
