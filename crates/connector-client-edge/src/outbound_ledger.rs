@@ -72,9 +72,10 @@ impl ClientPayoutLedger {
         domain: ChannelDomain,
     ) -> Result<(), InvalidChannelId> {
         let channel_id = channel_id.into();
+        self.book.set_channel_domain(channel_id.clone(), domain)?;
         self.book
-            .set_outbound_channel(channel_id.clone(), channel_id.clone());
-        self.book.set_channel_domain(channel_id, domain)
+            .set_outbound_channel(channel_id.clone(), channel_id);
+        Ok(())
     }
 
     /// Record that a packet destined for the client on `channel_id`
@@ -138,6 +139,19 @@ mod tests {
             .set_channel_domain(channel_id(1), test_domain())
             .expect("test channel id is valid");
         ledger
+    }
+
+    #[test]
+    fn an_invalid_channel_id_is_refused_and_registers_nothing() {
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("k")));
+
+        assert!(ledger
+            .set_channel_domain("not-a-channel-id", test_domain())
+            .is_err());
+        assert!(ledger
+            .record_payout("not-a-channel-id", 100, now())
+            .is_none());
     }
 
     #[test]
