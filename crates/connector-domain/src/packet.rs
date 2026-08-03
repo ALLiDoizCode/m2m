@@ -205,6 +205,12 @@ impl RejectCode {
     }
 
     /// T01: Peer Unreachable -- the app could not be reached over HTTP.
+    /// Also used (issue #698) when a client-edge destination has no live
+    /// BTP session bound to it, or the session that would have carried the
+    /// delivery ended or was superseded mid-flight: in every case the
+    /// packet itself is fine and the only fact worth reporting is "there is
+    /// currently no way to reach this peer," so the sender should retry
+    /// rather than conclude anything about the packet.
     pub fn t01_peer_unreachable() -> RejectCode {
         RejectCode("T01".to_string())
     }

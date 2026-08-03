@@ -81,6 +81,7 @@ mod claim_gate;
 mod claim_state;
 mod lookup_budget;
 mod outbound_ledger;
+mod session_registry;
 pub use channels::{
     ChannelLivenessPolicy, ChannelLookupFailed, ChannelResolutionError, ClientChannelRegistry,
     ClientChannelSource, DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel,
@@ -140,6 +141,13 @@ struct ClientEdgeState {
     /// judged strictly in arrival order; this bounds only the overlapped
     /// tail. See `btp::btp_session`.
     btp_session_window: NonZeroU32,
+    /// The client session registry (issue #698, toon-meta#262 decision
+    /// 12): which address's BTP session is live right now, fenced by a
+    /// monotonic generation so a reconnect can never be raced by the
+    /// session it replaced. Shared by every session `btp::btp_session`
+    /// serves -- bound at auth, cleared on close -- so a reconnect on a
+    /// different socket is visible to every other session immediately.
+    session_registry: Arc<session_registry::SessionRegistry>,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -263,6 +271,7 @@ pub fn router_with_gate_terms_and_btp_window(
         settlement_terms,
         settlements,
         btp_session_window,
+        session_registry: Arc::new(session_registry::SessionRegistry::new()),
     });
     Router::new()
         .route("/ilp", post(handle_ilp))

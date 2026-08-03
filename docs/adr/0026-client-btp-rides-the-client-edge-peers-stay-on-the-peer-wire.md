@@ -94,3 +94,33 @@ accept — the same direction every other staleness bound in this gate already e
 production caller decides _when_ to credit a channel; connector#698's session registry remains the
 next ticket that closes that gap. Solana channels net nothing yet: `ClientPayoutLedger` wraps
 `ClaimBook`, which only ever signs an EVM balance proof.
+
+## Update (issue #698): the session registry exists — "the socket is the lease"
+
+`crates/connector-client-edge/src/session_registry.rs`'s `SessionRegistry` answers the question
+this ADR's own §"Update (issue #697)" deferred: which socket, right now, is the live session for a
+client-edge address. One instance lives on `ClientEdgeState`, shared by every session
+`btp::btp_session` serves — bound at auth (keyed by the declared `peerId`), cleared when that same
+session's read loop ends. Deliberately the only record of reachability: no separate route entry
+with its own TTL, because a route record and a socket can disagree, and during the disagreement
+this connector would route paid work into a hole (`toon-meta#262` decision 12).
+
+Each bind is assigned the next generation from one monotonic counter shared by the whole registry;
+the highest generation for an address always wins, and a rebind's own later cleanup can never
+evict a binding at a generation newer than the one it names — buzz's own fencing law
+(`buzz-relay-mesh/src/wire.rs`: "the mesh may say 'don't dial' — it may never say 'take over'"),
+applied here to a socket instead of a mesh peer. `SessionRegistry::deliver` originates a MESSAGE
+through whichever session is current, fenced against a caller's stale remembered generation, and
+answers every failure path — no live session, or one that died or timed out mid-delivery — with a
+`T01` (Peer Unreachable) reject rather than `R00`, since the packet itself is fine and the sender
+should simply retry. A 120s backstop TTL (`SESSION_LEASE_BACKSTOP_TTL`) covers only a socket that
+looks alive at the TCP layer but has stopped producing frames; the primary liveness signal remains
+the socket's own read loop ending. `buzz#84`'s relay-side provider-freshness window must never
+exceed this constant's value.
+
+`bind`/`touch`/`unbind` are live in production — every real BTP session runs through them today.
+`deliver` still has no production caller: deciding when a packet's fulfillment should trigger a
+payout or a job dispatch, and to which address, remains the next ticket's job, same posture
+#697/#699 already shipped their own foundations under. Claim watermarks are unaffected by any of
+this — they stay exactly where issue #699's update already confirmed they survive reconnect: per
+channel in `ClientClaimGate`, never per session.
