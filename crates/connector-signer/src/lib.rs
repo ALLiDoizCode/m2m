@@ -21,6 +21,7 @@
 
 mod address;
 mod claim_signature;
+mod claim_state_challenge;
 mod crypto;
 mod error;
 pub mod giftwrap;
@@ -34,6 +35,10 @@ pub use address::{derive_evm_address, to_hex, Address};
 pub use claim_signature::{
     evm_balance_proof_digest, solana_balance_proof_message, verify_evm_balance_proof,
     verify_solana_balance_proof, EvmBalanceProof,
+};
+pub use claim_state_challenge::{
+    evm_claim_state_challenge_digest, solana_claim_state_challenge_message,
+    verify_evm_claim_state_challenge, verify_solana_claim_state_challenge, EvmClaimStateChallenge,
 };
 pub use error::{SignerError, TreasuryError};
 pub use giftwrap::GiftWrapError;

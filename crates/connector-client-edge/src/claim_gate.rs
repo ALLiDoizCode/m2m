@@ -310,6 +310,19 @@ pub struct ClientClaimGate {
     /// (issue #686): entries enqueued under the watermark lock, batched
     /// into one journal write + fsync outside it.
     committer: GroupCommitter,
+    /// The moment (unix seconds) this gate last accepted a claim on a
+    /// channel, keyed the same as [`Self::watermarks`] (issue #693's
+    /// claim-state endpoint: a fleet dashboard's liveness signal). Kept
+    /// **deliberately non-durable and separate from the watermark**: it is
+    /// updated by [`Self::note_claim_time`], called only after
+    /// [`Self::ingest`] has already returned -- never from inside `ingest`,
+    /// `admit`, or [`GroupCommitter`] -- so it adds no lock contention, no
+    /// I/O and no new work to the admission path #686/#688/#690 spent this
+    /// gate's whole history keeping cheap. A restart forgets it and the
+    /// next accepted claim repopulates it; the watermark (and therefore
+    /// every dollar figure the claim-state endpoint reports) is unaffected
+    /// either way, since that is still sourced from the durable journal.
+    last_claim_seen: RwLock<HashMap<String, u64>>,
 }
 
 impl ClientClaimGate {
@@ -343,6 +356,7 @@ impl ClientClaimGate {
             channels,
             watermarks,
             committer,
+            last_claim_seen: RwLock::new(HashMap::new()),
         })
     }
 
@@ -361,6 +375,43 @@ impl ClientClaimGate {
             .expect("client claim watermarks lock poisoned")
             .get(&canonical_channel_key(channel_key))
             .copied()
+    }
+
+    /// The registry of channels this gate accepts a claim on -- their
+    /// recorded counterparty, deposit floor and (for EVM) signing domain
+    /// (issue #693's claim-state endpoint needs all three to verify a
+    /// proof-of-control challenge and to report a channel's deposit; this
+    /// gate already holds the registry, so it is exposed rather than
+    /// threaded through separately).
+    pub(crate) fn channels(&self) -> &ClientChannelRegistry {
+        &self.channels
+    }
+
+    /// The unix-second timestamp [`Self::note_claim_time`] last recorded
+    /// for `channel_key`, or `None` if this gate has not accepted a claim
+    /// on it since the last restart. See [`Self::last_claim_seen`]'s own
+    /// doc for why this is best-effort rather than durable.
+    pub fn last_claim_time(&self, channel_key: &str) -> Option<u64> {
+        self.last_claim_seen
+            .read()
+            .expect("last claim time lock poisoned")
+            .get(&canonical_channel_key(channel_key))
+            .copied()
+    }
+
+    /// Record that a claim on `channel_key` was just accepted, at
+    /// `now_unix`. Deliberately a separate call a caller makes *after*
+    /// [`Self::ingest`] has already returned success, never something
+    /// `ingest`/`admit` do themselves -- see [`Self::last_claim_seen`]'s
+    /// doc. Every carrier that calls `ingest` (`POST /ilp`, `POST
+    /// /ilp/probe`, the BTP session) calls this right after, so the
+    /// claim-state endpoint's liveness signal covers every carrier a claim
+    /// can arrive on.
+    pub fn note_claim_time(&self, channel_key: &str, now_unix: u64) {
+        self.last_claim_seen
+            .write()
+            .expect("last claim time lock poisoned")
+            .insert(canonical_channel_key(channel_key), now_unix);
     }
 
     /// Parse and fully validate a plaintext claim JSON body (already

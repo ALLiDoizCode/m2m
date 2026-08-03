@@ -82,7 +82,7 @@ const BALANCE_PROOF_TYPE_HASH_PREIMAGE: &[u8] =
 const EIP712_DOMAIN_TYPE_HASH_PREIMAGE: &[u8] =
     b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 
-fn keccak256(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn keccak256(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Keccak256::new();
     hasher.update(bytes);
     hasher.finalize().into()
@@ -96,8 +96,9 @@ fn word_u128_be(value: u128) -> [u8; 32] {
     word
 }
 
-/// A `u64` nonce as a 32-byte, big-endian ABI word (a Solidity `uint256`).
-fn word_u64_be(value: u64) -> [u8; 32] {
+/// A `u64` nonce (or other small integer) as a 32-byte, big-endian ABI word
+/// (a Solidity `uint256`).
+pub(crate) fn word_u64_be(value: u64) -> [u8; 32] {
     let mut word = [0u8; 32];
     word[24..].copy_from_slice(&value.to_be_bytes());
     word
@@ -105,13 +106,19 @@ fn word_u64_be(value: u64) -> [u8; 32] {
 
 /// A 20-byte EVM address as a 32-byte ABI word (right-aligned, per
 /// Solidity's `address` encoding).
-fn word_address(address: &Address) -> [u8; 32] {
+pub(crate) fn word_address(address: &Address) -> [u8; 32] {
     let mut word = [0u8; 32];
     word[12..].copy_from_slice(address);
     word
 }
 
-fn domain_separator(chain_id: u64, verifying_contract: &Address) -> [u8; 32] {
+/// The `TokenNetwork` EIP-712 domain separator (`EIP712("TokenNetwork",
+/// "1")`), shared by every typed struct this connector signs or verifies
+/// under that domain -- a real claim's `BalanceProof` and, distinctly, a
+/// claim-state challenge's own struct (`crate::claim_state_challenge`).
+/// Reused rather than duplicated so both compute the identical domain a
+/// wallet signing either one actually sees.
+pub(crate) fn domain_separator(chain_id: u64, verifying_contract: &Address) -> [u8; 32] {
     let mut buf = Vec::with_capacity(32 * 5);
     buf.extend_from_slice(&keccak256(EIP712_DOMAIN_TYPE_HASH_PREIMAGE));
     buf.extend_from_slice(&keccak256(b"TokenNetwork"));
@@ -152,7 +159,7 @@ pub fn evm_balance_proof_digest(proof: &EvmBalanceProof) -> [u8; 32] {
 /// `27`/`28`) that recovers cleanly. Never panics on attacker-controlled
 /// bytes -- a truncated or corrupted signature simply fails to recover,
 /// exactly like one that recovers to the wrong party.
-fn recover_evm_signer(digest: &[u8; 32], signature: &[u8]) -> Option<Address> {
+pub(crate) fn recover_evm_signer(digest: &[u8; 32], signature: &[u8]) -> Option<Address> {
     if signature.len() != 65 {
         return None;
     }
