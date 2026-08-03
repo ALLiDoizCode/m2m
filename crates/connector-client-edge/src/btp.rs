@@ -240,6 +240,20 @@ pub(crate) fn decode_frame(buf: &[u8]) -> Result<BtpFrame, BtpDecodeError> {
     })
 }
 
+/// Append `protocolData count` + each entry (`nameLen name contentType
+/// dataLen data`), the layout every frame type below shares.
+fn write_protocol_data(out: &mut Vec<u8>, protocol_data: &[ProtocolData]) {
+    out.push(protocol_data.len() as u8);
+    for pd in protocol_data {
+        let name = pd.name.as_bytes();
+        out.push(name.len() as u8);
+        out.extend_from_slice(name);
+        out.extend_from_slice(&pd.content_type.to_be_bytes());
+        out.extend_from_slice(&(pd.data.len() as u32).to_be_bytes());
+        out.extend_from_slice(&pd.data);
+    }
+}
+
 /// Encode a RESPONSE frame answering `request_id`, carrying `protocol_data`
 /// and `ilp_packet` (empty = none; the length field is always written, as
 /// the client serializer does).
@@ -251,15 +265,7 @@ pub(crate) fn encode_response(
     let mut out = Vec::new();
     out.push(BTP_RESPONSE);
     out.extend_from_slice(&request_id.to_be_bytes());
-    out.push(protocol_data.len() as u8);
-    for pd in protocol_data {
-        let name = pd.name.as_bytes();
-        out.push(name.len() as u8);
-        out.extend_from_slice(name);
-        out.extend_from_slice(&pd.content_type.to_be_bytes());
-        out.extend_from_slice(&(pd.data.len() as u32).to_be_bytes());
-        out.extend_from_slice(&pd.data);
-    }
+    write_protocol_data(&mut out, protocol_data);
     out.extend_from_slice(&(ilp_packet.len() as u32).to_be_bytes());
     out.extend_from_slice(ilp_packet);
     out
@@ -284,15 +290,7 @@ pub(crate) fn encode_message(
     let mut out = Vec::new();
     out.push(BTP_MESSAGE);
     out.extend_from_slice(&request_id.to_be_bytes());
-    out.push(protocol_data.len() as u8);
-    for pd in protocol_data {
-        let name = pd.name.as_bytes();
-        out.push(name.len() as u8);
-        out.extend_from_slice(name);
-        out.extend_from_slice(&pd.content_type.to_be_bytes());
-        out.extend_from_slice(&(pd.data.len() as u32).to_be_bytes());
-        out.extend_from_slice(&pd.data);
-    }
+    write_protocol_data(&mut out, protocol_data);
     out.extend_from_slice(&(ilp_packet.len() as u32).to_be_bytes());
     out.extend_from_slice(ilp_packet);
     out
@@ -317,15 +315,7 @@ pub(crate) fn encode_transfer(
     out.push(BTP_TRANSFER);
     out.extend_from_slice(&request_id.to_be_bytes());
     out.extend_from_slice(&amount.to_be_bytes());
-    out.push(protocol_data.len() as u8);
-    for pd in protocol_data {
-        let name = pd.name.as_bytes();
-        out.push(name.len() as u8);
-        out.extend_from_slice(name);
-        out.extend_from_slice(&pd.content_type.to_be_bytes());
-        out.extend_from_slice(&(pd.data.len() as u32).to_be_bytes());
-        out.extend_from_slice(&pd.data);
-    }
+    write_protocol_data(&mut out, protocol_data);
     out
 }
 

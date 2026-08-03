@@ -38,11 +38,10 @@ const BTP_ERROR: u8 = 2;
 const BTP_MESSAGE: u8 = 6;
 const BTP_TRANSFER: u8 = 7;
 
-/// Serialize a MESSAGE the way `@toon-protocol/client`'s
-/// `serializeBtpMessage` does.
-fn btp_message(request_id: u32, protocol_data: &[(&str, &[u8])], ilp_packet: &[u8]) -> Vec<u8> {
-    let mut out = vec![BTP_MESSAGE];
-    out.extend_from_slice(&request_id.to_be_bytes());
+/// Append `protocolData count` + each entry, the layout `btp_message` and
+/// `btp_transfer` both carry, the way `@toon-protocol/client`'s
+/// `serializeBtpMessage` writes it.
+fn write_protocol_data(out: &mut Vec<u8>, protocol_data: &[(&str, &[u8])]) {
     out.push(protocol_data.len() as u8);
     for (name, data) in protocol_data {
         out.push(name.len() as u8);
@@ -51,6 +50,14 @@ fn btp_message(request_id: u32, protocol_data: &[(&str, &[u8])], ilp_packet: &[u
         out.extend_from_slice(&(data.len() as u32).to_be_bytes());
         out.extend_from_slice(data);
     }
+}
+
+/// Serialize a MESSAGE the way `@toon-protocol/client`'s
+/// `serializeBtpMessage` does.
+fn btp_message(request_id: u32, protocol_data: &[(&str, &[u8])], ilp_packet: &[u8]) -> Vec<u8> {
+    let mut out = vec![BTP_MESSAGE];
+    out.extend_from_slice(&request_id.to_be_bytes());
+    write_protocol_data(&mut out, protocol_data);
     out.extend_from_slice(&(ilp_packet.len() as u32).to_be_bytes());
     out.extend_from_slice(ilp_packet);
     out
@@ -63,14 +70,7 @@ fn btp_transfer(request_id: u32, amount: u64, protocol_data: &[(&str, &[u8])]) -
     let mut out = vec![BTP_TRANSFER];
     out.extend_from_slice(&request_id.to_be_bytes());
     out.extend_from_slice(&amount.to_be_bytes());
-    out.push(protocol_data.len() as u8);
-    for (name, data) in protocol_data {
-        out.push(name.len() as u8);
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&1u16.to_be_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        out.extend_from_slice(data);
-    }
+    write_protocol_data(&mut out, protocol_data);
     out
 }
 
