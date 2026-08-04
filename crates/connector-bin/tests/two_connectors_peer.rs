@@ -109,11 +109,29 @@ const PEER_FEE: u64 = 100;
 /// matches nothing by construction (§1.2 P1) and is refused at load.
 const PEER_SECRET: &str = "a-real-peering-secret";
 
-/// The payee's peer id for the payer, and the payer's for the payee. Two
-/// distinct names so a test that accidentally authenticates against the
-/// wrong relation cannot pass.
-const PAYEE_ID: &str = "beta";
-const PAYER_ID: &str = "alpha";
+/// **One id, written by both operators.** `[[peers]].id` names the peering
+/// *relation*, and it is the `peerId` the dialing side presents in its
+/// credential (§1.4) -- so P1 ("a credential naming a peer id that appears
+/// in `[[peers]]`", §1.2) only holds when the two files agree on the
+/// literal string. The bring-up doc says the same thing from the other
+/// end: when the `peer_auth_refused` event you expect never arrives,
+/// *"check the id spelling on both sides"*.
+///
+/// This file used to carry two distinct ids -- `"alpha"` and `"beta"` --
+/// on the reasoning that each side names the *other*. Nothing had ever
+/// dialed, so nothing had contradicted it; the first real dial did, by
+/// presenting an id the far side had no entry for and being admitted as an
+/// ordinary client (which is exactly what §1.2 requires of an unrecognised
+/// id, and exactly the silent failure the bring-up doc warns about).
+const PEERING_ID: &str = "alpha-beta";
+
+/// The payee, as the payer's `[[routes]]` and `[[peers]]` name it -- the
+/// relation id, since that is the only name a peering has.
+const PAYEE_ID: &str = PEERING_ID;
+
+/// The payer, as the payee's `[[peers]]` names it. The same string, for the
+/// same reason.
+const PAYER_ID: &str = PEERING_ID;
 
 /// `[signer] key_file` seeds, so a test can seal a packet to a spawned
 /// binary's real identity without asking it over the wire.
