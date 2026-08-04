@@ -1261,6 +1261,7 @@ dependencies = [
  "connector-domain",
  "connector-settlement",
  "connector-signer",
+ "ed25519-dalek",
  "hyper",
  "percent-encoding",
  "prometheus",
