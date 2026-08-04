@@ -305,6 +305,32 @@ pub enum ConfigError {
     )]
     PeerWireAddrRemoved,
 
+    /// **Dies with the field, in #718 -- deliberately not deleted here.**
+    /// This is the parse error for a `peer_wire_addr` that is still live
+    /// on this branch: [`crate::Config::load`] parses the field, `connector-cli`
+    /// binds a listener from it, and `rejects_an_invalid_peer_wire_addr`
+    /// asserts on this variant. Removing it here alone does not compile,
+    /// and removing what constructs it *is* #718's deletion (issue #679),
+    /// not a one-line cleanup this branch can do on its own.
+    ///
+    /// **Merge-order follow-up. This PR must land after #718**, and the
+    /// merge is not automatic: on every `peer_wire_addr` question, #718's
+    /// side wins. Once #718's `if raw.peer_wire_addr.is_some()` returns
+    /// [`ConfigError::PeerWireAddrRemoved`] in place of the parse above,
+    /// three things on this branch are dead and go in the same merge:
+    ///
+    /// 1. this variant;
+    /// 2. `rejects_an_invalid_peer_wire_addr`, which #718 replaces with
+    ///    `rejects_a_config_that_still_sets_peer_wire_addr`;
+    /// 3. `a_config_using_every_supported_section_still_loads`'s
+    ///    `peer_wire_addr = "127.0.0.1:4001"` fixture line and its
+    ///    `assert!(config.peer_wire_addr().is_some())` -- the accessor is
+    ///    gone by then.
+    ///
+    /// Only (3) fails loudly if missed (the fixture no longer loads, so
+    /// the test goes red), which is the good failure mode. (1) and (2)
+    /// would linger as dead code, which is why they are written down here
+    /// -- next to the variant itself -- rather than only in a PR body.
     #[error("invalid peer_wire_addr '{value}': {source}")]
     InvalidPeerWireAddr {
         value: String,
