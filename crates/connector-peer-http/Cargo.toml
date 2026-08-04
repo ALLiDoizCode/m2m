@@ -1,0 +1,44 @@
+[package]
+name = "connector-peer-http"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The §3 name table (issue #713 + #728): every header this carriage reads or
+# writes is declared there, beside its protocolData twin, so a header cannot
+# fork from the entry it pairs with (spec I2). No frame is encoded here.
+connector-btp = { path = "../connector-btp" }
+# The peering relation's configured shape: credential, endpoint scheme,
+# ceiling, timeouts, `[[peer_channels]]` (issue #723).
+connector-config = { path = "../connector-config" }
+connector-domain = { path = "../connector-domain" }
+# The role decision (issue #726). Called, never re-implemented.
+connector-peer-auth = { path = "../connector-peer-auth" }
+# The BTP carriage (issue #727), for the parts of it that are **not** BTP:
+# the claim JSON codec, the one refusal taxonomy, the canonical channel-id
+# form and the per-relation `AcceptedClaims` ledger. See this crate's
+# `lib.rs` for why a shared crate is not carved out yet.
+connector-peer-btp = { path = "../connector-peer-btp" }
+connector-runtime = { path = "../connector-runtime" }
+async-trait = "0.1"
+# Base64 is a header artifact and nothing else (§1.4, §4): the claim, the
+# claim ack and the credential are the same JSON both carriages carry.
+base64 = "0.22"
+chrono = "0.4"
+# `rustls-tls` only -- a peering carries signed balance proofs, so `https://`
+# is the only scheme that selects this carriage at all. Same 0.11 the
+# runtime and the binary already resolve to.
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+# `sync` for the per-relation ledgers and §7.2's one-claim-in-flight rule;
+# `time` for §6.3's two deadlines. No runtime is started here -- whoever
+# owns the listener owns the runtime.
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+connector-signer = { path = "../connector-signer" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+libsecp256k1 = "0.6"
+serde_json = "1"
