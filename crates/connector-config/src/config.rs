@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use url::Url;
 
 use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawClientChannel};
 use crate::error::ConfigError;
@@ -53,6 +54,25 @@ struct RawConfig {
     /// tables under one name; §11 leaves the spelling to this issue.
     #[serde(default)]
     peer_expose: Option<String>,
+    /// Whether a `[[peers]].endpoint` may name a **plaintext** scheme --
+    /// `ws://` or `http://` -- instead of the `wss://`/`https://` a peering
+    /// carrying signed balance proofs otherwise requires (issue #678,
+    /// gap 3).
+    ///
+    /// Absent and `false` are the same thing and are the production
+    /// answer: a plaintext endpoint stays [`ConfigError::PeerEndpointScheme`],
+    /// exactly as before this field existed. `true` is a **loopback and
+    /// test** opt-in, for a harness that stands up two connectors on
+    /// `127.0.0.1` with no TLS terminator between them; a node that sets it
+    /// logs a `WARN` naming every plaintext peering at startup.
+    ///
+    /// Deliberately one top-level switch rather than a per-peer knob: a
+    /// per-peer field reads as an ordinary property of that peering and
+    /// would be copied into a production file one peer at a time, where
+    /// this one is a single line an operator has to write about the whole
+    /// node.
+    #[serde(default)]
+    peer_allow_plaintext_endpoints: Option<bool>,
     /// The peering relations this node has (issue #488; endpoint,
     /// credential and per-relation terms, issue #677). What used to be a
     /// dialed `SocketAddr` is now an `endpoint` URL whose **scheme**
@@ -198,6 +218,7 @@ pub struct Config {
     peer_routes: Vec<PeerRouteConfig>,
     peers: Vec<PeerConfig>,
     peer_expose: PeerExposure,
+    peer_allow_plaintext_endpoints: bool,
     peer_channels: Vec<PeerChannelConfig>,
     operator: Option<OperatorConfig>,
     settlements: Vec<SettlementConfig>,
@@ -245,7 +266,8 @@ impl Config {
         let signer_key = SecretLocation::resolve(raw.signer)?;
         let (routes, peer_routes) = resolve_routes(raw.apex.as_deref(), raw.routes, raw.children)?;
         let peer_expose = parse_peer_exposure(raw.peer_expose)?;
-        let peers = resolve_peers(raw.peers, peer_expose)?;
+        let peer_allow_plaintext_endpoints = raw.peer_allow_plaintext_endpoints.unwrap_or(false);
+        let peers = resolve_peers(raw.peers, peer_expose, peer_allow_plaintext_endpoints)?;
         let peer_channels = resolve_peer_channels(raw.peer_channels)?;
         for peer_route in &peer_routes {
             let Some(peer) = peers.iter().find(|peer| peer.id() == peer_route.peer_id()) else {
@@ -467,6 +489,7 @@ impl Config {
             peer_routes,
             peers,
             peer_expose,
+            peer_allow_plaintext_endpoints,
             peer_channels,
             operator,
             settlements,
@@ -578,6 +601,30 @@ impl Config {
     /// on.
     pub fn peer_expose(&self) -> PeerExposure {
         self.peer_expose
+    }
+
+    /// Whether this node was told it may dial a **plaintext** peer
+    /// endpoint (issue #678, gap 3). `false` on every production config,
+    /// including every config that does not mention the field: `ws://` and
+    /// `http://` are refused at load exactly as they were before it
+    /// existed.
+    ///
+    /// `true` is loopback and test only. A caller that has one should say
+    /// so loudly at startup -- [`Config::plaintext_peerings`] is the list
+    /// to name.
+    pub fn peer_allow_plaintext_endpoints(&self) -> bool {
+        self.peer_allow_plaintext_endpoints
+    }
+
+    /// Every peering whose endpoint is plaintext, as `(peer id, endpoint)`
+    /// -- what a node with [`Config::peer_allow_plaintext_endpoints`] set
+    /// must name in its startup warning. Always empty when the switch is
+    /// off, because such an endpoint could not have loaded.
+    pub fn plaintext_peerings(&self) -> impl Iterator<Item = (&str, &Url)> {
+        self.peers.iter().filter_map(|peer| {
+            let endpoint = peer.endpoint()?;
+            matches!(endpoint.scheme(), "ws" | "http").then_some((peer.id(), endpoint))
+        })
     }
 
     /// The payment channels this node judges peer claims against (ADR

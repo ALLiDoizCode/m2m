@@ -52,6 +52,7 @@ use connector_domain::client_claim::ClientClaim;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 
 use crate::claim_gate::DurabilityTicket;
+use crate::peer::BtpAuthVerdict;
 use crate::{claim_rejection_reject, x402_terms_body, ClaimIngestRejection, ClientEdgeState};
 
 /// `GET /ilp/btp` -- the upgrade. The `btp` subprotocol is selected when
@@ -120,6 +121,13 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
     // never sends one -- unbound, exactly as every session behaved before
     // this registry existed.
     let mut binding: Option<(String, u64)> = None;
+    // ADR 0027 / issue #678: this socket serves two audiences. A session
+    // starts `client` -- `SessionRole`'s own default, not a third state --
+    // and becomes a peer session only when an `auth` entry proving §1.2's
+    // P1 *and* P2 arrives. Once it does, every remaining frame is the peer
+    // carriage's; frames processed before that stay client frames and are
+    // never retroactively reclassified (§1.5).
+    let mut peer_session: Option<connector_peer_btp::PeerSession> = None;
     while let Some(received) = stream.next().await {
         let frame_bytes = match received {
             Ok(Message::Binary(bytes)) => bytes,
@@ -127,6 +135,59 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
             Ok(_) => continue,
             Err(_) => break,
         };
+        if let Some(session) = peer_session.as_mut() {
+            match session.handle_frame(&frame_bytes).await {
+                Ok(None) => continue,
+                // The peer carriage ended the session deliberately, or the
+                // socket's send half is gone.
+                Ok(Some(_)) | Err(_) => break,
+            }
+        }
+        match peer_handover(&frame_bytes, &state) {
+            // Not consumed: the same frame is handed to the peer session,
+            // which binds its own role from it and answers it (§1.5 --
+            // role is bound in exactly one place).
+            Some(BtpAuthVerdict::Peer) => {
+                let peer_state = state
+                    .peers
+                    .as_ref()
+                    .and_then(|peers| peers.btp_state())
+                    .expect("a Peer verdict is only reachable with a BTP carriage mounted");
+                let mut session = connector_peer_btp::PeerSession::with_outbound(
+                    peer_state,
+                    replies.clone(),
+                    Arc::clone(&outbound),
+                );
+                match session.handle_frame(&frame_bytes).await {
+                    Ok(None) => {}
+                    Ok(Some(_)) | Err(_) => break,
+                }
+                peer_session = Some(session);
+                continue;
+            }
+            // §1.5's credential-smuggling defence: more than one `auth`
+            // entry on one frame is refused, not resolved. ERROR stays
+            // reserved for a frame this connector will not act on (§6.2).
+            Some(BtpAuthVerdict::Ambiguous) => {
+                let frame = decode_frame(&frame_bytes).expect("peeked frames already decoded");
+                if reply(
+                    &replies,
+                    encode_error(
+                        frame.request_id,
+                        "F00",
+                        "NotAcceptedError",
+                        b"more than one auth entry on one frame",
+                    ),
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            Some(BtpAuthVerdict::Client) | None => {}
+        }
         if handle_frame(
             &frame_bytes,
             &state,
@@ -151,6 +212,34 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
     }
     drop(replies);
     let _ = writer.await;
+}
+
+/// Whether this frame's `auth` entry hands the rest of the session to the
+/// peer carriage (`peer-carriage-spec.md` §1.2, §1.5, issue #678).
+///
+/// `None` for every frame that is not a MESSAGE carrying an `auth` entry,
+/// and for every node that mounts no BTP peer carriage -- which is the
+/// whole of what this costs a client session: one `iter().any()` over a
+/// frame's protocolData, on the frames that carry a credential.
+///
+/// The frame is **peeked, not consumed**. §1.3 forbids inferring role from
+/// the listener, and this function inspects nothing but the credential and
+/// the configured policy; the binding itself happens once, inside
+/// [`connector_peer_btp::PeerSession`], from this very frame.
+fn peer_handover(frame_bytes: &[u8], state: &Arc<ClientEdgeState>) -> Option<BtpAuthVerdict> {
+    let peers = state.peers.as_ref()?;
+    let frame = decode_frame(frame_bytes).ok()?;
+    if frame.frame_type != BTP_MESSAGE {
+        return None;
+    }
+    if !frame
+        .protocol_data
+        .iter()
+        .any(|entry| entry.name == AUTH_PROTOCOL)
+    {
+        return None;
+    }
+    Some(peers.btp_auth_verdict(&frame.protocol_data))
 }
 
 /// A slot in the session's in-flight window, holding the read loop back

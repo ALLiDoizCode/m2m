@@ -46,6 +46,30 @@ impl PeerCarriage {
             _ => None,
         }
     }
+
+    /// [`PeerCarriage::from_scheme`], plus the two **plaintext** schemes a
+    /// node that set `peer_allow_plaintext_endpoints` may also dial
+    /// (issue #678, gap 3): `ws://` selects BTP and `http://` selects
+    /// ILP-over-HTTP, on exactly the same terms their TLS twins do.
+    ///
+    /// `allow_plaintext` is `false` on every production config and on
+    /// every config that does not mention the field, and then this is
+    /// [`PeerCarriage::from_scheme`] byte for byte -- a plaintext endpoint
+    /// is still [`ConfigError::PeerEndpointScheme`]. The switch exists so a
+    /// laptop-runnable end-to-end test can point one connector at another's
+    /// loopback socket without a TLS terminator in the harness; it is not
+    /// a deployment shape.
+    fn from_scheme_allowing_plaintext(scheme: &str, allow_plaintext: bool) -> Option<PeerCarriage> {
+        match PeerCarriage::from_scheme(scheme) {
+            Some(carriage) => Some(carriage),
+            None if allow_plaintext => match scheme {
+                "ws" => Some(PeerCarriage::Btp),
+                "http" => Some(PeerCarriage::Http),
+                _ => None,
+            },
+            None => None,
+        }
+    }
 }
 
 impl fmt::Display for PeerCarriage {
@@ -365,9 +389,16 @@ impl PeerConfig {
 /// matter -- [`ConfigError::PeerUndialable`] and, via
 /// [`PeerConfig::can_originate`], [`ConfigError::PeerRouteUndeliverable`]
 /// -- are exactly the ones that need both axes at once.
+///
+/// `allow_plaintext` is issue #678's loopback opt-in
+/// (`peer_allow_plaintext_endpoints`): `false` -- the default and every
+/// production config -- keeps `ws://` and `http://` a hard
+/// [`ConfigError::PeerEndpointScheme`], exactly as before the switch
+/// existed.
 pub(crate) fn resolve_peers(
     raw: Vec<RawPeer>,
     expose: PeerExposure,
+    allow_plaintext: bool,
 ) -> Result<Vec<PeerConfig>, ConfigError> {
     let mut seen = HashSet::with_capacity(raw.len());
     let mut peers = Vec::with_capacity(raw.len());
@@ -392,13 +423,13 @@ pub(crate) fn resolve_peers(
                         value: value.clone(),
                         source,
                     })?;
-                let carriage = PeerCarriage::from_scheme(url.scheme()).ok_or_else(|| {
-                    ConfigError::PeerEndpointScheme {
-                        id: peer.id.clone(),
-                        value: value.clone(),
-                        scheme: url.scheme().to_string(),
-                    }
-                })?;
+                let carriage =
+                    PeerCarriage::from_scheme_allowing_plaintext(url.scheme(), allow_plaintext)
+                        .ok_or_else(|| ConfigError::PeerEndpointScheme {
+                            id: peer.id.clone(),
+                            value: value.clone(),
+                            scheme: url.scheme().to_string(),
+                        })?;
                 // No host check is needed: `wss` and `https` are both
                 // *special* schemes in the URL standard, so a URL without
                 // a host never parses in the first place and comes back
@@ -478,7 +509,7 @@ mod tests {
 
     #[test]
     fn resolves_a_wss_peer_onto_the_btp_carriage() {
-        let peers = resolve_peers(vec![raw("peer-b")], PeerExposure::Neither).expect("resolve");
+        let peers = resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
 
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].id(), "peer-b");
@@ -497,7 +528,7 @@ mod tests {
         let mut entry = raw("peer-b");
         entry.endpoint = Some("https://peer.example/ilp".to_string());
 
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither).expect("resolve");
+        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
 
         assert_eq!(peers[0].dial(), Some(PeerCarriage::Http));
     }
@@ -508,7 +539,7 @@ mod tests {
         entry.id = "  ".to_string();
 
         assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Both),
+            resolve_peers(vec![entry], PeerExposure::Both, false),
             Err(ConfigError::PeerIdEmpty)
         ));
     }
@@ -521,7 +552,7 @@ mod tests {
         entry.endpoint = None;
         entry.ceiling = Some(1_000);
 
-        let peers = resolve_peers(vec![entry], PeerExposure::Btp).expect("resolve");
+        let peers = resolve_peers(vec![entry], PeerExposure::Btp, false).expect("resolve");
 
         assert_eq!(peers[0].dial(), None);
         assert!(peers[0].can_originate());
@@ -536,7 +567,7 @@ mod tests {
         entry.endpoint = None;
         entry.ceiling = Some(1_000);
 
-        let peers = resolve_peers(vec![entry], PeerExposure::Http).expect("resolve");
+        let peers = resolve_peers(vec![entry], PeerExposure::Http, false).expect("resolve");
 
         assert!(!peers[0].can_originate());
     }

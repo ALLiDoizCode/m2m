@@ -10,6 +10,14 @@ license.workspace = true
 connector-btp = { path = "../connector-btp" }
 connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
+# The peer carriages, mounted on the listeners this crate already serves
+# (issue #678). ADR 0027 put peers on the same two wires clients ride and
+# told them apart by authentication, so the crate that owns those wires is
+# the one that has to dispatch -- and none of the three depends on this one,
+# so nothing here is circular.
+connector-peer-auth = { path = "../connector-peer-auth" }
+connector-peer-btp = { path = "../connector-peer-btp" }
+connector-peer-http = { path = "../connector-peer-http" }
 connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
