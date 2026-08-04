@@ -21,6 +21,7 @@ members = [
     "crates/connector-signer",
     "crates/connector-config",
     "crates/connector-peer-auth",
+    "crates/connector-peer-btp",
     "crates/connector-client-edge",
     "crates/connector-operator",
     "crates/connector-cli",

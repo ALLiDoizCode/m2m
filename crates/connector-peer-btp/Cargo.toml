@@ -1,0 +1,33 @@
+[package]
+name = "connector-peer-btp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The one BTP codec (issue #713, ADR 0027). This crate encodes and decodes
+# *nothing* itself -- every frame it puts on a wire goes through these
+# functions, so the peer carriage cannot fork the client edge's grammar.
+connector-btp = { path = "../connector-btp" }
+# The peering relation's configured shape: credential, endpoint scheme,
+# timeouts, `[[peer_channels]]` (issue #723).
+connector-config = { path = "../connector-config" }
+# The role decision (issue #726). Called, never re-implemented.
+connector-peer-auth = { path = "../connector-peer-auth" }
+connector-domain = { path = "../connector-domain" }
+connector-runtime = { path = "../connector-runtime" }
+connector-signer = { path = "../connector-signer" }
+async-trait = "0.1"
+chrono = "0.4"
+hex = "0.4"
+serde_json = "1"
+# `sync` for the session's reply channel and the per-relation ledgers;
+# `time` for §6.3's two deadlines. No runtime is started here -- whoever
+# owns the socket owns the runtime.
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+libsecp256k1 = "0.6"

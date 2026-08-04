@@ -45,8 +45,8 @@ mod session;
 pub use frame::{
     decode_frame, encode_error, encode_message, encode_response, encode_transfer, BtpDecodeError,
     BtpFrame, ProtocolData, ACCUMULATED_COST_PROTOCOL, AUTH_PROTOCOL, BTP_ERROR, BTP_MESSAGE,
-    BTP_RESPONSE, BTP_TRANSFER, CLAIM_PROTOCOL, CONTENT_TYPE_TEXT, PAYMENT_REQUIRED_PROTOCOL,
-    PAYOUT_CLAIM_PROTOCOL,
+    BTP_RESPONSE, BTP_TRANSFER, CLAIM_ACK_PROTOCOL, CLAIM_PROTOCOL, CONTENT_TYPE_TEXT,
+    MINIMUM_DELIVERY_PROTOCOL, PAYMENT_REQUIRED_PROTOCOL, PAYOUT_CLAIM_PROTOCOL,
 };
 pub use session::{
     reply, BtpSessionHandle, OriginateError, OutboundRequests, SessionGone, OUTBOUND_ANSWER_TIMEOUT,
