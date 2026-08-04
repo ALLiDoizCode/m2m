@@ -222,11 +222,11 @@ Peer-wire REJECTs use the existing RFC-0027 §3.3 codes:
 | `F00`             | A terminated envelope's `target` attempted to escape the route's handler path (issue #596).                                                       |
 | `F01`             | Malformed frame or packet; absent/all-zero `executionCondition` (§3.1).                                                                           |
 | `F02`             | No route to `destination`.                                                                                                                        |
+| `F03`             | The PREPARE resolved to one of this connector's own priced terminated routes, but `amount` did not cover that route's `price` (§5.4, issue #752). |
 | `F08`             | Duplicate packet (replay of a `correlationId` already answered).                                                                                  |
 | `R00`             | PREPARE expired before it could be forwarded or answered.                                                                                         |
 | `R01`             | This hop cannot meet the declared `minimumDelivery` after its fee (§4).                                                                           |
 | `R02`             | `expiresAt` leaves insufficient time for this hop to forward and get a reply.                                                                     |
-| `F03`             | The PREPARE resolved to one of this connector's own priced terminated routes, but `amount` did not cover that route's `price` (§5.4, issue #752). |
 | `T00`             | Internal error at this connector (retryable).                                                                                                     |
 | `T01`             | The configured next-hop peer is unreachable (stream down).                                                                                        |
 | `T04`             | This connector's exposure ceiling for the inbound peer is exceeded (§5.3).                                                                        |
