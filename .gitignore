@@ -109,8 +109,23 @@ deploy/connector-rust/operator.pem
 
 # Rust connector devnet overlay (issue #490) — real per-box key material,
 # never committed; mirrors deploy/connector-rust/signer.key above.
-infra/linode-node/signer-rust.key
-infra/linode-store/signer-rust.key
+#
+# The SETTLEMENT keys are the ones that hold value and they were missing from
+# this list until 2026-08-04: only `signer-rust.key` was ignored, while
+# `settlement-rust.key` and `settlement-solana-rust.key` sat untracked in the
+# checkout on both live boxes. `git status` showed them as `??`, so a single
+# `git add -A` run on a box would have committed funded private keys to a
+# PUBLIC repository. The settlement keys are the higher-value of the two
+# kinds, not the lower: the signer is only this connector's ILP signing
+# identity (ADR 0012), while these control the on-chain settlement accounts —
+# ~50,000 devnet USDC each on Base Sepolia, plus the Solana identities the
+# whole fleet's channels are opened against.
+#
+# Wildcards rather than exact paths, so a new box or a re-derived key cannot
+# reintroduce the gap by being named slightly differently.
+infra/linode-node/*.key
+infra/linode-store/*.key
+deploy/connector-rust/*.key
 
 # Store-box gas-station Solana fee-payer — real key material (128-char hex
 # Ed25519), never committed. Was tracked until the rotation that removed it;
