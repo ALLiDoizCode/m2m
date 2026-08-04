@@ -200,6 +200,40 @@ Two consequences worth writing down:
   required rather than optional; its absence is what left ADR 0024's peer-claim verification wired
   to nothing.
 
+### When a peer does not peer: `peer_auth_refused`
+
+A connector never refuses an interaction for failing to prove a peer id — refusing would tell
+whoever asked which peer ids this node has configured. It admits the interaction as an ordinary
+client instead, silently, on the wire.
+
+So the only place a failed peering shows up is an operator event named **`peer_auth_refused`**,
+carrying the configured peer id and which of the two requirements went unmet:
+
+| Field    | Meaning                                                                                   |
+| -------- | ----------------------------------------------------------------------------------------- |
+| `peerId` | the configured `[[peers]]` id that was asserted                                           |
+| `unmet`  | `P1` — the presented secret did not match; `P2` — the peer has no `[[peer_channels]]` row |
+
+`P1` is almost always a mistyped or stale shared secret on one of the two sides. `P2` cannot
+normally survive config load (`PeerChannelUnbound` refuses it), so seeing it means a node is
+running a config it did not load through the usual path.
+
+The event is rate-limited to one per peer id and requirement per minute, and each one reports how
+many were suppressed since the last — a peering retrying every second stays one line a minute, and
+still says it is still failing.
+
+**If a peering will not establish, look for this event first.** Without it the symptom is
+"peering configured, nothing peers, no error anywhere", which is exactly what happened on devnet
+before role-by-auth existed: an anonymous session was admitted as a quasi-peer and nothing
+anywhere said so.
+
+One case is deliberately silent: a credential naming a peer id **no `[[peers]]` entry
+configures**. Every ordinary client already declares a `peerId` of its own on the same BTP `auth`
+entry, so reporting those would bury the real ones and hand any anonymous caller a log-volume
+lever. The practical consequence: a peer that mistypes its **id** presents as a client with
+nothing logged, while a peer that mistypes its **secret** is loud. Check the id spelling on both
+sides when the event you expect is missing entirely.
+
 ### Watermark namespaces are disjoint
 
 A channel id in `[[peer_channels]]` must not also appear in `[[client_channels]]`. Peer and client
