@@ -599,11 +599,11 @@ mod tests {
             channel_id: format!("0x{:064x}", 1),
             nonce: 3,
             cumulative_amount: 750,
-            signature: connector_signer::Signature {
+            signature: connector_runtime::ClaimSignature::Evm(connector_signer::Signature {
                 r: [0x11; 32],
                 s: [0x22; 32],
                 recovery_id: 1,
-            },
+            }),
         };
 
         let pd = payout_claim_protocol_data(&claim);

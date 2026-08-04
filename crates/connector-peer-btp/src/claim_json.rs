@@ -22,9 +22,11 @@
 //! above the `PeerTransport` port; this module is the conversion, and
 //! nothing here ever puts those bytes on a wire.
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use connector_btp::{ProtocolData, CLAIM_PROTOCOL, CONTENT_TYPE_TEXT};
 use connector_domain::client_claim::{parse_client_claim, ClientClaim, ClientClaimError};
-use connector_runtime::WireClaim;
+use connector_runtime::{ClaimSignature, WireClaim};
 use connector_signer::Signature;
 
 /// The EIP-712 domain a peering relation's channel is signed under -- the
@@ -47,13 +49,19 @@ pub enum ClaimDecodeError {
     NotUtf8,
     /// Structurally invalid per the client edge's own validator.
     Structural(String),
-    /// A `solana` claim. The shape is pinned by the spec (§10.2 item 4)
-    /// and deliberately marked aspirational there; `ClaimBook` verifies
-    /// EIP-712 balance proofs only, so this connector cannot judge one and
-    /// says so rather than silently accepting it.
+    /// A claim on a chain this connector cannot judge. Only `mina`
+    /// reaches this now (ADR 0002 drops Mina from the Rust connector, and
+    /// `ClientClaim` has no Mina variant at all); `solana` used to, and
+    /// no longer does -- `ClaimBook` verifies ed25519 balance proofs
+    /// alongside EIP-712 ones since issue #732, which is what the live
+    /// devnet peering actually settles on.
     UnsupportedChain(&'static str),
-    /// The `signature` field is not `0x` + 130 hex characters (§4.2's
-    /// 65-byte `r ‖ s ‖ v`).
+    /// The `signature` field is not the shape its chain requires: `0x` +
+    /// 130 hex characters for EVM (§4.2's 65-byte `r ‖ s ‖ v`), or base64
+    /// of exactly 64 bytes for Solana's ed25519 -- the same encoding the
+    /// client edge's own gate decodes a Solana claim signature from
+    /// (`connector_client_edge::claim_gate`), since I4 means one codec
+    /// serves both edges.
     Signature,
 }
 
@@ -68,9 +76,10 @@ impl std::fmt::Display for ClaimDecodeError {
                     "'{chain}' peer claims are not verifiable by this connector"
                 )
             }
-            ClaimDecodeError::Signature => {
-                f.write_str("'signature' must be 0x-prefixed 130-char hex (r ‖ s ‖ v)")
-            }
+            ClaimDecodeError::Signature => f.write_str(
+                "'signature' must be 0x-prefixed 130-char hex (r ‖ s ‖ v) for an evm claim, \
+                 or base64 of 64 ed25519 bytes for a solana one",
+            ),
         }
     }
 }
@@ -102,7 +111,20 @@ pub fn canonical_evm_channel_id(channel_id: &str) -> String {
 /// edge.
 const ZERO_BYTES32: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Render `claim` as the §4 JSON, signed by `signer_address` on `domain`.
+/// Render `claim` as the §4 **EVM** JSON, signed by `signer_address` on
+/// `domain`.
+///
+/// EVM-only, and that is a property of the *emitting* side rather than of
+/// this codec: `ClaimBook::record_fulfillment` signs through the
+/// `connector_signer::Signer` port, whose two implementations
+/// (`LocalSigner`, `KmsSigner`) are both secp256k1, so a claim this
+/// connector owes is always an [`ClaimSignature::Evm`] one. Inbound is a
+/// different matter -- [`parse`] accepts both chains (issue #732) --
+/// because what a peer signs is the peer's business. The `unreachable!`
+/// below is therefore about this connector's own freshly signed claim, not
+/// about anything a peer controls; a Solana peer claim never reaches it.
+/// Signing one is issue #699's ed25519 signing capability, not this
+/// module's.
 ///
 /// `message_id` and `timestamp` are the caller's, deliberately: §6.3
 /// requires a payer's retransmission of an unacknowledged claim to be
@@ -117,6 +139,12 @@ pub fn encode(
     message_id: &str,
     timestamp: &str,
 ) -> String {
+    let ClaimSignature::Evm(signature) = claim.signature else {
+        unreachable!(
+            "this connector signs peer claims through the secp256k1 `Signer` port, so it never \
+             owes a Solana peer claim to render (issue #699)"
+        )
+    };
     let signer = format!("0x{}", hex::encode(signer_address));
     let mut json = serde_json::json!({
         "version": "1.0",
@@ -132,7 +160,7 @@ pub fn encode(
         // connector has no locks to put in them.
         "lockedAmount": "0",
         "locksRoot": ZERO_BYTES32,
-        "signature": format!("0x{}", hex::encode(claim.signature.to_bytes())),
+        "signature": format!("0x{}", hex::encode(signature.to_bytes())),
         "signerAddress": signer,
     });
     // `chainId`/`tokenNetworkAddress` are optional in the claim shape
@@ -186,23 +214,40 @@ pub fn parse(raw: &[u8]) -> Result<WireClaim, ClaimDecodeError> {
         ClientClaimError::Mina => ClaimDecodeError::UnsupportedChain("mina"),
         other => ClaimDecodeError::Structural(other.to_string()),
     })?;
-    let claim = match claim {
-        ClientClaim::Evm(claim) => claim,
-        ClientClaim::Solana(_) => return Err(ClaimDecodeError::UnsupportedChain("solana")),
-    };
-    Ok(WireClaim {
-        channel_id: canonical_evm_channel_id(&claim.channel_id),
-        nonce: claim.nonce,
-        cumulative_amount: claim.transferred_amount,
-        signature: parse_signature(&claim.signature)?,
-    })
+    match claim {
+        ClientClaim::Evm(claim) => Ok(WireClaim {
+            channel_id: canonical_evm_channel_id(&claim.channel_id),
+            nonce: claim.nonce,
+            cumulative_amount: claim.transferred_amount,
+            signature: ClaimSignature::Evm(parse_evm_signature(&claim.signature)?),
+        }),
+        // The channel id is the base58 `channelAccount`, uncanonicalised
+        // and deliberately so: base58 of an exact 32-byte decode has one
+        // spelling, so unlike EVM hex there is no second spelling a
+        // second watermark could hide behind, and normalising anyway
+        // would risk merging two accounts that are not the same account
+        // (`connector_domain::client_claim::canonical_channel_key`'s own
+        // reasoning, and the reason its `solana:` arm is the identity).
+        //
+        // `programId`/`signerPublicKey` are validated by the structural
+        // pass above and then dropped here, exactly as the EVM branch
+        // drops `signerAddress`: whose signature a claim is checked
+        // against comes from `ClaimBook`'s own per-channel record
+        // (`set_solana_channel`), never from the claim.
+        ClientClaim::Solana(claim) => Ok(WireClaim {
+            channel_id: claim.channel_account,
+            nonce: claim.nonce,
+            cumulative_amount: claim.transferred_amount,
+            signature: ClaimSignature::Solana(parse_solana_signature(&claim.signature)?),
+        }),
+    }
 }
 
 /// §4.2: 65 bytes `r ‖ s ‖ v`, with `v` as libsecp256k1 emits it
 /// (`{0, 1}`), never the wallet `{27, 28}` convention. The one place that
 /// conversion happens is immediately before on-chain submission, and it is
 /// not here.
-fn parse_signature(signature: &str) -> Result<Signature, ClaimDecodeError> {
+fn parse_evm_signature(signature: &str) -> Result<Signature, ClaimDecodeError> {
     let hex_body = signature
         .strip_prefix("0x")
         .ok_or(ClaimDecodeError::Signature)?;
@@ -221,6 +266,18 @@ fn parse_signature(signature: &str) -> Result<Signature, ClaimDecodeError> {
     })
 }
 
+/// A Solana claim's signature: base64 of exactly 64 ed25519 bytes -- the
+/// encoding `connector_client_edge`'s claim gate already decodes a client
+/// Solana claim's `signature` from, and therefore the one a peer claim
+/// uses too (I4: one codec, both edges). Never hex: the client edge has
+/// never emitted hex here and the live TypeScript fleet does not either.
+fn parse_solana_signature(signature: &str) -> Result<[u8; 64], ClaimDecodeError> {
+    let bytes = BASE64
+        .decode(signature)
+        .map_err(|_| ClaimDecodeError::Signature)?;
+    bytes.try_into().map_err(|_| ClaimDecodeError::Signature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,12 +287,34 @@ mod tests {
             channel_id: format!("0x{:064x}", 7),
             nonce: 4,
             cumulative_amount: 12_500,
-            signature: Signature {
+            signature: ClaimSignature::Evm(Signature {
                 r: [0x11; 32],
                 s: [0x22; 32],
                 recovery_id: 1,
-            },
+            }),
         }
+    }
+
+    /// A base58 32-byte Solana account, mixed case on purpose -- base58
+    /// is case-*sensitive*, so this is one account and not a spelling of
+    /// another.
+    const CHANNEL_ACCOUNT: &str = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F1Mh6usnNPUsqk";
+
+    fn solana_claim_json(signature: &str) -> String {
+        serde_json::json!({
+            "version": "1.0",
+            "blockchain": "solana",
+            "messageId": "m",
+            "timestamp": "2030-01-01T00:00:00Z",
+            "senderId": "s",
+            "programId": "11111111111111111111111111111111",
+            "channelAccount": CHANNEL_ACCOUNT,
+            "nonce": 1,
+            "transferredAmount": "10",
+            "signature": signature,
+            "signerPublicKey": "11111111111111111111111111111113",
+        })
+        .to_string()
     }
 
     fn domain() -> PeerClaimDomain {
@@ -325,11 +404,14 @@ mod tests {
     #[test]
     fn the_recovery_id_rides_raw_and_is_never_shifted_to_the_wallet_convention() {
         for recovery_id in [0u8, 1] {
+            let ClaimSignature::Evm(base) = wire_claim().signature else {
+                unreachable!("the fixture is an evm claim")
+            };
             let claim = WireClaim {
-                signature: Signature {
+                signature: ClaimSignature::Evm(Signature {
                     recovery_id,
-                    ..wire_claim().signature
-                },
+                    ..base
+                }),
                 ..wire_claim()
             };
             let json = encode(
@@ -350,29 +432,78 @@ mod tests {
         }
     }
 
+    /// The named regression (issue #732). Both live devnet peer configs
+    /// carry `chain: solana:devnet`, and the TypeScript fleet's
+    /// claim-receiver logs `blockchain: "solana"` every five minutes --
+    /// so a carriage that refused the chain outright could not do the one
+    /// thing the inter-node link actually does.
     #[test]
-    fn a_solana_claim_is_refused_by_chain_rather_than_reported_malformed() {
+    fn a_solana_claim_parses_into_its_channel_account_nonce_amount_and_ed25519_signature() {
+        let signature = [0x5au8; 64];
+        let json = solana_claim_json(&BASE64.encode(signature));
+
+        assert_eq!(
+            parse(json.as_bytes()),
+            Ok(WireClaim {
+                channel_id: CHANNEL_ACCOUNT.to_string(),
+                nonce: 1,
+                cumulative_amount: 10,
+                signature: ClaimSignature::Solana(signature),
+            })
+        );
+    }
+
+    /// §4.1's canonicalisation is EVM-only, deliberately: base58 of an
+    /// exact 32-byte decode has one spelling, and case-folding it would
+    /// merge accounts that are not the same account.
+    #[test]
+    fn a_solana_channel_account_reaches_the_watermark_key_verbatim() {
+        let json = solana_claim_json(&BASE64.encode([0x5au8; 64]));
+
+        let parsed = parse(json.as_bytes()).expect("a valid solana claim");
+
+        assert_eq!(parsed.channel_id, CHANNEL_ACCOUNT);
+        assert_ne!(parsed.channel_id, CHANNEL_ACCOUNT.to_ascii_lowercase());
+    }
+
+    /// The signature is base64 of exactly 64 ed25519 bytes -- the client
+    /// edge's own encoding (I4). Neither hex, nor a short string padded
+    /// into shape.
+    #[test]
+    fn a_solana_signature_that_is_not_base64_of_64_bytes_is_refused() {
+        for bad in [
+            BASE64.encode([0x5au8; 63]),
+            BASE64.encode([0x5au8; 65]),
+            "not base64!!".to_string(),
+            format!("0x{}", hex::encode([0x5au8; 64])),
+        ] {
+            assert_eq!(
+                parse(solana_claim_json(&bad).as_bytes()),
+                Err(ClaimDecodeError::Signature),
+                "accepted {bad:?}"
+            );
+        }
+    }
+
+    /// ADR 0002 drops Mina from the Rust connector, and #732 does not
+    /// bring it back: `mina` is still refused by chain, and still
+    /// distinguishably from a malformed claim.
+    #[test]
+    fn a_mina_claim_is_still_refused_by_chain_after_solana_landed() {
         let json = serde_json::json!({
             "version": "1.0",
-            "blockchain": "solana",
+            "blockchain": "mina",
             "messageId": "m",
             "timestamp": "2030-01-01T00:00:00Z",
             "senderId": "s",
-            "programId": "11111111111111111111111111111111",
-            "channelAccount": "11111111111111111111111111111112",
-            "nonce": 1,
-            "transferredAmount": "10",
-            "signature": "0xabcd",
-            "signerPublicKey": "11111111111111111111111111111113",
         })
         .to_string();
 
         assert_eq!(
             parse(json.as_bytes()),
-            Err(ClaimDecodeError::UnsupportedChain("solana"))
+            Err(ClaimDecodeError::UnsupportedChain("mina"))
         );
     }
-
     #[test]
     fn a_malformed_claim_is_refused_with_the_validators_own_reason() {
         assert!(matches!(

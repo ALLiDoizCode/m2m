@@ -22,7 +22,8 @@ use connector_domain::{
     Watermark,
 };
 use connector_signer::{
-    evm_balance_proof_digest, verify_evm_balance_proof, Address, EvmBalanceProof, Signature, Signer,
+    evm_balance_proof_digest, verify_evm_balance_proof, verify_solana_balance_proof, Address,
+    EvmBalanceProof, Signature, Signer,
 };
 use thiserror::Error;
 
@@ -44,28 +45,48 @@ pub struct WireClaim {
     pub channel_id: String,
     pub nonce: u64,
     pub cumulative_amount: u64,
-    pub signature: Signature,
+    pub signature: ClaimSignature,
 }
 
-const SIGNATURE_LEN: usize = 65; // r(32) + s(32) + recovery_id(1)
+const EVM_SIGNATURE_LEN: usize = 65; // r(32) + s(32) + recovery_id(1)
+const SOLANA_SIGNATURE_LEN: usize = 64; // ed25519 R(32) + S(32)
+
+/// The scheme discriminator [`WireClaim::encode`] writes ahead of a
+/// signature. Present so the in-process binary form stays decodable now
+/// that a signature has two lengths (issue #732); neither carriage puts
+/// these bytes on a wire (`connector_peer_btp::claim_json`'s own module
+/// doc), so no deployed peer ever parses them.
+const EVM_SCHEME: u8 = 0;
+const SOLANA_SCHEME: u8 = 1;
 
 impl WireClaim {
     /// Length-prefixed `channel_id` (so no two distinct tuples can ever
     /// collide on the same byte string) followed by `nonce`,
-    /// `cumulative_amount` and the raw signature -- the ad hoc encoding for
-    /// fields RFC-0027 has no concept of. ADR 0027 re-hosts this same byte
-    /// string as a `payment-channel-claim` BTP protocolData entry or a
-    /// `Payment-Channel-Claim` HTTP header; only the carriage moves.
+    /// `cumulative_amount`, a signature-scheme byte and the raw signature
+    /// -- the ad hoc encoding for fields RFC-0027 has no concept of. ADR
+    /// 0027 re-hosts this same byte string as a `payment-channel-claim`
+    /// BTP protocolData entry or a `Payment-Channel-Claim` HTTP header;
+    /// only the carriage moves.
     pub fn encode(&self) -> Vec<u8> {
         let channel_id_bytes = self.channel_id.as_bytes();
-        let mut out = Vec::with_capacity(2 + channel_id_bytes.len() + 8 + 8 + SIGNATURE_LEN);
+        let mut out =
+            Vec::with_capacity(2 + channel_id_bytes.len() + 8 + 8 + 1 + EVM_SIGNATURE_LEN);
         out.extend_from_slice(&(channel_id_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(channel_id_bytes);
         out.extend_from_slice(&self.nonce.to_be_bytes());
         out.extend_from_slice(&self.cumulative_amount.to_be_bytes());
-        out.extend_from_slice(&self.signature.r);
-        out.extend_from_slice(&self.signature.s);
-        out.push(self.signature.recovery_id);
+        match &self.signature {
+            ClaimSignature::Evm(signature) => {
+                out.push(EVM_SCHEME);
+                out.extend_from_slice(&signature.r);
+                out.extend_from_slice(&signature.s);
+                out.push(signature.recovery_id);
+            }
+            ClaimSignature::Solana(signature) => {
+                out.push(SOLANA_SCHEME);
+                out.extend_from_slice(signature);
+            }
+        }
         out
     }
 
@@ -83,20 +104,33 @@ impl WireClaim {
         offset += 8;
         let cumulative_amount = u64::from_be_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?);
         offset += 8;
-        let mut r = [0u8; 32];
-        r.copy_from_slice(bytes.get(offset..offset + 32)?);
-        offset += 32;
-        let mut s = [0u8; 32];
-        s.copy_from_slice(bytes.get(offset..offset + 32)?);
-        offset += 32;
-        let recovery_id = *bytes.get(offset)?;
+        let scheme = *bytes.get(offset)?;
         offset += 1;
+        let signature = match scheme {
+            EVM_SCHEME => {
+                let raw: [u8; EVM_SIGNATURE_LEN] = bytes
+                    .get(offset..offset + EVM_SIGNATURE_LEN)?
+                    .try_into()
+                    .ok()?;
+                offset += EVM_SIGNATURE_LEN;
+                ClaimSignature::Evm(Signature::from_bytes(&raw)?)
+            }
+            SOLANA_SCHEME => {
+                let raw: [u8; SOLANA_SIGNATURE_LEN] = bytes
+                    .get(offset..offset + SOLANA_SIGNATURE_LEN)?
+                    .try_into()
+                    .ok()?;
+                offset += SOLANA_SIGNATURE_LEN;
+                ClaimSignature::Solana(raw)
+            }
+            _ => return None,
+        };
         Some((
             WireClaim {
                 channel_id,
                 nonce,
                 cumulative_amount,
-                signature: Signature { r, s, recovery_id },
+                signature,
             },
             offset,
         ))
@@ -187,6 +221,106 @@ pub(crate) type OnChainChannelId = [u8; 32];
 pub struct ChannelDomain {
     pub chain_id: u64,
     pub token_network_address: Address,
+}
+
+/// A Solana peer channel's binding (issue #732): the 32-byte channel
+/// account whose raw bytes open the ed25519 balance-proof message
+/// (`connector_signer::solana_balance_proof_message`), and the ed25519
+/// public key whose signature this connector accepts on a claim naming it.
+///
+/// Deliberately **not** folded into [`ChannelDomain`]. A Solana claim's
+/// signature covers a 48-byte little-endian message with no domain
+/// separator, no `verifyingContract` and no chain id -- there is nothing an
+/// EIP-712 domain and this have in common to abstract over, and merging
+/// them would mean one of the two carrying fields the other's verifier
+/// silently ignores. `connector_domain::client_claim::ClientClaim`
+/// discriminates the same two chains the same way, and this is the peer
+/// wire's counterpart to that decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolanaChannel {
+    /// The raw 32 bytes the channel account's base58 id decodes to --
+    /// parsed once, at [`ClaimBook::set_solana_channel`] time, exactly as
+    /// [`ChannelDomain`]'s `OnChainChannelId` is.
+    pub channel_account: [u8; 32],
+    /// The counterparty's ed25519 public key, raw. Never a claim's own
+    /// self-declared `signerPublicKey` -- see
+    /// [`ClaimBook::set_verification_key`] for why the peer wire reads
+    /// this from its own record.
+    pub counterparty_public_key: [u8; 32],
+}
+
+/// A Solana channel account or counterparty key supplied to
+/// [`ClaimBook::set_solana_channel`] that is not base58 of exactly 32
+/// bytes. Refused where channels are configured rather than padded,
+/// truncated or hashed into shape -- the same rule [`InvalidChannelId`]
+/// enforces for the EVM side, and for the same reason: a channel account
+/// that is not the account is a signature check against the wrong message.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{field} {value:?} is not base58 of exactly 32 bytes")]
+pub struct InvalidSolanaChannel {
+    pub field: &'static str,
+    pub value: String,
+}
+
+/// Decode a base58 Solana account/key into its exact 32 bytes, or refuse.
+pub(crate) fn parse_base58_32(
+    field: &'static str,
+    value: &str,
+) -> Result<[u8; 32], InvalidSolanaChannel> {
+    let refuse = || InvalidSolanaChannel {
+        field,
+        value: value.to_string(),
+    };
+    let decoded = bs58::decode(value).into_vec().map_err(|_| refuse())?;
+    let bytes: [u8; 32] = decoded.try_into().map_err(|_| refuse())?;
+    Ok(bytes)
+}
+
+/// A peer claim's signature, discriminated by the scheme its chain
+/// actually uses (issue #732). The two are different lengths over
+/// different messages verified by different primitives, and the peer wire
+/// keeps them apart for the whole of their travel rather than flattening
+/// both into one opaque byte string -- a 64-byte ed25519 signature stuffed
+/// into a 65-byte `r ‖ s ‖ v` slot is a claim this connector could no
+/// longer tell you how to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimSignature {
+    /// secp256k1 `r ‖ s ‖ v` over ADR 0024's EIP-712 `BalanceProof`
+    /// digest.
+    Evm(Signature),
+    /// ed25519 over
+    /// `connector_signer::solana_balance_proof_message`'s 48 bytes.
+    Solana([u8; 64]),
+}
+
+impl ClaimSignature {
+    /// The signature's own bytes, in the length its scheme defines -- 65
+    /// for EVM, 64 for Solana. This is what a journal entry records and
+    /// what a settlement backend is later handed; nothing pads one to the
+    /// other's width.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            ClaimSignature::Evm(signature) => signature.to_bytes().to_vec(),
+            ClaimSignature::Solana(signature) => signature.to_vec(),
+        }
+    }
+
+    /// The EVM signature this carries, or `None` for a Solana one. Used by
+    /// the paths that are EVM-only by construction (on-chain redemption
+    /// through `connector_settlement::Claim`, whose `signature` field is
+    /// `connector_signer::Signature`).
+    pub fn as_evm(&self) -> Option<Signature> {
+        match self {
+            ClaimSignature::Evm(signature) => Some(*signature),
+            ClaimSignature::Solana(_) => None,
+        }
+    }
+}
+
+impl From<Signature> for ClaimSignature {
+    fn from(signature: Signature) -> ClaimSignature {
+        ClaimSignature::Evm(signature)
+    }
 }
 
 /// A channel id supplied to [`ClaimBook::set_channel_domain`] that is not
@@ -300,6 +434,16 @@ pub struct ClaimBook {
     /// via `connector_signer::verify_evm_balance_proof`, never the claim's
     /// own self-declared field.
     counterparties: HashMap<String, Address>,
+    /// `channel_id` -> its Solana binding (issue #732): the channel account
+    /// bytes a claim's ed25519 message is built over and the counterparty
+    /// key its signature must verify against. Deliberately a **second**
+    /// map rather than a chain field on the first: a channel is registered
+    /// on exactly one chain, and a lookup that misses here after hitting
+    /// `channel_domains` (or vice versa) is the honest
+    /// [`ClaimRejectReason::UnknownChannel`] a claim presenting the wrong
+    /// chain's signature for a channel deserves. See
+    /// [`ClaimBook::set_solana_channel`].
+    solana_channels: HashMap<String, SolanaChannel>,
     /// `channel_id` -> the exposure ceiling this connector tolerates before
     /// it stops forwarding for that channel's counterparty (ADR 0005,
     /// peer-wire-spec.md §5.3, issue #424). A channel with none configured
@@ -333,6 +477,7 @@ impl ClaimBook {
             outbound_channels,
             channel_domains: HashMap::new(),
             counterparties,
+            solana_channels: HashMap::new(),
             ceilings: HashMap::new(),
             outbound: RwLock::new(HashMap::new()),
             inbound_watermarks: RwLock::new(HashMap::new()),
@@ -407,6 +552,48 @@ impl ClaimBook {
         let on_chain_id = parse_channel_id(&channel_id)?;
         self.channel_domains
             .insert(channel_id, (on_chain_id, domain));
+        Ok(())
+    }
+
+    /// Register `channel_account` as a Solana peer channel whose claims
+    /// this connector accepts from `counterparty_public_key` (issue #732)
+    /// -- the Solana counterpart to [`ClaimBook::set_channel_domain`] plus
+    /// [`ClaimBook::set_verification_key`] in one call, because on Solana
+    /// the two are inseparable: the account *is* the whole of the signed
+    /// message's domain, and there is no separate `verifyingContract` for
+    /// a second call to carry.
+    ///
+    /// `channel_account` is the base58 account id, and doubles as the
+    /// `channel_id` a claim names and a watermark is filed under -- the
+    /// same string the wire's `channelAccount` field carries. Base58 of an
+    /// exact 32-byte decode has one spelling, so unlike the EVM side there
+    /// is nothing to canonicalise (see
+    /// `connector_domain::client_claim::canonical_channel_key`'s own
+    /// reasoning), and an id that does not decode to exactly 32 bytes is
+    /// refused here rather than padded into shape.
+    ///
+    /// A channel registered here can never be confused with one registered
+    /// by `set_channel_domain`: a claim's chain is decided by which
+    /// signature scheme it carries, and each scheme reads only its own map
+    /// (see [`ClaimBook::accept_inbound`]). Registering the same string in
+    /// both maps therefore still yields two independent channels, not one
+    /// ambiguous one -- and in practice cannot happen, since a 32-byte
+    /// base58 id is never `0x` + 64 hex nor a decimal numeral.
+    pub fn set_solana_channel(
+        &mut self,
+        channel_account: impl Into<String>,
+        counterparty_public_key: &str,
+    ) -> Result<(), InvalidSolanaChannel> {
+        let channel_account = channel_account.into();
+        let account_bytes = parse_base58_32("channel account", &channel_account)?;
+        let counterparty_public_key = parse_base58_32("counterparty key", counterparty_public_key)?;
+        self.solana_channels.insert(
+            channel_account,
+            SolanaChannel {
+                channel_account: account_bytes,
+                counterparty_public_key,
+            },
+        );
         Ok(())
     }
 
@@ -516,7 +703,7 @@ impl ClaimBook {
                         channel_id: ledger.channel_id.clone(),
                         nonce: ledger.nonce,
                         cumulative_amount: ledger.cumulative_amount,
-                        signature,
+                        signature: ClaimSignature::Evm(signature),
                     });
                 }
             }
@@ -639,7 +826,7 @@ impl ClaimBook {
             channel_id: ledger.channel_id.clone(),
             nonce: ledger.nonce,
             cumulative_amount: ledger.cumulative_amount,
-            signature,
+            signature: ClaimSignature::Evm(signature),
         };
         ledger.pending = Some(claim.clone());
         ledger.pending_since = Some(now);
@@ -726,6 +913,61 @@ impl ClaimBook {
         }
     }
 
+    /// Whether `claim`'s signature is genuine, for the chain the signature
+    /// itself is in and against this connector's **own** record of that
+    /// channel (issue #732, `client-edge-spec.md` §1.3 step 4's rule that
+    /// a forger can declare anything).
+    ///
+    /// The claim's scheme selects which record is consulted, and each
+    /// scheme reads only its own map. An ed25519 signature naming a
+    /// channel registered as EVM therefore finds nothing and is
+    /// [`ClaimRejectReason::UnknownChannel`], and so is the mirror case --
+    /// neither is ever checked against the other chain's record, and
+    /// neither can be made to pass by relabelling. Both chains verify
+    /// through `connector_signer::claim_signature`, the same module the
+    /// client edge's own gate uses (`ClientClaimGate`), so there is one
+    /// EIP-712 digest and one ed25519 message definition in this
+    /// workspace, not two per edge.
+    ///
+    /// ADR 0002 keeps Mina out entirely: [`ClaimSignature`] has no Mina
+    /// variant, so a Mina claim is refused before it can reach here, at
+    /// the carriage's own `parse`.
+    fn verify_signature(&self, claim: &WireClaim) -> Result<(), ClaimRejectReason> {
+        match &claim.signature {
+            ClaimSignature::Evm(signature) => {
+                let Some(&(on_chain_id, domain)) = self.channel_domains.get(&claim.channel_id)
+                else {
+                    return Err(ClaimRejectReason::UnknownChannel);
+                };
+                let Some(counterparty) = self.counterparties.get(&claim.channel_id) else {
+                    return Err(ClaimRejectReason::UnknownChannel);
+                };
+                let proof = evm_proof(on_chain_id, domain, claim.nonce, claim.cumulative_amount);
+                if verify_evm_balance_proof(&proof, &signature.to_bytes(), counterparty) {
+                    Ok(())
+                } else {
+                    Err(ClaimRejectReason::SignatureInvalid)
+                }
+            }
+            ClaimSignature::Solana(signature) => {
+                let Some(channel) = self.solana_channels.get(&claim.channel_id) else {
+                    return Err(ClaimRejectReason::UnknownChannel);
+                };
+                if verify_solana_balance_proof(
+                    &channel.channel_account,
+                    claim.nonce,
+                    claim.cumulative_amount,
+                    signature,
+                    &channel.counterparty_public_key,
+                ) {
+                    Ok(())
+                } else {
+                    Err(ClaimRejectReason::SignatureInvalid)
+                }
+            }
+        }
+    }
+
     /// Verify and, if valid, accept an inbound `claim`, advancing the
     /// watermark on its `channel_id` (peer-wire-spec.md §3.4). Independent
     /// of whatever PREPARE the claim rode in on -- a rejected claim does
@@ -734,15 +976,9 @@ impl ClaimBook {
     /// [`ClaimRejectReason::UnknownChannel`] -- neither leaves anything
     /// this connector could verify a signature against.
     pub fn accept_inbound(&self, claim: &WireClaim) -> ClaimAckOutcome {
-        let Some(&(on_chain_id, domain)) = self.channel_domains.get(&claim.channel_id) else {
-            return ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel);
-        };
-        let Some(counterparty) = self.counterparties.get(&claim.channel_id) else {
-            return ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel);
-        };
-        let proof = evm_proof(on_chain_id, domain, claim.nonce, claim.cumulative_amount);
-        if !verify_evm_balance_proof(&proof, &claim.signature.to_bytes(), counterparty) {
-            return ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid);
+        match self.verify_signature(claim) {
+            Ok(()) => {}
+            Err(reason) => return ClaimAckOutcome::Rejected(reason),
         }
 
         let mut watermarks = self
@@ -761,7 +997,7 @@ impl ClaimBook {
                     channel_id: claim.channel_id.clone(),
                     nonce: claim.nonce,
                     cumulative_amount: claim.cumulative_amount,
-                    signature: claim.signature.to_bytes().to_vec(),
+                    signature: claim.signature.to_bytes(),
                 });
                 ClaimAckOutcome::Accepted
             }
@@ -889,9 +1125,11 @@ mod tests {
             channel_id: channel.to_string(),
             nonce,
             cumulative_amount: amount,
-            signature: signer
-                .sign(&evm_balance_proof_digest(&proof))
-                .expect("sign"),
+            signature: ClaimSignature::Evm(
+                signer
+                    .sign(&evm_balance_proof_digest(&proof))
+                    .expect("sign"),
+            ),
         }
     }
 
@@ -917,11 +1155,11 @@ mod tests {
             channel_id: channel_id(1),
             nonce: 7,
             cumulative_amount: 900,
-            signature: Signature {
+            signature: ClaimSignature::Evm(Signature {
                 r: [1u8; 32],
                 s: [2u8; 32],
                 recovery_id: 1,
-            },
+            }),
         };
         let mut bytes = claim.encode();
         bytes.extend_from_slice(b"trailing");
@@ -1206,7 +1444,9 @@ mod tests {
             channel_id: channel_id(1),
             nonce: 1,
             cumulative_amount: 100,
-            signature: peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap(),
+            signature: ClaimSignature::Evm(
+                peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap(),
+            ),
         };
 
         let outcome = book.accept_inbound(&claim);
@@ -1557,6 +1797,430 @@ mod tests {
                     fulfilled: 10,
                 }]
             );
+        }
+    }
+
+    /// Issue #732: the peer wire's Solana half. Every test here exercises
+    /// the *inbound* direction, which is the whole of what a Solana peer
+    /// claim can be today -- this connector signs through the secp256k1
+    /// `Signer` port, so it never owes one.
+    mod solana {
+        use super::*;
+        use connector_signer::solana_balance_proof_message;
+        use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signer as Ed25519Signer};
+
+        /// A deterministic ed25519 keypair -- no RNG, so a failure here
+        /// reproduces exactly.
+        fn keypair(seed: u8) -> Keypair {
+            let secret = SecretKey::from_bytes(&[seed; 32]).expect("32 bytes is a valid seed");
+            let public = PublicKey::from(&secret);
+            Keypair { secret, public }
+        }
+
+        fn base58(bytes: &[u8; 32]) -> String {
+            bs58::encode(bytes).into_string()
+        }
+
+        /// A Solana channel account id, distinct per `n`.
+        fn account(n: u8) -> [u8; 32] {
+            let mut bytes = [0xA0; 32];
+            bytes[31] = n;
+            bytes
+        }
+
+        /// A book that accepts claims on `account(n)` signed by `signer`.
+        fn book_with_solana_channel(n: u8, signer: &Keypair) -> ClaimBook {
+            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            book.set_solana_channel(base58(&account(n)), &base58(&signer.public.to_bytes()))
+                .expect("a 32-byte base58 account and key");
+            book
+        }
+
+        /// A claim on `account(n)`, genuinely signed by `signer` over the
+        /// 48-byte balance-proof message -- exactly what a peer's own
+        /// Solana signing path produces.
+        fn sign_solana(signer: &Keypair, n: u8, nonce: u64, amount: u64) -> WireClaim {
+            let message = solana_balance_proof_message(&account(n), nonce, amount);
+            WireClaim {
+                channel_id: base58(&account(n)),
+                nonce,
+                cumulative_amount: amount,
+                signature: ClaimSignature::Solana(signer.sign(&message).to_bytes()),
+            }
+        }
+
+        #[test]
+        fn a_genuine_solana_claim_from_the_registered_counterparty_is_accepted() {
+            let peer = keypair(1);
+            let book = book_with_solana_channel(1, &peer);
+
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&peer, 1, 1, 100)),
+                ClaimAckOutcome::Accepted
+            );
+        }
+
+        #[test]
+        fn a_solana_claim_signed_by_the_wrong_key_is_rejected() {
+            let peer = keypair(1);
+            let impostor = keypair(2);
+            let book = book_with_solana_channel(1, &peer);
+
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&impostor, 1, 1, 100)),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid)
+            );
+        }
+
+        /// The claim's own `signerPublicKey` is dropped at the carriage
+        /// and this book consults only its own record, so re-registering
+        /// the channel to a different key invalidates every claim the old
+        /// key ever signed -- the property that makes the self-declared
+        /// field worthless to a forger.
+        #[test]
+        fn re_registering_the_counterparty_invalidates_the_old_keys_claims() {
+            let peer = keypair(1);
+            let claim = sign_solana(&peer, 1, 1, 100);
+            let mut book = book_with_solana_channel(1, &peer);
+            book.set_solana_channel(base58(&account(1)), &base58(&keypair(2).public.to_bytes()))
+                .unwrap();
+
+            assert_eq!(
+                book.accept_inbound(&claim),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid)
+            );
+        }
+
+        /// A genuine signature over *another* account's message is not a
+        /// claim on this one: the account bytes open the signed message,
+        /// and they come from this book's record of the channel the claim
+        /// names, never from the claim.
+        #[test]
+        fn a_signature_over_a_different_channel_account_does_not_verify() {
+            let peer = keypair(1);
+            let book = book_with_solana_channel(1, &peer);
+            let elsewhere = sign_solana(&peer, 2, 1, 100);
+            let relabelled = WireClaim {
+                channel_id: base58(&account(1)),
+                ..elsewhere
+            };
+
+            assert_eq!(
+                book.accept_inbound(&relabelled),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid)
+            );
+        }
+
+        #[test]
+        fn a_solana_claim_on_an_unregistered_account_is_rejected_as_unknown_channel() {
+            let peer = keypair(1);
+            let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&peer, 1, 1, 100)),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel)
+            );
+        }
+
+        /// **Chain confusion, both directions.** Each scheme reads only
+        /// its own map, so neither a Solana signature on an EVM-registered
+        /// channel nor an EVM signature on a Solana-registered one is ever
+        /// checked against the other chain's record. Both are
+        /// `unknown_channel`, and neither can be made to pass by
+        /// relabelling.
+        #[test]
+        fn a_claim_carrying_the_other_chains_signature_scheme_is_unknown_channel() {
+            let peer = keypair(1);
+            let evm_signer = LocalSigner::generate("peer-key");
+            let evm_key = derive_evm_address(&evm_signer.public_key().unwrap());
+
+            // An EVM-registered channel, reached by a Solana signature.
+            let evm_book = book_with_peer("peer-b", &channel_id(1), evm_key);
+            let solana_on_evm_channel = WireClaim {
+                channel_id: channel_id(1),
+                ..sign_solana(&peer, 1, 1, 100)
+            };
+            assert_eq!(
+                evm_book.accept_inbound(&solana_on_evm_channel),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel)
+            );
+
+            // A Solana-registered channel, reached by an EVM signature.
+            let solana_book = book_with_solana_channel(1, &peer);
+            let evm_on_solana_channel = WireClaim {
+                channel_id: base58(&account(1)),
+                ..sign_claim(&evm_signer, &channel_id(1), 1, 100)
+            };
+            assert_eq!(
+                solana_book.accept_inbound(&evm_on_solana_channel),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel)
+            );
+        }
+
+        /// Verify, advance, acknowledge -- the three things #732's
+        /// definition of done asks for, in one pass.
+        #[test]
+        fn an_accepted_solana_claim_advances_the_ledger_and_a_replay_is_refused() {
+            let peer = keypair(1);
+            let book = book_with_solana_channel(1, &peer);
+            let first = sign_solana(&peer, 1, 1, 100);
+            let second = sign_solana(&peer, 1, 2, 250);
+
+            assert_eq!(book.accept_inbound(&first), ClaimAckOutcome::Accepted);
+            assert_eq!(book.accept_inbound(&second), ClaimAckOutcome::Accepted);
+
+            // The watermark moved, and the ledger reports the *latest*
+            // claim -- with its 64 ed25519 bytes intact, not padded to
+            // EVM's 65.
+            let view = book
+                .views()
+                .into_iter()
+                .find(|view| view.channel_id == base58(&account(1)))
+                .expect("the channel is known");
+            assert_eq!((view.nonce, view.cumulative_amount), (2, 250));
+            let latest = book
+                .latest_inbound_claim(&base58(&account(1)))
+                .expect("a claim was accepted");
+            assert_eq!((latest.nonce, latest.cumulative_amount), (2, 250));
+            assert_eq!(latest.signature.len(), 64);
+
+            // Replaying either is refused rather than re-accepted.
+            assert_eq!(
+                book.accept_inbound(&first),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing)
+            );
+            assert_eq!(
+                book.accept_inbound(&second),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing)
+            );
+        }
+
+        /// A fresher nonce that *lowers* the cumulative amount is refused
+        /// -- the same rule the EVM side is held to, since it is
+        /// `connector_domain::validate_claim`'s rule and not a per-chain
+        /// one. (A nonce that advances while the amount merely holds
+        /// steady is legal there and stays legal here: it moves no value,
+        /// so it takes none back either.)
+        #[test]
+        fn a_solana_claim_lowering_the_cumulative_amount_is_refused() {
+            let peer = keypair(1);
+            let book = book_with_solana_channel(1, &peer);
+            book.accept_inbound(&sign_solana(&peer, 1, 1, 100));
+
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&peer, 1, 2, 99)),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::AmountNotAdvancing)
+            );
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&peer, 1, 2, 100)),
+                ClaimAckOutcome::Accepted
+            );
+        }
+
+        /// Exposure and its ceiling are chain-agnostic -- they count value
+        /// delivered, which has no signature scheme -- so a Solana channel
+        /// gets the same ADR 0005 protection an EVM one does.
+        #[test]
+        fn an_accepted_solana_claim_covers_exposure_the_same_way_an_evm_one_does() {
+            let peer = keypair(1);
+            let mut book = book_with_solana_channel(1, &peer);
+            book.set_ceiling(base58(&account(1)), 150);
+            book.record_inbound_delivery(&base58(&account(1)), 200);
+            assert!(book.is_over_ceiling(&base58(&account(1))));
+
+            book.accept_inbound(&sign_solana(&peer, 1, 1, 200));
+
+            assert_eq!(book.exposure(&base58(&account(1))), 0);
+            assert!(!book.is_over_ceiling(&base58(&account(1))));
+        }
+
+        /// An account or key that is not base58 of exactly 32 bytes is
+        /// refused where channels are configured -- never padded,
+        /// truncated or hashed into shape, the same rule
+        /// `set_channel_domain` holds an EVM id to.
+        #[test]
+        fn set_solana_channel_refuses_anything_that_is_not_a_32_byte_account() {
+            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            let good = base58(&account(1));
+
+            assert!(book.set_solana_channel(&good, "not base58 0OIl").is_err());
+            assert!(book
+                .set_solana_channel(bs58::encode([0u8; 31]).into_string(), &good)
+                .is_err());
+            assert!(book
+                .set_solana_channel(&good, &bs58::encode([0u8; 33]).into_string())
+                .is_err());
+            assert!(book.set_solana_channel("", &good).is_err());
+
+            // Nothing was registered by any of those, so a genuine claim
+            // still finds no channel.
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&keypair(1), 1, 1, 100)),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel)
+            );
+        }
+
+        /// A Solana channel's accepted claims survive a restart through
+        /// the same ADR 0005 journal an EVM channel's do, with the 64-byte
+        /// signature recovered intact.
+        #[test]
+        fn a_solana_watermark_rebuilds_from_the_journal() {
+            let peer = keypair(1);
+            let journal = Arc::new(InMemoryJournal::new());
+            let mut book = book_with_solana_channel(1, &peer);
+            book.set_journal(journal.clone()).unwrap();
+            book.accept_inbound(&sign_solana(&peer, 1, 4, 400));
+
+            let mut rebuilt = book_with_solana_channel(1, &peer);
+            rebuilt.set_journal(journal).unwrap();
+
+            // The replay is refused against the rebuilt watermark, which
+            // is the only thing that makes a restart safe.
+            assert_eq!(
+                rebuilt.accept_inbound(&sign_solana(&peer, 1, 4, 400)),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing)
+            );
+            assert_eq!(
+                rebuilt.accept_inbound(&sign_solana(&peer, 1, 5, 500)),
+                ClaimAckOutcome::Accepted
+            );
+        }
+
+        /// **The bidirectional ledger** (#262's riskiest surface, and the
+        /// reason a second chain doubles it): one `ClaimBook` holds live
+        /// outbound state *and* live inbound state at the same time, and
+        /// after #732 the two can be on different chains. Interleaving an
+        /// EVM outbound ledger with a Solana inbound watermark must leave
+        /// each exactly where it would have been alone -- the failure mode
+        /// is lost money, not a wrong number.
+        #[test]
+        fn an_evm_outbound_ledger_and_a_solana_inbound_watermark_do_not_disturb_each_other() {
+            let peer = keypair(1);
+            let evm_key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
+            let mut book = book_with_peer("peer-b", &channel_id(1), evm_key);
+            book.set_solana_channel(base58(&account(1)), &base58(&peer.public.to_bytes()))
+                .unwrap();
+
+            book.record_fulfillment("peer-b", 100, now()).unwrap();
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&peer, 1, 1, 70)),
+                ClaimAckOutcome::Accepted
+            );
+            let outbound = book.record_fulfillment("peer-b", 50, now()).unwrap();
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&peer, 1, 2, 90)),
+                ClaimAckOutcome::Accepted
+            );
+
+            // Outbound: still EVM-signed, still the running total, and
+            // untouched by anything that arrived on the Solana channel.
+            assert_eq!(book.outbound_cumulative_amount("peer-b"), 150);
+            assert!(matches!(outbound.signature, ClaimSignature::Evm(_)));
+            assert_eq!(book.pending_claim("peer-b"), Some(outbound));
+            assert_eq!(book.outbound_channel_id("peer-b"), Some(channel_id(1)));
+
+            // Inbound: the Solana watermark is the Solana claims' own, and
+            // the EVM channel has no watermark at all -- no claim arrived
+            // on it.
+            assert_eq!(
+                book.accept_inbound(&sign_solana(&peer, 1, 2, 90)),
+                ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing)
+            );
+            assert!(book
+                .views()
+                .iter()
+                .any(|view| view.channel_id == base58(&account(1))
+                    && view.direction == crate::operator_view::ClaimDirection::Inbound
+                    && view.nonce == 2));
+        }
+
+        proptest::proptest! {
+            /// The watermark rule is the same rule on both chains
+            /// (`connector_domain::validate_claim`, not a per-chain
+            /// copy): an arbitrary sequence of genuinely signed Solana
+            /// claims is accepted exactly when the nonce strictly
+            /// advances and the cumulative amount does not go backwards,
+            /// and the high-water mark tracks what was *accepted* --
+            /// never a value only a rejected claim carried.
+            #[test]
+            fn only_strictly_advancing_solana_claims_are_ever_accepted(
+                steps in proptest::collection::vec((1u64..8, 0u64..400), 1..24)
+            ) {
+                let peer = keypair(1);
+                let book = book_with_solana_channel(1, &peer);
+                let mut accepted: Option<(u64, u64)> = None;
+
+                for (nonce, amount) in steps {
+                    let outcome = book.accept_inbound(&sign_solana(&peer, 1, nonce, amount));
+                    let advances = match accepted {
+                        None => true,
+                        Some((high_nonce, high_amount)) => {
+                            nonce > high_nonce && amount >= high_amount
+                        }
+                    };
+                    proptest::prop_assert_eq!(
+                        outcome == ClaimAckOutcome::Accepted,
+                        advances,
+                        "nonce {} amount {} against watermark {:?}",
+                        nonce,
+                        amount,
+                        accepted
+                    );
+                    if advances {
+                        accepted = Some((nonce, amount));
+                    }
+                }
+
+                match accepted {
+                    None => proptest::prop_assert!(
+                        book.latest_inbound_claim(&base58(&account(1))).is_none()
+                    ),
+                    Some((nonce, amount)) => {
+                        let latest = book
+                            .latest_inbound_claim(&base58(&account(1)))
+                            .expect("a claim was accepted");
+                        proptest::prop_assert_eq!(latest.nonce, nonce);
+                        proptest::prop_assert_eq!(latest.cumulative_amount, u128::from(amount));
+                    }
+                }
+            }
+
+            /// A signature is only ever accepted for the exact
+            /// `(account, nonce, amount)` triple it covers: perturbing any
+            /// one of the three after signing is a forgery, whatever the
+            /// watermark would otherwise have said.
+            #[test]
+            fn a_solana_signature_never_covers_a_field_it_did_not_sign(
+                nonce in 1u64..1000,
+                amount in 1u64..1_000_000,
+                nonce_delta in 1u64..50,
+                amount_delta in 1u64..50,
+            ) {
+                let peer = keypair(1);
+                let book = book_with_solana_channel(1, &peer);
+                let genuine = sign_solana(&peer, 1, nonce, amount);
+
+                let tampered_nonce = WireClaim { nonce: nonce + nonce_delta, ..genuine.clone() };
+                let tampered_amount = WireClaim {
+                    cumulative_amount: amount + amount_delta,
+                    ..genuine.clone()
+                };
+
+                proptest::prop_assert_eq!(
+                    book.accept_inbound(&tampered_nonce),
+                    ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid)
+                );
+                proptest::prop_assert_eq!(
+                    book.accept_inbound(&tampered_amount),
+                    ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid)
+                );
+                // ...and the genuine one still lands, so no rejection
+                // above moved the watermark.
+                proptest::prop_assert_eq!(
+                    book.accept_inbound(&genuine),
+                    ClaimAckOutcome::Accepted
+                );
+            }
         }
     }
 }

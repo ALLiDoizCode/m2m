@@ -176,8 +176,10 @@ pub(crate) fn sign_wire_claim(
         channel_id,
         nonce,
         cumulative_amount,
-        signature: signer
-            .sign(&evm_balance_proof_digest(&proof))
-            .expect("sign"),
+        signature: crate::claim::ClaimSignature::Evm(
+            signer
+                .sign(&evm_balance_proof_digest(&proof))
+                .expect("sign"),
+        ),
     }
 }
