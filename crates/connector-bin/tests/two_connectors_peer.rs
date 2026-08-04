@@ -91,7 +91,9 @@ use connector_domain::{Prepare, Reject};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
-use connector_signer::{derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof};
+use connector_signer::{
+    derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof, PublicKeyBytes,
+};
 
 mod support;
 use support::{
@@ -137,8 +139,7 @@ const PAYEE_SIGNER_SEED: u8 = 72;
 /// deposit), which leaves this key for the payee's own settlement identity
 /// -- it needs gas and nothing else, being structurally the side that is
 /// owed.
-const PAYEE_PRIVATE_KEY: &str =
-    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const PAYEE_PRIVATE_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 /// The prefix the payee terminates, and the prefix the payer routes to the
 /// payee. The route is a strict prefix of the termination so a packet
@@ -243,10 +244,24 @@ enum Carriage {
 
 impl Carriage {
     /// The `[[peers]] endpoint` scheme that selects this carriage (§2.1).
+    /// **Dial** and **expose** are separate axes, and so are their
+    /// spellings: an endpoint's scheme is a URL scheme, `peer_expose`'s
+    /// value is a carriage name. Confusing them is a load-time error
+    /// (`InvalidPeerExposure`), which is the point of keeping the two
+    /// spellings in one place.
     fn scheme(self) -> &'static str {
         match self {
             Carriage::Btp => "wss",
             Carriage::Http => "https",
+        }
+    }
+
+    /// The `peer_expose` value that opens a listener for this carriage
+    /// (§2.1).
+    fn expose(self) -> &'static str {
+        match self {
+            Carriage::Btp => "btp",
+            Carriage::Http => "http",
         }
     }
 }
@@ -441,15 +456,11 @@ counterparty_key = "{payer}"
 chain_id = {ANVIL_CHAIN_ID}
 token_network = "{token_network}"
 
-# §1.9 case 4, which only the payee's config can create: a peering whose
-# credential is correct and which has no `[[peer_channels]]` row at all, so
-# P1 holds and P2 fails. It must be classified `client`.
-[[peers]]
-id = "ghost"
-ceiling = 1000000
-
-[peers.credential]
-secret = "{PEER_SECRET}"
+# §1.9 case 4 -- a peering with a correct credential and no
+# `[[peer_channels]]` row -- is deliberately *absent* here, because it
+# cannot be written: `ConfigError::PeerUnbound` refuses it at load. See
+# `a_peer_with_no_channel_binding_refuses_to_start`, which is the only form
+# that case can take against a live binary.
 "#,
         state_dir = state_dir.display(),
         key_file = key_file.path().display(),
@@ -515,7 +526,7 @@ token_network = "{token_network}"
 "#,
         state_dir = state_dir.display(),
         key_file = key_file.path().display(),
-        expose = carriage.scheme(),
+        expose = carriage.expose(),
         settlement = fixture.settlement_block(settlement_key_file.path()),
         channel_id = fixture.channel_id,
         payee = to_hex(&fixture.payee_address),
@@ -533,6 +544,24 @@ token_network = "{token_network}"
 /// to describe itself.
 fn peer_journal(state_dir: &std::path::Path) -> String {
     std::fs::read_to_string(state_dir.join("peer-claims.log")).unwrap_or_default()
+}
+
+/// A packet addressed **across** the peering, carrying enough value to
+/// survive the hop's own fee.
+///
+/// `support::sample_prepare` mints an `amount: 0` packet, which is right
+/// for a terminated route and wrong for a forwarding one: `peer-wire-spec.md`
+/// §4 computes `A' = A - fee` and rejects **`R01`** when `A'` falls below
+/// the sender's `minimumDelivery` floor, so a zero-amount packet never
+/// reaches the peer transport at all -- it is refused one layer earlier, by
+/// arithmetic. A test that used a zero amount here would be asserting the
+/// fee check, not the peering.
+fn peer_bound_prepare(destination: &str, body: &'static [u8], payee: &PublicKeyBytes) -> Prepare {
+    let (data, shared_secret) = sealed_prepare_data(body, payee);
+    Prepare {
+        amount: 10 * PEER_FEE,
+        ..sample_prepare(destination, data, &shared_secret)
+    }
 }
 
 /// Present `credential` and `claim` to a running connector's HTTP carriage
@@ -728,9 +757,18 @@ async fn a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp() {
     }
 }
 
-/// §1.9's five cases, in its own order, as `(name, credential)` -- shared
-/// so the two carriages cannot drift in *which* cases they cover, which is
-/// exactly the drift §9 warns about.
+/// §1.9's cases that a **wire** can present, in its own order, as
+/// `(name, credential)` -- shared so the two carriages cannot drift in
+/// *which* cases they cover, which is exactly the drift §9 warns about.
+///
+/// Four of §1.9's five. Its case 4 -- a correct credential for a peer with
+/// **no** `[[peer_channels]]` entry, P2 alone failing -- is missing because
+/// **it cannot be presented to a Rust connector at all**: this
+/// implementation refuses such a peering at config load
+/// (`ConfigError::PeerUnbound`), so no running binary can hold one to
+/// authenticate against. That is a *stronger* position than §1.9 requires,
+/// and it moves the case from the wire to startup; the live-binary form of
+/// it is [`a_peer_with_no_channel_binding_refuses_to_start`].
 fn refused_credentials() -> Vec<(&'static str, Option<String>)> {
     vec![
         ("no credential at all", None),
@@ -740,14 +778,61 @@ fn refused_credentials() -> Vec<(&'static str, Option<String>)> {
             Some(peer_credential(PAYER_ID, "not-the-secret")),
         ),
         (
-            "a correct credential for a peer with no [[peer_channels]] entry (P2 alone)",
-            Some(peer_credential("ghost", PEER_SECRET)),
-        ),
-        (
             "a valid credential naming an unconfigured peer id",
             Some(peer_credential("nobody", PEER_SECRET)),
         ),
     ]
+}
+
+/// **§1.9 case 4, in the only form a live binary can express it.**
+///
+/// The case is *"a correct `peerId` and correct secret for a peer with no
+/// `[[peer_channels]]` entry"*, which §1.9 requires be classified `client`.
+/// A Rust connector never gets that far: `ConfigError::PeerUnbound` refuses
+/// the configuration outright, so the peering the credential would name
+/// does not exist to be authenticated against.
+///
+/// Asserted here rather than left to `connector-config`'s own unit test
+/// because the property #734 cares about is what the **process** does. A
+/// node that started and merely logged a warning would satisfy the config
+/// test and violate this one -- and it is the process that would then be
+/// carrying a peering nobody can account for.
+#[test]
+fn a_peer_with_no_channel_binding_refuses_to_start() {
+    let key_file = write_raw_key_file(PAYEE_SIGNER_SEED);
+    let config = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "both"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "unbound"
+ceiling = 1000000
+
+[peers.credential]
+secret = "{PEER_SECRET}"
+"#,
+        key_file = key_file.path().display(),
+    ));
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_connector"))
+        .arg(config.path())
+        .output()
+        .expect("run the connector binary");
+    assert!(
+        !output.status.success(),
+        "§1.2 P2: a peering with no channel binding can never take the peer role, \
+         so the node must refuse to start rather than carry it"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unbound") && stderr.contains("[[peer_channels]]"),
+        "the refusal must name the peering and the missing table, not fail \
+         generically: {stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -785,8 +870,7 @@ async fn a_packet_routed_to_a_configured_peer_is_answered_t01() {
     );
 
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
-    let (data, shared) = sealed_prepare_data(b"across the peering", &payee_identity);
-    let prepare = sample_prepare(APP_PREFIX, data, &shared);
+    let prepare = peer_bound_prepare(APP_PREFIX, b"across the peering", &payee_identity);
     let client = reqwest::Client::new();
     let (status, body, _ack) =
         post_peer_request(&client, &payer.client_edge_addr, None, None, &prepare).await;
@@ -871,8 +955,7 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
     // The packet is sealed to the **payee's** identity: it terminates
     // there, and the payer is a forwarding hop that cannot open it (§8.1).
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
-    let (data, shared) = sealed_prepare_data(b"across the peering", &payee_identity);
-    let prepare = sample_prepare(APP_PREFIX, data, &shared);
+    let prepare = peer_bound_prepare(APP_PREFIX, b"across the peering", &payee_identity);
 
     let client = reqwest::Client::new();
     let (status, body, _ack) =
