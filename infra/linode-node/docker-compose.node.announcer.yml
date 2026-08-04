@@ -1,0 +1,46 @@
+# kind:10032 announcer sidecar for the Rust edge (connector#681 / #683).
+# ADR-0022: the connector answers, it does not announce — this sidecar polls
+# GET /ilp/identity on connector-rust and republishes the proven facts.
+# Deployed 2026-08-01 (buzz epic toon-meta#256 orchestration).
+#
+# RECONCILED FROM THE LIVE APEX BOX 2026-08-04, byte-for-byte, behaviour
+# unchanged. It had been running for three days with **no source in this
+# repo at all** — the announcer's *code* is versioned (packages/announcer/,
+# which is what builds the image named below) but this deployment overlay,
+# the file that says which endpoints this box announces, was not. Redeploying
+# the apex from a clean checkout would therefore have silently dropped the
+# service that publishes every endpoint the network discovers.
+#
+# Bring it up alongside the other overlays:
+#   docker compose -f infra/linode-node/docker-compose.node.yml \
+#                  -f infra/linode-node/docker-compose.node.rust.yml \
+#                  -f infra/linode-node/docker-compose.node.announcer.yml up -d announcer
+#
+# `image: linode-node-announcer` is a **locally built** image, not a registry
+# pull — compose named it after the project when it was first built from
+# packages/announcer/Dockerfile. There is no `build:` stanza here because
+# this overlay is applied on a box whose checkout is the repo root, and
+# adding one would rebuild the announcer on every unrelated `up -d`. If the
+# image is ever lost from the box's local docker, rebuild it with:
+#   docker build -t linode-node-announcer packages/announcer
+services:
+  announcer:
+    image: linode-node-announcer
+    restart: unless-stopped
+    environment:
+      ANNOUNCER_RUST_EDGE_URL: http://connector-rust:4000
+      ANNOUNCER_RELAY_URLS: http://relay:3100
+      ANNOUNCER_RELAY_PUBLIC_URL: wss://relay-ws.devnet.toonprotocol.dev
+      ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay
+      # NOTE: these two publish the `/rust/` path — the disposable artifact
+      # ADR 0013 says "nothing durable should be published against". Phase 7
+      # of the cutover plan repoints them at /ilp and /ilp/btp once the Rust
+      # connector is the default edge. Pure env passthrough
+      # (packages/announcer/src/config.ts → announce-builder.ts), so changing
+      # them and running `up -d announcer` is the whole of that step.
+      ANNOUNCER_HTTP_ENDPOINT: https://proxy.devnet.toonprotocol.dev/rust/ilp
+      ANNOUNCER_BTP_ENDPOINT: wss://proxy.devnet.toonprotocol.dev/rust/ilp/btp
+      ANNOUNCER_IDENTITY_SECRET_KEY_FILE: /app/data/announce.key
+      ANNOUNCER_SOLANA_CHAIN_ID: solana:devnet
+    volumes:
+      - /root/keys/announce.key:/app/data/announce.key:ro

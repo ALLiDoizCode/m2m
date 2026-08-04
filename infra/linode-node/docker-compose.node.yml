@@ -6,7 +6,7 @@
 
 services:
   connector:
-    image: ghcr.io/toon-protocol/connector:3.36.1
+    image: ghcr.io/toon-protocol/connector:3.36.3-solchan.0
     environment:
       CONFIG_FILE: /app/config/connector.yaml
       TOON_MNEMONIC: ${TOON_MNEMONIC}
@@ -30,7 +30,7 @@ services:
       start_period: 15s
 
   relay:
-    image: ghcr.io/toon-protocol/relay:sha-a8693a9
+    image: ghcr.io/toon-protocol/relay:sha-d80f279
     environment:
       TOON_OBLIVIOUS_MODE: 'true'
       TOON_BLS_PORT: '3100'
