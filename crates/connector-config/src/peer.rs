@@ -166,6 +166,24 @@ pub struct PeerCredential {
 }
 
 impl PeerCredential {
+    /// A credential over `secret`, for a caller that is not
+    /// [`resolve_peers`] -- the dial side building what it will present, and
+    /// tests standing up a policy whose shape config load refuses to
+    /// produce (a peering with no `[[peer_channels]]` row, say, which is
+    /// [`ConfigError::PeerChannelUnbound`] at load but is exactly the P2
+    /// branch a role decision must still get right).
+    ///
+    /// It does **not** refuse an empty secret, and that is deliberate: the
+    /// refusal that matters is [`PeerCredential::matches`] returning `false`
+    /// for one, which holds for every credential however it was built. A
+    /// constructor that refused instead would move the guarantee to the
+    /// construction site, where a future caller can forget it.
+    pub fn new(secret: impl Into<String>) -> Self {
+        PeerCredential {
+            secret: secret.into(),
+        }
+    }
+
     /// Whether `presented` is this peering's configured secret.
     ///
     /// Two properties, both load-bearing (`peer-carriage-spec.md` §1.2):
