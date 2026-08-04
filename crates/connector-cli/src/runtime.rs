@@ -1062,6 +1062,66 @@ key_file = "{}"
         assert!(runtime.connector.routes().is_empty());
     }
 
+    /// `peer-carriage-spec.md` §11, and #620's gap 3 closed at last: the
+    /// `[[peer_channels]]` table must **actually wire `ClaimBook`'s
+    /// verification key and EIP-712 domain**, "with no code-only setters
+    /// left on the config path".
+    ///
+    /// Before issue #678 the table loaded, validated and reached nothing,
+    /// so every peer claim was refused `unknown_channel` and none was ever
+    /// signed. `recognizes_channel` is the observable end of that wiring:
+    /// it is true exactly when a counterparty address has been recorded
+    /// for the channel, which is the record a peer claim's signature is
+    /// recovered against.
+    #[tokio::test]
+    async fn peer_channels_reach_the_claim_ledger() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let channel = format!("0x{}", "cd".repeat(32));
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "btp"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/ilp/btp"
+ceiling = 4200
+
+[peers.credential]
+secret = "a-real-peering-secret"
+
+[[peer_channels]]
+peer_id = "store"
+channel_id = "{channel}"
+counterparty_key = "0x00000000000000000000000000000000000000aa"
+chain_id = 31337
+token_network = "0x00000000000000000000000000000000000000bb"
+"#,
+                state_dir = state_dir.path().display(),
+                key_file = key_path.display(),
+            )
+        });
+
+        let runtime = build(&config).await.expect("build");
+
+        assert!(
+            runtime.connector.recognizes_channel(&channel),
+            "the [[peer_channels]] row must reach ClaimBook's verification key, or every \
+             peer claim on it is refused `unknown_channel` however correctly it was signed"
+        );
+        assert!(
+            !runtime
+                .connector
+                .recognizes_channel(&format!("0x{}", "ee".repeat(32))),
+            "and only that row -- a channel nobody configured is still unknown"
+        );
+    }
+
     #[tokio::test]
     async fn builds_a_signer_from_a_hex_encoded_key_file() {
         let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
